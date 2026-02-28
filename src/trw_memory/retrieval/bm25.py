@@ -1,0 +1,128 @@
+"""BM25 sparse retrieval for trw-memory.
+
+Tokenizes MemoryEntry objects (content + detail + tags) and scores them
+against a query using the BM25Okapi algorithm.  Falls back to token-overlap
+scoring when all BM25 scores are zero (common in small corpora where IDF
+becomes zero for frequently appearing terms).
+
+Requires the optional ``bm25`` extra::
+
+    pip install "trw-memory[bm25]"
+
+When ``rank_bm25`` is not installed the function returns an empty list so
+callers degrade gracefully without raising.
+"""
+
+from __future__ import annotations
+
+import structlog
+
+from trw_memory.models.memory import MemoryEntry
+
+try:
+    from rank_bm25 import BM25Okapi  # type: ignore[import-untyped]
+
+    _BM25_AVAILABLE = True
+except ImportError:
+    _BM25_AVAILABLE = False
+
+logger = structlog.get_logger()
+
+
+def _tokenize_entry(entry: MemoryEntry) -> list[str]:
+    """Build a lowercased token list for *entry*.
+
+    Concatenates content, detail, and tags.  Hyphenated tags are expanded so
+    that ``"pydantic-v2"`` also matches query tokens ``"pydantic"`` and
+    ``"v2"``.
+
+    Args:
+        entry: The memory entry to tokenize.
+
+    Returns:
+        List of lowercase string tokens.
+    """
+    content = entry.content.lower()
+    detail = entry.detail.lower()
+
+    tag_parts: list[str] = []
+    for tag in entry.tags:
+        tag_str = tag.lower()
+        tag_parts.append(tag_str)
+        if "-" in tag_str:
+            tag_parts.extend(tag_str.split("-"))
+
+    tags_str = " ".join(tag_parts)
+    text = f"{content} {detail} {tags_str}"
+    return text.split()
+
+
+def bm25_search(
+    query: str,
+    entries: list[MemoryEntry],
+    top_k: int = 50,
+) -> list[tuple[str, float]]:
+    """Run BM25 sparse retrieval over a list of :class:`~trw_memory.models.memory.MemoryEntry` objects.
+
+    Args:
+        query: The search query string.
+        entries: Candidate memory entries to rank.
+        top_k: Maximum number of results to return.
+
+    Returns:
+        List of ``(entry_id, score)`` pairs sorted by score descending.
+        Returns an empty list when ``rank_bm25`` is unavailable or *entries*
+        is empty.
+    """
+    if not _BM25_AVAILABLE or not entries:
+        logger.debug(
+            "bm25_search_skipped",
+            reason="unavailable" if not _BM25_AVAILABLE else "empty_entries",
+            entry_count=len(entries),
+        )
+        return []
+
+    corpus: list[list[str]] = [_tokenize_entry(e) for e in entries]
+    tokenized_query = query.lower().split()
+
+    bm25 = BM25Okapi(corpus)
+    scores = bm25.get_scores(tokenized_query)
+
+    # Build (entry_id, score) pairs — skip entries with blank ids
+    paired: list[tuple[str, float]] = []
+    for i, entry in enumerate(entries):
+        entry_id = entry.id
+        if entry_id:
+            paired.append((entry_id, float(scores[i])))
+
+    # BM25 IDF is 0 when a term appears in exactly N/2 documents (small
+    # corpora).  Fall back to token-overlap scoring when all scores are zero.
+    if all(s == 0.0 for _, s in paired):
+        query_set = set(tokenized_query)
+        fallback: list[tuple[str, float]] = []
+        for i, entry in enumerate(entries):
+            entry_id = entry.id
+            if not entry_id:
+                continue
+            entry_tokens = set(corpus[i])
+            overlap = len(query_set & entry_tokens)
+            if overlap > 0:
+                jaccard = overlap / len(query_set | entry_tokens)
+                fallback.append((entry_id, jaccard))
+        fallback.sort(key=lambda x: x[1], reverse=True)
+        logger.debug(
+            "bm25_search_fallback",
+            query=query,
+            fallback_results=len(fallback),
+        )
+        return fallback[:top_k]
+
+    paired.sort(key=lambda x: x[1], reverse=True)
+    results = [(eid, s) for eid, s in paired if s > 0.0][:top_k]
+    logger.debug(
+        "bm25_search_complete",
+        query=query,
+        candidates=len(entries),
+        returned=len(results),
+    )
+    return results

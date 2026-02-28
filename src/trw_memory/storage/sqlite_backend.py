@@ -1,0 +1,644 @@
+"""SQLite + sqlite-vec storage backend.
+
+Primary storage implementation for trw-memory.  Stores all :class:`MemoryEntry`
+fields in a plain ``memories`` table, with an optional ``vec_memories`` virtual
+table (sqlite-vec) for vector search.
+
+Graceful degradation: if sqlite-vec is not installed, all metadata operations
+continue to work; only :meth:`upsert_vector` and :meth:`search_vectors` become
+no-ops.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import struct
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import ClassVar
+
+import structlog
+
+from trw_memory.exceptions import StorageError
+from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.storage.interface import StorageBackend
+
+try:
+    import sqlite_vec  # type: ignore[import-not-found]
+
+    _SQLITE_VEC_AVAILABLE = True
+except ImportError:
+    _SQLITE_VEC_AVAILABLE = False
+
+logger = structlog.get_logger()
+
+# ---------------------------------------------------------------------------
+# DDL
+# ---------------------------------------------------------------------------
+
+_CREATE_MEMORIES = """
+CREATE TABLE IF NOT EXISTS memories (
+    id                TEXT PRIMARY KEY,
+    content           TEXT NOT NULL,
+    detail            TEXT DEFAULT '',
+    tags              TEXT DEFAULT '[]',
+    evidence          TEXT DEFAULT '[]',
+    importance        REAL DEFAULT 0.5,
+    status            TEXT DEFAULT 'active',
+    recurrence        INTEGER DEFAULT 1,
+    namespace         TEXT DEFAULT 'default',
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    last_accessed_at  TEXT,
+    access_count      INTEGER DEFAULT 0,
+    q_value           REAL DEFAULT 0.5,
+    q_observations    INTEGER DEFAULT 0,
+    source            TEXT DEFAULT 'agent',
+    source_identity   TEXT DEFAULT '',
+    merged_from       TEXT DEFAULT '[]',
+    consolidated_from TEXT DEFAULT '[]',
+    consolidated_into TEXT,
+    metadata          TEXT DEFAULT '{}'
+)
+"""
+
+_CREATE_IDX_NAMESPACE = (
+    "CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace)"
+)
+_CREATE_IDX_STATUS = (
+    "CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)"
+)
+
+# ---------------------------------------------------------------------------
+# Row <-> MemoryEntry helpers
+# ---------------------------------------------------------------------------
+
+_COLUMNS = (
+    "id", "content", "detail", "tags", "evidence", "importance", "status",
+    "recurrence", "namespace", "created_at", "updated_at", "last_accessed_at",
+    "access_count", "q_value", "q_observations", "source", "source_identity",
+    "merged_from", "consolidated_from", "consolidated_into", "metadata",
+)
+
+# Allowlist for UPDATE: all columns except immutable ones.
+_VALID_UPDATE_COLUMNS: frozenset[str] = frozenset(_COLUMNS) - frozenset(
+    {"id", "created_at"}
+)
+
+
+def _row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
+    """Convert a SQLite row tuple to a :class:`MemoryEntry`.
+
+    The column order must match :data:`_COLUMNS`.
+    """
+    (
+        id_, content, detail, tags_json, evidence_json, importance, status,
+        recurrence, namespace, created_at_s, updated_at_s, last_accessed_s,
+        access_count, q_value, q_obs, source, source_identity,
+        merged_json, cons_from_json, consolidated_into, metadata_json,
+    ) = row
+
+    tags: list[str] = json.loads(str(tags_json)) if tags_json else []
+    evidence: list[str] = json.loads(str(evidence_json)) if evidence_json else []
+    merged_from: list[str] = json.loads(str(merged_json)) if merged_json else []
+    cons_from: list[str] = json.loads(str(cons_from_json)) if cons_from_json else []
+    metadata: dict[str, str] = json.loads(str(metadata_json)) if metadata_json else {}
+
+    def _parse_dt(val: object) -> datetime:
+        dt = datetime.fromisoformat(str(val))
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    last_accessed: datetime | None = (
+        _parse_dt(last_accessed_s) if last_accessed_s else None
+    )
+
+    return MemoryEntry(
+        id=str(id_),
+        content=str(content),
+        detail=str(detail) if detail else "",
+        tags=tags,
+        evidence=evidence,
+        importance=float(str(importance)),
+        status=MemoryStatus(str(status)),
+        recurrence=int(str(recurrence)),
+        namespace=str(namespace),
+        created_at=_parse_dt(created_at_s),
+        updated_at=_parse_dt(updated_at_s),
+        last_accessed_at=last_accessed,
+        access_count=int(str(access_count)),
+        q_value=float(str(q_value)),
+        q_observations=int(str(q_obs)),
+        source=str(source),
+        source_identity=str(source_identity) if source_identity else "",
+        merged_from=merged_from,
+        consolidated_from=cons_from,
+        consolidated_into=str(consolidated_into) if consolidated_into else None,
+        metadata=metadata,
+    )
+
+
+def _entry_to_row(entry: MemoryEntry) -> tuple[object, ...]:
+    """Convert a :class:`MemoryEntry` to an INSERT/REPLACE row tuple."""
+    # Pydantic v2: use_enum_values=True + strict=True can leave the field
+    # as an enum instance in some code paths.  Safely extract the value.
+    raw_status = entry.status
+    status_val = raw_status.value if isinstance(raw_status, MemoryStatus) else str(raw_status)
+    return (
+        entry.id,
+        entry.content,
+        entry.detail,
+        json.dumps(entry.tags),
+        json.dumps(entry.evidence),
+        entry.importance,
+        status_val,
+        entry.recurrence,
+        entry.namespace,
+        entry.created_at.isoformat(),
+        entry.updated_at.isoformat(),
+        entry.last_accessed_at.isoformat() if entry.last_accessed_at else None,
+        entry.access_count,
+        entry.q_value,
+        entry.q_observations,
+        entry.source,
+        entry.source_identity,
+        json.dumps(entry.merged_from),
+        json.dumps(entry.consolidated_from),
+        entry.consolidated_into,
+        json.dumps(entry.metadata),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Backend
+# ---------------------------------------------------------------------------
+
+
+class SQLiteBackend(StorageBackend):
+    """SQLite-backed storage with optional sqlite-vec vector search.
+
+    Args:
+        db_path: Path to the SQLite database file.  Parent directories are
+            created automatically.
+        dim: Embedding dimension for the vec_memories virtual table.
+            Defaults to 384 (all-MiniLM-L6-v2).
+    """
+
+    _DEFAULT_DIM: ClassVar[int] = 384
+
+    def __init__(self, db_path: Path, dim: int = 384) -> None:
+        self._db_path = db_path
+        self._dim = dim
+        self._vec_available = False
+
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(db_path))
+        self._conn.row_factory = sqlite3.Row
+        self._ensure_schema()
+
+        if _SQLITE_VEC_AVAILABLE:
+            try:
+                self._conn.enable_load_extension(True)
+                sqlite_vec.load(self._conn)
+                self._conn.enable_load_extension(False)
+                self._ensure_vec_table()
+                self._vec_available = True
+                logger.debug("sqlite_vec_loaded", db=str(db_path))
+            except Exception:  # noqa: BLE001
+                self._vec_available = False
+                logger.debug("sqlite_vec_load_failed", db=str(db_path), exc_info=True)
+        else:
+            logger.debug("sqlite_vec_unavailable", reason="not_installed")
+
+    # ------------------------------------------------------------------
+    # Schema
+    # ------------------------------------------------------------------
+
+    def _ensure_schema(self) -> None:
+        self._conn.execute(_CREATE_MEMORIES)
+        self._conn.execute(_CREATE_IDX_NAMESPACE)
+        self._conn.execute(_CREATE_IDX_STATUS)
+        self._conn.commit()
+
+    def _ensure_vec_table(self) -> None:
+        self._conn.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories "
+            f"USING vec0(embedding float[{self._dim}])"
+        )
+        # Companion table to map rowid <-> entry_id
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS vec_index ("
+            "rowid INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "entry_id TEXT UNIQUE NOT NULL)"
+        )
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Public property
+    # ------------------------------------------------------------------
+
+    @property
+    def vec_available(self) -> bool:
+        """``True`` when sqlite-vec is loaded and the virtual table exists."""
+        return self._vec_available
+
+    # ------------------------------------------------------------------
+    # StorageBackend interface
+    # ------------------------------------------------------------------
+
+    def store(self, entry: MemoryEntry) -> None:
+        """INSERT OR REPLACE the entry into the memories table.
+
+        Args:
+            entry: Memory entry to persist.
+
+        Raises:
+            StorageError: If the write fails.
+        """
+        placeholders = ", ".join(["?"] * len(_COLUMNS))
+        col_list = ", ".join(_COLUMNS)
+        sql = f"INSERT OR REPLACE INTO memories ({col_list}) VALUES ({placeholders})"
+        try:
+            self._conn.execute(sql, _entry_to_row(entry))
+            self._conn.commit()
+            logger.debug("memory_stored", entry_id=entry.id)
+        except Exception as exc:  # noqa: BLE001
+            raise StorageError(
+                f"Failed to store entry {entry.id}: {exc}",
+                path=str(self._db_path),
+            ) from exc
+
+    def get(self, entry_id: str) -> MemoryEntry | None:
+        """Retrieve an entry by id.
+
+        Args:
+            entry_id: Target entry id.
+
+        Returns:
+            :class:`MemoryEntry` or ``None`` if not found.
+
+        Raises:
+            StorageError: If the query fails.
+        """
+        col_list = ", ".join(_COLUMNS)
+        sql = f"SELECT {col_list} FROM memories WHERE id = ?"
+        try:
+            row = self._conn.execute(sql, (entry_id,)).fetchone()
+            if row is None:
+                return None
+            return _row_to_entry(tuple(row))
+        except Exception as exc:  # noqa: BLE001
+            raise StorageError(
+                f"Failed to get entry {entry_id}: {exc}",
+                path=str(self._db_path),
+            ) from exc
+
+    def update(self, entry_id: str, **fields: object) -> MemoryEntry | None:
+        """Apply a partial update to an existing entry.
+
+        Args:
+            entry_id: Target entry id.
+            **fields: Fields to update.
+
+        Returns:
+            Updated :class:`MemoryEntry` or ``None`` if not found.
+
+        Raises:
+            StorageError: If the update fails.
+        """
+        if not fields:
+            return self.get(entry_id)
+
+        existing = self.get(entry_id)
+        if existing is None:
+            return None
+
+        try:
+            # Serialise list/dict fields to JSON for SQLite
+            set_parts: list[str] = []
+            values: list[object] = []
+            _list_fields = {
+                "tags", "evidence", "merged_from", "consolidated_from",
+            }
+            _json_fields = {"metadata"}
+
+            # Auto-set updated_at when not explicitly provided
+            field_dict: dict[str, object] = dict(fields)
+            if "updated_at" not in field_dict:
+                field_dict["updated_at"] = datetime.now(timezone.utc)
+
+            for key, val in field_dict.items():
+                if key not in _VALID_UPDATE_COLUMNS:
+                    raise StorageError(
+                        f"Invalid update field: {key!r}",
+                        path=str(self._db_path),
+                    )
+                set_parts.append(f"{key} = ?")
+                if key in _list_fields and isinstance(val, list):
+                    values.append(json.dumps(val))
+                elif key in _json_fields and isinstance(val, dict):
+                    values.append(json.dumps(val))
+                elif isinstance(val, datetime):
+                    values.append(val.isoformat())
+                elif isinstance(val, MemoryStatus):
+                    # use_enum_values=True means val is typically str already;
+                    # handle the rare case where a MemoryStatus enum is passed
+                    values.append(val.value)
+                else:
+                    values.append(val)
+
+            values.append(entry_id)
+            sql = f"UPDATE memories SET {', '.join(set_parts)} WHERE id = ?"
+            self._conn.execute(sql, values)
+            self._conn.commit()
+            return self.get(entry_id)
+        except StorageError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise StorageError(
+                f"Failed to update entry {entry_id}: {exc}",
+                path=str(self._db_path),
+            ) from exc
+
+    def delete(self, entry_id: str) -> bool:
+        """Remove an entry from the memories table (and vec_index if present).
+
+        Args:
+            entry_id: Target entry id.
+
+        Returns:
+            ``True`` if deleted, ``False`` if not found.
+
+        Raises:
+            StorageError: If the deletion fails.
+        """
+        try:
+            cursor = self._conn.execute(
+                "DELETE FROM memories WHERE id = ?", (entry_id,)
+            )
+            deleted = cursor.rowcount > 0
+            if deleted and self._vec_available:
+                self._delete_vector(entry_id)
+            self._conn.commit()
+            logger.debug("memory_deleted", entry_id=entry_id, existed=deleted)
+            return deleted
+        except Exception as exc:  # noqa: BLE001
+            raise StorageError(
+                f"Failed to delete entry {entry_id}: {exc}",
+                path=str(self._db_path),
+            ) from exc
+
+    def _delete_vector(self, entry_id: str) -> None:
+        """Remove the vector row for *entry_id* (no-op if absent)."""
+        row = self._conn.execute(
+            "SELECT rowid FROM vec_index WHERE entry_id = ?", (entry_id,)
+        ).fetchone()
+        if row is None:
+            return
+        rowid: int = row[0]
+        self._conn.execute("DELETE FROM vec_memories WHERE rowid = ?", (rowid,))
+        self._conn.execute("DELETE FROM vec_index WHERE rowid = ?", (rowid,))
+
+    def search(
+        self,
+        query: str,
+        *,
+        top_k: int = 25,
+        tags: list[str] | None = None,
+        status: MemoryStatus | None = None,
+        min_importance: float = 0.0,
+        namespace: str | None = None,
+    ) -> list[MemoryEntry]:
+        """Keyword LIKE search on content + detail + tags with filters.
+
+        Args:
+            query: Free-text search term (case-insensitive substring match).
+            top_k: Maximum results to return.
+            tags: If provided, entries must contain ALL listed tags.
+            status: If provided, restrict to this status.
+            min_importance: Lower bound on importance (inclusive).
+            namespace: If provided, restrict to this namespace.
+
+        Returns:
+            Up to *top_k* matching :class:`MemoryEntry` objects.
+
+        Raises:
+            StorageError: If the query fails.
+        """
+        col_list = ", ".join(_COLUMNS)
+        where_clauses: list[str] = []
+        params: list[object] = []
+
+        # Keyword match — LIKE on content, detail, tags JSON
+        # Escape LIKE metacharacters to prevent unintended wildcard expansion
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like_term = f"%{escaped}%"
+        where_clauses.append(
+            "(content LIKE ? ESCAPE '\\' OR detail LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')"
+        )
+        params.extend([like_term, like_term, like_term])
+
+        if status is not None:
+            where_clauses.append("status = ?")
+            params.append(status.value)
+
+        if min_importance > 0.0:
+            where_clauses.append("importance >= ?")
+            params.append(min_importance)
+
+        if namespace is not None:
+            where_clauses.append("namespace = ?")
+            params.append(namespace)
+
+        where_sql = " AND ".join(where_clauses) if where_clauses else "1"
+        sql = (
+            f"SELECT {col_list} FROM memories WHERE {where_sql} "
+            f"ORDER BY importance DESC, updated_at DESC LIMIT ?"
+        )
+        params.append(top_k)
+
+        try:
+            rows = self._conn.execute(sql, params).fetchall()
+            results = [_row_to_entry(tuple(r)) for r in rows]
+
+            # Post-filter by tags (all-of semantics)
+            if tags:
+                required = set(tags)
+                results = [e for e in results if required.issubset(set(e.tags))]
+
+            return results[:top_k]
+        except Exception as exc:  # noqa: BLE001
+            raise StorageError(
+                f"Failed to search memories: {exc}",
+                path=str(self._db_path),
+            ) from exc
+
+    def count(self, namespace: str | None = None) -> int:
+        """Return the number of stored entries.
+
+        Args:
+            namespace: If provided, count only this namespace.
+
+        Returns:
+            Entry count.
+
+        Raises:
+            StorageError: If the count query fails.
+        """
+        try:
+            if namespace is not None:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) FROM memories WHERE namespace = ?",
+                    (namespace,),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) FROM memories"
+                ).fetchone()
+            return int(row[0]) if row else 0
+        except Exception as exc:  # noqa: BLE001
+            raise StorageError(
+                f"Failed to count memories: {exc}",
+                path=str(self._db_path),
+            ) from exc
+
+    def list_entries(
+        self,
+        *,
+        status: MemoryStatus | None = None,
+        namespace: str | None = None,
+        limit: int = 100,
+    ) -> list[MemoryEntry]:
+        """Return entries with optional filters, ordered by updated_at desc.
+
+        Args:
+            status: If provided, filter by this status.
+            namespace: If provided, filter by this namespace.
+            limit: Maximum entries to return.
+
+        Returns:
+            Up to *limit* matching :class:`MemoryEntry` objects.
+
+        Raises:
+            StorageError: If the query fails.
+        """
+        col_list = ", ".join(_COLUMNS)
+        where_clauses: list[str] = []
+        params: list[object] = []
+
+        if status is not None:
+            where_clauses.append("status = ?")
+            params.append(status.value)
+
+        if namespace is not None:
+            where_clauses.append("namespace = ?")
+            params.append(namespace)
+
+        where_sql = " AND ".join(where_clauses) if where_clauses else "1"
+        sql = (
+            f"SELECT {col_list} FROM memories WHERE {where_sql} "
+            f"ORDER BY updated_at DESC LIMIT ?"
+        )
+        params.append(limit)
+
+        try:
+            rows = self._conn.execute(sql, params).fetchall()
+            return [_row_to_entry(tuple(r)) for r in rows]
+        except Exception as exc:  # noqa: BLE001
+            raise StorageError(
+                f"Failed to list entries: {exc}",
+                path=str(self._db_path),
+            ) from exc
+
+    def close(self) -> None:
+        """Close the database connection."""
+        try:
+            self._conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        logger.debug("sqlite_backend_closed", db=str(self._db_path))
+
+    def __enter__(self) -> SQLiteBackend:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
+        self.close()
+
+    # ------------------------------------------------------------------
+    # Vector operations (sqlite-vec)
+    # ------------------------------------------------------------------
+
+    def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:
+        """Insert or update a vector in vec_memories.
+
+        No-op when sqlite-vec is not available.
+
+        Args:
+            entry_id: The corresponding memory entry id.
+            embedding: Dense float vector (length must equal *dim*).
+        """
+        if not self._vec_available:
+            return
+
+        emb_bytes = struct.pack(f"{self._dim}f", *embedding)
+
+        # Ensure a vec_index row exists and get its rowid
+        self._conn.execute(
+            "INSERT OR IGNORE INTO vec_index(entry_id) VALUES(?)", (entry_id,)
+        )
+        row = self._conn.execute(
+            "SELECT rowid FROM vec_index WHERE entry_id = ?", (entry_id,)
+        ).fetchone()
+        rowid: int = row[0]
+
+        # Delete old vector then insert fresh (idempotent upsert)
+        self._conn.execute(
+            "DELETE FROM vec_memories WHERE rowid = ?", (rowid,)
+        )
+        self._conn.execute(
+            "INSERT INTO vec_memories(rowid, embedding) VALUES(?, ?)",
+            (rowid, emb_bytes),
+        )
+        self._conn.commit()
+        logger.debug("vector_upserted", entry_id=entry_id)
+
+    def search_vectors(
+        self, query_embedding: list[float], top_k: int = 25
+    ) -> list[tuple[str, float]]:
+        """KNN search in vec_memories.
+
+        No-op (returns empty list) when sqlite-vec is not available.
+
+        Args:
+            query_embedding: Query vector (length must equal *dim*).
+            top_k: Number of nearest neighbours to return.
+
+        Returns:
+            List of ``(entry_id, distance)`` pairs sorted by distance ascending.
+        """
+        if not self._vec_available:
+            return []
+
+        query_bytes = struct.pack(f"{self._dim}f", *query_embedding)
+        try:
+            rows = self._conn.execute(
+                """
+                SELECT vi.entry_id, vm.distance
+                FROM vec_memories vm
+                JOIN vec_index vi ON vm.rowid = vi.rowid
+                WHERE vm.embedding MATCH ? AND k = ?
+                ORDER BY vm.distance
+                """,
+                (query_bytes, top_k),
+            ).fetchall()
+            return [(str(r[0]), float(r[1])) for r in rows]
+        except Exception:  # noqa: BLE001
+            logger.debug("vector_search_error", exc_info=True)
+            return []

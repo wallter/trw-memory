@@ -1,0 +1,147 @@
+"""MCP tool: memory_search — list/filter memory entries with pagination.
+
+Thin wrapper around backend.list_entries() with namespace validation,
+optional tag/status filtering, and offset-based pagination.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import structlog
+
+from trw_memory.exceptions import ConfigError
+from trw_memory.models.memory import MemoryStatus
+from trw_memory.namespace import validate_namespace
+from trw_memory.storage.interface import StorageBackend
+
+logger = structlog.get_logger()
+
+# Valid status values for user-supplied strings
+_VALID_STATUSES = {s.value for s in MemoryStatus}
+
+
+def memory_search_impl(
+    namespace: str,
+    *,
+    backend: StorageBackend,
+    status: str | None = None,
+    tags: list[str] | None = None,
+    sort_by: str = "updated_at",
+    offset: int = 0,
+    limit: int = 50,
+) -> dict[str, object]:
+    """Core implementation of memory_search (callable without MCP).
+
+    Args:
+        namespace: Namespace to search within.
+        backend: Storage backend instance.
+        status: If provided, filter to entries with this lifecycle status.
+        tags: If provided, only entries containing ALL of these tags are returned.
+        sort_by: Field to sort results by (informational; backends sort by updated_at).
+        offset: Number of entries to skip (pagination).
+        limit: Maximum entries to return per page.
+
+    Returns:
+        {"entries": list[dict], "total": int, "offset": int, "limit": int}
+        or {"error": str, "status": "invalid"} on validation failure.
+    """
+    try:
+        validate_namespace(namespace)
+    except ConfigError as exc:
+        return {"error": str(exc), "status": "invalid"}
+
+    # Validate status string
+    memory_status: MemoryStatus | None = None
+    if status is not None:
+        if status not in _VALID_STATUSES:
+            return {
+                "error": f"Invalid status {status!r}. Must be one of: {sorted(_VALID_STATUSES)}",
+                "status": "invalid",
+            }
+        memory_status = MemoryStatus(status)
+
+    # Fetch all matching entries (apply status + namespace, handle pagination here)
+    fetch_limit = max(limit + offset, 500)
+    entries = backend.list_entries(
+        status=memory_status,
+        namespace=namespace,
+        limit=fetch_limit,
+    )
+
+    # Apply tag filter in Python (not all backends support tag filtering in list_entries)
+    if tags:
+        tag_set = set(tags)
+        entries = [e for e in entries if tag_set.issubset(set(e.tags))]
+
+    total = len(entries)
+
+    # Pagination slice
+    page = entries[offset: offset + limit]
+
+    result_dicts = [e.model_dump(mode="json") for e in page]
+
+    logger.debug(
+        "memory_search",
+        namespace=namespace,
+        status=status,
+        total=total,
+        offset=offset,
+        limit=limit,
+        returned=len(result_dicts),
+    )
+
+    return {
+        "entries": result_dicts,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }
+
+
+def register_search_tool(mcp: Any) -> None:
+    """Register memory_search with a FastMCP server instance.
+
+    Args:
+        mcp: FastMCP server instance (imported lazily to keep fastmcp optional).
+    """
+    from pathlib import Path as _Path
+
+    from trw_memory.models.config import MemoryConfig
+    from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+    async def memory_search(
+        namespace: str = "project:default",
+        status: str | None = None,
+        tags: list[str] | None = None,
+        sort_by: str = "updated_at",
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        """List and filter memory entries with pagination.
+
+        Args:
+            namespace: Namespace to search within (e.g., 'project:default').
+            status: Filter by lifecycle status: 'active', 'resolved', 'obsolete', 'archived'.
+            tags: Filter to entries containing ALL of these tags.
+            sort_by: Sort field (default: 'updated_at').
+            offset: Pagination offset.
+            limit: Maximum entries per page (default 50).
+
+        Returns:
+            {"entries": [...], "total": int, "offset": int, "limit": int}
+        """
+        cfg = MemoryConfig()
+        db_path = _Path(cfg.storage_path) / cfg.sqlite_db_name
+        with SQLiteBackend(db_path, dim=cfg.embedding_dim) as backend:
+            return memory_search_impl(
+                namespace,
+                backend=backend,
+                status=status,
+                tags=tags,
+                sort_by=sort_by,
+                offset=offset,
+                limit=limit,
+            )
+
+    mcp.tool()(memory_search)
