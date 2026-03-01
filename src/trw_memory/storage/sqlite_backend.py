@@ -552,6 +552,60 @@ class SQLiteBackend(StorageBackend):
                 path=str(self._db_path),
             ) from exc
 
+    # ------------------------------------------------------------------
+    # Namespace operations
+    # ------------------------------------------------------------------
+
+    def list_namespaces(self) -> list[str]:
+        """Return all distinct namespaces that have stored entries.
+
+        Returns:
+            Sorted list of namespace strings.
+
+        Raises:
+            StorageError: If the query fails.
+        """
+        try:
+            rows = self._conn.execute(
+                "SELECT DISTINCT namespace FROM memories ORDER BY namespace"
+            ).fetchall()
+            return [str(row[0]) for row in rows]
+        except Exception as exc:  # noqa: BLE001
+            raise StorageError(
+                f"Failed to list namespaces: {exc}",
+                path=str(self._db_path),
+            ) from exc
+
+    def delete_by_namespace(self, namespace: str) -> int:
+        """Delete all entries in a namespace.
+
+        Args:
+            namespace: Namespace to clear.
+
+        Returns:
+            Number of entries deleted.
+
+        Raises:
+            StorageError: If the deletion fails.
+        """
+        try:
+            cursor = self._conn.execute(
+                "DELETE FROM memories WHERE namespace = ?", (namespace,)
+            )
+            self._conn.commit()
+            deleted = cursor.rowcount
+            logger.debug(
+                "namespace_deleted",
+                namespace=namespace,
+                entries_deleted=deleted,
+            )
+            return deleted
+        except Exception as exc:  # noqa: BLE001
+            raise StorageError(
+                f"Failed to delete namespace {namespace!r}: {exc}",
+                path=str(self._db_path),
+            ) from exc
+
     def close(self) -> None:
         """Close the database connection."""
         try:
