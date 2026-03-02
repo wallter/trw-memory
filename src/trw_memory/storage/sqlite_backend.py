@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import struct
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import ClassVar
@@ -192,9 +193,10 @@ class SQLiteBackend(StorageBackend):
         self._db_path = db_path
         self._dim = dim
         self._vec_available = False
+        self._lock = threading.Lock()
 
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path))
+        self._conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30.0)
         self._conn.row_factory = sqlite3.Row
         self._ensure_schema()
 
@@ -261,8 +263,9 @@ class SQLiteBackend(StorageBackend):
         col_list = ", ".join(_COLUMNS)
         sql = f"INSERT OR REPLACE INTO memories ({col_list}) VALUES ({placeholders})"
         try:
-            self._conn.execute(sql, _entry_to_row(entry))
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute(sql, _entry_to_row(entry))
+                self._conn.commit()
             logger.debug("memory_stored", entry_id=entry.id)
         except Exception as exc:  # noqa: BLE001
             raise StorageError(
@@ -285,7 +288,8 @@ class SQLiteBackend(StorageBackend):
         col_list = ", ".join(_COLUMNS)
         sql = f"SELECT {col_list} FROM memories WHERE id = ?"
         try:
-            row = self._conn.execute(sql, (entry_id,)).fetchone()
+            with self._lock:
+                row = self._conn.execute(sql, (entry_id,)).fetchone()
             if row is None:
                 return None
             return _row_to_entry(tuple(row))
@@ -351,8 +355,9 @@ class SQLiteBackend(StorageBackend):
 
             values.append(entry_id)
             sql = f"UPDATE memories SET {', '.join(set_parts)} WHERE id = ?"
-            self._conn.execute(sql, values)
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute(sql, values)
+                self._conn.commit()
             return self.get(entry_id)
         except StorageError:
             raise
@@ -375,13 +380,14 @@ class SQLiteBackend(StorageBackend):
             StorageError: If the deletion fails.
         """
         try:
-            cursor = self._conn.execute(
-                "DELETE FROM memories WHERE id = ?", (entry_id,)
-            )
-            deleted = cursor.rowcount > 0
-            if deleted and self._vec_available:
-                self._delete_vector(entry_id)
-            self._conn.commit()
+            with self._lock:
+                cursor = self._conn.execute(
+                    "DELETE FROM memories WHERE id = ?", (entry_id,)
+                )
+                deleted = cursor.rowcount > 0
+                if deleted and self._vec_available:
+                    self._delete_vector(entry_id)
+                self._conn.commit()
             logger.debug("memory_deleted", entry_id=entry_id, existed=deleted)
             return deleted
         except Exception as exc:  # noqa: BLE001
@@ -460,7 +466,8 @@ class SQLiteBackend(StorageBackend):
         params.append(top_k)
 
         try:
-            rows = self._conn.execute(sql, params).fetchall()
+            with self._lock:
+                rows = self._conn.execute(sql, params).fetchall()
             results = [_row_to_entry(tuple(r)) for r in rows]
 
             # Post-filter by tags (all-of semantics)
@@ -488,15 +495,16 @@ class SQLiteBackend(StorageBackend):
             StorageError: If the count query fails.
         """
         try:
-            if namespace is not None:
-                row = self._conn.execute(
-                    "SELECT COUNT(*) FROM memories WHERE namespace = ?",
-                    (namespace,),
-                ).fetchone()
-            else:
-                row = self._conn.execute(
-                    "SELECT COUNT(*) FROM memories"
-                ).fetchone()
+            with self._lock:
+                if namespace is not None:
+                    row = self._conn.execute(
+                        "SELECT COUNT(*) FROM memories WHERE namespace = ?",
+                        (namespace,),
+                    ).fetchone()
+                else:
+                    row = self._conn.execute(
+                        "SELECT COUNT(*) FROM memories"
+                    ).fetchone()
             return int(row[0]) if row else 0
         except Exception as exc:  # noqa: BLE001
             raise StorageError(
@@ -544,7 +552,8 @@ class SQLiteBackend(StorageBackend):
         params.append(limit)
 
         try:
-            rows = self._conn.execute(sql, params).fetchall()
+            with self._lock:
+                rows = self._conn.execute(sql, params).fetchall()
             return [_row_to_entry(tuple(r)) for r in rows]
         except Exception as exc:  # noqa: BLE001
             raise StorageError(
@@ -566,9 +575,10 @@ class SQLiteBackend(StorageBackend):
             StorageError: If the query fails.
         """
         try:
-            rows = self._conn.execute(
-                "SELECT DISTINCT namespace FROM memories ORDER BY namespace"
-            ).fetchall()
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT DISTINCT namespace FROM memories ORDER BY namespace"
+                ).fetchall()
             return [str(row[0]) for row in rows]
         except Exception as exc:  # noqa: BLE001
             raise StorageError(
@@ -589,10 +599,11 @@ class SQLiteBackend(StorageBackend):
             StorageError: If the deletion fails.
         """
         try:
-            cursor = self._conn.execute(
-                "DELETE FROM memories WHERE namespace = ?", (namespace,)
-            )
-            self._conn.commit()
+            with self._lock:
+                cursor = self._conn.execute(
+                    "DELETE FROM memories WHERE namespace = ?", (namespace,)
+                )
+                self._conn.commit()
             deleted = cursor.rowcount
             logger.debug(
                 "namespace_deleted",
@@ -643,24 +654,25 @@ class SQLiteBackend(StorageBackend):
 
         emb_bytes = struct.pack(f"{self._dim}f", *embedding)
 
-        # Ensure a vec_index row exists and get its rowid
-        self._conn.execute(
-            "INSERT OR IGNORE INTO vec_index(entry_id) VALUES(?)", (entry_id,)
-        )
-        row = self._conn.execute(
-            "SELECT rowid FROM vec_index WHERE entry_id = ?", (entry_id,)
-        ).fetchone()
-        rowid: int = row[0]
+        with self._lock:
+            # Ensure a vec_index row exists and get its rowid
+            self._conn.execute(
+                "INSERT OR IGNORE INTO vec_index(entry_id) VALUES(?)", (entry_id,)
+            )
+            row = self._conn.execute(
+                "SELECT rowid FROM vec_index WHERE entry_id = ?", (entry_id,)
+            ).fetchone()
+            rowid: int = row[0]
 
-        # Delete old vector then insert fresh (idempotent upsert)
-        self._conn.execute(
-            "DELETE FROM vec_memories WHERE rowid = ?", (rowid,)
-        )
-        self._conn.execute(
-            "INSERT INTO vec_memories(rowid, embedding) VALUES(?, ?)",
-            (rowid, emb_bytes),
-        )
-        self._conn.commit()
+            # Delete old vector then insert fresh (idempotent upsert)
+            self._conn.execute(
+                "DELETE FROM vec_memories WHERE rowid = ?", (rowid,)
+            )
+            self._conn.execute(
+                "INSERT INTO vec_memories(rowid, embedding) VALUES(?, ?)",
+                (rowid, emb_bytes),
+            )
+            self._conn.commit()
         logger.debug("vector_upserted", entry_id=entry_id)
 
     def search_vectors(
@@ -682,16 +694,17 @@ class SQLiteBackend(StorageBackend):
 
         query_bytes = struct.pack(f"{self._dim}f", *query_embedding)
         try:
-            rows = self._conn.execute(
-                """
-                SELECT vi.entry_id, vm.distance
-                FROM vec_memories vm
-                JOIN vec_index vi ON vm.rowid = vi.rowid
-                WHERE vm.embedding MATCH ? AND k = ?
-                ORDER BY vm.distance
-                """,
-                (query_bytes, top_k),
-            ).fetchall()
+            with self._lock:
+                rows = self._conn.execute(
+                    """
+                    SELECT vi.entry_id, vm.distance
+                    FROM vec_memories vm
+                    JOIN vec_index vi ON vm.rowid = vi.rowid
+                    WHERE vm.embedding MATCH ? AND k = ?
+                    ORDER BY vm.distance
+                    """,
+                    (query_bytes, top_k),
+                ).fetchall()
             return [(str(r[0]), float(r[1])) for r in rows]
         except Exception:  # noqa: BLE001
             logger.debug("vector_search_error", exc_info=True)

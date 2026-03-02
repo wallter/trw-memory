@@ -364,3 +364,51 @@ class TestUpdate:
         result = backend.update("u4", tags=["new", "updated"])
         assert result is not None
         assert result.tags == ["new", "updated"]
+
+
+# ---------------------------------------------------------------------------
+# Cross-thread safety (check_same_thread=False)
+# ---------------------------------------------------------------------------
+
+
+class TestCrossThreadSafety:
+    """Verify SQLiteBackend can be used from multiple threads."""
+
+    def test_store_and_get_from_different_thread(self, backend: SQLiteBackend) -> None:
+        """Store from main thread, get from a worker thread."""
+        import threading
+
+        backend.store(make_entry("cross-1", "shared data"))
+        result_holder: list[MemoryEntry | None] = [None]
+
+        def worker() -> None:
+            result_holder[0] = backend.get("cross-1")
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join(timeout=5)
+
+        assert result_holder[0] is not None
+        assert result_holder[0].content == "shared data"
+
+    def test_concurrent_writes_from_threads(self, backend: SQLiteBackend) -> None:
+        """Multiple threads can write concurrently without ProgrammingError."""
+        import threading
+
+        errors: list[Exception] = []
+
+        def writer(thread_id: int) -> None:
+            try:
+                for i in range(10):
+                    backend.store(make_entry(f"t{thread_id}-{i}", f"data-{i}"))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=writer, args=(tid,)) for tid in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"Thread errors: {errors}"
+        assert backend.count() == 40
