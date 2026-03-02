@@ -60,7 +60,13 @@ CREATE TABLE IF NOT EXISTS memories (
     merged_from       TEXT DEFAULT '[]',
     consolidated_from TEXT DEFAULT '[]',
     consolidated_into TEXT,
-    metadata          TEXT DEFAULT '{}'
+    metadata          TEXT DEFAULT '{}',
+    vector_clock      TEXT DEFAULT '{}',
+    remote_id         TEXT,
+    published_to_platform INTEGER DEFAULT 0,
+    pending_delete    INTEGER DEFAULT 0,
+    cross_validated   INTEGER DEFAULT 0,
+    outcome_history   TEXT DEFAULT '[]'
 )
 """
 
@@ -69,6 +75,39 @@ _CREATE_IDX_NAMESPACE = (
 )
 _CREATE_IDX_STATUS = (
     "CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)"
+)
+
+_CREATE_GRAPH_EDGES = """
+CREATE TABLE IF NOT EXISTS memory_graph_edges (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id   TEXT NOT NULL,
+    target_id   TEXT NOT NULL,
+    edge_type   TEXT NOT NULL,
+    weight      REAL NOT NULL CHECK (weight >= 0.0 AND weight <= 1.0),
+    created_at  TEXT NOT NULL,
+    UNIQUE (source_id, target_id, edge_type)
+)
+"""
+
+_CREATE_IDX_MGE_SOURCE = (
+    "CREATE INDEX IF NOT EXISTS idx_mge_source ON memory_graph_edges(source_id, edge_type)"
+)
+_CREATE_IDX_MGE_TARGET = (
+    "CREATE INDEX IF NOT EXISTS idx_mge_target ON memory_graph_edges(target_id, edge_type)"
+)
+
+_CREATE_NAMESPACES = """
+CREATE TABLE IF NOT EXISTS memory_namespaces (
+    namespace_id  TEXT PRIMARY KEY,
+    team_id       TEXT,
+    created_at    TEXT NOT NULL,
+    expires_at    TEXT,
+    status        TEXT NOT NULL DEFAULT 'active'
+)
+"""
+
+_CREATE_IDX_MN_STATUS = (
+    "CREATE INDEX IF NOT EXISTS idx_mn_status ON memory_namespaces(status, expires_at)"
 )
 
 # ---------------------------------------------------------------------------
@@ -80,6 +119,8 @@ _COLUMNS = (
     "recurrence", "namespace", "created_at", "updated_at", "last_accessed_at",
     "access_count", "q_value", "q_observations", "source", "source_identity",
     "merged_from", "consolidated_from", "consolidated_into", "metadata",
+    "vector_clock", "remote_id", "published_to_platform", "pending_delete",
+    "cross_validated", "outcome_history",
 )
 
 # Allowlist for UPDATE: all columns except immutable ones.
@@ -98,6 +139,8 @@ def _row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         recurrence, namespace, created_at_s, updated_at_s, last_accessed_s,
         access_count, q_value, q_obs, source, source_identity,
         merged_json, cons_from_json, consolidated_into, metadata_json,
+        vector_clock_json, remote_id, published_raw, pending_del_raw,
+        cross_val_raw, outcome_json,
     ) = row
 
     tags: list[str] = json.loads(str(tags_json)) if tags_json else []
@@ -105,6 +148,8 @@ def _row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
     merged_from: list[str] = json.loads(str(merged_json)) if merged_json else []
     cons_from: list[str] = json.loads(str(cons_from_json)) if cons_from_json else []
     metadata: dict[str, str] = json.loads(str(metadata_json)) if metadata_json else {}
+    vector_clock: dict[str, int] = json.loads(str(vector_clock_json)) if vector_clock_json else {}
+    outcome_history: list[str] = json.loads(str(outcome_json)) if outcome_json else []
 
     def _parse_dt(val: object) -> datetime:
         dt = datetime.fromisoformat(str(val))
@@ -138,6 +183,12 @@ def _row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         consolidated_from=cons_from,
         consolidated_into=str(consolidated_into) if consolidated_into else None,
         metadata=metadata,
+        vector_clock=vector_clock,
+        remote_id=str(remote_id) if remote_id else None,
+        published_to_platform=bool(int(str(published_raw))) if published_raw else False,
+        pending_delete=bool(int(str(pending_del_raw))) if pending_del_raw else False,
+        cross_validated=bool(int(str(cross_val_raw))) if cross_val_raw else False,
+        outcome_history=outcome_history,
     )
 
 
@@ -169,6 +220,12 @@ def _entry_to_row(entry: MemoryEntry) -> tuple[object, ...]:
         json.dumps(entry.consolidated_from),
         entry.consolidated_into,
         json.dumps(entry.metadata),
+        json.dumps(entry.vector_clock),
+        entry.remote_id,
+        int(entry.published_to_platform),
+        int(entry.pending_delete),
+        int(entry.cross_validated),
+        json.dumps(entry.outcome_history),
     )
 
 
@@ -219,9 +276,31 @@ class SQLiteBackend(StorageBackend):
     # ------------------------------------------------------------------
 
     def _ensure_schema(self) -> None:
-        self._conn.execute(_CREATE_MEMORIES)
-        self._conn.execute(_CREATE_IDX_NAMESPACE)
-        self._conn.execute(_CREATE_IDX_STATUS)
+        cursor = self._conn.cursor()
+        cursor.execute(_CREATE_MEMORIES)
+        cursor.execute(_CREATE_IDX_NAMESPACE)
+        cursor.execute(_CREATE_IDX_STATUS)
+        cursor.execute(_CREATE_GRAPH_EDGES)
+        cursor.execute(_CREATE_IDX_MGE_SOURCE)
+        cursor.execute(_CREATE_IDX_MGE_TARGET)
+        cursor.execute(_CREATE_NAMESPACES)
+        cursor.execute(_CREATE_IDX_MN_STATUS)
+        # Migration: add new columns for sync + graph (Sprint 37)
+        _migrate_cols = [
+            ("vector_clock", "TEXT DEFAULT '{}'"),
+            ("remote_id", "TEXT"),
+            ("published_to_platform", "INTEGER DEFAULT 0"),
+            ("pending_delete", "INTEGER DEFAULT 0"),
+            ("cross_validated", "INTEGER DEFAULT 0"),
+            ("outcome_history", "TEXT DEFAULT '[]'"),
+        ]
+        for col_name, col_def in _migrate_cols:
+            try:
+                cursor.execute(
+                    f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists
         self._conn.commit()
 
     def _ensure_vec_table(self) -> None:
@@ -325,8 +404,9 @@ class SQLiteBackend(StorageBackend):
             values: list[object] = []
             _list_fields = {
                 "tags", "evidence", "merged_from", "consolidated_from",
+                "outcome_history",
             }
-            _json_fields = {"metadata"}
+            _json_fields = {"metadata", "vector_clock"}
 
             # Auto-set updated_at when not explicitly provided
             field_dict: dict[str, object] = dict(fields)

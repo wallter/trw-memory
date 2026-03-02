@@ -10,10 +10,13 @@ from trw_memory.security.pii import (
     PIIAction,
     PIIMatch,
     PIIType,
+    anonymize_installation_id,
     check_entry_pii,
     detect_pii,
+    redact_paths,
     redact_text,
     shannon_entropy,
+    strip_pii,
 )
 
 
@@ -305,3 +308,116 @@ class TestCheckEntryPII:
             m for m in matches_high if m.pii_type == PIIType.HIGH_ENTROPY
         ]
         assert len(he_low) >= len(he_high)
+
+
+# ---------------------------------------------------------------------------
+# strip_pii tests
+# ---------------------------------------------------------------------------
+
+
+class TestStripPII:
+    """Tests for the strip_pii anonymization helper."""
+
+    def test_email_replaced_with_placeholder(self) -> None:
+        """Email addresses are replaced with <email>."""
+        result = strip_pii("Contact admin@example.com for help.")
+        assert "<email>" in result
+        assert "admin@example.com" not in result
+
+    def test_api_key_replaced_with_placeholder(self) -> None:
+        """API key patterns are replaced with <api_key>."""
+        result = strip_pii("Use sk-abcdefghijklmnopqrstuvwxyz to auth.")
+        assert "<api_key>" in result
+        assert "sk-abcdefghijklmnopqrstuvwxyz" not in result
+
+    def test_token_prefix_replaced(self) -> None:
+        """token- prefixed keys are replaced."""
+        result = strip_pii("token-abcdefghijklmnopqrstuvwxyz")
+        assert "<api_key>" in result
+
+    def test_clean_text_unchanged(self) -> None:
+        """Text without PII is returned unchanged."""
+        text = "This is a normal sentence with no secrets."
+        assert strip_pii(text) == text
+
+    def test_multiple_emails_all_replaced(self) -> None:
+        """All email occurrences are replaced."""
+        result = strip_pii("a@b.com and c@d.org")
+        assert "a@b.com" not in result
+        assert "c@d.org" not in result
+        assert result.count("<email>") == 2
+
+
+# ---------------------------------------------------------------------------
+# redact_paths tests
+# ---------------------------------------------------------------------------
+
+
+class TestRedactPaths:
+    """Tests for the redact_paths anonymization helper."""
+
+    def test_project_root_replaced(self) -> None:
+        """Occurrences of project_root are replaced with <project>."""
+        result = redact_paths("/home/user/myproject/src/foo.py", "/home/user/myproject")
+        assert "<project>" in result
+        assert "/home/user/myproject" not in result
+
+    def test_empty_root_returns_text_unchanged(self) -> None:
+        """Empty project_root leaves text unchanged."""
+        text = "/some/absolute/path/file.py"
+        assert redact_paths(text, "") == text
+
+    def test_default_root_returns_text_unchanged(self) -> None:
+        """Default (empty) project_root leaves text unchanged."""
+        text = "/some/path/file.py"
+        assert redact_paths(text) == text
+
+    def test_no_match_returns_text_unchanged(self) -> None:
+        """Text not containing the root is returned unchanged."""
+        text = "No path here at all."
+        result = redact_paths(text, "/home/user/project")
+        assert result == text
+
+    def test_multiple_occurrences_all_replaced(self) -> None:
+        """All occurrences of the root are replaced."""
+        root = "/home/user/proj"
+        text = f"{root}/a.py and {root}/b.py"
+        result = redact_paths(text, root)
+        assert root not in result
+        assert result.count("<project>") == 2
+
+
+# ---------------------------------------------------------------------------
+# anonymize_installation_id tests
+# ---------------------------------------------------------------------------
+
+
+class TestAnonymizeInstallationId:
+    """Tests for the double-SHA-256 anonymization helper."""
+
+    def test_returns_16_hex_chars(self) -> None:
+        """Output is exactly 16 hexadecimal characters."""
+        result = anonymize_installation_id("my-installation-id")
+        assert len(result) == 16
+        assert all(c in "0123456789abcdef" for c in result)
+
+    def test_same_input_same_output(self) -> None:
+        """Deterministic: same input always yields same output."""
+        raw = "stable-id-12345"
+        assert anonymize_installation_id(raw) == anonymize_installation_id(raw)
+
+    def test_different_inputs_different_outputs(self) -> None:
+        """Different inputs produce different outputs (no trivial collision)."""
+        assert anonymize_installation_id("id-a") != anonymize_installation_id("id-b")
+
+    def test_output_does_not_contain_input(self) -> None:
+        """The raw ID is not present in the anonymized output."""
+        raw = "supersecret-installation-xyz"
+        result = anonymize_installation_id(raw)
+        assert raw not in result
+
+    def test_empty_string_produces_valid_hash(self) -> None:
+        """Empty string input still produces a valid 16-char hex output."""
+        result = anonymize_installation_id("")
+        assert len(result) == 16
+        assert all(c in "0123456789abcdef" for c in result)

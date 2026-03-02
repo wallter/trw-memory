@@ -54,6 +54,16 @@ class MemoryEntry(BaseModel):
     source: str = Field(default="agent", description="Origin: 'human', 'agent', 'tool', 'consolidated'")
     source_identity: str = Field(default="", description="Name of source agent/user")
 
+    # Sync fields (PRD-CORE-047)
+    vector_clock: dict[str, int] = Field(default_factory=dict, description="node_id -> counter for conflict resolution")
+    remote_id: str | None = None
+    published_to_platform: bool = False
+    pending_delete: bool = False
+
+    # Graph fields (PRD-CORE-048)
+    cross_validated: bool = False
+    outcome_history: list[str] = Field(default_factory=list, description="Structured event log (boost, decay, promote records)")
+
     # Merge/consolidation tracking
     merged_from: list[str] = Field(default_factory=list)
     consolidated_from: list[str] = Field(default_factory=list)

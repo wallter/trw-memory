@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -87,6 +87,13 @@ class MemoryConfig(BaseSettings):
     # Poisoning defense
     poisoning_detection_enabled: bool = True
     poisoning_z_threshold: float = 3.0
+
+    # Sync configuration (PRD-CORE-047)
+    sync_enabled: bool = False
+    sync_min_importance: float = Field(default=0.7, ge=0.0, le=1.0, description="Min importance to publish remotely")
+    sync_namespace: str = ""
+    platform_url: str = ""
+    platform_api_key: str = ""
 
     @model_validator(mode="after")
     def _check_weight_sum(self) -> "MemoryConfig":

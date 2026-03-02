@@ -3,20 +3,85 @@
 Thin wrapper around lifecycle.consolidation.consolidate_cycle. Validates
 namespace, runs the consolidation cycle (or a dry-run preview), and returns
 a structured result dict.
+
+Also supports team namespace promotion: when namespace starts with "team:",
+high-importance entries are copied to the project namespace.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 import structlog
 
 from trw_memory.exceptions import ConfigError
 from trw_memory.lifecycle.consolidation import consolidate_cycle
+from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespace import validate_namespace
 from trw_memory.storage.interface import StorageBackend
 
 logger = structlog.get_logger()
+
+
+def _promote_team_memories(
+    namespace: str,
+    backend: StorageBackend,
+    promotion_threshold: float = 0.7,
+) -> dict[str, object]:
+    """Promote high-impact team memories to the project namespace.
+
+    Entries with importance >= promotion_threshold are copied to
+    "project:default" with provenance tracking. Lower-importance
+    entries are counted but not promoted.
+
+    Args:
+        namespace: Team namespace (e.g., "team:sprint-37").
+        backend: Storage backend instance.
+        promotion_threshold: Minimum importance to promote (default 0.7).
+
+    Returns:
+        {"promoted_count": int, "discarded_count": int, "namespace_id": str,
+         "completed_at": str}
+    """
+    entries = backend.list_entries(
+        status=MemoryStatus.ACTIVE,
+        namespace=namespace,
+        limit=10_000,
+    )
+
+    promoted_count = 0
+    discarded_count = 0
+    now = datetime.now(timezone.utc)
+
+    for entry in entries:
+        if entry.importance >= promotion_threshold:
+            outcome = f"promoted_from:{namespace}:timestamp={now.isoformat()}"
+            promoted = entry.model_copy(update={
+                "id": f"promoted-{entry.id}",
+                "namespace": "project:default",
+                "source_identity": namespace,
+                "outcome_history": entry.outcome_history + [outcome],
+                "updated_at": now,
+            })
+            backend.store(promoted)
+            promoted_count += 1
+        else:
+            discarded_count += 1
+
+    logger.info(
+        "team_memories_promoted",
+        namespace=namespace,
+        promoted=promoted_count,
+        discarded=discarded_count,
+    )
+
+    return {
+        "promoted_count": promoted_count,
+        "discarded_count": discarded_count,
+        "namespace_id": namespace,
+        "completed_at": now.isoformat(),
+    }
 
 
 def memory_consolidate_impl(
@@ -40,6 +105,10 @@ def memory_consolidate_impl(
         validate_namespace(namespace)
     except ConfigError as exc:
         return {"error": str(exc), "status": "invalid"}
+
+    # Team namespace promotion: copy high-impact entries to project namespace
+    if namespace.startswith("team:"):
+        return _promote_team_memories(namespace, backend)
 
     try:
         result = consolidate_cycle(
