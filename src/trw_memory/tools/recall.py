@@ -68,7 +68,7 @@ def memory_recall_impl(
             validate_namespace(ns)
             extra_ns.append(ns)
         except ConfigError:
-            pass  # skip invalid extra namespaces silently
+            logger.debug("recall_invalid_namespace_skipped", namespace=ns)
 
     all_namespaces = [namespace] + extra_ns
 

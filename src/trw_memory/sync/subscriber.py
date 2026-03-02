@@ -10,6 +10,7 @@ import json
 import threading
 from typing import Any, Callable
 
+import httpx
 import structlog
 
 from trw_memory.models.config import MemoryConfig
@@ -60,8 +61,6 @@ class SSESubscriber:
 
     def _listen_loop(self) -> None:
         """Main event loop -- connects, reads SSE, reconnects on failure."""
-        import httpx
-
         url = f"{self._cfg.platform_url.rstrip('/')}/v1/learnings/stream"
 
         while not self._stop_event.is_set():
@@ -80,7 +79,7 @@ class SSESubscriber:
                             if self._stop_event.is_set():
                                 return
                             self._process_line(line)
-            except Exception:
+            except (httpx.HTTPError, OSError):
                 logger.debug("sse_connection_error", exc_info=True)
 
             if not self._stop_event.is_set():
@@ -104,4 +103,4 @@ class SSESubscriber:
                         event_type=event_type,
                     )
             except json.JSONDecodeError:
-                pass
+                logger.debug("sse_malformed_json", data=data_str[:200])

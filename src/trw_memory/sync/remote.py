@@ -21,6 +21,10 @@ logger = structlog.get_logger()
 PUBLISH_TIMEOUT = 5.0  # seconds
 FETCH_TIMEOUT = 3.0
 
+MAX_SUMMARY_LENGTH = 1000
+MAX_DETAIL_LENGTH = 10_000
+MAX_TAGS_COUNT = 20
+
 
 def _anonymize_entry(
     entry: MemoryEntry,
@@ -41,9 +45,9 @@ def _anonymize_entry(
     detail = redact_paths(detail, project_root)
 
     return {
-        "summary": content[:1000],
-        "detail": detail[:10000] if detail else None,
-        "tags": entry.tags[:20],
+        "summary": content[:MAX_SUMMARY_LENGTH],
+        "detail": detail[:MAX_DETAIL_LENGTH] if detail else None,
+        "tags": entry.tags[:MAX_TAGS_COUNT],
         "impact": entry.importance,
         "embedding": None,  # populated by caller if available
         "source_project": anonymize_installation_id(
@@ -96,7 +100,7 @@ def publish_memory(
                     status=resp.status_code,
                 )
                 return False
-    except Exception:
+    except Exception:  # noqa: BLE001 — fail-open: never raise to caller
         logger.debug("memory_publish_error", entry_id=entry.id, exc_info=True)
         return False
 
@@ -145,7 +149,7 @@ def fetch_shared_memories(
             results = resp.json()
             if not isinstance(results, list):
                 results = results.get("results", [])
-    except Exception:
+    except Exception:  # noqa: BLE001 — fail-open: never raise to caller
         logger.debug("memory_fetch_error", exc_info=True)
         return []
 

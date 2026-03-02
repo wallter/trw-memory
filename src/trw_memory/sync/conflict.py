@@ -98,7 +98,7 @@ def resolve_conflict(
 
     merged_tags = sorted(set(local.tags) | set(remote.tags))
     merged_clock = merge_clocks(local.vector_clock, remote.vector_clock)
-    merged_importance = min(max(local.importance, remote.importance), 1.0)
+    merged_importance = max(local.importance, remote.importance)
 
     # Build merged_from tracking
     merged_from = list(set(local.merged_from + remote.merged_from))

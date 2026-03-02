@@ -10,7 +10,7 @@ import json
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import structlog
 
@@ -55,7 +55,7 @@ class RetryQueue:
             self._append(record)
             return True
 
-    def drain(self, publish_fn: Any) -> dict[str, int]:
+    def drain(self, publish_fn: Callable[[dict[str, Any]], bool]) -> dict[str, int]:
         """Attempt to drain the queue by re-publishing all entries.
 
         Args:
@@ -83,7 +83,7 @@ class RetryQueue:
 
                 try:
                     success = publish_fn(record["payload"])
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 — publish_fn may raise anything
                     record["retry_count"] = record.get("retry_count", 0) + 1
                     record["last_error"] = str(exc)
                     remaining.append(record)
@@ -108,7 +108,8 @@ class RetryQueue:
 
     def depth(self) -> int:
         """Return the number of entries in the queue."""
-        return len(self._read_all())
+        with self._lock:
+            return len(self._read_all())
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -14,10 +14,11 @@ import pytest
 
 from trw_memory.graph import (
     CROSS_VALIDATION_THRESHOLD,
+    DECAY_DELTA,
     IMPORTANCE_BOOST,
     MAX_TRAVERSAL_DEPTH,
     SIMILARITY_THRESHOLD,
-    _cosine_similarity,
+    _safe_cosine_similarity,
     apply_importance_boost,
     apply_importance_decay,
     create_consolidation_edges,
@@ -610,16 +611,16 @@ class TestDetectCrossValidation:
 
 class TestCosineSimilarity:
     def test_identical_vectors(self) -> None:
-        assert abs(_cosine_similarity([1.0, 0.0], [1.0, 0.0]) - 1.0) < 0.001
+        assert abs(_safe_cosine_similarity([1.0, 0.0], [1.0, 0.0]) - 1.0) < 0.001
 
     def test_orthogonal_vectors(self) -> None:
-        assert abs(_cosine_similarity([1.0, 0.0], [0.0, 1.0])) < 0.001
+        assert abs(_safe_cosine_similarity([1.0, 0.0], [0.0, 1.0])) < 0.001
 
     def test_empty_vectors(self) -> None:
-        assert _cosine_similarity([], []) == 0.0
+        assert _safe_cosine_similarity([], []) == 0.0
 
     def test_mismatched_lengths(self) -> None:
-        assert _cosine_similarity([1.0], [1.0, 0.0]) == 0.0
+        assert _safe_cosine_similarity([1.0], [1.0, 0.0]) == 0.0
 
     def test_zero_vector(self) -> None:
-        assert _cosine_similarity([0.0, 0.0], [1.0, 0.0]) == 0.0
+        assert _safe_cosine_similarity([0.0, 0.0], [1.0, 0.0]) == 0.0

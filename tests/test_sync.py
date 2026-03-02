@@ -33,6 +33,9 @@ from trw_memory.sync.conflict import (
 )
 from trw_memory.sync.remote import (
     FETCH_TIMEOUT,
+    MAX_DETAIL_LENGTH,
+    MAX_SUMMARY_LENGTH,
+    MAX_TAGS_COUNT,
     PUBLISH_TIMEOUT,
     _anonymize_entry,
     fetch_shared_memories,
@@ -85,6 +88,34 @@ def _make_config(
         platform_api_key=platform_api_key,
         sync_min_importance=sync_min_importance,
     )
+
+
+def _mock_httpx_client(
+    mock_client_cls: MagicMock,
+    *,
+    status_code: int = 200,
+    json_data: Any = None,
+    side_effect: Exception | None = None,
+) -> MagicMock:
+    """Wire up an httpx.Client context-manager mock.
+
+    Returns the mock client so callers can inspect ``post.call_args``.
+    """
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+
+    if side_effect is not None:
+        mock_client.post.side_effect = side_effect
+    else:
+        mock_resp = MagicMock()
+        mock_resp.status_code = status_code
+        if json_data is not None:
+            mock_resp.json.return_value = json_data
+        mock_client.post.return_value = mock_resp
+
+    mock_client_cls.return_value = mock_client
+    return mock_client
 
 
 # ===========================================================================
@@ -469,13 +500,7 @@ class TestPublishMemory:
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_returns_true_on_200_response(self, mock_client_cls: MagicMock) -> None:
         """Returns True when the backend responds with 200."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.return_value = mock_resp
-        mock_client_cls.return_value = mock_client
+        _mock_httpx_client(mock_client_cls, status_code=200)
 
         cfg = _make_config()
         entry = _make_entry(importance=0.9)
@@ -484,13 +509,7 @@ class TestPublishMemory:
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_calls_correct_url_with_auth(self, mock_client_cls: MagicMock) -> None:
         """POST goes to {platform_url}/v1/learnings with Bearer token."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.return_value = mock_resp
-        mock_client_cls.return_value = mock_client
+        mock_client = _mock_httpx_client(mock_client_cls, status_code=200)
 
         cfg = _make_config(platform_url="https://api.test.com")
         entry = _make_entry(importance=0.9)
@@ -504,13 +523,7 @@ class TestPublishMemory:
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_returns_false_on_503_response(self, mock_client_cls: MagicMock) -> None:
         """Returns False on 503 (fail-open, queued for retry)."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 503
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.return_value = mock_resp
-        mock_client_cls.return_value = mock_client
+        _mock_httpx_client(mock_client_cls, status_code=503)
 
         cfg = _make_config()
         entry = _make_entry(importance=0.9)
@@ -519,11 +532,7 @@ class TestPublishMemory:
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_returns_false_on_connection_error(self, mock_client_cls: MagicMock) -> None:
         """Returns False on connection error (fail-open, no exception raised)."""
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.side_effect = ConnectionError("refused")
-        mock_client_cls.return_value = mock_client
+        _mock_httpx_client(mock_client_cls, side_effect=ConnectionError("refused"))
 
         cfg = _make_config()
         entry = _make_entry(importance=0.9)
@@ -533,13 +542,7 @@ class TestPublishMemory:
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_includes_embedding_in_payload(self, mock_client_cls: MagicMock) -> None:
         """When embedding is provided, it's included in the payload."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.return_value = mock_resp
-        mock_client_cls.return_value = mock_client
+        mock_client = _mock_httpx_client(mock_client_cls, status_code=200)
 
         cfg = _make_config()
         entry = _make_entry(importance=0.9)
@@ -553,13 +556,7 @@ class TestPublishMemory:
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_no_auth_header_without_api_key(self, mock_client_cls: MagicMock) -> None:
         """When platform_api_key is empty, no Authorization header."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.return_value = mock_resp
-        mock_client_cls.return_value = mock_client
+        mock_client = _mock_httpx_client(mock_client_cls, status_code=200)
 
         cfg = _make_config(platform_api_key="")
         entry = _make_entry(importance=0.9)
@@ -591,11 +588,7 @@ class TestFetchSharedMemories:
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_returns_empty_on_connection_error(self, mock_client_cls: MagicMock) -> None:
         """Returns [] on connection error (fail-open)."""
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.side_effect = ConnectionError("refused")
-        mock_client_cls.return_value = mock_client
+        _mock_httpx_client(mock_client_cls, side_effect=ConnectionError("refused"))
 
         cfg = _make_config()
         assert fetch_shared_memories("query", cfg) == []
@@ -603,17 +596,14 @@ class TestFetchSharedMemories:
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_returns_results_with_shared_prefix(self, mock_client_cls: MagicMock) -> None:
         """Remote results get [shared] prefix on content."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = [
-            {"summary": "Use caching for speed"},
-            {"summary": "Retry on 503 errors"},
-        ]
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.return_value = mock_resp
-        mock_client_cls.return_value = mock_client
+        _mock_httpx_client(
+            mock_client_cls,
+            status_code=200,
+            json_data=[
+                {"summary": "Use caching for speed"},
+                {"summary": "Retry on 503 errors"},
+            ],
+        )
 
         cfg = _make_config()
         results = fetch_shared_memories("query", cfg)
@@ -625,17 +615,14 @@ class TestFetchSharedMemories:
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_deduplicates_against_local_entries(self, mock_client_cls: MagicMock) -> None:
         """Remote results matching local content are excluded."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = [
-            {"summary": "Use caching for speed"},
-            {"summary": "Existing local knowledge"},
-        ]
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.return_value = mock_resp
-        mock_client_cls.return_value = mock_client
+        _mock_httpx_client(
+            mock_client_cls,
+            status_code=200,
+            json_data=[
+                {"summary": "Use caching for speed"},
+                {"summary": "Existing local knowledge"},
+            ],
+        )
 
         cfg = _make_config()
         local = [_make_entry(content="Existing local knowledge")]
@@ -646,14 +633,7 @@ class TestFetchSharedMemories:
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_respects_limit_parameter(self, mock_client_cls: MagicMock) -> None:
         """Limit parameter is sent in the POST payload."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = []
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.return_value = mock_resp
-        mock_client_cls.return_value = mock_client
+        mock_client = _mock_httpx_client(mock_client_cls, status_code=200, json_data=[])
 
         cfg = _make_config()
         fetch_shared_memories("query", cfg, limit=5)
@@ -665,14 +645,7 @@ class TestFetchSharedMemories:
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_calls_correct_search_url(self, mock_client_cls: MagicMock) -> None:
         """POST goes to {platform_url}/v1/learnings/search."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = []
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.return_value = mock_resp
-        mock_client_cls.return_value = mock_client
+        mock_client = _mock_httpx_client(mock_client_cls, status_code=200, json_data=[])
 
         cfg = _make_config(platform_url="https://api.test.com")
         fetch_shared_memories("test query", cfg)
@@ -683,13 +656,7 @@ class TestFetchSharedMemories:
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_returns_empty_on_non_200(self, mock_client_cls: MagicMock) -> None:
         """Returns [] on non-200 status code."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 500
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.return_value = mock_resp
-        mock_client_cls.return_value = mock_client
+        _mock_httpx_client(mock_client_cls, status_code=500)
 
         cfg = _make_config()
         assert fetch_shared_memories("query", cfg) == []
@@ -697,16 +664,11 @@ class TestFetchSharedMemories:
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_handles_results_wrapper_dict(self, mock_client_cls: MagicMock) -> None:
         """Handles response wrapped in {results: [...]} dict."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "results": [{"summary": "A finding"}],
-        }
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.return_value = mock_resp
-        mock_client_cls.return_value = mock_client
+        _mock_httpx_client(
+            mock_client_cls,
+            status_code=200,
+            json_data={"results": [{"summary": "A finding"}]},
+        )
 
         cfg = _make_config()
         results = fetch_shared_memories("query", cfg)

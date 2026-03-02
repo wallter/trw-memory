@@ -18,6 +18,7 @@ from typing import Any
 import structlog
 
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.retrieval.dense import cosine_similarity
 
 logger = structlog.get_logger()
 
@@ -27,6 +28,7 @@ CROSS_VALIDATION_THRESHOLD = 0.92
 TAG_COOCCURRENCE_MIN_SHARED = 2
 CANDIDATE_LIMIT = 500
 IMPORTANCE_BOOST = 0.05
+DECAY_DELTA = 0.1
 
 
 def create_similarity_edges(
@@ -55,7 +57,7 @@ def create_similarity_edges(
     for cand_id, cand_emb in candidate_embeddings:
         if cand_id == entry.id:
             continue
-        sim = _cosine_similarity(embedding, cand_emb)
+        sim = _safe_cosine_similarity(embedding, cand_emb)
         if sim > SIMILARITY_THRESHOLD:
             _upsert_edge(conn, entry.id, cand_id, "similarity", round(sim, 4), now)
             _upsert_edge(conn, cand_id, entry.id, "similarity", round(sim, 4), now)
@@ -212,7 +214,7 @@ def detect_cross_validation(
         return False
 
     for _remote_id, project_id, remote_emb in remote_entries:
-        sim = _cosine_similarity(embedding, remote_emb)
+        sim = _safe_cosine_similarity(embedding, remote_emb)
         if sim > CROSS_VALIDATION_THRESHOLD:
             logger.debug(
                 "cross_validation_detected",
@@ -251,7 +253,7 @@ def apply_importance_boost(
 
 def apply_importance_decay(
     entry: MemoryEntry,
-    delta: float = 0.1,
+    delta: float = DECAY_DELTA,
 ) -> MemoryEntry:
     """Apply importance decay for unused shared memories.
 
@@ -297,15 +299,17 @@ def memory_decay_pass(
     ).fetchone()
     total_qualifying = total[0] if total else 0
 
+    # Direct SQL for batch performance — StorageBackend.update() is
+    # per-entry and would create N+1 round-trips for 1000-row batches.
     decayed = 0
     for (entry_id,) in rows:
         now = datetime.now(timezone.utc).isoformat()
-        outcome = f"importance_decay:delta=-0.10:reason=unused_90d:timestamp={now}"
+        outcome = f"importance_decay:delta=-{DECAY_DELTA:.2f}:reason=unused_90d:timestamp={now}"
         conn.execute(
-            "UPDATE memories SET importance = MAX(importance - 0.1, 0.0), "
+            "UPDATE memories SET importance = MAX(importance - ?, 0.0), "
             "outcome_history = json_insert(outcome_history, '$[#]', ?) "
             "WHERE id = ?",
-            (outcome, entry_id),
+            (DECAY_DELTA, outcome, entry_id),
         )
         decayed += 1
 
@@ -323,16 +327,16 @@ def memory_decay_pass(
 # ---------------------------------------------------------------------------
 
 
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Compute cosine similarity between two vectors."""
-    if len(a) != len(b) or not a:
+def _safe_cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity with graceful degradation for graph operations.
+
+    Delegates to ``retrieval.dense.cosine_similarity`` but returns 0.0
+    instead of raising on dimension mismatch or empty vectors.
+    """
+    try:
+        return cosine_similarity(a, b)
+    except ValueError:
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(x * x for x in b) ** 0.5
-    if norm_a == 0.0 or norm_b == 0.0:
-        return 0.0
-    return float(dot / (norm_a * norm_b))
 
 
 def _upsert_edge(
