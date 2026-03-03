@@ -39,6 +39,12 @@ vectors = ["sqlite-vec>=0.1.0"]
 bm25 = ["rank-bm25>=0.2.0"]
 llm = ["anthropic>=0.40.0"]
 api = ["fastapi>=0.115.0", "uvicorn[standard]>=0.30.0"]
+langchain = ["langchain-core>=0.3.0"]
+llamaindex = ["llama-index-core>=0.11.0"]
+crewai = ["crewai>=0.74.0"]
+all-integrations = [
+    "trw-memory[langchain,llamaindex,crewai]",
+]
 all = ["trw-memory[mcp,embeddings,vectors,bm25,llm,api]"]
 dev = [
     "pytest>=8.0.0",
@@ -56,11 +62,78 @@ Repository = "https://github.com/trw-framework/trw-memory"
 Issues = "https://github.com/trw-framework/trw-memory/issues"
 
 [project.scripts]
-trw-memory = "trw_memory.server:main"
+trw-memory = "trw_memory.cli:main"
+trw-memory-server = "trw_memory.server:main"
 trw-memory-api = "trw_memory.api.app:create_app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/trw_memory"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    # --- Foundations ---
+    "E",        # pycodestyle errors
+    "W",        # pycodestyle warnings
+    "F",        # Pyflakes: unused imports (F401), undefined names (F821), unused vars (F841)
+
+    # --- Import hygiene ---
+    "I",        # isort: consistent import ordering
+
+    # --- Bug patterns (catches redundant except, mutable defaults, unused loop vars) ---
+    "B",        # flake8-bugbear: B014 duplicate exception handler, B006 mutable defaults, B018 useless expr
+
+    # --- Modern Python syntax ---
+    "UP",       # pyupgrade: deprecated aliases, union types (X | Y)
+
+    # --- Code simplification ---
+    "SIM",      # flake8-simplify: SIM102 nested-if, SIM105 contextlib.suppress
+    "RET",      # flake8-return: RET504 assign-then-return, RET505-508 superfluous else
+    "PIE",      # flake8-pie: PIE790 unnecessary pass, PIE794 duplicate class field
+
+    # --- Exception handling quality ---
+    "TRY",      # tryceratops: TRY201 verbose raise, TRY301 raise-in-try
+
+    # --- Async safety ---
+    "ASYNC",    # flake8-async: blocking I/O in async functions
+
+    # --- pytest hygiene ---
+    "PT",       # flake8-pytest-style: fixture/assert/exception style
+
+    # --- Type checking optimization ---
+    "TC",       # flake8-type-checking: move type-only imports to TYPE_CHECKING
+
+    # --- Ruff-native ---
+    "RUF",      # RUF012 mutable ClassVar, RUF100 unused noqa
+]
+ignore = [
+    "E501",     # line too long — handled by line-length setting
+    "TRY003",   # long exception messages inline are fine in application code
+    "TRY002",   # raising ValueError/TypeError directly is idiomatic in libraries
+    "TRY300",   # return-in-try is standard CLI handler pattern (try/except/finally)
+    "SIM108",   # ternary operator is not always more readable than if/else
+    "RET504",   # assign-then-return is often clearer than inline return
+    "TC001",    # typing imports used at runtime via Pydantic models — not type-checking-only
+    "TC002",    # third-party imports used at runtime — not type-checking-only
+    "TC003",    # stdlib imports used at runtime in constructors — not type-checking-only
+    "B008",     # function calls in defaults — FastMCP/Pydantic patterns use this idiomatically
+]
+fixable = ["F401", "B007", "B013", "B014", "UP", "I", "PIE790", "TC", "RUF100"]
+unfixable = ["F841"]  # never auto-delete "unused" variables (could be side-effect assignments)
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["PT", "TRY", "SIM", "B018", "RUF012"]
+"benchmarks/**/*.py" = ["TRY", "PT"]
+"src/trw_memory/cli.py" = ["ASYNC230", "ASYNC240"]  # CLI runs via asyncio.run(), blocking I/O is fine
+"**/__init__.py" = ["F401"]  # re-exports are intentional
+"**/conftest.py" = ["PT"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["trw_memory"]
+split-on-trailing-comma = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

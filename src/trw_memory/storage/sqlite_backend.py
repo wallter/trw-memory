@@ -23,6 +23,12 @@ import structlog
 
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.storage._parsing import (
+    parse_dt,
+    parse_json_dict_int,
+    parse_json_dict_str,
+    parse_json_list,
+)
 from trw_memory.storage.interface import StorageBackend
 
 try:
@@ -143,52 +149,34 @@ def _row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         cross_val_raw, outcome_json,
     ) = row
 
-    tags: list[str] = json.loads(str(tags_json)) if tags_json else []
-    evidence: list[str] = json.loads(str(evidence_json)) if evidence_json else []
-    merged_from: list[str] = json.loads(str(merged_json)) if merged_json else []
-    cons_from: list[str] = json.loads(str(cons_from_json)) if cons_from_json else []
-    metadata: dict[str, str] = json.loads(str(metadata_json)) if metadata_json else {}
-    vector_clock: dict[str, int] = json.loads(str(vector_clock_json)) if vector_clock_json else {}
-    outcome_history: list[str] = json.loads(str(outcome_json)) if outcome_json else []
-
-    def _parse_dt(val: object) -> datetime:
-        dt = datetime.fromisoformat(str(val))
-        if dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-
-    last_accessed: datetime | None = (
-        _parse_dt(last_accessed_s) if last_accessed_s else None
-    )
-
     return MemoryEntry(
         id=str(id_),
         content=str(content),
         detail=str(detail) if detail else "",
-        tags=tags,
-        evidence=evidence,
+        tags=parse_json_list(tags_json),
+        evidence=parse_json_list(evidence_json),
         importance=float(str(importance)),
         status=MemoryStatus(str(status)),
         recurrence=int(str(recurrence)),
         namespace=str(namespace),
-        created_at=_parse_dt(created_at_s),
-        updated_at=_parse_dt(updated_at_s),
-        last_accessed_at=last_accessed,
+        created_at=parse_dt(created_at_s),
+        updated_at=parse_dt(updated_at_s),
+        last_accessed_at=parse_dt(last_accessed_s) if last_accessed_s else None,
         access_count=int(str(access_count)),
         q_value=float(str(q_value)),
         q_observations=int(str(q_obs)),
         source=str(source),
         source_identity=str(source_identity) if source_identity else "",
-        merged_from=merged_from,
-        consolidated_from=cons_from,
+        merged_from=parse_json_list(merged_json),
+        consolidated_from=parse_json_list(cons_from_json),
         consolidated_into=str(consolidated_into) if consolidated_into else None,
-        metadata=metadata,
-        vector_clock=vector_clock,
+        metadata=parse_json_dict_str(metadata_json),
+        vector_clock=parse_json_dict_int(vector_clock_json),
         remote_id=str(remote_id) if remote_id else None,
         published_to_platform=bool(int(str(published_raw))) if published_raw else False,
         pending_delete=bool(int(str(pending_del_raw))) if pending_del_raw else False,
         cross_validated=bool(int(str(cross_val_raw))) if cross_val_raw else False,
-        outcome_history=outcome_history,
+        outcome_history=parse_json_list(outcome_json),
     )
 
 

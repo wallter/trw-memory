@@ -1,0 +1,1154 @@
+{
+  "entries": [
+    {
+      "id": "golden-001",
+      "content": "Pydantic v2 requires model_config = ConfigDict(strict=True) for type enforcement",
+      "tags": [
+        "python",
+        "pydantic"
+      ],
+      "importance": 0.9,
+      "queries": [
+        {
+          "query": "pydantic strict mode",
+          "relevant": true
+        },
+        {
+          "query": "database indexing",
+          "relevant": false
+        },
+        {
+          "query": "pydantic ConfigDict",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-002",
+      "content": "FastAPI dependency injection uses Depends() for request-scoped services",
+      "tags": [
+        "python",
+        "fastapi"
+      ],
+      "importance": 0.85,
+      "queries": [
+        {
+          "query": "fastapi dependency injection",
+          "relevant": true
+        },
+        {
+          "query": "react hooks",
+          "relevant": false
+        },
+        {
+          "query": "Depends service",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-003",
+      "content": "Python asyncio event loop must not be nested without nest_asyncio",
+      "tags": [
+        "python",
+        "asyncio"
+      ],
+      "importance": 0.8,
+      "queries": [
+        {
+          "query": "asyncio event loop nested",
+          "relevant": true
+        },
+        {
+          "query": "docker compose",
+          "relevant": false
+        },
+        {
+          "query": "python async",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-004",
+      "content": "mypy --strict catches implicit Any and missing return types",
+      "tags": [
+        "python",
+        "mypy"
+      ],
+      "importance": 0.75,
+      "queries": [
+        {
+          "query": "mypy strict mode",
+          "relevant": true
+        },
+        {
+          "query": "javascript types",
+          "relevant": false
+        },
+        {
+          "query": "type checking python",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-005",
+      "content": "pytest fixtures with autouse=True run for every test in scope",
+      "tags": [
+        "python",
+        "pytest"
+      ],
+      "importance": 0.8,
+      "queries": [
+        {
+          "query": "pytest autouse fixture",
+          "relevant": true
+        },
+        {
+          "query": "vitest setup",
+          "relevant": false
+        },
+        {
+          "query": "test fixtures",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-006",
+      "content": "Python typing.Protocol enables structural subtyping without inheritance",
+      "tags": [
+        "python",
+        "typing"
+      ],
+      "importance": 0.7,
+      "queries": [
+        {
+          "query": "typing Protocol structural",
+          "relevant": true
+        },
+        {
+          "query": "kubernetes deployment",
+          "relevant": false
+        },
+        {
+          "query": "python duck typing",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-007",
+      "content": "Pydantic Field(alias='name') requires populate_by_name=True in model_config",
+      "tags": [
+        "python",
+        "pydantic"
+      ],
+      "importance": 0.85,
+      "queries": [
+        {
+          "query": "pydantic alias field",
+          "relevant": true
+        },
+        {
+          "query": "redis caching",
+          "relevant": false
+        },
+        {
+          "query": "populate_by_name",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-008",
+      "content": "React useEffect cleanup function runs before component unmount",
+      "tags": [
+        "javascript",
+        "react"
+      ],
+      "importance": 0.8,
+      "queries": [
+        {
+          "query": "react useEffect cleanup",
+          "relevant": true
+        },
+        {
+          "query": "python decorators",
+          "relevant": false
+        },
+        {
+          "query": "component lifecycle",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-009",
+      "content": "TypeScript discriminated unions need a literal type tag field",
+      "tags": [
+        "javascript",
+        "typescript"
+      ],
+      "importance": 0.85,
+      "queries": [
+        {
+          "query": "typescript discriminated union",
+          "relevant": true
+        },
+        {
+          "query": "sql migrations",
+          "relevant": false
+        },
+        {
+          "query": "tagged union pattern",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-010",
+      "content": "Node.js streams handle backpressure via highWaterMark setting",
+      "tags": [
+        "javascript",
+        "node"
+      ],
+      "importance": 0.7,
+      "queries": [
+        {
+          "query": "node streams backpressure",
+          "relevant": true
+        },
+        {
+          "query": "docker volumes",
+          "relevant": false
+        },
+        {
+          "query": "highWaterMark",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-011",
+      "content": "Vitest uses vi.fn() for mocking functions in unit tests",
+      "tags": [
+        "javascript",
+        "vitest"
+      ],
+      "importance": 0.75,
+      "queries": [
+        {
+          "query": "vitest mock function",
+          "relevant": true
+        },
+        {
+          "query": "pytest mock",
+          "relevant": false
+        },
+        {
+          "query": "vi.fn unit test",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-012",
+      "content": "Zod schema validation integrates with React Hook Form via resolver",
+      "tags": [
+        "javascript",
+        "zod"
+      ],
+      "importance": 0.8,
+      "queries": [
+        {
+          "query": "zod react hook form",
+          "relevant": true
+        },
+        {
+          "query": "pydantic validation",
+          "relevant": false
+        },
+        {
+          "query": "schema validation frontend",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-013",
+      "content": "Next.js App Router uses server components by default for performance",
+      "tags": [
+        "javascript",
+        "nextjs"
+      ],
+      "importance": 0.85,
+      "queries": [
+        {
+          "query": "nextjs server components",
+          "relevant": true
+        },
+        {
+          "query": "fastapi routing",
+          "relevant": false
+        },
+        {
+          "query": "app router default",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-014",
+      "content": "TypeScript satisfies operator validates type without widening",
+      "tags": [
+        "javascript",
+        "typescript"
+      ],
+      "importance": 0.7,
+      "queries": [
+        {
+          "query": "typescript satisfies operator",
+          "relevant": true
+        },
+        {
+          "query": "python assert",
+          "relevant": false
+        },
+        {
+          "query": "type narrowing",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-015",
+      "content": "SQLite WAL mode improves concurrent read performance significantly",
+      "tags": [
+        "database",
+        "sqlite"
+      ],
+      "importance": 0.9,
+      "queries": [
+        {
+          "query": "sqlite WAL mode",
+          "relevant": true
+        },
+        {
+          "query": "react rendering",
+          "relevant": false
+        },
+        {
+          "query": "concurrent reads",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-016",
+      "content": "PostgreSQL EXPLAIN ANALYZE shows actual execution time per plan node",
+      "tags": [
+        "database",
+        "postgres"
+      ],
+      "importance": 0.85,
+      "queries": [
+        {
+          "query": "postgres explain analyze",
+          "relevant": true
+        },
+        {
+          "query": "python profiling",
+          "relevant": false
+        },
+        {
+          "query": "query execution plan",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-017",
+      "content": "Redis SET with NX and EX flags implements distributed locks",
+      "tags": [
+        "database",
+        "redis"
+      ],
+      "importance": 0.8,
+      "queries": [
+        {
+          "query": "redis distributed lock",
+          "relevant": true
+        },
+        {
+          "query": "file system lock",
+          "relevant": false
+        },
+        {
+          "query": "SET NX EX",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-018",
+      "content": "Database migration scripts must be idempotent for safe re-runs",
+      "tags": [
+        "database",
+        "migration"
+      ],
+      "importance": 0.9,
+      "queries": [
+        {
+          "query": "idempotent migration",
+          "relevant": true
+        },
+        {
+          "query": "docker rebuild",
+          "relevant": false
+        },
+        {
+          "query": "database schema migration",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-019",
+      "content": "Composite indexes in SQL follow leftmost prefix rule for queries",
+      "tags": [
+        "database",
+        "indexing"
+      ],
+      "importance": 0.85,
+      "queries": [
+        {
+          "query": "composite index leftmost",
+          "relevant": true
+        },
+        {
+          "query": "python list index",
+          "relevant": false
+        },
+        {
+          "query": "sql index optimization",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-020",
+      "content": "SQL query plans degrade when statistics are stale after bulk loads",
+      "tags": [
+        "database",
+        "query"
+      ],
+      "importance": 0.75,
+      "queries": [
+        {
+          "query": "query plan statistics",
+          "relevant": true
+        },
+        {
+          "query": "javascript bundling",
+          "relevant": false
+        },
+        {
+          "query": "sql performance bulk",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-021",
+      "content": "Docker multi-stage builds reduce final image size by separating build deps",
+      "tags": [
+        "devops",
+        "docker"
+      ],
+      "importance": 0.85,
+      "queries": [
+        {
+          "query": "docker multi-stage build",
+          "relevant": true
+        },
+        {
+          "query": "python packaging",
+          "relevant": false
+        },
+        {
+          "query": "image size reduction",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-022",
+      "content": "CI/CD pipeline caching of node_modules speeds up JavaScript builds",
+      "tags": [
+        "devops",
+        "ci-cd"
+      ],
+      "importance": 0.8,
+      "queries": [
+        {
+          "query": "ci cache node_modules",
+          "relevant": true
+        },
+        {
+          "query": "python virtualenv",
+          "relevant": false
+        },
+        {
+          "query": "pipeline build speed",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-023",
+      "content": "Kubernetes liveness probes restart pods that fail health checks",
+      "tags": [
+        "devops",
+        "kubernetes"
+      ],
+      "importance": 0.9,
+      "queries": [
+        {
+          "query": "kubernetes liveness probe",
+          "relevant": true
+        },
+        {
+          "query": "pytest health",
+          "relevant": false
+        },
+        {
+          "query": "pod restart health",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-024",
+      "content": "Prometheus metrics collection requires instrumentation at application level",
+      "tags": [
+        "devops",
+        "monitoring"
+      ],
+      "importance": 0.75,
+      "queries": [
+        {
+          "query": "prometheus metrics instrumentation",
+          "relevant": true
+        },
+        {
+          "query": "python logging",
+          "relevant": false
+        },
+        {
+          "query": "application monitoring",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-025",
+      "content": "Blue-green deployment eliminates downtime by switching traffic atomically",
+      "tags": [
+        "devops",
+        "deployment"
+      ],
+      "importance": 0.85,
+      "queries": [
+        {
+          "query": "blue-green deployment",
+          "relevant": true
+        },
+        {
+          "query": "database rollback",
+          "relevant": false
+        },
+        {
+          "query": "zero downtime deploy",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-026",
+      "content": "Terraform state must be stored remotely for team collaboration",
+      "tags": [
+        "devops",
+        "terraform"
+      ],
+      "importance": 0.8,
+      "queries": [
+        {
+          "query": "terraform remote state",
+          "relevant": true
+        },
+        {
+          "query": "git branching",
+          "relevant": false
+        },
+        {
+          "query": "infrastructure state",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-027",
+      "content": "JWT tokens should use short expiry with refresh token rotation",
+      "tags": [
+        "security",
+        "jwt"
+      ],
+      "importance": 0.9,
+      "queries": [
+        {
+          "query": "jwt refresh token rotation",
+          "relevant": true
+        },
+        {
+          "query": "database session",
+          "relevant": false
+        },
+        {
+          "query": "token expiry security",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-028",
+      "content": "bcrypt with cost factor 12 provides adequate password hashing security",
+      "tags": [
+        "security",
+        "encryption"
+      ],
+      "importance": 0.85,
+      "queries": [
+        {
+          "query": "bcrypt cost factor",
+          "relevant": true
+        },
+        {
+          "query": "base64 encoding",
+          "relevant": false
+        },
+        {
+          "query": "password hashing",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-029",
+      "content": "RBAC policies should deny by default and grant explicit permissions",
+      "tags": [
+        "security",
+        "rbac"
+      ],
+      "importance": 0.9,
+      "queries": [
+        {
+          "query": "rbac deny default",
+          "relevant": true
+        },
+        {
+          "query": "css display none",
+          "relevant": false
+        },
+        {
+          "query": "role permissions",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-030",
+      "content": "OAuth2 PKCE flow prevents authorization code interception attacks",
+      "tags": [
+        "security",
+        "auth"
+      ],
+      "importance": 0.85,
+      "queries": [
+        {
+          "query": "oauth2 pkce flow",
+          "relevant": true
+        },
+        {
+          "query": "api key header",
+          "relevant": false
+        },
+        {
+          "query": "authorization code security",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-031",
+      "content": "CORS preflight OPTIONS requests must include Access-Control-Allow-Methods",
+      "tags": [
+        "security",
+        "cors"
+      ],
+      "importance": 0.8,
+      "queries": [
+        {
+          "query": "cors preflight options",
+          "relevant": true
+        },
+        {
+          "query": "http GET request",
+          "relevant": false
+        },
+        {
+          "query": "access control headers",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-032",
+      "content": "XSS prevention requires output encoding at every insertion point",
+      "tags": [
+        "security",
+        "xss"
+      ],
+      "importance": 0.9,
+      "queries": [
+        {
+          "query": "xss output encoding",
+          "relevant": true
+        },
+        {
+          "query": "input validation",
+          "relevant": false
+        },
+        {
+          "query": "cross-site scripting prevention",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-033",
+      "content": "Unit tests should not depend on external services or file system state",
+      "tags": [
+        "testing",
+        "unit"
+      ],
+      "importance": 0.85,
+      "queries": [
+        {
+          "query": "unit test isolation",
+          "relevant": true
+        },
+        {
+          "query": "integration database",
+          "relevant": false
+        },
+        {
+          "query": "external dependency test",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-034",
+      "content": "Integration tests need database fixtures reset between test runs",
+      "tags": [
+        "testing",
+        "integration"
+      ],
+      "importance": 0.8,
+      "queries": [
+        {
+          "query": "integration test fixture reset",
+          "relevant": true
+        },
+        {
+          "query": "unit mock",
+          "relevant": false
+        },
+        {
+          "query": "database test cleanup",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-035",
+      "content": "Code coverage below 80% indicates untested critical paths",
+      "tags": [
+        "testing",
+        "coverage"
+      ],
+      "importance": 0.75,
+      "queries": [
+        {
+          "query": "coverage threshold critical",
+          "relevant": true
+        },
+        {
+          "query": "performance benchmark",
+          "relevant": false
+        },
+        {
+          "query": "test coverage path",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-036",
+      "content": "Mocking should target the module where the name is looked up, not defined",
+      "tags": [
+        "testing",
+        "mocking"
+      ],
+      "importance": 0.9,
+      "queries": [
+        {
+          "query": "mock module lookup",
+          "relevant": true
+        },
+        {
+          "query": "dependency injection",
+          "relevant": false
+        },
+        {
+          "query": "monkeypatch import",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-037",
+      "content": "Test fixtures should be minimal and create only what the test requires",
+      "tags": [
+        "testing",
+        "fixtures"
+      ],
+      "importance": 0.8,
+      "queries": [
+        {
+          "query": "minimal test fixture",
+          "relevant": true
+        },
+        {
+          "query": "factory pattern",
+          "relevant": false
+        },
+        {
+          "query": "fixture scope",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-038",
+      "content": "TDD red-green-refactor cycle catches regressions before they ship",
+      "tags": [
+        "testing",
+        "tdd"
+      ],
+      "importance": 0.85,
+      "queries": [
+        {
+          "query": "tdd red green refactor",
+          "relevant": true
+        },
+        {
+          "query": "code review",
+          "relevant": false
+        },
+        {
+          "query": "test driven development",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-039",
+      "content": "Microservices need distributed tracing to debug cross-service failures",
+      "tags": [
+        "architecture",
+        "microservices"
+      ],
+      "importance": 0.85,
+      "queries": [
+        {
+          "query": "microservices distributed tracing",
+          "relevant": true
+        },
+        {
+          "query": "monolith logging",
+          "relevant": false
+        },
+        {
+          "query": "cross-service debug",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-040",
+      "content": "Monolith-first approach reduces complexity until scale demands splitting",
+      "tags": [
+        "architecture",
+        "monolith"
+      ],
+      "importance": 0.8,
+      "queries": [
+        {
+          "query": "monolith first approach",
+          "relevant": true
+        },
+        {
+          "query": "kubernetes scaling",
+          "relevant": false
+        },
+        {
+          "query": "complexity reduction",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-041",
+      "content": "Event-driven architecture decouples producers from consumers via message bus",
+      "tags": [
+        "architecture",
+        "event-driven"
+      ],
+      "importance": 0.9,
+      "queries": [
+        {
+          "query": "event driven message bus",
+          "relevant": true
+        },
+        {
+          "query": "synchronous API",
+          "relevant": false
+        },
+        {
+          "query": "producer consumer decouple",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-042",
+      "content": "CQRS separates read models from write models for scalability",
+      "tags": [
+        "architecture",
+        "cqrs"
+      ],
+      "importance": 0.85,
+      "queries": [
+        {
+          "query": "cqrs read write model",
+          "relevant": true
+        },
+        {
+          "query": "crud endpoint",
+          "relevant": false
+        },
+        {
+          "query": "query command separation",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-043",
+      "content": "Domain-driven design bounded contexts prevent model pollution across teams",
+      "tags": [
+        "architecture",
+        "ddd"
+      ],
+      "importance": 0.9,
+      "queries": [
+        {
+          "query": "ddd bounded context",
+          "relevant": true
+        },
+        {
+          "query": "database schema",
+          "relevant": false
+        },
+        {
+          "query": "domain model boundary",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-044",
+      "content": "Clean architecture dependency rule: outer layers depend on inner layers only",
+      "tags": [
+        "architecture",
+        "clean"
+      ],
+      "importance": 0.85,
+      "queries": [
+        {
+          "query": "clean architecture dependency",
+          "relevant": true
+        },
+        {
+          "query": "npm dependency",
+          "relevant": false
+        },
+        {
+          "query": "layer dependency rule",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-045",
+      "content": "Embedding models must normalize vectors for cosine similarity to work correctly",
+      "tags": [
+        "ai-ml",
+        "embeddings"
+      ],
+      "importance": 0.9,
+      "queries": [
+        {
+          "query": "embedding normalize cosine",
+          "relevant": true
+        },
+        {
+          "query": "sql index",
+          "relevant": false
+        },
+        {
+          "query": "vector similarity search",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-046",
+      "content": "LLM temperature 0 produces deterministic outputs for reproducible pipelines",
+      "tags": [
+        "ai-ml",
+        "llm"
+      ],
+      "importance": 0.85,
+      "queries": [
+        {
+          "query": "llm temperature deterministic",
+          "relevant": true
+        },
+        {
+          "query": "random seed",
+          "relevant": false
+        },
+        {
+          "query": "reproducible generation",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-047",
+      "content": "RAG retrieval quality depends on chunk size and overlap parameters",
+      "tags": [
+        "ai-ml",
+        "rag"
+      ],
+      "importance": 0.9,
+      "queries": [
+        {
+          "query": "rag chunk size overlap",
+          "relevant": true
+        },
+        {
+          "query": "database pagination",
+          "relevant": false
+        },
+        {
+          "query": "retrieval augmented generation",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-048",
+      "content": "Fine-tuning on fewer than 100 examples risks catastrophic forgetting",
+      "tags": [
+        "ai-ml",
+        "fine-tuning"
+      ],
+      "importance": 0.8,
+      "queries": [
+        {
+          "query": "fine-tuning catastrophic forgetting",
+          "relevant": true
+        },
+        {
+          "query": "transfer learning",
+          "relevant": false
+        },
+        {
+          "query": "few-shot training",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-049",
+      "content": "System prompts should front-load critical instructions for attention",
+      "tags": [
+        "ai-ml",
+        "prompting"
+      ],
+      "importance": 0.85,
+      "queries": [
+        {
+          "query": "system prompt instructions",
+          "relevant": true
+        },
+        {
+          "query": "user input parsing",
+          "relevant": false
+        },
+        {
+          "query": "prompt engineering attention",
+          "relevant": true
+        }
+      ]
+    },
+    {
+      "id": "golden-050",
+      "content": "Agent tool-use loops need max-iteration guards to prevent infinite chains",
+      "tags": [
+        "ai-ml",
+        "agents"
+      ],
+      "importance": 0.9,
+      "queries": [
+        {
+          "query": "agent tool loop guard",
+          "relevant": true
+        },
+        {
+          "query": "event loop python",
+          "relevant": false
+        },
+        {
+          "query": "infinite chain prevention",
+          "relevant": true
+        }
+      ]
+    }
+  ]
+}

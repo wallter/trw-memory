@@ -1,0 +1,827 @@
+"""Tests for trw_memory.cli."""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from trw_memory.cli import _build_parser, main
+
+# Patch targets — module-level imports in trw_memory.cli
+_CLI = "trw_memory.cli"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_store_result(
+    memory_id: str = "M-abc12345",
+    namespace: str = "default",
+) -> dict[str, str]:
+    return {
+        "memory_id": memory_id,
+        "namespace": namespace,
+        "status": "stored",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+    }
+
+
+def _make_recall_result(
+    memory_id: str = "M-abc12345",
+    content: str = "test content",
+    score: float = 0.85,
+) -> dict[str, Any]:
+    return {
+        "memory_id": memory_id,
+        "content": content,
+        "detail": "",
+        "tags": ["test"],
+        "importance": 0.7,
+        "score": score,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "namespace": "default",
+    }
+
+
+def _make_forget_result(memory_id: str = "M-abc12345") -> dict[str, str]:
+    return {
+        "memory_id": memory_id,
+        "status": "deleted",
+        "namespace": "default",
+    }
+
+
+def _mock_client() -> MagicMock:
+    """Create a mock MemoryClient with async method stubs."""
+    client = MagicMock()
+    client.store = AsyncMock(return_value=_make_store_result())
+    client.recall = AsyncMock(return_value=[_make_recall_result()])
+    client.search = AsyncMock(return_value=[_make_recall_result()])
+    client.forget = AsyncMock(return_value=_make_forget_result())
+    client.close = AsyncMock()
+    return client
+
+
+def _mock_entry(
+    entry_id: str = "M-001",
+    content: str = "test",
+    tags: list[str] | None = None,
+) -> MagicMock:
+    """Create a mock MemoryEntry for export tests."""
+    mock = MagicMock()
+    mock.id = entry_id
+    mock.content = content
+    mock.detail = ""
+    mock.tags = tags or ["py"]
+    mock.importance = 0.5
+    mock.status = "active"
+    mock.namespace = "default"
+    mock.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    mock.updated_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    mock.metadata = {}
+    return mock
+
+
+# ---------------------------------------------------------------------------
+# Parser tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildParser:
+    def test_no_command_returns_none(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args([])
+        assert args.command is None
+
+    def test_store_command(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["store", "--summary", "test"])
+        assert args.command == "store"
+        assert args.summary == "test"
+        assert args.importance == 0.5
+        assert args.namespace == "default"
+
+    def test_store_all_args(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args([
+            "store", "--summary", "test", "--detail", "details",
+            "--tags", "py", "--tags", "test", "--importance", "0.9",
+            "--namespace", "myns",
+        ])
+        assert args.summary == "test"
+        assert args.detail == "details"
+        assert args.tags == ["py", "test"]
+        assert args.importance == 0.9
+        assert args.namespace == "myns"
+
+    def test_recall_command(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["recall", "my query"])
+        assert args.command == "recall"
+        assert args.query == "my query"
+        assert args.limit == 10
+        assert args.fmt == "table"
+
+    def test_recall_with_format(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["recall", "q", "--format", "json"])
+        assert args.fmt == "json"
+
+    def test_search_command(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["search", "--tags", "py", "--min-importance", "0.5"])
+        assert args.command == "search"
+        assert args.tags == ["py"]
+        assert args.min_importance == 0.5
+
+    def test_consolidate_command(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["consolidate", "--dry-run"])
+        assert args.command == "consolidate"
+        assert args.dry_run is True
+
+    def test_export_command(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["export", "--format", "yaml", "--output", "/tmp/out.yaml"])
+        assert args.command == "export"
+        assert args.fmt == "yaml"
+        assert args.output == "/tmp/out.yaml"
+
+    def test_import_command(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["import", "/tmp/data.json", "--merge"])
+        assert args.command == "import"
+        assert args.path == "/tmp/data.json"
+        assert args.merge is True
+
+    def test_status_command(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["status", "--format", "json"])
+        assert args.command == "status"
+        assert args.fmt == "json"
+
+    def test_forget_command(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["forget", "M-abc123"])
+        assert args.command == "forget"
+        assert args.memory_id == "M-abc123"
+
+
+# ---------------------------------------------------------------------------
+# main() — no command
+# ---------------------------------------------------------------------------
+
+
+class TestMainNoCommand:
+    def test_no_args_returns_1(self) -> None:
+        assert main([]) == 1
+
+    def test_no_args_prints_help(self, capsys: pytest.CaptureFixture[str]) -> None:
+        main([])
+        captured = capsys.readouterr()
+        assert "trw-memory" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# store subcommand
+# ---------------------------------------------------------------------------
+
+
+class TestStoreCommand:
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_store_success(
+        self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        client = _mock_client()
+        mock_cls.return_value = client
+        ret = main(["store", "--summary", "Test content"])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "Stored:" in captured.out
+        assert "M-abc12345" in captured.out
+        client.store.assert_awaited_once()
+        client.close.assert_awaited_once()
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_store_with_tags(self, mock_cls: MagicMock) -> None:
+        client = _mock_client()
+        mock_cls.return_value = client
+        main(["store", "--summary", "test", "--tags", "py", "--tags", "sql"])
+        call_kwargs = client.store.call_args
+        assert call_kwargs is not None
+        assert call_kwargs.kwargs.get("tags") == ["py", "sql"]
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_store_with_importance(self, mock_cls: MagicMock) -> None:
+        client = _mock_client()
+        mock_cls.return_value = client
+        main(["store", "--summary", "test", "--importance", "0.9"])
+        call_kwargs = client.store.call_args
+        assert call_kwargs is not None
+        assert call_kwargs.kwargs.get("importance") == 0.9
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_store_error(
+        self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        client = _mock_client()
+        client.store = AsyncMock(side_effect=ValueError("empty content"))
+        mock_cls.return_value = client
+        ret = main(["store", "--summary", ""])
+        assert ret == 1
+        captured = capsys.readouterr()
+        assert "Error:" in captured.err
+
+    def test_store_missing_summary(self) -> None:
+        with pytest.raises(SystemExit):
+            main(["store"])
+
+
+# ---------------------------------------------------------------------------
+# recall subcommand
+# ---------------------------------------------------------------------------
+
+
+class TestRecallCommand:
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_recall_table(
+        self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        client = _mock_client()
+        mock_cls.return_value = client
+        ret = main(["recall", "test query"])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "M-abc12345" in captured.out
+        client.recall.assert_awaited_once()
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_recall_json(
+        self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        client = _mock_client()
+        mock_cls.return_value = client
+        ret = main(["recall", "test query", "--format", "json"])
+        assert ret == 0
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out)
+        assert isinstance(parsed, list)
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_recall_compact(
+        self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        client = _mock_client()
+        mock_cls.return_value = client
+        ret = main(["recall", "q", "--format", "compact"])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "score=" in captured.out
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_recall_with_tags(self, mock_cls: MagicMock) -> None:
+        client = _mock_client()
+        mock_cls.return_value = client
+        main(["recall", "q", "--tags", "py"])
+        call_kwargs = client.recall.call_args
+        assert call_kwargs is not None
+        assert call_kwargs.kwargs.get("tags") == ["py"]
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_recall_with_limit(self, mock_cls: MagicMock) -> None:
+        client = _mock_client()
+        mock_cls.return_value = client
+        main(["recall", "q", "--limit", "5"])
+        call_kwargs = client.recall.call_args
+        assert call_kwargs is not None
+        assert call_kwargs.kwargs.get("limit") == 5
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_recall_error(
+        self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        client = _mock_client()
+        client.recall = AsyncMock(side_effect=RuntimeError("backend down"))
+        mock_cls.return_value = client
+        ret = main(["recall", "q"])
+        assert ret == 1
+        captured = capsys.readouterr()
+        assert "Error:" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# search subcommand
+# ---------------------------------------------------------------------------
+
+
+class TestSearchCommand:
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_search_success(
+        self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        client = _mock_client()
+        mock_cls.return_value = client
+        ret = main(["search", "--tags", "py"])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "M-abc12345" in captured.out
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_search_with_since(self, mock_cls: MagicMock) -> None:
+        client = _mock_client()
+        mock_cls.return_value = client
+        ret = main(["search", "--since", "2026-01-01T00:00:00"])
+        assert ret == 0
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_search_invalid_since(
+        self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        client = _mock_client()
+        mock_cls.return_value = client
+        ret = main(["search", "--since", "not-a-date"])
+        assert ret == 1
+        captured = capsys.readouterr()
+        assert "invalid datetime" in captured.err
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_search_json_format(
+        self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        client = _mock_client()
+        mock_cls.return_value = client
+        ret = main(["search", "--format", "json"])
+        assert ret == 0
+        parsed = json.loads(capsys.readouterr().out)
+        assert isinstance(parsed, list)
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_search_with_min_importance(self, mock_cls: MagicMock) -> None:
+        client = _mock_client()
+        mock_cls.return_value = client
+        main(["search", "--min-importance", "0.8"])
+        call_kwargs = client.search.call_args
+        assert call_kwargs is not None
+        assert call_kwargs.kwargs.get("min_importance") == 0.8
+
+
+# ---------------------------------------------------------------------------
+# consolidate subcommand
+# ---------------------------------------------------------------------------
+
+
+class TestConsolidateCommand:
+    @patch(f"{_CLI}.consolidate_cycle")
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
+    def test_consolidate_success(
+        self,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
+        mock_cycle: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        mock_config_cls.return_value = MagicMock()
+        mock_backend = MagicMock()
+        mock_backend_fn.return_value = mock_backend
+        mock_cycle.return_value = {"status": "no_clusters", "consolidated_count": 0}
+
+        ret = main(["consolidate"])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "no_clusters" in captured.out
+        mock_backend.close.assert_called_once()
+
+    @patch(f"{_CLI}.consolidate_cycle")
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
+    def test_consolidate_dry_run(
+        self,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
+        mock_cycle: MagicMock,
+    ) -> None:
+        mock_config_cls.return_value = MagicMock()
+        mock_backend_fn.return_value = MagicMock()
+        mock_cycle.return_value = {"dry_run": True, "clusters": [], "consolidated_count": 0}
+        ret = main(["consolidate", "--dry-run"])
+        assert ret == 0
+        call_kwargs = mock_cycle.call_args
+        assert call_kwargs is not None
+        assert call_kwargs.kwargs.get("dry_run") is True
+
+    @patch(f"{_CLI}.MemoryConfig", side_effect=RuntimeError("config fail"))
+    def test_consolidate_error(
+        self,
+        mock_config_cls: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        ret = main(["consolidate"])
+        assert ret == 1
+        captured = capsys.readouterr()
+        assert "Error:" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# export subcommand
+# ---------------------------------------------------------------------------
+
+
+class TestExportCommand:
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
+    def test_export_json_stdout(
+        self,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        mock_config_cls.return_value = MagicMock()
+        mock_backend = MagicMock()
+        mock_backend.list_entries.return_value = [_mock_entry()]
+        mock_backend_fn.return_value = mock_backend
+
+        ret = main(["export"])
+        assert ret == 0
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out)
+        assert len(parsed) == 1
+        assert parsed[0]["id"] == "M-001"
+
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
+    def test_export_json_to_file(
+        self,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        mock_config_cls.return_value = MagicMock()
+        mock_backend = MagicMock()
+        mock_backend.list_entries.return_value = [_mock_entry()]
+        mock_backend_fn.return_value = mock_backend
+
+        out_path = str(tmp_path / "out.json")
+        ret = main(["export", "--output", out_path])
+        assert ret == 0
+        data = json.loads(Path(out_path).read_text())
+        assert len(data) == 1
+
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
+    def test_export_empty(
+        self,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        mock_config_cls.return_value = MagicMock()
+        mock_backend = MagicMock()
+        mock_backend.list_entries.return_value = []
+        mock_backend_fn.return_value = mock_backend
+
+        ret = main(["export"])
+        assert ret == 0
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out)
+        assert parsed == []
+
+    @patch(f"{_CLI}.MemoryConfig", side_effect=RuntimeError("fail"))
+    def test_export_error(
+        self,
+        mock_config_cls: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        ret = main(["export"])
+        assert ret == 1
+        assert "Error:" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# import subcommand
+# ---------------------------------------------------------------------------
+
+
+class TestImportCommand:
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_import_json_success(
+        self,
+        mock_cls: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        client = _mock_client()
+        mock_cls.return_value = client
+
+        data = [
+            {"content": "Entry 1", "tags": ["a"], "importance": 0.7},
+            {"content": "Entry 2", "tags": ["b"], "importance": 0.5},
+        ]
+        fpath = tmp_path / "import.json"
+        fpath.write_text(json.dumps(data))
+
+        ret = main(["import", str(fpath)])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "Imported 2" in captured.out
+        assert client.store.await_count == 2
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_import_skips_empty_content(
+        self,
+        mock_cls: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        client = _mock_client()
+        mock_cls.return_value = client
+
+        data = [{"content": ""}, {"content": "valid"}]
+        fpath = tmp_path / "import.json"
+        fpath.write_text(json.dumps(data))
+
+        ret = main(["import", str(fpath)])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "Imported 1" in captured.out
+        assert "skipped 1" in captured.out
+
+    def test_import_file_not_found(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        ret = main(["import", "/nonexistent/file.json"])
+        assert ret == 1
+        captured = capsys.readouterr()
+        assert "file not found" in captured.err
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_import_invalid_json(
+        self,
+        mock_cls: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        fpath = tmp_path / "bad.json"
+        fpath.write_text("{not valid json")
+        ret = main(["import", str(fpath)])
+        assert ret == 1
+        assert "failed to parse" in capsys.readouterr().err
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_import_not_a_list(
+        self,
+        mock_cls: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        fpath = tmp_path / "obj.json"
+        fpath.write_text('{"key": "value"}')
+        ret = main(["import", str(fpath)])
+        assert ret == 1
+        assert "expected a JSON/YAML array" in capsys.readouterr().err
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_import_merge_mode_skip_existing(
+        self,
+        mock_cls: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        client = _mock_client()
+        # recall returns matching entry for ID check
+        client.recall = AsyncMock(return_value=[{"memory_id": "M-existing"}])
+        mock_cls.return_value = client
+
+        data = [
+            {"id": "M-existing", "content": "old"},
+            {"content": "new entry"},
+        ]
+        fpath = tmp_path / "import.json"
+        fpath.write_text(json.dumps(data))
+
+        ret = main(["import", str(fpath), "--merge"])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "skipped 1" in captured.out
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_import_merge_mode_no_id(
+        self,
+        mock_cls: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Entries without an id field are always imported in merge mode."""
+        client = _mock_client()
+        mock_cls.return_value = client
+
+        data = [{"content": "no id entry"}]
+        fpath = tmp_path / "import.json"
+        fpath.write_text(json.dumps(data))
+
+        ret = main(["import", str(fpath), "--merge"])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "Imported 1" in captured.out
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_import_handles_non_dict_entries(
+        self,
+        mock_cls: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        client = _mock_client()
+        mock_cls.return_value = client
+
+        data = ["not a dict", {"content": "valid"}]
+        fpath = tmp_path / "import.json"
+        fpath.write_text(json.dumps(data))
+
+        ret = main(["import", str(fpath)])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "Imported 1" in captured.out
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_import_non_list_tags_ignored(
+        self,
+        mock_cls: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        client = _mock_client()
+        mock_cls.return_value = client
+
+        data = [{"content": "test", "tags": "not-a-list"}]
+        fpath = tmp_path / "import.json"
+        fpath.write_text(json.dumps(data))
+
+        ret = main(["import", str(fpath)])
+        assert ret == 0
+        call_kwargs = client.store.call_args
+        assert call_kwargs is not None
+        assert call_kwargs.kwargs.get("tags") == []
+
+
+# ---------------------------------------------------------------------------
+# status subcommand
+# ---------------------------------------------------------------------------
+
+
+class TestStatusCommand:
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
+    def test_status_table(
+        self,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        config = MagicMock()
+        config.storage_backend = "sqlite"
+        config.storage_path = ".memory"
+        mock_config_cls.return_value = config
+
+        mock_backend = MagicMock()
+        mock_backend.count.return_value = 42
+        mock_backend_fn.return_value = mock_backend
+
+        ret = main(["status"])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "42" in captured.out
+        assert "Memory System Status" in captured.out
+
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
+    def test_status_json(
+        self,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        config = MagicMock()
+        config.storage_backend = "sqlite"
+        config.storage_path = ".memory"
+        mock_config_cls.return_value = config
+
+        mock_backend = MagicMock()
+        mock_backend.count.return_value = 5
+        mock_backend_fn.return_value = mock_backend
+
+        ret = main(["status", "--format", "json"])
+        assert ret == 0
+        parsed = json.loads(capsys.readouterr().out)
+        assert parsed["entry_count"] == 5
+
+    @patch(f"{_CLI}.MemoryConfig", side_effect=RuntimeError("fail"))
+    def test_status_error(
+        self,
+        mock_config_cls: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        ret = main(["status"])
+        assert ret == 1
+        assert "Error:" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# forget subcommand
+# ---------------------------------------------------------------------------
+
+
+class TestForgetCommand:
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_forget_success(
+        self,
+        mock_cls: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        client = _mock_client()
+        mock_cls.return_value = client
+        ret = main(["forget", "M-abc123"])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "Deleted:" in captured.out
+        client.forget.assert_awaited_once_with("M-abc123")
+
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    def test_forget_not_found(
+        self,
+        mock_cls: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from trw_memory.exceptions import MemoryNotFoundError
+
+        client = _mock_client()
+        client.forget = AsyncMock(side_effect=MemoryNotFoundError("not found"))
+        mock_cls.return_value = client
+        ret = main(["forget", "M-nonexistent"])
+        assert ret == 1
+        assert "Error:" in capsys.readouterr().err
+
+    def test_forget_missing_id(self) -> None:
+        with pytest.raises(SystemExit):
+            main(["forget"])
+
+
+# ---------------------------------------------------------------------------
+# Export/Import round-trip
+# ---------------------------------------------------------------------------
+
+
+class TestExportImportRoundTrip:
+    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
+    def test_json_round_trip(
+        self,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
+        mock_client_cls: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Setup export
+        mock_config_cls.return_value = MagicMock()
+        mock_backend = MagicMock()
+        mock_backend.list_entries.return_value = [
+            _mock_entry(entry_id="M-round", content="roundtrip test", tags=["rt"])
+        ]
+        mock_backend_fn.return_value = mock_backend
+
+        # Export
+        out_path = str(tmp_path / "roundtrip.json")
+        ret = main(["export", "--output", out_path])
+        assert ret == 0
+
+        # Verify export file
+        data = json.loads(Path(out_path).read_text())
+        assert len(data) == 1
+        assert data[0]["content"] == "roundtrip test"
+
+        # Setup import
+        client = _mock_client()
+        mock_client_cls.return_value = client
+
+        # Clear capsys
+        capsys.readouterr()
+
+        # Import
+        ret = main(["import", out_path])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "Imported 1" in captured.out
+        client.store.assert_awaited_once()
+        # Verify the content was passed through
+        call_kwargs = client.store.call_args
+        assert call_kwargs is not None
+        assert call_kwargs.kwargs.get("content") == "roundtrip test"

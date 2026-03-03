@@ -12,7 +12,6 @@ Trade-offs vs :class:`~trw_memory.storage.sqlite_backend.SQLiteBackend`:
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +19,7 @@ import structlog
 
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.storage._parsing import parse_dt, parse_json_dict_str, parse_json_list
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.persistence import lock_for_rmw, read_yaml, write_yaml
 
@@ -93,40 +93,19 @@ def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
             return default
 
     def _str_list(key: str) -> list[str]:
-        val = data.get(key, [])
-        if isinstance(val, list):
-            return [str(v) for v in val]
-        # Handle JSON-encoded strings (shouldn't happen in YAML, but defensive)
-        if isinstance(val, str):
-            try:
-                parsed = json.loads(val)
-                if isinstance(parsed, list):
-                    return [str(v) for v in parsed]
-            except json.JSONDecodeError:
-                pass
-        return []
+        return parse_json_list(data.get(key, []))
 
     def _str_dict(key: str) -> dict[str, str]:
-        val = data.get(key, {})
-        if isinstance(val, dict):
-            return {str(k): str(v) for k, v in val.items()}
-        return {}
-
-    def _parse_dt(val: object) -> datetime:
-        s = str(val)
-        dt = datetime.fromisoformat(s)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
+        return parse_json_dict_str(data.get(key, {}))
 
     created_at_raw = data.get("created_at")
     updated_at_raw = data.get("updated_at")
-    created_at = _parse_dt(created_at_raw) if created_at_raw else datetime.now(timezone.utc)
-    updated_at = _parse_dt(updated_at_raw) if updated_at_raw else datetime.now(timezone.utc)
+    created_at = parse_dt(created_at_raw) if created_at_raw else datetime.now(timezone.utc)
+    updated_at = parse_dt(updated_at_raw) if updated_at_raw else datetime.now(timezone.utc)
 
     last_accessed_raw = data.get("last_accessed_at")
     last_accessed_at: datetime | None = (
-        _parse_dt(last_accessed_raw) if last_accessed_raw else None
+        parse_dt(last_accessed_raw) if last_accessed_raw else None
     )
 
     status_raw = _str("status", "active")

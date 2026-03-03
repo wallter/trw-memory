@@ -1,0 +1,544 @@
+{
+  "pairs": [
+    {
+      "id": "dedup-001",
+      "entry_a": {
+        "content": "Pydantic v2 uses ConfigDict instead of class Config",
+        "tags": [
+          "python",
+          "pydantic"
+        ]
+      },
+      "entry_b": {
+        "content": "In Pydantic version 2, ConfigDict replaces the old class Config pattern",
+        "tags": [
+          "python",
+          "pydantic"
+        ]
+      },
+      "expected_duplicate": true
+    },
+    {
+      "id": "dedup-002",
+      "entry_a": {
+        "content": "Docker compose requires version 3.8 for GPU support",
+        "tags": [
+          "devops",
+          "docker"
+        ]
+      },
+      "entry_b": {
+        "content": "SQLite WAL mode improves write concurrency",
+        "tags": [
+          "database",
+          "sqlite"
+        ]
+      },
+      "expected_duplicate": false
+    },
+    {
+      "id": "dedup-003",
+      "entry_a": {
+        "content": "FastAPI dependency injection uses Depends for services",
+        "tags": [
+          "python",
+          "fastapi"
+        ]
+      },
+      "entry_b": {
+        "content": "In FastAPI, service dependencies are injected via the Depends function",
+        "tags": [
+          "python",
+          "fastapi"
+        ]
+      },
+      "expected_duplicate": true
+    },
+    {
+      "id": "dedup-004",
+      "entry_a": {
+        "content": "React useState hook triggers re-render on state change",
+        "tags": [
+          "javascript",
+          "react"
+        ]
+      },
+      "entry_b": {
+        "content": "Kubernetes pod affinity rules control scheduling placement",
+        "tags": [
+          "devops",
+          "kubernetes"
+        ]
+      },
+      "expected_duplicate": false
+    },
+    {
+      "id": "dedup-005",
+      "entry_a": {
+        "content": "pytest fixtures provide reusable test setup and teardown",
+        "tags": [
+          "testing",
+          "pytest"
+        ]
+      },
+      "entry_b": {
+        "content": "In pytest, fixtures handle test setup and cleanup in a reusable way",
+        "tags": [
+          "testing",
+          "pytest"
+        ]
+      },
+      "expected_duplicate": true
+    },
+    {
+      "id": "dedup-006",
+      "entry_a": {
+        "content": "JWT tokens should have short expiry times for security",
+        "tags": [
+          "security",
+          "jwt"
+        ]
+      },
+      "entry_b": {
+        "content": "Redis pub/sub enables real-time messaging between services",
+        "tags": [
+          "database",
+          "redis"
+        ]
+      },
+      "expected_duplicate": false
+    },
+    {
+      "id": "dedup-007",
+      "entry_a": {
+        "content": "TypeScript generics enable type-safe reusable components",
+        "tags": [
+          "javascript",
+          "typescript"
+        ]
+      },
+      "entry_b": {
+        "content": "Generics in TypeScript allow writing components that are both reusable and type-safe",
+        "tags": [
+          "javascript",
+          "typescript"
+        ]
+      },
+      "expected_duplicate": true
+    },
+    {
+      "id": "dedup-008",
+      "entry_a": {
+        "content": "Alembic migrations must be run in order for schema consistency",
+        "tags": [
+          "database",
+          "migration"
+        ]
+      },
+      "entry_b": {
+        "content": "XSS attacks inject malicious scripts into web pages",
+        "tags": [
+          "security",
+          "xss"
+        ]
+      },
+      "expected_duplicate": false
+    },
+    {
+      "id": "dedup-009",
+      "entry_a": {
+        "content": "asyncio.gather runs multiple coroutines concurrently",
+        "tags": [
+          "python",
+          "asyncio"
+        ]
+      },
+      "entry_b": {
+        "content": "Python asyncio.gather executes coroutines in parallel concurrently",
+        "tags": [
+          "python",
+          "asyncio"
+        ]
+      },
+      "expected_duplicate": true
+    },
+    {
+      "id": "dedup-010",
+      "entry_a": {
+        "content": "Terraform plan shows infrastructure changes before apply",
+        "tags": [
+          "devops",
+          "terraform"
+        ]
+      },
+      "entry_b": {
+        "content": "Next.js getServerSideProps runs on every request for SSR",
+        "tags": [
+          "javascript",
+          "nextjs"
+        ]
+      },
+      "expected_duplicate": false
+    },
+    {
+      "id": "dedup-011",
+      "entry_a": {
+        "content": "CORS preflight requests use the OPTIONS HTTP method",
+        "tags": [
+          "security",
+          "cors"
+        ]
+      },
+      "entry_b": {
+        "content": "The OPTIONS method is used for CORS preflight checks",
+        "tags": [
+          "security",
+          "cors"
+        ]
+      },
+      "expected_duplicate": true
+    },
+    {
+      "id": "dedup-012",
+      "entry_a": {
+        "content": "Code coverage tools measure which lines are executed during tests",
+        "tags": [
+          "testing",
+          "coverage"
+        ]
+      },
+      "entry_b": {
+        "content": "Embedding vectors must be normalized for cosine similarity",
+        "tags": [
+          "ai-ml",
+          "embeddings"
+        ]
+      },
+      "expected_duplicate": false
+    },
+    {
+      "id": "dedup-013",
+      "entry_a": {
+        "content": "Microservices communicate via API gateways or message queues",
+        "tags": [
+          "architecture",
+          "microservices"
+        ]
+      },
+      "entry_b": {
+        "content": "In microservice architectures, services talk through API gateways or message queues",
+        "tags": [
+          "architecture",
+          "microservices"
+        ]
+      },
+      "expected_duplicate": true
+    },
+    {
+      "id": "dedup-014",
+      "entry_a": {
+        "content": "LLM fine-tuning requires curated high-quality training data",
+        "tags": [
+          "ai-ml",
+          "fine-tuning"
+        ]
+      },
+      "entry_b": {
+        "content": "PostgreSQL partitioning improves query performance on large tables",
+        "tags": [
+          "database",
+          "postgres"
+        ]
+      },
+      "expected_duplicate": false
+    },
+    {
+      "id": "dedup-015",
+      "entry_a": {
+        "content": "mypy --strict catches missing type annotations in Python code",
+        "tags": [
+          "python",
+          "mypy"
+        ]
+      },
+      "entry_b": {
+        "content": "Running mypy in strict mode detects missing type annotations",
+        "tags": [
+          "python",
+          "mypy"
+        ]
+      },
+      "expected_duplicate": true
+    },
+    {
+      "id": "dedup-016",
+      "entry_a": {
+        "content": "Docker volumes persist data across container restarts",
+        "tags": [
+          "devops",
+          "docker"
+        ]
+      },
+      "entry_b": {
+        "content": "Integration tests verify component interactions end-to-end",
+        "tags": [
+          "testing",
+          "integration"
+        ]
+      },
+      "expected_duplicate": false
+    },
+    {
+      "id": "dedup-017",
+      "entry_a": {
+        "content": "RAG systems split documents into chunks for vector retrieval",
+        "tags": [
+          "ai-ml",
+          "rag"
+        ]
+      },
+      "entry_b": {
+        "content": "Retrieval-augmented generation chunks documents for vector-based search",
+        "tags": [
+          "ai-ml",
+          "rag"
+        ]
+      },
+      "expected_duplicate": true
+    },
+    {
+      "id": "dedup-018",
+      "entry_a": {
+        "content": "RBAC policies should follow least-privilege principle",
+        "tags": [
+          "security",
+          "rbac"
+        ]
+      },
+      "entry_b": {
+        "content": "Node.js process.env reads environment variables at runtime",
+        "tags": [
+          "javascript",
+          "node"
+        ]
+      },
+      "expected_duplicate": false
+    },
+    {
+      "id": "dedup-019",
+      "entry_a": {
+        "content": "Event-driven systems use message brokers for async communication",
+        "tags": [
+          "architecture",
+          "event-driven"
+        ]
+      },
+      "entry_b": {
+        "content": "Async communication in event-driven architectures relies on message brokers",
+        "tags": [
+          "architecture",
+          "event-driven"
+        ]
+      },
+      "expected_duplicate": true
+    },
+    {
+      "id": "dedup-020",
+      "entry_a": {
+        "content": "SQLite FTS5 provides full-text search with ranking functions",
+        "tags": [
+          "database",
+          "sqlite"
+        ]
+      },
+      "entry_b": {
+        "content": "Zod schemas validate runtime data in TypeScript applications",
+        "tags": [
+          "javascript",
+          "zod"
+        ]
+      },
+      "expected_duplicate": false
+    },
+    {
+      "id": "dedup-021",
+      "entry_a": {
+        "content": "Clean architecture puts business logic in the domain layer",
+        "tags": [
+          "architecture",
+          "clean"
+        ]
+      },
+      "entry_b": {
+        "content": "In clean architecture, the domain layer contains all business logic",
+        "tags": [
+          "architecture",
+          "clean"
+        ]
+      },
+      "expected_duplicate": true
+    },
+    {
+      "id": "dedup-022",
+      "entry_a": {
+        "content": "Kubernetes namespaces isolate resources within a cluster",
+        "tags": [
+          "devops",
+          "kubernetes"
+        ]
+      },
+      "entry_b": {
+        "content": "bcrypt is recommended for password hashing over SHA-256",
+        "tags": [
+          "security",
+          "encryption"
+        ]
+      },
+      "expected_duplicate": false
+    },
+    {
+      "id": "dedup-023",
+      "entry_a": {
+        "content": "TDD requires writing failing tests before implementation code",
+        "tags": [
+          "testing",
+          "tdd"
+        ]
+      },
+      "entry_b": {
+        "content": "Test-driven development means writing tests that fail before writing the code",
+        "tags": [
+          "testing",
+          "tdd"
+        ]
+      },
+      "expected_duplicate": true
+    },
+    {
+      "id": "dedup-024",
+      "entry_a": {
+        "content": "CI/CD pipelines should run linting before expensive test suites",
+        "tags": [
+          "devops",
+          "ci-cd"
+        ]
+      },
+      "entry_b": {
+        "content": "DDD aggregate roots enforce consistency boundaries",
+        "tags": [
+          "architecture",
+          "ddd"
+        ]
+      },
+      "expected_duplicate": false
+    },
+    {
+      "id": "dedup-025",
+      "entry_a": {
+        "content": "LLM prompting benefits from few-shot examples in the context",
+        "tags": [
+          "ai-ml",
+          "prompting"
+        ]
+      },
+      "entry_b": {
+        "content": "Including few-shot examples in LLM prompts improves output quality",
+        "tags": [
+          "ai-ml",
+          "prompting"
+        ]
+      },
+      "expected_duplicate": true
+    },
+    {
+      "id": "dedup-026",
+      "entry_a": {
+        "content": "Redis TTL keys enable automatic cache expiration",
+        "tags": [
+          "database",
+          "redis"
+        ]
+      },
+      "entry_b": {
+        "content": "React Server Components reduce client-side JavaScript bundle size",
+        "tags": [
+          "javascript",
+          "react"
+        ]
+      },
+      "expected_duplicate": false
+    },
+    {
+      "id": "dedup-027",
+      "entry_a": {
+        "content": "Vitest supports concurrent test execution for faster feedback",
+        "tags": [
+          "javascript",
+          "vitest"
+        ]
+      },
+      "entry_b": {
+        "content": "Concurrent test running in Vitest speeds up the test feedback loop",
+        "tags": [
+          "javascript",
+          "vitest"
+        ]
+      },
+      "expected_duplicate": true
+    },
+    {
+      "id": "dedup-028",
+      "entry_a": {
+        "content": "Monitoring dashboards need alerting thresholds for SLO violations",
+        "tags": [
+          "devops",
+          "monitoring"
+        ]
+      },
+      "entry_b": {
+        "content": "CQRS enables independent scaling of read and write workloads",
+        "tags": [
+          "architecture",
+          "cqrs"
+        ]
+      },
+      "expected_duplicate": false
+    },
+    {
+      "id": "dedup-029",
+      "entry_a": {
+        "content": "Agent tool-calling requires structured output parsing for reliability",
+        "tags": [
+          "ai-ml",
+          "agents"
+        ]
+      },
+      "entry_b": {
+        "content": "Reliable agent tool use depends on structured output parsing",
+        "tags": [
+          "ai-ml",
+          "agents"
+        ]
+      },
+      "expected_duplicate": true
+    },
+    {
+      "id": "dedup-030",
+      "entry_a": {
+        "content": "PostgreSQL indexes should be analyzed after bulk data loads",
+        "tags": [
+          "database",
+          "postgres"
+        ]
+      },
+      "entry_b": {
+        "content": "OAuth2 authorization code flow is preferred over implicit flow",
+        "tags": [
+          "security",
+          "auth"
+        ]
+      },
+      "expected_duplicate": false
+    }
+  ]
+}

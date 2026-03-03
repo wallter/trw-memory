@@ -64,14 +64,18 @@ def test_all_exports_complete() -> None:
 
     expected = {
         "ConfigError",
+        "MemoryClient",
         "MemoryConfig",
+        "MemoryConnectionError",
         "MemoryEntry",
         "MemoryError",
         "MemoryEvent",
         "MemoryEventType",
         "MemoryIndex",
+        "MemoryNotFoundError",
         "MemoryStatus",
         "StorageError",
+        "ToolAlreadyRegisteredError",
         "__version__",
         "namespace_to_path",
         "validate_namespace",
@@ -81,11 +85,21 @@ def test_all_exports_complete() -> None:
 
 def test_exceptions_inherit_properly() -> None:
     """Custom exceptions have correct hierarchy."""
-    from trw_memory import ConfigError, MemoryError, StorageError
+    from trw_memory import (
+        ConfigError,
+        MemoryConnectionError,
+        MemoryError,
+        MemoryNotFoundError,
+        StorageError,
+        ToolAlreadyRegisteredError,
+    )
 
     assert issubclass(MemoryError, Exception)
     assert issubclass(StorageError, MemoryError)
     assert issubclass(ConfigError, MemoryError)
+    assert issubclass(MemoryConnectionError, MemoryError)
+    assert issubclass(MemoryNotFoundError, MemoryError)
+    assert issubclass(ToolAlreadyRegisteredError, MemoryError)
 
 
 def test_memory_status_is_enum() -> None:
