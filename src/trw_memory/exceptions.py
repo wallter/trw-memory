@@ -22,3 +22,15 @@ class StorageError(MemoryError):
 
 class ConfigError(MemoryError):
     """Raised when configuration is invalid or cannot be loaded."""
+
+
+class MemoryConnectionError(MemoryError):
+    """Raised when no connection mode is available."""
+
+
+class MemoryNotFoundError(MemoryError):
+    """Raised when a memory entry is not found."""
+
+
+class ToolAlreadyRegisteredError(MemoryError):
+    """Raised when register_tools() is called twice."""

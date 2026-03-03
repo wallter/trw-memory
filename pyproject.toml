@@ -5,10 +5,26 @@ build-backend = "hatchling.build"
 [project]
 name = "trw-memory"
 version = "0.1.0"
-description = "Local-first memory layer for AI coding agents — store, recall, and evolve knowledge via MCP"
+description = "Persistent memory engine with hybrid retrieval, tiered storage, and semantic dedup for AI agents"
 readme = "README.md"
 license = "CC-BY-NC-SA-4.0"
 requires-python = ">=3.10"
+authors = [
+    { name = "TRW Framework", email = "noreply@trwframework.com" },
+]
+keywords = ["memory", "ai-agents", "retrieval", "embeddings", "mcp", "knowledge-management", "semantic-search"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
 dependencies = [
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
@@ -17,7 +33,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-mcp = ["fastmcp>=2.0.0"]
+mcp = ["fastmcp>=3.0.0,<4.0.0"]
 embeddings = ["sentence-transformers>=2.0.0"]
 vectors = ["sqlite-vec>=0.1.0"]
 bm25 = ["rank-bm25>=0.2.0"]
@@ -35,7 +51,9 @@ dev = [
 
 [project.urls]
 Homepage = "https://trwframework.com"
+Documentation = "https://trwframework.com/docs"
 Repository = "https://github.com/trw-framework/trw-memory"
+Issues = "https://github.com/trw-framework/trw-memory/issues"
 
 [project.scripts]
 trw-memory = "trw_memory.server:main"
