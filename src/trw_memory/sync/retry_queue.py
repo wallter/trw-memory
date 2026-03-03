@@ -6,11 +6,13 @@ to a persistent JSONL file and re-attempted on the next drain cycle.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import structlog
 
@@ -83,7 +85,7 @@ class RetryQueue:
 
                 try:
                     success = publish_fn(record["payload"])
-                except Exception as exc:  # noqa: BLE001 — publish_fn may raise anything
+                except Exception as exc:
                     record["retry_count"] = record.get("retry_count", 0) + 1
                     record["last_error"] = str(exc)
                     remaining.append(record)
@@ -121,10 +123,8 @@ class RetryQueue:
         entries: list[dict[str, Any]] = []
         for line in self._path.read_text().strip().splitlines():
             if line.strip():
-                try:
+                with contextlib.suppress(json.JSONDecodeError):
                     entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
         return entries
 
     def _append(self, record: dict[str, Any]) -> None:

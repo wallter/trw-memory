@@ -15,12 +15,12 @@ mcp = FastMCP("trw-memory")
 
 
 def _register_tools() -> None:
-    from trw_memory.tools.store import register_store_tool
-    from trw_memory.tools.recall import register_recall_tool
-    from trw_memory.tools.forget import register_forget_tool
     from trw_memory.tools.consolidate import register_consolidate_tool
+    from trw_memory.tools.forget import register_forget_tool
+    from trw_memory.tools.recall import register_recall_tool
     from trw_memory.tools.search import register_search_tool
     from trw_memory.tools.status import register_status_tool
+    from trw_memory.tools.store import register_store_tool
 
     register_store_tool(mcp)
     register_recall_tool(mcp)

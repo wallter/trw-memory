@@ -86,14 +86,14 @@ def _run_job(job_id: str, backend: SQLiteBackend) -> None:
             count = backend.count()
             result = {"entries_scanned": str(count), "action": "tier_sweep_noop"}
         else:
-            raise ValueError(f"Unknown job type: {job.job_type}")
+            raise ValueError(f"Unknown job type: {job.job_type}")  # noqa: TRY301
 
         with _lock:
             job.status = JobStatus.COMPLETED
             job.completed_at = datetime.now(timezone.utc)
             job.result = result
 
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         with _lock:
             job.status = JobStatus.FAILED
             job.completed_at = datetime.now(timezone.utc)

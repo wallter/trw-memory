@@ -147,7 +147,7 @@ class AuditLog:
                 try:
                     data = json.loads(stripped)
                     records.append(AuditRecord.model_validate(data))
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     raise StorageError(
                         f"Corrupt audit record at line {line_no}: {exc}",
                         path=str(self._path),

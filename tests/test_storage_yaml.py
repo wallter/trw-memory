@@ -21,7 +21,6 @@ import pytest
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.yaml_backend import YAMLBackend
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

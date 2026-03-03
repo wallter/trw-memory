@@ -32,7 +32,6 @@ from trw_memory.retrieval.dense import cosine_similarity
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.storage.yaml_backend import YAMLBackend
 
-
 # ---------------------------------------------------------------------------
 # Shared fixture — entry factory
 # ---------------------------------------------------------------------------

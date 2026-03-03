@@ -93,7 +93,7 @@ def read_yaml(path: Path) -> dict[str, object]:
         if data is None:
             return {}
         if not isinstance(data, dict):
-            raise StorageError(
+            raise StorageError(  # noqa: TRY301
                 f"YAML root must be a mapping, got {type(data).__name__}",
                 path=str(path),
             )
@@ -101,7 +101,7 @@ def read_yaml(path: Path) -> dict[str, object]:
         return result
     except StorageError:
         raise
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise StorageError(
             f"Failed to read YAML: {exc}",
             path=str(path),
@@ -143,7 +143,7 @@ def write_yaml(path: Path, data: dict[str, object]) -> None:
         logger.debug("yaml_written", path=str(path))
     except StorageError:
         raise
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise StorageError(
             f"Failed to write YAML: {exc}",
             path=str(path),
@@ -176,7 +176,7 @@ def append_jsonl(path: Path, record: dict[str, object]) -> None:
             finally:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         logger.debug("jsonl_appended", path=str(path))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise StorageError(
             f"Failed to append JSONL: {exc}",
             path=str(path),

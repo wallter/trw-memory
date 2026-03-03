@@ -96,7 +96,7 @@ class MemoryConfig(BaseSettings):
     platform_api_key: str = ""
 
     @model_validator(mode="after")
-    def _check_weight_sum(self) -> "MemoryConfig":
+    def _check_weight_sum(self) -> MemoryConfig:
         total = (
             self.score_relevance_weight
             + self.score_recency_weight

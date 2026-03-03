@@ -22,7 +22,6 @@ from trw_memory.retrieval.dense import cosine_similarity, dense_search
 from trw_memory.retrieval.fusion import rrf_fuse
 from trw_memory.retrieval.pipeline import hybrid_search
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -187,7 +186,6 @@ class TestCosineSimilarity:
         assert cosine_similarity([3.0], [5.0]) == pytest.approx(1.0)
 
     def test_high_dimensional(self) -> None:
-        import math
         n = 384
         a = [1.0] * n
         b = [1.0] * n

@@ -82,6 +82,6 @@ class MemoryIndex(BaseModel):
     total_count: int = 0
 
     @model_validator(mode="after")
-    def _sync_total_count(self) -> "MemoryIndex":
+    def _sync_total_count(self) -> MemoryIndex:
         self.total_count = len(self.entries)
         return self

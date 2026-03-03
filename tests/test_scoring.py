@@ -16,11 +16,7 @@ Covers:
 
 from __future__ import annotations
 
-import math
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
-
-import pytest
 
 from trw_memory.lifecycle.scoring import (
     apply_time_decay,
@@ -34,7 +30,6 @@ from trw_memory.lifecycle.scoring import (
     utility_based_prune_candidates,
 )
 from trw_memory.models.config import MemoryConfig
-
 
 # ---------------------------------------------------------------------------
 # Helpers

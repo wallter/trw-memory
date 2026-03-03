@@ -116,7 +116,7 @@ def resolve_conflict(
             "vector_clock": merged_clock,
             "importance": round(merged_importance, 4),
             "merged_from": merged_from,
-            "outcome_history": local.outcome_history + [outcome],
+            "outcome_history": [*local.outcome_history, outcome],
             "updated_at": datetime.now(timezone.utc),
         },
     )

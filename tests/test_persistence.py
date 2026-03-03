@@ -17,7 +17,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from ruamel.yaml import YAML
 
 from trw_memory.exceptions import StorageError
 from trw_memory.storage.persistence import (
@@ -27,7 +26,6 @@ from trw_memory.storage.persistence import (
     read_yaml,
     write_yaml,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

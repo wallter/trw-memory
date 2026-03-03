@@ -125,8 +125,8 @@ fixable = ["F401", "B007", "B013", "B014", "UP", "I", "PIE790", "TC", "RUF100"]
 unfixable = ["F841"]  # never auto-delete "unused" variables (could be side-effect assignments)
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["PT", "TRY", "SIM", "B018", "RUF012"]
-"benchmarks/**/*.py" = ["TRY", "PT"]
+"tests/**/*.py" = ["PT", "TRY", "SIM", "B018", "RUF012", "F841", "E741", "B017", "RUF059", "B905"]
+"benchmarks/**/*.py" = ["TRY", "PT", "B905"]
 "src/trw_memory/cli.py" = ["ASYNC230", "ASYNC240"]  # CLI runs via asyncio.run(), blocking I/O is fine
 "**/__init__.py" = ["F401"]  # re-exports are intentional
 "**/conftest.py" = ["PT"]

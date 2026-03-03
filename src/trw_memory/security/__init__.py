@@ -50,37 +50,31 @@ from trw_memory.security.rbac import (
 )
 
 __all__ = [
-    # Audit
+    "ROLE_PERMISSIONS",
+    "AnomalyResult",
+    "AnomalyType",
     "AuditLog",
     "AuditRecord",
-    # Encryption
-    "decrypt_entry_fields",
-    "decrypt_field",
-    "derive_namespace_key",
-    "encrypt_entry_fields",
-    "encrypt_field",
-    "generate_master_key",
-    # Keys
-    "get_master_key",
-    "rotate_master_key",
-    "store_master_key",
-    # PII
     "PIIAction",
     "PIIMatch",
     "PIIType",
-    "check_entry_pii",
-    "detect_pii",
-    "redact_text",
-    "shannon_entropy",
-    # Poisoning
-    "AnomalyResult",
-    "AnomalyType",
-    "PoisoningDetector",
-    "quarantine_entry",
-    # RBAC
-    "ROLE_PERMISSIONS",
     "Permission",
+    "PoisoningDetector",
     "Role",
+    "check_entry_pii",
     "check_permission",
+    "decrypt_entry_fields",
+    "decrypt_field",
+    "derive_namespace_key",
+    "detect_pii",
+    "encrypt_entry_fields",
+    "encrypt_field",
+    "generate_master_key",
+    "get_master_key",
+    "quarantine_entry",
+    "redact_text",
     "require_permission",
+    "rotate_master_key",
+    "shannon_entropy",
+    "store_master_key",
 ]

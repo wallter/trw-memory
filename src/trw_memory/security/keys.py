@@ -8,6 +8,7 @@ Key source hierarchy (highest priority first):
 
 from __future__ import annotations
 
+import contextlib
 import os
 import stat
 from pathlib import Path
@@ -18,9 +19,8 @@ from trw_memory.exceptions import ConfigError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.security.encryption import (
     decrypt_entry_fields,
-    encrypt_entry_fields,
-    generate_master_key,
     derive_namespace_key,
+    encrypt_entry_fields,
 )
 from trw_memory.storage.interface import StorageBackend
 
@@ -48,7 +48,7 @@ def _read_key_from_keyring() -> bytes | None:
         if stored is None:
             return None
         return bytes.fromhex(stored)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.debug("keyring_read_failed", exc_info=True)
         return None
 
@@ -163,7 +163,7 @@ def store_master_key(key: bytes, config: MemoryConfig) -> None:
             _keyring.set_password(_SERVICE_NAME, _KEY_ACCOUNT, key.hex())
             logger.info("master_key_stored", target="keyring")
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise ConfigError(f"Failed to store key in keyring: {exc}") from exc
 
     if config.key_source == "env":
@@ -177,11 +177,9 @@ def store_master_key(key: bytes, config: MemoryConfig) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(key)
     # Restrict permissions to owner-only (0600)
-    try:
+    # Windows doesn't support Unix permissions — best effort
+    with contextlib.suppress(OSError):
         path.chmod(stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        # Windows doesn't support Unix permissions — best effort
-        pass
     logger.info("master_key_stored", target=str(path))
 
 

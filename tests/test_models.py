@@ -22,7 +22,6 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.events import MemoryEvent, MemoryEventType
 from trw_memory.models.memory import MemoryEntry, MemoryIndex, MemoryStatus
 
-
 # ---------------------------------------------------------------------------
 # MemoryStatus
 # ---------------------------------------------------------------------------
@@ -332,12 +331,14 @@ class TestExceptions:
         assert err.path == ""
 
     def test_storage_error_inherits_memory_error(self) -> None:
-        from trw_memory.exceptions import MemoryError as MemErr, StorageError
+        from trw_memory.exceptions import MemoryError as MemErr
+        from trw_memory.exceptions import StorageError
         err = StorageError("storage fail", path="/db")
         assert isinstance(err, MemErr)
         assert err.path == "/db"
 
     def test_config_error_inherits_memory_error(self) -> None:
-        from trw_memory.exceptions import MemoryError as MemErr, ConfigError
+        from trw_memory.exceptions import ConfigError
+        from trw_memory.exceptions import MemoryError as MemErr
         err = ConfigError("config fail")
         assert isinstance(err, MemErr)

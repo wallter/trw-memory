@@ -111,7 +111,7 @@ class TRWCrewStorage:
         self,
         query: str,
         limit: int = 3,
-        filter: dict[str, Any] | None = None,  # noqa: A002
+        filter: dict[str, Any] | None = None,
         score_threshold: float = 0.0,
     ) -> list[dict[str, Any]]:
         """Search stored memories by query.

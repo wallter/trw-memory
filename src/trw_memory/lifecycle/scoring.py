@@ -330,12 +330,11 @@ def compute_calibration_accuracy(recall_stats: dict[str, object]) -> float:
     ratio = positive / total
     if ratio >= 0.75:
         return 2.0
-    elif ratio >= 0.50:
+    if ratio >= 0.50:
         return 1.5
-    elif ratio >= 0.25:
+    if ratio >= 0.25:
         return 1.0
-    else:
-        return 0.5
+    return 0.5
 
 
 # ---------------------------------------------------------------------------

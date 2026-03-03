@@ -15,7 +15,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -24,11 +24,9 @@ import pytest
 
 from trw_memory.client import MemoryClient
 from trw_memory.exceptions import (
-    MemoryConnectionError,
     MemoryNotFoundError,
     ToolAlreadyRegisteredError,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

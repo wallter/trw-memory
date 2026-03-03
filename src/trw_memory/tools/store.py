@@ -80,8 +80,8 @@ def memory_store_impl(
 
     try:
         backend.store(entry)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("memory_store_failed", entry_id=entry_id, error=str(exc))
+    except Exception as exc:
+        logger.exception("memory_store_failed", entry_id=entry_id, error=str(exc))
         return {"error": f"storage error: {exc}", "status": "error"}
 
     logger.info(

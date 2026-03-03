@@ -14,12 +14,7 @@ straightforward (no global state to clean up).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import structlog
-
-if TYPE_CHECKING:
-    pass  # keep TYPE_CHECKING block for future protocol import if needed
 
 logger = structlog.get_logger()
 
@@ -74,7 +69,7 @@ class LocalEmbeddingProvider:
                 "sentence-transformers not installed — embeddings unavailable",
                 hint="pip install trw-memory[embeddings]",
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning(
                 "failed to load embedding model",
                 model=self._model_name,
@@ -105,7 +100,7 @@ class LocalEmbeddingProvider:
         try:
             vector = model.encode(text, normalize_embeddings=True)  # type: ignore[attr-defined]
             return [float(v) for v in vector]
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning(
                 "embedding generation failed",
                 text_length=len(text),
@@ -150,7 +145,7 @@ class LocalEmbeddingProvider:
                 else:
                     results.append([float(v) for v in vectors[vec_idx]])
                     vec_idx += 1
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning(
                 "batch embedding failed",
                 batch_size=len(texts),

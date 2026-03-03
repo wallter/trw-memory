@@ -34,7 +34,7 @@ def health_check(
     db_status = "ok"
     try:
         backend.count()
-    except Exception:  # noqa: BLE001
+    except Exception:
         db_status = "degraded"
 
     return HealthResponse(

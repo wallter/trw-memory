@@ -6,18 +6,11 @@ Uses an in-memory SQLite database with the DDL from sqlite_backend.py.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from datetime import datetime, timezone
 
-import pytest
-
 from trw_memory.graph import (
-    CROSS_VALIDATION_THRESHOLD,
-    DECAY_DELTA,
     IMPORTANCE_BOOST,
-    MAX_TRAVERSAL_DEPTH,
-    SIMILARITY_THRESHOLD,
     _safe_cosine_similarity,
     apply_importance_boost,
     apply_importance_decay,
@@ -29,7 +22,6 @@ from trw_memory.graph import (
     memory_decay_pass,
 )
 from trw_memory.models.memory import MemoryEntry
-
 
 # ---------------------------------------------------------------------------
 # DDL (copied from sqlite_backend.py for in-memory test setup)

@@ -61,7 +61,7 @@ def _promote_team_memories(
                 "id": f"promoted-{entry.id}",
                 "namespace": "project:default",
                 "source_identity": namespace,
-                "outcome_history": entry.outcome_history + [outcome],
+                "outcome_history": [*entry.outcome_history, outcome],
                 "updated_at": now,
             })
             backend.store(promoted)
@@ -117,8 +117,8 @@ def memory_consolidate_impl(
             dry_run=dry_run,
             namespace=namespace,
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.error("memory_consolidate_failed", namespace=namespace, error=str(exc))
+    except Exception as exc:
+        logger.exception("memory_consolidate_failed", namespace=namespace, error=str(exc))
         return {"error": f"consolidation error: {exc}", "status": "error"}
 
     # Normalise result keys for the MCP contract

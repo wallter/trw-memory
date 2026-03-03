@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Iterator
-from unittest.mock import MagicMock, patch
+from datetime import datetime
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -22,7 +21,6 @@ from trw_memory.lifecycle.consolidation import (
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.interface import StorageBackend
-
 
 # ---------------------------------------------------------------------------
 # Helpers / Fixtures

@@ -18,7 +18,6 @@ import pytest
 
 from trw_memory.client import MemoryClient
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -206,7 +205,6 @@ class TestAutoRecallMetadata:
             q: str, *, recalled_memories: list[dict[str, Any]] | None = None
         ) -> None:
             """My docstring."""
-            pass
 
         assert my_handler.__name__ == "my_handler"
         assert my_handler.__doc__ == "My docstring."

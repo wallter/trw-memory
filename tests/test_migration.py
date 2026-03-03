@@ -13,12 +13,10 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-import pytest
 from ruamel.yaml import YAML
 
 from trw_memory.migration.from_trw import from_learning_entry, migrate_entries_dir
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
-
 
 # ---------------------------------------------------------------------------
 # Helpers

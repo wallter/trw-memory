@@ -20,13 +20,9 @@ from pathlib import Path
 
 import pytest
 
-# Corpus / fixture generation
-from benchmarks.corpus import (
-    create_dedup_set,
-    create_golden_set,
-    generate_corpus,
-    generate_query_set,
-)
+# Benchmark classes
+from benchmarks.bench_latency import LatencyBenchmark
+from benchmarks.bench_memory import MemoryBenchmark
 
 # Quality metrics
 from benchmarks.bench_quality import (
@@ -37,11 +33,15 @@ from benchmarks.bench_quality import (
     recall_at_k,
     reciprocal_rank,
 )
-
-# Benchmark classes
-from benchmarks.bench_latency import LatencyBenchmark
 from benchmarks.bench_throughput import ThroughputBenchmark
-from benchmarks.bench_memory import MemoryBenchmark
+
+# Corpus / fixture generation
+from benchmarks.corpus import (
+    create_dedup_set,
+    create_golden_set,
+    generate_corpus,
+    generate_query_set,
+)
 
 # Runner
 from benchmarks.runner import (
@@ -50,7 +50,6 @@ from benchmarks.runner import (
     format_report,
     run_benchmarks,
 )
-
 
 # ====================================================================
 # Corpus generation tests

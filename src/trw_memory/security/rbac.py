@@ -8,9 +8,10 @@ Defines a simple role/permission model with three roles:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from enum import Enum
 from functools import wraps
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 from trw_memory.exceptions import ConfigError
 

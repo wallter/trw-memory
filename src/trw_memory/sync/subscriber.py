@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import json
 import threading
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import httpx
 import structlog
@@ -73,12 +74,11 @@ class SSESubscriber:
                 if self._last_event_id:
                     headers["Last-Event-ID"] = self._last_event_id
 
-                with httpx.Client(timeout=None) as client:
-                    with client.stream("GET", url, headers=headers) as response:
-                        for line in response.iter_lines():
-                            if self._stop_event.is_set():
-                                return
-                            self._process_line(line)
+                with httpx.Client(timeout=None) as client, client.stream("GET", url, headers=headers) as response:
+                    for line in response.iter_lines():
+                        if self._stop_event.is_set():
+                            return
+                        self._process_line(line)
             except (httpx.HTTPError, OSError):
                 logger.debug("sse_connection_error", exc_info=True)
 

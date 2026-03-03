@@ -5,16 +5,12 @@ Tests the *_impl functions directly without requiring a running FastMCP server.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.tools.forget import memory_forget_impl
 from trw_memory.tools.recall import memory_recall_impl
 from trw_memory.tools.search import memory_search_impl
-from trw_memory.tools.forget import memory_forget_impl
-
 
 # ---------------------------------------------------------------------------
 # Helpers

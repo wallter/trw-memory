@@ -11,11 +11,11 @@ Tier definitions:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
-import re
 from collections import OrderedDict
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, cast
 
@@ -320,7 +320,7 @@ class TierManager:
                     backend.upsert_vector(entry_id, embedding)
                 finally:
                     backend.close()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.debug("warm_tier_vec_upsert_failed", entry_id=entry_id, exc_info=True)
 
         # Always update sidecar for keyword search
@@ -377,7 +377,7 @@ class TierManager:
                     backend.delete(entry_id)
                 finally:
                     backend.close()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.debug("warm_tier_db_remove_failed", entry_id=entry_id, exc_info=True)
 
         # Purge from sidecar
@@ -439,7 +439,7 @@ class TierManager:
                             {"id": eid, "score": float(1.0 - dist)}
                             for eid, dist in raw
                         ]
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.debug("warm_tier_vec_search_failed", exc_info=True)
 
         return self._warm_keyword_search(query_tokens, top_k)
@@ -463,7 +463,7 @@ class TierManager:
             except json.JSONDecodeError:
                 continue
             text = str(rec.get("summary", "")).lower()
-            tags = [str(t).lower() for t in cast(list[object], rec.get("tags") or [])]
+            tags = [str(t).lower() for t in cast("list[object]", rec.get("tags") or [])]
             text += " " + " ".join(tags)
             matched = sum(1 for tok in lower_tokens if tok in text)
             if matched > 0:
@@ -553,14 +553,12 @@ class TierManager:
             data = read_yaml(entry_path)
             write_yaml(dest, data)
             # Remove from warm sidecar (best-effort)
-            try:
+            with contextlib.suppress(Exception):
                 self.warm_remove(entry_id)
-            except Exception:  # noqa: BLE001
-                pass
             # Delete original
             entry_path.unlink(missing_ok=True)
             logger.debug("cold_archive", entry_id=entry_id, dest=str(dest))
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning(
                 "cold_archive_failed",
                 entry_id=entry_id,
@@ -590,7 +588,7 @@ class TierManager:
         for yaml_file in cold_base.rglob("*.yaml"):
             try:
                 data = read_yaml(yaml_file)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 continue
             if str(data.get("id", "")) != entry_id:
                 continue
@@ -603,7 +601,7 @@ class TierManager:
                 yaml_file.unlink(missing_ok=True)
                 logger.debug("cold_promote", entry_id=entry_id, src=str(yaml_file))
                 return data
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.warning(
                     "cold_promote_failed",
                     entry_id=entry_id,
@@ -633,11 +631,11 @@ class TierManager:
         for yaml_file in sorted(cold_base.rglob("*.yaml")):
             try:
                 data = read_yaml(yaml_file)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 continue
 
             text = str(data.get("content", data.get("summary", ""))).lower()
-            tags = [str(t).lower() for t in cast(list[object], data.get("tags") or [])]
+            tags = [str(t).lower() for t in cast("list[object]", data.get("tags") or [])]
             text += " " + " ".join(tags)
 
             if any(tok in text for tok in lower_tokens):
@@ -687,7 +685,7 @@ class TierManager:
                 self.warm_add(entry_id, evicted.model_dump(), None)
                 demoted += 1
                 logger.debug("sweep_hot_to_warm", entry_id=entry_id)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.warning("sweep_hot_to_warm_failed", entry_id=entry_id, exc_info=True)
                 errors += 1
 
@@ -716,7 +714,7 @@ class TierManager:
                             days=days,
                             importance_score=importance,
                         )
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.warning(
                         "sweep_warm_to_cold_failed",
                         path=str(yaml_file),
@@ -756,7 +754,7 @@ class TierManager:
                             days=days,
                             importance_score=importance,
                         )
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.warning(
                         "sweep_cold_purge_failed",
                         path=str(yaml_file),

@@ -17,9 +17,10 @@ import asyncio
 import functools
 import inspect
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 from trw_memory.exceptions import (
     MemoryConnectionError,
@@ -434,15 +435,18 @@ class MemoryClient:
             # Check if recalled_memories is a positional arg
             sig = inspect.signature(fn)
             for name, param in sig.parameters.items():
-                if name == "recalled_memories" and param.kind in (
-                    inspect.Parameter.POSITIONAL_ONLY,
-                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                if (
+                    name == "recalled_memories"
+                    and param.kind in (
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    )
+                    and param.default is inspect.Parameter.empty
                 ):
-                    if param.default is inspect.Parameter.empty:
-                        raise TypeError(
-                            "Decorated function must not have 'recalled_memories' "
-                            "as a required positional parameter"
-                        )
+                    raise TypeError(
+                        "Decorated function must not have 'recalled_memories' "
+                        "as a required positional parameter"
+                    )
 
             @functools.wraps(fn)
             async def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -454,7 +458,7 @@ class MemoryClient:
                         memories = [
                             m for m in raw if float(m["score"]) >= min_score
                         ]
-                except Exception:  # noqa: BLE001
+                except Exception:
                     memories = []
 
                 kwargs["recalled_memories"] = memories

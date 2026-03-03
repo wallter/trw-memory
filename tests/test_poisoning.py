@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.poisoning import (
     AnomalyResult,
@@ -13,7 +11,6 @@ from trw_memory.security.poisoning import (
     PoisoningDetector,
     quarantine_entry,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

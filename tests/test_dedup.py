@@ -14,21 +14,18 @@ Covers:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Iterator
-from unittest.mock import MagicMock
 
 import pytest
 
-from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.lifecycle.dedup import (
     DedupResult,
+    batch_dedup,
     check_duplicate,
     merge_entries,
-    batch_dedup,
 )
+from trw_memory.models.config import MemoryConfig
+from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.retrieval.dense import cosine_similarity
-
 
 # ---------------------------------------------------------------------------
 # Helpers

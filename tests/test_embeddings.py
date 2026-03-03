@@ -15,10 +15,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from trw_memory.embeddings.local import LocalEmbeddingProvider
-
 
 # ---------------------------------------------------------------------------
 # Helper: produce a provider with no model loaded

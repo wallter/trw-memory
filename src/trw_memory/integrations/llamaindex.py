@@ -19,7 +19,8 @@ Requires ``llama-index-core >= 0.11.0``::
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import contextlib
+from typing import TYPE_CHECKING, Any, ClassVar
 
 try:
     from llama_index.core.llms import ChatMessage, MessageRole  # type: ignore[import-not-found]
@@ -53,7 +54,7 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
     _backend: Any = None
     _owns_backend: bool = False
 
-    model_config: dict[str, Any] = {"arbitrary_types_allowed": True}
+    model_config: ClassVar[dict[str, Any]] = {"arbitrary_types_allowed": True}
 
     def __init__(
         self,
@@ -148,10 +149,8 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
                 role = MessageRole.USER
                 for tag in entry.tags:
                     if tag.startswith(ROLE_TAG_PREFIX):
-                        try:
+                        with contextlib.suppress(ValueError):
                             role = MessageRole(tag[len(ROLE_TAG_PREFIX):])
-                        except ValueError:
-                            pass
                         break
                 deleted.append(ChatMessage(role=role, content=entry.content))
                 self._backend.delete(entry.id)

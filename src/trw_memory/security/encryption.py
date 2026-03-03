@@ -10,9 +10,9 @@ from __future__ import annotations
 import base64
 import os
 
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives import hashes
 
 from trw_memory.models.memory import MemoryEntry
 

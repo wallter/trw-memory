@@ -245,7 +245,7 @@ def apply_importance_boost(
 
     return entry.model_copy(update={
         "importance": new_importance,
-        "outcome_history": entry.outcome_history + [outcome],
+        "outcome_history": [*entry.outcome_history, outcome],
         "cross_validated": True,
         "updated_at": datetime.now(timezone.utc),
     })
@@ -268,7 +268,7 @@ def apply_importance_decay(
 
     return entry.model_copy(update={
         "importance": new_importance,
-        "outcome_history": entry.outcome_history + [outcome],
+        "outcome_history": [*entry.outcome_history, outcome],
         "updated_at": datetime.now(timezone.utc),
     })
 

@@ -8,7 +8,6 @@ from trw_memory.exceptions import MemoryError
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.pii import (
     PIIAction,
-    PIIMatch,
     PIIType,
     anonymize_installation_id,
     check_entry_pii,
@@ -18,7 +17,6 @@ from trw_memory.security.pii import (
     shannon_entropy,
     strip_pii,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

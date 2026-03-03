@@ -14,7 +14,6 @@ Covers:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -33,9 +32,6 @@ from trw_memory.sync.conflict import (
 )
 from trw_memory.sync.remote import (
     FETCH_TIMEOUT,
-    MAX_DETAIL_LENGTH,
-    MAX_SUMMARY_LENGTH,
-    MAX_TAGS_COUNT,
     PUBLISH_TIMEOUT,
     _anonymize_entry,
     fetch_shared_memories,
@@ -43,7 +39,6 @@ from trw_memory.sync.remote import (
 )
 from trw_memory.sync.retry_queue import MAX_QUEUE_DEPTH, MAX_RETRIES, RetryQueue
 from trw_memory.sync.subscriber import RECONNECT_DELAY, SSESubscriber
-
 
 # ---------------------------------------------------------------------------
 # Helpers

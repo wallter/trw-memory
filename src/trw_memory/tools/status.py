@@ -51,8 +51,8 @@ def memory_status_impl(
 
     try:
         total_entries = backend.count(namespace=namespace)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("memory_status_count_failed", error=str(exc))
+    except Exception as exc:
+        logger.exception("memory_status_count_failed", error=str(exc))
         return {"error": f"storage error: {exc}", "status": "error"}
 
     # Build namespace breakdown
@@ -65,7 +65,7 @@ def memory_status_impl(
             try:
                 ns_count = backend.count(namespace=ns)
                 namespaces[ns] = ns_count
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
 
         # Also include active entry count
@@ -75,7 +75,7 @@ def memory_status_impl(
                 limit=10_000,
             )
             namespaces["__active__"] = len(active_entries)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     config_summary: dict[str, object] = {

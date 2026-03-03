@@ -19,7 +19,8 @@ Requires ``langchain-core >= 0.3.0``::
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Self, Sequence
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Self
 
 try:
     from langchain_core.chat_history import BaseChatMessageHistory  # type: ignore[import-not-found]

@@ -325,7 +325,7 @@ def _archive_originals(
             )
             processed.append(entry.id)
         except Exception as exc:
-            logger.error(
+            logger.exception(
                 "consolidation_archive_failed",
                 entry_id=entry.id,
                 consolidated_id=consolidated_id,
@@ -469,8 +469,8 @@ def consolidate_cycle(
             _archive_originals(cluster, consolidated_id, storage)
             consolidated_count += 1
 
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
+        except Exception as exc:
+            logger.exception(
                 "consolidation_cluster_failed",
                 cluster_ids=cluster_ids,
                 error=str(exc),

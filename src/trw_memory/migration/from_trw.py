@@ -280,7 +280,7 @@ def migrate_entries_dir(entries_dir: Path) -> list[MemoryEntry]:
             data: dict[str, object] = {str(k): v for k, v in raw.items()}
             entry = from_learning_entry(data)
             entries.append(entry)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning(
                 "failed to migrate entry",
                 file=yaml_path.name,

@@ -54,7 +54,7 @@ def _reload_server_with_mock() -> tuple[types.ModuleType, MagicMock, list[str]]:
     sys.modules["fastmcp"] = fake_fastmcp
 
     try:
-        import trw_memory.server as server_mod  # noqa: F811
+        import trw_memory.server as server_mod
     finally:
         # Restore: remove mock fastmcp, leave server cached for callers
         sys.modules.pop("fastmcp", None)
@@ -94,7 +94,7 @@ class TestServerModule:
 
     def test_all_tool_modules_importable(self) -> None:
         """All 6 tool modules must be importable with their impl functions."""
-        from trw_memory.tools import store, recall, forget, consolidate, search, status
+        from trw_memory.tools import consolidate, forget, recall, search, status, store
         assert callable(store.memory_store_impl)
         assert callable(recall.memory_recall_impl)
         assert callable(forget.memory_forget_impl)
@@ -104,12 +104,12 @@ class TestServerModule:
 
     def test_register_functions_exist(self) -> None:
         """Each tool module must export a register_*_tool function."""
-        from trw_memory.tools.store import register_store_tool
-        from trw_memory.tools.recall import register_recall_tool
-        from trw_memory.tools.forget import register_forget_tool
         from trw_memory.tools.consolidate import register_consolidate_tool
+        from trw_memory.tools.forget import register_forget_tool
+        from trw_memory.tools.recall import register_recall_tool
         from trw_memory.tools.search import register_search_tool
         from trw_memory.tools.status import register_status_tool
+        from trw_memory.tools.store import register_store_tool
 
         for fn in [
             register_store_tool, register_recall_tool, register_forget_tool,

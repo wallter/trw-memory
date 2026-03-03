@@ -20,7 +20,6 @@ import pytest
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -401,7 +400,7 @@ class TestCrossThreadSafety:
             try:
                 for i in range(10):
                     backend.store(make_entry(f"t{thread_id}-{i}", f"data-{i}"))
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 errors.append(exc)
 
         threads = [threading.Thread(target=writer, args=(tid,)) for tid in range(4)]

@@ -155,7 +155,7 @@ class LocalMemoryAdapter:
         entry = make_entry(
             content=content,
             namespace=self._namespace,
-            tags=tags + [f"file:{file_path}"],
+            tags=[*tags, f"file:{file_path}"],
             importance=0.6,
             source="human",
         )

@@ -37,7 +37,6 @@ from trw_memory.security import (
     store_master_key,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -522,6 +521,7 @@ class TestRotateMasterKey:
     def test_old_key_cannot_decrypt_after_rotation(self, tmp_path: Path) -> None:
         """After rotation, old key must no longer decrypt stored entries."""
         from cryptography.exceptions import InvalidTag
+
         from trw_memory.storage.sqlite_backend import SQLiteBackend
 
         old_key = generate_master_key()

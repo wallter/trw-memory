@@ -7,13 +7,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
-from trw_memory.tools.store import memory_store_impl
 from trw_memory.tools.consolidate import memory_consolidate_impl
 from trw_memory.tools.status import memory_status_impl
-
+from trw_memory.tools.store import memory_store_impl
 
 # ---------------------------------------------------------------------------
 # Helpers

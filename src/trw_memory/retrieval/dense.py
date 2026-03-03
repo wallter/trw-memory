@@ -35,7 +35,7 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     """
     if len(a) != len(b):
         raise ValueError(f"Dimension mismatch: {len(a)} vs {len(b)}")
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(x * x for x in b))
     if norm_a == 0.0 or norm_b == 0.0:
@@ -100,7 +100,7 @@ def dense_search(
         assert embedder is not None  # for mypy
         try:
             q_vec = embedder.embed(query)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning("dense_search_embed_failed", query=query[:80])
             return []
 
@@ -117,7 +117,7 @@ def dense_search(
         try:
             score = cosine_similarity(q_vec, stored)
             results.append((entry_id, score))
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.debug("dense_search_entry_skipped", entry_id=entry_id)
             continue
 

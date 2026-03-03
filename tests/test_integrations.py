@@ -12,15 +12,15 @@ import importlib
 import importlib.machinery
 import sys
 import types
+from collections.abc import Generator
 from datetime import datetime, timezone
-from typing import Any, Generator
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from trw_memory.integrations._backend import create_backend, make_entry
 from trw_memory.models.memory import MemoryEntry
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -71,7 +71,6 @@ def _make_langchain_mocks() -> dict[str, types.ModuleType]:
     class BaseChatMessageHistory:
         """Mock BaseChatMessageHistory ABC."""
 
-        pass
 
     lc_history.BaseChatMessageHistory = BaseChatMessageHistory  # type: ignore[attr-defined]
     lc_core.chat_history = lc_history  # type: ignore[attr-defined]
@@ -408,7 +407,7 @@ class TestLangChainAdapter:
             session_id="s1", backend=mock_backend
         )
         # Force ownership
-        history._owns_backend = True  # noqa: SLF001
+        history._owns_backend = True
         history.close()
         mock_backend.close.assert_called_once()
 

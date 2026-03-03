@@ -6,11 +6,8 @@ TDD: tests written before implementation.
 from __future__ import annotations
 
 import json
-from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -21,7 +18,6 @@ from trw_memory.lifecycle.tiers import (
 )
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -311,7 +307,7 @@ class TestWarmTier:
 
 class TestColdTier:
     def test_cold_archive_moves_file(self, mgr: TierManager, mem_dir: Path) -> None:
-        from trw_memory.storage.persistence import write_yaml, read_yaml
+        from trw_memory.storage.persistence import read_yaml, write_yaml
 
         entries_dir = mem_dir / "entries"
         entries_dir.mkdir(parents=True, exist_ok=True)
@@ -566,7 +562,6 @@ class TestSweep:
     def test_sweep_error_in_entry_increments_errors(
         self, mgr: TierManager, mem_dir: Path
     ) -> None:
-        from trw_memory.storage.persistence import write_yaml
 
         entries_dir = mem_dir / "entries"
         entries_dir.mkdir(parents=True, exist_ok=True)

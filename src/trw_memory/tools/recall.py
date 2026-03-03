@@ -70,7 +70,7 @@ def memory_recall_impl(
         except ConfigError:
             logger.debug("recall_invalid_namespace_skipped", namespace=ns)
 
-    all_namespaces = [namespace] + extra_ns
+    all_namespaces = [namespace, *extra_ns]
 
     # Gather active entries across all requested namespaces
     all_entries = []
@@ -170,7 +170,7 @@ def _graph_related(
 
     try:
         return graph_query(effective_conn, root_ids, depth=depth)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.debug("graph_related_error", exc_info=True)
         return []
 

@@ -93,14 +93,13 @@ def publish_memory(
             if 200 <= resp.status_code < 300:
                 logger.debug("memory_published", entry_id=entry.id)
                 return True
-            else:
-                logger.warning(
-                    "memory_publish_failed",
-                    entry_id=entry.id,
-                    status=resp.status_code,
-                )
-                return False
-    except Exception:  # noqa: BLE001 — fail-open: never raise to caller
+            logger.warning(
+                "memory_publish_failed",
+                entry_id=entry.id,
+                status=resp.status_code,
+            )
+            return False
+    except Exception:
         logger.debug("memory_publish_error", entry_id=entry.id, exc_info=True)
         return False
 
@@ -149,7 +148,7 @@ def fetch_shared_memories(
             results = resp.json()
             if not isinstance(results, list):
                 results = results.get("results", [])
-    except Exception:  # noqa: BLE001 — fail-open: never raise to caller
+    except Exception:
         logger.debug("memory_fetch_error", exc_info=True)
         return []
 

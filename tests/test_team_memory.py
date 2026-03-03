@@ -6,14 +6,11 @@ from team namespaces to the project namespace.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
-import pytest
+from datetime import datetime
 
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools.consolidate import _promote_team_memories, memory_consolidate_impl
-
 
 # ---------------------------------------------------------------------------
 # In-memory backend for team promotion tests

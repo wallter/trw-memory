@@ -12,8 +12,8 @@ from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.storage.yaml_backend import YAMLBackend
 
 __all__ = [
-    "StorageBackend",
     "SQLiteBackend",
+    "StorageBackend",
     "YAMLBackend",
     "append_jsonl",
     "json_serializer",

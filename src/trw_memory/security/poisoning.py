@@ -88,7 +88,7 @@ class PoisoningDetector:
             return []
 
         results: list[AnomalyResult] = []
-        for bucket_key, bucket_entries in buckets.items():
+        for _bucket_key, bucket_entries in buckets.items():
             count = len(bucket_entries)
             z = (count - mean) / std
             if z >= self._z_threshold:
@@ -130,7 +130,7 @@ class PoisoningDetector:
             return []
 
         results: list[AnomalyResult] = []
-        for entry, size in zip(entries, sizes):
+        for entry, size in zip(entries, sizes, strict=False):
             z = (size - mean) / std
             if z >= self._z_threshold:
                 results.append(
