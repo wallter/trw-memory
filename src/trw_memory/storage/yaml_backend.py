@@ -181,7 +181,7 @@ class YAMLBackend(StorageBackend):
             try:
                 data = read_yaml(yaml_file)
                 entries.append(_dict_to_entry(data))
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.warning("yaml_backend_skip_corrupt", path=str(yaml_file))
         return entries
 
@@ -222,7 +222,7 @@ class YAMLBackend(StorageBackend):
             return _dict_to_entry(data)
         except StorageError:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise StorageError(
                 f"Failed to deserialise entry {entry_id}: {exc}",
                 path=str(path),
@@ -250,7 +250,7 @@ class YAMLBackend(StorageBackend):
                 data = read_yaml(path)
             except StorageError:
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 raise StorageError(
                     f"Failed to read entry {entry_id} for update: {exc}",
                     path=str(path),
@@ -285,7 +285,7 @@ class YAMLBackend(StorageBackend):
 
         try:
             return _dict_to_entry(data)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise StorageError(
                 f"Failed to deserialise updated entry {entry_id}: {exc}",
                 path=str(path),
@@ -310,7 +310,7 @@ class YAMLBackend(StorageBackend):
             path.unlink()
             logger.debug("yaml_entry_deleted", entry_id=entry_id)
             return True
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise StorageError(
                 f"Failed to delete entry {entry_id}: {exc}",
                 path=str(path),

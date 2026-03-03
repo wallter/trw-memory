@@ -11,6 +11,7 @@ no-ops.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import struct
@@ -253,7 +254,7 @@ class SQLiteBackend(StorageBackend):
                 self._ensure_vec_table()
                 self._vec_available = True
                 logger.debug("sqlite_vec_loaded", db=str(db_path))
-            except Exception:  # noqa: BLE001
+            except Exception:
                 self._vec_available = False
                 logger.debug("sqlite_vec_load_failed", db=str(db_path), exc_info=True)
         else:
@@ -283,12 +284,10 @@ class SQLiteBackend(StorageBackend):
             ("outcome_history", "TEXT DEFAULT '[]'"),
         ]
         for col_name, col_def in _migrate_cols:
-            try:
+            with contextlib.suppress(sqlite3.OperationalError):
                 cursor.execute(
                     f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}"
                 )
-            except sqlite3.OperationalError:
-                pass  # column already exists
         self._conn.commit()
 
     def _ensure_vec_table(self) -> None:
@@ -334,7 +333,7 @@ class SQLiteBackend(StorageBackend):
                 self._conn.execute(sql, _entry_to_row(entry))
                 self._conn.commit()
             logger.debug("memory_stored", entry_id=entry.id)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise StorageError(
                 f"Failed to store entry {entry.id}: {exc}",
                 path=str(self._db_path),
@@ -360,7 +359,7 @@ class SQLiteBackend(StorageBackend):
             if row is None:
                 return None
             return _row_to_entry(tuple(row))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise StorageError(
                 f"Failed to get entry {entry_id}: {exc}",
                 path=str(self._db_path),
@@ -403,14 +402,14 @@ class SQLiteBackend(StorageBackend):
 
             for key, val in field_dict.items():
                 if key not in _VALID_UPDATE_COLUMNS:
-                    raise StorageError(
+                    raise StorageError(  # noqa: TRY301
                         f"Invalid update field: {key!r}",
                         path=str(self._db_path),
                     )
                 set_parts.append(f"{key} = ?")
-                if key in _list_fields and isinstance(val, list):
-                    values.append(json.dumps(val))
-                elif key in _json_fields and isinstance(val, dict):
+                if (key in _list_fields and isinstance(val, list)) or (
+                    key in _json_fields and isinstance(val, dict)
+                ):
                     values.append(json.dumps(val))
                 elif isinstance(val, datetime):
                     values.append(val.isoformat())
@@ -429,7 +428,7 @@ class SQLiteBackend(StorageBackend):
             return self.get(entry_id)
         except StorageError:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise StorageError(
                 f"Failed to update entry {entry_id}: {exc}",
                 path=str(self._db_path),
@@ -458,7 +457,7 @@ class SQLiteBackend(StorageBackend):
                 self._conn.commit()
             logger.debug("memory_deleted", entry_id=entry_id, existed=deleted)
             return deleted
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise StorageError(
                 f"Failed to delete entry {entry_id}: {exc}",
                 path=str(self._db_path),
@@ -544,7 +543,7 @@ class SQLiteBackend(StorageBackend):
                 results = [e for e in results if required.issubset(set(e.tags))]
 
             return results[:top_k]
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise StorageError(
                 f"Failed to search memories: {exc}",
                 path=str(self._db_path),
@@ -574,7 +573,7 @@ class SQLiteBackend(StorageBackend):
                         "SELECT COUNT(*) FROM memories"
                     ).fetchone()
             return int(row[0]) if row else 0
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise StorageError(
                 f"Failed to count memories: {exc}",
                 path=str(self._db_path),
@@ -623,7 +622,7 @@ class SQLiteBackend(StorageBackend):
             with self._lock:
                 rows = self._conn.execute(sql, params).fetchall()
             return [_row_to_entry(tuple(r)) for r in rows]
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise StorageError(
                 f"Failed to list entries: {exc}",
                 path=str(self._db_path),
@@ -648,7 +647,7 @@ class SQLiteBackend(StorageBackend):
                     "SELECT DISTINCT namespace FROM memories ORDER BY namespace"
                 ).fetchall()
             return [str(row[0]) for row in rows]
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise StorageError(
                 f"Failed to list namespaces: {exc}",
                 path=str(self._db_path),
@@ -679,7 +678,7 @@ class SQLiteBackend(StorageBackend):
                 entries_deleted=deleted,
             )
             return deleted
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise StorageError(
                 f"Failed to delete namespace {namespace!r}: {exc}",
                 path=str(self._db_path),
@@ -687,10 +686,8 @@ class SQLiteBackend(StorageBackend):
 
     def close(self) -> None:
         """Close the database connection."""
-        try:
+        with contextlib.suppress(Exception):
             self._conn.close()
-        except Exception:  # noqa: BLE001
-            pass
         logger.debug("sqlite_backend_closed", db=str(self._db_path))
 
     def __enter__(self) -> SQLiteBackend:
@@ -774,6 +771,6 @@ class SQLiteBackend(StorageBackend):
                     (query_bytes, top_k),
                 ).fetchall()
             return [(str(r[0]), float(r[1])) for r in rows]
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.debug("vector_search_error", exc_info=True)
             return []
