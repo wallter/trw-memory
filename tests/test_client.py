@@ -395,7 +395,7 @@ class TestRegisterTools:
         self, client: MemoryClient
     ) -> None:
         agent = object()  # No register_tool or tool
-        with pytest.raises(TypeError, match="register_tool.*tool"):
+        with pytest.raises(TypeError, match=r"register_tool.*tool"):
             client.register_tools(agent)
 
 

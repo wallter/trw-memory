@@ -211,7 +211,7 @@ class TestYamlFieldInjection:
         entry = factory("e-yaml-inj")
         yaml_backend.store(entry)
         with pytest.raises(StorageError, match="Invalid update field"):
-            yaml_backend.update("e-yaml-inj", **{"__class__": "Exploit"})
+            yaml_backend.update("e-yaml-inj", __class__="Exploit")
 
     def test_yaml_update_cannot_change_id(
         self, yaml_backend: YAMLBackend, make_entry: object
@@ -502,7 +502,7 @@ class TestBm25FallbackJaccard:
         e2 = self._make_entry("j-no-match", "completely unrelated xyz abc")
         results = bm25_search("python", [e1, e2, e2], top_k=10)
         # All returned scores must be positive
-        for entry_id, score in results:
+        for _entry_id, score in results:
             assert score > 0.0
 
     def test_bm25_empty_entries_returns_empty(self) -> None:
