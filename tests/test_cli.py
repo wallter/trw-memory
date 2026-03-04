@@ -10,7 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from trw_memory.cli import _build_parser, main
+from trw_memory.cli import main
+from trw_memory.cli_parser import build_parser
 
 # Patch targets — module-level imports in trw_memory.cli
 _CLI = "trw_memory.cli"
@@ -97,12 +98,12 @@ def _mock_entry(
 
 class TestBuildParser:
     def test_no_command_returns_none(self) -> None:
-        parser = _build_parser()
+        parser = build_parser()
         args = parser.parse_args([])
         assert args.command is None
 
     def test_store_command(self) -> None:
-        parser = _build_parser()
+        parser = build_parser()
         args = parser.parse_args(["store", "--summary", "test"])
         assert args.command == "store"
         assert args.summary == "test"
@@ -110,7 +111,7 @@ class TestBuildParser:
         assert args.namespace == "default"
 
     def test_store_all_args(self) -> None:
-        parser = _build_parser()
+        parser = build_parser()
         args = parser.parse_args([
             "store", "--summary", "test", "--detail", "details",
             "--tags", "py", "--tags", "test", "--importance", "0.9",
@@ -123,7 +124,7 @@ class TestBuildParser:
         assert args.namespace == "myns"
 
     def test_recall_command(self) -> None:
-        parser = _build_parser()
+        parser = build_parser()
         args = parser.parse_args(["recall", "my query"])
         assert args.command == "recall"
         assert args.query == "my query"
@@ -131,45 +132,45 @@ class TestBuildParser:
         assert args.fmt == "table"
 
     def test_recall_with_format(self) -> None:
-        parser = _build_parser()
+        parser = build_parser()
         args = parser.parse_args(["recall", "q", "--format", "json"])
         assert args.fmt == "json"
 
     def test_search_command(self) -> None:
-        parser = _build_parser()
+        parser = build_parser()
         args = parser.parse_args(["search", "--tags", "py", "--min-importance", "0.5"])
         assert args.command == "search"
         assert args.tags == ["py"]
         assert args.min_importance == 0.5
 
     def test_consolidate_command(self) -> None:
-        parser = _build_parser()
+        parser = build_parser()
         args = parser.parse_args(["consolidate", "--dry-run"])
         assert args.command == "consolidate"
         assert args.dry_run is True
 
     def test_export_command(self) -> None:
-        parser = _build_parser()
+        parser = build_parser()
         args = parser.parse_args(["export", "--format", "yaml", "--output", "/tmp/out.yaml"])
         assert args.command == "export"
         assert args.fmt == "yaml"
         assert args.output == "/tmp/out.yaml"
 
     def test_import_command(self) -> None:
-        parser = _build_parser()
+        parser = build_parser()
         args = parser.parse_args(["import", "/tmp/data.json", "--merge"])
         assert args.command == "import"
         assert args.path == "/tmp/data.json"
         assert args.merge is True
 
     def test_status_command(self) -> None:
-        parser = _build_parser()
+        parser = build_parser()
         args = parser.parse_args(["status", "--format", "json"])
         assert args.command == "status"
         assert args.fmt == "json"
 
     def test_forget_command(self) -> None:
-        parser = _build_parser()
+        parser = build_parser()
         args = parser.parse_args(["forget", "M-abc123"])
         assert args.command == "forget"
         assert args.memory_id == "M-abc123"
@@ -795,6 +796,112 @@ class TestForgetCommand:
 # ---------------------------------------------------------------------------
 
 
+class TestYamlExport:
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
+    def test_export_yaml_to_file(
+        self,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        from ruamel.yaml import YAML
+
+        mock_config_cls.return_value = MagicMock()
+        mock_backend = MagicMock()
+        mock_backend.list_entries.return_value = [_mock_entry()]
+        mock_backend_fn.return_value = mock_backend
+
+        out_path = str(tmp_path / "out.yaml")
+        ret = main(["export", "--format", "yaml", "--output", out_path])
+        assert ret == 0
+        yaml = YAML()
+        data = yaml.load(Path(out_path))
+        assert len(data) == 1
+        assert data[0]["id"] == "M-001"
+
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
+    def test_export_yaml_stdout(
+        self,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from ruamel.yaml import YAML
+        from io import StringIO
+
+        mock_config_cls.return_value = MagicMock()
+        mock_backend = MagicMock()
+        mock_backend.list_entries.return_value = [_mock_entry()]
+        mock_backend_fn.return_value = mock_backend
+
+        ret = main(["export", "--format", "yaml"])
+        assert ret == 0
+        captured = capsys.readouterr()
+        yaml = YAML()
+        data = yaml.load(StringIO(captured.out))
+        assert len(data) == 1
+        assert data[0]["id"] == "M-001"
+
+
+class TestYamlImport:
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
+    def test_import_yaml_success(
+        self,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from ruamel.yaml import YAML
+
+        mock_config_cls.return_value = MagicMock()
+        mock_backend = MagicMock()
+        mock_backend_fn.return_value = mock_backend
+
+        yaml = YAML()
+        data = [
+            {"content": "YAML Entry 1", "tags": ["a"], "importance": 0.7},
+            {"content": "YAML Entry 2", "tags": ["b"], "importance": 0.5},
+        ]
+        fpath = tmp_path / "import.yaml"
+        with open(fpath, "w") as f:
+            yaml.dump(data, f)
+
+        ret = main(["import", str(fpath)])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "Imported 2" in captured.out
+        assert mock_backend.store.call_count == 2
+
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
+    def test_import_yml_extension(
+        self,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from ruamel.yaml import YAML
+
+        mock_config_cls.return_value = MagicMock()
+        mock_backend = MagicMock()
+        mock_backend_fn.return_value = mock_backend
+
+        yaml = YAML()
+        fpath = tmp_path / "import.yml"
+        with open(fpath, "w") as f:
+            yaml.dump([{"content": "yml test"}], f)
+
+        ret = main(["import", str(fpath)])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "Imported 1" in captured.out
+
+
 class TestExportImportRoundTrip:
     @patch(f"{_CLI}._create_local_backend")
     @patch(f"{_CLI}.MemoryConfig")
@@ -837,3 +944,39 @@ class TestExportImportRoundTrip:
             if hasattr(c[0][0], "content") and c[0][0].content == "roundtrip test"
         ]
         assert len(store_calls) == 1
+
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
+    def test_yaml_round_trip(
+        self,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from ruamel.yaml import YAML
+
+        mock_config_cls.return_value = MagicMock()
+        mock_backend = MagicMock()
+        mock_backend.list_entries.return_value = [
+            _mock_entry(entry_id="M-yaml", content="yaml roundtrip", tags=["yr"])
+        ]
+        mock_backend_fn.return_value = mock_backend
+
+        # Export YAML
+        out_path = str(tmp_path / "roundtrip.yaml")
+        ret = main(["export", "--format", "yaml", "--output", out_path])
+        assert ret == 0
+
+        yaml = YAML()
+        data = yaml.load(Path(out_path))
+        assert len(data) == 1
+        assert data[0]["content"] == "yaml roundtrip"
+
+        capsys.readouterr()
+
+        # Import YAML
+        ret = main(["import", out_path])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "Imported 1" in captured.out

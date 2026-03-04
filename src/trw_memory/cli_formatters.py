@@ -12,7 +12,7 @@ import json
 from typing import Any
 
 
-def _truncate(text: str, max_len: int = 60) -> str:
+def _truncate(text: str, max_len: int = 80) -> str:
     """Truncate text to *max_len* characters, adding ellipsis if needed."""
     if len(text) <= max_len:
         return text
@@ -127,3 +127,19 @@ def format_import_summary(imported: int, skipped: int) -> str:
         Human-readable summary.
     """
     return f"Imported {imported} entries, skipped {skipped}"
+
+
+def entry_to_export_dict(entry: Any) -> dict[str, Any]:
+    """Convert a MemoryEntry to a serializable dict for export."""
+    return {
+        "id": entry.id,
+        "content": entry.content,
+        "detail": entry.detail,
+        "tags": list(entry.tags),
+        "importance": entry.importance,
+        "status": str(entry.status),
+        "namespace": entry.namespace,
+        "created_at": entry.created_at.isoformat(),
+        "updated_at": entry.updated_at.isoformat(),
+        "metadata": dict(entry.metadata) if entry.metadata else {},
+    }
