@@ -25,6 +25,7 @@ from datetime import date, datetime, timezone
 
 import structlog
 
+from trw_memory.lifecycle._utils import days_since_access as _days_since_access
 from trw_memory.models.config import MemoryConfig
 
 logger = structlog.get_logger()
@@ -55,34 +56,6 @@ def _ensure_utc(ts: datetime) -> datetime:
     if ts.tzinfo is None:
         return ts.replace(tzinfo=timezone.utc)
     return ts
-
-
-def _days_since_access(
-    entry: dict[str, object],
-    today: date,
-    fallback_days: int = 30,
-) -> int:
-    """Compute days since last access, falling back to creation date.
-
-    Resolution order: last_accessed_at -> created_at -> fallback_days.
-
-    MemoryEntry uses ``last_accessed_at`` and ``created_at`` (ISO datetime strings).
-    """
-    for field in ("last_accessed_at", "created_at"):
-        raw = entry.get(field)
-        if raw is None:
-            continue
-        raw_str = str(raw)
-        if not raw_str or raw_str in ("None", "null", ""):
-            continue
-        try:
-            # isoformat may include time component — take only date portion
-            dt = datetime.fromisoformat(raw_str)
-            return max(0, (today - dt.date()).days)
-        except ValueError:
-            continue
-
-    return fallback_days
 
 
 # ---------------------------------------------------------------------------

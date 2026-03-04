@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from datetime import datetime, timezone
+from typing import TypeVar
 from uuid import uuid4
 
 import structlog
@@ -32,6 +34,77 @@ _PATH_RE = re.compile(
 def _redact_paths(text: str) -> str:
     """Replace filesystem paths with [REDACTED_PATH] before sending to LLM."""
     return _PATH_RE.sub("[REDACTED_PATH]", text)
+
+
+# ---------------------------------------------------------------------------
+# Shared clustering algorithm — used by both trw-memory and trw-mcp
+# ---------------------------------------------------------------------------
+
+T = TypeVar("T")
+
+
+def complete_linkage_cluster(
+    items: list[tuple[T, list[float]]],
+    similarity_threshold: float,
+    min_cluster_size: int,
+    similarity_fn: Callable[[list[float], list[float]], float] | None = None,
+) -> list[list[T]]:
+    """Complete-linkage agglomerative clustering on (item, vector) pairs.
+
+    Two items belong to the same cluster when every pair in the group has
+    cosine similarity >= *similarity_threshold*.
+
+    This is the shared algorithm extracted so both trw-memory and trw-mcp
+    use a single canonical implementation.
+
+    Args:
+        items: List of (item, embedding_vector) tuples.
+        similarity_threshold: Minimum pairwise similarity to merge into cluster.
+        min_cluster_size: Clusters smaller than this are discarded.
+        similarity_fn: Cosine similarity function. Defaults to
+            :func:`trw_memory.retrieval.dense.cosine_similarity`.
+
+    Returns:
+        List of clusters; each cluster is a list of items (first element of
+        each tuple). Clusters smaller than *min_cluster_size* are excluded.
+    """
+    if similarity_fn is None:
+        similarity_fn = cosine_similarity
+
+    n = len(items)
+    cluster_id: list[int] = list(range(n))
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            sim = similarity_fn(items[i][1], items[j][1])
+            if sim >= similarity_threshold:
+                cid_i = cluster_id[i]
+                cid_j = cluster_id[j]
+                if cid_i == cid_j:
+                    continue
+                # Check that ALL pairs between the two clusters satisfy threshold
+                i_members = [k for k in range(n) if cluster_id[k] == cid_i]
+                j_members = [k for k in range(n) if cluster_id[k] == cid_j]
+                can_merge = all(
+                    similarity_fn(items[a][1], items[b][1]) >= similarity_threshold
+                    for a in i_members
+                    for b in j_members
+                )
+                if can_merge:
+                    for k in range(n):
+                        if cluster_id[k] == cid_j:
+                            cluster_id[k] = cid_i
+
+    # Collect clusters by cluster_id
+    clusters_map: dict[int, list[T]] = {}
+    for idx, cid in enumerate(cluster_id):
+        clusters_map.setdefault(cid, []).append(items[idx][0])
+
+    return [
+        cluster
+        for cluster in clusters_map.values()
+        if len(cluster) >= min_cluster_size
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -101,42 +174,11 @@ def find_clusters(
     if len(indexed) < min_cluster_size:
         return []
 
-    # Complete-linkage agglomerative clustering
-    # Invariant: every pair within a cluster must be >= threshold
-    n = len(indexed)
-    cluster_id: list[int] = list(range(n))
-
-    for i in range(n):
-        for j in range(i + 1, n):
-            sim = cosine_similarity(indexed[i][1], indexed[j][1])
-            if sim >= similarity_threshold:
-                cid_i = cluster_id[i]
-                cid_j = cluster_id[j]
-                if cid_i == cid_j:
-                    continue
-                # Check that ALL pairs between the two clusters satisfy threshold
-                i_members = [k for k in range(n) if cluster_id[k] == cid_i]
-                j_members = [k for k in range(n) if cluster_id[k] == cid_j]
-                can_merge = all(
-                    cosine_similarity(indexed[a][1], indexed[b][1]) >= similarity_threshold
-                    for a in i_members
-                    for b in j_members
-                )
-                if can_merge:
-                    for k in range(n):
-                        if cluster_id[k] == cid_j:
-                            cluster_id[k] = cid_i
-
-    # Collect clusters by cluster_id
-    clusters_map: dict[int, list[MemoryEntry]] = {}
-    for idx, cid in enumerate(cluster_id):
-        clusters_map.setdefault(cid, []).append(indexed[idx][0])
-
-    return [
-        cluster
-        for cluster in clusters_map.values()
-        if len(cluster) >= min_cluster_size
-    ]
+    return complete_linkage_cluster(
+        indexed,
+        similarity_threshold,
+        min_cluster_size,
+    )
 
 
 # ---------------------------------------------------------------------------

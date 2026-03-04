@@ -17,10 +17,14 @@ import math
 from collections import OrderedDict
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import NamedTuple, cast
+from typing import TYPE_CHECKING, NamedTuple, cast
+
+if TYPE_CHECKING:
+    from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 import structlog
 
+from trw_memory.lifecycle._utils import days_since_access as _days_since_access
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.dense import cosine_similarity
@@ -53,53 +57,6 @@ class TierSweepResult(NamedTuple):
     def total(self) -> int:
         """Total number of entries affected by this sweep."""
         return self.promoted + self.demoted + self.purged + self.errors
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _days_since_access(
-    entry: dict[str, object],
-    today: date,
-    fallback_days: int = 30,
-) -> int:
-    """Compute days since last access from an entry dict.
-
-    Resolution order: last_accessed_at -> created_at -> fallback_days.
-
-    Handles both datetime objects (from model_dump) and ISO strings (from YAML).
-
-    Args:
-        entry: Entry data dict (from YAML or model_dump).
-        today: Reference date for computing delta.
-        fallback_days: Days to return when no date is parseable.
-
-    Returns:
-        Number of days since the entry was last accessed.
-    """
-    for field in ("last_accessed_at", "created_at", "created"):
-        val = entry.get(field)
-        if val is None:
-            continue
-        # datetime object (from model_dump)
-        if isinstance(val, datetime):
-            return max(0, (today - val.date()).days)
-        if isinstance(val, date) and not isinstance(val, datetime):
-            return max(0, (today - val).days)
-        # String (from YAML)
-        raw = str(val)
-        if not raw or raw == "None":
-            continue
-        try:
-            if "T" in raw or " " in raw:
-                dt = datetime.fromisoformat(raw)
-                return max(0, (today - dt.date()).days)
-            return max(0, (today - date.fromisoformat(raw)).days)
-        except (ValueError, TypeError):
-            continue
-    return fallback_days
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +177,65 @@ class TierManager:
         # LRU invariant: MRU at the end (rightmost), LRU at the front (leftmost)
         self._hot: OrderedDict[str, MemoryEntry] = OrderedDict()
 
+        # Warm tier: cached SQLiteBackend to avoid open/close per operation
+        self._warm_backend: SQLiteBackend | None = None
+        self._warm_backend_dim: int | None = None
+
+    # -----------------------------------------------------------------------
+    # Lifecycle
+    # -----------------------------------------------------------------------
+
+    def _get_warm_backend(self, dim: int | None = None) -> SQLiteBackend | None:
+        """Lazy-init and cache a SQLiteBackend for warm tier operations.
+
+        Args:
+            dim: Embedding dimension (required for vector ops, None for metadata-only).
+
+        Returns:
+            Cached SQLiteBackend instance, or None if import fails.
+        """
+        try:
+            from trw_memory.storage.sqlite_backend import SQLiteBackend as _SQLiteBackend
+        except ImportError:
+            return None
+
+        # Normalise dim so that a call with dim=None and a subsequent call with
+        # dim=384 (SQLiteBackend's internal default) do not needlessly recreate
+        # the backend — both resolve to the same effective dimension.
+        effective_dim = dim if dim is not None else 384  # SQLiteBackend default
+
+        # If dim changed, close old backend and recreate
+        if self._warm_backend is not None and self._warm_backend_dim != effective_dim:
+            self._warm_backend.close()
+            self._warm_backend = None
+            self._warm_backend_dim = None
+
+        if self._warm_backend is None:
+            db_path = self._warm_db_path()
+            self._warm_backend = _SQLiteBackend(db_path, dim=effective_dim)
+            self._warm_backend_dim = effective_dim
+
+        return self._warm_backend
+
+    def close(self) -> None:
+        """Release all resources held by this TierManager."""
+        self._hot.clear()
+        if self._warm_backend is not None:
+            self._warm_backend.close()
+            self._warm_backend = None
+            self._warm_backend_dim = None
+
+    def __enter__(self) -> TierManager:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
+        self.close()
+
     # -----------------------------------------------------------------------
     # Hot Tier
     # -----------------------------------------------------------------------
@@ -305,21 +321,11 @@ class TierManager:
             entry_data: Dict of entry fields.
             embedding: Optional dense embedding vector.
         """
-        try:
-            from trw_memory.storage.sqlite_backend import SQLiteBackend
-
-            _SQLITE_AVAILABLE = True
-        except ImportError:
-            _SQLITE_AVAILABLE = False
-
-        if _SQLITE_AVAILABLE and embedding is not None:
+        if embedding is not None:
             try:
-                db_path = self._warm_db_path()
-                backend = SQLiteBackend(db_path, dim=len(embedding))
-                try:
+                backend = self._get_warm_backend(dim=len(embedding))
+                if backend is not None:
                     backend.upsert_vector(entry_id, embedding)
-                finally:
-                    backend.close()
             except Exception:
                 logger.debug("warm_tier_vec_upsert_failed", entry_id=entry_id, exc_info=True)
 
@@ -368,15 +374,9 @@ class TierManager:
             entry_id: Memory entry identifier to remove.
         """
         try:
-            from trw_memory.storage.sqlite_backend import SQLiteBackend
-
-            db_path = self._warm_db_path()
-            if db_path.exists():
-                backend = SQLiteBackend(db_path)
-                try:
-                    backend.delete(entry_id)
-                finally:
-                    backend.close()
+            backend = self._get_warm_backend()
+            if backend is not None:
+                backend.delete(entry_id)
         except Exception:
             logger.debug("warm_tier_db_remove_failed", entry_id=entry_id, exc_info=True)
 
@@ -425,15 +425,9 @@ class TierManager:
 
         if query_embedding is not None:
             try:
-                from trw_memory.storage.sqlite_backend import SQLiteBackend
-
-                db_path = self._warm_db_path()
-                if db_path.exists():
-                    backend = SQLiteBackend(db_path, dim=len(query_embedding))
-                    try:
-                        raw = backend.search_vectors(query_embedding, top_k=top_k)
-                    finally:
-                        backend.close()
+                backend = self._get_warm_backend(dim=len(query_embedding))
+                if backend is not None:
+                    raw = backend.search_vectors(query_embedding, top_k=top_k)
                     if raw:
                         return [
                             {"id": eid, "score": float(1.0 - dist)}
