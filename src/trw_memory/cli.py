@@ -237,7 +237,15 @@ async def _handle_import(args: argparse.Namespace) -> int:
         print("Error: expected a JSON/YAML array of entries", file=sys.stderr)
         return 1
 
-    client = MemoryClient(namespace=args.namespace, mode="local")
+    try:
+        from trw_memory.integrations._backend import make_entry
+
+        config = MemoryConfig()
+        backend = _create_local_backend(config, args.namespace)
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
     imported = 0
     skipped = 0
     try:
@@ -246,18 +254,13 @@ async def _handle_import(args: argparse.Namespace) -> int:
                 continue
 
             if args.merge:
-                # Check if entry already exists by ID
+                # Check if entry already exists by direct ID lookup
                 eid = entry_data.get("id", "")
                 if eid:
-                    try:
-                        existing = await client.recall(eid, limit=1)
-                        if existing and any(
-                            r.get("memory_id") == eid for r in existing
-                        ):
-                            skipped += 1
-                            continue
-                    except Exception:
-                        pass
+                    existing = backend.get(eid)
+                    if existing is not None:
+                        skipped += 1
+                        continue
 
             content = str(entry_data.get("content", ""))
             if not content.strip():
@@ -270,12 +273,14 @@ async def _handle_import(args: argparse.Namespace) -> int:
             importance = float(entry_data.get("importance", 0.5))
             detail = str(entry_data.get("detail", ""))
 
-            await client.store(
+            entry = make_entry(
                 content=content,
+                namespace=args.namespace,
                 tags=tags,
                 importance=importance,
                 detail=detail,
             )
+            backend.store(entry)
             imported += 1
 
         print(format_import_summary(imported, skipped))
@@ -284,7 +289,7 @@ async def _handle_import(args: argparse.Namespace) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     finally:
-        await client.close()
+        backend.close()
 
 
 async def _handle_status(args: argparse.Namespace) -> int:

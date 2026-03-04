@@ -511,15 +511,18 @@ class TestExportCommand:
 
 
 class TestImportCommand:
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
     def test_import_json_success(
         self,
-        mock_cls: MagicMock,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        client = _mock_client()
-        mock_cls.return_value = client
+        mock_config_cls.return_value = MagicMock()
+        mock_backend = MagicMock()
+        mock_backend_fn.return_value = mock_backend
 
         data = [
             {"content": "Entry 1", "tags": ["a"], "importance": 0.7},
@@ -532,17 +535,21 @@ class TestImportCommand:
         assert ret == 0
         captured = capsys.readouterr()
         assert "Imported 2" in captured.out
-        assert client.store.await_count == 2
+        assert mock_backend.store.call_count == 2
+        mock_backend.close.assert_called_once()
 
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
     def test_import_skips_empty_content(
         self,
-        mock_cls: MagicMock,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        client = _mock_client()
-        mock_cls.return_value = client
+        mock_config_cls.return_value = MagicMock()
+        mock_backend = MagicMock()
+        mock_backend_fn.return_value = mock_backend
 
         data = [{"content": ""}, {"content": "valid"}]
         fpath = tmp_path / "import.json"
@@ -562,10 +569,8 @@ class TestImportCommand:
         captured = capsys.readouterr()
         assert "file not found" in captured.err
 
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
     def test_import_invalid_json(
         self,
-        mock_cls: MagicMock,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
@@ -575,10 +580,8 @@ class TestImportCommand:
         assert ret == 1
         assert "failed to parse" in capsys.readouterr().err
 
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
     def test_import_not_a_list(
         self,
-        mock_cls: MagicMock,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
@@ -588,17 +591,20 @@ class TestImportCommand:
         assert ret == 1
         assert "expected a JSON/YAML array" in capsys.readouterr().err
 
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
     def test_import_merge_mode_skip_existing(
         self,
-        mock_cls: MagicMock,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        client = _mock_client()
-        # recall returns matching entry for ID check
-        client.recall = AsyncMock(return_value=[{"memory_id": "M-existing"}])
-        mock_cls.return_value = client
+        mock_config_cls.return_value = MagicMock()
+        mock_backend = MagicMock()
+        # backend.get returns an entry for existing ID, None for others
+        mock_backend.get.side_effect = lambda eid: _mock_entry() if eid == "M-existing" else None
+        mock_backend_fn.return_value = mock_backend
 
         data = [
             {"id": "M-existing", "content": "old"},
@@ -612,16 +618,19 @@ class TestImportCommand:
         captured = capsys.readouterr()
         assert "skipped 1" in captured.out
 
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
     def test_import_merge_mode_no_id(
         self,
-        mock_cls: MagicMock,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Entries without an id field are always imported in merge mode."""
-        client = _mock_client()
-        mock_cls.return_value = client
+        mock_config_cls.return_value = MagicMock()
+        mock_backend = MagicMock()
+        mock_backend_fn.return_value = mock_backend
 
         data = [{"content": "no id entry"}]
         fpath = tmp_path / "import.json"
@@ -632,15 +641,18 @@ class TestImportCommand:
         captured = capsys.readouterr()
         assert "Imported 1" in captured.out
 
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
     def test_import_handles_non_dict_entries(
         self,
-        mock_cls: MagicMock,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        client = _mock_client()
-        mock_cls.return_value = client
+        mock_config_cls.return_value = MagicMock()
+        mock_backend = MagicMock()
+        mock_backend_fn.return_value = mock_backend
 
         data = ["not a dict", {"content": "valid"}]
         fpath = tmp_path / "import.json"
@@ -651,14 +663,17 @@ class TestImportCommand:
         captured = capsys.readouterr()
         assert "Imported 1" in captured.out
 
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
     def test_import_non_list_tags_ignored(
         self,
-        mock_cls: MagicMock,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
         tmp_path: Path,
     ) -> None:
-        client = _mock_client()
-        mock_cls.return_value = client
+        mock_config_cls.return_value = MagicMock()
+        mock_backend = MagicMock()
+        mock_backend_fn.return_value = mock_backend
 
         data = [{"content": "test", "tags": "not-a-list"}]
         fpath = tmp_path / "import.json"
@@ -666,9 +681,11 @@ class TestImportCommand:
 
         ret = main(["import", str(fpath)])
         assert ret == 0
-        call_kwargs = client.store.call_args
-        assert call_kwargs is not None
-        assert call_kwargs.kwargs.get("tags") == []
+        # Verify backend.store was called with an entry that has empty tags
+        call_args = mock_backend.store.call_args
+        assert call_args is not None
+        stored_entry = call_args[0][0]
+        assert list(stored_entry.tags) == []
 
 
 # ---------------------------------------------------------------------------
@@ -779,18 +796,16 @@ class TestForgetCommand:
 
 
 class TestExportImportRoundTrip:
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
     @patch(f"{_CLI}._create_local_backend")
     @patch(f"{_CLI}.MemoryConfig")
     def test_json_round_trip(
         self,
         mock_config_cls: MagicMock,
         mock_backend_fn: MagicMock,
-        mock_client_cls: MagicMock,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        # Setup export
+        # Setup export backend
         mock_config_cls.return_value = MagicMock()
         mock_backend = MagicMock()
         mock_backend.list_entries.return_value = [
@@ -808,20 +823,17 @@ class TestExportImportRoundTrip:
         assert len(data) == 1
         assert data[0]["content"] == "roundtrip test"
 
-        # Setup import
-        client = _mock_client()
-        mock_client_cls.return_value = client
-
         # Clear capsys
         capsys.readouterr()
 
-        # Import
+        # Import (reuses same mocked _create_local_backend and MemoryConfig)
         ret = main(["import", out_path])
         assert ret == 0
         captured = capsys.readouterr()
         assert "Imported 1" in captured.out
-        client.store.assert_awaited_once()
-        # Verify the content was passed through
-        call_kwargs = client.store.call_args
-        assert call_kwargs is not None
-        assert call_kwargs.kwargs.get("content") == "roundtrip test"
+        # Verify backend.store was called with the roundtrip content
+        store_calls = [
+            c for c in mock_backend.store.call_args_list
+            if hasattr(c[0][0], "content") and c[0][0].content == "roundtrip test"
+        ]
+        assert len(store_calls) == 1

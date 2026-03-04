@@ -17,7 +17,9 @@ Usage::
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, Self, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+from trw_memory.integrations._mixin import BackendOwnerMixin
 
 if TYPE_CHECKING:
     from trw_memory.storage.interface import StorageBackend
@@ -97,7 +99,7 @@ class VSCodeMemoryInterface(Protocol):
         ...
 
 
-class LocalMemoryAdapter:
+class LocalMemoryAdapter(BackendOwnerMixin):
     """Concrete :class:`VSCodeMemoryInterface` using the local storage backend.
 
     Intended for local development and testing of the VSCode extension.
@@ -195,15 +197,4 @@ class LocalMemoryAdapter:
             "storage_backend": type(self._backend).__name__,
         }
 
-    # -- Resource management ------------------------------------------------
-
-    def close(self) -> None:
-        """Release backend resources if this instance owns them."""
-        if self._owns_backend:
-            self._backend.close()
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.close()
+    # Resource management inherited from BackendOwnerMixin.

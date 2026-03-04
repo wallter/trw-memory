@@ -141,13 +141,13 @@ def generate_query_set(
 
 
 def create_golden_set(output_path: Path) -> None:
-    """Generate and write the 50-entry golden set fixture to YAML.
+    """Generate and write the 50-entry golden set fixture to JSON.
 
     Each entry includes content, tags, importance, and a set of queries
     with ground-truth relevance judgments for quality benchmarks.
 
     Args:
-        output_path: Path to write the YAML file.
+        output_path: Path to write the JSON file.
     """
     golden_entries: list[dict[str, object]] = []
 
@@ -284,7 +284,7 @@ def create_golden_set(output_path: Path) -> None:
 
 
 def create_dedup_set(output_path: Path) -> None:
-    """Generate and write the 30-pair dedup accuracy set to YAML.
+    """Generate and write the 30-pair dedup accuracy set to JSON.
 
     Each pair has entry_a, entry_b, and an expected_duplicate boolean.
     Pairs alternate between true duplicates (paraphrases) and

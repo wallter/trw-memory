@@ -20,7 +20,7 @@ Requires ``crewai >= 0.74.0``::
 from __future__ import annotations
 
 import importlib.util
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any
 
 # Verify crewai is available (but don't import heavy modules)
 try:
@@ -34,13 +34,15 @@ if _crewai_spec is None:
         'Install it with: pip install "trw-memory[crewai]"'
     )
 
+from trw_memory.integrations._mixin import BackendOwnerMixin
+
 if TYPE_CHECKING:
     from trw_memory.storage.interface import StorageBackend
 
 _TAG_PREFIX = "crewai"
 
 
-class TRWCrewStorage:
+class TRWCrewStorage(BackendOwnerMixin):
     """RAGStorage-compatible adapter backed by trw-memory.
 
     Implements the duck-typed interface expected by CrewAI's memory classes:
@@ -154,15 +156,4 @@ class TRWCrewStorage:
         for entry in entries:
             self._backend.delete(entry.id)
 
-    # -- Resource management ------------------------------------------------
-
-    def close(self) -> None:
-        """Release backend resources if this instance owns them."""
-        if self._owns_backend:
-            self._backend.close()
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.close()
+    # Resource management inherited from BackendOwnerMixin.

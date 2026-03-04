@@ -20,7 +20,7 @@ Requires ``langchain-core >= 0.3.0``::
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING
 
 try:
     from langchain_core.chat_history import BaseChatMessageHistory  # type: ignore[import-not-found]
@@ -31,13 +31,15 @@ except ImportError as exc:
         'Install it with: pip install "trw-memory[langchain]"'
     ) from exc
 
+from trw_memory.integrations._mixin import BackendOwnerMixin
+
 if TYPE_CHECKING:
     from trw_memory.storage.interface import StorageBackend
 
 _TAG_PREFIX = "lc:session:"
 
 
-class TRWChatMessageHistory(BaseChatMessageHistory):  # type: ignore[misc]
+class TRWChatMessageHistory(BackendOwnerMixin, BaseChatMessageHistory):  # type: ignore[misc]
     """Persistent chat message history backed by trw-memory.
 
     Each message is stored as a :class:`MemoryEntry` with tags encoding
@@ -130,15 +132,4 @@ class TRWChatMessageHistory(BaseChatMessageHistory):  # type: ignore[misc]
             if self._session_tag in entry.tags:
                 self._backend.delete(entry.id)
 
-    # -- Resource management ------------------------------------------------
-
-    def close(self) -> None:
-        """Release backend resources if this instance owns them."""
-        if self._owns_backend:
-            self._backend.close()
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.close()
+    # Resource management inherited from BackendOwnerMixin.
