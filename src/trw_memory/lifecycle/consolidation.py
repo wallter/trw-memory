@@ -17,6 +17,7 @@ from uuid import uuid4
 
 import structlog
 
+from trw_memory.exceptions import StorageError
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
@@ -366,7 +367,7 @@ def _archive_originals(
                 updated_at=datetime.now(timezone.utc),
             )
             processed.append(entry.id)
-        except Exception as exc:
+        except (StorageError, ValueError, RuntimeError) as exc:
             logger.exception(
                 "consolidation_archive_failed",
                 entry_id=entry.id,
@@ -511,7 +512,7 @@ def consolidate_cycle(
             _archive_originals(cluster, consolidated_id, storage)
             consolidated_count += 1
 
-        except Exception as exc:
+        except Exception as exc:  # broad catch: per-cluster error boundary
             logger.exception(
                 "consolidation_cluster_failed",
                 cluster_ids=cluster_ids,

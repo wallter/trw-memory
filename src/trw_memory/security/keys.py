@@ -48,7 +48,7 @@ def _read_key_from_keyring() -> bytes | None:
         if stored is None:
             return None
         return bytes.fromhex(stored)
-    except Exception:
+    except (ValueError, OSError, RuntimeError):
         logger.debug("keyring_read_failed", exc_info=True)
         return None
 
@@ -163,7 +163,7 @@ def store_master_key(key: bytes, config: MemoryConfig) -> None:
             _keyring.set_password(_SERVICE_NAME, _KEY_ACCOUNT, key.hex())
             logger.info("master_key_stored", target="keyring")
             return
-        except Exception as exc:
+        except (OSError, RuntimeError) as exc:
             raise ConfigError(f"Failed to store key in keyring: {exc}") from exc
 
     if config.key_source == "env":

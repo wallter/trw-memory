@@ -85,7 +85,7 @@ class RetryQueue:
 
                 try:
                     success = publish_fn(record["payload"])
-                except Exception as exc:
+                except (OSError, ConnectionError, ValueError) as exc:
                     record["retry_count"] = record.get("retry_count", 0) + 1
                     record["last_error"] = str(exc)
                     remaining.append(record)

@@ -113,7 +113,7 @@ class MemoryClient:
                 config = MemoryConfig()
                 self._backend = _create_local_backend(config, namespace)
                 self._resolved_mode = "local"
-            except Exception as exc:
+            except (OSError, ValueError, ImportError) as exc:
                 if mode == "local":
                     raise MemoryConnectionError(
                         f"Failed to create local backend: {exc}"
@@ -458,7 +458,7 @@ class MemoryClient:
                         memories = [
                             m for m in raw if float(m["score"]) >= min_score
                         ]
-                except Exception:
+                except Exception:  # broad catch: fail-open recall decorator
                     memories = []
 
                 kwargs["recalled_memories"] = memories

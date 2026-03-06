@@ -17,6 +17,7 @@ from pathlib import Path
 
 import structlog
 from ruamel.yaml import YAML
+from ruamel.yaml import YAMLError  # type: ignore[attr-defined]
 
 from trw_memory.exceptions import StorageError
 
@@ -101,7 +102,7 @@ def read_yaml(path: Path) -> dict[str, object]:
         return result
     except StorageError:
         raise
-    except Exception as exc:
+    except (OSError, YAMLError, ValueError, TypeError) as exc:
         raise StorageError(
             f"Failed to read YAML: {exc}",
             path=str(path),
@@ -137,13 +138,13 @@ def write_yaml(path: Path, data: dict[str, object]) -> None:
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
             # fd is now closed by os.fdopen context manager
             tmp_path.rename(path)
-        except Exception:
+        except Exception:  # broad catch: must clean temp file on any failure
             tmp_path.unlink(missing_ok=True)
             raise
         logger.debug("yaml_written", path=str(path))
     except StorageError:
         raise
-    except Exception as exc:
+    except (OSError, YAMLError, ValueError, TypeError, RuntimeError) as exc:
         raise StorageError(
             f"Failed to write YAML: {exc}",
             path=str(path),
@@ -176,7 +177,7 @@ def append_jsonl(path: Path, record: dict[str, object]) -> None:
             finally:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         logger.debug("jsonl_appended", path=str(path))
-    except Exception as exc:
+    except (OSError, ValueError, TypeError) as exc:
         raise StorageError(
             f"Failed to append JSONL: {exc}",
             path=str(path),

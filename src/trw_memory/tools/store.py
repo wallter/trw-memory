@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import structlog
 
-from trw_memory.exceptions import ConfigError
+from trw_memory.exceptions import ConfigError, StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.namespace import validate_namespace
 from trw_memory.storage.interface import StorageBackend
@@ -80,7 +80,7 @@ def memory_store_impl(
 
     try:
         backend.store(entry)
-    except Exception as exc:
+    except Exception as exc:  # broad catch: tool error boundary
         logger.exception("memory_store_failed", entry_id=entry_id, error=str(exc))
         return {"error": f"storage error: {exc}", "status": "error"}
 

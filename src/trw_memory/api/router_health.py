@@ -34,7 +34,7 @@ def health_check(
     db_status = "ok"
     try:
         backend.count()
-    except Exception:
+    except Exception:  # broad catch: health check must not crash
         db_status = "degraded"
 
     return HealthResponse(

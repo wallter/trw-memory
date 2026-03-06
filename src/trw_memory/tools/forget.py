@@ -10,7 +10,7 @@ from typing import Any
 
 import structlog
 
-from trw_memory.exceptions import ConfigError
+from trw_memory.exceptions import ConfigError, StorageError
 from trw_memory.namespace import validate_namespace
 from trw_memory.storage.interface import StorageBackend
 
@@ -63,7 +63,7 @@ def memory_forget_impl(
             if entry is not None and entry.namespace == namespace:
                 was_deleted = backend.delete(memory_id)
                 deleted_count = 1 if was_deleted else 0
-        except Exception as exc:
+        except StorageError as exc:
             logger.warning("memory_forget_delete_error", memory_id=memory_id, error=str(exc))
 
         logger.info(
@@ -82,7 +82,7 @@ def memory_forget_impl(
             top_k=10_000,
             namespace=namespace,
         )
-    except Exception as exc:
+    except StorageError as exc:
         logger.warning("memory_forget_search_error", query=query[:80], error=str(exc))
         return {"deleted": 0, "status": "ok"}
 
@@ -91,7 +91,7 @@ def memory_forget_impl(
         try:
             if backend.delete(entry.id):
                 deleted_count += 1
-        except Exception as exc:
+        except StorageError as exc:
             logger.warning("memory_forget_delete_error", memory_id=entry.id, error=str(exc))
 
     logger.info(

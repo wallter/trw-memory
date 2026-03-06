@@ -40,7 +40,7 @@ async def _handle_store(args: argparse.Namespace) -> int:
         )
         print(format_store_result(result))
         return 0
-    except Exception as exc:
+    except Exception as exc:  # broad catch: CLI error boundary
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     finally:
@@ -59,7 +59,7 @@ async def _handle_recall(args: argparse.Namespace) -> int:
         )
         print(format_results(results, fmt=args.fmt))
         return 0
-    except Exception as exc:
+    except Exception as exc:  # broad catch: CLI error boundary
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     finally:
@@ -87,7 +87,7 @@ async def _handle_search(args: argparse.Namespace) -> int:
         )
         print(format_results(results, fmt=args.fmt))
         return 0
-    except Exception as exc:
+    except Exception as exc:  # broad catch: CLI error boundary
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     finally:
@@ -111,7 +111,7 @@ async def _handle_consolidate(args: argparse.Namespace) -> int:
             return 0
         finally:
             backend.close()
-    except Exception as exc:
+    except Exception as exc:  # broad catch: CLI error boundary
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
@@ -146,7 +146,7 @@ async def _handle_export(args: argparse.Namespace) -> int:
             return 0
         finally:
             backend.close()
-    except Exception as exc:
+    except Exception as exc:  # broad catch: CLI error boundary
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
@@ -168,7 +168,7 @@ async def _handle_import(args: argparse.Namespace) -> int:
             data = yaml.load(raw_text)
         else:
             data = json.loads(raw_text)
-    except Exception as exc:
+    except (json.JSONDecodeError, ValueError) as exc:
         print(f"Error: failed to parse {args.path}: {exc}", file=sys.stderr)
         return 1
 
@@ -181,7 +181,7 @@ async def _handle_import(args: argparse.Namespace) -> int:
 
         config = MemoryConfig()
         backend = _create_local_backend(config, args.namespace)
-    except Exception as exc:
+    except Exception as exc:  # broad catch: CLI error boundary
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
@@ -224,7 +224,7 @@ async def _handle_import(args: argparse.Namespace) -> int:
 
         print(format_import_summary(imported, skipped))
         return 0
-    except Exception as exc:
+    except Exception as exc:  # broad catch: CLI error boundary
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     finally:
@@ -248,7 +248,7 @@ async def _handle_status(args: argparse.Namespace) -> int:
             return 0
         finally:
             backend.close()
-    except Exception as exc:
+    except Exception as exc:  # broad catch: CLI error boundary
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
@@ -261,7 +261,7 @@ async def _handle_forget(args: argparse.Namespace) -> int:
         mid = result.get("memory_id", "")
         print(f"Deleted: {mid}")
         return 0
-    except Exception as exc:
+    except Exception as exc:  # broad catch: CLI error boundary
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     finally:

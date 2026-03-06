@@ -170,7 +170,7 @@ def _graph_related(
 
     try:
         return graph_query(effective_conn, root_ids, depth=depth)
-    except Exception:
+    except (sqlite3.Error, ValueError, KeyError):
         logger.debug("graph_related_error", exc_info=True)
         return []
 

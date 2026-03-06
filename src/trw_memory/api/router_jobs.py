@@ -93,7 +93,7 @@ def _run_job(job_id: str, backend: SQLiteBackend) -> None:
             job.completed_at = datetime.now(timezone.utc)
             job.result = result
 
-    except Exception as exc:
+    except (ValueError, OSError) as exc:  # broad catch: job error boundary
         with _lock:
             job.status = JobStatus.FAILED
             job.completed_at = datetime.now(timezone.utc)

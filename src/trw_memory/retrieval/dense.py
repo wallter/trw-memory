@@ -100,7 +100,7 @@ def dense_search(
         assert embedder is not None  # for mypy
         try:
             q_vec = embedder.embed(query)
-        except Exception:
+        except (RuntimeError, ValueError, TypeError):
             logger.warning("dense_search_embed_failed", query=query[:80])
             return []
 
@@ -117,7 +117,7 @@ def dense_search(
         try:
             score = cosine_similarity(q_vec, stored)
             results.append((entry_id, score))
-        except Exception:
+        except (ValueError, ZeroDivisionError):
             logger.debug("dense_search_entry_skipped", entry_id=entry_id)
             continue
 

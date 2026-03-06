@@ -30,6 +30,14 @@ from trw_memory.storage._parsing import (
     parse_json_dict_str,
     parse_json_list,
 )
+from trw_memory.storage._shared import (
+    DICT_FIELDS,
+    ENTRY_COLUMNS,
+    IMMUTABLE_FIELDS,
+    LIST_FIELDS,
+    serialize_update_value,
+    validate_update_fields,
+)
 from trw_memory.storage.interface import StorageBackend
 
 try:
@@ -121,19 +129,10 @@ _CREATE_IDX_MN_STATUS = (
 # Row <-> MemoryEntry helpers
 # ---------------------------------------------------------------------------
 
-_COLUMNS = (
-    "id", "content", "detail", "tags", "evidence", "importance", "status",
-    "recurrence", "namespace", "created_at", "updated_at", "last_accessed_at",
-    "access_count", "q_value", "q_observations", "source", "source_identity",
-    "merged_from", "consolidated_from", "consolidated_into", "metadata",
-    "vector_clock", "remote_id", "published_to_platform", "pending_delete",
-    "cross_validated", "outcome_history",
-)
+_COLUMNS = ENTRY_COLUMNS
 
 # Allowlist for UPDATE: all columns except immutable ones.
-_VALID_UPDATE_COLUMNS: frozenset[str] = frozenset(_COLUMNS) - frozenset(
-    {"id", "created_at"}
-)
+_VALID_UPDATE_COLUMNS: frozenset[str] = frozenset(_COLUMNS) - IMMUTABLE_FIELDS
 
 
 def _row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
@@ -254,7 +253,7 @@ class SQLiteBackend(StorageBackend):
                 self._ensure_vec_table()
                 self._vec_available = True
                 logger.debug("sqlite_vec_loaded", db=str(db_path))
-            except Exception:
+            except (sqlite3.Error, OSError):
                 self._vec_available = False
                 logger.debug("sqlite_vec_load_failed", db=str(db_path), exc_info=True)
         else:
@@ -333,7 +332,7 @@ class SQLiteBackend(StorageBackend):
                 self._conn.execute(sql, _entry_to_row(entry))
                 self._conn.commit()
             logger.debug("memory_stored", entry_id=entry.id)
-        except Exception as exc:
+        except (sqlite3.Error, json.JSONDecodeError) as exc:
             raise StorageError(
                 f"Failed to store entry {entry.id}: {exc}",
                 path=str(self._db_path),
@@ -359,7 +358,7 @@ class SQLiteBackend(StorageBackend):
             if row is None:
                 return None
             return _row_to_entry(tuple(row))
-        except Exception as exc:
+        except (sqlite3.Error, ValueError, KeyError) as exc:
             raise StorageError(
                 f"Failed to get entry {entry_id}: {exc}",
                 path=str(self._db_path),
@@ -389,36 +388,30 @@ class SQLiteBackend(StorageBackend):
             # Serialise list/dict fields to JSON for SQLite
             set_parts: list[str] = []
             values: list[object] = []
-            _list_fields = {
-                "tags", "evidence", "merged_from", "consolidated_from",
-                "outcome_history",
-            }
-            _json_fields = {"metadata", "vector_clock"}
 
             # Auto-set updated_at when not explicitly provided
             field_dict: dict[str, object] = dict(fields)
             if "updated_at" not in field_dict:
                 field_dict["updated_at"] = datetime.now(timezone.utc)
 
+            try:
+                validate_update_fields(field_dict, _VALID_UPDATE_COLUMNS)
+            except ValueError as ve:
+                raise StorageError(  # noqa: TRY301
+                    f"Invalid update field: {ve.args[0]!r}",
+                    path=str(self._db_path),
+                ) from None
+
             for key, val in field_dict.items():
-                if key not in _VALID_UPDATE_COLUMNS:
-                    raise StorageError(  # noqa: TRY301
-                        f"Invalid update field: {key!r}",
-                        path=str(self._db_path),
-                    )
                 set_parts.append(f"{key} = ?")
-                if (key in _list_fields and isinstance(val, list)) or (
-                    key in _json_fields and isinstance(val, dict)
+                normalised = serialize_update_value(key, val)
+                # SQLite needs JSON strings for list/dict columns
+                if (key in LIST_FIELDS and isinstance(normalised, list)) or (
+                    key in DICT_FIELDS and isinstance(normalised, dict)
                 ):
-                    values.append(json.dumps(val))
-                elif isinstance(val, datetime):
-                    values.append(val.isoformat())
-                elif isinstance(val, MemoryStatus):
-                    # use_enum_values=True means val is typically str already;
-                    # handle the rare case where a MemoryStatus enum is passed
-                    values.append(val.value)
+                    values.append(json.dumps(normalised))
                 else:
-                    values.append(val)
+                    values.append(normalised)
 
             values.append(entry_id)
             sql = f"UPDATE memories SET {', '.join(set_parts)} WHERE id = ?"
@@ -428,7 +421,7 @@ class SQLiteBackend(StorageBackend):
             return self.get(entry_id)
         except StorageError:
             raise
-        except Exception as exc:
+        except (sqlite3.Error, ValueError, TypeError, json.JSONDecodeError) as exc:
             raise StorageError(
                 f"Failed to update entry {entry_id}: {exc}",
                 path=str(self._db_path),
@@ -457,7 +450,7 @@ class SQLiteBackend(StorageBackend):
                 self._conn.commit()
             logger.debug("memory_deleted", entry_id=entry_id, existed=deleted)
             return deleted
-        except Exception as exc:
+        except sqlite3.Error as exc:
             raise StorageError(
                 f"Failed to delete entry {entry_id}: {exc}",
                 path=str(self._db_path),
@@ -543,7 +536,7 @@ class SQLiteBackend(StorageBackend):
                 results = [e for e in results if required.issubset(set(e.tags))]
 
             return results[:top_k]
-        except Exception as exc:
+        except (sqlite3.Error, ValueError, KeyError) as exc:
             raise StorageError(
                 f"Failed to search memories: {exc}",
                 path=str(self._db_path),
@@ -573,7 +566,7 @@ class SQLiteBackend(StorageBackend):
                         "SELECT COUNT(*) FROM memories"
                     ).fetchone()
             return int(row[0]) if row else 0
-        except Exception as exc:
+        except sqlite3.Error as exc:
             raise StorageError(
                 f"Failed to count memories: {exc}",
                 path=str(self._db_path),
@@ -622,7 +615,7 @@ class SQLiteBackend(StorageBackend):
             with self._lock:
                 rows = self._conn.execute(sql, params).fetchall()
             return [_row_to_entry(tuple(r)) for r in rows]
-        except Exception as exc:
+        except (sqlite3.Error, ValueError, KeyError) as exc:
             raise StorageError(
                 f"Failed to list entries: {exc}",
                 path=str(self._db_path),
@@ -647,7 +640,7 @@ class SQLiteBackend(StorageBackend):
                     "SELECT DISTINCT namespace FROM memories ORDER BY namespace"
                 ).fetchall()
             return [str(row[0]) for row in rows]
-        except Exception as exc:
+        except sqlite3.Error as exc:
             raise StorageError(
                 f"Failed to list namespaces: {exc}",
                 path=str(self._db_path),
@@ -678,7 +671,7 @@ class SQLiteBackend(StorageBackend):
                 entries_deleted=deleted,
             )
             return deleted
-        except Exception as exc:
+        except sqlite3.Error as exc:
             raise StorageError(
                 f"Failed to delete namespace {namespace!r}: {exc}",
                 path=str(self._db_path),
@@ -686,7 +679,7 @@ class SQLiteBackend(StorageBackend):
 
     def close(self) -> None:
         """Close the database connection."""
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(sqlite3.Error):
             self._conn.close()
         logger.debug("sqlite_backend_closed", db=str(self._db_path))
 
@@ -771,6 +764,6 @@ class SQLiteBackend(StorageBackend):
                     (query_bytes, top_k),
                 ).fetchall()
             return [(str(r[0]), float(r[1])) for r in rows]
-        except Exception:
+        except sqlite3.Error:
             logger.debug("vector_search_error", exc_info=True)
             return []

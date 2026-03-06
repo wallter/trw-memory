@@ -99,7 +99,7 @@ def publish_memory(
                 status=resp.status_code,
             )
             return False
-    except Exception:
+    except (httpx.HTTPError, OSError, ConnectionError):
         logger.debug("memory_publish_error", entry_id=entry.id, exc_info=True)
         return False
 
@@ -148,7 +148,7 @@ def fetch_shared_memories(
             results = resp.json()
             if not isinstance(results, list):
                 results = results.get("results", [])
-    except Exception:
+    except (httpx.HTTPError, OSError, ConnectionError):
         logger.debug("memory_fetch_error", exc_info=True)
         return []
 

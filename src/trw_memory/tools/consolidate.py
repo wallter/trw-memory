@@ -15,7 +15,7 @@ from typing import Any
 
 import structlog
 
-from trw_memory.exceptions import ConfigError
+from trw_memory.exceptions import ConfigError, StorageError
 from trw_memory.lifecycle.consolidation import consolidate_cycle
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespace import validate_namespace
@@ -117,7 +117,7 @@ def memory_consolidate_impl(
             dry_run=dry_run,
             namespace=namespace,
         )
-    except Exception as exc:
+    except (StorageError, ValueError) as exc:
         logger.exception("memory_consolidate_failed", namespace=namespace, error=str(exc))
         return {"error": f"consolidation error: {exc}", "status": "error"}
 

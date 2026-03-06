@@ -10,7 +10,7 @@ from typing import Any
 
 import structlog
 
-from trw_memory.exceptions import ConfigError
+from trw_memory.exceptions import ConfigError, StorageError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespace import validate_namespace
@@ -51,7 +51,7 @@ def memory_status_impl(
 
     try:
         total_entries = backend.count(namespace=namespace)
-    except Exception as exc:
+    except Exception as exc:  # broad catch: tool error boundary
         logger.exception("memory_status_count_failed", error=str(exc))
         return {"error": f"storage error: {exc}", "status": "error"}
 
@@ -65,7 +65,7 @@ def memory_status_impl(
             try:
                 ns_count = backend.count(namespace=ns)
                 namespaces[ns] = ns_count
-            except Exception:
+            except Exception:  # broad catch: best-effort namespace count
                 pass
 
         # Also include active entry count
@@ -75,7 +75,7 @@ def memory_status_impl(
                 limit=10_000,
             )
             namespaces["__active__"] = len(active_entries)
-        except Exception:
+        except Exception:  # broad catch: best-effort active count
             pass
 
     config_summary: dict[str, object] = {

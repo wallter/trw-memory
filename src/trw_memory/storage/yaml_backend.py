@@ -20,6 +20,10 @@ import structlog
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage._parsing import parse_dt, parse_json_dict_str, parse_json_list
+from trw_memory.storage._shared import (
+    serialize_update_value,
+    validate_update_fields,
+)
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.persistence import lock_for_rmw, read_yaml, write_yaml
 
@@ -181,7 +185,7 @@ class YAMLBackend(StorageBackend):
             try:
                 data = read_yaml(yaml_file)
                 entries.append(_dict_to_entry(data))
-            except Exception:
+            except (OSError, StorageError, ValueError, KeyError):
                 logger.warning("yaml_backend_skip_corrupt", path=str(yaml_file))
         return entries
 
@@ -222,7 +226,7 @@ class YAMLBackend(StorageBackend):
             return _dict_to_entry(data)
         except StorageError:
             raise
-        except Exception as exc:
+        except (ValueError, KeyError, TypeError) as exc:
             raise StorageError(
                 f"Failed to deserialise entry {entry_id}: {exc}",
                 path=str(path),
@@ -250,42 +254,31 @@ class YAMLBackend(StorageBackend):
                 data = read_yaml(path)
             except StorageError:
                 raise
-            except Exception as exc:
+            except (OSError, ValueError, KeyError) as exc:
                 raise StorageError(
                     f"Failed to read entry {entry_id} for update: {exc}",
                     path=str(path),
                 ) from exc
 
             # Apply updates — serialise complex types to YAML-friendly forms
-            _list_fields = {
-                "tags", "evidence", "merged_from", "consolidated_from",
-            }
             field_dict: dict[str, object] = dict(fields)
-            for key in field_dict:
-                if key not in _VALID_UPDATE_FIELDS:
-                    raise StorageError(
-                        f"Invalid update field: {key!r}",
-                        path=str(path),
-                    )
+            try:
+                validate_update_fields(field_dict, _VALID_UPDATE_FIELDS)
+            except ValueError as ve:
+                raise StorageError(
+                    f"Invalid update field: {ve.args[0]!r}",
+                    path=str(path),
+                ) from None
             if "updated_at" not in field_dict:
                 field_dict["updated_at"] = datetime.now(timezone.utc)
             for key, val in field_dict.items():
-                if key in _list_fields and isinstance(val, list):
-                    data[key] = [str(v) for v in val]
-                elif key == "metadata" and isinstance(val, dict):
-                    data[key] = {str(k): str(v) for k, v in val.items()}
-                elif isinstance(val, datetime):
-                    data[key] = val.isoformat()
-                elif isinstance(val, MemoryStatus):
-                    data[key] = val.value
-                else:
-                    data[key] = val
+                data[key] = serialize_update_value(key, val)
 
             write_yaml(path, data)
 
         try:
             return _dict_to_entry(data)
-        except Exception as exc:
+        except (ValueError, KeyError, TypeError) as exc:
             raise StorageError(
                 f"Failed to deserialise updated entry {entry_id}: {exc}",
                 path=str(path),
@@ -310,7 +303,7 @@ class YAMLBackend(StorageBackend):
             path.unlink()
             logger.debug("yaml_entry_deleted", entry_id=entry_id)
             return True
-        except Exception as exc:
+        except OSError as exc:
             raise StorageError(
                 f"Failed to delete entry {entry_id}: {exc}",
                 path=str(path),
