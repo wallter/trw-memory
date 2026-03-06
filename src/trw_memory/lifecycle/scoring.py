@@ -226,17 +226,9 @@ def entry_utility(
     source_type = str(entry.get("source", "agent"))
     days_unused = _days_since_access(entry, today, fallback_days=effective_fallback)
 
-    # Apply time decay to both importance and q_value at query time
-    created_raw = entry.get("created_at")
-    if created_raw is not None:
-        created_str = str(created_raw)
-        if created_str and created_str not in ("None", "null", ""):
-            try:
-                created_dt = datetime.fromisoformat(created_str)
-                base_impact = apply_time_decay(base_impact, created_dt)
-                q_value = apply_time_decay(q_value, created_dt)
-            except ValueError:
-                pass
+    # Double-decay fix (PRD-QUAL-032-FR03): apply_time_decay was removed here
+    # because compute_utility_score() already applies Ebbinghaus exponential
+    # decay internally via retention = exp(-decay_rate * days).
 
     return compute_utility_score(
         q_value=q_value,
