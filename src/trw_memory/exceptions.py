@@ -34,3 +34,7 @@ class MemoryNotFoundError(MemoryError):
 
 class ToolAlreadyRegisteredError(MemoryError):
     """Raised when register_tools() is called twice."""
+
+
+class DimensionMismatchError(ValueError):
+    """Raised when vectors have incompatible dimensions."""

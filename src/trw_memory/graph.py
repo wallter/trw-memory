@@ -17,6 +17,7 @@ from typing import Any
 
 import structlog
 
+from trw_memory.exceptions import DimensionMismatchError
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.dense import cosine_similarity
 
@@ -302,18 +303,21 @@ def memory_decay_pass(
     # Direct SQL for batch performance — StorageBackend.update() is
     # per-entry and would create N+1 round-trips for 1000-row batches.
     decayed = 0
-    for (entry_id,) in rows:
-        now = datetime.now(timezone.utc).isoformat()
-        outcome = f"importance_decay:delta=-{DECAY_DELTA:.2f}:reason=unused_90d:timestamp={now}"
-        conn.execute(
-            "UPDATE memories SET importance = MAX(importance - ?, 0.0), "
-            "outcome_history = json_insert(outcome_history, '$[#]', ?) "
-            "WHERE id = ?",
-            (DECAY_DELTA, outcome, entry_id),
-        )
-        decayed += 1
-
-    conn.commit()
+    try:
+        for (entry_id,) in rows:
+            now = datetime.now(timezone.utc).isoformat()
+            outcome = f"importance_decay:delta=-{DECAY_DELTA:.2f}:reason=unused_90d:timestamp={now}"
+            conn.execute(
+                "UPDATE memories SET importance = MAX(importance - ?, 0.0), "
+                "outcome_history = json_insert(outcome_history, '$[#]', ?) "
+                "WHERE id = ?",
+                (DECAY_DELTA, outcome, entry_id),
+            )
+            decayed += 1
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
     return {
         "processed": decayed,
@@ -331,11 +335,17 @@ def _safe_cosine_similarity(a: list[float], b: list[float]) -> float:
     """Cosine similarity with graceful degradation for graph operations.
 
     Delegates to ``retrieval.dense.cosine_similarity`` but returns 0.0
-    instead of raising on dimension mismatch or empty vectors.
+    on dimension mismatch.  Other ``ValueError`` subclasses are re-raised
+    so callers can distinguish true zero-similarity from incompatible vectors.
     """
     try:
         return cosine_similarity(a, b)
-    except ValueError:
+    except DimensionMismatchError:
+        logger.debug(
+            "cosine_dimension_mismatch",
+            len_a=len(a),
+            len_b=len(b),
+        )
         return 0.0
 
 

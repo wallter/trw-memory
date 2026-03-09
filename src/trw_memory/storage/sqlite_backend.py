@@ -130,6 +130,7 @@ _CREATE_IDX_MN_STATUS = (
 # ---------------------------------------------------------------------------
 
 _COLUMNS = ENTRY_COLUMNS
+_COLUMNS_SQL = ", ".join(_COLUMNS)
 
 # Allowlist for UPDATE: all columns except immutable ones.
 _VALID_UPDATE_COLUMNS: frozenset[str] = frozenset(_COLUMNS) - IMMUTABLE_FIELDS
@@ -265,29 +266,32 @@ class SQLiteBackend(StorageBackend):
 
     def _ensure_schema(self) -> None:
         cursor = self._conn.cursor()
-        cursor.execute(_CREATE_MEMORIES)
-        cursor.execute(_CREATE_IDX_NAMESPACE)
-        cursor.execute(_CREATE_IDX_STATUS)
-        cursor.execute(_CREATE_GRAPH_EDGES)
-        cursor.execute(_CREATE_IDX_MGE_SOURCE)
-        cursor.execute(_CREATE_IDX_MGE_TARGET)
-        cursor.execute(_CREATE_NAMESPACES)
-        cursor.execute(_CREATE_IDX_MN_STATUS)
-        # Migration: add new columns for sync + graph (Sprint 37)
-        _migrate_cols = [
-            ("vector_clock", "TEXT DEFAULT '{}'"),
-            ("remote_id", "TEXT"),
-            ("published_to_platform", "INTEGER DEFAULT 0"),
-            ("pending_delete", "INTEGER DEFAULT 0"),
-            ("cross_validated", "INTEGER DEFAULT 0"),
-            ("outcome_history", "TEXT DEFAULT '[]'"),
-        ]
-        for col_name, col_def in _migrate_cols:
-            with contextlib.suppress(sqlite3.OperationalError):
-                cursor.execute(
-                    f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}"
-                )
-        self._conn.commit()
+        try:
+            cursor.execute(_CREATE_MEMORIES)
+            cursor.execute(_CREATE_IDX_NAMESPACE)
+            cursor.execute(_CREATE_IDX_STATUS)
+            cursor.execute(_CREATE_GRAPH_EDGES)
+            cursor.execute(_CREATE_IDX_MGE_SOURCE)
+            cursor.execute(_CREATE_IDX_MGE_TARGET)
+            cursor.execute(_CREATE_NAMESPACES)
+            cursor.execute(_CREATE_IDX_MN_STATUS)
+            # Migration: add new columns for sync + graph (Sprint 37)
+            _migrate_cols = [
+                ("vector_clock", "TEXT DEFAULT '{}'"),
+                ("remote_id", "TEXT"),
+                ("published_to_platform", "INTEGER DEFAULT 0"),
+                ("pending_delete", "INTEGER DEFAULT 0"),
+                ("cross_validated", "INTEGER DEFAULT 0"),
+                ("outcome_history", "TEXT DEFAULT '[]'"),
+            ]
+            for col_name, col_def in _migrate_cols:
+                with contextlib.suppress(sqlite3.OperationalError):
+                    cursor.execute(
+                        f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}"
+                    )
+            self._conn.commit()
+        finally:
+            cursor.close()
 
     def _ensure_vec_table(self) -> None:
         self._conn.execute(
@@ -325,8 +329,7 @@ class SQLiteBackend(StorageBackend):
             StorageError: If the write fails.
         """
         placeholders = ", ".join(["?"] * len(_COLUMNS))
-        col_list = ", ".join(_COLUMNS)
-        sql = f"INSERT OR REPLACE INTO memories ({col_list}) VALUES ({placeholders})"
+        sql = f"INSERT OR REPLACE INTO memories ({_COLUMNS_SQL}) VALUES ({placeholders})"
         try:
             with self._lock:
                 self._conn.execute(sql, _entry_to_row(entry))
@@ -350,8 +353,7 @@ class SQLiteBackend(StorageBackend):
         Raises:
             StorageError: If the query fails.
         """
-        col_list = ", ".join(_COLUMNS)
-        sql = f"SELECT {col_list} FROM memories WHERE id = ?"
+        sql = f"SELECT {_COLUMNS_SQL} FROM memories WHERE id = ?"
         try:
             with self._lock:
                 row = self._conn.execute(sql, (entry_id,)).fetchone()
@@ -493,7 +495,6 @@ class SQLiteBackend(StorageBackend):
         Raises:
             StorageError: If the query fails.
         """
-        col_list = ", ".join(_COLUMNS)
         where_clauses: list[str] = []
         params: list[object] = []
 
@@ -520,7 +521,7 @@ class SQLiteBackend(StorageBackend):
 
         where_sql = " AND ".join(where_clauses) if where_clauses else "1"
         sql = (
-            f"SELECT {col_list} FROM memories WHERE {where_sql} "
+            f"SELECT {_COLUMNS_SQL} FROM memories WHERE {where_sql} "
             f"ORDER BY importance DESC, updated_at DESC LIMIT ?"
         )
         params.append(top_k)
@@ -592,7 +593,6 @@ class SQLiteBackend(StorageBackend):
         Raises:
             StorageError: If the query fails.
         """
-        col_list = ", ".join(_COLUMNS)
         where_clauses: list[str] = []
         params: list[object] = []
 
@@ -606,7 +606,7 @@ class SQLiteBackend(StorageBackend):
 
         where_sql = " AND ".join(where_clauses) if where_clauses else "1"
         sql = (
-            f"SELECT {col_list} FROM memories WHERE {where_sql} "
+            f"SELECT {_COLUMNS_SQL} FROM memories WHERE {where_sql} "
             f"ORDER BY updated_at DESC LIMIT ?"
         )
         params.append(limit)

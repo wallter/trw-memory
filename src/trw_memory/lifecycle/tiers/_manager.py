@@ -6,6 +6,7 @@ and orchestrates lifecycle sweep transitions via execute_sweep().
 
 from __future__ import annotations
 
+import threading
 from collections import OrderedDict
 from pathlib import Path
 
@@ -57,6 +58,7 @@ class TierManager:
         # Hot tier: OrderedDict used as LRU cache
         # LRU invariant: MRU at the end (rightmost), LRU at the front (leftmost)
         self._hot: OrderedDict[str, MemoryEntry] = OrderedDict()
+        self._hot_lock = threading.Lock()
 
         # Composed tier stores
         self._warm_store = WarmTierStore(base_dir)
@@ -95,10 +97,11 @@ class TierManager:
         Returns:
             MemoryEntry if in cache, None otherwise.
         """
-        if entry_id not in self._hot:
-            return None
-        self._hot.move_to_end(entry_id)
-        return self._hot[entry_id]
+        with self._hot_lock:
+            if entry_id not in self._hot:
+                return None
+            self._hot.move_to_end(entry_id)
+            return self._hot[entry_id]
 
     def hot_put(self, entry_id: str, entry: MemoryEntry) -> None:
         """Add or refresh an entry in the hot cache.
@@ -111,31 +114,34 @@ class TierManager:
         """
         cfg = self._config
 
-        if entry_id in self._hot:
-            self._hot.move_to_end(entry_id)
+        with self._hot_lock:
+            if entry_id in self._hot:
+                self._hot.move_to_end(entry_id)
+                self._hot[entry_id] = entry
+                return
+
             self._hot[entry_id] = entry
-            return
+            self._hot.move_to_end(entry_id)
 
-        self._hot[entry_id] = entry
-        self._hot.move_to_end(entry_id)
-
-        # Evict LRU if over capacity
-        if len(self._hot) > cfg.hot_max_entries:
-            evicted_id, _ = self._hot.popitem(last=False)
-            logger.debug(
-                "hot_tier_evict",
-                evicted_id=evicted_id,
-                capacity=cfg.hot_max_entries,
-            )
+            # Evict LRU if over capacity
+            if len(self._hot) > cfg.hot_max_entries:
+                evicted_id, _ = self._hot.popitem(last=False)
+                logger.debug(
+                    "hot_tier_evict",
+                    evicted_id=evicted_id,
+                    capacity=cfg.hot_max_entries,
+                )
 
     def hot_clear(self) -> None:
         """Evict all entries from the hot cache (for testing / shutdown)."""
-        self._hot.clear()
+        with self._hot_lock:
+            self._hot.clear()
 
     @property
     def hot_size(self) -> int:
         """Number of entries currently in the hot cache."""
-        return len(self._hot)
+        with self._hot_lock:
+            return len(self._hot)
 
     # -----------------------------------------------------------------------
     # Warm Tier (delegated)

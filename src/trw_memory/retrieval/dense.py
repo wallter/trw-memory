@@ -18,6 +18,7 @@ import math
 import structlog
 
 from trw_memory.embeddings.interface import EmbeddingProvider
+from trw_memory.exceptions import DimensionMismatchError
 
 logger = structlog.get_logger()
 
@@ -34,7 +35,7 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
         when either vector is the zero vector.
     """
     if len(a) != len(b):
-        raise ValueError(f"Dimension mismatch: {len(a)} vs {len(b)}")
+        raise DimensionMismatchError(f"Dimension mismatch: {len(a)} vs {len(b)}")
     dot = sum(x * y for x, y in zip(a, b, strict=True))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(x * x for x in b))
