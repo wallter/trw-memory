@@ -1,7 +1,7 @@
 """Tests for MemoryClient SDK.
 
 Covers:
-- Constructor with different modes (local, auto, mcp/rest stubs)
+- Constructor with different modes (local, auto, mcp stub)
 - store() — valid content, empty content, invalid importance
 - recall() — sorted by score, limit validation
 - forget() — existing entry, non-existent entry
@@ -71,12 +71,8 @@ class TestConstructor:
         assert c.resolved_mode == "local"
 
     def test_mcp_mode_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError, match="MCP/REST"):
+        with pytest.raises(NotImplementedError, match="MCP mode"):
             MemoryClient(namespace="default", mode="mcp")
-
-    def test_rest_mode_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError, match="MCP/REST"):
-            MemoryClient(namespace="default", mode="rest")
 
     def test_invalid_namespace_raises(self) -> None:
         with pytest.raises(Exception):
@@ -90,17 +86,15 @@ class TestConstructor:
         assert c.namespace == "project:test-proj"
         assert c.resolved_mode == "local"
 
-    def test_base_url_and_timeout_stored(
+    def test_timeout_stored(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "s"))
         c = MemoryClient(
             namespace="default",
             mode="local",
-            base_url="http://localhost:8080",
             timeout=10.0,
         )
-        assert c._base_url == "http://localhost:8080"
         assert c._timeout == 10.0
 
 

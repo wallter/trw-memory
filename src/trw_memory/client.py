@@ -1,8 +1,8 @@
 """MemoryClient — Python SDK for trw-memory.
 
 Provides a high-level async API for storing, recalling, searching, and
-forgetting memories.  Supports local (SQLite/YAML) backends with stubs
-for future MCP and REST transport modes.
+forgetting memories.  Supports local (SQLite/YAML) backends with a stub
+for future MCP transport mode.
 
 Usage::
 
@@ -84,29 +84,26 @@ class MemoryClient:
     Args:
         namespace: Isolation scope (e.g. ``"project:my-app"``, ``"default"``).
         mode: Transport mode — ``"local"`` (SQLite/YAML), ``"mcp"`` (stdio),
-            ``"rest"`` (HTTP), or ``"auto"`` (try local first).
-        base_url: Base URL for REST mode.  Ignored for other modes.
+            or ``"auto"`` (try local first).
         timeout: Timeout in seconds for remote operations.
     """
 
     def __init__(
         self,
         namespace: str,
-        mode: Literal["local", "mcp", "rest", "auto"] = "auto",
-        base_url: str | None = None,
+        mode: Literal["local", "mcp", "auto"] = "auto",
         timeout: float = 5.0,
     ) -> None:
         validate_namespace(namespace)
         self._namespace = namespace
         self._timeout = timeout
-        self._base_url = base_url
         self._lock = asyncio.Lock()
         self._tools_registered = False
         self._backend: StorageBackend | None = None
         self._resolved_mode: str = ""
 
-        if mode in ("mcp", "rest"):
-            raise NotImplementedError("MCP/REST modes are not yet implemented")
+        if mode == "mcp":
+            raise NotImplementedError("MCP mode is not yet implemented")
 
         if mode in ("local", "auto"):
             try:

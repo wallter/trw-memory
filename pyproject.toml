@@ -38,14 +38,13 @@ embeddings = ["sentence-transformers>=2.0.0"]
 vectors = ["sqlite-vec>=0.1.0"]
 bm25 = ["rank-bm25>=0.2.0"]
 llm = ["anthropic>=0.40.0"]
-api = ["fastapi>=0.115.0", "uvicorn[standard]>=0.30.0"]
 langchain = ["langchain-core>=0.3.0"]
 llamaindex = ["llama-index-core>=0.11.0"]
 crewai = ["crewai>=0.74.0"]
 all-integrations = [
     "trw-memory[langchain,llamaindex,crewai]",
 ]
-all = ["trw-memory[mcp,embeddings,vectors,bm25,llm,api]"]
+all = ["trw-memory[mcp,embeddings,vectors,bm25,llm]"]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",
@@ -64,7 +63,6 @@ Issues = "https://github.com/trw-framework/trw-memory/issues"
 [project.scripts]
 trw-memory = "trw_memory.cli:main"
 trw-memory-server = "trw_memory.server:main"
-trw-memory-api = "trw_memory.api.app:create_app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/trw_memory"]
