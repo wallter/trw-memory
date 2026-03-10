@@ -704,7 +704,7 @@ class TestRetryQueue:
         queue.enqueue("M-001", {"summary": "test-1"})
         queue.enqueue("M-002", {"summary": "test-2"})
 
-        result = queue.drain(lambda payload: True)
+        result = queue.drain(lambda _: True)
         assert result == {"drained": 2, "failed": 0, "skipped": 0}
         assert queue.depth() == 0
 
@@ -713,7 +713,7 @@ class TestRetryQueue:
         queue = RetryQueue(tmp_path / "queue.jsonl")
         queue.enqueue("M-001", {"summary": "test"})
 
-        result = queue.drain(lambda payload: False)
+        result = queue.drain(lambda _: False)
         assert result["failed"] == 1
         assert queue.depth() == 1
 
@@ -737,7 +737,7 @@ class TestRetryQueue:
         queue_path.write_text(json.dumps(record) + "\n")
 
         queue = RetryQueue(queue_path)
-        result = queue.drain(lambda payload: True)
+        result = queue.drain(lambda _: True)
         assert result == {"drained": 0, "failed": 0, "skipped": 1}
         assert queue.depth() == 1  # Still in queue, just skipped
 
@@ -746,7 +746,7 @@ class TestRetryQueue:
         queue = RetryQueue(tmp_path / "queue.jsonl")
         queue.enqueue("M-001", {"summary": "test"})
 
-        def failing_publish(payload: Any) -> bool:
+        def failing_publish(_payload: Any) -> bool:
             raise ConnectionError("network down")
 
         result = queue.drain(failing_publish)
@@ -927,3 +927,138 @@ class TestModuleConstants:
 
     def test_max_merged_detail_length(self) -> None:
         assert MAX_MERGED_DETAIL_LENGTH == 2000
+
+
+# ===========================================================================
+# FR01 (PRD-QUAL-038): SSESubscriber Reconnection & Branch Coverage
+# ===========================================================================
+
+
+class TestSSESubscriberDaemonThread:
+    """FR01: SSESubscriber daemon thread lifecycle and reconnection tests."""
+
+    def test_subscriber_start_creates_daemon_thread(self) -> None:
+        """start() when sync_enabled=True creates a daemon thread."""
+        cfg = _make_config(sync_enabled=True, platform_url="https://api.example.com")
+        sub = SSESubscriber(cfg, on_event=lambda _data: None)
+        with patch.object(sub, "_listen_loop"):
+            sub.start()
+            assert sub._thread is not None
+            assert sub._thread.daemon is True
+            assert sub._thread.name == "sse-subscriber"
+            sub.stop()
+
+    def test_subscriber_stop_sets_event_and_joins(self) -> None:
+        """stop() sets _stop_event and joins thread."""
+        cfg = _make_config(sync_enabled=True)
+        sub = SSESubscriber(cfg, on_event=lambda _data: None)
+        # Create a mock thread that reports alive
+        mock_thread = MagicMock()
+        mock_thread.is_alive.return_value = True
+        sub._thread = mock_thread
+        sub.stop()
+        assert sub._stop_event.is_set()
+        mock_thread.join.assert_called_once_with(timeout=2.0)
+
+    @patch("trw_memory.sync.subscriber.httpx.Client")
+    def test_listen_loop_reconnect_on_http_error(
+        self, mock_client_cls: MagicMock
+    ) -> None:
+        """HTTPError during stream triggers reconnect (loop re-enters)."""
+        import httpx
+
+        cfg = _make_config()
+        sub = SSESubscriber(cfg, on_event=lambda _data: None)
+
+        # First call raises HTTPError, second sets stop event to exit
+        call_count = 0
+
+        def side_effect(*_args: Any, **_kwargs: Any) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise httpx.HTTPError("server error")
+            # On second call, set stop to exit loop
+            sub._stop_event.set()
+            raise httpx.HTTPError("stop")
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.stream.side_effect = side_effect
+        mock_client_cls.return_value = mock_client
+
+        sub._listen_loop()
+        # Should have attempted at least 2 connections (reconnect)
+        assert call_count >= 2
+
+    @patch("trw_memory.sync.subscriber.httpx.Client")
+    def test_listen_loop_reconnect_on_os_error(
+        self, mock_client_cls: MagicMock
+    ) -> None:
+        """OSError during stream triggers reconnect."""
+        cfg = _make_config()
+        sub = SSESubscriber(cfg, on_event=lambda _data: None)
+
+        call_count = 0
+
+        def side_effect(*_args: Any, **_kwargs: Any) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise OSError("connection reset")
+            sub._stop_event.set()
+            raise OSError("stop")
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.stream.side_effect = side_effect
+        mock_client_cls.return_value = mock_client
+
+        sub._listen_loop()
+        assert call_count >= 2
+
+    def test_listen_loop_stop_event_exits(self) -> None:
+        """Set _stop_event before calling _listen_loop -> loop exits immediately."""
+        cfg = _make_config()
+        sub = SSESubscriber(cfg, on_event=lambda _data: None)
+        sub._stop_event.set()
+        # Should return immediately without error
+        sub._listen_loop()
+        assert sub._stop_event.is_set()
+
+    @patch("trw_memory.sync.subscriber.httpx.Client")
+    def test_subscriber_last_event_id_sent_on_reconnect(
+        self, mock_client_cls: MagicMock
+    ) -> None:
+        """After setting _last_event_id, reconnect sends it in headers."""
+        cfg = _make_config(platform_api_key="test-key")
+        sub = SSESubscriber(cfg, on_event=lambda _data: None)
+        sub._last_event_id = "evt-99"
+
+        captured_headers: list[dict[str, str]] = []
+
+        def stream_side_effect(
+            _method: str, _url: str, headers: dict[str, str] | None = None, **_kw: Any
+        ) -> MagicMock:
+            if headers:
+                captured_headers.append(dict(headers))
+            sub._stop_event.set()
+            mock_resp = MagicMock()
+            mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_resp.iter_lines.return_value = iter([])
+            return mock_resp
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.stream.side_effect = stream_side_effect
+        mock_client_cls.return_value = mock_client
+
+        sub._listen_loop()
+
+        assert len(captured_headers) >= 1
+        assert captured_headers[0].get("Last-Event-ID") == "evt-99"
+        assert "Authorization" in captured_headers[0]

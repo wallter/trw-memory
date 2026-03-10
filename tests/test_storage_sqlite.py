@@ -411,3 +411,189 @@ class TestCrossThreadSafety:
 
         assert not errors, f"Thread errors: {errors}"
         assert backend.count() == 40
+
+
+# ===========================================================================
+# FR03 (PRD-QUAL-038): SQLite Branch Coverage Tests
+# ===========================================================================
+
+
+class TestUpdateBranchCoverage:
+    """FR03: Branch coverage for update() with various field types."""
+
+    def test_update_list_field_tags(self, backend: SQLiteBackend) -> None:
+        """update(entry_id, tags=['new']) serializes tags as JSON."""
+        backend.store(make_entry("u-tags", tags=["old"]))
+        result = backend.update("u-tags", tags=["new", "added"])
+        assert result is not None
+        assert result.tags == ["new", "added"]
+
+    def test_update_list_field_evidence(self, backend: SQLiteBackend) -> None:
+        """update with evidence list serializes correctly."""
+        backend.store(make_entry("u-ev"))
+        result = backend.update("u-ev", evidence=["log1.txt", "trace.json"])
+        assert result is not None
+        assert result.evidence == ["log1.txt", "trace.json"]
+
+    def test_update_dict_field_metadata(self, backend: SQLiteBackend) -> None:
+        """update(entry_id, metadata={'key': 'val'}) serializes as JSON."""
+        backend.store(make_entry("u-meta"))
+        result = backend.update("u-meta", metadata={"sprint": "52", "agent": "tm-b"})
+        assert result is not None
+        assert result.metadata == {"sprint": "52", "agent": "tm-b"}
+
+    def test_update_dict_field_vector_clock(self, backend: SQLiteBackend) -> None:
+        """update with vector_clock dict serializes correctly."""
+        backend.store(make_entry("u-vc"))
+        result = backend.update("u-vc", vector_clock={"node-1": 3, "node-2": 1})
+        assert result is not None
+        # vector_clock stores as dict[str, int]; serialized through JSON
+        assert result.vector_clock["node-1"] == 3
+        assert result.vector_clock["node-2"] == 1
+
+    def test_update_datetime_field(self, backend: SQLiteBackend) -> None:
+        """update with datetime value converts to isoformat."""
+        backend.store(make_entry("u-dt"))
+        from datetime import datetime, timezone
+
+        new_time = datetime(2026, 3, 10, 12, 0, 0, tzinfo=timezone.utc)
+        result = backend.update("u-dt", last_accessed_at=new_time)
+        assert result is not None
+        assert result.last_accessed_at is not None
+        assert result.last_accessed_at.year == 2026
+        assert result.last_accessed_at.month == 3
+
+    def test_update_memory_status_enum(self, backend: SQLiteBackend) -> None:
+        """update with MemoryStatus.RESOLVED extracts .value correctly."""
+        backend.store(make_entry("u-status", status=MemoryStatus.ACTIVE))
+        result = backend.update("u-status", status=MemoryStatus.RESOLVED)
+        assert result is not None
+        assert result.status == MemoryStatus.RESOLVED
+
+    def test_update_invalid_column_raises(self, backend: SQLiteBackend) -> None:
+        """update(entry_id, id='hacked') raises StorageError for immutable field."""
+        from trw_memory.exceptions import StorageError
+
+        backend.store(make_entry("u-invalid"))
+        with pytest.raises(StorageError, match="Invalid update field"):
+            backend.update("u-invalid", id="hacked")
+
+    def test_update_auto_sets_updated_at(self, backend: SQLiteBackend) -> None:
+        """update without explicit updated_at auto-sets it to now."""
+        entry = make_entry("u-auto")
+        backend.store(entry)
+        original_updated = entry.updated_at
+
+        result = backend.update("u-auto", importance=0.9)
+        assert result is not None
+        # updated_at should have been auto-set to a recent time
+        assert result.updated_at >= original_updated
+
+
+class TestSearchLikeEscaping:
+    """FR03: LIKE metacharacter escaping in search()."""
+
+    def test_search_like_metachar_percent(self, backend: SQLiteBackend) -> None:
+        """search('%admin%') escapes % so it matches literal '%admin%' only."""
+        backend.store(make_entry("literal-pct", "100%admin% access"))
+        backend.store(make_entry("no-pct", "regular admin access"))
+        results = backend.search("%admin%")
+        ids = [e.id for e in results]
+        assert "literal-pct" in ids
+        # 'no-pct' should NOT match because % is escaped (literal)
+        assert "no-pct" not in ids
+
+    def test_search_like_metachar_underscore(self, backend: SQLiteBackend) -> None:
+        """search('admin_test') escapes _ so it matches literal underscore only."""
+        backend.store(make_entry("literal-us", "admin_test configuration"))
+        backend.store(make_entry("no-us", "adminXtest configuration"))
+        results = backend.search("admin_test")
+        ids = [e.id for e in results]
+        assert "literal-us" in ids
+        # Without escaping, _ would match any single char including X
+        assert "no-us" not in ids
+
+    def test_search_like_metachar_backslash(self, backend: SQLiteBackend) -> None:
+        """Backslash in search query is escaped to prevent LIKE wildcard interpretation."""
+        backend.store(make_entry("bs-entry", "C:\\path\\to\\file config"))
+        backend.store(make_entry("no-bs", "Cpath_to_file config"))
+        results = backend.search("C:\\path")
+        ids = [e.id for e in results]
+        assert "bs-entry" in ids
+
+
+class TestDeleteVectorAbsentRow:
+    """FR03: _delete_vector when no vec_index row is a no-op."""
+
+    def test_delete_vector_absent_row(self, backend: SQLiteBackend) -> None:
+        """_delete_vector for a nonexistent entry_id is a no-op.
+
+        When sqlite-vec is not installed the vec_index table does not exist,
+        so we create it manually to exercise the _delete_vector branch.
+        """
+        backend.store(make_entry("no-vec", "test content"))
+
+        # If vec_index doesn't exist (no sqlite-vec), create it for this test
+        if not backend._vec_available:
+            backend._conn.execute(
+                "CREATE TABLE IF NOT EXISTS vec_index ("
+                "rowid INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "entry_id TEXT UNIQUE NOT NULL)"
+            )
+            backend._conn.commit()
+
+        # Calling _delete_vector directly should not raise (entry has no vec row)
+        backend._delete_vector("no-vec")
+        # Entry should still exist in memories table
+        assert backend.get("no-vec") is not None
+
+
+class TestListEntriesCombinedFilters:
+    """FR03: list_entries with combined status + namespace filters."""
+
+    def test_list_entries_combined_filters(self, backend: SQLiteBackend) -> None:
+        """list_entries(status=active, namespace='test') applies both filters."""
+        backend.store(make_entry("a1", status=MemoryStatus.ACTIVE, namespace="test"))
+        backend.store(make_entry("a2", status=MemoryStatus.ACTIVE, namespace="other"))
+        backend.store(make_entry("r1", status=MemoryStatus.RESOLVED, namespace="test"))
+        backend.store(make_entry("r2", status=MemoryStatus.RESOLVED, namespace="other"))
+
+        results = backend.list_entries(status=MemoryStatus.ACTIVE, namespace="test")
+        ids = {e.id for e in results}
+        assert ids == {"a1"}
+
+
+class TestDeleteByNamespace:
+    """FR03: delete_by_namespace with populated and empty namespaces."""
+
+    def test_delete_by_namespace_populated(self, backend: SQLiteBackend) -> None:
+        """delete_by_namespace('test-ns') with 3 entries returns 3."""
+        for i in range(3):
+            backend.store(make_entry(f"dns-{i}", namespace="test-ns"))
+        backend.store(make_entry("other-ns", namespace="keep"))
+
+        deleted = backend.delete_by_namespace("test-ns")
+        assert deleted == 3
+        assert backend.count("test-ns") == 0
+        assert backend.count("keep") == 1
+
+    def test_delete_by_namespace_empty(self, backend: SQLiteBackend) -> None:
+        """delete_by_namespace('empty-ns') with 0 entries returns 0."""
+        backend.store(make_entry("x", namespace="different"))
+        deleted = backend.delete_by_namespace("empty-ns")
+        assert deleted == 0
+
+
+class TestCountWithNamespaceFilter:
+    """FR03: count(namespace='specific') returns filtered count."""
+
+    def test_count_with_namespace_filter(self, backend: SQLiteBackend) -> None:
+        """count(namespace='specific') returns only that namespace's count."""
+        for i in range(4):
+            backend.store(make_entry(f"spec-{i}", namespace="specific"))
+        for i in range(2):
+            backend.store(make_entry(f"other-{i}", namespace="other"))
+
+        assert backend.count(namespace="specific") == 4
+        assert backend.count(namespace="other") == 2
+        assert backend.count() == 6

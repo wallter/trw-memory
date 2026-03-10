@@ -438,3 +438,130 @@ class TestHybridSearch:
         entry_map = {e.id: e for e in entries}
         for r in results:
             assert r is entry_map[r.id]
+
+
+# ===========================================================================
+# FR02 (PRD-QUAL-038): Pipeline Graceful Degradation Tests
+# ===========================================================================
+
+
+class TestHybridSearchDegradation:
+    """FR02: hybrid_search graceful degradation when BM25/dense unavailable."""
+
+    def _entries(self) -> list[MemoryEntry]:
+        return [
+            _make_entry("e1", "pydantic validation error", tags=["pydantic"]),
+            _make_entry("e2", "fastmcp middleware tool", tags=["mcp"]),
+            _make_entry("e3", "structlog event keyword", tags=["logging"]),
+        ]
+
+    def test_hybrid_search_bm25_unavailable(self) -> None:
+        """When _BM25_AVAILABLE=False, only dense results are returned."""
+        embedder = _StubEmbedder()
+        entries = self._entries()
+        stored = {e.id: embedder.embed(e.id) or [] for e in entries}
+
+        with patch("trw_memory.retrieval.bm25._BM25_AVAILABLE", False):
+            results = hybrid_search(
+                "pydantic",
+                entries,
+                embedder=embedder,
+                stored_embeddings=stored,
+            )
+        # BM25 returns [] due to unavailable, but dense provides results
+        assert len(results) >= 1
+
+    def test_hybrid_search_embedder_none(self) -> None:
+        """When embedder=None, only BM25 results are returned."""
+        entries = self._entries()
+        results = hybrid_search(
+            "pydantic",
+            entries,
+            embedder=None,
+            stored_embeddings=None,
+        )
+        # BM25 should find "e1" which contains "pydantic"
+        assert len(results) >= 1
+        ids = [r.id for r in results]
+        assert "e1" in ids
+
+    def test_hybrid_search_embedder_not_available(self) -> None:
+        """When embedder.available()=False, only BM25 results are returned."""
+        embedder = _StubEmbedder(available=False)
+        entries = self._entries()
+        # Even with stored_embeddings, dense should be skipped
+        stored = {"e1": [0.1, 0.2, 0.3]}
+        results = hybrid_search(
+            "pydantic",
+            entries,
+            embedder=embedder,
+            stored_embeddings=stored,
+        )
+        # BM25 should still find "e1"
+        assert len(results) >= 1
+        ids = [r.id for r in results]
+        assert "e1" in ids
+
+    def test_hybrid_search_both_unavailable(self) -> None:
+        """When both BM25 and dense are unavailable, returns empty list."""
+        entries = self._entries()
+        with patch("trw_memory.retrieval.bm25._BM25_AVAILABLE", False):
+            results = hybrid_search(
+                "pydantic",
+                entries,
+                embedder=None,
+                stored_embeddings=None,
+            )
+        assert results == []
+
+    def test_hybrid_search_single_source_passthrough(self) -> None:
+        """When only one source has results, RRF fusion is a passthrough."""
+        entries = self._entries()
+        # Only BM25, no embedder
+        with patch("trw_memory.retrieval.pipeline.dense_search", return_value=[]):
+            results = hybrid_search("pydantic", entries, embedder=None)
+        # BM25 alone should produce results passed through RRF
+        assert len(results) >= 1
+
+    def test_hybrid_search_normal_rrf_fusion(self) -> None:
+        """Both sources produce results and RRF fusion is applied."""
+        embedder = _StubEmbedder()
+        entries = self._entries()
+        stored = {e.id: embedder.embed(e.content[:3]) or [] for e in entries}
+
+        results = hybrid_search(
+            "pydantic",
+            entries,
+            embedder=embedder,
+            stored_embeddings=stored,
+        )
+        # RRF should combine results from both sources
+        assert len(results) >= 1
+
+    def test_hybrid_search_empty_entries(self) -> None:
+        """Empty entry list returns empty results."""
+        results = hybrid_search("query", [])
+        assert results == []
+
+    def test_hybrid_search_embedder_none_with_stored_embeddings(self) -> None:
+        """When embedder is None but stored_embeddings exist, BM25 results are returned."""
+        entries = self._entries()
+        stored = {"e1": [0.1, 0.2, 0.3]}
+        results = hybrid_search(
+            "pydantic",
+            entries,
+            embedder=None,
+            stored_embeddings=stored,
+        )
+        # dense_search is called (stored_embeddings truthy) but returns []
+        # since embedder is None; BM25 should still find "e1"
+        assert len(results) >= 1
+        ids = [r.id for r in results]
+        assert "e1" in ids
+
+    def test_hybrid_search_query_empty_string(self) -> None:
+        """Empty query string with entries still processes without error."""
+        entries = self._entries()
+        # Should not raise, returns whatever BM25/dense produce for empty query
+        results = hybrid_search("", entries)
+        assert len(results) >= 0

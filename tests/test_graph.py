@@ -616,3 +616,126 @@ class TestCosineSimilarity:
 
     def test_zero_vector(self) -> None:
         assert _safe_cosine_similarity([0.0, 0.0], [1.0, 0.0]) == 0.0
+
+
+# ===========================================================================
+# FR05 (PRD-QUAL-038): Graph Edge Case Tests
+# ===========================================================================
+
+
+class TestGraphQueryEdgeCases:
+    """FR05: graph_query edge cases -- cycles, empty roots, depth clamping."""
+
+    def test_graph_query_circular_reference(self) -> None:
+        """A->B->C->A cycle at depth=3 -> terminates, discovers B and C."""
+        conn = _make_conn()
+        _insert_edge(conn, "A", "B", "similarity", 0.9)
+        _insert_edge(conn, "B", "C", "similarity", 0.8)
+        _insert_edge(conn, "C", "A", "similarity", 0.7)  # back to root
+
+        results = graph_query(conn, ["A"], depth=3)
+        ids = {r["id"] for r in results}
+        # A is a root node, so it won't appear in results; B and C discovered
+        assert "B" in ids
+        assert "C" in ids
+        assert "A" not in ids
+        # Should terminate without infinite loop (visited set prevents re-visiting)
+        assert len(results) == 2
+
+    def test_graph_query_empty_root_ids(self) -> None:
+        """root_ids=[] -> empty list."""
+        conn = _make_conn()
+        _insert_edge(conn, "A", "B", "similarity", 0.9)
+        results = graph_query(conn, [], depth=2)
+        assert results == []
+
+    def test_graph_query_depth_clamping(self) -> None:
+        """depth=10 -> clamped to MAX_TRAVERSAL_DEPTH (3)."""
+        conn = _make_conn()
+        # Chain: A->B->C->D->E (depth 4)
+        _insert_edge(conn, "A", "B", "similarity", 0.9)
+        _insert_edge(conn, "B", "C", "similarity", 0.8)
+        _insert_edge(conn, "C", "D", "similarity", 0.7)
+        _insert_edge(conn, "D", "E", "similarity", 0.6)
+
+        results = graph_query(conn, ["A"], depth=10)
+        ids = {r["id"] for r in results}
+        # Clamped to 3, so B(1), C(2), D(3) are found; E(4) is not
+        assert "B" in ids
+        assert "C" in ids
+        assert "D" in ids
+        assert "E" not in ids
+
+    def test_graph_query_disconnected_node(self) -> None:
+        """Root with no edges -> empty results."""
+        conn = _make_conn()
+        # No edges from "lonely"
+        results = graph_query(conn, ["lonely"], depth=2)
+        assert results == []
+
+
+class TestSafeCosineSimilarityEdgeCases:
+    """FR05: _safe_cosine_similarity edge cases."""
+
+    def test_safe_cosine_similarity_dimension_mismatch(self) -> None:
+        """Different dimensions -> returns 0.0 (graceful degradation)."""
+        result = _safe_cosine_similarity([1.0, 0.0], [1.0, 0.0, 0.0])
+        assert result == 0.0
+
+    def test_safe_cosine_similarity_zero_vectors(self) -> None:
+        """Zero vectors -> returns 0.0."""
+        result = _safe_cosine_similarity([0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+        assert result == 0.0
+
+
+class TestCreateSimilarityEdgesEdgeCases:
+    """FR05: create_similarity_edges skips self-references."""
+
+    def test_create_similarity_edges_skip_self(self) -> None:
+        """Candidate same as entry -> skipped."""
+        conn = _make_conn()
+        entry = _make_entry("self-ref")
+        # Candidate has the same ID as the entry
+        candidates = [("self-ref", _V1)]
+
+        count = create_similarity_edges(
+            entry, conn, embedding=_V1, candidate_embeddings=candidates
+        )
+        assert count == 0
+        assert _count_edges(conn) == 0
+
+
+class TestMemoryDecayPassBatch:
+    """FR05: memory_decay_pass processes entries in batches."""
+
+    def test_memory_decay_pass_batch(self) -> None:
+        """Entries unused for cutoff_days get decay applied."""
+        conn = _make_conn()
+        old_date = "2020-01-01T00:00:00+00:00"
+
+        # Insert 5 cross-validated entries with old access time
+        for i in range(5):
+            _insert_memory_row(
+                conn,
+                f"decay-{i}",
+                cross_validated=1,
+                last_accessed_at=old_date,
+                importance=0.8,
+            )
+
+        result = memory_decay_pass(conn, cutoff_days=90, batch_size=3)
+
+        # Only 3 processed due to batch_size
+        assert result["processed"] == 3
+        assert result["remaining"] == 2
+        assert result["total_decayed"] == 3
+
+        # Verify the first 3 had importance reduced
+        decayed_count = 0
+        for i in range(5):
+            row = conn.execute(
+                "SELECT importance FROM memories WHERE id = ?", (f"decay-{i}",)
+            ).fetchone()
+            if row and abs(row[0] - 0.7) < 0.001:  # 0.8 - 0.1 = 0.7
+                decayed_count += 1
+        assert decayed_count == 3
