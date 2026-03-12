@@ -549,7 +549,7 @@ class TestMemoryDecayPass:
         old_date = "2020-01-01T00:00:00+00:00"
         _insert_memory_row(conn, "e1", cross_validated=1, last_accessed_at=old_date, importance=0.05)
 
-        result = memory_decay_pass(conn, cutoff_days=90)
+        memory_decay_pass(conn, cutoff_days=90)
 
         row = conn.execute("SELECT importance FROM memories WHERE id = 'e1'").fetchone()
         assert row is not None
@@ -568,8 +568,7 @@ class TestDetectCrossValidation:
         # Same vector = sim 1.0, well above 0.92
         remote = [("remote-1", "proj-b", _V1)]
 
-        result = detect_cross_validation(entry, conn, embedding=_V1, remote_entries=remote)
-        assert result is True
+        assert detect_cross_validation(entry, conn, embedding=_V1, remote_entries=remote)
 
     def test_false_below_threshold(self) -> None:
         conn = _make_conn()
@@ -577,23 +576,20 @@ class TestDetectCrossValidation:
         # Orthogonal = sim 0.0
         remote = [("remote-1", "proj-b", _V3)]
 
-        result = detect_cross_validation(entry, conn, embedding=_V1, remote_entries=remote)
-        assert result is False
+        assert not detect_cross_validation(entry, conn, embedding=_V1, remote_entries=remote)
 
     def test_false_when_no_embedding(self) -> None:
         conn = _make_conn()
         entry = _make_entry("e1")
         remote = [("remote-1", "proj-b", _V1)]
 
-        result = detect_cross_validation(entry, conn, embedding=None, remote_entries=remote)
-        assert result is False
+        assert not detect_cross_validation(entry, conn, embedding=None, remote_entries=remote)
 
     def test_false_when_no_remote_entries(self) -> None:
         conn = _make_conn()
         entry = _make_entry("e1")
 
-        result = detect_cross_validation(entry, conn, embedding=_V1, remote_entries=None)
-        assert result is False
+        assert not detect_cross_validation(entry, conn, embedding=_V1, remote_entries=None)
 
 
 # ===========================================================================

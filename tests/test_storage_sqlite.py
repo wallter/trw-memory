@@ -151,17 +151,15 @@ class TestStoreOverwrite:
 class TestDelete:
     def test_delete_removes_entry(self, backend: SQLiteBackend) -> None:
         backend.store(make_entry("del1"))
-        deleted = backend.delete("del1")
-        assert deleted is True
+        assert backend.delete("del1")
         assert backend.get("del1") is None
 
     def test_delete_returns_true_when_existed(self, backend: SQLiteBackend) -> None:
         backend.store(make_entry("del2"))
-        assert backend.delete("del2") is True
+        assert backend.delete("del2")
 
     def test_delete_nonexistent_returns_false(self, backend: SQLiteBackend) -> None:
-        result = backend.delete("no-such-entry")
-        assert result is False
+        assert not backend.delete("no-such-entry")
 
     def test_double_delete_returns_false_second_time(self, backend: SQLiteBackend) -> None:
         backend.store(make_entry("del3"))
@@ -545,7 +543,10 @@ class TestDeleteVectorAbsentRow:
         # Calling _delete_vector directly should not raise (entry has no vec row)
         backend._delete_vector("no-vec")
         # Entry should still exist in memories table
-        assert backend.get("no-vec") is not None
+        preserved = backend.get("no-vec")
+        assert preserved is not None
+        assert preserved.id == "no-vec"
+        assert preserved.content == "test content"
 
 
 class TestListEntriesCombinedFilters:

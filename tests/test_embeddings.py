@@ -161,7 +161,7 @@ class TestGracefulDegradationViaImport:
             provider = LocalEmbeddingProvider()
             provider._load_attempted = True
             result = provider.available()
-        assert result is False
+        assert not result
 
     def test_embed_batch_returns_nones_when_sentence_transformers_missing(self) -> None:
         with patch(

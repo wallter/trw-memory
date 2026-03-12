@@ -176,8 +176,9 @@ class TestAutoRecallPositionalArg:
         ) -> None:
             pass
 
-        # Should not raise
-        assert handler is not None
+        # Should not raise; handler is a decorated coroutine function
+        assert callable(handler)
+        assert handler.__name__ == "handler"
 
     def test_optional_positional_recalled_memories_ok(
         self, client: MemoryClient
@@ -190,7 +191,8 @@ class TestAutoRecallPositionalArg:
         ) -> None:
             pass
 
-        assert handler is not None
+        assert callable(handler)
+        assert handler.__name__ == "handler"
 
 
 # ---------------------------------------------------------------------------

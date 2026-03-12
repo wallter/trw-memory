@@ -129,6 +129,7 @@ class TestSqliteUpdateInjection:
         )
         assert updated is not None
         assert updated.importance == pytest.approx(0.9)
+        assert updated.status == MemoryStatus.RESOLVED
 
     def test_update_nonexistent_returns_none(
         self, sqlite_backend: SQLiteBackend
@@ -145,6 +146,7 @@ class TestSqliteUpdateInjection:
         result = sqlite_backend.update("e-no-fields")
         assert result is not None
         assert result.content == "original"
+        assert result.id == "e-no-fields"
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +184,7 @@ class TestYamlPathTraversal:
         result = yaml_backend.get("M-001-safe")
         assert result is not None
         assert result.id == "M-001-safe"
+        assert result.content == "test content"
 
     @pytest.mark.parametrize(
         "bad_id",
@@ -231,6 +234,7 @@ class TestYamlFieldInjection:
         updated = yaml_backend.update("e-yaml-valid", importance=0.8)
         assert updated is not None
         assert updated.importance == pytest.approx(0.8)
+        assert updated.id == "e-yaml-valid"
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +382,8 @@ class TestSqliteContextManager:
         """with SQLiteBackend(...) as backend: should call close() on exit."""
         db_path = tmp_path / "cm_test.db"
         with SQLiteBackend(db_path) as backend:
-            assert backend is not None
+            assert isinstance(backend, SQLiteBackend)
+            assert backend.count() == 0
         # After exit the connection should be closed; further operations raise
         # This just verifies no exception was raised during __exit__
 
@@ -387,7 +392,7 @@ class TestSqliteContextManager:
         db_path = tmp_path / "cm_exc_test.db"
         with pytest.raises(ValueError, match="intentional"):
             with SQLiteBackend(db_path) as backend:
-                assert backend is not None
+                assert isinstance(backend, SQLiteBackend)
                 raise ValueError("intentional test error")
         # Verify the connection is closed: attempting to use the raw conn
         # after close should not interfere with the test framework
@@ -585,4 +590,9 @@ class TestMemoryConfigWeightValidation:
         monkeypatch.setenv("MEMORY_SCORE_RECENCY_WEIGHT", "0.3")
         monkeypatch.setenv("MEMORY_SCORE_IMPORTANCE_WEIGHT", "0.3")
         cfg = MemoryConfig()
-        assert cfg is not None
+        total = (
+            cfg.score_relevance_weight
+            + cfg.score_recency_weight
+            + cfg.score_importance_weight
+        )
+        assert abs(total - 1.0) < 0.02  # within tolerance

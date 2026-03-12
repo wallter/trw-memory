@@ -316,6 +316,41 @@ class SQLiteBackend(StorageBackend):
         return self._vec_available
 
     # ------------------------------------------------------------------
+    # Filter helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_filter_clause(
+        *,
+        status: MemoryStatus | None = None,
+        namespace: str | None = None,
+        min_importance: float = 0.0,
+    ) -> tuple[str, list[object]]:
+        """Build a WHERE clause fragment from common filter parameters.
+
+        Returns:
+            A ``(where_sql, params)`` tuple.  *where_sql* is ``"1"`` when no
+            filters are active, otherwise the clauses joined with ``AND``.
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status.value)
+
+        if min_importance > 0.0:
+            clauses.append("importance >= ?")
+            params.append(min_importance)
+
+        if namespace is not None:
+            clauses.append("namespace = ?")
+            params.append(namespace)
+
+        where_sql = " AND ".join(clauses) if clauses else "1"
+        return where_sql, params
+
+    # ------------------------------------------------------------------
     # StorageBackend interface
     # ------------------------------------------------------------------
 
@@ -495,31 +530,29 @@ class SQLiteBackend(StorageBackend):
         Raises:
             StorageError: If the query fails.
         """
-        where_clauses: list[str] = []
-        params: list[object] = []
-
         # Keyword match — LIKE on content, detail, tags JSON
         # Escape LIKE metacharacters to prevent unintended wildcard expansion
         escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         like_term = f"%{escaped}%"
-        where_clauses.append(
-            "(content LIKE ? ESCAPE '\\' OR detail LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')"
+        like_clause = (
+            "(content LIKE ? ESCAPE '\\' OR detail LIKE ? ESCAPE '\\' "
+            "OR tags LIKE ? ESCAPE '\\')"
         )
-        params.extend([like_term, like_term, like_term])
+        like_params: list[object] = [like_term, like_term, like_term]
 
-        if status is not None:
-            where_clauses.append("status = ?")
-            params.append(status.value)
+        filter_sql, filter_params = self._build_filter_clause(
+            status=status,
+            namespace=namespace,
+            min_importance=min_importance,
+        )
 
-        if min_importance > 0.0:
-            where_clauses.append("importance >= ?")
-            params.append(min_importance)
+        # Combine LIKE clause with filter clauses
+        if filter_sql == "1":
+            where_sql = like_clause
+        else:
+            where_sql = f"{like_clause} AND {filter_sql}"
+        params: list[object] = like_params + filter_params
 
-        if namespace is not None:
-            where_clauses.append("namespace = ?")
-            params.append(namespace)
-
-        where_sql = " AND ".join(where_clauses) if where_clauses else "1"
         sql = (
             f"SELECT {_COLUMNS_SQL} FROM memories WHERE {where_sql} "
             f"ORDER BY importance DESC, updated_at DESC LIMIT ?"
@@ -593,18 +626,10 @@ class SQLiteBackend(StorageBackend):
         Raises:
             StorageError: If the query fails.
         """
-        where_clauses: list[str] = []
-        params: list[object] = []
-
-        if status is not None:
-            where_clauses.append("status = ?")
-            params.append(status.value)
-
-        if namespace is not None:
-            where_clauses.append("namespace = ?")
-            params.append(namespace)
-
-        where_sql = " AND ".join(where_clauses) if where_clauses else "1"
+        where_sql, params = self._build_filter_clause(
+            status=status,
+            namespace=namespace,
+        )
         sql = (
             f"SELECT {_COLUMNS_SQL} FROM memories WHERE {where_sql} "
             f"ORDER BY updated_at DESC LIMIT ?"

@@ -682,8 +682,7 @@ class TestRetryQueue:
     def test_enqueue_appends_to_file(self, tmp_path: Path) -> None:
         """Enqueue writes a JSONL record to the queue file."""
         queue = RetryQueue(tmp_path / "queue.jsonl")
-        result = queue.enqueue("M-001", {"summary": "test"})
-        assert result is True
+        assert queue.enqueue("M-001", {"summary": "test"})
         assert queue.depth() == 1
 
     def test_enqueue_returns_false_at_max_depth(self, tmp_path: Path) -> None:
@@ -694,8 +693,7 @@ class TestRetryQueue:
         for i in range(MAX_QUEUE_DEPTH):
             queue.enqueue(f"M-{i}", {"summary": f"entry-{i}"})
         # Next enqueue should fail
-        result = queue.enqueue("M-overflow", {"summary": "overflow"})
-        assert result is False
+        assert not queue.enqueue("M-overflow", {"summary": "overflow"})
         assert queue.depth() == MAX_QUEUE_DEPTH
 
     def test_drain_publishes_and_removes_successful(self, tmp_path: Path) -> None:
@@ -785,8 +783,7 @@ class TestRetryQueue:
         """Enqueue creates parent directories if needed."""
         queue_path = tmp_path / "subdir" / "queue.jsonl"
         queue = RetryQueue(queue_path)
-        result = queue.enqueue("M-001", {"summary": "test"})
-        assert result is True
+        assert queue.enqueue("M-001", {"summary": "test"})
         assert queue_path.exists()
 
 

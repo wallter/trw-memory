@@ -128,7 +128,7 @@ class TestDelete:
 
     def test_delete_returns_true_when_existed(self, backend: YAMLBackend) -> None:
         backend.store(make_entry("del2"))
-        assert backend.delete("del2") is True
+        assert backend.delete("del2")
 
     def test_delete_get_returns_none_after_delete(self, backend: YAMLBackend) -> None:
         backend.store(make_entry("del3"))

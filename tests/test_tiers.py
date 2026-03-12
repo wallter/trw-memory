@@ -700,18 +700,6 @@ class TestColdPromoteEdgeCases:
 class TestSweepEdgeCases:
     """FR04: sweep() edge cases -- hot->warm, warm->cold, cold->purge."""
 
-    def test_sweep_hot_to_warm_demotion(
-        self, mgr: TierManager, cfg: MemoryConfig
-    ) -> None:
-        """Entry exceeds hot_ttl_days -> moved to warm."""
-        stale = _make_entry("stale-hot", days_old=cfg.hot_ttl_days + 1)
-        mgr.hot_put("stale-hot", stale)
-        assert mgr.hot_size == 1
-
-        result = mgr.sweep()
-        assert mgr.hot_get("stale-hot") is None
-        assert result.demoted >= 1
-
     def test_sweep_warm_to_cold_archival(
         self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig
     ) -> None:

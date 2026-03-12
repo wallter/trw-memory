@@ -264,7 +264,7 @@ class TestBackendHelper:
         mock_backend = MagicMock()
         backend, owns = resolve_backend("ns", None, mock_backend)
         assert backend is mock_backend
-        assert owns is False
+        assert not owns
 
     def test_resolve_backend_creates_new_backend(self, tmp_path: Any) -> None:
         """resolve_backend creates and owns backend when none provided."""
@@ -274,7 +274,7 @@ class TestBackendHelper:
         backend, owns = resolve_backend("test", str(tmp_path), None)
         try:
             assert isinstance(backend, StorageBackend)
-            assert owns is True
+            assert owns
         finally:
             backend.close()
 
@@ -464,6 +464,7 @@ class TestLlamaIndexAdapter:
 
         result = store.delete_messages("s1")
         assert result is not None
+        assert len(result) == 1  # the message that was deleted
         assert store.get_messages("s1") == []
 
     def test_delete_messages_returns_none_for_empty_key(self, tmp_backend: Any) -> None:
@@ -677,7 +678,8 @@ class TestVSCodeInterface:
         """UT-VS-01: VSCodeMemoryInterface imports in base install."""
         from trw_memory.integrations.vscode import VSCodeMemoryInterface
 
-        assert VSCodeMemoryInterface is not None
+        # Verify it's a usable protocol class, not just a non-None import
+        assert hasattr(VSCodeMemoryInterface, "__protocol_attrs__") or callable(VSCodeMemoryInterface)
 
     def test_protocol_has_all_methods(self) -> None:
         """UT-VS-02: VSCodeMemoryInterface declares all 4 methods."""

@@ -417,7 +417,7 @@ class TestConsolidateCommand:
         assert ret == 0
         call_kwargs = mock_cycle.call_args
         assert call_kwargs is not None
-        assert call_kwargs.kwargs.get("dry_run") is True
+        assert call_kwargs.kwargs.get("dry_run")
 
     @patch(f"{_CLI}.MemoryConfig", side_effect=RuntimeError("config fail"))
     def test_consolidate_error(

@@ -140,7 +140,7 @@ class TestAuditLogVerifyChain:
     def test_empty_log_is_valid(self, audit_log: AuditLog) -> None:
         """An empty audit log verifies as valid."""
         valid, count, msg = audit_log.verify_chain()
-        assert valid is True
+        assert valid
         assert count == 0
         assert msg == ""
 
@@ -148,7 +148,7 @@ class TestAuditLogVerifyChain:
         """A single-record chain verifies correctly."""
         audit_log.append(action="store")
         valid, count, msg = audit_log.verify_chain()
-        assert valid is True
+        assert valid
         assert count == 1
         assert msg == ""
 
@@ -157,7 +157,7 @@ class TestAuditLogVerifyChain:
         for i in range(10):
             audit_log.append(action="store", target_id=f"M-{i}")
         valid, count, msg = audit_log.verify_chain()
-        assert valid is True
+        assert valid
         assert count == 10
         assert msg == ""
 
@@ -179,7 +179,7 @@ class TestAuditLogVerifyChain:
         # Re-create audit log to read tampered data
         tampered_log = AuditLog(audit_path)
         valid, count, msg = tampered_log.verify_chain()
-        assert valid is False
+        assert not valid
         assert count == 3
         assert "record_hash mismatch" in msg
 
@@ -198,7 +198,7 @@ class TestAuditLogVerifyChain:
 
         tampered_log = AuditLog(audit_path)
         valid, count, msg = tampered_log.verify_chain()
-        assert valid is False
+        assert not valid
         assert "prev_hash mismatch" in msg
 
 
@@ -301,5 +301,5 @@ class TestAuditLogPersistence:
 
         # Full chain should still verify
         valid, count, msg = log2.verify_chain()
-        assert valid is True
+        assert valid
         assert count == 3

@@ -7,7 +7,8 @@ def test_package_importable() -> None:
     """Package is importable."""
     import trw_memory
 
-    assert trw_memory is not None
+    assert hasattr(trw_memory, "__version__")
+    assert hasattr(trw_memory, "__all__")
 
 
 def test_version_accessible() -> None:
@@ -37,15 +38,15 @@ def test_core_exports_exist() -> None:
         validate_namespace,
     )
 
-    assert ConfigError is not None
-    assert MemoryConfig is not None
-    assert MemoryEntry is not None
-    assert MemoryError is not None
-    assert MemoryEvent is not None
-    assert MemoryEventType is not None
-    assert MemoryIndex is not None
-    assert MemoryStatus is not None
-    assert StorageError is not None
+    assert issubclass(ConfigError, Exception)
+    assert issubclass(MemoryConfig, object)
+    assert issubclass(MemoryEntry, object)
+    assert issubclass(MemoryError, Exception)
+    assert issubclass(MemoryEvent, object)
+    assert issubclass(MemoryEventType, object)
+    assert issubclass(MemoryIndex, object)
+    assert issubclass(MemoryStatus, object)
+    assert issubclass(StorageError, Exception)
     assert callable(namespace_to_path)
     assert callable(validate_namespace)
 
