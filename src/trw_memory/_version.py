@@ -1,3 +1,5 @@
-"""Package version."""
+"""Package version — derived from pyproject.toml via importlib.metadata."""
 
-__version__ = "0.1.0"
+from importlib.metadata import version as _pkg_version
+
+__version__: str = _pkg_version("trw-memory")
