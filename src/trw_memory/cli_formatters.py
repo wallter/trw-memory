@@ -9,6 +9,7 @@ Supports three output modes:
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from typing import TypedDict
 
 from trw_memory.models.memory import MemoryEntry
@@ -38,7 +39,7 @@ def _format_tags(tags: list[str]) -> str:
 
 
 def format_results(
-    results: list[dict[str, object]], fmt: str = "table"
+    results: Sequence[Mapping[str, object]], fmt: str = "table"
 ) -> str:
     """Format recall/search results.
 
@@ -101,7 +102,7 @@ def format_status(status: StatusDict, fmt: str = "table") -> str:
     return "\n".join(lines)
 
 
-def format_store_result(result: dict[str, str]) -> str:
+def format_store_result(result: Mapping[str, object]) -> str:
     """Format store confirmation.
 
     Args:

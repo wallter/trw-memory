@@ -56,7 +56,7 @@ class LocalEmbeddingProvider:
 
         self._load_attempted = True
         try:
-            from sentence_transformers import SentenceTransformer  # type: ignore[import-not-found]
+            from sentence_transformers import SentenceTransformer
 
             self._model = SentenceTransformer(self._model_name)
             logger.debug(

@@ -515,7 +515,7 @@ class MemoryClient:
                 except Exception:  # broad catch: fail-open recall decorator
                     memories = []
 
-                kwargs["recalled_memories"] = memories  # type: ignore[assignment]
+                kwargs["recalled_memories"] = memories
                 return await fn(*args, **kwargs)
 
             return wrapper

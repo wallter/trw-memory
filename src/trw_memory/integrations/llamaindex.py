@@ -73,6 +73,13 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
             namespace, storage_path, backend,
         )
 
+    @property
+    def _backend_or_raise(self) -> StorageBackend:
+        """Return the backend, raising if not initialised."""
+        if self._backend is None:
+            raise RuntimeError("TRWChatStore backend not initialised")
+        return self._backend
+
     @classmethod
     def class_name(cls) -> str:
         """Return class name for LlamaIndex serialization."""
@@ -91,7 +98,7 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
         from trw_memory.integrations._backend import DEFAULT_LIST_LIMIT, ROLE_TAG_PREFIX
 
         key_tag = f"{_TAG_PREFIX}{key}"
-        entries = self._backend.list_entries(
+        entries = self._backend_or_raise.list_entries(
             namespace=self.namespace,
             limit=DEFAULT_LIST_LIMIT,
         )
@@ -132,14 +139,14 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
             importance=0.5,
             source="agent",
         )
-        self._backend.store(entry)
+        self._backend_or_raise.store(entry)
 
     def delete_messages(self, key: str) -> list[ChatMessage] | None:
         """Remove all messages for *key*.  Returns the deleted messages."""
         from trw_memory.integrations._backend import DEFAULT_LIST_LIMIT, ROLE_TAG_PREFIX
 
         key_tag = f"{_TAG_PREFIX}{key}"
-        entries = self._backend.list_entries(
+        entries = self._backend_or_raise.list_entries(
             namespace=self.namespace,
             limit=DEFAULT_LIST_LIMIT,
         )
@@ -153,7 +160,7 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
                             role = MessageRole(tag[len(ROLE_TAG_PREFIX):])
                         break
                 deleted.append(ChatMessage(role=role, content=entry.content))
-                self._backend.delete(entry.id)
+                self._backend_or_raise.delete(entry.id)
         return deleted or None
 
     def delete_message(self, key: str, idx: int) -> ChatMessage | None:
@@ -177,7 +184,7 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
         """Return all existing conversation keys."""
         from trw_memory.integrations._backend import DEFAULT_LIST_LIMIT
 
-        entries = self._backend.list_entries(
+        entries = self._backend_or_raise.list_entries(
             namespace=self.namespace,
             limit=DEFAULT_LIST_LIMIT,
         )
@@ -193,7 +200,7 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
     def close(self) -> None:
         """Release backend resources if this instance owns them."""
         if self._owns_backend:
-            self._backend.close()
+            self._backend_or_raise.close()
 
     def __enter__(self) -> TRWChatStore:
         return self
