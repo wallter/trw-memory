@@ -11,7 +11,6 @@ high-importance entries are copied to the project namespace.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
 
 import structlog
 
@@ -20,6 +19,7 @@ from trw_memory.lifecycle.consolidation import consolidate_cycle
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespace import validate_namespace
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.tools._types import McpServer
 
 logger = structlog.get_logger()
 
@@ -140,7 +140,7 @@ def memory_consolidate_impl(
     }
 
 
-def register_consolidate_tool(mcp: Any) -> None:
+def register_consolidate_tool(mcp: McpServer) -> None:
     """Register memory_consolidate with a FastMCP server instance.
 
     Args:
@@ -151,7 +151,7 @@ def register_consolidate_tool(mcp: Any) -> None:
     from trw_memory.models.config import MemoryConfig
     from trw_memory.storage.sqlite_backend import SQLiteBackend
 
-    @mcp.tool()  # type: ignore[untyped-decorator]
+    @mcp.tool()
     async def memory_consolidate(
         namespace: str = "project:default",
         dry_run: bool = False,

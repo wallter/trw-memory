@@ -6,8 +6,6 @@ active configuration. Namespace is optional — when None, reports globally.
 
 from __future__ import annotations
 
-from typing import Any
-
 import structlog
 
 from trw_memory.exceptions import ConfigError, StorageError
@@ -15,6 +13,7 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespace import validate_namespace
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.tools._types import McpServer
 
 logger = structlog.get_logger()
 
@@ -99,7 +98,7 @@ def memory_status_impl(
     }
 
 
-def register_status_tool(mcp: Any) -> None:
+def register_status_tool(mcp: McpServer) -> None:
     """Register memory_status with a FastMCP server instance.
 
     Args:
@@ -109,7 +108,7 @@ def register_status_tool(mcp: Any) -> None:
 
     from trw_memory.storage.sqlite_backend import SQLiteBackend
 
-    @mcp.tool()  # type: ignore[untyped-decorator]
+    @mcp.tool()
     async def memory_status(
         namespace: str | None = None,
     ) -> dict[str, object]:

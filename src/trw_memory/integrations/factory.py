@@ -18,7 +18,20 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-from typing import Any
+from typing import Protocol, runtime_checkable
+
+
+@runtime_checkable
+class AdapterClass(Protocol):
+    """Structural type for all integration adapter classes.
+
+    Any class that can be instantiated via keyword arguments satisfies this
+    protocol — it exists solely to give ``get_adapter`` a concrete return
+    type without importing framework-specific base classes.
+    """
+
+    def __init__(self, **kwargs: object) -> None: ...
+
 
 # Mapping of framework name -> (spec_check_module, adapter_module, adapter_class)
 _REGISTRY: dict[str, tuple[str | None, str, str]] = {
@@ -51,7 +64,7 @@ _INSTALL_HINTS: dict[str, str] = {
 }
 
 
-def get_adapter(framework: str) -> type[Any]:
+def get_adapter(framework: str) -> type[object]:
     """Return the adapter class for the given framework.
 
     Args:
@@ -82,7 +95,7 @@ def get_adapter(framework: str) -> type[Any]:
 
     # Lazy-import the adapter module
     mod = importlib.import_module(adapter_module)
-    cls: type[Any] = getattr(mod, class_name)
+    cls: type[object] = getattr(mod, class_name)
     return cls
 
 

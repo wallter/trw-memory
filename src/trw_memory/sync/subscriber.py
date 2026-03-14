@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Callable
-from typing import Any
 
 import httpx
 import structlog
@@ -32,7 +31,7 @@ class SSESubscriber:
     def __init__(
         self,
         cfg: MemoryConfig,
-        on_event: Callable[[dict[str, Any]], None],
+        on_event: Callable[[dict[str, object]], None],
     ) -> None:
         self._cfg = cfg
         self._on_event = on_event
@@ -94,7 +93,10 @@ class SSESubscriber:
             if not data_str:
                 return
             try:
-                data = json.loads(data_str)
+                raw = json.loads(data_str)
+                if not isinstance(raw, dict):
+                    return
+                data: dict[str, object] = raw
                 event_type = data.get("type", "")
                 if event_type == "learning_published":
                     self._on_event(data)

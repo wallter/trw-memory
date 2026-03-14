@@ -20,7 +20,7 @@ Requires ``llama-index-core >= 0.11.0``::
 from __future__ import annotations
 
 import contextlib
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 try:
     from llama_index.core.llms import ChatMessage, MessageRole  # type: ignore[import-not-found]
@@ -51,10 +51,10 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
 
     namespace: str = "default"
     _storage_path: str | None = None
-    _backend: Any = None
+    _backend: StorageBackend | None = None
     _owns_backend: bool = False
 
-    model_config: ClassVar[dict[str, Any]] = {"arbitrary_types_allowed": True}
+    model_config: ClassVar[dict[str, object]] = {"arbitrary_types_allowed": True}
 
     def __init__(
         self,
@@ -62,7 +62,7 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
         *,
         storage_path: str | None = None,
         backend: StorageBackend | None = None,
-        **kwargs: Any,
+        **kwargs: object,
     ) -> None:
         from trw_memory.integrations._backend import resolve_backend
 

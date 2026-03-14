@@ -6,13 +6,12 @@ by ID or performs a bulk search-and-delete.
 
 from __future__ import annotations
 
-from typing import Any
-
 import structlog
 
 from trw_memory.exceptions import ConfigError, StorageError
 from trw_memory.namespace import validate_namespace
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.tools._types import McpServer
 
 logger = structlog.get_logger()
 
@@ -104,7 +103,7 @@ def memory_forget_impl(
     return {"deleted": deleted_count, "status": "ok"}
 
 
-def register_forget_tool(mcp: Any) -> None:
+def register_forget_tool(mcp: McpServer) -> None:
     """Register memory_forget with a FastMCP server instance.
 
     Args:

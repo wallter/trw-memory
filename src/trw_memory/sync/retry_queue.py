@@ -12,7 +12,7 @@ import threading
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TypedDict
 
 import structlog
 
@@ -20,6 +20,16 @@ logger = structlog.get_logger()
 
 MAX_QUEUE_DEPTH = 500
 MAX_RETRIES = 5
+
+
+class QueueRecord(TypedDict):
+    """Typed structure for a single JSONL retry queue record."""
+
+    entry_id: str
+    payload: dict[str, object]
+    queued_at: str
+    retry_count: int
+    last_error: str | None
 
 
 class RetryQueue:
@@ -32,7 +42,7 @@ class RetryQueue:
         self._path = queue_path
         self._lock = threading.Lock()
 
-    def enqueue(self, entry_id: str, payload: dict[str, Any]) -> bool:
+    def enqueue(self, entry_id: str, payload: dict[str, object]) -> bool:
         """Append a failed publish to the retry queue.
 
         Returns ``False`` if the queue is at capacity (500 entries).
@@ -47,7 +57,7 @@ class RetryQueue:
                 )
                 return False
 
-            record: dict[str, Any] = {
+            record: QueueRecord = {
                 "entry_id": entry_id,
                 "payload": payload,
                 "queued_at": datetime.now(timezone.utc).isoformat(),
@@ -57,7 +67,7 @@ class RetryQueue:
             self._append(record)
             return True
 
-    def drain(self, publish_fn: Callable[[dict[str, Any]], bool]) -> dict[str, int]:
+    def drain(self, publish_fn: Callable[[dict[str, object]], bool]) -> dict[str, int]:
         """Attempt to drain the queue by re-publishing all entries.
 
         Args:
@@ -72,13 +82,13 @@ class RetryQueue:
             if not entries:
                 return {"drained": 0, "failed": 0, "skipped": 0}
 
-            remaining: list[dict[str, Any]] = []
+            remaining: list[QueueRecord] = []
             drained = 0
             failed = 0
             skipped = 0
 
             for record in entries:
-                if record.get("retry_count", 0) >= MAX_RETRIES:
+                if record["retry_count"] >= MAX_RETRIES:
                     remaining.append(record)
                     skipped += 1
                     continue
@@ -86,7 +96,7 @@ class RetryQueue:
                 try:
                     success = publish_fn(record["payload"])
                 except (OSError, ConnectionError, ValueError) as exc:
-                    record["retry_count"] = record.get("retry_count", 0) + 1
+                    record["retry_count"] += 1
                     record["last_error"] = str(exc)
                     remaining.append(record)
                     failed += 1
@@ -95,7 +105,7 @@ class RetryQueue:
                 if success:
                     drained += 1
                 else:
-                    record["retry_count"] = record.get("retry_count", 0) + 1
+                    record["retry_count"] += 1
                     record["last_error"] = "publish returned False"
                     remaining.append(record)
                     failed += 1
@@ -117,22 +127,22 @@ class RetryQueue:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _read_all(self) -> list[dict[str, Any]]:
+    def _read_all(self) -> list[QueueRecord]:
         if not self._path.exists():
             return []
-        entries: list[dict[str, Any]] = []
+        entries: list[QueueRecord] = []
         for line in self._path.read_text().strip().splitlines():
             if line.strip():
                 with contextlib.suppress(json.JSONDecodeError):
                     entries.append(json.loads(line))
         return entries
 
-    def _append(self, record: dict[str, Any]) -> None:
+    def _append(self, record: QueueRecord) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._path, "a") as f:
             f.write(json.dumps(record) + "\n")
 
-    def _write_all(self, entries: list[dict[str, Any]]) -> None:
+    def _write_all(self, entries: list[QueueRecord]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._path, "w") as f:
             for entry in entries:

@@ -11,11 +11,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from enum import Enum
 from functools import wraps
-from typing import Any, TypeVar
+from typing import ParamSpec, TypeVar
 
 from trw_memory.exceptions import ConfigError
 
-F = TypeVar("F", bound=Callable[..., Any])
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
 
 
 class Role(str, Enum):
@@ -61,7 +62,9 @@ def check_permission(role: Role, permission: Permission) -> bool:
     return permission in allowed
 
 
-def require_permission(permission: Permission) -> Callable[[F], F]:
+def require_permission(
+    permission: Permission,
+) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
     """Decorator that enforces a permission check before function execution.
 
     The decorated function **must** accept a keyword argument ``role``
@@ -81,10 +84,10 @@ def require_permission(permission: Permission) -> Callable[[F], F]:
             ...
     """
 
-    def decorator(func: F) -> F:
+    def decorator(func: Callable[_P, _R]) -> Callable[_P, _R]:
         @wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            role: Role | None = kwargs.get("role")
+        def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+            role: object = kwargs.get("role")
             if role is None:
                 raise ConfigError(
                     f"Missing 'role' kwarg required by "
@@ -99,6 +102,6 @@ def require_permission(permission: Permission) -> Callable[[F], F]:
                 )
             return func(*args, **kwargs)
 
-        return wrapper  # type: ignore[return-value]
+        return wrapper
 
     return decorator

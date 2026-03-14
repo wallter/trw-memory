@@ -17,10 +17,10 @@ import asyncio
 import functools
 import inspect
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal, Protocol, TypedDict, runtime_checkable
 
 from trw_memory.exceptions import (
     MemoryConnectionError,
@@ -38,19 +38,66 @@ def _make_id() -> str:
     return f"M-{uuid.uuid4().hex[:8]}"
 
 
-def _entry_to_result(entry: MemoryEntry, score: float = 0.0) -> dict[str, Any]:
+class MemoryResultDict(TypedDict):
+    """Shape of a single result dict returned by recall/search."""
+
+    memory_id: str
+    content: str
+    detail: str
+    tags: list[str]
+    importance: float
+    score: float
+    created_at: str
+    updated_at: str
+    namespace: str
+
+
+class StoreResultDict(TypedDict):
+    """Shape of the dict returned by MemoryClient.store()."""
+
+    memory_id: str
+    namespace: str
+    status: str
+    timestamp: str
+
+
+class ForgetResultDict(TypedDict):
+    """Shape of the dict returned by MemoryClient.forget()."""
+
+    memory_id: str
+    status: str
+    namespace: str
+
+
+@runtime_checkable
+class AgentWithRegisterTool(Protocol):
+    """Protocol for agent objects that expose a ``register_tool`` method."""
+
+    def register_tool(
+        self, name: str, fn: Callable[..., Coroutine[object, object, object]]
+    ) -> None: ...
+
+
+@runtime_checkable
+class AgentWithToolDecorator(Protocol):
+    """Protocol for agent objects that expose a ``tool()`` decorator factory."""
+
+    def tool(self) -> Callable[[Callable[..., Coroutine[object, object, object]]], None]: ...
+
+
+def _entry_to_result(entry: MemoryEntry, score: float = 0.0) -> MemoryResultDict:
     """Convert a MemoryEntry to a result dict."""
-    return {
-        "memory_id": entry.id,
-        "content": entry.content,
-        "detail": entry.detail,
-        "tags": list(entry.tags),
-        "importance": entry.importance,
-        "score": score,
-        "created_at": entry.created_at.isoformat(),
-        "updated_at": entry.updated_at.isoformat(),
-        "namespace": entry.namespace,
-    }
+    return MemoryResultDict(
+        memory_id=entry.id,
+        content=entry.content,
+        detail=entry.detail,
+        tags=list(entry.tags),
+        importance=entry.importance,
+        score=score,
+        created_at=entry.created_at.isoformat(),
+        updated_at=entry.updated_at.isoformat(),
+        namespace=entry.namespace,
+    )
 
 
 def _create_local_backend(config: MemoryConfig, namespace: str) -> StorageBackend:
@@ -76,6 +123,10 @@ def _create_local_backend(config: MemoryConfig, namespace: str) -> StorageBacken
 
     entries_dir = base / namespace.replace(":", "_") / "entries"
     return YAMLBackend(entries_dir=entries_dir)
+
+
+# Type alias for the async tool functions produced by _make_tool_functions.
+_ToolFn = Callable[..., Coroutine[object, object, object]]
 
 
 class MemoryClient:
@@ -148,7 +199,7 @@ class MemoryClient:
         importance: float = 0.5,
         detail: str = "",
         metadata: dict[str, str] | None = None,
-    ) -> dict[str, str]:
+    ) -> StoreResultDict:
         """Store a new memory entry.
 
         Args:
@@ -190,12 +241,12 @@ class MemoryClient:
         async with self._lock:
             self._get_backend().store(entry)
 
-        return {
-            "memory_id": memory_id,
-            "namespace": self._namespace,
-            "status": "stored",
-            "timestamp": now.isoformat(),
-        }
+        return StoreResultDict(
+            memory_id=memory_id,
+            namespace=self._namespace,
+            status="stored",
+            timestamp=now.isoformat(),
+        )
 
     async def recall(
         self,
@@ -203,7 +254,7 @@ class MemoryClient:
         limit: int = 10,
         tags: list[str] | None = None,
         min_score: float = 0.0,
-    ) -> list[dict[str, Any]]:
+    ) -> list[MemoryResultDict]:
         """Search memories by keyword query.
 
         Args:
@@ -230,7 +281,7 @@ class MemoryClient:
             )
 
         # Score by importance (keyword match already filtered by backend)
-        results: list[dict[str, Any]] = [
+        results: list[MemoryResultDict] = [
             _entry_to_result(entry, score=entry.importance)
             for entry in entries
             if entry.importance >= min_score
@@ -239,7 +290,7 @@ class MemoryClient:
         results.sort(key=lambda r: float(r["score"]), reverse=True)
         return results[:limit]
 
-    async def forget(self, memory_id: str) -> dict[str, str]:
+    async def forget(self, memory_id: str) -> ForgetResultDict:
         """Delete a memory entry.
 
         Args:
@@ -265,11 +316,11 @@ class MemoryClient:
                 )
             backend.delete(memory_id)
 
-        return {
-            "memory_id": memory_id,
-            "status": "deleted",
-            "namespace": self._namespace,
-        }
+        return ForgetResultDict(
+            memory_id=memory_id,
+            status="deleted",
+            namespace=self._namespace,
+        )
 
     async def search(
         self,
@@ -277,7 +328,7 @@ class MemoryClient:
         min_importance: float = 0.0,
         since: datetime | None = None,
         limit: int = 50,
-    ) -> list[dict[str, Any]]:
+    ) -> list[MemoryResultDict]:
         """Search memories with filters.
 
         Args:
@@ -306,8 +357,8 @@ class MemoryClient:
             )
 
         # Post-filter
-        tag_set = set(tags) if tags else None
-        results: list[dict[str, Any]] = []
+        tag_set: set[str] = set(tags) if tags else set()
+        results: list[MemoryResultDict] = []
         for entry in entries:
             if entry.importance < min_importance:
                 continue
@@ -324,7 +375,7 @@ class MemoryClient:
     # Tool registration (FR09)
     # ------------------------------------------------------------------
 
-    def _make_tool_functions(self) -> dict[str, Callable[..., Any]]:
+    def _make_tool_functions(self) -> dict[str, _ToolFn]:
         """Create the shared tool functions for agent registration."""
         client = self
 
@@ -332,21 +383,21 @@ class MemoryClient:
             content: str,
             tags: list[str] | None = None,
             importance: float = 0.5,
-        ) -> dict[str, str]:
+        ) -> StoreResultDict:
             return await client.store(content, tags=tags, importance=importance)
 
         async def memory_recall(
             query: str, limit: int = 10
-        ) -> list[dict[str, Any]]:
+        ) -> list[MemoryResultDict]:
             return await client.recall(query, limit=limit)
 
-        async def memory_forget(memory_id: str) -> dict[str, str]:
+        async def memory_forget(memory_id: str) -> ForgetResultDict:
             return await client.forget(memory_id)
 
         async def memory_search(
             tags: list[str] | None = None,
             min_importance: float = 0.0,
-        ) -> list[dict[str, Any]]:
+        ) -> list[MemoryResultDict]:
             return await client.search(tags=tags, min_importance=min_importance)
 
         return {
@@ -356,7 +407,9 @@ class MemoryClient:
             "memory_search": memory_search,
         }
 
-    def register_tools(self, agent: Any) -> None:
+    def register_tools(
+        self, agent: AgentWithRegisterTool | AgentWithToolDecorator
+    ) -> None:
         """Register memory tools with an agent framework.
 
         Attempts to register ``memory_store``, ``memory_recall``,
@@ -385,7 +438,7 @@ class MemoryClient:
             for name, fn in tools.items():
                 register_fn(name, fn)
         elif tool_decorator is not None and callable(tool_decorator):
-            dec: Any = tool_decorator()
+            dec = tool_decorator()
             for fn in tools.values():
                 dec(fn)
         else:
@@ -404,7 +457,7 @@ class MemoryClient:
         query_from: str,
         limit: int = 10,
         min_score: float = 0.0,
-    ) -> Callable[..., Any]:
+    ) -> Callable[[Callable[..., Coroutine[object, object, object]]], Callable[..., Coroutine[object, object, object]]]:
         """Decorator that injects recalled memories into a function.
 
         Before calling the decorated function, extracts a query string from
@@ -428,7 +481,9 @@ class MemoryClient:
         """
         client = self
 
-        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        def decorator(
+            fn: Callable[..., Coroutine[object, object, object]],
+        ) -> Callable[..., Coroutine[object, object, object]]:
             # Check if recalled_memories is a positional arg
             sig = inspect.signature(fn)
             for name, param in sig.parameters.items():
@@ -446,8 +501,10 @@ class MemoryClient:
                     )
 
             @functools.wraps(fn)
-            async def wrapper(*args: Any, **kwargs: Any) -> Any:
-                memories: list[dict[str, Any]] = []
+            async def wrapper(
+                *args: object, **kwargs: object
+            ) -> object:
+                memories: list[MemoryResultDict] = []
                 try:
                     query = kwargs.get(query_from, "")
                     if query:
@@ -458,7 +515,7 @@ class MemoryClient:
                 except Exception:  # broad catch: fail-open recall decorator
                     memories = []
 
-                kwargs["recalled_memories"] = memories
+                kwargs["recalled_memories"] = memories  # type: ignore[assignment]
                 return await fn(*args, **kwargs)
 
             return wrapper

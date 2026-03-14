@@ -7,7 +7,6 @@ stores it via the backend, and returns the memory_id and status.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
 from uuid import uuid4
 
 import structlog
@@ -16,6 +15,7 @@ from trw_memory.exceptions import ConfigError, StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.namespace import validate_namespace
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.tools._types import McpServer
 
 logger = structlog.get_logger()
 
@@ -98,7 +98,7 @@ def memory_store_impl(
     }
 
 
-def register_store_tool(mcp: Any) -> None:
+def register_store_tool(mcp: McpServer) -> None:
     """Register memory_store with a FastMCP server instance.
 
     Args:
@@ -109,7 +109,7 @@ def register_store_tool(mcp: Any) -> None:
     from trw_memory.models.config import MemoryConfig
     from trw_memory.storage.sqlite_backend import SQLiteBackend
 
-    @mcp.tool()  # type: ignore[untyped-decorator]
+    @mcp.tool()
     async def memory_store(
         content: str,
         namespace: str = "project:default",

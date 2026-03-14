@@ -9,7 +9,7 @@ Usage::
     client = MemoryClient(namespace="project:my-app")
 
     @client.auto_recall(query_from="prompt", limit=5)
-    async def handle(prompt: str, *, recalled_memories: list | None = None):
+    async def handle(prompt: str, *, recalled_memories: list[dict[str, object]] | None = None):
         ...
 """
 

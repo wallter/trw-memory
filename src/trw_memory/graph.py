@@ -13,7 +13,6 @@ from __future__ import annotations
 import sqlite3
 from collections import deque
 from datetime import datetime, timedelta, timezone
-from typing import Any
 
 import structlog
 
@@ -135,7 +134,7 @@ def graph_query(
     root_ids: list[str],
     depth: int = 2,
     edge_types: list[str] | None = None,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, str | int | float]]:
     """BFS traversal from root nodes up to specified depth.
 
     Args:
@@ -156,7 +155,7 @@ def graph_query(
         depth = MAX_TRAVERSAL_DEPTH
 
     visited: set[str] = set(root_ids)
-    results: list[dict[str, Any]] = []
+    results: list[dict[str, str | int | float]] = []
     queue: deque[tuple[str, int]] = deque()
 
     for rid in root_ids:
@@ -174,7 +173,7 @@ def graph_query(
                 f"SELECT target_id, edge_type, weight FROM memory_graph_edges "
                 f"WHERE source_id = ? AND edge_type IN ({placeholders})"
             )
-            params: tuple[Any, ...] = (node_id, *edge_types)
+            params: tuple[str, ...] = (node_id, *edge_types)
         else:
             sql = "SELECT target_id, edge_type, weight FROM memory_graph_edges WHERE source_id = ?"
             params = (node_id,)

@@ -8,7 +8,6 @@ serialisation logic used by both :mod:`sqlite_backend` and
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 from trw_memory.models.memory import MemoryStatus
 
@@ -62,7 +61,9 @@ def validate_update_fields(
             raise ValueError(key)
 
 
-def serialize_update_value(key: str, val: Any) -> Any:  # noqa: ANN401
+def serialize_update_value(
+    key: str, val: object
+) -> list[str] | dict[str, str] | str | object:
     """Normalise a single update value for storage.
 
     Handles:

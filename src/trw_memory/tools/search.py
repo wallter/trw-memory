@@ -6,14 +6,13 @@ optional tag/status filtering, and offset-based pagination.
 
 from __future__ import annotations
 
-from typing import Any
-
 import structlog
 
 from trw_memory.exceptions import ConfigError
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespace import validate_namespace
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.tools._types import McpServer
 
 logger = structlog.get_logger()
 
@@ -99,7 +98,7 @@ def memory_search_impl(
     }
 
 
-def register_search_tool(mcp: Any) -> None:
+def register_search_tool(mcp: McpServer) -> None:
     """Register memory_search with a FastMCP server instance.
 
     Args:

@@ -9,7 +9,18 @@ Supports three output modes:
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TypedDict
+
+from trw_memory.models.memory import MemoryEntry
+
+
+class StatusDict(TypedDict):
+    """Shape of the status info dict passed to format_status."""
+
+    namespace: str
+    entry_count: int
+    backend: str
+    storage_path: str
 
 
 def _truncate(text: str, max_len: int = 80) -> str:
@@ -26,7 +37,9 @@ def _format_tags(tags: list[str]) -> str:
     return "[" + ",".join(tags) + "]"
 
 
-def format_results(results: list[dict[str, Any]], fmt: str = "table") -> str:
+def format_results(
+    results: list[dict[str, object]], fmt: str = "table"
+) -> str:
     """Format recall/search results.
 
     Args:
@@ -57,9 +70,10 @@ def format_results(results: list[dict[str, Any]], fmt: str = "table") -> str:
     rows: list[str] = [header, sep]
     for r in results:
         mid = str(r.get("memory_id", "?"))[:12]
-        score = float(r.get("score", 0.0))
-        importance = float(r.get("importance", 0.0))
-        tags = _format_tags(r.get("tags", []))[:16]
+        score = float(r.get("score", 0.0))  # type: ignore[arg-type]
+        importance = float(r.get("importance", 0.0))  # type: ignore[arg-type]
+        raw_tags = r.get("tags", [])
+        tags = _format_tags(raw_tags if isinstance(raw_tags, list) else [])[:16]
         content = _truncate(str(r.get("content", "")))
         rows.append(
             f"{mid:<12} {score:>6.2f} {importance:>10.2f} {tags:<16} {content}"
@@ -67,7 +81,7 @@ def format_results(results: list[dict[str, Any]], fmt: str = "table") -> str:
     return "\n".join(rows)
 
 
-def format_status(status: dict[str, Any], fmt: str = "table") -> str:
+def format_status(status: StatusDict, fmt: str = "table") -> str:
     """Format status output.
 
     Args:
@@ -129,7 +143,7 @@ def format_import_summary(imported: int, skipped: int) -> str:
     return f"Imported {imported} entries, skipped {skipped}"
 
 
-def entry_to_export_dict(entry: Any) -> dict[str, Any]:
+def entry_to_export_dict(entry: MemoryEntry) -> dict[str, object]:
     """Convert a MemoryEntry to a serializable dict for export."""
     return {
         "id": entry.id,

@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import os
 import stat
+import types
 from pathlib import Path
 
 import structlog
@@ -24,11 +25,12 @@ from trw_memory.security.encryption import (
 )
 from trw_memory.storage.interface import StorageBackend
 
+_keyring: types.ModuleType | None
 try:
     import keyring as _keyring
     _KEYRING_AVAILABLE = True
 except ImportError:
-    _keyring = None  # type: ignore[assignment]
+    _keyring = None
     _KEYRING_AVAILABLE = False
 
 logger = structlog.get_logger()

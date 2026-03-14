@@ -10,7 +10,6 @@ and they are appended under a "related" key in the response.
 from __future__ import annotations
 
 import sqlite3
-from typing import Any
 
 import structlog
 
@@ -20,6 +19,7 @@ from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespace import validate_namespace
 from trw_memory.retrieval import hybrid_search
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.tools._types import McpServer
 
 logger = structlog.get_logger()
 
@@ -137,11 +137,11 @@ def memory_recall_impl(
 
 
 def _graph_related(
-    result_dicts: list[dict[str, Any]],
+    result_dicts: list[dict[str, object]],
     depth: int,
     backend: StorageBackend,
     conn: sqlite3.Connection | None,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, str | int | float]]:
     """Query the knowledge graph for entries related to the recall results.
 
     Args:
@@ -175,7 +175,7 @@ def _graph_related(
         return []
 
 
-def register_recall_tool(mcp: Any) -> None:
+def register_recall_tool(mcp: McpServer) -> None:
     """Register memory_recall with a FastMCP server instance.
 
     Args:

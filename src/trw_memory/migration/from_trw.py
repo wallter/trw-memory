@@ -26,7 +26,6 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
 
 import structlog
 
@@ -270,7 +269,7 @@ def migrate_entries_dir(entries_dir: Path) -> list[MemoryEntry]:
 
     for yaml_path in yaml_files:
         try:
-            raw: Any = yml.load(yaml_path)
+            raw: object = yml.load(yaml_path)
             if not isinstance(raw, dict):
                 logger.warning(
                     "skipping non-dict YAML",

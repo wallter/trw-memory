@@ -1,5 +1,9 @@
 """MCP tools for trw-memory — 6 tools registered via FastMCP."""
 
+from __future__ import annotations
+
+from trw_memory.tools._types import McpServer
+
 from trw_memory.tools.consolidate import (
     memory_consolidate_impl,
     register_consolidate_tool,
@@ -11,6 +15,7 @@ from trw_memory.tools.status import memory_status_impl, register_status_tool
 from trw_memory.tools.store import memory_store_impl, register_store_tool
 
 __all__ = [
+    "McpServer",
     "memory_consolidate_impl",
     "memory_forget_impl",
     "memory_recall_impl",

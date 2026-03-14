@@ -20,7 +20,7 @@ Requires ``crewai >= 0.74.0``::
 from __future__ import annotations
 
 import importlib.util
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, TypedDict
 
 # Verify crewai is available (but don't import heavy modules)
 try:
@@ -40,6 +40,15 @@ if TYPE_CHECKING:
     from trw_memory.storage.interface import StorageBackend
 
 _TAG_PREFIX = "crewai"
+
+
+class CrewSearchResult(TypedDict):
+    """Typed structure for a single CrewAI search result entry."""
+
+    id: str
+    metadata: dict[str, str]
+    context: str
+    score: float
 
 
 class TRWCrewStorage(BackendOwnerMixin):
@@ -78,8 +87,8 @@ class TRWCrewStorage(BackendOwnerMixin):
 
     def save(
         self,
-        value: Any,
-        metadata: dict[str, Any] | None = None,
+        value: object,
+        metadata: dict[str, object] | None = None,
         agent: str | None = None,
     ) -> None:
         """Persist a memory entry.
@@ -113,9 +122,9 @@ class TRWCrewStorage(BackendOwnerMixin):
         self,
         query: str,
         limit: int = 3,
-        filter: dict[str, Any] | None = None,
+        filter: dict[str, object] | None = None,
         score_threshold: float = 0.0,
-    ) -> list[dict[str, Any]]:
+    ) -> list[CrewSearchResult]:
         """Search stored memories by query.
 
         Args:
@@ -134,15 +143,15 @@ class TRWCrewStorage(BackendOwnerMixin):
             namespace=self._namespace,
         )
 
-        results: list[dict[str, Any]] = []
+        results: list[CrewSearchResult] = []
         for entry in entries:
             if entry.importance >= score_threshold:
-                results.append({
-                    "id": entry.id,
-                    "metadata": dict(entry.metadata),
-                    "context": entry.content,
-                    "score": entry.importance,
-                })
+                results.append(CrewSearchResult(
+                    id=entry.id,
+                    metadata=dict(entry.metadata),
+                    context=entry.content,
+                    score=entry.importance,
+                ))
         return results
 
     def reset(self) -> None:

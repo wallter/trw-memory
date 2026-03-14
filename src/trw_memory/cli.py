@@ -12,9 +12,9 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from trw_memory.cli_formatters import (
+    StatusDict,
     entry_to_export_dict,
     format_export_summary,
     format_import_summary,
@@ -238,12 +238,12 @@ async def _handle_status(args: argparse.Namespace) -> int:
         backend = _create_local_backend(config, args.namespace)
         try:
             count = backend.count(namespace=args.namespace)
-            status_info: dict[str, Any] = {
-                "namespace": args.namespace,
-                "entry_count": count,
-                "backend": config.storage_backend,
-                "storage_path": config.storage_path,
-            }
+            status_info = StatusDict(
+                namespace=args.namespace,
+                entry_count=count,
+                backend=config.storage_backend,
+                storage_path=config.storage_path,
+            )
             print(format_status(status_info, fmt=args.fmt))
             return 0
         finally:
