@@ -97,13 +97,7 @@ class MemoryConfig(BaseSettings):
 
     @model_validator(mode="after")
     def _check_weight_sum(self) -> MemoryConfig:
-        total = (
-            self.score_relevance_weight
-            + self.score_recency_weight
-            + self.score_importance_weight
-        )
+        total = self.score_relevance_weight + self.score_recency_weight + self.score_importance_weight
         if abs(total - 1.0) > 0.01:
-            raise ValueError(
-                f"Score weights must sum to 1.0, got {total:.3f}"
-            )
+            raise ValueError(f"Score weights must sum to 1.0, got {total:.3f}")
         return self

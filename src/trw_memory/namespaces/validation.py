@@ -11,9 +11,7 @@ from trw_memory.exceptions import ConfigError
 
 # Valid namespace: scope:name or bare scope (global, default)
 # name part: alphanumeric, hyphens, underscores (no dots, slashes, colons)
-_NS_PATTERN = re.compile(
-    r"^(project:[a-zA-Z0-9_-]+|global|default|team:[a-zA-Z0-9_-]+|org:[a-zA-Z0-9_-]+)$"
-)
+_NS_PATTERN = re.compile(r"^(project:[a-zA-Z0-9_-]+|global|default|team:[a-zA-Z0-9_-]+|org:[a-zA-Z0-9_-]+)$")
 
 _MAX_LENGTH = 128
 
@@ -36,9 +34,7 @@ def validate_namespace(ns: str) -> str:
     ns = ns.strip()
 
     if len(ns) > _MAX_LENGTH:
-        raise ConfigError(
-            f"namespace too long: {len(ns)} chars (max {_MAX_LENGTH})"
-        )
+        raise ConfigError(f"namespace too long: {len(ns)} chars (max {_MAX_LENGTH})")
 
     if not _NS_PATTERN.match(ns):
         raise ConfigError(

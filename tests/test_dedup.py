@@ -31,6 +31,7 @@ from trw_memory.retrieval.dense import cosine_similarity
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_entry(
     entry_id: str,
     content: str,
@@ -91,6 +92,7 @@ class _StubEmbedder:
 # cosine_similarity
 # ---------------------------------------------------------------------------
 
+
 class TestCosineSimilarity:
     def test_identical_vectors(self) -> None:
         a = [1.0, 0.0, 0.0]
@@ -122,6 +124,7 @@ class TestCosineSimilarity:
     def test_partial_similarity(self) -> None:
         # 45-degree angle → cos(45°) ≈ 0.707
         import math
+
         v = 1.0 / math.sqrt(2.0)
         a = [v, v, 0.0]
         b = [1.0, 0.0, 0.0]
@@ -137,6 +140,7 @@ class TestCosineSimilarity:
 # ---------------------------------------------------------------------------
 # check_duplicate
 # ---------------------------------------------------------------------------
+
 
 class TestCheckDuplicate:
     def test_embedder_unavailable_returns_store(self) -> None:
@@ -171,6 +175,7 @@ class TestCheckDuplicate:
     def test_merge_when_similarity_between_thresholds(self) -> None:
         embedder = _StubEmbedder(available=True)
         import math
+
         # 90% cosine similarity (between 0.85 merge and 0.95 skip thresholds)
         sq = math.sqrt(1.0 - 0.81)
         vec_existing = [1.0, 0.0, 0.0]
@@ -227,6 +232,7 @@ class TestCheckDuplicate:
     def test_picks_best_matching_entry(self) -> None:
         embedder = _StubEmbedder(available=True)
         import math
+
         # e1 has ~0.9 similarity, e2 has 1.0 similarity
         vec_new = [1.0, 0.0, 0.0]
         vec_e1 = [0.9, math.sqrt(0.19), 0.0]
@@ -284,6 +290,7 @@ class TestCheckDuplicate:
 # ---------------------------------------------------------------------------
 # merge_entries
 # ---------------------------------------------------------------------------
+
 
 class TestMergeEntries:
     def test_tags_are_unioned(self) -> None:
@@ -360,6 +367,7 @@ class TestMergeEntries:
 
     def test_updated_at_changes(self) -> None:
         import time
+
         old_time = datetime(2020, 1, 1, tzinfo=timezone.utc)
         existing = _make_entry("e1", "content")
         existing = existing.model_copy(update={"updated_at": old_time})
@@ -390,6 +398,7 @@ class TestMergeEntries:
 # ---------------------------------------------------------------------------
 # batch_dedup
 # ---------------------------------------------------------------------------
+
 
 class TestBatchDedup:
     def test_embedder_unavailable_returns_skipped(self) -> None:
@@ -443,6 +452,7 @@ class TestBatchDedup:
     def test_near_duplicates_merged(self) -> None:
         embedder = _StubEmbedder(available=True)
         import math
+
         # 0.9 similarity → merge (above merge threshold 0.85, below skip 0.95)
         sq = math.sqrt(1.0 - 0.81)
         embedder.set_vector("entry one ", [1.0, 0.0, 0.0])

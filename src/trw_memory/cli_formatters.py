@@ -38,9 +38,7 @@ def _format_tags(tags: list[str]) -> str:
     return "[" + ",".join(tags) + "]"
 
 
-def format_results(
-    results: Sequence[Mapping[str, object]], fmt: str = "table"
-) -> str:
+def format_results(results: Sequence[Mapping[str, object]], fmt: str = "table") -> str:
     """Format recall/search results.
 
     Args:
@@ -76,9 +74,7 @@ def format_results(
         raw_tags = r.get("tags", [])
         tags = _format_tags(raw_tags if isinstance(raw_tags, list) else [])[:16]
         content = _truncate(str(r.get("content", "")))
-        rows.append(
-            f"{mid:<12} {score:>6.2f} {importance:>10.2f} {tags:<16} {content}"
-        )
+        rows.append(f"{mid:<12} {score:>6.2f} {importance:>10.2f} {tags:<16} {content}")
     return "\n".join(rows)
 
 
@@ -127,7 +123,7 @@ def format_export_summary(count: int, path: str | None) -> str:
     Returns:
         Human-readable summary.
     """
-    dest = path if path else "stdout"
+    dest = path or "stdout"
     return f"Exported {count} entries to {dest}"
 
 

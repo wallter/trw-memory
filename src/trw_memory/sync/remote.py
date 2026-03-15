@@ -37,7 +37,6 @@ class AnonymizedEntry(TypedDict):
     source_project: str
 
 
-
 def _anonymize_entry(
     entry: MemoryEntry,
     project_root: str = "",
@@ -158,9 +157,7 @@ def fetch_shared_memories(
                 return []
 
             raw = resp.json()
-            results: list[dict[str, object]] = (
-                raw if isinstance(raw, list) else raw.get("results", [])
-            )
+            results: list[dict[str, object]] = raw if isinstance(raw, list) else raw.get("results", [])
     except (httpx.HTTPError, OSError, ConnectionError):
         logger.debug("memory_fetch_error", exc_info=True)
         return []

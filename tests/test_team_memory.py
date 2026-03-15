@@ -69,8 +69,7 @@ class _InMemoryBackend(StorageBackend):
         if status is not None:
             sv = status.value if isinstance(status, MemoryStatus) else str(status)
             results = [
-                e for e in results
-                if (e.status.value if isinstance(e.status, MemoryStatus) else str(e.status)) == sv
+                e for e in results if (e.status.value if isinstance(e.status, MemoryStatus) else str(e.status)) == sv
             ]
         return results[:top_k]
 
@@ -90,8 +89,7 @@ class _InMemoryBackend(StorageBackend):
         if status is not None:
             sv = status.value if isinstance(status, MemoryStatus) else str(status)
             results = [
-                e for e in results
-                if (e.status.value if isinstance(e.status, MemoryStatus) else str(e.status)) == sv
+                e for e in results if (e.status.value if isinstance(e.status, MemoryStatus) else str(e.status)) == sv
             ]
         if namespace is not None:
             results = [e for e in results if e.namespace == namespace]

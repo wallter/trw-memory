@@ -74,7 +74,7 @@ def memory_forget_impl(
         return {"deleted": deleted_count, "status": "ok"}
 
     # --- Bulk delete via search query ---
-    assert query is not None  # narrowed above
+    assert query is not None  # noqa: S101 — mypy narrowing guard; query is not None here: the memory_id branch above returns before reaching this line, and the early-return guard ensures at least one of memory_id/query is set
     try:
         matches = backend.search(
             query,
@@ -90,7 +90,7 @@ def memory_forget_impl(
         try:
             if backend.delete(entry.id):
                 deleted_count += 1
-        except StorageError as exc:
+        except StorageError as exc:  # per-item error handling: log delete failure for this entry, continue bulk delete  # noqa: PERF203
             logger.warning("memory_forget_delete_error", memory_id=entry.id, error=str(exc))
 
     logger.info(

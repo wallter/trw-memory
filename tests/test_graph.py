@@ -71,12 +71,8 @@ CREATE TABLE IF NOT EXISTS memory_graph_edges (
 )
 """
 
-_CREATE_IDX_MGE_SOURCE = (
-    "CREATE INDEX IF NOT EXISTS idx_mge_source ON memory_graph_edges(source_id, edge_type)"
-)
-_CREATE_IDX_MGE_TARGET = (
-    "CREATE INDEX IF NOT EXISTS idx_mge_target ON memory_graph_edges(target_id, edge_type)"
-)
+_CREATE_IDX_MGE_SOURCE = "CREATE INDEX IF NOT EXISTS idx_mge_source ON memory_graph_edges(source_id, edge_type)"
+_CREATE_IDX_MGE_TARGET = "CREATE INDEX IF NOT EXISTS idx_mge_target ON memory_graph_edges(target_id, edge_type)"
 
 
 # ---------------------------------------------------------------------------
@@ -167,8 +163,7 @@ def _insert_edge(
     """Insert an edge directly for test setup."""
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
-        "INSERT INTO memory_graph_edges (source_id, target_id, edge_type, weight, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO memory_graph_edges (source_id, target_id, edge_type, weight, created_at) VALUES (?, ?, ?, ?, ?)",
         (source_id, target_id, edge_type, weight, now),
     )
     conn.commit()
@@ -200,9 +195,7 @@ class TestCreateSimilarityEdges:
         count = create_similarity_edges(entry, conn, embedding=_V1, candidate_embeddings=candidates)
 
         assert count == 2  # bidirectional
-        edges = conn.execute(
-            "SELECT source_id, target_id, edge_type FROM memory_graph_edges"
-        ).fetchall()
+        edges = conn.execute("SELECT source_id, target_id, edge_type FROM memory_graph_edges").fetchall()
         assert len(edges) == 2
         sources = {(e[0], e[1]) for e in edges}
         assert ("e1", "e2") in sources
@@ -694,9 +687,7 @@ class TestCreateSimilarityEdgesEdgeCases:
         # Candidate has the same ID as the entry
         candidates = [("self-ref", _V1)]
 
-        count = create_similarity_edges(
-            entry, conn, embedding=_V1, candidate_embeddings=candidates
-        )
+        count = create_similarity_edges(entry, conn, embedding=_V1, candidate_embeddings=candidates)
         assert count == 0
         assert _count_edges(conn) == 0
 
@@ -729,9 +720,7 @@ class TestMemoryDecayPassBatch:
         # Verify the first 3 had importance reduced
         decayed_count = 0
         for i in range(5):
-            row = conn.execute(
-                "SELECT importance FROM memories WHERE id = ?", (f"decay-{i}",)
-            ).fetchone()
+            row = conn.execute("SELECT importance FROM memories WHERE id = ?", (f"decay-{i}",)).fetchone()
             if row and abs(row[0] - 0.7) < 0.001:  # 0.8 - 0.1 = 0.7
                 decayed_count += 1
         assert decayed_count == 3

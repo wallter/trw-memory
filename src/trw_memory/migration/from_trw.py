@@ -175,9 +175,7 @@ def from_learning_entry(data: dict[str, object]) -> MemoryEntry:
     raw_updated = data.get("updated") or data.get("updated_at")
     updated_at = _date_to_dt(raw_updated) if raw_updated is not None else created_at
 
-    last_accessed_at = _opt_date_to_dt(
-        data.get("last_accessed_at")
-    )
+    last_accessed_at = _opt_date_to_dt(data.get("last_accessed_at"))
 
     # --- importance (was impact) ----------------------------------------------
     raw_importance = data.get("impact") if "impact" in data else data.get("importance")
@@ -192,9 +190,7 @@ def from_learning_entry(data: dict[str, object]) -> MemoryEntry:
     namespace = _safe_str(data.get("namespace"), "default")
     source = _safe_str(data.get("source"), "agent")
     source_identity = _safe_str(data.get("source_identity"), "")
-    consolidated_into: str | None = (
-        _safe_str(data.get("consolidated_into")) or None
-    )
+    consolidated_into: str | None = _safe_str(data.get("consolidated_into")) or None
 
     # --- list fields ----------------------------------------------------------
     tags = _safe_str_list(data.get("tags"))

@@ -14,10 +14,9 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 
 from trw_memory.lifecycle._utils import days_since_access
-
 
 # ---------------------------------------------------------------------------
 # Basic type handling

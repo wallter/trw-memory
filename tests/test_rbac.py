@@ -66,11 +66,14 @@ class TestRoleEnum:
     def test_role_enum_has_exactly_three_members(self) -> None:
         assert len(list(Role)) == 3
 
-    @pytest.mark.parametrize("role,expected", [
-        (Role.READER, "reader"),
-        (Role.WRITER, "writer"),
-        (Role.ADMIN, "admin"),
-    ])
+    @pytest.mark.parametrize(
+        "role,expected",
+        [
+            (Role.READER, "reader"),
+            (Role.WRITER, "writer"),
+            (Role.ADMIN, "admin"),
+        ],
+    )
     def test_parametrized_role_string_values(self, role: Role, expected: str) -> None:
         assert role.value == expected
         assert role == expected  # str enum equality
@@ -112,15 +115,16 @@ class TestPermissionEnum:
     def test_permission_enum_has_exactly_four_members(self) -> None:
         assert len(list(Permission)) == 4
 
-    @pytest.mark.parametrize("perm,expected", [
-        (Permission.READ, "read"),
-        (Permission.WRITE, "write"),
-        (Permission.DELETE, "delete"),
-        (Permission.ADMIN, "admin"),
-    ])
-    def test_parametrized_permission_string_values(
-        self, perm: Permission, expected: str
-    ) -> None:
+    @pytest.mark.parametrize(
+        "perm,expected",
+        [
+            (Permission.READ, "read"),
+            (Permission.WRITE, "write"),
+            (Permission.DELETE, "delete"),
+            (Permission.ADMIN, "admin"),
+        ],
+    )
+    def test_parametrized_permission_string_values(self, perm: Permission, expected: str) -> None:
         assert perm.value == expected
 
 
@@ -233,23 +237,24 @@ class TestCheckPermission:
         result = check_permission(Role.READER, Permission.READ)
         assert type(result) is bool
 
-    @pytest.mark.parametrize("role,perm,expected", [
-        (Role.READER, Permission.READ,   True),
-        (Role.READER, Permission.WRITE,  False),
-        (Role.READER, Permission.DELETE, False),
-        (Role.READER, Permission.ADMIN,  False),
-        (Role.WRITER, Permission.READ,   True),
-        (Role.WRITER, Permission.WRITE,  True),
-        (Role.WRITER, Permission.DELETE, False),
-        (Role.WRITER, Permission.ADMIN,  False),
-        (Role.ADMIN,  Permission.READ,   True),
-        (Role.ADMIN,  Permission.WRITE,  True),
-        (Role.ADMIN,  Permission.DELETE, True),
-        (Role.ADMIN,  Permission.ADMIN,  True),
-    ])
-    def test_parametrized_all_combinations(
-        self, role: Role, perm: Permission, expected: bool
-    ) -> None:
+    @pytest.mark.parametrize(
+        "role,perm,expected",
+        [
+            (Role.READER, Permission.READ, True),
+            (Role.READER, Permission.WRITE, False),
+            (Role.READER, Permission.DELETE, False),
+            (Role.READER, Permission.ADMIN, False),
+            (Role.WRITER, Permission.READ, True),
+            (Role.WRITER, Permission.WRITE, True),
+            (Role.WRITER, Permission.DELETE, False),
+            (Role.WRITER, Permission.ADMIN, False),
+            (Role.ADMIN, Permission.READ, True),
+            (Role.ADMIN, Permission.WRITE, True),
+            (Role.ADMIN, Permission.DELETE, True),
+            (Role.ADMIN, Permission.ADMIN, True),
+        ],
+    )
+    def test_parametrized_all_combinations(self, role: Role, perm: Permission, expected: bool) -> None:
         assert check_permission(role, perm) is expected
 
 
@@ -405,7 +410,6 @@ class TestRequirePermissionMissingRole:
             pass
 
         with pytest.raises(ConfigError, match="Missing 'role' kwarg"):
-
             read_fn()  # no role kwarg
 
     def test_error_message_contains_permission(self) -> None:
@@ -507,13 +511,16 @@ class TestRequirePermissionAsync:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("role,perm", [
-    (Role.READER, Permission.WRITE),
-    (Role.READER, Permission.DELETE),
-    (Role.READER, Permission.ADMIN),
-    (Role.WRITER, Permission.DELETE),
-    (Role.WRITER, Permission.ADMIN),
-])
+@pytest.mark.parametrize(
+    "role,perm",
+    [
+        (Role.READER, Permission.WRITE),
+        (Role.READER, Permission.DELETE),
+        (Role.READER, Permission.ADMIN),
+        (Role.WRITER, Permission.DELETE),
+        (Role.WRITER, Permission.ADMIN),
+    ],
+)
 def test_deny_matrix_via_decorator(role: Role, perm: Permission) -> None:
     @require_permission(perm)
     def guarded(*, role: Role) -> None:
@@ -528,15 +535,18 @@ def test_deny_matrix_via_decorator(role: Role, perm: Permission) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("role,perm", [
-    (Role.READER, Permission.READ),
-    (Role.WRITER, Permission.READ),
-    (Role.WRITER, Permission.WRITE),
-    (Role.ADMIN,  Permission.READ),
-    (Role.ADMIN,  Permission.WRITE),
-    (Role.ADMIN,  Permission.DELETE),
-    (Role.ADMIN,  Permission.ADMIN),
-])
+@pytest.mark.parametrize(
+    "role,perm",
+    [
+        (Role.READER, Permission.READ),
+        (Role.WRITER, Permission.READ),
+        (Role.WRITER, Permission.WRITE),
+        (Role.ADMIN, Permission.READ),
+        (Role.ADMIN, Permission.WRITE),
+        (Role.ADMIN, Permission.DELETE),
+        (Role.ADMIN, Permission.ADMIN),
+    ],
+)
 def test_allow_matrix_via_decorator(role: Role, perm: Permission) -> None:
     @require_permission(perm)
     def guarded(*, role: Role) -> str:

@@ -17,8 +17,8 @@ from uuid import uuid4
 
 import structlog
 
-from trw_memory.exceptions import StorageError
 from trw_memory.embeddings.interface import EmbeddingProvider
+from trw_memory.exceptions import StorageError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.retrieval.dense import cosine_similarity
@@ -101,11 +101,7 @@ def complete_linkage_cluster(
     for idx, cid in enumerate(cluster_id):
         clusters_map.setdefault(cid, []).append(items[idx][0])
 
-    return [
-        cluster
-        for cluster in clusters_map.values()
-        if len(cluster) >= min_cluster_size
-    ]
+    return [cluster for cluster in clusters_map.values() if len(cluster) >= min_cluster_size]
 
 
 # ---------------------------------------------------------------------------
@@ -153,11 +149,7 @@ def find_clusters(
     )
 
     # Filter out already-consolidated entries and entries already archived
-    entries = [
-        e for e in entries
-        if e.source != "consolidated"
-        and e.consolidated_into is None
-    ]
+    entries = [e for e in entries if e.source != "consolidated" and e.consolidated_into is None]
 
     if len(entries) < min_cluster_size:
         return []
@@ -292,11 +284,7 @@ def _create_consolidated_entry(
 
     tags = sorted({t for e in cluster for t in e.tags})
 
-    all_evidence: list[str] = list(dict.fromkeys(
-        ev
-        for e in cluster
-        for ev in e.evidence
-    ))
+    all_evidence: list[str] = list(dict.fromkeys(ev for e in cluster for ev in e.evidence))
 
     recurrence = sum(e.recurrence for e in cluster)
     q_value = max(e.q_value for e in cluster)
@@ -367,7 +355,7 @@ def _archive_originals(
                 updated_at=datetime.now(timezone.utc),
             )
             processed.append(entry.id)
-        except (StorageError, ValueError, RuntimeError) as exc:
+        except (StorageError, ValueError, RuntimeError) as exc:  # per-item error handling: re-raise but log each failure individually  # noqa: PERF203
             logger.exception(
                 "consolidation_archive_failed",
                 entry_id=entry.id,
@@ -405,11 +393,7 @@ def _mean_pairwise_similarity(
     if len(valid) < 2:
         return 0.0
 
-    pairs = [
-        cosine_similarity(valid[i], valid[j])
-        for i in range(len(valid))
-        for j in range(i + 1, len(valid))
-    ]
+    pairs = [cosine_similarity(valid[i], valid[j]) for i in range(len(valid)) for j in range(i + 1, len(valid))]
     return sum(pairs) / len(pairs) if pairs else 0.0
 
 
@@ -467,11 +451,13 @@ def consolidate_cycle(
             mean_sim = 0.0
             if embedder is not None and embedder.available():
                 mean_sim = _mean_pairwise_similarity(cluster, embedder)
-            cluster_previews.append({
-                "entry_ids": entry_ids,
-                "count": len(cluster),
-                "mean_similarity": round(mean_sim, 3),
-            })
+            cluster_previews.append(
+                {
+                    "entry_ids": entry_ids,
+                    "count": len(cluster),
+                    "mean_similarity": round(mean_sim, 3),
+                }
+            )
         return {
             "dry_run": True,
             "clusters": cluster_previews,
@@ -503,9 +489,7 @@ def consolidate_cycle(
                 detail = fallback["detail"]
 
             # FR03: Create consolidated entry
-            new_entry = _create_consolidated_entry(
-                cluster, content, detail, storage, ns
-            )
+            new_entry = _create_consolidated_entry(cluster, content, detail, storage, ns)
             consolidated_id = new_entry.id
 
             # FR04: Archive originals

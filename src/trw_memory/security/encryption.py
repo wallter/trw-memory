@@ -46,9 +46,7 @@ def derive_namespace_key(master_key: bytes, namespace: str) -> bytes:
         ValueError: If *master_key* is not 32 bytes.
     """
     if len(master_key) != _KEY_LENGTH:
-        raise ValueError(
-            f"master_key must be {_KEY_LENGTH} bytes, got {len(master_key)}"
-        )
+        raise ValueError(f"master_key must be {_KEY_LENGTH} bytes, got {len(master_key)}")
     hkdf = HKDF(
         algorithm=hashes.SHA256(),
         length=_KEY_LENGTH,
@@ -72,9 +70,7 @@ def encrypt_field(plaintext: str, key: bytes) -> str:
         ValueError: If *key* is not 32 bytes.
     """
     if len(key) != _KEY_LENGTH:
-        raise ValueError(
-            f"key must be {_KEY_LENGTH} bytes, got {len(key)}"
-        )
+        raise ValueError(f"key must be {_KEY_LENGTH} bytes, got {len(key)}")
     nonce = os.urandom(_NONCE_LENGTH)
     aesgcm = AESGCM(key)
     # AESGCM.encrypt returns ciphertext + 16-byte tag appended
@@ -100,9 +96,7 @@ def decrypt_field(ciphertext_b64: str, key: bytes) -> str:
             or tampered data).
     """
     if len(key) != _KEY_LENGTH:
-        raise ValueError(
-            f"key must be {_KEY_LENGTH} bytes, got {len(key)}"
-        )
+        raise ValueError(f"key must be {_KEY_LENGTH} bytes, got {len(key)}")
     payload = base64.b64decode(ciphertext_b64)
     if len(payload) < _NONCE_LENGTH + 16:
         raise ValueError("Encrypted payload too short")

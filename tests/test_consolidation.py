@@ -225,7 +225,7 @@ class TestParseConsolidationResponse:
         assert _parse_consolidation_response("") is None
 
     def test_non_json_line_skipped(self) -> None:
-        response = "just text\n{\"summary\": \"s\", \"detail\": \"d\"}"
+        response = 'just text\n{"summary": "s", "detail": "d"}'
         result = _parse_consolidation_response(response)
         assert result == {"summary": "s", "detail": "d"}
 
@@ -283,10 +283,8 @@ class TestCreateConsolidatedEntry:
     def test_creates_entry_with_correct_fields(self) -> None:
         storage = _InMemoryBackend()
         cluster = [
-            _make_entry("e1", importance=0.8, tags=["a", "b"], evidence=["ev1"],
-                        recurrence=2, q_value=0.7),
-            _make_entry("e2", importance=0.6, tags=["b", "c"], evidence=["ev2"],
-                        recurrence=3, q_value=0.5),
+            _make_entry("e1", importance=0.8, tags=["a", "b"], evidence=["ev1"], recurrence=2, q_value=0.7),
+            _make_entry("e2", importance=0.6, tags=["b", "c"], evidence=["ev2"], recurrence=3, q_value=0.5),
         ]
         result = _create_consolidated_entry(cluster, "summary text", "detail text", storage)
         assert result.id.startswith("M-")
@@ -426,9 +424,7 @@ class TestFindClusters:
         storage.store(_make_entry("outlier", content="outlier"))
         # 3 similar + 1 outlier
         embedder = _make_embedder(vectors=[_V1, _V2, _V3, _V_OUTLIER])
-        result = find_clusters(
-            storage, embedder, similarity_threshold=0.5, min_cluster_size=3
-        )
+        result = find_clusters(storage, embedder, similarity_threshold=0.5, min_cluster_size=3)
         # Should get 1 cluster of 3 (outlier excluded)
         assert len(result) == 1
         cluster_ids = {e.id for e in result[0]}
@@ -441,9 +437,7 @@ class TestFindClusters:
         for i in range(3):
             storage.store(_make_entry(f"f{i}", namespace="ns-b"))
         embedder = _make_embedder(vectors=[_V1, _V2, _V3])
-        result = find_clusters(
-            storage, embedder, similarity_threshold=0.5, min_cluster_size=3, namespace="ns-a"
-        )
+        result = find_clusters(storage, embedder, similarity_threshold=0.5, min_cluster_size=3, namespace="ns-a")
         if result:
             for entry in result[0]:
                 assert entry.namespace == "ns-a"
@@ -455,9 +449,7 @@ class TestFindClusters:
         # Only return 3 vectors even though more entries exist
         embedder = _make_embedder(vectors=[_V1, _V2, _V3])
         embedder.embed_batch.return_value = [_V1, _V2, _V3]
-        result = find_clusters(
-            storage, embedder, similarity_threshold=0.5, min_cluster_size=3, max_entries=3
-        )
+        result = find_clusters(storage, embedder, similarity_threshold=0.5, min_cluster_size=3, max_entries=3)
         # embed_batch called with at most max_entries entries
         call_args = embedder.embed_batch.call_args
         assert call_args is not None

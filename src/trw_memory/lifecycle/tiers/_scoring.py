@@ -7,13 +7,12 @@ named tuple used to report sweep outcomes.
 from __future__ import annotations
 
 import math
-from datetime import date
+from datetime import datetime, timezone
 from typing import NamedTuple
 
 from trw_memory.lifecycle._utils import days_since_access as _days_since_access
 from trw_memory.models.config import MemoryConfig
 from trw_memory.retrieval.dense import cosine_similarity
-
 
 # ---------------------------------------------------------------------------
 # Result types
@@ -88,11 +87,7 @@ def compute_importance_score(
         relevance = max(0.0, cosine_similarity(query_embedding, entry_embedding))
     else:
         # Token overlap ratio fallback
-        entry_text = (
-            str(entry.get("content", "")).lower()
-            + " "
-            + str(entry.get("detail", "")).lower()
-        )
+        entry_text = str(entry.get("content", "")).lower() + " " + str(entry.get("detail", "")).lower()
         entry_tokens = set(entry_text.split())
         query_set = {t.lower() for t in query_tokens}
         if query_set:
@@ -101,7 +96,7 @@ def compute_importance_score(
             relevance = 0.0
 
     # Recency: exponential decay based on days since access
-    today = date.today()
+    today = datetime.now(tz=timezone.utc).date()
     days = _days_since_access(entry, today)
     half_life = cfg.decay_half_life_days
     decay_rate = math.log(2) / half_life if half_life > 0 else 0.0

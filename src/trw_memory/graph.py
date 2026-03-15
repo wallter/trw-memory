@@ -115,9 +115,7 @@ def create_consolidation_edges(
 
     for source_id in entry.consolidated_from:
         # Check source exists
-        row = conn.execute(
-            "SELECT id FROM memories WHERE id = ?", (source_id,)
-        ).fetchone()
+        row = conn.execute("SELECT id FROM memories WHERE id = ?", (source_id,)).fetchone()
         if row is None:
             logger.debug("consolidation_edge_skip_missing", source_id=source_id)
             continue
@@ -170,7 +168,7 @@ def graph_query(
         if edge_types:
             placeholders = ", ".join("?" for _ in edge_types)
             sql = (
-                f"SELECT target_id, edge_type, weight FROM memory_graph_edges "
+                f"SELECT target_id, edge_type, weight FROM memory_graph_edges "  # noqa: S608 — placeholders is ? repeated (no user input in SQL structure); values are parameterized
                 f"WHERE source_id = ? AND edge_type IN ({placeholders})"
             )
             params: tuple[str, ...] = (node_id, *edge_types)
@@ -182,12 +180,14 @@ def graph_query(
             target_id, edge_type, weight = row
             if target_id not in visited:
                 visited.add(target_id)
-                results.append({
-                    "id": target_id,
-                    "depth": current_depth + 1,
-                    "edge_type": edge_type,
-                    "weight": weight,
-                })
+                results.append(
+                    {
+                        "id": target_id,
+                        "depth": current_depth + 1,
+                        "edge_type": edge_type,
+                        "weight": weight,
+                    }
+                )
                 queue.append((target_id, current_depth + 1))
 
     return results
@@ -238,17 +238,16 @@ def apply_importance_boost(
     """
     new_importance = min(round(entry.importance + delta, 4), 1.0)
     now = datetime.now(timezone.utc).isoformat()
-    outcome = (
-        f"importance_boost:delta=+{delta:.2f}:reason={reason}:"
-        f"new_value={new_importance:.4f}:timestamp={now}"
-    )
+    outcome = f"importance_boost:delta=+{delta:.2f}:reason={reason}:new_value={new_importance:.4f}:timestamp={now}"
 
-    return entry.model_copy(update={
-        "importance": new_importance,
-        "outcome_history": [*entry.outcome_history, outcome],
-        "cross_validated": True,
-        "updated_at": datetime.now(timezone.utc),
-    })
+    return entry.model_copy(
+        update={
+            "importance": new_importance,
+            "outcome_history": [*entry.outcome_history, outcome],
+            "cross_validated": True,
+            "updated_at": datetime.now(timezone.utc),
+        }
+    )
 
 
 def apply_importance_decay(
@@ -261,16 +260,15 @@ def apply_importance_decay(
     """
     new_importance = max(round(entry.importance - delta, 4), 0.0)
     now = datetime.now(timezone.utc).isoformat()
-    outcome = (
-        f"importance_decay:delta=-{delta:.2f}:reason=unused_90d:"
-        f"new_value={new_importance:.4f}:timestamp={now}"
-    )
+    outcome = f"importance_decay:delta=-{delta:.2f}:reason=unused_90d:new_value={new_importance:.4f}:timestamp={now}"
 
-    return entry.model_copy(update={
-        "importance": new_importance,
-        "outcome_history": [*entry.outcome_history, outcome],
-        "updated_at": datetime.now(timezone.utc),
-    })
+    return entry.model_copy(
+        update={
+            "importance": new_importance,
+            "outcome_history": [*entry.outcome_history, outcome],
+            "updated_at": datetime.now(timezone.utc),
+        }
+    )
 
 
 def memory_decay_pass(

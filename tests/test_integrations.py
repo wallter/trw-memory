@@ -71,7 +71,6 @@ def _make_langchain_mocks() -> dict[str, types.ModuleType]:
     class BaseChatMessageHistory:
         """Mock BaseChatMessageHistory ABC."""
 
-
     lc_history.BaseChatMessageHistory = BaseChatMessageHistory  # type: ignore[attr-defined]
     lc_core.chat_history = lc_history  # type: ignore[attr-defined]
 
@@ -301,23 +300,17 @@ class TestLangChainAdapter:
 
     def test_session_id_stored(self, tmp_backend: Any) -> None:
         """UT-LC-10: Constructor sets session_id."""
-        history = self.mod.TRWChatMessageHistory(
-            session_id="s1", backend=tmp_backend
-        )
+        history = self.mod.TRWChatMessageHistory(session_id="s1", backend=tmp_backend)
         assert history.session_id == "s1"
 
     def test_messages_empty_initially(self, tmp_backend: Any) -> None:
         """UT-LC-02: Empty history returns empty list."""
-        history = self.mod.TRWChatMessageHistory(
-            session_id="s1", backend=tmp_backend
-        )
+        history = self.mod.TRWChatMessageHistory(session_id="s1", backend=tmp_backend)
         assert history.messages == []
 
     def test_add_messages_stores_entries(self, tmp_backend: Any) -> None:
         """UT-LC-04: add_messages stores entries retrievable via messages."""
-        history = self.mod.TRWChatMessageHistory(
-            session_id="s1", backend=tmp_backend
-        )
+        history = self.mod.TRWChatMessageHistory(session_id="s1", backend=tmp_backend)
         history.add_messages([self.HumanMessage("hello"), self.AIMessage("hi")])
 
         msgs = history.messages
@@ -327,9 +320,7 @@ class TestLangChainAdapter:
 
     def test_messages_returns_chronological_order(self, tmp_backend: Any) -> None:
         """UT-LC-03: Messages are returned in insertion order."""
-        history = self.mod.TRWChatMessageHistory(
-            session_id="s1", backend=tmp_backend
-        )
+        history = self.mod.TRWChatMessageHistory(session_id="s1", backend=tmp_backend)
         for i in range(5):
             history.add_messages([self.HumanMessage(f"msg-{i}")])
 
@@ -338,9 +329,7 @@ class TestLangChainAdapter:
 
     def test_clear_removes_all_messages(self, tmp_backend: Any) -> None:
         """UT-LC-05: clear() removes all messages for the session."""
-        history = self.mod.TRWChatMessageHistory(
-            session_id="s1", backend=tmp_backend
-        )
+        history = self.mod.TRWChatMessageHistory(session_id="s1", backend=tmp_backend)
         history.add_messages([self.HumanMessage("hello")])
         assert len(history.messages) == 1
 
@@ -362,9 +351,7 @@ class TestLangChainAdapter:
 
     def test_message_role_preserved(self, tmp_backend: Any) -> None:
         """UT-LC-07: Message roles (human/ai) are preserved."""
-        history = self.mod.TRWChatMessageHistory(
-            session_id="s1", backend=tmp_backend
-        )
+        history = self.mod.TRWChatMessageHistory(session_id="s1", backend=tmp_backend)
         history.add_messages([self.HumanMessage("q"), self.AIMessage("a")])
 
         msgs = history.messages
@@ -394,18 +381,14 @@ class TestLangChainAdapter:
     def test_close_non_owned_backend(self) -> None:
         """close() on non-owned backend does not call backend.close()."""
         mock_backend = MagicMock()
-        history = self.mod.TRWChatMessageHistory(
-            session_id="s1", backend=mock_backend
-        )
+        history = self.mod.TRWChatMessageHistory(session_id="s1", backend=mock_backend)
         history.close()
         mock_backend.close.assert_not_called()
 
     def test_close_owned_backend(self, tmp_path: Any) -> None:
         """close() on owned backend releases resources."""
         mock_backend = MagicMock()
-        history = self.mod.TRWChatMessageHistory(
-            session_id="s1", backend=mock_backend
-        )
+        history = self.mod.TRWChatMessageHistory(session_id="s1", backend=mock_backend)
         # Force ownership
         history._owns_backend = True
         history.close()
@@ -413,9 +396,7 @@ class TestLangChainAdapter:
 
     def test_context_manager(self, tmp_backend: Any) -> None:
         """Context manager calls close() on exit."""
-        history = self.mod.TRWChatMessageHistory(
-            session_id="s1", backend=tmp_backend
-        )
+        history = self.mod.TRWChatMessageHistory(session_id="s1", backend=tmp_backend)
         with history as h:
             assert h is history
         # Should not raise — close is safe on non-owned backend
@@ -552,16 +533,12 @@ class TestCrewAIAdapter:
 
     def test_instantiation(self, tmp_backend: Any) -> None:
         """UT-CA-01: TRWCrewStorage instantiates correctly."""
-        storage = self.mod.TRWCrewStorage(
-            namespace="test", backend=tmp_backend
-        )
+        storage = self.mod.TRWCrewStorage(namespace="test", backend=tmp_backend)
         assert storage.namespace == "test"
 
     def test_save_stores_entry(self, tmp_backend: Any) -> None:
         """UT-CA-02: save() stores content in backend."""
-        storage = self.mod.TRWCrewStorage(
-            namespace="default", backend=tmp_backend
-        )
+        storage = self.mod.TRWCrewStorage(namespace="default", backend=tmp_backend)
         storage.save("found a bug in module X")
 
         entries = tmp_backend.list_entries(namespace="default", limit=100)
@@ -570,9 +547,7 @@ class TestCrewAIAdapter:
 
     def test_save_with_agent_tag(self, tmp_backend: Any) -> None:
         """UT-CA-03: save() with agent adds agent tag."""
-        storage = self.mod.TRWCrewStorage(
-            namespace="default", backend=tmp_backend
-        )
+        storage = self.mod.TRWCrewStorage(namespace="default", backend=tmp_backend)
         storage.save("finding", agent="researcher")
 
         entries = tmp_backend.list_entries(namespace="default", limit=100)
@@ -580,9 +555,7 @@ class TestCrewAIAdapter:
 
     def test_search_returns_results(self, tmp_backend: Any) -> None:
         """UT-CA-04: search() returns matching entries."""
-        storage = self.mod.TRWCrewStorage(
-            namespace="default", backend=tmp_backend
-        )
+        storage = self.mod.TRWCrewStorage(namespace="default", backend=tmp_backend)
         storage.save("bug in authentication module")
 
         results = storage.search("authentication")
@@ -591,9 +564,7 @@ class TestCrewAIAdapter:
 
     def test_search_score_threshold(self, tmp_backend: Any) -> None:
         """search() with score_threshold filters results."""
-        storage = self.mod.TRWCrewStorage(
-            namespace="default", backend=tmp_backend
-        )
+        storage = self.mod.TRWCrewStorage(namespace="default", backend=tmp_backend)
         storage.save("low importance entry")
 
         # All entries have importance 0.5, so threshold 0.6 should filter all
@@ -606,9 +577,7 @@ class TestCrewAIAdapter:
 
     def test_reset_clears_all(self, tmp_backend: Any) -> None:
         """UT-CA-05: reset() clears all entries."""
-        storage = self.mod.TRWCrewStorage(
-            namespace="default", backend=tmp_backend
-        )
+        storage = self.mod.TRWCrewStorage(namespace="default", backend=tmp_backend)
         storage.save("entry 1")
         storage.save("entry 2")
         assert tmp_backend.count(namespace="default") == 2
@@ -618,9 +587,7 @@ class TestCrewAIAdapter:
 
     def test_save_with_metadata(self, tmp_backend: Any) -> None:
         """UT-CA-06: save() passes metadata to backend."""
-        storage = self.mod.TRWCrewStorage(
-            namespace="default", backend=tmp_backend
-        )
+        storage = self.mod.TRWCrewStorage(namespace="default", backend=tmp_backend)
         storage.save("finding", metadata={"priority": "high"})
 
         entries = tmp_backend.list_entries(namespace="default", limit=100)
@@ -628,9 +595,7 @@ class TestCrewAIAdapter:
 
     def test_search_respects_limit(self, tmp_backend: Any) -> None:
         """UT-CA-07: search() respects limit parameter."""
-        storage = self.mod.TRWCrewStorage(
-            namespace="default", search_limit=5, backend=tmp_backend
-        )
+        storage = self.mod.TRWCrewStorage(namespace="default", search_limit=5, backend=tmp_backend)
         for i in range(10):
             storage.save(f"entry about topic {i}")
 
@@ -659,9 +624,7 @@ class TestCrewAIAdapter:
 
     def test_context_manager(self, tmp_backend: Any) -> None:
         """Context manager calls close() on exit."""
-        storage = self.mod.TRWCrewStorage(
-            namespace="default", backend=tmp_backend
-        )
+        storage = self.mod.TRWCrewStorage(namespace="default", backend=tmp_backend)
         with storage as s:
             assert s is storage
 
@@ -685,9 +648,7 @@ class TestVSCodeInterface:
         """UT-VS-02: VSCodeMemoryInterface declares all 4 methods."""
         from trw_memory.integrations.vscode import VSCodeMemoryInterface
 
-        methods = [
-            m for m in dir(VSCodeMemoryInterface) if not m.startswith("_")
-        ]
+        methods = [m for m in dir(VSCodeMemoryInterface) if not m.startswith("_")]
         assert "get_relevant" in methods
         assert "store_selection" in methods
         assert "search" in methods
@@ -887,14 +848,7 @@ class TestFactory:
         after = set(sys.modules.keys())
 
         new_modules = after - before
-        framework_modules = [
-            m
-            for m in new_modules
-            if any(
-                f in m
-                for f in ["langchain", "llama_index", "crewai"]
-            )
-        ]
+        framework_modules = [m for m in new_modules if any(f in m for f in ["langchain", "llama_index", "crewai"])]
         assert framework_modules == [], f"Framework modules loaded: {framework_modules}"
 
 
@@ -913,13 +867,13 @@ class TestIntegration:
         HumanMessage = mocks["langchain_core.messages"].HumanMessage  # type: ignore[attr-defined]
         AIMessage = mocks["langchain_core.messages"].AIMessage  # type: ignore[attr-defined]
 
-        history = mod.TRWChatMessageHistory(
-            session_id="round-trip", backend=tmp_backend
+        history = mod.TRWChatMessageHistory(session_id="round-trip", backend=tmp_backend)
+        history.add_messages(
+            [
+                HumanMessage("What is TRW?"),
+                AIMessage("TRW is an operational framework."),
+            ]
         )
-        history.add_messages([
-            HumanMessage("What is TRW?"),
-            AIMessage("TRW is an operational framework."),
-        ])
 
         msgs = history.messages
         assert len(msgs) == 2
@@ -952,9 +906,7 @@ class TestIntegration:
         """IT-03: CrewAI save + search round-trip."""
         mocks = _make_crewai_mocks()
         mod = _import_crewai_adapter(mocks)
-        storage = mod.TRWCrewStorage(
-            namespace="default", backend=tmp_backend
-        )
+        storage = mod.TRWCrewStorage(namespace="default", backend=tmp_backend)
         storage.save("Important finding about authentication")
         results = storage.search("authentication")
         assert len(results) >= 1

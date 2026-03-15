@@ -214,7 +214,7 @@ def entry_utility(
     """
     cfg = config or MemoryConfig()
     effective_fallback = fallback_days if fallback_days is not None else 30
-    today = date.today()
+    today = datetime.now(tz=timezone.utc).date()
 
     # MemoryEntry uses 'importance' (was 'impact' in LearningEntry)
     q_value = _float_field(entry, "q_value", _float_field(entry, "importance", 0.5))
@@ -496,7 +496,7 @@ def utility_based_prune_candidates(
     """
     candidates: list[dict[str, object]] = []
     seen_ids: set[str] = set()
-    today = date.today()
+    today = datetime.now(tz=timezone.utc).date()
 
     for data in entries:
         entry_id = str(data.get("id", ""))
@@ -506,7 +506,9 @@ def utility_based_prune_candidates(
         created_raw = data.get("created_at")
         created_str = str(created_raw) if created_raw is not None else ""
         try:
-            created = date.fromisoformat(created_str[:10]) if created_str and created_str not in ("None", "null") else today
+            created = (
+                date.fromisoformat(created_str[:10]) if created_str and created_str not in ("None", "null") else today
+            )
         except ValueError:
             created = today
 
@@ -515,14 +517,16 @@ def utility_based_prune_candidates(
 
         # Tier 1: Status-based cleanup
         if entry_status in ("resolved", "obsolete"):
-            candidates.append({
-                "id": entry_id,
-                "content": data.get("content", ""),
-                "age_days": age_days,
-                "utility": 0.0,
-                "suggested_status": entry_status,
-                "reason": f"Already marked {entry_status} — cleanup candidate",
-            })
+            candidates.append(
+                {
+                    "id": entry_id,
+                    "content": data.get("content", ""),
+                    "age_days": age_days,
+                    "utility": 0.0,
+                    "suggested_status": entry_status,
+                    "reason": f"Already marked {entry_status} — cleanup candidate",
+                }
+            )
             seen_ids.add(entry_id)
             continue
 
@@ -530,33 +534,35 @@ def utility_based_prune_candidates(
 
         # Tier 2: Delete-level utility
         if utility < delete_threshold:
-            candidates.append({
-                "id": entry_id,
-                "content": data.get("content", ""),
-                "age_days": age_days,
-                "utility": round(utility, 3),
-                "suggested_status": "obsolete",
-                "reason": (
-                    f"Utility {utility:.3f} below delete threshold "
-                    f"({delete_threshold:.3f}). age={age_days}d"
-                ),
-            })
+            candidates.append(
+                {
+                    "id": entry_id,
+                    "content": data.get("content", ""),
+                    "age_days": age_days,
+                    "utility": round(utility, 3),
+                    "suggested_status": "obsolete",
+                    "reason": (
+                        f"Utility {utility:.3f} below delete threshold ({delete_threshold:.3f}). age={age_days}d"
+                    ),
+                }
+            )
             seen_ids.add(entry_id)
             continue
 
         # Tier 3: Prune-level utility (fading, older than 14 days)
         if utility < prune_threshold and age_days > 14:
-            candidates.append({
-                "id": entry_id,
-                "content": data.get("content", ""),
-                "age_days": age_days,
-                "utility": round(utility, 3),
-                "suggested_status": "obsolete",
-                "reason": (
-                    f"Utility {utility:.3f} below prune threshold "
-                    f"({prune_threshold:.3f}) and age {age_days}d > 14d"
-                ),
-            })
+            candidates.append(
+                {
+                    "id": entry_id,
+                    "content": data.get("content", ""),
+                    "age_days": age_days,
+                    "utility": round(utility, 3),
+                    "suggested_status": "obsolete",
+                    "reason": (
+                        f"Utility {utility:.3f} below prune threshold ({prune_threshold:.3f}) and age {age_days}d > 14d"
+                    ),
+                }
+            )
             seen_ids.add(entry_id)
 
     return candidates

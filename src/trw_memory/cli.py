@@ -34,7 +34,7 @@ async def _handle_store(args: argparse.Namespace) -> int:
     try:
         result = await client.store(
             content=args.summary,
-            tags=args.tags if args.tags else None,
+            tags=args.tags or None,
             importance=args.importance,
             detail=args.detail,
         )
@@ -51,7 +51,7 @@ async def _handle_recall(args: argparse.Namespace) -> int:
     """Handle the 'recall' subcommand."""
     client = MemoryClient(namespace=args.namespace, mode="local")
     try:
-        tags = args.tags if args.tags else None
+        tags = args.tags or None
         results = await client.recall(
             query=args.query,
             limit=args.limit,
@@ -78,7 +78,7 @@ async def _handle_search(args: argparse.Namespace) -> int:
 
     client = MemoryClient(namespace=args.namespace, mode="local")
     try:
-        tags = args.tags if args.tags else None
+        tags = args.tags or None
         results = await client.search(
             tags=tags,
             min_importance=args.min_importance,

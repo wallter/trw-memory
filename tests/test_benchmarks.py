@@ -276,9 +276,9 @@ class TestQualityMetrics:
     def test_mean_reciprocal_rank(self) -> None:
         """MRR over multiple queries."""
         data = [
-            (["a", "b"], {"a"}),      # RR = 1.0
-            (["x", "a"], {"a"}),      # RR = 0.5
-            (["x", "y", "a"], {"a"}), # RR = 1/3
+            (["a", "b"], {"a"}),  # RR = 1.0
+            (["x", "a"], {"a"}),  # RR = 0.5
+            (["x", "y", "a"], {"a"}),  # RR = 1/3
         ]
         expected = (1.0 + 0.5 + 1 / 3) / 3
         assert mean_reciprocal_rank(data) == pytest.approx(expected)
@@ -480,7 +480,7 @@ class TestRunner:
             "suites": {
                 "quality": {
                     "precision_at_5": 0.70,  # -22% -> regression
-                    "recall_at_10": 0.79,    # -1.25% -> no regression
+                    "recall_at_10": 0.79,  # -1.25% -> no regression
                 },
             },
         }
@@ -574,18 +574,14 @@ class TestRunner:
 
     def test_golden_set_bundled_fixture_exists(self) -> None:
         """The bundled golden_set.json fixture exists and has 50 entries."""
-        fixture_path = (
-            Path(__file__).parent.parent / "benchmarks" / "fixtures" / "golden_set.json"
-        )
+        fixture_path = Path(__file__).parent.parent / "benchmarks" / "fixtures" / "golden_set.json"
         assert fixture_path.exists(), f"Missing: {fixture_path}"
         data = json.loads(fixture_path.read_text())
         assert len(data["entries"]) == 50
 
     def test_dedup_set_bundled_fixture_exists(self) -> None:
         """The bundled dedup_set.json fixture exists and has 30 pairs."""
-        fixture_path = (
-            Path(__file__).parent.parent / "benchmarks" / "fixtures" / "dedup_set.json"
-        )
+        fixture_path = Path(__file__).parent.parent / "benchmarks" / "fixtures" / "dedup_set.json"
         assert fixture_path.exists(), f"Missing: {fixture_path}"
         data = json.loads(fixture_path.read_text())
         assert len(data["pairs"]) == 30

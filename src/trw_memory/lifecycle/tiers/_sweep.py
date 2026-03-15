@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import json
 from collections import OrderedDict
-from datetime import date, datetime, timezone
+from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
-def execute_sweep(
+def execute_sweep(  # noqa: C901
     *,
     hot: OrderedDict[str, MemoryEntry],
     config: MemoryConfig,
@@ -56,7 +57,7 @@ def execute_sweep(
         TierSweepResult with counts of promoted, demoted, purged, and errors.
     """
     cfg = config
-    today = date.today()
+    today = datetime.now(tz=timezone.utc).date()
     promoted = 0
     demoted = 0
     purged = 0
@@ -67,8 +68,7 @@ def execute_sweep(
     # 1. Hot -> Warm: evict stale hot entries
     stale_hot_ids: list[str] = []
     for entry_id, entry in list(hot.items()):
-        entry_dict = entry.model_dump()
-        days = _days_since_access(entry_dict, today)
+        days = _days_since_access(entry.model_dump(), today)
         if days > cfg.hot_ttl_days:
             stale_hot_ids.append(entry_id)
 
@@ -78,14 +78,14 @@ def execute_sweep(
             warm_add_fn(entry_id, evicted.model_dump(), None)
             demoted += 1
             logger.debug("sweep_hot_to_warm", entry_id=entry_id)
-        except (OSError, StorageError, ValueError):
+        except (OSError, StorageError, ValueError):  # per-item error handling: one failed eviction must not abort the sweep  # noqa: PERF203
             logger.warning("sweep_hot_to_warm_failed", entry_id=entry_id, exc_info=True)
             errors += 1
 
     # 2. Warm -> Cold: scan entries directory for idle low-importance entries
     if entries_dir.exists():
         for yaml_file in sorted(entries_dir.glob("*.yaml")):
-            if yaml_file.name in ("index.yaml",):
+            if yaml_file.name == "index.yaml":
                 continue
             try:
                 data = read_yaml(yaml_file)
@@ -93,8 +93,7 @@ def execute_sweep(
                 if not entry_id:
                     continue
                 # Skip non-active entries
-                status_val = str(data.get("status", "active"))
-                if status_val != "active":
+                if str(data.get("status", "active")) != "active":
                     continue
                 days = _days_since_access(data, today)
                 importance = compute_importance_score(data, [], config=cfg)
@@ -130,9 +129,7 @@ def execute_sweep(
                         "purged_at": datetime.now(timezone.utc).isoformat(),
                         "days_idle": days,
                         "importance_score": importance,
-                        "importance": float(
-                            str(data.get("importance", data.get("impact", 0.5)))
-                        ),
+                        "importance": float(str(data.get("importance", data.get("impact", 0.5)))),
                         "content": str(data.get("content", data.get("summary", ""))),
                     }
                     purge_audit_path.parent.mkdir(parents=True, exist_ok=True)
@@ -146,7 +143,7 @@ def execute_sweep(
                         days=days,
                         importance_score=importance,
                     )
-            except (OSError, StorageError, ValueError):
+            except (OSError, StorageError, ValueError):  # per-item error handling: skip unreadable files, continue sweep  # noqa: PERF203
                 logger.warning(
                     "sweep_cold_purge_failed",
                     path=str(yaml_file),

@@ -119,9 +119,7 @@ class TestLoadCaching:
     def test_load_not_re_attempted_after_failure(self) -> None:
         provider = _unavailable_provider()
         # _load_model should return immediately without re-trying
-        with patch.object(
-            provider.__class__, "_load_model", wraps=provider._load_model
-        ) as mock_load:
+        with patch.object(provider.__class__, "_load_model", wraps=provider._load_model) as mock_load:
             provider.available()
             provider.available()
         # Called twice, but the actual import path must only run once.

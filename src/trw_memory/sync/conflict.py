@@ -104,9 +104,7 @@ def resolve_conflict(
     merged_from = list(set(local.merged_from + remote.merged_from))
 
     now = datetime.now(timezone.utc).isoformat()
-    outcome = (
-        f"conflict_merged:local={local.id}:remote={remote.id}:timestamp={now}"
-    )
+    outcome = f"conflict_merged:local={local.id}:remote={remote.id}:timestamp={now}"
 
     # Use local as the base, update with merged values
     merged = local.model_copy(

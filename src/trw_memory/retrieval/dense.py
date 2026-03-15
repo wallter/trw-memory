@@ -98,7 +98,7 @@ def dense_search(
     q_vec: list[float] | None = query_embedding
     if q_vec is None:
         # embedder is not None here (guarded above)
-        assert embedder is not None  # for mypy
+        assert embedder is not None  # noqa: S101 — mypy narrowing guard; embedder is not None here: the early-return guard above (line ~89) exits when embedder is None and query_embedding is also None
         try:
             q_vec = embedder.embed(query)
         except (RuntimeError, ValueError, TypeError):

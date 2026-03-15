@@ -37,9 +37,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient:
 
 
 class TestAutoRecallHappy:
-    async def test_query_extracted_and_memories_injected(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_query_extracted_and_memories_injected(self, client: MemoryClient) -> None:
         """Memories matching the query are injected as recalled_memories."""
         await client.store("pydantic strict mode required", tags=["pydantic"])
 
@@ -76,9 +74,7 @@ class TestAutoRecallHappy:
 
 
 class TestAutoRecallFailOpen:
-    async def test_missing_query_from_injects_empty(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_missing_query_from_injects_empty(self, client: MemoryClient) -> None:
         """If the query_from kwarg is absent, inject empty list."""
 
         @client.auto_recall(query_from="missing_key")
@@ -90,9 +86,7 @@ class TestAutoRecallFailOpen:
         result = await handler(x=42)
         assert result == []
 
-    async def test_backend_error_injects_empty(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_backend_error_injects_empty(self, client: MemoryClient) -> None:
         """If the backend raises, inject empty list (fail-open)."""
 
         @client.auto_recall(query_from="prompt")
@@ -102,9 +96,7 @@ class TestAutoRecallFailOpen:
             return recalled_memories
 
         # Patch recall to raise
-        with patch.object(
-            client, "recall", new_callable=AsyncMock, side_effect=RuntimeError("boom")
-        ):
+        with patch.object(client, "recall", new_callable=AsyncMock, side_effect=RuntimeError("boom")):
             result = await handler(prompt="anything")
         assert result == []
 
@@ -127,9 +119,7 @@ class TestAutoRecallFailOpen:
 
 
 class TestAutoRecallMinScore:
-    async def test_min_score_filters_low_results(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_min_score_filters_low_results(self, client: MemoryClient) -> None:
         """Results below min_score should be filtered out."""
         await client.store("low importance entry", importance=0.1)
         await client.store("high importance entry", importance=0.9)
@@ -152,43 +142,31 @@ class TestAutoRecallMinScore:
 
 
 class TestAutoRecallPositionalArg:
-    def test_positional_recalled_memories_raises(
-        self, client: MemoryClient
-    ) -> None:
+    def test_positional_recalled_memories_raises(self, client: MemoryClient) -> None:
         """If the decorated function has recalled_memories as a required
         positional parameter, raise TypeError at decoration time."""
         with pytest.raises(TypeError, match="recalled_memories"):
 
             @client.auto_recall(query_from="q")
-            async def handler(
-                q: str, recalled_memories: list[dict[str, Any]]
-            ) -> None:
+            async def handler(q: str, recalled_memories: list[dict[str, Any]]) -> None:
                 pass
 
-    def test_keyword_only_recalled_memories_ok(
-        self, client: MemoryClient
-    ) -> None:
+    def test_keyword_only_recalled_memories_ok(self, client: MemoryClient) -> None:
         """keyword-only recalled_memories should not raise."""
 
         @client.auto_recall(query_from="q")
-        async def handler(
-            q: str, *, recalled_memories: list[dict[str, Any]] | None = None
-        ) -> None:
+        async def handler(q: str, *, recalled_memories: list[dict[str, Any]] | None = None) -> None:
             pass
 
         # Should not raise; handler is a decorated coroutine function
         assert callable(handler)
         assert handler.__name__ == "handler"
 
-    def test_optional_positional_recalled_memories_ok(
-        self, client: MemoryClient
-    ) -> None:
+    def test_optional_positional_recalled_memories_ok(self, client: MemoryClient) -> None:
         """Positional recalled_memories with a default value should be allowed."""
 
         @client.auto_recall(query_from="q")
-        async def handler(
-            q: str, recalled_memories: list[dict[str, Any]] | None = None
-        ) -> None:
+        async def handler(q: str, recalled_memories: list[dict[str, Any]] | None = None) -> None:
             pass
 
         assert callable(handler)
@@ -203,9 +181,7 @@ class TestAutoRecallPositionalArg:
 class TestAutoRecallMetadata:
     def test_preserves_function_name(self, client: MemoryClient) -> None:
         @client.auto_recall(query_from="q")
-        async def my_handler(
-            q: str, *, recalled_memories: list[dict[str, Any]] | None = None
-        ) -> None:
+        async def my_handler(q: str, *, recalled_memories: list[dict[str, Any]] | None = None) -> None:
             """My docstring."""
 
         assert my_handler.__name__ == "my_handler"

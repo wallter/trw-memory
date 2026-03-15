@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import structlog
 
-from trw_memory.exceptions import ConfigError, StorageError
+from trw_memory.exceptions import ConfigError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespace import validate_namespace
@@ -64,7 +64,7 @@ def memory_status_impl(
             try:
                 ns_count = backend.count(namespace=ns)
                 namespaces[ns] = ns_count
-            except Exception:  # broad catch: best-effort namespace count
+            except Exception:  # broad catch: best-effort namespace count, per-item skip intentional  # noqa: PERF203, S110
                 pass
 
         # Also include active entry count
@@ -74,7 +74,7 @@ def memory_status_impl(
                 limit=10_000,
             )
             namespaces["__active__"] = len(active_entries)
-        except Exception:  # broad catch: best-effort active count
+        except Exception:  # broad catch: best-effort active count  # noqa: S110
             pass
 
     config_summary: dict[str, object] = {

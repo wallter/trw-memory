@@ -61,9 +61,7 @@ class ColdTierStore:
         cold_base = self._cold_dir().resolve()
         resolved = path.resolve()
         if not resolved.is_relative_to(cold_base):
-            raise ValueError(
-                f"Path traversal guard: {path} is not under cold dir {cold_base}"
-            )
+            raise ValueError(f"Path traversal guard: {path} is not under cold dir {cold_base}")
 
     def _assert_within_base_dir(self, path: Path) -> None:
         """Guard against path traversal attacks on any base dir operations.
@@ -79,9 +77,7 @@ class ColdTierStore:
         base = self._base_dir.resolve()
         resolved = path.resolve()
         if not resolved.is_relative_to(base):
-            raise ValueError(
-                f"Path traversal guard: {path} is not under base_dir {base}"
-            )
+            raise ValueError(f"Path traversal guard: {path} is not under base_dir {base}")
 
     def cold_archive(self, entry_id: str, entry_path: Path) -> None:
         """Move a warm-tier YAML entry to the cold archive partition.

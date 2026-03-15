@@ -73,9 +73,7 @@ class ForgetResultDict(TypedDict):
 class AgentWithRegisterTool(Protocol):
     """Protocol for agent objects that expose a ``register_tool`` method."""
 
-    def register_tool(
-        self, name: str, fn: Callable[..., Coroutine[object, object, object]]
-    ) -> None: ...
+    def register_tool(self, name: str, fn: Callable[..., Coroutine[object, object, object]]) -> None: ...
 
 
 @runtime_checkable
@@ -163,14 +161,10 @@ class MemoryClient:
                 self._resolved_mode = "local"
             except (OSError, ValueError, ImportError) as exc:
                 if mode == "local":
-                    raise MemoryConnectionError(
-                        f"Failed to create local backend: {exc}"
-                    ) from exc
+                    raise MemoryConnectionError(f"Failed to create local backend: {exc}") from exc
 
         if mode == "auto" and self._backend is None:
-            raise MemoryConnectionError(
-                "No connection mode available. Tried: local."
-            )
+            raise MemoryConnectionError("No connection mode available. Tried: local.")
 
     @property
     def resolved_mode(self) -> str:
@@ -218,9 +212,7 @@ class MemoryClient:
         if not content or not content.strip():
             raise ValueError("content must not be empty")
         if not 0.0 <= importance <= 1.0:
-            raise ValueError(
-                f"importance must be in [0.0, 1.0], got {importance}"
-            )
+            raise ValueError(f"importance must be in [0.0, 1.0], got {importance}")
 
         memory_id = _make_id()
         now = datetime.now(timezone.utc)
@@ -282,9 +274,7 @@ class MemoryClient:
 
         # Score by importance (keyword match already filtered by backend)
         results: list[MemoryResultDict] = [
-            _entry_to_result(entry, score=entry.importance)
-            for entry in entries
-            if entry.importance >= min_score
+            _entry_to_result(entry, score=entry.importance) for entry in entries if entry.importance >= min_score
         ]
 
         results.sort(key=lambda r: float(r["score"]), reverse=True)
@@ -307,13 +297,9 @@ class MemoryClient:
             backend = self._get_backend()
             existing = backend.get(memory_id)
             if existing is None:
-                raise MemoryNotFoundError(
-                    f"Memory entry {memory_id!r} not found"
-                )
+                raise MemoryNotFoundError(f"Memory entry {memory_id!r} not found")
             if existing.namespace != self._namespace:
-                raise MemoryNotFoundError(
-                    f"Memory entry {memory_id!r} not found in namespace {self._namespace!r}"
-                )
+                raise MemoryNotFoundError(f"Memory entry {memory_id!r} not found in namespace {self._namespace!r}")
             backend.delete(memory_id)
 
         return ForgetResultDict(
@@ -346,9 +332,7 @@ class MemoryClient:
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
         if not 0.0 <= min_importance <= 1.0:
-            raise ValueError(
-                f"min_importance must be in [0.0, 1.0], got {min_importance}"
-            )
+            raise ValueError(f"min_importance must be in [0.0, 1.0], got {min_importance}")
 
         async with self._lock:
             entries = self._get_backend().list_entries(
@@ -386,9 +370,7 @@ class MemoryClient:
         ) -> StoreResultDict:
             return await client.store(content, tags=tags, importance=importance)
 
-        async def memory_recall(
-            query: str, limit: int = 10
-        ) -> list[MemoryResultDict]:
+        async def memory_recall(query: str, limit: int = 10) -> list[MemoryResultDict]:
             return await client.recall(query, limit=limit)
 
         async def memory_forget(memory_id: str) -> ForgetResultDict:
@@ -407,9 +389,7 @@ class MemoryClient:
             "memory_search": memory_search,
         }
 
-    def register_tools(
-        self, agent: AgentWithRegisterTool | AgentWithToolDecorator
-    ) -> None:
+    def register_tools(self, agent: AgentWithRegisterTool | AgentWithToolDecorator) -> None:
         """Register memory tools with an agent framework.
 
         Attempts to register ``memory_store``, ``memory_recall``,
@@ -424,9 +404,7 @@ class MemoryClient:
             TypeError: If *agent* does not have a compatible registration API.
         """
         if self._tools_registered:
-            raise ToolAlreadyRegisteredError(
-                "register_tools() has already been called on this client"
-            )
+            raise ToolAlreadyRegisteredError("register_tools() has already been called on this client")
 
         tools = self._make_tool_functions()
 
@@ -442,9 +420,7 @@ class MemoryClient:
             for fn in tools.values():
                 dec(fn)
         else:
-            raise TypeError(
-                "Agent must have a 'register_tool()' method or 'tool()' decorator"
-            )
+            raise TypeError("Agent must have a 'register_tool()' method or 'tool()' decorator")
 
         self._tools_registered = True
 
@@ -489,29 +465,25 @@ class MemoryClient:
             for name, param in sig.parameters.items():
                 if (
                     name == "recalled_memories"
-                    and param.kind in (
+                    and param.kind
+                    in (
                         inspect.Parameter.POSITIONAL_ONLY,
                         inspect.Parameter.POSITIONAL_OR_KEYWORD,
                     )
                     and param.default is inspect.Parameter.empty
                 ):
                     raise TypeError(
-                        "Decorated function must not have 'recalled_memories' "
-                        "as a required positional parameter"
+                        "Decorated function must not have 'recalled_memories' as a required positional parameter"
                     )
 
             @functools.wraps(fn)
-            async def wrapper(
-                *args: object, **kwargs: object
-            ) -> object:
+            async def wrapper(*args: object, **kwargs: object) -> object:
                 memories: list[MemoryResultDict] = []
                 try:
                     query = kwargs.get(query_from, "")
                     if query:
                         raw = await client.recall(str(query), limit=limit)
-                        memories = [
-                            m for m in raw if float(m["score"]) >= min_score
-                        ]
+                        memories = [m for m in raw if float(m["score"]) >= min_score]
                 except Exception:  # broad catch: fail-open recall decorator
                     memories = []
 

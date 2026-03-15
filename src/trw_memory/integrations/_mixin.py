@@ -1,7 +1,14 @@
 """Shared mixin for integration adapter resource management."""
+
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Self
+import sys
+from typing import TYPE_CHECKING
+
+if sys.version_info >= (3, 11):
+    from typing import Self
+else:
+    from typing_extensions import Self
 
 if TYPE_CHECKING:
     from trw_memory.storage.interface import StorageBackend

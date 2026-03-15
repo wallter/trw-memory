@@ -12,8 +12,6 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
-
 from trw_memory.lifecycle.tiers._manager import TierManager
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 

@@ -76,7 +76,7 @@ def memory_search_impl(
     total = len(entries)
 
     # Pagination slice
-    page = entries[offset: offset + limit]
+    page = entries[offset : offset + limit]
 
     result_dicts = [e.model_dump(mode="json") for e in page]
 

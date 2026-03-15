@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from trw_memory.tools._types import McpServer
-
 from trw_memory.tools.consolidate import (
     memory_consolidate_impl,
     register_consolidate_tool,

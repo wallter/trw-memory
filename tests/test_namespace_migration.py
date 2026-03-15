@@ -107,14 +107,20 @@ class TestNamespaceManager:
         now = datetime.now(timezone.utc)
         backend.store(
             MemoryEntry(
-                id="M-001", content="test", namespace="project:alpha",
-                created_at=now, updated_at=now,
+                id="M-001",
+                content="test",
+                namespace="project:alpha",
+                created_at=now,
+                updated_at=now,
             )
         )
         backend.store(
             MemoryEntry(
-                id="M-002", content="test", namespace="project:beta",
-                created_at=now, updated_at=now,
+                id="M-002",
+                content="test",
+                namespace="project:beta",
+                created_at=now,
+                updated_at=now,
             )
         )
 
@@ -131,20 +137,29 @@ class TestNamespaceManager:
         now = datetime.now(timezone.utc)
         backend.store(
             MemoryEntry(
-                id="M-001", content="test", namespace="project:doomed",
-                created_at=now, updated_at=now,
+                id="M-001",
+                content="test",
+                namespace="project:doomed",
+                created_at=now,
+                updated_at=now,
             )
         )
         backend.store(
             MemoryEntry(
-                id="M-002", content="test", namespace="project:doomed",
-                created_at=now, updated_at=now,
+                id="M-002",
+                content="test",
+                namespace="project:doomed",
+                created_at=now,
+                updated_at=now,
             )
         )
         backend.store(
             MemoryEntry(
-                id="M-003", content="keep", namespace="default",
-                created_at=now, updated_at=now,
+                id="M-003",
+                content="keep",
+                namespace="default",
+                created_at=now,
+                updated_at=now,
             )
         )
 
@@ -163,14 +178,20 @@ class TestNamespaceManager:
         now = datetime.now(timezone.utc)
         backend.store(
             MemoryEntry(
-                id="M-001", content="a", namespace="default",
-                created_at=now, updated_at=now,
+                id="M-001",
+                content="a",
+                namespace="default",
+                created_at=now,
+                updated_at=now,
             )
         )
         backend.store(
             MemoryEntry(
-                id="M-002", content="b", namespace="default",
-                created_at=now, updated_at=now,
+                id="M-002",
+                content="b",
+                namespace="default",
+                created_at=now,
+                updated_at=now,
             )
         )
 

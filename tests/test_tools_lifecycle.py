@@ -84,10 +84,7 @@ class TestMemoryStoreImpl:
 
     def test_tags_passed_to_entry(self) -> None:
         backend = _mock_backend()
-        result = memory_store_impl(
-            "tagged content", "project:default",
-            backend=backend, tags=["python", "async"]
-        )
+        result = memory_store_impl("tagged content", "project:default", backend=backend, tags=["python", "async"])
         assert result["status"] == "stored"
         # Verify store was called
         assert backend.store.called
@@ -97,36 +94,25 @@ class TestMemoryStoreImpl:
 
     def test_importance_passed_to_entry(self) -> None:
         backend = _mock_backend()
-        memory_store_impl(
-            "important tip", "project:default",
-            backend=backend, importance=0.9
-        )
+        memory_store_impl("important tip", "project:default", backend=backend, importance=0.9)
         stored_entry: MemoryEntry = backend.store.call_args[0][0]
         assert stored_entry.importance == 0.9
 
     def test_importance_out_of_range_returns_error(self) -> None:
         backend = _mock_backend()
-        result = memory_store_impl(
-            "content", "project:default", backend=backend, importance=1.5
-        )
+        result = memory_store_impl("content", "project:default", backend=backend, importance=1.5)
         assert result["status"] == "invalid"
         assert "error" in result
 
     def test_detail_passed_to_entry(self) -> None:
         backend = _mock_backend()
-        memory_store_impl(
-            "tip", "project:default",
-            backend=backend, detail="extended explanation"
-        )
+        memory_store_impl("tip", "project:default", backend=backend, detail="extended explanation")
         stored_entry: MemoryEntry = backend.store.call_args[0][0]
         assert stored_entry.detail == "extended explanation"
 
     def test_metadata_passed_to_entry(self) -> None:
         backend = _mock_backend()
-        memory_store_impl(
-            "meta tip", "project:default",
-            backend=backend, metadata={"source": "test"}
-        )
+        memory_store_impl("meta tip", "project:default", backend=backend, metadata={"source": "test"})
         stored_entry: MemoryEntry = backend.store.call_args[0][0]
         assert stored_entry.metadata == {"source": "test"}
 
@@ -152,9 +138,7 @@ class TestMemoryStoreImpl:
 class TestMemoryConsolidateImpl:
     def test_dry_run_returns_plan_dict(self) -> None:
         backend = _mock_backend()
-        result = memory_consolidate_impl(
-            "project:default", backend=backend, dry_run=True
-        )
+        result = memory_consolidate_impl("project:default", backend=backend, dry_run=True)
         assert "clusters_found" in result
         assert "entries_consolidated" in result
         assert "dry_run" in result

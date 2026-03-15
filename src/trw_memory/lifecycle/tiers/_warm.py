@@ -101,9 +101,7 @@ class WarmTierStore:
         self._warm_sidecar_upsert(entry_id, entry_data)
         logger.debug("warm_tier_add", entry_id=entry_id, has_embedding=embedding is not None)
 
-    def _warm_sidecar_upsert(
-        self, entry_id: str, entry_data: dict[str, object]
-    ) -> None:
+    def _warm_sidecar_upsert(self, entry_id: str, entry_data: dict[str, object]) -> None:
         """Write entry metadata to the warm sidecar JSONL for keyword search."""
         sidecar = self._warm_sidecar_path()
         records: list[dict[str, object]] = []
@@ -120,9 +118,7 @@ class WarmTierStore:
                     continue
 
         # Use 'content' (MemoryEntry) or fall back to 'summary' (legacy)
-        summary = str(
-            entry_data.get("content", entry_data.get("summary", ""))
-        )
+        summary = str(entry_data.get("content", entry_data.get("summary", "")))
         record: dict[str, object] = {
             "id": entry_id,
             "summary": summary,
@@ -197,18 +193,13 @@ class WarmTierStore:
                 if backend is not None:
                     raw = backend.search_vectors(query_embedding, top_k=top_k)
                     if raw:
-                        return [
-                            {"id": eid, "score": float(1.0 - dist)}
-                            for eid, dist in raw
-                        ]
+                        return [{"id": eid, "score": float(1.0 - dist)} for eid, dist in raw]
             except (OSError, ValueError):
                 logger.debug("warm_tier_vec_search_failed", exc_info=True)
 
         return self._warm_keyword_search(query_tokens, top_k)
 
-    def _warm_keyword_search(
-        self, query_tokens: list[str], top_k: int
-    ) -> list[dict[str, object]]:
+    def _warm_keyword_search(self, query_tokens: list[str], top_k: int) -> list[dict[str, object]]:
         """Search the warm sidecar JSONL for keyword matches."""
         sidecar = self._warm_sidecar_path()
         if not sidecar.exists() or not query_tokens:

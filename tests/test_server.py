@@ -29,6 +29,7 @@ def _make_fastmcp_mock() -> tuple[MagicMock, MagicMock, list[str]]:
         def _decorator(fn: object) -> object:
             registered_tools.append(getattr(fn, "__name__", "unknown"))
             return fn
+
         return _decorator
 
     mcp_instance.tool = _tool_decorator
@@ -87,14 +88,13 @@ class TestServerModule:
     def test_six_tools_registered(self) -> None:
         """Exactly 6 tools must be registered via mcp.tool()."""
         server_mod, mcp_instance, registered_tools = _reload_server_with_mock()
-        assert len(registered_tools) == 6, (
-            f"Expected 6 tools, got {len(registered_tools)}: {registered_tools}"
-        )
+        assert len(registered_tools) == 6, f"Expected 6 tools, got {len(registered_tools)}: {registered_tools}"
         sys.modules.pop("trw_memory.server", None)
 
     def test_all_tool_modules_importable(self) -> None:
         """All 6 tool modules must be importable with their impl functions."""
         from trw_memory.tools import consolidate, forget, recall, search, status, store
+
         assert callable(store.memory_store_impl)
         assert callable(recall.memory_recall_impl)
         assert callable(forget.memory_forget_impl)
@@ -112,7 +112,11 @@ class TestServerModule:
         from trw_memory.tools.store import register_store_tool
 
         for fn in [
-            register_store_tool, register_recall_tool, register_forget_tool,
-            register_consolidate_tool, register_search_tool, register_status_tool,
+            register_store_tool,
+            register_recall_tool,
+            register_forget_tool,
+            register_consolidate_tool,
+            register_search_tool,
+            register_status_tool,
         ]:
             assert callable(fn), f"{fn} must be callable"

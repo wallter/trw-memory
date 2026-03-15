@@ -321,18 +321,21 @@ class TestExceptions:
 
     def test_memory_error_message_and_path(self) -> None:
         from trw_memory.exceptions import MemoryError as MemErr
+
         err = MemErr("test msg", path="/some/path")
         assert str(err) == "test msg"
         assert err.path == "/some/path"
 
     def test_memory_error_default_path_empty(self) -> None:
         from trw_memory.exceptions import MemoryError as MemErr
+
         err = MemErr("test")
         assert err.path == ""
 
     def test_storage_error_inherits_memory_error(self) -> None:
         from trw_memory.exceptions import MemoryError as MemErr
         from trw_memory.exceptions import StorageError
+
         err = StorageError("storage fail", path="/db")
         assert isinstance(err, MemErr)
         assert err.path == "/db"
@@ -340,5 +343,6 @@ class TestExceptions:
     def test_config_error_inherits_memory_error(self) -> None:
         from trw_memory.exceptions import ConfigError
         from trw_memory.exceptions import MemoryError as MemErr
+
         err = ConfigError("config fail")
         assert isinstance(err, MemErr)

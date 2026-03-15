@@ -67,13 +67,11 @@ class SSESubscriber:
             try:
                 headers: dict[str, str] = {}
                 if self._cfg.platform_api_key:
-                    headers["Authorization"] = (
-                        f"Bearer {self._cfg.platform_api_key}"
-                    )
+                    headers["Authorization"] = f"Bearer {self._cfg.platform_api_key}"
                 if self._last_event_id:
                     headers["Last-Event-ID"] = self._last_event_id
 
-                with httpx.Client(timeout=None) as client, client.stream("GET", url, headers=headers) as response:
+                with httpx.Client(timeout=None) as client, client.stream("GET", url, headers=headers) as response:  # noqa: S113 — timeout=None is intentional: SSE long-poll connection must stay open indefinitely until a message arrives
                     for line in response.iter_lines():
                         if self._stop_event.is_set():
                             return

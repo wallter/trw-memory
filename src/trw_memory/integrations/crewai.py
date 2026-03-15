@@ -29,10 +29,7 @@ except (ValueError, ModuleNotFoundError):
     _crewai_spec = None
 
 if _crewai_spec is None:
-    raise ImportError(
-        "crewai is required for the CrewAI adapter. "
-        'Install it with: pip install "trw-memory[crewai]"'
-    )
+    raise ImportError('crewai is required for the CrewAI adapter. Install it with: pip install "trw-memory[crewai]"')
 
 from trw_memory.integrations._mixin import BackendOwnerMixin
 
@@ -77,7 +74,9 @@ class TRWCrewStorage(BackendOwnerMixin):
         self._namespace = namespace
         self._search_limit = search_limit
         self._backend, self._owns_backend = resolve_backend(
-            namespace, storage_path, backend,
+            namespace,
+            storage_path,
+            backend,
         )
 
     @property
@@ -143,15 +142,16 @@ class TRWCrewStorage(BackendOwnerMixin):
             namespace=self._namespace,
         )
 
-        results: list[CrewSearchResult] = []
-        for entry in entries:
-            if entry.importance >= score_threshold:
-                results.append(CrewSearchResult(
-                    id=entry.id,
-                    metadata=dict(entry.metadata),
-                    context=entry.content,
-                    score=entry.importance,
-                ))
+        results = [
+            CrewSearchResult(
+                id=entry.id,
+                metadata=dict(entry.metadata),
+                context=entry.content,
+                score=entry.importance,
+            )
+            for entry in entries
+            if entry.importance >= score_threshold
+        ]
         return results
 
     def reset(self) -> None:

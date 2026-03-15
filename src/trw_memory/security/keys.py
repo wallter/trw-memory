@@ -28,6 +28,7 @@ from trw_memory.storage.interface import StorageBackend
 _keyring: types.ModuleType | None
 try:
     import keyring as _keyring
+
     _KEYRING_AVAILABLE = True
 except ImportError:
     _keyring = None
@@ -63,10 +64,7 @@ def _read_key_from_env() -> bytes | None:
     try:
         key = bytes.fromhex(raw)
         if len(key) != _KEY_LENGTH:
-            raise ConfigError(
-                f"{_ENV_VAR} must decode to {_KEY_LENGTH} bytes, "
-                f"got {len(key)}"
-            )
+            raise ConfigError(f"{_ENV_VAR} must decode to {_KEY_LENGTH} bytes, got {len(key)}")
         return key
     except ValueError as exc:
         raise ConfigError(f"Invalid hex in {_ENV_VAR}: {exc}") from exc
@@ -84,10 +82,7 @@ def _read_key_from_file(config: MemoryConfig) -> bytes | None:
         return None
     data = path.read_bytes()
     if len(data) != _KEY_LENGTH:
-        raise ConfigError(
-            f"Key file {path} must contain exactly {_KEY_LENGTH} bytes, "
-            f"got {len(data)}"
-        )
+        raise ConfigError(f"Key file {path} must contain exactly {_KEY_LENGTH} bytes, got {len(data)}")
     return data
 
 
@@ -151,16 +146,11 @@ def store_master_key(key: bytes, config: MemoryConfig) -> None:
         ConfigError: If the key cannot be stored (wrong length, write error).
     """
     if len(key) != _KEY_LENGTH:
-        raise ConfigError(
-            f"Master key must be {_KEY_LENGTH} bytes, got {len(key)}"
-        )
+        raise ConfigError(f"Master key must be {_KEY_LENGTH} bytes, got {len(key)}")
 
     if config.key_source == "keyring":
         if not _KEYRING_AVAILABLE or _keyring is None:
-            raise ConfigError(
-                "keyring package not installed — "
-                "install with: pip install keyring"
-            )
+            raise ConfigError("keyring package not installed — install with: pip install keyring")
         try:
             _keyring.set_password(_SERVICE_NAME, _KEY_ACCOUNT, key.hex())
             logger.info("master_key_stored", target="keyring")
@@ -170,8 +160,7 @@ def store_master_key(key: bytes, config: MemoryConfig) -> None:
 
     if config.key_source == "env":
         raise ConfigError(
-            "Cannot persist key to env var — set MEMORY_MASTER_KEY "
-            "in your shell profile or use key_source='file'"
+            "Cannot persist key to env var — set MEMORY_MASTER_KEY in your shell profile or use key_source='file'"
         )
 
     # file source
@@ -207,13 +196,9 @@ def rotate_master_key(
         ConfigError: If either key is not 32 bytes.
     """
     if len(old_key) != _KEY_LENGTH:
-        raise ConfigError(
-            f"old_key must be {_KEY_LENGTH} bytes, got {len(old_key)}"
-        )
+        raise ConfigError(f"old_key must be {_KEY_LENGTH} bytes, got {len(old_key)}")
     if len(new_key) != _KEY_LENGTH:
-        raise ConfigError(
-            f"new_key must be {_KEY_LENGTH} bytes, got {len(new_key)}"
-        )
+        raise ConfigError(f"new_key must be {_KEY_LENGTH} bytes, got {len(new_key)}")
 
     entries = backend.list_entries(limit=100_000)
     count = 0

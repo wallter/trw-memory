@@ -121,7 +121,9 @@ class LocalMemoryAdapter(BackendOwnerMixin):
 
         self._namespace = namespace
         self._backend, self._owns_backend = resolve_backend(
-            namespace, storage_path, backend,
+            namespace,
+            storage_path,
+            backend,
         )
 
     def get_relevant(

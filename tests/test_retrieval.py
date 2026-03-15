@@ -26,6 +26,7 @@ from trw_memory.retrieval.pipeline import hybrid_search
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_entry(
     entry_id: str,
     content: str,
@@ -72,6 +73,7 @@ class _StubEmbedder:
 # ---------------------------------------------------------------------------
 # bm25_search
 # ---------------------------------------------------------------------------
+
 
 class TestBM25Search:
     def test_returns_top_k_results(self) -> None:
@@ -158,6 +160,7 @@ class TestBM25Search:
 # cosine_similarity
 # ---------------------------------------------------------------------------
 
+
 class TestCosineSimilarity:
     def test_identical_vectors(self) -> None:
         v = [1.0, 2.0, 3.0]
@@ -196,6 +199,7 @@ class TestCosineSimilarity:
 # ---------------------------------------------------------------------------
 # dense_search
 # ---------------------------------------------------------------------------
+
 
 class TestDenseSearch:
     def _stored(self, ids: list[str], embedder: _StubEmbedder) -> dict[str, list[float]]:
@@ -281,6 +285,7 @@ class TestDenseSearch:
 # rrf_fuse
 # ---------------------------------------------------------------------------
 
+
 class TestRRFFuse:
     def test_empty_rankings_returns_empty(self) -> None:
         assert rrf_fuse([]) == []
@@ -341,6 +346,7 @@ class TestRRFFuse:
 # hybrid_search
 # ---------------------------------------------------------------------------
 
+
 class TestHybridSearch:
     def _entries(self) -> list[MemoryEntry]:
         return [
@@ -369,9 +375,7 @@ class TestHybridSearch:
         entries = self._entries()
         stored = {e.id: embedder.embed(e.id) or [] for e in entries}  # type: ignore[list-item]
         with patch("trw_memory.retrieval.pipeline.bm25_search", return_value=[]):
-            results = hybrid_search(
-                "e1", entries, embedder=embedder, stored_embeddings=stored
-            )
+            results = hybrid_search("e1", entries, embedder=embedder, stored_embeddings=stored)
         # Dense should find "e1" as top result (identical id prefix)
         assert len(results) >= 1
 
@@ -379,9 +383,7 @@ class TestHybridSearch:
         embedder = _StubEmbedder()
         entries = self._entries()
         stored = {e.id: embedder.embed(e.id) or [] for e in entries}  # type: ignore[list-item]
-        results = hybrid_search(
-            "pydantic model", entries, embedder=embedder, stored_embeddings=stored
-        )
+        results = hybrid_search("pydantic model", entries, embedder=embedder, stored_embeddings=stored)
         assert len(results) >= 1
 
     def test_neither_source_returns_empty(self) -> None:

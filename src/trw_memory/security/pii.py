@@ -64,9 +64,7 @@ _PII_PATTERNS: list[tuple[PIIType, re.Pattern[str], float]] = [
     ),
     (
         PIIType.PHONE,
-        re.compile(
-            r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"
-        ),
+        re.compile(r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"),
         0.8,
     ),
     (
@@ -143,16 +141,16 @@ def detect_pii(
 
     # Regex-based detection
     for pii_type, pattern, confidence in _PII_PATTERNS:
-        for m in pattern.finditer(text):
-            matches.append(
-                PIIMatch(
-                    pii_type=pii_type,
-                    value=m.group(),
-                    start=m.start(),
-                    end=m.end(),
-                    confidence=confidence,
-                )
+        matches.extend(
+            PIIMatch(
+                pii_type=pii_type,
+                value=m.group(),
+                start=m.start(),
+                end=m.end(),
+                confidence=confidence,
             )
+            for m in pattern.finditer(text)
+        )
 
     # High-entropy token detection
     # Split on whitespace and common delimiters to get tokens
@@ -163,10 +161,7 @@ def detect_pii(
         # Skip tokens already matched by regex patterns
         token_start = m.start()
         token_end = m.end()
-        already_matched = any(
-            pm.start <= token_start and pm.end >= token_end
-            for pm in matches
-        )
+        already_matched = any(pm.start <= token_start and pm.end >= token_end for pm in matches)
         if already_matched:
             continue
         ent = shannon_entropy(token)
@@ -240,9 +235,7 @@ def check_entry_pii(
     if action == PIIAction.BLOCK:
         pii_types = {m.pii_type for m in all_matches}
         raise MemoryError(
-            f"PII detected in entry {entry.id!r}: "
-            f"types={sorted(pii_types)}. "
-            f"Entry blocked by PII policy."
+            f"PII detected in entry {entry.id!r}: types={sorted(pii_types)}. Entry blocked by PII policy."
         )
 
     if action == PIIAction.REDACT:

@@ -51,9 +51,7 @@ def rrf_fuse(
     fused_scores: dict[str, float] = {}
     for ranking in rankings:
         for rank, (entry_id, _) in enumerate(ranking):
-            fused_scores[entry_id] = (
-                fused_scores.get(entry_id, 0.0) + 1.0 / (k + rank + 1)
-            )
+            fused_scores[entry_id] = fused_scores.get(entry_id, 0.0) + 1.0 / (k + rank + 1)
 
     result = list(fused_scores.items())
     result.sort(key=lambda x: x[1], reverse=True)

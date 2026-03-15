@@ -29,12 +29,29 @@ from trw_memory.storage.persistence import lock_for_rmw, read_yaml, write_yaml
 
 logger = structlog.get_logger()
 
-_VALID_UPDATE_FIELDS: frozenset[str] = frozenset({
-    "content", "detail", "tags", "evidence", "importance", "status",
-    "recurrence", "namespace", "updated_at", "last_accessed_at",
-    "access_count", "q_value", "q_observations", "source", "source_identity",
-    "merged_from", "consolidated_from", "consolidated_into", "metadata",
-})
+_VALID_UPDATE_FIELDS: frozenset[str] = frozenset(
+    {
+        "content",
+        "detail",
+        "tags",
+        "evidence",
+        "importance",
+        "status",
+        "recurrence",
+        "namespace",
+        "updated_at",
+        "last_accessed_at",
+        "access_count",
+        "q_value",
+        "q_observations",
+        "source",
+        "source_identity",
+        "merged_from",
+        "consolidated_from",
+        "consolidated_into",
+        "metadata",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -57,9 +74,7 @@ def _entry_to_dict(entry: MemoryEntry) -> dict[str, object]:
         "namespace": entry.namespace,
         "created_at": entry.created_at.isoformat(),
         "updated_at": entry.updated_at.isoformat(),
-        "last_accessed_at": (
-            entry.last_accessed_at.isoformat() if entry.last_accessed_at else None
-        ),
+        "last_accessed_at": (entry.last_accessed_at.isoformat() if entry.last_accessed_at else None),
         "access_count": entry.access_count,
         "q_value": entry.q_value,
         "q_observations": entry.q_observations,
@@ -108,9 +123,7 @@ def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
     updated_at = parse_dt(updated_at_raw) if updated_at_raw else datetime.now(timezone.utc)
 
     last_accessed_raw = data.get("last_accessed_at")
-    last_accessed_at: datetime | None = (
-        parse_dt(last_accessed_raw) if last_accessed_raw else None
-    )
+    last_accessed_at: datetime | None = parse_dt(last_accessed_raw) if last_accessed_raw else None
 
     status_raw = _str("status", "active")
     try:
@@ -119,9 +132,7 @@ def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
         status = MemoryStatus.ACTIVE
 
     consolidated_into_raw = data.get("consolidated_into")
-    consolidated_into: str | None = (
-        str(consolidated_into_raw) if consolidated_into_raw else None
-    )
+    consolidated_into: str | None = str(consolidated_into_raw) if consolidated_into_raw else None
 
     return MemoryEntry(
         id=_str("id"),
@@ -185,7 +196,7 @@ class YAMLBackend(StorageBackend):
             try:
                 data = read_yaml(yaml_file)
                 entries.append(_dict_to_entry(data))
-            except (OSError, StorageError, ValueError, KeyError):
+            except (OSError, StorageError, ValueError, KeyError):  # per-item error handling: skip corrupt YAML files, load the rest  # noqa: PERF203
                 logger.warning("yaml_backend_skip_corrupt", path=str(yaml_file))
         return entries
 
@@ -345,11 +356,7 @@ class YAMLBackend(StorageBackend):
             # Keyword match
             entry_status = str(entry.status)
             tag_text = " ".join(entry.tags).lower()
-            if (
-                needle not in entry.content.lower()
-                and needle not in entry.detail.lower()
-                and needle not in tag_text
-            ):
+            if needle not in entry.content.lower() and needle not in entry.detail.lower() and needle not in tag_text:
                 continue
 
             # Status filter
@@ -387,9 +394,7 @@ class YAMLBackend(StorageBackend):
             # Fast path: count files without deserialising
             return sum(1 for _ in self._dir.glob("*.yaml"))
         # Need to deserialise for namespace filtering
-        return sum(
-            1 for e in self._load_all() if e.namespace == namespace
-        )
+        return sum(1 for e in self._load_all() if e.namespace == namespace)
 
     def list_entries(
         self,

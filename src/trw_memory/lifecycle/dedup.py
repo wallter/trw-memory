@@ -34,7 +34,6 @@ class DedupResult(NamedTuple):
     similarity: float
 
 
-
 def check_duplicate(
     content: str,
     entries: list[MemoryEntry],
@@ -275,8 +274,7 @@ def batch_dedup(
                 obsoleted = entry_j.model_copy(
                     update={
                         "status": MemoryStatus.OBSOLETE,
-                        "detail": entry_j.detail
-                        + f"\n[Auto-obsoleted: duplicate of {id_i}, similarity={sim:.3f}]",
+                        "detail": entry_j.detail + f"\n[Auto-obsoleted: duplicate of {id_i}, similarity={sim:.3f}]",
                         "updated_at": datetime.now(timezone.utc),
                     }
                 )
@@ -295,8 +293,7 @@ def batch_dedup(
                 obsoleted_j = entry_j.model_copy(
                     update={
                         "status": MemoryStatus.OBSOLETE,
-                        "detail": entry_j.detail
-                        + f"\n[Auto-merged into {id_i}, similarity={sim:.3f}]",
+                        "detail": entry_j.detail + f"\n[Auto-merged into {id_i}, similarity={sim:.3f}]",
                         "updated_at": datetime.now(timezone.utc),
                     }
                 )

@@ -8,7 +8,8 @@ circular imports (``__init__`` itself re-exports ``McpServer`` for convenience).
 
 from __future__ import annotations
 
-from typing import Callable, Protocol, runtime_checkable
+from collections.abc import Callable
+from typing import Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -24,5 +25,4 @@ class McpServer(Protocol):
     requiring a type-ignore comment.
     """
 
-    def tool(self) -> Callable[..., object]:  # noqa: D102 — Protocol stub
-        ...  # pragma: no cover
+    def tool(self) -> Callable[..., object]: ...  # pragma: no cover

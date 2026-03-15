@@ -88,9 +88,7 @@ class TestGetMasterKeyEnv:
         result = get_master_key(config)
         assert len(result) == _KEY_LENGTH
 
-    def test_env_key_not_set_falls_through_to_file(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_env_key_not_set_falls_through_to_file(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.delenv("MEMORY_MASTER_KEY", raising=False)
         key = generate_master_key()
         key_file = tmp_path / "master.key"
@@ -99,9 +97,7 @@ class TestGetMasterKeyEnv:
         result = get_master_key(config)
         assert result == key
 
-    def test_env_key_raises_config_error_for_wrong_hex_length(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_env_key_raises_config_error_for_wrong_hex_length(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # 16 bytes = 32 hex chars — too short for 32-byte key
         short_key = bytes(16)
         monkeypatch.setenv("MEMORY_MASTER_KEY", short_key.hex())
@@ -109,22 +105,16 @@ class TestGetMasterKeyEnv:
         with pytest.raises(ConfigError, match="must decode to"):
             get_master_key(config)
 
-    def test_env_key_raises_config_error_for_invalid_hex(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_env_key_raises_config_error_for_invalid_hex(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MEMORY_MASTER_KEY", "not-valid-hex!!")
         config = _make_config(key_source="env")
         with pytest.raises(ConfigError, match="Invalid hex"):
             get_master_key(config)
 
-    def test_no_sources_available_raises_config_error(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_no_sources_available_raises_config_error(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.delenv("MEMORY_MASTER_KEY", raising=False)
         nonexistent_file = tmp_path / "nonexistent.key"
-        config = _make_config(
-            key_source="env", key_file_path=str(nonexistent_file)
-        )
+        config = _make_config(key_source="env", key_file_path=str(nonexistent_file))
         with pytest.raises(ConfigError, match="No master key found"):
             get_master_key(config)
 
@@ -143,9 +133,7 @@ class TestGetMasterKeyFile:
         result = get_master_key(config)
         assert result == key
 
-    def test_file_not_found_raises_config_error(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_file_not_found_raises_config_error(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.delenv("MEMORY_MASTER_KEY", raising=False)
         nonexistent = tmp_path / "no.key"
         config = _make_config(key_source="file", key_file_path=str(nonexistent))
@@ -197,9 +185,7 @@ class TestGetMasterKeyUnknownSource:
 
 
 class TestGetMasterKeyKeyring:
-    def test_reads_key_from_keyring_when_available(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_reads_key_from_keyring_when_available(self, monkeypatch: pytest.MonkeyPatch) -> None:
         key = generate_master_key()
         mock_keyring = MagicMock()
         mock_keyring.get_password.return_value = key.hex()
@@ -212,13 +198,9 @@ class TestGetMasterKeyKeyring:
             result = get_master_key(config)
 
         assert result == key
-        mock_keyring.get_password.assert_called_once_with(
-            "trw-memory", "master-key"
-        )
+        mock_keyring.get_password.assert_called_once_with("trw-memory", "master-key")
 
-    def test_falls_through_to_env_when_keyring_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_falls_through_to_env_when_keyring_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         key = generate_master_key()
         monkeypatch.setenv("MEMORY_MASTER_KEY", key.hex())
         mock_keyring = MagicMock()
@@ -245,16 +227,12 @@ class TestGetMasterKeyKeyring:
             patch("trw_memory.security.keys._KEYRING_AVAILABLE", False),
             patch("trw_memory.security.keys._keyring", None),
         ):
-            config = _make_config(
-                key_source="keyring", key_file_path=str(key_file)
-            )
+            config = _make_config(key_source="keyring", key_file_path=str(key_file))
             result = get_master_key(config)
 
         assert result == key
 
-    def test_keyring_get_password_exception_falls_through(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_keyring_get_password_exception_falls_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
         key = generate_master_key()
         monkeypatch.setenv("MEMORY_MASTER_KEY", key.hex())
         mock_keyring = MagicMock()
@@ -338,9 +316,7 @@ class TestStoreMasterKeyFile:
             store_master_key(b"", config)
 
     @pytest.mark.parametrize("bad_length", [0, 1, 16, 31, 33, 48, 64])
-    def test_parametrized_bad_key_lengths_rejected(
-        self, tmp_path: Path, bad_length: int
-    ) -> None:
+    def test_parametrized_bad_key_lengths_rejected(self, tmp_path: Path, bad_length: int) -> None:
         key_file = tmp_path / f"bad_{bad_length}.key"
         config = _make_config(key_source="file", key_file_path=str(key_file))
         with pytest.raises(ConfigError):
@@ -377,9 +353,7 @@ class TestStoreMasterKeyKeyring:
             config = _make_config(key_source="keyring")
             store_master_key(key, config)
 
-        mock_keyring.set_password.assert_called_once_with(
-            "trw-memory", "master-key", key.hex()
-        )
+        mock_keyring.set_password.assert_called_once_with("trw-memory", "master-key", key.hex())
 
     def test_raises_config_error_when_keyring_unavailable(self) -> None:
         key = generate_master_key()
@@ -408,8 +382,6 @@ class TestStoreMasterKeyKeyring:
 # ---------------------------------------------------------------------------
 # rotate_master_key
 # ---------------------------------------------------------------------------
-
-
 
 
 class TestRotateMasterKey:
@@ -539,4 +511,3 @@ class TestRotateMasterKey:
             ns_key_old_again = derive_namespace_key(old_key, stored.namespace)
             with pytest.raises(InvalidTag):
                 decrypt_entry_fields(stored, ns_key_old_again)
-

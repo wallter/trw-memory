@@ -57,13 +57,15 @@ def _promote_team_memories(
     for entry in entries:
         if entry.importance >= promotion_threshold:
             outcome = f"promoted_from:{namespace}:timestamp={now.isoformat()}"
-            promoted = entry.model_copy(update={
-                "id": f"promoted-{entry.id}",
-                "namespace": "project:default",
-                "source_identity": namespace,
-                "outcome_history": [*entry.outcome_history, outcome],
-                "updated_at": now,
-            })
+            promoted = entry.model_copy(
+                update={
+                    "id": f"promoted-{entry.id}",
+                    "namespace": "project:default",
+                    "source_identity": namespace,
+                    "outcome_history": [*entry.outcome_history, outcome],
+                    "updated_at": now,
+                }
+            )
             backend.store(promoted)
             promoted_count += 1
         else:

@@ -327,6 +327,22 @@ class TestSearch:
         assert "both" in ids
         assert "one" not in ids
 
+    def test_search_matches_entry_id(self, backend: SQLiteBackend) -> None:
+        """FIX-055: search LIKE clause includes the id column."""
+        backend.store(make_entry("L-b6911941", "some content about patterns"))
+        backend.store(make_entry("L-deadbeef", "unrelated content"))
+
+        results = backend.search("L-b6911941")
+        ids = [e.id for e in results]
+        assert "L-b6911941" in ids
+        assert "L-deadbeef" not in ids
+
+    def test_search_partial_id_match(self, backend: SQLiteBackend) -> None:
+        """FIX-055: partial ID substring matches via LIKE."""
+        backend.store(make_entry("L-b6911941", "test content"))
+        results = backend.search("b6911941")
+        assert any(e.id == "L-b6911941" for e in results)
+
 
 # ---------------------------------------------------------------------------
 # Update (partial field update)

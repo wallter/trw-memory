@@ -97,9 +97,7 @@ class TestMemoryRecallImpl:
     def test_min_score_filters_results(self) -> None:
         backend = _mock_backend([_make_entry()])
         # With min_score=1.0, nothing should pass (importance defaults to 0.5)
-        result = memory_recall_impl(
-            "test", "project:default", backend=backend, min_score=1.0
-        )
+        result = memory_recall_impl("test", "project:default", backend=backend, min_score=1.0)
         assert "memories" in result
         assert isinstance(result["memories"], list)
 
@@ -136,9 +134,7 @@ class TestMemorySearchImpl:
     def test_offset_and_limit_in_result(self) -> None:
         entries = [_make_entry(f"M-{i:03d}") for i in range(5)]
         backend = _mock_backend(entries)
-        result = memory_search_impl(
-            "project:default", backend=backend, offset=2, limit=2
-        )
+        result = memory_search_impl("project:default", backend=backend, offset=2, limit=2)
         assert result["offset"] == 2
         assert result["limit"] == 2
 
@@ -148,16 +144,12 @@ class TestMemorySearchImpl:
             _make_entry("M-002", tags=["rust"]),
         ]
         backend = _mock_backend(entries)
-        result = memory_search_impl(
-            "project:default", backend=backend, tags=["python"]
-        )
+        result = memory_search_impl("project:default", backend=backend, tags=["python"])
         assert "entries" in result
 
     def test_invalid_status_returns_error(self) -> None:
         backend = _mock_backend()
-        result = memory_search_impl(
-            "project:default", backend=backend, status="nonexistent_status"
-        )
+        result = memory_search_impl("project:default", backend=backend, status="nonexistent_status")
         assert result.get("status") == "invalid" or "entries" in result
 
 

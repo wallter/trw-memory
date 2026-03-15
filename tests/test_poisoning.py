@@ -72,32 +72,29 @@ class TestCheckFrequency:
 
         # Create 20 entries: 1 per hour for 19 hours, then 15 in the same
         # window (spike)
-        entries: list[MemoryEntry] = []
-        for i in range(19):
-            entries.append(
-                _make_entry(
-                    entry_id=f"M-{i:03d}",
-                    content=f"Normal #{i}",
-                    created_at=base + timedelta(hours=i),
-                )
+        entries: list[MemoryEntry] = [
+            _make_entry(
+                entry_id=f"M-{i:03d}",
+                content=f"Normal #{i}",
+                created_at=base + timedelta(hours=i),
             )
+            for i in range(19)
+        ]
         # Spike: 15 entries in 5 minutes in the same window
         spike_time = base + timedelta(hours=20)
-        for j in range(15):
-            entries.append(
-                _make_entry(
-                    entry_id=f"M-spike-{j:03d}",
-                    content=f"Spike #{j}",
-                    created_at=spike_time + timedelta(minutes=j),
-                )
+        entries.extend(
+            _make_entry(
+                entry_id=f"M-spike-{j:03d}",
+                content=f"Spike #{j}",
+                created_at=spike_time + timedelta(minutes=j),
             )
+            for j in range(15)
+        )
 
         detector = PoisoningDetector(z_threshold=2.0)
         results = detector.check_frequency(entries, window_minutes=60)
         assert len(results) > 0
-        assert all(
-            r.anomaly_type == AnomalyType.FREQUENCY_SPIKE for r in results
-        )
+        assert all(r.anomaly_type == AnomalyType.FREQUENCY_SPIKE for r in results)
 
     def test_single_entry_no_anomalies(self) -> None:
         """A single entry cannot produce frequency anomalies."""
@@ -123,24 +120,16 @@ class TestCheckSize:
 
     def test_normal_sizes_no_anomalies(self) -> None:
         """Entries of similar size produce no anomalies."""
-        entries = [
-            _make_entry(entry_id=f"M-{i}", content="A" * 100)
-            for i in range(20)
-        ]
+        entries = [_make_entry(entry_id=f"M-{i}", content="A" * 100) for i in range(20)]
         detector = PoisoningDetector(z_threshold=3.0)
         results = detector.check_size(entries)
         assert results == []
 
     def test_huge_entry_detected(self) -> None:
         """An entry much larger than average is flagged."""
-        entries = [
-            _make_entry(entry_id=f"M-{i}", content="A" * 100)
-            for i in range(20)
-        ]
+        entries = [_make_entry(entry_id=f"M-{i}", content="A" * 100) for i in range(20)]
         # Add one giant entry
-        entries.append(
-            _make_entry(entry_id="M-giant", content="B" * 10000)
-        )
+        entries.append(_make_entry(entry_id="M-giant", content="B" * 10000))
 
         detector = PoisoningDetector(z_threshold=2.0)
         results = detector.check_size(entries)
@@ -158,10 +147,7 @@ class TestCheckSize:
 
     def test_detail_field_included_in_size(self) -> None:
         """Both content and detail contribute to size calculation."""
-        entries = [
-            _make_entry(entry_id=f"M-{i}", content="A" * 50, detail="B" * 50)
-            for i in range(20)
-        ]
+        entries = [_make_entry(entry_id=f"M-{i}", content="A" * 50, detail="B" * 50) for i in range(20)]
         # Giant detail
         entries.append(
             _make_entry(
@@ -186,40 +172,34 @@ class TestCheckPatterns:
 
     def test_varied_content_no_anomalies(self) -> None:
         """Entries with unique content produce no pattern anomalies."""
-        entries = [
-            _make_entry(entry_id=f"M-{i}", content=f"Unique content #{i}")
-            for i in range(20)
-        ]
+        entries = [_make_entry(entry_id=f"M-{i}", content=f"Unique content #{i}") for i in range(20)]
         detector = PoisoningDetector(z_threshold=2.0)
         results = detector.check_patterns(entries)
         assert results == []
 
     def test_identical_content_detected(self) -> None:
         """Many entries with identical content are flagged."""
-        entries: list[MemoryEntry] = []
         # 5 unique entries
-        for i in range(5):
-            entries.append(
-                _make_entry(
-                    entry_id=f"M-unique-{i}",
-                    content=f"Unique #{i}",
-                )
+        entries: list[MemoryEntry] = [
+            _make_entry(
+                entry_id=f"M-unique-{i}",
+                content=f"Unique #{i}",
             )
+            for i in range(5)
+        ]
         # 20 identical entries (poisoning attempt)
-        for j in range(20):
-            entries.append(
-                _make_entry(
-                    entry_id=f"M-dup-{j}",
-                    content="INJECTED POISONED CONTENT",
-                )
+        entries.extend(
+            _make_entry(
+                entry_id=f"M-dup-{j}",
+                content="INJECTED POISONED CONTENT",
             )
+            for j in range(20)
+        )
 
         detector = PoisoningDetector(z_threshold=2.0)
         results = detector.check_patterns(entries)
         assert len(results) > 0
-        assert all(
-            r.anomaly_type == AnomalyType.PATTERN_ANOMALY for r in results
-        )
+        assert all(r.anomaly_type == AnomalyType.PATTERN_ANOMALY for r in results)
         # All flagged should be the duplicated content
         flagged_ids = {r.entry_id for r in results}
         assert all(eid.startswith("M-dup-") for eid in flagged_ids)
@@ -257,22 +237,21 @@ class TestAnalyze:
     def test_analyze_returns_anomaly_results(self) -> None:
         """analyze() returns AnomalyResult instances."""
         # Create entries with both size and pattern anomalies
-        entries: list[MemoryEntry] = []
-        for i in range(10):
-            entries.append(
-                _make_entry(
-                    entry_id=f"M-{i}",
-                    content=f"Normal #{i}",
-                )
+        entries: list[MemoryEntry] = [
+            _make_entry(
+                entry_id=f"M-{i}",
+                content=f"Normal #{i}",
             )
+            for i in range(10)
+        ]
         # Add poisoned duplicates
-        for j in range(15):
-            entries.append(
-                _make_entry(
-                    entry_id=f"M-poison-{j}",
-                    content="POISONED",
-                )
+        entries.extend(
+            _make_entry(
+                entry_id=f"M-poison-{j}",
+                content="POISONED",
             )
+            for j in range(15)
+        )
 
         detector = PoisoningDetector(z_threshold=2.0)
         results = detector.analyze(entries)
@@ -339,14 +318,9 @@ class TestCustomThreshold:
 
     def test_lower_threshold_catches_more(self) -> None:
         """A lower z_threshold flags more entries."""
-        entries = [
-            _make_entry(entry_id=f"M-{i}", content="A" * 100)
-            for i in range(20)
-        ]
+        entries = [_make_entry(entry_id=f"M-{i}", content="A" * 100) for i in range(20)]
         # Add moderately large entry (not extreme)
-        entries.append(
-            _make_entry(entry_id="M-medium", content="B" * 500)
-        )
+        entries.append(_make_entry(entry_id="M-medium", content="B" * 500))
 
         strict = PoisoningDetector(z_threshold=3.0)
         relaxed = PoisoningDetector(z_threshold=1.0)

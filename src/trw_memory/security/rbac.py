@@ -89,17 +89,11 @@ def require_permission(
         def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
             role: object = kwargs.get("role")
             if role is None:
-                raise ConfigError(
-                    f"Missing 'role' kwarg required by "
-                    f"@require_permission({permission.value!r})"
-                )
+                raise ConfigError(f"Missing 'role' kwarg required by @require_permission({permission.value!r})")
             if not isinstance(role, Role):
                 role = Role(role)
             if not check_permission(role, permission):
-                raise ConfigError(
-                    f"Permission denied: role {role.value!r} "
-                    f"lacks {permission.value!r} permission"
-                )
+                raise ConfigError(f"Permission denied: role {role.value!r} lacks {permission.value!r} permission")
             return func(*args, **kwargs)
 
         return wrapper

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import structlog
 from ruamel.yaml import YAML
-from ruamel.yaml import YAMLError  # type: ignore[attr-defined]
+from ruamel.yaml.error import YAMLError
 
 from trw_memory.exceptions import StorageError
 
@@ -91,22 +91,20 @@ def read_yaml(path: Path) -> dict[str, object]:
                 data = _new_yaml().load(fh)
             finally:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-        if data is None:
-            return {}
-        if not isinstance(data, dict):
-            raise StorageError(  # noqa: TRY301
-                f"YAML root must be a mapping, got {type(data).__name__}",
-                path=str(path),
-            )
-        result: dict[str, object] = dict(data)
-        return result
-    except StorageError:
-        raise
     except (OSError, YAMLError, ValueError, TypeError) as exc:
         raise StorageError(
             f"Failed to read YAML: {exc}",
             path=str(path),
         ) from exc
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise StorageError(
+            f"YAML root must be a mapping, got {type(data).__name__}",
+            path=str(path),
+        )
+    result: dict[str, object] = dict(data)
+    return result
 
 
 def write_yaml(path: Path, data: dict[str, object]) -> None:

@@ -80,66 +80,48 @@ def yaml_backend(tmp_path: Path) -> YAMLBackend:
 
 
 class TestSqliteUpdateInjection:
-    def test_sqlite_update_invalid_column_raises(
-        self, sqlite_backend: SQLiteBackend, make_entry: object
-    ) -> None:
+    def test_sqlite_update_invalid_column_raises(self, sqlite_backend: SQLiteBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("e-inj-1")
         sqlite_backend.store(entry)
         with pytest.raises(StorageError, match="Invalid update field"):
             sqlite_backend.update("e-inj-1", evil_column="value")
 
-    def test_sqlite_update_sql_injection_attempt(
-        self, sqlite_backend: SQLiteBackend, make_entry: object
-    ) -> None:
+    def test_sqlite_update_sql_injection_attempt(self, sqlite_backend: SQLiteBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("e-inj-2")
         sqlite_backend.store(entry)
         with pytest.raises(StorageError, match="Invalid update field"):
             sqlite_backend.update("e-inj-2", **{"id = 1 OR 1=1 --": "pwned"})
 
-    def test_sqlite_update_cannot_change_id(
-        self, sqlite_backend: SQLiteBackend, make_entry: object
-    ) -> None:
+    def test_sqlite_update_cannot_change_id(self, sqlite_backend: SQLiteBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("e-id-change")
         sqlite_backend.store(entry)
         with pytest.raises(StorageError, match="Invalid update field"):
             sqlite_backend.update("e-id-change", id="new_id")
 
-    def test_sqlite_update_cannot_change_created_at(
-        self, sqlite_backend: SQLiteBackend, make_entry: object
-    ) -> None:
+    def test_sqlite_update_cannot_change_created_at(self, sqlite_backend: SQLiteBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("e-created-at")
         sqlite_backend.store(entry)
         with pytest.raises(StorageError, match="Invalid update field"):
-            sqlite_backend.update(
-                "e-created-at", created_at=datetime.now(timezone.utc)
-            )
+            sqlite_backend.update("e-created-at", created_at=datetime.now(timezone.utc))
 
-    def test_sqlite_update_valid_fields_accepted(
-        self, sqlite_backend: SQLiteBackend, make_entry: object
-    ) -> None:
+    def test_sqlite_update_valid_fields_accepted(self, sqlite_backend: SQLiteBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("e-valid")
         sqlite_backend.store(entry)
-        updated = sqlite_backend.update(
-            "e-valid", importance=0.9, status=MemoryStatus.RESOLVED
-        )
+        updated = sqlite_backend.update("e-valid", importance=0.9, status=MemoryStatus.RESOLVED)
         assert updated is not None
         assert updated.importance == pytest.approx(0.9)
         assert updated.status == MemoryStatus.RESOLVED
 
-    def test_update_nonexistent_returns_none(
-        self, sqlite_backend: SQLiteBackend
-    ) -> None:
+    def test_update_nonexistent_returns_none(self, sqlite_backend: SQLiteBackend) -> None:
         result = sqlite_backend.update("no-such-entry", importance=0.7)
         assert result is None
 
-    def test_update_empty_fields_returns_current(
-        self, sqlite_backend: SQLiteBackend, make_entry: object
-    ) -> None:
+    def test_update_empty_fields_returns_current(self, sqlite_backend: SQLiteBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("e-no-fields", content="original")
         sqlite_backend.store(entry)
@@ -155,9 +137,7 @@ class TestSqliteUpdateInjection:
 
 
 class TestYamlPathTraversal:
-    def test_yaml_store_path_traversal_raises(
-        self, yaml_backend: YAMLBackend, make_entry: object
-    ) -> None:
+    def test_yaml_store_path_traversal_raises(self, yaml_backend: YAMLBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("../../etc/evil")
         with pytest.raises(StorageError, match="traversal"):
@@ -175,9 +155,7 @@ class TestYamlPathTraversal:
         with pytest.raises(StorageError, match="traversal"):
             yaml_backend.update("../evil", importance=0.9)
 
-    def test_legitimate_id_accepted(
-        self, yaml_backend: YAMLBackend, make_entry: object
-    ) -> None:
+    def test_legitimate_id_accepted(self, yaml_backend: YAMLBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("M-001-safe")
         yaml_backend.store(entry)
@@ -194,9 +172,7 @@ class TestYamlPathTraversal:
             "/absolute/path",
         ],
     )
-    def test_various_traversal_patterns_rejected(
-        self, yaml_backend: YAMLBackend, bad_id: str
-    ) -> None:
+    def test_various_traversal_patterns_rejected(self, yaml_backend: YAMLBackend, bad_id: str) -> None:
         with pytest.raises(StorageError):
             yaml_backend.get(bad_id)
 
@@ -207,27 +183,21 @@ class TestYamlPathTraversal:
 
 
 class TestYamlFieldInjection:
-    def test_yaml_update_invalid_field_raises(
-        self, yaml_backend: YAMLBackend, make_entry: object
-    ) -> None:
+    def test_yaml_update_invalid_field_raises(self, yaml_backend: YAMLBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("e-yaml-inj")
         yaml_backend.store(entry)
         with pytest.raises(StorageError, match="Invalid update field"):
             yaml_backend.update("e-yaml-inj", __class__="Exploit")
 
-    def test_yaml_update_cannot_change_id(
-        self, yaml_backend: YAMLBackend, make_entry: object
-    ) -> None:
+    def test_yaml_update_cannot_change_id(self, yaml_backend: YAMLBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("e-yaml-id")
         yaml_backend.store(entry)
         with pytest.raises(StorageError, match="Invalid update field"):
             yaml_backend.update("e-yaml-id", id="new_id")
 
-    def test_valid_fields_accepted(
-        self, yaml_backend: YAMLBackend, make_entry: object
-    ) -> None:
+    def test_valid_fields_accepted(self, yaml_backend: YAMLBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("e-yaml-valid")
         yaml_backend.store(entry)
@@ -243,9 +213,7 @@ class TestYamlFieldInjection:
 
 
 class TestSqliteTimezoneRoundtrip:
-    def test_utc_datetime_roundtrip(
-        self, sqlite_backend: SQLiteBackend, make_entry: object
-    ) -> None:
+    def test_utc_datetime_roundtrip(self, sqlite_backend: SQLiteBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         now = datetime(2025, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
         entry = factory("e-tz-1", created_at=now, updated_at=now)
@@ -255,9 +223,7 @@ class TestSqliteTimezoneRoundtrip:
         assert result.created_at.tzinfo is not None
         assert result.created_at.utcoffset().total_seconds() == 0  # type: ignore[union-attr]
 
-    def test_returned_datetime_is_utc_aware(
-        self, sqlite_backend: SQLiteBackend, make_entry: object
-    ) -> None:
+    def test_returned_datetime_is_utc_aware(self, sqlite_backend: SQLiteBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("e-tz-2")
         sqlite_backend.store(entry)
@@ -273,9 +239,7 @@ class TestSqliteTimezoneRoundtrip:
 
 
 class TestSqliteLikeEscaping:
-    def _make_entry(
-        self, entry_id: str, content: str
-    ) -> MemoryEntry:
+    def _make_entry(self, entry_id: str, content: str) -> MemoryEntry:
         now = datetime.now(timezone.utc)
         return MemoryEntry(
             id=entry_id,
@@ -285,9 +249,7 @@ class TestSqliteLikeEscaping:
             updated_at=now,
         )
 
-    def test_sqlite_search_literal_percent(
-        self, sqlite_backend: SQLiteBackend
-    ) -> None:
+    def test_sqlite_search_literal_percent(self, sqlite_backend: SQLiteBackend) -> None:
         """Searching for '100%' should find only the matching entry."""
         e1 = self._make_entry("pct-1", "100% coverage achieved")
         e2 = self._make_entry("pct-2", "basic test entry unrelated")
@@ -298,9 +260,7 @@ class TestSqliteLikeEscaping:
         assert "pct-1" in ids
         assert "pct-2" not in ids
 
-    def test_sqlite_search_literal_underscore(
-        self, sqlite_backend: SQLiteBackend
-    ) -> None:
+    def test_sqlite_search_literal_underscore(self, sqlite_backend: SQLiteBackend) -> None:
         """Searching for 'a_b' should not match 'axb' (underscore not wildcard)."""
         e1 = self._make_entry("ul-1", "a_b test entry with underscore")
         e2 = self._make_entry("ul-2", "axb entry without underscore")
@@ -311,9 +271,7 @@ class TestSqliteLikeEscaping:
         assert "ul-1" in ids
         assert "ul-2" not in ids
 
-    def test_percent_does_not_return_all_entries(
-        self, sqlite_backend: SQLiteBackend
-    ) -> None:
+    def test_percent_does_not_return_all_entries(self, sqlite_backend: SQLiteBackend) -> None:
         """A search for '%' should only match entries actually containing '%'."""
         for i in range(5):
             e = self._make_entry(f"nopct-{i}", f"entry number {i} no special chars")
@@ -334,9 +292,7 @@ class TestSqliteLikeEscaping:
 
 
 class TestAutoUpdatedAt:
-    def test_sqlite_update_auto_sets_updated_at(
-        self, sqlite_backend: SQLiteBackend, make_entry: object
-    ) -> None:
+    def test_sqlite_update_auto_sets_updated_at(self, sqlite_backend: SQLiteBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         before = datetime.now(timezone.utc)
         entry = factory("e-upd-ts", created_at=before, updated_at=before)
@@ -347,9 +303,7 @@ class TestAutoUpdatedAt:
         assert result is not None
         assert result.updated_at >= before
 
-    def test_yaml_update_auto_sets_updated_at(
-        self, yaml_backend: YAMLBackend, make_entry: object
-    ) -> None:
+    def test_yaml_update_auto_sets_updated_at(self, yaml_backend: YAMLBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         before = datetime.now(timezone.utc)
         entry = factory("e-yaml-upd", created_at=before, updated_at=before)
@@ -359,9 +313,7 @@ class TestAutoUpdatedAt:
         assert result is not None
         assert result.updated_at >= before
 
-    def test_sqlite_explicit_updated_at_respected(
-        self, sqlite_backend: SQLiteBackend, make_entry: object
-    ) -> None:
+    def test_sqlite_explicit_updated_at_respected(self, sqlite_backend: SQLiteBackend, make_entry: object) -> None:
         """When caller explicitly passes updated_at, it must be used."""
         factory = make_entry  # type: ignore[operator]
         entry = factory("e-explicit-upd")
@@ -414,19 +366,13 @@ class TestSqliteContextManager:
 
 class TestMemoryIndexTotalCount:
     def test_memory_index_total_count_auto_synced(self) -> None:
-        entries = [
-            MemoryEntry(id=f"M-{i}", content=f"content {i}", status=MemoryStatus.ACTIVE)
-            for i in range(3)
-        ]
+        entries = [MemoryEntry(id=f"M-{i}", content=f"content {i}", status=MemoryStatus.ACTIVE) for i in range(3)]
         idx = MemoryIndex(entries=entries)
         assert idx.total_count == 3
 
     def test_total_count_ignores_explicit_value(self) -> None:
         """Passing total_count=0 with 3 entries should yield total_count=3."""
-        entries = [
-            MemoryEntry(id=f"M-{i}", content=f"content {i}", status=MemoryStatus.ACTIVE)
-            for i in range(3)
-        ]
+        entries = [MemoryEntry(id=f"M-{i}", content=f"content {i}", status=MemoryStatus.ACTIVE) for i in range(3)]
         idx = MemoryIndex(entries=entries, total_count=0)
         assert idx.total_count == 3
 
@@ -473,9 +419,7 @@ class TestCosineSimilarity:
         "len_a, len_b",
         [(3, 2), (100, 384), (1, 2)],
     )
-    def test_parametrized_dimension_mismatch(
-        self, len_a: int, len_b: int
-    ) -> None:
+    def test_parametrized_dimension_mismatch(self, len_a: int, len_b: int) -> None:
         a = [1.0] * len_a
         b = [1.0] * len_b
         with pytest.raises(ValueError):
@@ -552,47 +496,29 @@ class TestMemoryEntryIdValidation:
 class TestMemoryConfigWeightValidation:
     def test_default_weights_sum_to_one(self) -> None:
         cfg = MemoryConfig()
-        total = (
-            cfg.score_relevance_weight
-            + cfg.score_recency_weight
-            + cfg.score_importance_weight
-        )
+        total = cfg.score_relevance_weight + cfg.score_recency_weight + cfg.score_importance_weight
         assert abs(total - 1.0) < 0.01
 
-    def test_memory_config_invalid_weights_raises(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_memory_config_invalid_weights_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MEMORY_SCORE_RELEVANCE_WEIGHT", "0.5")
         monkeypatch.setenv("MEMORY_SCORE_RECENCY_WEIGHT", "0.5")
         monkeypatch.setenv("MEMORY_SCORE_IMPORTANCE_WEIGHT", "0.5")
         with pytest.raises(ValidationError, match="weights must sum"):
             MemoryConfig()
 
-    def test_custom_valid_weights_accepted(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_custom_valid_weights_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MEMORY_SCORE_RELEVANCE_WEIGHT", "0.5")
         monkeypatch.setenv("MEMORY_SCORE_RECENCY_WEIGHT", "0.25")
         monkeypatch.setenv("MEMORY_SCORE_IMPORTANCE_WEIGHT", "0.25")
         cfg = MemoryConfig()
-        total = (
-            cfg.score_relevance_weight
-            + cfg.score_recency_weight
-            + cfg.score_importance_weight
-        )
+        total = cfg.score_relevance_weight + cfg.score_recency_weight + cfg.score_importance_weight
         assert abs(total - 1.0) < 0.01
 
-    def test_weight_sum_boundary_within_tolerance(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_weight_sum_boundary_within_tolerance(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Weights summing to 1.005 should pass (within 0.01 tolerance)."""
         monkeypatch.setenv("MEMORY_SCORE_RELEVANCE_WEIGHT", "0.405")
         monkeypatch.setenv("MEMORY_SCORE_RECENCY_WEIGHT", "0.3")
         monkeypatch.setenv("MEMORY_SCORE_IMPORTANCE_WEIGHT", "0.3")
         cfg = MemoryConfig()
-        total = (
-            cfg.score_relevance_weight
-            + cfg.score_recency_weight
-            + cfg.score_importance_weight
-        )
+        total = cfg.score_relevance_weight + cfg.score_recency_weight + cfg.score_importance_weight
         assert abs(total - 1.0) < 0.02  # within tolerance

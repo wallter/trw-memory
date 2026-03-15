@@ -72,9 +72,7 @@ class TestAuditRecord:
 class TestAuditLogAppend:
     """Tests for appending records to the audit log."""
 
-    def test_genesis_record_has_empty_prev_hash(
-        self, audit_log: AuditLog
-    ) -> None:
+    def test_genesis_record_has_empty_prev_hash(self, audit_log: AuditLog) -> None:
         """First record in the chain has prev_hash = ''."""
         record = audit_log.append(action="store", target_id="M-001")
         assert record.prev_hash == ""
@@ -102,9 +100,7 @@ class TestAuditLogAppend:
         assert record.actor == "agent-alpha"
         assert record.detail == {"field": "content"}
 
-    def test_append_persists_to_file(
-        self, audit_log: AuditLog, audit_path: Path
-    ) -> None:
+    def test_append_persists_to_file(self, audit_log: AuditLog, audit_path: Path) -> None:
         """Records are written to the JSONL file."""
         audit_log.append(action="store")
         assert audit_path.exists()
@@ -114,9 +110,7 @@ class TestAuditLogAppend:
         assert data["action"] == "store"
         assert data["record_hash"] != ""
 
-    def test_multiple_appends_maintain_chain(
-        self, audit_log: AuditLog
-    ) -> None:
+    def test_multiple_appends_maintain_chain(self, audit_log: AuditLog) -> None:
         """A chain of 5 records maintains consistent linkage."""
         records: list[AuditRecord] = []
         for i in range(5):
@@ -161,9 +155,7 @@ class TestAuditLogVerifyChain:
         assert count == 10
         assert msg == ""
 
-    def test_tampering_detected_in_action_field(
-        self, audit_log: AuditLog, audit_path: Path
-    ) -> None:
+    def test_tampering_detected_in_action_field(self, audit_log: AuditLog, audit_path: Path) -> None:
         """Modifying a record's action field breaks the chain."""
         audit_log.append(action="store")
         audit_log.append(action="recall")
@@ -183,9 +175,7 @@ class TestAuditLogVerifyChain:
         assert count == 3
         assert "record_hash mismatch" in msg
 
-    def test_tampering_detected_in_prev_hash(
-        self, audit_log: AuditLog, audit_path: Path
-    ) -> None:
+    def test_tampering_detected_in_prev_hash(self, audit_log: AuditLog, audit_path: Path) -> None:
         """Modifying a record's prev_hash breaks the chain."""
         audit_log.append(action="store")
         audit_log.append(action="recall")
@@ -215,9 +205,7 @@ class TestAuditLogReadAll:
         records = audit_log.read_all()
         assert records == []
 
-    def test_read_all_returns_all_records(
-        self, audit_log: AuditLog
-    ) -> None:
+    def test_read_all_returns_all_records(self, audit_log: AuditLog) -> None:
         """All appended records are returned in order."""
         audit_log.append(action="store", target_id="M-001")
         audit_log.append(action="recall", target_id="M-002")
@@ -230,9 +218,7 @@ class TestAuditLogReadAll:
         assert records[1].action == "recall"
         assert records[2].action == "delete"
 
-    def test_read_all_preserves_hash_chain(
-        self, audit_log: AuditLog
-    ) -> None:
+    def test_read_all_preserves_hash_chain(self, audit_log: AuditLog) -> None:
         """Records read from disk maintain their hash chain fields."""
         r1 = audit_log.append(action="store")
         r2 = audit_log.append(action="recall")
@@ -251,9 +237,7 @@ class TestAuditLogReadAll:
 class TestHashDeterminism:
     """Verify that hash computation is deterministic."""
 
-    def test_same_data_produces_same_hash(
-        self, audit_log: AuditLog
-    ) -> None:
+    def test_same_data_produces_same_hash(self, audit_log: AuditLog) -> None:
         """Internal _compute_hash is deterministic."""
         data = {
             "timestamp": "2026-01-01T00:00:00+00:00",
@@ -266,15 +250,11 @@ class TestHashDeterminism:
         assert h1 == h2
         assert len(h1) == 64  # SHA-256 hex digest
 
-    def test_different_data_produces_different_hash(
-        self, audit_log: AuditLog
-    ) -> None:
+    def test_different_data_produces_different_hash(self, audit_log: AuditLog) -> None:
         """Even a small change produces a different hash."""
         data1 = {"action": "store", "target_id": "M-001"}
         data2 = {"action": "store", "target_id": "M-002"}
-        assert audit_log._compute_hash(data1) != audit_log._compute_hash(
-            data2
-        )
+        assert audit_log._compute_hash(data1) != audit_log._compute_hash(data2)
 
 
 # ---------------------------------------------------------------------------
@@ -285,9 +265,7 @@ class TestHashDeterminism:
 class TestAuditLogPersistence:
     """Test that a new AuditLog instance resumes from existing data."""
 
-    def test_new_instance_continues_chain(
-        self, audit_path: Path
-    ) -> None:
+    def test_new_instance_continues_chain(self, audit_path: Path) -> None:
         """A new AuditLog created from an existing file continues the chain."""
         log1 = AuditLog(audit_path)
         r1 = log1.append(action="store")

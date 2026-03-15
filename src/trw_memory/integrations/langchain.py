@@ -27,8 +27,7 @@ try:
     from langchain_core.messages import AIMessage, BaseMessage, HumanMessage  # type: ignore[import-not-found]
 except ImportError as exc:
     raise ImportError(
-        "langchain-core is required for the LangChain adapter. "
-        'Install it with: pip install "trw-memory[langchain]"'
+        'langchain-core is required for the LangChain adapter. Install it with: pip install "trw-memory[langchain]"'
     ) from exc
 
 from trw_memory.integrations._mixin import BackendOwnerMixin
@@ -68,7 +67,9 @@ class TRWChatMessageHistory(BackendOwnerMixin, BaseChatMessageHistory):  # type:
         self._namespace = namespace
         self._session_tag = f"{_TAG_PREFIX}{session_id}"
         self._backend, self._owns_backend = resolve_backend(
-            namespace, storage_path, backend,
+            namespace,
+            storage_path,
+            backend,
         )
 
     @property
@@ -87,9 +88,7 @@ class TRWChatMessageHistory(BackendOwnerMixin, BaseChatMessageHistory):  # type:
             namespace=self._namespace,
             limit=DEFAULT_LIST_LIMIT,
         )
-        session_entries = [
-            e for e in entries if self._session_tag in e.tags
-        ]
+        session_entries = [e for e in entries if self._session_tag in e.tags]
         session_entries.sort(key=lambda e: e.created_at)
 
         result: list[BaseMessage] = []
@@ -97,7 +96,7 @@ class TRWChatMessageHistory(BackendOwnerMixin, BaseChatMessageHistory):  # type:
             role = "human"
             for tag in entry.tags:
                 if tag.startswith(ROLE_TAG_PREFIX):
-                    role = tag[len(ROLE_TAG_PREFIX):]
+                    role = tag[len(ROLE_TAG_PREFIX) :]
                     break
             if role == "ai":
                 result.append(AIMessage(content=entry.content))

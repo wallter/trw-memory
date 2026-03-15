@@ -112,11 +112,23 @@ class TestBuildParser:
 
     def test_store_all_args(self) -> None:
         parser = build_parser()
-        args = parser.parse_args([
-            "store", "--summary", "test", "--detail", "details",
-            "--tags", "py", "--tags", "test", "--importance", "0.9",
-            "--namespace", "myns",
-        ])
+        args = parser.parse_args(
+            [
+                "store",
+                "--summary",
+                "test",
+                "--detail",
+                "details",
+                "--tags",
+                "py",
+                "--tags",
+                "test",
+                "--importance",
+                "0.9",
+                "--namespace",
+                "myns",
+            ]
+        )
         assert args.summary == "test"
         assert args.detail == "details"
         assert args.tags == ["py", "test"]
@@ -198,9 +210,7 @@ class TestMainNoCommand:
 
 class TestStoreCommand:
     @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_store_success(
-        self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_store_success(self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
         client = _mock_client()
         mock_cls.return_value = client
         ret = main(["store", "--summary", "Test content"])
@@ -230,9 +240,7 @@ class TestStoreCommand:
         assert call_kwargs.kwargs.get("importance") == 0.9
 
     @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_store_error(
-        self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_store_error(self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
         client = _mock_client()
         client.store = AsyncMock(side_effect=ValueError("empty content"))
         mock_cls.return_value = client
@@ -253,9 +261,7 @@ class TestStoreCommand:
 
 class TestRecallCommand:
     @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_recall_table(
-        self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_recall_table(self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
         client = _mock_client()
         mock_cls.return_value = client
         ret = main(["recall", "test query"])
@@ -265,9 +271,7 @@ class TestRecallCommand:
         client.recall.assert_awaited_once()
 
     @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_recall_json(
-        self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_recall_json(self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
         client = _mock_client()
         mock_cls.return_value = client
         ret = main(["recall", "test query", "--format", "json"])
@@ -277,9 +281,7 @@ class TestRecallCommand:
         assert isinstance(parsed, list)
 
     @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_recall_compact(
-        self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_recall_compact(self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
         client = _mock_client()
         mock_cls.return_value = client
         ret = main(["recall", "q", "--format", "compact"])
@@ -306,9 +308,7 @@ class TestRecallCommand:
         assert call_kwargs.kwargs.get("limit") == 5
 
     @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_recall_error(
-        self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_recall_error(self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
         client = _mock_client()
         client.recall = AsyncMock(side_effect=RuntimeError("backend down"))
         mock_cls.return_value = client
@@ -325,9 +325,7 @@ class TestRecallCommand:
 
 class TestSearchCommand:
     @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_search_success(
-        self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_search_success(self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
         client = _mock_client()
         mock_cls.return_value = client
         ret = main(["search", "--tags", "py"])
@@ -343,9 +341,7 @@ class TestSearchCommand:
         assert ret == 0
 
     @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_search_invalid_since(
-        self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_search_invalid_since(self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
         client = _mock_client()
         mock_cls.return_value = client
         ret = main(["search", "--since", "not-a-date"])
@@ -354,9 +350,7 @@ class TestSearchCommand:
         assert "invalid datetime" in captured.err
 
     @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_search_json_format(
-        self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_search_json_format(self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
         client = _mock_client()
         mock_cls.return_value = client
         ret = main(["search", "--format", "json"])
@@ -562,9 +556,7 @@ class TestImportCommand:
         assert "Imported 1" in captured.out
         assert "skipped 1" in captured.out
 
-    def test_import_file_not_found(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_import_file_not_found(self, capsys: pytest.CaptureFixture[str]) -> None:
         ret = main(["import", "/nonexistent/file.json"])
         assert ret == 1
         captured = capsys.readouterr()
@@ -828,8 +820,9 @@ class TestYamlExport:
         mock_backend_fn: MagicMock,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        from ruamel.yaml import YAML
         from io import StringIO
+
+        from ruamel.yaml import YAML
 
         mock_config_cls.return_value = MagicMock()
         mock_backend = MagicMock()
@@ -940,7 +933,8 @@ class TestExportImportRoundTrip:
         assert "Imported 1" in captured.out
         # Verify backend.store was called with the roundtrip content
         store_calls = [
-            c for c in mock_backend.store.call_args_list
+            c
+            for c in mock_backend.store.call_args_list
             if hasattr(c[0][0], "content") and c[0][0].content == "roundtrip test"
         ]
         assert len(store_calls) == 1
@@ -958,9 +952,7 @@ class TestExportImportRoundTrip:
 
         mock_config_cls.return_value = MagicMock()
         mock_backend = MagicMock()
-        mock_backend.list_entries.return_value = [
-            _mock_entry(entry_id="M-yaml", content="yaml roundtrip", tags=["yr"])
-        ]
+        mock_backend.list_entries.return_value = [_mock_entry(entry_id="M-yaml", content="yaml roundtrip", tags=["yr"])]
         mock_backend_fn.return_value = mock_backend
 
         # Export YAML

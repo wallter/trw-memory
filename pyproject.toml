@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "trw-memory"
-version = "0.1.1"
+version = "0.1.2"
 description = "Persistent memory engine with hybrid retrieval, tiered storage, and semantic dedup for AI agents"
 readme = "README.md"
 license = "CC-BY-NC-SA-4.0"
@@ -50,8 +50,11 @@ dev = [
     "pytest-cov>=5.0.0",
     "pytest-asyncio>=0.24.0",
     "mypy>=1.11.0",
-    "ruff>=0.8.0",
+    "ruff>=0.15.0",
     "httpx>=0.27.0",
+    "pip-audit>=2.7.0",
+    "vulture>=2.11",
+    "deptry>=0.21.0",
 ]
 
 [project.urls]
@@ -106,6 +109,16 @@ select = [
 
     # --- Ruff-native ---
     "RUF",      # RUF012 mutable ClassVar, RUF100 unused noqa
+
+    # --- Expanded rule sets (PRD-QUAL-046 FR07) ---
+    "C4",       # flake8-comprehensions: unnecessary list/dict comprehension
+    "PERF",     # performance anti-patterns
+    "G",        # flake8-logging-format: logging format strings
+    "S",        # bandit: security checks
+    "DTZ",      # flake8-datetimez: timezone-aware datetime
+    "FURB",     # refurb: modern Python idioms
+    "C901",     # McCabe complexity
+    "ANN",      # flake8-annotations: type annotations
 ]
 ignore = [
     "E501",     # line too long — handled by line-length setting
@@ -118,12 +131,15 @@ ignore = [
     "TC002",    # third-party imports used at runtime — not type-checking-only
     "TC003",    # stdlib imports used at runtime in constructors — not type-checking-only
     "B008",     # function calls in defaults — FastMCP/Pydantic patterns use this idiomatically
+    "ISC001",   # conflicts with formatter
+    "ANN101",   # deprecated: self type annotation
+    "ANN102",   # deprecated: cls type annotation
 ]
 fixable = ["F401", "B007", "B013", "B014", "UP", "I", "PIE790", "TC", "RUF100"]
 unfixable = ["F841"]  # never auto-delete "unused" variables (could be side-effect assignments)
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["PT", "TRY", "SIM", "B018", "RUF012", "F841", "E741", "B017", "RUF059", "B905"]
+"tests/**/*.py" = ["PT", "TRY", "SIM", "B018", "RUF012", "F841", "E741", "B017", "RUF059", "B905", "ANN", "S101", "S", "G"]
 "benchmarks/**/*.py" = ["TRY", "PT", "B905"]
 "src/trw_memory/cli.py" = ["ASYNC230", "ASYNC240"]  # CLI runs via asyncio.run(), blocking I/O is fine
 "**/__init__.py" = ["F401"]  # re-exports are intentional
@@ -132,6 +148,13 @@ unfixable = ["F841"]  # never auto-delete "unused" variables (could be side-effe
 [tool.ruff.lint.isort]
 known-first-party = ["trw_memory"]
 split-on-trailing-comma = true
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -147,5 +170,5 @@ source = ["trw_memory"]
 omit = ["*/server.py"]
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 85  # PRD-INFRA-042: normalized across packages (mcp=80, memory=85, eval=85, backend=75)
 show_missing = true

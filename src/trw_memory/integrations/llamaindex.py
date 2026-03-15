@@ -27,8 +27,7 @@ try:
     from llama_index.core.storage.chat_store.base import BaseChatStore  # type: ignore[import-not-found]
 except ImportError as exc:
     raise ImportError(
-        "llama-index-core is required for the LlamaIndex adapter. "
-        'Install it with: pip install "trw-memory[llamaindex]"'
+        'llama-index-core is required for the LlamaIndex adapter. Install it with: pip install "trw-memory[llamaindex]"'
     ) from exc
 
 if TYPE_CHECKING:
@@ -70,7 +69,9 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
         self.namespace = namespace
         self._storage_path = storage_path
         self._backend, self._owns_backend = resolve_backend(
-            namespace, storage_path, backend,
+            namespace,
+            storage_path,
+            backend,
         )
 
     @property
@@ -110,7 +111,7 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
             role = MessageRole.USER
             for tag in entry.tags:
                 if tag.startswith(ROLE_TAG_PREFIX):
-                    role_str = tag[len(ROLE_TAG_PREFIX):]
+                    role_str = tag[len(ROLE_TAG_PREFIX) :]
                     try:
                         role = MessageRole(role_str)
                     except ValueError:
@@ -157,7 +158,7 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
                 for tag in entry.tags:
                     if tag.startswith(ROLE_TAG_PREFIX):
                         with contextlib.suppress(ValueError):
-                            role = MessageRole(tag[len(ROLE_TAG_PREFIX):])
+                            role = MessageRole(tag[len(ROLE_TAG_PREFIX) :])
                         break
                 deleted.append(ChatMessage(role=role, content=entry.content))
                 self._backend_or_raise.delete(entry.id)
@@ -169,7 +170,7 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
         if idx < 0 or idx >= len(messages):
             return None
         removed = messages[idx]
-        remaining = messages[:idx] + messages[idx + 1:]
+        remaining = messages[:idx] + messages[idx + 1 :]
         self.set_messages(key, remaining)
         return removed
 
@@ -192,7 +193,7 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
         for entry in entries:
             for tag in entry.tags:
                 if tag.startswith(_TAG_PREFIX):
-                    keys.add(tag[len(_TAG_PREFIX):])
+                    keys.add(tag[len(_TAG_PREFIX) :])
         return sorted(keys)
 
     # -- Resource management ------------------------------------------------

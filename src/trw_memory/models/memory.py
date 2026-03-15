@@ -62,7 +62,9 @@ class MemoryEntry(BaseModel):
 
     # Graph fields (PRD-CORE-048)
     cross_validated: bool = False
-    outcome_history: list[str] = Field(default_factory=list, description="Structured event log (boost, decay, promote records)")
+    outcome_history: list[str] = Field(
+        default_factory=list, description="Structured event log (boost, decay, promote records)"
+    )
 
     # Merge/consolidation tracking
     merged_from: list[str] = Field(default_factory=list)

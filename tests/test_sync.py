@@ -958,9 +958,7 @@ class TestSSESubscriberDaemonThread:
         mock_thread.join.assert_called_once_with(timeout=2.0)
 
     @patch("trw_memory.sync.subscriber.httpx.Client")
-    def test_listen_loop_reconnect_on_http_error(
-        self, mock_client_cls: MagicMock
-    ) -> None:
+    def test_listen_loop_reconnect_on_http_error(self, mock_client_cls: MagicMock) -> None:
         """HTTPError during stream triggers reconnect (loop re-enters)."""
         import httpx
 
@@ -990,9 +988,7 @@ class TestSSESubscriberDaemonThread:
         assert call_count >= 2
 
     @patch("trw_memory.sync.subscriber.httpx.Client")
-    def test_listen_loop_reconnect_on_os_error(
-        self, mock_client_cls: MagicMock
-    ) -> None:
+    def test_listen_loop_reconnect_on_os_error(self, mock_client_cls: MagicMock) -> None:
         """OSError during stream triggers reconnect."""
         cfg = _make_config()
         sub = SSESubscriber(cfg, on_event=lambda _data: None)
@@ -1026,9 +1022,7 @@ class TestSSESubscriberDaemonThread:
         assert sub._stop_event.is_set()
 
     @patch("trw_memory.sync.subscriber.httpx.Client")
-    def test_subscriber_last_event_id_sent_on_reconnect(
-        self, mock_client_cls: MagicMock
-    ) -> None:
+    def test_subscriber_last_event_id_sent_on_reconnect(self, mock_client_cls: MagicMock) -> None:
         """After setting _last_event_id, reconnect sends it in headers."""
         cfg = _make_config(platform_api_key="test-key")
         sub = SSESubscriber(cfg, on_event=lambda _data: None)
@@ -1036,9 +1030,7 @@ class TestSSESubscriberDaemonThread:
 
         captured_headers: list[dict[str, str]] = []
 
-        def stream_side_effect(
-            _method: str, _url: str, headers: dict[str, str] | None = None, **_kw: Any
-        ) -> MagicMock:
+        def stream_side_effect(_method: str, _url: str, headers: dict[str, str] | None = None, **_kw: Any) -> MagicMock:
             if headers:
                 captured_headers.append(dict(headers))
             sub._stop_event.set()

@@ -11,7 +11,6 @@ from datetime import datetime
 
 from trw_memory.models.memory import MemoryStatus
 
-
 # ---------------------------------------------------------------------------
 # Field definitions
 # ---------------------------------------------------------------------------
@@ -19,21 +18,48 @@ from trw_memory.models.memory import MemoryStatus
 #: All column/field names on MemoryEntry, in canonical order.
 #: Used by SQLiteBackend for SELECT/INSERT column lists.
 ENTRY_COLUMNS: tuple[str, ...] = (
-    "id", "content", "detail", "tags", "evidence", "importance", "status",
-    "recurrence", "namespace", "created_at", "updated_at", "last_accessed_at",
-    "access_count", "q_value", "q_observations", "source", "source_identity",
-    "merged_from", "consolidated_from", "consolidated_into", "metadata",
-    "vector_clock", "remote_id", "published_to_platform", "pending_delete",
-    "cross_validated", "outcome_history",
+    "id",
+    "content",
+    "detail",
+    "tags",
+    "evidence",
+    "importance",
+    "status",
+    "recurrence",
+    "namespace",
+    "created_at",
+    "updated_at",
+    "last_accessed_at",
+    "access_count",
+    "q_value",
+    "q_observations",
+    "source",
+    "source_identity",
+    "merged_from",
+    "consolidated_from",
+    "consolidated_into",
+    "metadata",
+    "vector_clock",
+    "remote_id",
+    "published_to_platform",
+    "pending_delete",
+    "cross_validated",
+    "outcome_history",
 )
 
 #: Fields that must never be changed via ``update()``.
 IMMUTABLE_FIELDS: frozenset[str] = frozenset({"id", "created_at"})
 
 #: Fields whose values are JSON-encoded lists.
-LIST_FIELDS: frozenset[str] = frozenset({
-    "tags", "evidence", "merged_from", "consolidated_from", "outcome_history",
-})
+LIST_FIELDS: frozenset[str] = frozenset(
+    {
+        "tags",
+        "evidence",
+        "merged_from",
+        "consolidated_from",
+        "outcome_history",
+    }
+)
 
 #: Fields whose values are JSON-encoded dicts.
 DICT_FIELDS: frozenset[str] = frozenset({"metadata", "vector_clock"})
@@ -42,6 +68,7 @@ DICT_FIELDS: frozenset[str] = frozenset({"metadata", "vector_clock"})
 # ---------------------------------------------------------------------------
 # Update helpers
 # ---------------------------------------------------------------------------
+
 
 def validate_update_fields(
     fields: dict[str, object],
@@ -61,9 +88,7 @@ def validate_update_fields(
             raise ValueError(key)
 
 
-def serialize_update_value(
-    key: str, val: object
-) -> list[str] | dict[str, str] | str | object:
+def serialize_update_value(key: str, val: object) -> list[str] | dict[str, str] | str | object:
     """Normalise a single update value for storage.
 
     Handles:

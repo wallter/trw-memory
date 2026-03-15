@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 # ---------------------------------------------------------------------------
@@ -62,9 +62,7 @@ def shared_backend(tmp_path: Path) -> SQLiteBackend:  # type: ignore[misc]
 class TestConcurrentAccess:
     """FR06: Concurrent access tests using threading.Barrier."""
 
-    def test_concurrent_store_five_entries(
-        self, shared_backend: SQLiteBackend
-    ) -> None:
+    def test_concurrent_store_five_entries(self, shared_backend: SQLiteBackend) -> None:
         """5 threads store simultaneously; all 5 entries exist afterward."""
         num_threads = 5
         barrier = threading.Barrier(num_threads)
@@ -80,9 +78,7 @@ class TestConcurrentAccess:
                 with errors_lock:
                     errors.append(exc)
 
-        threads = [
-            threading.Thread(target=worker, args=(i,)) for i in range(num_threads)
-        ]
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(num_threads)]
         for t in threads:
             t.start()
         for t in threads:
@@ -94,9 +90,7 @@ class TestConcurrentAccess:
             result = shared_backend.get(f"conc-{i}")
             assert result is not None, f"Entry conc-{i} missing"
 
-    def test_concurrent_update_same_entry(
-        self, shared_backend: SQLiteBackend
-    ) -> None:
+    def test_concurrent_update_same_entry(self, shared_backend: SQLiteBackend) -> None:
         """3 threads update the same entry's tags; no OperationalError."""
         entry = _make_entry("shared-update", "base content", tags=["original"])
         shared_backend.store(entry)
@@ -117,9 +111,7 @@ class TestConcurrentAccess:
                 with errors_lock:
                     errors.append(exc)
 
-        threads = [
-            threading.Thread(target=worker, args=(i,)) for i in range(num_threads)
-        ]
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(num_threads)]
         for t in threads:
             t.start()
         for t in threads:
@@ -131,9 +123,7 @@ class TestConcurrentAccess:
         # Tags will be from whichever thread committed last — just verify no crash
         assert isinstance(result.tags, list)
 
-    def test_concurrent_store_and_search(
-        self, shared_backend: SQLiteBackend
-    ) -> None:
+    def test_concurrent_store_and_search(self, shared_backend: SQLiteBackend) -> None:
         """Concurrent store + search operations do not corrupt the database."""
         num_writers = 3
         num_readers = 2
@@ -144,19 +134,13 @@ class TestConcurrentAccess:
 
         # Pre-seed some entries for search to find
         for i in range(5):
-            shared_backend.store(
-                _make_entry(f"seed-{i}", f"python programming item {i}")
-            )
+            shared_backend.store(_make_entry(f"seed-{i}", f"python programming item {i}"))
 
         def writer(thread_id: int) -> None:
             try:
                 barrier.wait(timeout=5)
                 for j in range(5):
-                    shared_backend.store(
-                        _make_entry(
-                            f"w{thread_id}-{j}", f"python thread {thread_id} item {j}"
-                        )
-                    )
+                    shared_backend.store(_make_entry(f"w{thread_id}-{j}", f"python thread {thread_id} item {j}"))
             except Exception as exc:
                 with errors_lock:
                     errors.append(exc)
@@ -170,11 +154,10 @@ class TestConcurrentAccess:
                 with errors_lock:
                     errors.append(exc)
 
-        threads: list[threading.Thread] = []
-        for i in range(num_writers):
-            threads.append(threading.Thread(target=writer, args=(i,)))
-        for i in range(num_readers):
-            threads.append(threading.Thread(target=reader, args=(i,)))
+        threads: list[threading.Thread] = [
+            threading.Thread(target=writer, args=(i,)) for i in range(num_writers)
+        ]
+        threads.extend(threading.Thread(target=reader, args=(i,)) for i in range(num_readers))
 
         for t in threads:
             t.start()
@@ -183,9 +166,7 @@ class TestConcurrentAccess:
 
         assert not errors, f"Thread errors: {errors}"
 
-    def test_concurrent_delete_and_get(
-        self, shared_backend: SQLiteBackend
-    ) -> None:
+    def test_concurrent_delete_and_get(self, shared_backend: SQLiteBackend) -> None:
         """Concurrent delete + get on the same entry does not crash."""
         entry = _make_entry("delete-target", "will be deleted")
         shared_backend.store(entry)
@@ -225,9 +206,7 @@ class TestConcurrentAccess:
 
         assert not errors, f"Thread errors: {errors}"
 
-    def test_concurrent_delete_by_namespace(
-        self, shared_backend: SQLiteBackend
-    ) -> None:
+    def test_concurrent_delete_by_namespace(self, shared_backend: SQLiteBackend) -> None:
         """Concurrent namespace deletes do not corrupt the database."""
         # Create entries in two namespaces
         for i in range(5):
@@ -258,9 +237,7 @@ class TestConcurrentAccess:
         assert not errors, f"Thread errors: {errors}"
         assert shared_backend.count() == 0
 
-    def test_concurrent_store_unique_ids(
-        self, shared_backend: SQLiteBackend
-    ) -> None:
+    def test_concurrent_store_unique_ids(self, shared_backend: SQLiteBackend) -> None:
         """All entries stored concurrently have unique IDs."""
         num_threads = 5
         entries_per_thread = 4
@@ -282,9 +259,7 @@ class TestConcurrentAccess:
                 with errors_lock:
                     errors.append(exc)
 
-        threads = [
-            threading.Thread(target=worker, args=(i,)) for i in range(num_threads)
-        ]
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(num_threads)]
         for t in threads:
             t.start()
         for t in threads:

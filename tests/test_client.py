@@ -55,17 +55,13 @@ def yaml_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient
 
 
 class TestConstructor:
-    def test_local_mode_creates_backend(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_local_mode_creates_backend(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "s"))
         c = MemoryClient(namespace="default", mode="local")
         assert c.resolved_mode == "local"
         assert c.namespace == "default"
 
-    def test_auto_mode_resolves_to_local(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_auto_mode_resolves_to_local(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "s"))
         c = MemoryClient(namespace="default", mode="auto")
         assert c.resolved_mode == "local"
@@ -78,17 +74,13 @@ class TestConstructor:
         with pytest.raises(Exception):
             MemoryClient(namespace="invalid namespace!")
 
-    def test_project_namespace(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_project_namespace(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "s"))
         c = MemoryClient(namespace="project:test-proj", mode="local")
         assert c.namespace == "project:test-proj"
         assert c.resolved_mode == "local"
 
-    def test_timeout_stored(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_timeout_stored(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "s"))
         c = MemoryClient(
             namespace="default",
@@ -142,9 +134,7 @@ class TestStore:
         assert r1["status"] == "stored"
 
     async def test_store_with_detail(self, client: MemoryClient) -> None:
-        result = await client.store(
-            "summary", detail="extended explanation", tags=["a"]
-        )
+        result = await client.store("summary", detail="extended explanation", tags=["a"])
         assert result["status"] == "stored"
 
 
@@ -224,9 +214,7 @@ class TestForget:
         results = await client.recall("unique ephemeral content xyz123")
         assert len(results) == 0
 
-    async def test_forget_wrong_namespace(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_forget_wrong_namespace(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Entry in namespace A cannot be forgotten by client in namespace B."""
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "ns_test"))
         client_a = MemoryClient(namespace="project:aaa", mode="local")
@@ -314,9 +302,7 @@ class TestThreadSafety:
         # Run concurrent stores and recalls
         store_tasks = [store_batch(f"batch-{j}", 5) for j in range(3)]
         recall_tasks = [recall_batch(3) for _ in range(2)]
-        all_results = await asyncio.gather(
-            *store_tasks, *recall_tasks, return_exceptions=True
-        )
+        all_results = await asyncio.gather(*store_tasks, *recall_tasks, return_exceptions=True)
 
         # No exceptions should have been raised
         for result in all_results:
@@ -329,9 +315,7 @@ class TestThreadSafety:
 
 
 class TestContextManager:
-    async def test_async_context_manager(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_async_context_manager(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "ctx"))
         async with MemoryClient(namespace="default", mode="local") as c:
             result = await c.store("context managed")
@@ -385,9 +369,7 @@ class TestRegisterTools:
         with pytest.raises(ToolAlreadyRegisteredError):
             client.register_tools(agent)
 
-    def test_incompatible_agent_raises_type_error(
-        self, client: MemoryClient
-    ) -> None:
+    def test_incompatible_agent_raises_type_error(self, client: MemoryClient) -> None:
         agent = object()  # No register_tool or tool
         with pytest.raises(TypeError, match=r"register_tool.*tool"):
             client.register_tools(agent)

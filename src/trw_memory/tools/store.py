@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import structlog
 
-from trw_memory.exceptions import ConfigError, StorageError
+from trw_memory.exceptions import ConfigError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.namespace import validate_namespace
 from trw_memory.storage.interface import StorageBackend

@@ -85,12 +85,8 @@ CREATE TABLE IF NOT EXISTS memories (
 )
 """
 
-_CREATE_IDX_NAMESPACE = (
-    "CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace)"
-)
-_CREATE_IDX_STATUS = (
-    "CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)"
-)
+_CREATE_IDX_NAMESPACE = "CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace)"
+_CREATE_IDX_STATUS = "CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)"
 
 _CREATE_GRAPH_EDGES = """
 CREATE TABLE IF NOT EXISTS memory_graph_edges (
@@ -104,12 +100,8 @@ CREATE TABLE IF NOT EXISTS memory_graph_edges (
 )
 """
 
-_CREATE_IDX_MGE_SOURCE = (
-    "CREATE INDEX IF NOT EXISTS idx_mge_source ON memory_graph_edges(source_id, edge_type)"
-)
-_CREATE_IDX_MGE_TARGET = (
-    "CREATE INDEX IF NOT EXISTS idx_mge_target ON memory_graph_edges(target_id, edge_type)"
-)
+_CREATE_IDX_MGE_SOURCE = "CREATE INDEX IF NOT EXISTS idx_mge_source ON memory_graph_edges(source_id, edge_type)"
+_CREATE_IDX_MGE_TARGET = "CREATE INDEX IF NOT EXISTS idx_mge_target ON memory_graph_edges(target_id, edge_type)"
 
 _CREATE_NAMESPACES = """
 CREATE TABLE IF NOT EXISTS memory_namespaces (
@@ -121,9 +113,7 @@ CREATE TABLE IF NOT EXISTS memory_namespaces (
 )
 """
 
-_CREATE_IDX_MN_STATUS = (
-    "CREATE INDEX IF NOT EXISTS idx_mn_status ON memory_namespaces(status, expires_at)"
-)
+_CREATE_IDX_MN_STATUS = "CREATE INDEX IF NOT EXISTS idx_mn_status ON memory_namespaces(status, expires_at)"
 
 # ---------------------------------------------------------------------------
 # Row <-> MemoryEntry helpers
@@ -142,12 +132,33 @@ def _row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
     The column order must match :data:`_COLUMNS`.
     """
     (
-        id_, content, detail, tags_json, evidence_json, importance, status,
-        recurrence, namespace, created_at_s, updated_at_s, last_accessed_s,
-        access_count, q_value, q_obs, source, source_identity,
-        merged_json, cons_from_json, consolidated_into, metadata_json,
-        vector_clock_json, remote_id, published_raw, pending_del_raw,
-        cross_val_raw, outcome_json,
+        id_,
+        content,
+        detail,
+        tags_json,
+        evidence_json,
+        importance,
+        status,
+        recurrence,
+        namespace,
+        created_at_s,
+        updated_at_s,
+        last_accessed_s,
+        access_count,
+        q_value,
+        q_obs,
+        source,
+        source_identity,
+        merged_json,
+        cons_from_json,
+        consolidated_into,
+        metadata_json,
+        vector_clock_json,
+        remote_id,
+        published_raw,
+        pending_del_raw,
+        cross_val_raw,
+        outcome_json,
     ) = row
 
     return MemoryEntry(
@@ -286,18 +297,13 @@ class SQLiteBackend(StorageBackend):
             ]
             for col_name, col_def in _migrate_cols:
                 with contextlib.suppress(sqlite3.OperationalError):
-                    cursor.execute(
-                        f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}"
-                    )
+                    cursor.execute(f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}")
             self._conn.commit()
         finally:
             cursor.close()
 
     def _ensure_vec_table(self) -> None:
-        self._conn.execute(
-            f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories "
-            f"USING vec0(embedding float[{self._dim}])"
-        )
+        self._conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(embedding float[{self._dim}])")
         # Companion table to map rowid <-> entry_id
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS vec_index ("
@@ -364,7 +370,7 @@ class SQLiteBackend(StorageBackend):
             StorageError: If the write fails.
         """
         placeholders = ", ".join(["?"] * len(_COLUMNS))
-        sql = f"INSERT OR REPLACE INTO memories ({_COLUMNS_SQL}) VALUES ({placeholders})"
+        sql = f"INSERT OR REPLACE INTO memories ({_COLUMNS_SQL}) VALUES ({placeholders})"  # noqa: S608 — _COLUMNS_SQL is a static constant (no user input); values are parameterized
         try:
             with self._lock:
                 self._conn.execute(sql, _entry_to_row(entry))
@@ -388,7 +394,7 @@ class SQLiteBackend(StorageBackend):
         Raises:
             StorageError: If the query fails.
         """
-        sql = f"SELECT {_COLUMNS_SQL} FROM memories WHERE id = ?"
+        sql = f"SELECT {_COLUMNS_SQL} FROM memories WHERE id = ?"  # noqa: S608 — _COLUMNS_SQL is a static constant; entry_id is a parameterized ?
         try:
             with self._lock:
                 row = self._conn.execute(sql, (entry_id,)).fetchone()
@@ -434,7 +440,7 @@ class SQLiteBackend(StorageBackend):
             try:
                 validate_update_fields(field_dict, _VALID_UPDATE_COLUMNS)
             except ValueError as ve:
-                raise StorageError(  # noqa: TRY301
+                raise StorageError(
                     f"Invalid update field: {ve.args[0]!r}",
                     path=str(self._db_path),
                 ) from None
@@ -451,7 +457,7 @@ class SQLiteBackend(StorageBackend):
                     values.append(normalised)
 
             values.append(entry_id)
-            sql = f"UPDATE memories SET {', '.join(set_parts)} WHERE id = ?"
+            sql = f"UPDATE memories SET {', '.join(set_parts)} WHERE id = ?"  # noqa: S608 — column names come from the validated UPDATABLE_FIELDS whitelist; values are parameterized
             with self._lock:
                 self._conn.execute(sql, values)
                 self._conn.commit()
@@ -478,9 +484,7 @@ class SQLiteBackend(StorageBackend):
         """
         try:
             with self._lock:
-                cursor = self._conn.execute(
-                    "DELETE FROM memories WHERE id = ?", (entry_id,)
-                )
+                cursor = self._conn.execute("DELETE FROM memories WHERE id = ?", (entry_id,))
                 deleted = cursor.rowcount > 0
                 if deleted and self._vec_available:
                     self._delete_vector(entry_id)
@@ -495,9 +499,7 @@ class SQLiteBackend(StorageBackend):
 
     def _delete_vector(self, entry_id: str) -> None:
         """Remove the vector row for *entry_id* (no-op if absent)."""
-        row = self._conn.execute(
-            "SELECT rowid FROM vec_index WHERE entry_id = ?", (entry_id,)
-        ).fetchone()
+        row = self._conn.execute("SELECT rowid FROM vec_index WHERE entry_id = ?", (entry_id,)).fetchone()
         if row is None:
             return
         rowid: int = row[0]
@@ -530,15 +532,15 @@ class SQLiteBackend(StorageBackend):
         Raises:
             StorageError: If the query fails.
         """
-        # Keyword match — LIKE on content, detail, tags JSON
+        # Keyword match — LIKE on id, content, detail, tags JSON
         # Escape LIKE metacharacters to prevent unintended wildcard expansion
         escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         like_term = f"%{escaped}%"
         like_clause = (
-            "(content LIKE ? ESCAPE '\\' OR detail LIKE ? ESCAPE '\\' "
-            "OR tags LIKE ? ESCAPE '\\')"
+            "(id LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\' "
+            "OR detail LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')"
         )
-        like_params: list[object] = [like_term, like_term, like_term]
+        like_params: list[object] = [like_term, like_term, like_term, like_term]
 
         filter_sql, filter_params = self._build_filter_clause(
             status=status,
@@ -554,7 +556,7 @@ class SQLiteBackend(StorageBackend):
         params: list[object] = like_params + filter_params
 
         sql = (
-            f"SELECT {_COLUMNS_SQL} FROM memories WHERE {where_sql} "
+            f"SELECT {_COLUMNS_SQL} FROM memories WHERE {where_sql} "  # noqa: S608 — _COLUMNS_SQL and where_sql are built from static constants and ? placeholders only
             f"ORDER BY importance DESC, updated_at DESC LIMIT ?"
         )
         params.append(top_k)
@@ -596,9 +598,7 @@ class SQLiteBackend(StorageBackend):
                         (namespace,),
                     ).fetchone()
                 else:
-                    row = self._conn.execute(
-                        "SELECT COUNT(*) FROM memories"
-                    ).fetchone()
+                    row = self._conn.execute("SELECT COUNT(*) FROM memories").fetchone()
             return int(row[0]) if row else 0
         except sqlite3.Error as exc:
             raise StorageError(
@@ -631,7 +631,7 @@ class SQLiteBackend(StorageBackend):
             namespace=namespace,
         )
         sql = (
-            f"SELECT {_COLUMNS_SQL} FROM memories WHERE {where_sql} "
+            f"SELECT {_COLUMNS_SQL} FROM memories WHERE {where_sql} "  # noqa: S608 — _COLUMNS_SQL and where_sql are built from static constants and ? placeholders only
             f"ORDER BY updated_at DESC LIMIT ?"
         )
         params.append(limit)
@@ -661,9 +661,7 @@ class SQLiteBackend(StorageBackend):
         """
         try:
             with self._lock:
-                rows = self._conn.execute(
-                    "SELECT DISTINCT namespace FROM memories ORDER BY namespace"
-                ).fetchall()
+                rows = self._conn.execute("SELECT DISTINCT namespace FROM memories ORDER BY namespace").fetchall()
             return [str(row[0]) for row in rows]
         except sqlite3.Error as exc:
             raise StorageError(
@@ -685,9 +683,7 @@ class SQLiteBackend(StorageBackend):
         """
         try:
             with self._lock:
-                cursor = self._conn.execute(
-                    "DELETE FROM memories WHERE namespace = ?", (namespace,)
-                )
+                cursor = self._conn.execute("DELETE FROM memories WHERE namespace = ?", (namespace,))
                 self._conn.commit()
             deleted = cursor.rowcount
             logger.debug(
@@ -739,18 +735,12 @@ class SQLiteBackend(StorageBackend):
 
         with self._lock:
             # Ensure a vec_index row exists and get its rowid
-            self._conn.execute(
-                "INSERT OR IGNORE INTO vec_index(entry_id) VALUES(?)", (entry_id,)
-            )
-            row = self._conn.execute(
-                "SELECT rowid FROM vec_index WHERE entry_id = ?", (entry_id,)
-            ).fetchone()
+            self._conn.execute("INSERT OR IGNORE INTO vec_index(entry_id) VALUES(?)", (entry_id,))
+            row = self._conn.execute("SELECT rowid FROM vec_index WHERE entry_id = ?", (entry_id,)).fetchone()
             rowid: int = row[0]
 
             # Delete old vector then insert fresh (idempotent upsert)
-            self._conn.execute(
-                "DELETE FROM vec_memories WHERE rowid = ?", (rowid,)
-            )
+            self._conn.execute("DELETE FROM vec_memories WHERE rowid = ?", (rowid,))
             self._conn.execute(
                 "INSERT INTO vec_memories(rowid, embedding) VALUES(?, ?)",
                 (rowid, emb_bytes),
@@ -758,9 +748,7 @@ class SQLiteBackend(StorageBackend):
             self._conn.commit()
         logger.debug("vector_upserted", entry_id=entry_id)
 
-    def search_vectors(
-        self, query_embedding: list[float], top_k: int = 25
-    ) -> list[tuple[str, float]]:
+    def search_vectors(self, query_embedding: list[float], top_k: int = 25) -> list[tuple[str, float]]:
         """KNN search in vec_memories.
 
         No-op (returns empty list) when sqlite-vec is not available.

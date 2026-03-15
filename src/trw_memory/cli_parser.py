@@ -30,7 +30,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_recall.add_argument("--limit", type=int, default=10, help="Max results")
     p_recall.add_argument("--tags", action="append", default=[], help="Filter tags (repeatable)")
     p_recall.add_argument("--namespace", default="default", help="Namespace")
-    p_recall.add_argument("--format", dest="fmt", choices=["table", "json", "compact"], default="table", help="Output format")
+    p_recall.add_argument(
+        "--format", dest="fmt", choices=["table", "json", "compact"], default="table", help="Output format"
+    )
 
     # --- search ---
     p_search = subparsers.add_parser("search", help="Filter-based search")
@@ -39,7 +41,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--since", default=None, help="ISO datetime filter")
     p_search.add_argument("--limit", type=int, default=50, help="Max results")
     p_search.add_argument("--namespace", default="default", help="Namespace")
-    p_search.add_argument("--format", dest="fmt", choices=["table", "json", "compact"], default="table", help="Output format")
+    p_search.add_argument(
+        "--format", dest="fmt", choices=["table", "json", "compact"], default="table", help="Output format"
+    )
 
     # --- consolidate ---
     p_consolidate = subparsers.add_parser("consolidate", help="Trigger consolidation")

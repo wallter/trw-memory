@@ -63,11 +63,11 @@ def memory_recall_impl(
 
     # Validate any additional namespaces
     extra_ns: list[str] = []
-    for ns in (include_namespaces or []):
+    for ns in include_namespaces or []:
         try:
             validate_namespace(ns)
             extra_ns.append(ns)
-        except ConfigError:
+        except ConfigError:  # per-item error handling: skip invalid namespaces, continue with valid ones  # noqa: PERF203
             logger.debug("recall_invalid_namespace_skipped", namespace=ns)
 
     all_namespaces = [namespace, *extra_ns]
@@ -107,10 +107,7 @@ def memory_recall_impl(
 
     # Apply min_score filter and limit
     if min_score > 0.0:
-        ranked_dicts = [
-            d for d in ranked_dicts
-            if entry_utility(d) >= min_score
-        ]
+        ranked_dicts = [d for d in ranked_dicts if entry_utility(d) >= min_score]
 
     result_dicts = ranked_dicts[:limit]
 
@@ -164,9 +161,7 @@ def _graph_related(
         logger.debug("graph_related_skip", reason="no_sqlite_connection")
         return []
 
-    root_ids = [
-        str(d["id"]) for d in result_dicts if "id" in d
-    ]
+    root_ids = [str(d["id"]) for d in result_dicts if "id" in d]
 
     try:
         return graph_query(effective_conn, root_ids, depth=depth)

@@ -89,9 +89,7 @@ class TestComputeImportanceScore:
         cfg = MemoryConfig()
         high: dict[str, object] = {"content": "x", "importance": 0.9}
         low: dict[str, object] = {"content": "x", "importance": 0.1}
-        assert compute_importance_score(high, [], config=cfg) > compute_importance_score(
-            low, [], config=cfg
-        )
+        assert compute_importance_score(high, [], config=cfg) > compute_importance_score(low, [], config=cfg)
 
     def test_token_overlap_boosts_relevance(self) -> None:
         cfg = MemoryConfig()
@@ -247,11 +245,7 @@ class TestWarmTier:
         mgr.warm_add("e1", d1, None)
         mgr.warm_add("e1", d2, None)
         sidecar = mgr._warm_sidecar_path()
-        records = [
-            json.loads(l)
-            for l in sidecar.read_text(encoding="utf-8").splitlines()
-            if l.strip()
-        ]
+        records = [json.loads(l) for l in sidecar.read_text(encoding="utf-8").splitlines() if l.strip()]
         e1_records = [r for r in records if r.get("id") == "e1"]
         assert len(e1_records) == 1
         assert e1_records[0]["summary"] == "new"
@@ -262,11 +256,7 @@ class TestWarmTier:
         mgr.warm_remove("e1")
         sidecar = mgr._warm_sidecar_path()
         if sidecar.exists():
-            records = [
-                json.loads(l)
-                for l in sidecar.read_text(encoding="utf-8").splitlines()
-                if l.strip()
-            ]
+            records = [json.loads(l) for l in sidecar.read_text(encoding="utf-8").splitlines() if l.strip()]
             ids = [r.get("id") for r in records]
             assert "e1" not in ids
 
@@ -428,9 +418,7 @@ class TestSweep:
         assert result.purged == 0
         assert result.errors == 0
 
-    def test_sweep_demotes_stale_hot_entry(
-        self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig
-    ) -> None:
+    def test_sweep_demotes_stale_hot_entry(self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig) -> None:
         stale_entry = _make_entry("stale", days_old=cfg.hot_ttl_days + 5)
         mgr.hot_put("stale", stale_entry)
         assert mgr.hot_size == 1
@@ -439,18 +427,14 @@ class TestSweep:
         assert mgr.hot_get("stale") is None
         assert result.demoted >= 1
 
-    def test_sweep_keeps_fresh_hot_entry(
-        self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig
-    ) -> None:
+    def test_sweep_keeps_fresh_hot_entry(self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig) -> None:
         fresh_entry = _make_entry("fresh", days_old=1)
         mgr.hot_put("fresh", fresh_entry)
         result = mgr.sweep()
         assert mgr.hot_get("fresh") is not None
         assert result.demoted == 0
 
-    def test_sweep_demotes_warm_to_cold(
-        self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig
-    ) -> None:
+    def test_sweep_demotes_warm_to_cold(self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig) -> None:
         from trw_memory.storage.persistence import write_yaml
 
         entries_dir = mem_dir / "entries"
@@ -458,9 +442,7 @@ class TestSweep:
 
         mgr._entries_dir = entries_dir
 
-        old_time = (
-            datetime.now(timezone.utc) - timedelta(days=cfg.cold_threshold_days + 10)
-        ).isoformat()
+        old_time = (datetime.now(timezone.utc) - timedelta(days=cfg.cold_threshold_days + 10)).isoformat()
         entry_file = entries_dir / "old-entry.yaml"
         write_yaml(
             entry_file,
@@ -478,18 +460,14 @@ class TestSweep:
         assert not entry_file.exists()
         assert result.demoted >= 1
 
-    def test_sweep_warm_to_cold_skips_non_active(
-        self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig
-    ) -> None:
+    def test_sweep_warm_to_cold_skips_non_active(self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig) -> None:
         from trw_memory.storage.persistence import write_yaml
 
         entries_dir = mem_dir / "entries"
         entries_dir.mkdir(parents=True, exist_ok=True)
         mgr._entries_dir = entries_dir
 
-        old_time = (
-            datetime.now(timezone.utc) - timedelta(days=cfg.cold_threshold_days + 10)
-        ).isoformat()
+        old_time = (datetime.now(timezone.utc) - timedelta(days=cfg.cold_threshold_days + 10)).isoformat()
         entry_file = entries_dir / "resolved-entry.yaml"
         write_yaml(
             entry_file,
@@ -507,16 +485,12 @@ class TestSweep:
         # resolved entries should NOT be archived
         assert entry_file.exists()
 
-    def test_sweep_purges_expired_cold_entry(
-        self, mgr: TierManager, cfg: MemoryConfig
-    ) -> None:
+    def test_sweep_purges_expired_cold_entry(self, mgr: TierManager, cfg: MemoryConfig) -> None:
         from trw_memory.storage.persistence import write_yaml
 
         cold_partition = mgr._cold_dir() / "2024" / "01"
         cold_partition.mkdir(parents=True, exist_ok=True)
-        old_time = (
-            datetime.now(timezone.utc) - timedelta(days=cfg.retention_days + 10)
-        ).isoformat()
+        old_time = (datetime.now(timezone.utc) - timedelta(days=cfg.retention_days + 10)).isoformat()
         cold_file = cold_partition / "expired.yaml"
         write_yaml(
             cold_file,
@@ -533,16 +507,12 @@ class TestSweep:
         assert not cold_file.exists()
         assert result.purged >= 1
 
-    def test_sweep_keeps_high_importance_cold_entry(
-        self, mgr: TierManager, cfg: MemoryConfig
-    ) -> None:
+    def test_sweep_keeps_high_importance_cold_entry(self, mgr: TierManager, cfg: MemoryConfig) -> None:
         from trw_memory.storage.persistence import write_yaml
 
         cold_partition = mgr._cold_dir() / "2024" / "01"
         cold_partition.mkdir(parents=True, exist_ok=True)
-        old_time = (
-            datetime.now(timezone.utc) - timedelta(days=cfg.retention_days + 10)
-        ).isoformat()
+        old_time = (datetime.now(timezone.utc) - timedelta(days=cfg.retention_days + 10)).isoformat()
         cold_file = cold_partition / "important.yaml"
         write_yaml(
             cold_file,
@@ -559,9 +529,7 @@ class TestSweep:
         assert cold_file.exists()
         assert result.purged == 0
 
-    def test_sweep_error_in_entry_increments_errors(
-        self, mgr: TierManager, mem_dir: Path
-    ) -> None:
+    def test_sweep_error_in_entry_increments_errors(self, mgr: TierManager, mem_dir: Path) -> None:
 
         entries_dir = mem_dir / "entries"
         entries_dir.mkdir(parents=True, exist_ok=True)
@@ -574,16 +542,12 @@ class TestSweep:
         result = mgr.sweep()
         assert result.errors >= 1
 
-    def test_sweep_writes_purge_audit_log(
-        self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig
-    ) -> None:
+    def test_sweep_writes_purge_audit_log(self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig) -> None:
         from trw_memory.storage.persistence import write_yaml
 
         cold_partition = mgr._cold_dir() / "2023" / "01"
         cold_partition.mkdir(parents=True, exist_ok=True)
-        old_time = (
-            datetime.now(timezone.utc) - timedelta(days=cfg.retention_days + 50)
-        ).isoformat()
+        old_time = (datetime.now(timezone.utc) - timedelta(days=cfg.retention_days + 50)).isoformat()
         write_yaml(
             cold_partition / "old.yaml",
             {
@@ -631,9 +595,7 @@ class TestTierSweepResult:
 class TestColdPromoteEdgeCases:
     """FR04: cold_promote() edge cases."""
 
-    def test_cold_promote_found(
-        self, mgr: TierManager, mem_dir: Path
-    ) -> None:
+    def test_cold_promote_found(self, mgr: TierManager, mem_dir: Path) -> None:
         """Cold archive has entry -> returns entry, moves to warm, deletes YAML."""
         from trw_memory.storage.persistence import write_yaml
 
@@ -655,9 +617,7 @@ class TestColdPromoteEdgeCases:
         result = mgr.cold_promote("nonexistent-entry-xyz")
         assert result is None
 
-    def test_cold_promote_read_yaml_failure(
-        self, mgr: TierManager, mem_dir: Path
-    ) -> None:
+    def test_cold_promote_read_yaml_failure(self, mgr: TierManager, mem_dir: Path) -> None:
         """Corrupt YAML file -> skips to next, no crash."""
         from trw_memory.storage.persistence import write_yaml
 
@@ -677,9 +637,7 @@ class TestColdPromoteEdgeCases:
         assert result is not None
         assert result["id"] == "valid-entry"
 
-    def test_cold_promote_updates_last_accessed(
-        self, mgr: TierManager, mem_dir: Path
-    ) -> None:
+    def test_cold_promote_updates_last_accessed(self, mgr: TierManager, mem_dir: Path) -> None:
         """Promoted entry has updated last_accessed_at."""
         from trw_memory.storage.persistence import write_yaml
 
@@ -700,9 +658,7 @@ class TestColdPromoteEdgeCases:
 class TestSweepEdgeCases:
     """FR04: sweep() edge cases -- hot->warm, warm->cold, cold->purge."""
 
-    def test_sweep_warm_to_cold_archival(
-        self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig
-    ) -> None:
+    def test_sweep_warm_to_cold_archival(self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig) -> None:
         """Entry exceeds cold_threshold_days + low importance -> archived."""
         from trw_memory.storage.persistence import write_yaml
 
@@ -710,9 +666,7 @@ class TestSweepEdgeCases:
         entries_dir.mkdir(parents=True, exist_ok=True)
         mgr._entries_dir = entries_dir
 
-        old_time = (
-            datetime.now(timezone.utc) - timedelta(days=cfg.cold_threshold_days + 20)
-        ).isoformat()
+        old_time = (datetime.now(timezone.utc) - timedelta(days=cfg.cold_threshold_days + 20)).isoformat()
         entry_file = entries_dir / "archive-me.yaml"
         write_yaml(
             entry_file,
@@ -734,17 +688,13 @@ class TestSweepEdgeCases:
         cold_files = list(mgr._cold_dir().rglob("*.yaml"))
         assert len(cold_files) >= 1
 
-    def test_sweep_cold_to_purge(
-        self, mgr: TierManager, cfg: MemoryConfig
-    ) -> None:
+    def test_sweep_cold_to_purge(self, mgr: TierManager, cfg: MemoryConfig) -> None:
         """Entry exceeds retention_days + very low importance -> purged with audit."""
         from trw_memory.storage.persistence import write_yaml
 
         cold_partition = mgr._cold_dir() / "2023" / "06"
         cold_partition.mkdir(parents=True, exist_ok=True)
-        old_time = (
-            datetime.now(timezone.utc) - timedelta(days=cfg.retention_days + 100)
-        ).isoformat()
+        old_time = (datetime.now(timezone.utc) - timedelta(days=cfg.retention_days + 100)).isoformat()
         cold_file = cold_partition / "purge-me.yaml"
         write_yaml(
             cold_file,
@@ -761,17 +711,13 @@ class TestSweepEdgeCases:
         assert not cold_file.exists()
         assert result.purged >= 1
 
-    def test_sweep_purge_writes_audit_jsonl(
-        self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig
-    ) -> None:
+    def test_sweep_purge_writes_audit_jsonl(self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig) -> None:
         """Verify purge_audit.jsonl gets JSON record on purge."""
         from trw_memory.storage.persistence import write_yaml
 
         cold_partition = mgr._cold_dir() / "2023" / "05"
         cold_partition.mkdir(parents=True, exist_ok=True)
-        old_time = (
-            datetime.now(timezone.utc) - timedelta(days=cfg.retention_days + 200)
-        ).isoformat()
+        old_time = (datetime.now(timezone.utc) - timedelta(days=cfg.retention_days + 200)).isoformat()
         write_yaml(
             cold_partition / "audit-test.yaml",
             {
@@ -794,9 +740,7 @@ class TestSweepEdgeCases:
         assert "purged_at" in record
         assert "days_idle" in record
 
-    def test_sweep_error_handling(
-        self, mgr: TierManager, mem_dir: Path
-    ) -> None:
+    def test_sweep_error_handling(self, mgr: TierManager, mem_dir: Path) -> None:
         """Per-entry exception increments errors count."""
         entries_dir = mem_dir / "entries"
         entries_dir.mkdir(parents=True, exist_ok=True)
@@ -818,9 +762,7 @@ class TestSweepEdgeCases:
         assert result.errors == 0
         assert result.total == 0
 
-    def test_sweep_warm_to_cold_writes_yaml(
-        self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig
-    ) -> None:
+    def test_sweep_warm_to_cold_writes_yaml(self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig) -> None:
         """Archived entry creates YAML file in cold dir."""
         from trw_memory.storage.persistence import write_yaml
 
@@ -828,9 +770,7 @@ class TestSweepEdgeCases:
         entries_dir.mkdir(parents=True, exist_ok=True)
         mgr._entries_dir = entries_dir
 
-        old_time = (
-            datetime.now(timezone.utc) - timedelta(days=cfg.cold_threshold_days + 30)
-        ).isoformat()
+        old_time = (datetime.now(timezone.utc) - timedelta(days=cfg.cold_threshold_days + 30)).isoformat()
         entry_file = entries_dir / "cold-check.yaml"
         write_yaml(
             entry_file,
@@ -860,9 +800,7 @@ class TestSweepEdgeCases:
 class TestWarmKeywordSearchEdgeCases:
     """FR04: _warm_keyword_search edge cases."""
 
-    def test_warm_keyword_search_malformed_jsonl(
-        self, mgr: TierManager, mem_dir: Path
-    ) -> None:
+    def test_warm_keyword_search_malformed_jsonl(self, mgr: TierManager, mem_dir: Path) -> None:
         """Bad JSONL line -> skipped, valid lines searched."""
         sidecar = mgr._warm_sidecar_path()
         sidecar.parent.mkdir(parents=True, exist_ok=True)
@@ -878,9 +816,7 @@ class TestWarmKeywordSearchEdgeCases:
         assert "valid-1" in ids
         assert "valid-2" not in ids  # "java" doesn't match "python"
 
-    def test_warm_keyword_search_empty_sidecar(
-        self, mgr: TierManager, mem_dir: Path
-    ) -> None:
+    def test_warm_keyword_search_empty_sidecar(self, mgr: TierManager, mem_dir: Path) -> None:
         """Empty sidecar file -> empty results."""
         sidecar = mgr._warm_sidecar_path()
         sidecar.parent.mkdir(parents=True, exist_ok=True)

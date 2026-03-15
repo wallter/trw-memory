@@ -145,5 +145,4 @@ class RetryQueue:
     def _write_all(self, entries: list[QueueRecord]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._path, "w") as f:
-            for entry in entries:
-                f.write(json.dumps(entry) + "\n")
+            f.writelines(json.dumps(entry) + "\n" for entry in entries)

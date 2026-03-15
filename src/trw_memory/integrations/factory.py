@@ -80,18 +80,14 @@ def get_adapter(framework: str) -> type[object]:
     """
     if framework not in _REGISTRY:
         valid = ", ".join(sorted(_REGISTRY))
-        raise ValueError(
-            f"Unknown framework {framework!r}. Valid options: {valid}"
-        )
+        raise ValueError(f"Unknown framework {framework!r}. Valid options: {valid}")
 
     spec_module, adapter_module, class_name = _REGISTRY[framework]
 
     # Check if the external dependency is installed
     if spec_module is not None and importlib.util.find_spec(spec_module) is None:
         hint = _INSTALL_HINTS.get(framework, f"pip install the {framework} package")
-        raise ImportError(
-            f"{framework} is not installed. Install it with: {hint}"
-        )
+        raise ImportError(f"{framework} is not installed. Install it with: {hint}")
 
     # Lazy-import the adapter module
     mod = importlib.import_module(adapter_module)

@@ -108,8 +108,7 @@ class AuditLog:
                 return (
                     False,
                     len(records),
-                    f"Record {idx}: prev_hash mismatch "
-                    f"(expected {prev_hash!r}, got {record.prev_hash!r})",
+                    f"Record {idx}: prev_hash mismatch (expected {prev_hash!r}, got {record.prev_hash!r})",
                 )
 
             # Recompute record_hash and compare
@@ -120,9 +119,7 @@ class AuditLog:
                 return (
                     False,
                     len(records),
-                    f"Record {idx}: record_hash mismatch "
-                    f"(expected {expected_hash!r}, "
-                    f"got {record.record_hash!r})",
+                    f"Record {idx}: record_hash mismatch (expected {expected_hash!r}, got {record.record_hash!r})",
                 )
 
             prev_hash = record.record_hash

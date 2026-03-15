@@ -88,22 +88,19 @@ class PoisoningDetector:
             return []
 
         results: list[AnomalyResult] = []
-        for _bucket_key, bucket_entries in buckets.items():
+        for bucket_entries in buckets.values():
             count = len(bucket_entries)
             z = (count - mean) / std
             if z >= self._z_threshold:
-                for entry in bucket_entries:
-                    results.append(
-                        AnomalyResult(
-                            entry_id=entry.id,
-                            anomaly_type=AnomalyType.FREQUENCY_SPIKE,
-                            z_score=round(z, 2),
-                            detail=(
-                                f"{count} entries in window "
-                                f"(mean={mean:.1f}, std={std:.1f})"
-                            ),
-                        )
+                results.extend(
+                    AnomalyResult(
+                        entry_id=entry.id,
+                        anomaly_type=AnomalyType.FREQUENCY_SPIKE,
+                        z_score=round(z, 2),
+                        detail=(f"{count} entries in window (mean={mean:.1f}, std={std:.1f})"),
                     )
+                    for entry in bucket_entries
+                )
         return results
 
     def check_size(
@@ -138,10 +135,7 @@ class PoisoningDetector:
                         entry_id=entry.id,
                         anomaly_type=AnomalyType.SIZE_ANOMALY,
                         z_score=round(z, 2),
-                        detail=(
-                            f"size={size} chars "
-                            f"(mean={mean:.1f}, std={std:.1f})"
-                        ),
+                        detail=(f"size={size} chars (mean={mean:.1f}, std={std:.1f})"),
                     )
                 )
         return results
@@ -191,10 +185,7 @@ class PoisoningDetector:
                         entry_id=entry.id,
                         anomaly_type=AnomalyType.PATTERN_ANOMALY,
                         z_score=round(z, 2),
-                        detail=(
-                            f"content repeated {count} times "
-                            f"(mean={mean:.1f}, std={std:.1f})"
-                        ),
+                        detail=(f"content repeated {count} times (mean={mean:.1f}, std={std:.1f})"),
                     )
                 )
         return results
