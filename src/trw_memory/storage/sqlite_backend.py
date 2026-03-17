@@ -255,6 +255,12 @@ class SQLiteBackend(StorageBackend):
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30.0)
         self._conn.row_factory = sqlite3.Row
+
+        # WAL mode: concurrent reads are not serialized behind writes.
+        # synchronous=NORMAL is safe with WAL and avoids fsync on every commit.
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+
         self._ensure_schema()
 
         if _SQLITE_VEC_AVAILABLE:

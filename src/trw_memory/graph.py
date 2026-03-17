@@ -10,7 +10,9 @@ Graph traversal via BFS up to depth 3.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
+import threading
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
@@ -31,11 +33,20 @@ IMPORTANCE_BOOST = 0.05
 DECAY_DELTA = 0.1
 
 
+def _optional_lock(lock: threading.Lock | None) -> contextlib.AbstractContextManager[bool]:
+    """Return a context manager that acquires *lock* if provided, else no-op."""
+    if lock is not None:
+        return lock
+    return contextlib.nullcontext(True)
+
+
 def create_similarity_edges(
     entry: MemoryEntry,
     conn: sqlite3.Connection,
     embedding: list[float] | None = None,
     candidate_embeddings: list[tuple[str, list[float]]] | None = None,
+    *,
+    lock: threading.Lock | None = None,
 ) -> int:
     """Create similarity edges between entry and candidates above threshold.
 
@@ -44,6 +55,7 @@ def create_similarity_edges(
         conn: SQLite connection (must have memory_graph_edges table).
         embedding: The entry's embedding vector.
         candidate_embeddings: List of (entry_id, embedding) pairs to compare against.
+        lock: Optional threading lock for thread-safe commit.
 
     Returns:
         Number of edges created.
@@ -54,16 +66,17 @@ def create_similarity_edges(
     created = 0
     now = datetime.now(timezone.utc).isoformat()
 
-    for cand_id, cand_emb in candidate_embeddings:
-        if cand_id == entry.id:
-            continue
-        sim = _safe_cosine_similarity(embedding, cand_emb)
-        if sim > SIMILARITY_THRESHOLD:
-            _upsert_edge(conn, entry.id, cand_id, "similarity", round(sim, 4), now)
-            _upsert_edge(conn, cand_id, entry.id, "similarity", round(sim, 4), now)
-            created += 2
+    with _optional_lock(lock):
+        for cand_id, cand_emb in candidate_embeddings:
+            if cand_id == entry.id:
+                continue
+            sim = _safe_cosine_similarity(embedding, cand_emb)
+            if sim > SIMILARITY_THRESHOLD:
+                _upsert_edge(conn, entry.id, cand_id, "similarity", round(sim, 4), now)
+                _upsert_edge(conn, cand_id, entry.id, "similarity", round(sim, 4), now)
+                created += 2
 
-    conn.commit()
+        conn.commit()
     logger.debug("similarity_edges_created", entry_id=entry.id, count=created)
     return created
 
@@ -72,11 +85,16 @@ def create_tag_cooccurrence_edges(
     entry: MemoryEntry,
     conn: sqlite3.Connection,
     candidate_entries: list[MemoryEntry] | None = None,
+    *,
+    lock: threading.Lock | None = None,
 ) -> int:
     """Create tag co-occurrence edges for entries sharing 2+ tags.
 
     Uses Jaccard similarity as weight.
     Limited to 500 most recent candidates.
+
+    Args:
+        lock: Optional threading lock for thread-safe commit.
     """
     if not entry.tags or candidate_entries is None:
         return 0
@@ -85,19 +103,20 @@ def create_tag_cooccurrence_edges(
     created = 0
     now = datetime.now(timezone.utc).isoformat()
 
-    for cand in candidate_entries[:CANDIDATE_LIMIT]:
-        if cand.id == entry.id or not cand.tags:
-            continue
-        cand_tags = set(cand.tags)
-        shared = entry_tags & cand_tags
-        if len(shared) >= TAG_COOCCURRENCE_MIN_SHARED:
-            union_size = len(entry_tags | cand_tags)
-            jaccard = len(shared) / union_size if union_size > 0 else 0.0
-            _upsert_edge(conn, entry.id, cand.id, "tag_cooccurrence", round(jaccard, 4), now)
-            _upsert_edge(conn, cand.id, entry.id, "tag_cooccurrence", round(jaccard, 4), now)
-            created += 2
+    with _optional_lock(lock):
+        for cand in candidate_entries[:CANDIDATE_LIMIT]:
+            if cand.id == entry.id or not cand.tags:
+                continue
+            cand_tags = set(cand.tags)
+            shared = entry_tags & cand_tags
+            if len(shared) >= TAG_COOCCURRENCE_MIN_SHARED:
+                union_size = len(entry_tags | cand_tags)
+                jaccard = len(shared) / union_size if union_size > 0 else 0.0
+                _upsert_edge(conn, entry.id, cand.id, "tag_cooccurrence", round(jaccard, 4), now)
+                _upsert_edge(conn, cand.id, entry.id, "tag_cooccurrence", round(jaccard, 4), now)
+                created += 2
 
-    conn.commit()
+        conn.commit()
     logger.debug("tag_edges_created", entry_id=entry.id, count=created)
     return created
 
@@ -105,24 +124,31 @@ def create_tag_cooccurrence_edges(
 def create_consolidation_edges(
     entry: MemoryEntry,
     conn: sqlite3.Connection,
+    *,
+    lock: threading.Lock | None = None,
 ) -> int:
-    """Create consolidation lineage edges from consolidated_from."""
+    """Create consolidation lineage edges from consolidated_from.
+
+    Args:
+        lock: Optional threading lock for thread-safe commit.
+    """
     if not entry.consolidated_from:
         return 0
 
     created = 0
     now = datetime.now(timezone.utc).isoformat()
 
-    for source_id in entry.consolidated_from:
-        # Check source exists
-        row = conn.execute("SELECT id FROM memories WHERE id = ?", (source_id,)).fetchone()
-        if row is None:
-            logger.debug("consolidation_edge_skip_missing", source_id=source_id)
-            continue
-        _upsert_edge(conn, entry.id, source_id, "consolidation", 1.0, now)
-        created += 1
+    with _optional_lock(lock):
+        for source_id in entry.consolidated_from:
+            # Check source exists
+            row = conn.execute("SELECT id FROM memories WHERE id = ?", (source_id,)).fetchone()
+            if row is None:
+                logger.debug("consolidation_edge_skip_missing", source_id=source_id)
+                continue
+            _upsert_edge(conn, entry.id, source_id, "consolidation", 1.0, now)
+            created += 1
 
-    conn.commit()
+        conn.commit()
     logger.debug("consolidation_edges_created", entry_id=entry.id, count=created)
     return created
 
@@ -275,8 +301,13 @@ def memory_decay_pass(
     conn: sqlite3.Connection,
     cutoff_days: int = 90,
     batch_size: int = 1000,
+    *,
+    lock: threading.Lock | None = None,
 ) -> dict[str, int]:
     """Run decay pass on cross-validated memories unused for cutoff_days.
+
+    Args:
+        lock: Optional threading lock for thread-safe commit.
 
     Returns:
         {"processed": int, "remaining": int, "total_decayed": int}
@@ -300,21 +331,24 @@ def memory_decay_pass(
     # Direct SQL for batch performance — StorageBackend.update() is
     # per-entry and would create N+1 round-trips for 1000-row batches.
     decayed = 0
-    try:
-        for (entry_id,) in rows:
-            now = datetime.now(timezone.utc).isoformat()
-            outcome = f"importance_decay:delta=-{DECAY_DELTA:.2f}:reason=unused_90d:timestamp={now}"
-            conn.execute(
-                "UPDATE memories SET importance = MAX(importance - ?, 0.0), "
-                "outcome_history = json_insert(outcome_history, '$[#]', ?) "
-                "WHERE id = ?",
-                (DECAY_DELTA, outcome, entry_id),
-            )
-            decayed += 1
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+    # Capture timestamp once before the loop: all entries in one decay pass
+    # should share the same timestamp for consistency and performance.
+    batch_now = datetime.now(timezone.utc).isoformat()
+    with _optional_lock(lock):
+        try:
+            for (entry_id,) in rows:
+                outcome = f"importance_decay:delta=-{DECAY_DELTA:.2f}:reason=unused_90d:timestamp={batch_now}"
+                conn.execute(
+                    "UPDATE memories SET importance = MAX(importance - ?, 0.0), "
+                    "outcome_history = json_insert(outcome_history, '$[#]', ?) "
+                    "WHERE id = ?",
+                    (DECAY_DELTA, outcome, entry_id),
+                )
+                decayed += 1
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     return {
         "processed": decayed,
