@@ -258,8 +258,12 @@ class SQLiteBackend(StorageBackend):
 
         # WAL mode: concurrent reads are not serialized behind writes.
         # synchronous=NORMAL is safe with WAL and avoids fsync on every commit.
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
+        wal_result = self._conn.execute("PRAGMA journal_mode=WAL").fetchone()
+        if wal_result and wal_result[0] != "wal":
+            logger.warning("wal_mode_not_enabled", got=wal_result[0])
+        sync_result = self._conn.execute("PRAGMA synchronous=NORMAL").fetchone()
+        if sync_result and sync_result[0] not in ("1", 1):
+            logger.warning("synchronous_normal_not_set", got=sync_result[0] if sync_result else None)
 
         self._ensure_schema()
 
