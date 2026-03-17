@@ -694,8 +694,8 @@ class SQLiteBackend(StorageBackend):
         try:
             with self._lock:
                 cursor = self._conn.execute("DELETE FROM memories WHERE namespace = ?", (namespace,))
+                deleted = cursor.rowcount
                 self._conn.commit()
-            deleted = cursor.rowcount
             logger.debug(
                 "namespace_deleted",
                 namespace=namespace,
