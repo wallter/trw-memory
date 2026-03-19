@@ -20,7 +20,7 @@ from trw_memory.retrieval.bm25 import bm25_search
 from trw_memory.retrieval.dense import dense_search
 from trw_memory.retrieval.fusion import rrf_fuse
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 
 def hybrid_search(

@@ -24,7 +24,7 @@ from trw_memory.storage.persistence import read_yaml
 if TYPE_CHECKING:
     from trw_memory.models.memory import MemoryEntry
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 
 def _sweep_hot_to_warm(

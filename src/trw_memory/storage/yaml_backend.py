@@ -27,7 +27,7 @@ from trw_memory.storage._shared import (
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.persistence import lock_for_rmw, read_yaml, write_yaml
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 _VALID_UPDATE_FIELDS: frozenset[str] = frozenset(
     {

@@ -17,7 +17,7 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.retrieval.dense import cosine_similarity
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 
 class DedupResult(NamedTuple):

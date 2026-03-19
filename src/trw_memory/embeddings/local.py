@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import structlog
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 _DEFAULT_MODEL = "all-MiniLM-L6-v2"
 _DEFAULT_DIM = 384
@@ -60,19 +60,20 @@ class LocalEmbeddingProvider:
 
             self._model = SentenceTransformer(self._model_name)
             logger.debug(
-                "embedding model loaded",
+                "embedding_model_loaded",
                 model=self._model_name,
                 dim=self._dim,
             )
         except ImportError:
             logger.debug(
-                "sentence-transformers not installed — embeddings unavailable",
+                "embedding_library_unavailable",
                 hint="pip install trw-memory[embeddings]",
             )
         except (OSError, RuntimeError, ValueError):
             logger.warning(
-                "failed to load embedding model",
+                "embedding_model_load_failed",
                 model=self._model_name,
+                exc_info=True,
             )
 
         return self._model
@@ -102,8 +103,9 @@ class LocalEmbeddingProvider:
             return [float(v) for v in vector]
         except (RuntimeError, ValueError, TypeError):
             logger.warning(
-                "embedding generation failed",
+                "embedding_generation_failed",
                 text_length=len(text),
+                exc_info=True,
             )
             return None
 
@@ -147,8 +149,9 @@ class LocalEmbeddingProvider:
                     vec_idx += 1
         except (RuntimeError, ValueError, TypeError):
             logger.warning(
-                "batch embedding failed",
+                "embedding_batch_failed",
                 batch_size=len(texts),
+                exc_info=True,
             )
             return [None] * len(texts)
 

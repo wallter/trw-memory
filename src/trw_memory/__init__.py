@@ -1,5 +1,11 @@
 """trw-memory — Local-first memory layer for AI coding agents."""
 
+import logging
+
+# Library best practice: prevent "No handler found" warnings.
+# The consuming application (trw-mcp, user projects) configures logging.
+logging.getLogger(__name__).addHandler(logging.NullHandler())
+
 from trw_memory._version import __version__
 from trw_memory.client import MemoryClient
 from trw_memory.exceptions import (

@@ -32,7 +32,7 @@ import structlog
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.persistence import _new_yaml
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -248,7 +248,7 @@ def migrate_entries_dir(entries_dir: Path) -> list[MemoryEntry]:
     """
     if not entries_dir.exists():
         logger.warning(
-            "migration source directory not found",
+            "migration_source_dir_not_found",
             path=str(entries_dir),
         )
         return []
@@ -258,7 +258,7 @@ def migrate_entries_dir(entries_dir: Path) -> list[MemoryEntry]:
     yaml_files = sorted(entries_dir.glob("*.yaml"))
 
     logger.info(
-        "starting migration",
+        "migration_start",
         source=str(entries_dir),
         file_count=len(yaml_files),
     )
@@ -268,7 +268,7 @@ def migrate_entries_dir(entries_dir: Path) -> list[MemoryEntry]:
             raw: object = yml.load(yaml_path)
             if not isinstance(raw, dict):
                 logger.warning(
-                    "skipping non-dict YAML",
+                    "migration_skip_non_dict",
                     file=yaml_path.name,
                 )
                 continue
@@ -277,12 +277,13 @@ def migrate_entries_dir(entries_dir: Path) -> list[MemoryEntry]:
             entries.append(entry)
         except (OSError, ValueError, KeyError, TypeError):
             logger.warning(
-                "failed to migrate entry",
+                "migration_entry_failed",
                 file=yaml_path.name,
+                exc_info=True,
             )
 
     logger.info(
-        "migration complete",
+        "migration_complete",
         migrated=len(entries),
         skipped=len(yaml_files) - len(entries),
     )

@@ -13,6 +13,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import structlog
+
 from trw_memory.cli_formatters import (
     StatusDict,
     entry_to_export_dict,
@@ -26,6 +28,8 @@ from trw_memory.cli_parser import build_parser
 from trw_memory.client import MemoryClient, _create_local_backend
 from trw_memory.lifecycle.consolidation import consolidate_cycle
 from trw_memory.models.config import MemoryConfig
+
+logger = structlog.get_logger(__name__)
 
 
 async def _handle_store(args: argparse.Namespace) -> int:
@@ -42,6 +46,7 @@ async def _handle_store(args: argparse.Namespace) -> int:
         return 0
     except Exception as exc:  # broad catch: CLI error boundary
         print(f"Error: {exc}", file=sys.stderr)
+        logger.error("cli_store_failed", error=str(exc), exc_info=True)
         return 1
     finally:
         await client.close()
@@ -61,6 +66,7 @@ async def _handle_recall(args: argparse.Namespace) -> int:
         return 0
     except Exception as exc:  # broad catch: CLI error boundary
         print(f"Error: {exc}", file=sys.stderr)
+        logger.error("cli_recall_failed", error=str(exc), exc_info=True)
         return 1
     finally:
         await client.close()
@@ -74,6 +80,7 @@ async def _handle_search(args: argparse.Namespace) -> int:
             since = datetime.fromisoformat(args.since).replace(tzinfo=timezone.utc)
         except ValueError:
             print(f"Error: invalid datetime format: {args.since}", file=sys.stderr)
+            logger.error("cli_search_invalid_datetime", since=args.since)
             return 1
 
     client = MemoryClient(namespace=args.namespace, mode="local")
@@ -89,6 +96,7 @@ async def _handle_search(args: argparse.Namespace) -> int:
         return 0
     except Exception as exc:  # broad catch: CLI error boundary
         print(f"Error: {exc}", file=sys.stderr)
+        logger.error("cli_search_failed", error=str(exc), exc_info=True)
         return 1
     finally:
         await client.close()
@@ -113,6 +121,7 @@ async def _handle_consolidate(args: argparse.Namespace) -> int:
             backend.close()
     except Exception as exc:  # broad catch: CLI error boundary
         print(f"Error: {exc}", file=sys.stderr)
+        logger.error("cli_consolidate_failed", error=str(exc), exc_info=True)
         return 1
 
 
@@ -148,6 +157,7 @@ async def _handle_export(args: argparse.Namespace) -> int:
             backend.close()
     except Exception as exc:  # broad catch: CLI error boundary
         print(f"Error: {exc}", file=sys.stderr)
+        logger.error("cli_export_failed", error=str(exc), exc_info=True)
         return 1
 
 
@@ -156,6 +166,7 @@ async def _handle_import(args: argparse.Namespace) -> int:
     file_path = Path(args.path)
     if not file_path.exists():
         print(f"Error: file not found: {args.path}", file=sys.stderr)
+        logger.error("cli_import_file_not_found", path=args.path)
         return 1
 
     raw_text = file_path.read_text(encoding="utf-8")
@@ -170,10 +181,12 @@ async def _handle_import(args: argparse.Namespace) -> int:
             data = json.loads(raw_text)
     except (json.JSONDecodeError, ValueError) as exc:
         print(f"Error: failed to parse {args.path}: {exc}", file=sys.stderr)
+        logger.error("cli_import_parse_failed", path=args.path, error=str(exc), exc_info=True)
         return 1
 
     if not isinstance(data, list):
         print("Error: expected a JSON/YAML array of entries", file=sys.stderr)
+        logger.error("cli_import_invalid_format", reason="expected_array")
         return 1
 
     try:
@@ -183,6 +196,7 @@ async def _handle_import(args: argparse.Namespace) -> int:
         backend = _create_local_backend(config, args.namespace)
     except Exception as exc:  # broad catch: CLI error boundary
         print(f"Error: {exc}", file=sys.stderr)
+        logger.error("cli_import_setup_failed", error=str(exc), exc_info=True)
         return 1
 
     imported = 0
@@ -226,6 +240,7 @@ async def _handle_import(args: argparse.Namespace) -> int:
         return 0
     except Exception as exc:  # broad catch: CLI error boundary
         print(f"Error: {exc}", file=sys.stderr)
+        logger.error("cli_import_failed", error=str(exc), exc_info=True)
         return 1
     finally:
         backend.close()
@@ -250,6 +265,7 @@ async def _handle_status(args: argparse.Namespace) -> int:
             backend.close()
     except Exception as exc:  # broad catch: CLI error boundary
         print(f"Error: {exc}", file=sys.stderr)
+        logger.error("cli_status_failed", error=str(exc), exc_info=True)
         return 1
 
 
@@ -263,6 +279,7 @@ async def _handle_forget(args: argparse.Namespace) -> int:
         return 0
     except Exception as exc:  # broad catch: CLI error boundary
         print(f"Error: {exc}", file=sys.stderr)
+        logger.error("cli_forget_failed", error=str(exc), exc_info=True)
         return 1
     finally:
         await client.close()
@@ -283,6 +300,7 @@ async def _dispatch(args: argparse.Namespace) -> int:
     handler = handlers.get(args.command)
     if handler is None:
         print(f"Unknown command: {args.command}", file=sys.stderr)
+        logger.error("cli_unknown_command", command=args.command)
         return 1
     return await handler(args)
 
@@ -296,12 +314,24 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         Exit code: 0 for success, 1 for error.
     """
+    from trw_memory._logging import configure_logging
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
     if not args.command:
         parser.print_help()
         return 1
+
+    # Configure logging from CLI flags
+    verbosity = args.verbose
+    if args.quiet:
+        verbosity = -1
+
+    configure_logging(
+        verbosity=verbosity,
+        log_level=args.log_level,
+    )
 
     return asyncio.run(_dispatch(args))
 

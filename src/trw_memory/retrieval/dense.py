@@ -20,7 +20,7 @@ import structlog
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.exceptions import DimensionMismatchError
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:

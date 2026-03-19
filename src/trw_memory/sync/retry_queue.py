@@ -16,7 +16,7 @@ from typing import TypedDict
 
 import structlog
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 MAX_QUEUE_DEPTH = 500
 MAX_RETRIES = 5

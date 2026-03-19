@@ -34,7 +34,7 @@ except ImportError:
     _keyring = None
     _KEYRING_AVAILABLE = False
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 _SERVICE_NAME = "trw-memory"
 _KEY_ACCOUNT = "master-key"

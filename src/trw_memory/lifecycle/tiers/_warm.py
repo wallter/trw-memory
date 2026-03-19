@@ -15,7 +15,7 @@ import structlog
 if TYPE_CHECKING:
     from trw_memory.storage.sqlite_backend import SQLiteBackend
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 
 class WarmTierStore:

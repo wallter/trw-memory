@@ -24,7 +24,7 @@ from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.retrieval.dense import cosine_similarity
 from trw_memory.storage.interface import StorageBackend
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 # NFR06 — Path redaction pattern for LLM prompts
 _PATH_RE = re.compile(

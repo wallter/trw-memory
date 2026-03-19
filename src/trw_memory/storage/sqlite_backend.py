@@ -47,7 +47,7 @@ try:
 except ImportError:
     _SQLITE_VEC_AVAILABLE = False
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # DDL

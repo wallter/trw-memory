@@ -16,7 +16,7 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.pii import anonymize_installation_id, redact_paths, strip_pii
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 PUBLISH_TIMEOUT = 5.0  # seconds
 FETCH_TIMEOUT = 3.0

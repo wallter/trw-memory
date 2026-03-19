@@ -21,7 +21,7 @@ from trw_memory.namespace import validate_namespace
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools._types import McpServer
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 
 def _promote_team_memories(

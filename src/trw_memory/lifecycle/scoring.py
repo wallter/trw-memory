@@ -28,7 +28,7 @@ import structlog
 from trw_memory.lifecycle._utils import days_since_access as _days_since_access
 from trw_memory.models.config import MemoryConfig
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------

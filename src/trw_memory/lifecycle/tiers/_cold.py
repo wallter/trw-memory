@@ -17,7 +17,7 @@ from trw_memory.exceptions import StorageError
 from trw_memory.lifecycle.tiers._warm import WarmTierStore
 from trw_memory.storage.persistence import read_yaml, write_yaml
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 
 class ColdTierStore:

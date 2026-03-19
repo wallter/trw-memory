@@ -14,6 +14,23 @@ def build_parser() -> argparse.ArgumentParser:
         prog="trw-memory",
         description="trw-memory CLI — manage your AI agent memory",
     )
+
+    # Global logging flags
+    parser.add_argument(
+        "-v", "--verbose", action="count", default=0,
+        help="Increase verbosity (-v=DEBUG, -vv=DEBUG+more). Stacks.",
+    )
+    parser.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="Suppress output except warnings and errors",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        default=None,
+        help="Explicit log level (overrides -v/-q/env vars)",
+    )
+
     subparsers = parser.add_subparsers(dest="command")
 
     # --- store ---

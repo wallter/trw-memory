@@ -21,7 +21,7 @@ from ruamel.yaml.error import YAMLError
 
 from trw_memory.exceptions import StorageError
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------

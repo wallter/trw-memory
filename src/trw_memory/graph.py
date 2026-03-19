@@ -22,7 +22,7 @@ from trw_memory.exceptions import DimensionMismatchError
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.dense import cosine_similarity
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 MAX_TRAVERSAL_DEPTH = 3
 SIMILARITY_THRESHOLD = 0.75

@@ -14,7 +14,7 @@ from trw_memory.namespace import validate_namespace
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools._types import McpServer
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 # Valid status values for user-supplied strings
 _VALID_STATUSES = {s.value for s in MemoryStatus}

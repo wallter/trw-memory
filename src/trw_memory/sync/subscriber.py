@@ -15,7 +15,7 @@ import structlog
 
 from trw_memory.models.config import MemoryConfig
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 RECONNECT_DELAY = 5.0  # seconds
 HEARTBEAT_TIMEOUT = 30.0

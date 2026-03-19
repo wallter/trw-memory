@@ -26,7 +26,7 @@ try:
 except ImportError:
     _BM25_AVAILABLE = False
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 
 def _tokenize_entry(entry: MemoryEntry) -> list[str]:

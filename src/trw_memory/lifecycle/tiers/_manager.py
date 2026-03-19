@@ -19,7 +19,7 @@ from trw_memory.lifecycle.tiers._warm import WarmTierStore
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 
 class TierManager:

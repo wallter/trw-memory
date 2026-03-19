@@ -13,7 +13,7 @@ import structlog
 
 from trw_memory.models.memory import MemoryEntry
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 MAX_MERGED_DETAIL_LENGTH = 2000
 

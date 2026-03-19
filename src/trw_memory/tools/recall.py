@@ -21,7 +21,7 @@ from trw_memory.retrieval import hybrid_search
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools._types import McpServer
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 
 def memory_recall_impl(
