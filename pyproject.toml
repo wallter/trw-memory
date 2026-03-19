@@ -141,9 +141,10 @@ unfixable = ["F841"]  # never auto-delete "unused" variables (could be side-effe
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["PT", "TRY", "SIM", "B018", "RUF012", "F841", "E741", "B017", "RUF059", "B905", "ANN", "S101", "S", "G"]
 "benchmarks/**/*.py" = ["TRY", "PT", "B905"]
-"src/trw_memory/cli.py" = ["ASYNC230", "ASYNC240"]  # CLI runs via asyncio.run(), blocking I/O is fine
-"**/__init__.py" = ["F401"]  # re-exports are intentional
+"src/trw_memory/cli.py" = ["ASYNC230", "ASYNC240", "G201", "TRY400"]  # CLI: blocking I/O fine, structured error logging at boundary
+"**/__init__.py" = ["F401", "E402"]  # re-exports after NullHandler init are intentional
 "**/conftest.py" = ["PT"]
+"src/trw_memory/_logging.py" = ["ANN401"]  # structlog processor convention
 
 [tool.ruff.lint.isort]
 known-first-party = ["trw_memory"]
