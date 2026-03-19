@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import sys
+from collections.abc import MutableMapping
 from typing import Any
 
 import structlog
@@ -31,8 +32,8 @@ _SENSITIVE_VALUE_RE = re.compile(
 
 
 def _redact_secrets(
-    logger: Any, method_name: str, event_dict: dict[str, Any],
-) -> dict[str, Any]:
+    logger: Any, method_name: str, event_dict: MutableMapping[str, Any],
+) -> MutableMapping[str, Any]:
     for key in list(event_dict):
         key_lower = key.lower()
         if any(pat in key_lower for pat in _SENSITIVE_PATTERNS):
@@ -45,8 +46,8 @@ def _redact_secrets(
 
 
 def _add_component(
-    logger: Any, method_name: str, event_dict: dict[str, Any],
-) -> dict[str, Any]:
+    logger: Any, method_name: str, event_dict: MutableMapping[str, Any],
+) -> MutableMapping[str, Any]:
     logger_name = event_dict.get("_logger_name") or event_dict.get("logger")
     if logger_name and "component" not in event_dict:
         parts = str(logger_name).split(".")
