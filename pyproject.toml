@@ -7,7 +7,7 @@ name = "trw-memory"
 version = "0.3.0"
 description = "Persistent memory engine with hybrid retrieval, tiered storage, and semantic dedup for AI agents"
 readme = "README.md"
-license = "CC-BY-NC-SA-4.0"
+license = "BUSL-1.1"
 requires-python = ">=3.10"
 authors = [
     { name = "TRW Framework", email = "noreply@trwframework.com" },
