@@ -289,13 +289,35 @@ class SQLiteBackend(StorageBackend):
         cursor = self._conn.cursor()
         try:
             cursor.execute(_CREATE_MEMORIES)
+            cursor.execute(_CREATE_GRAPH_EDGES)
+            cursor.execute(_CREATE_NAMESPACES)
+
+            # Migration: rename columns from older schema versions.
+            # Must run BEFORE index creation since indexes reference new names.
+            _rename_cols = [
+                ("memories", "impact", "importance"),
+                ("memory_graph_edges", "relation", "edge_type"),
+            ]
+            for table, old_name, new_name in _rename_cols:
+                with contextlib.suppress(sqlite3.OperationalError):
+                    cursor.execute(f"ALTER TABLE {table} RENAME COLUMN {old_name} TO {new_name}")
+
             cursor.execute(_CREATE_IDX_NAMESPACE)
             cursor.execute(_CREATE_IDX_STATUS)
-            cursor.execute(_CREATE_GRAPH_EDGES)
             cursor.execute(_CREATE_IDX_MGE_SOURCE)
             cursor.execute(_CREATE_IDX_MGE_TARGET)
-            cursor.execute(_CREATE_NAMESPACES)
+
+            # Migration: add missing columns to memory_namespaces
+            for col_name, col_def in [
+                ("team_id", "TEXT"),
+                ("expires_at", "TEXT"),
+                ("status", "TEXT NOT NULL DEFAULT 'active'"),
+            ]:
+                with contextlib.suppress(sqlite3.OperationalError):
+                    cursor.execute(f"ALTER TABLE memory_namespaces ADD COLUMN {col_name} {col_def}")
+
             cursor.execute(_CREATE_IDX_MN_STATUS)
+
             # Migration: add new columns for sync + graph (Sprint 37)
             _migrate_cols = [
                 ("vector_clock", "TEXT DEFAULT '{}'"),
