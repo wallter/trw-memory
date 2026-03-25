@@ -1,0 +1,41 @@
+Business Source License 1.1
+
+Licensor:  Tyler Wall
+Licensed Work:  TRW Framework
+                The Licensed Work is (c) 2026 Tyler Wall.
+
+Additional Use Grant:
+  You may use the Licensed Work for any purpose other than offering
+  a commercial product or service that competes with the Licensed Work.
+
+  "Compete" means providing a substantially similar product or service
+  that replaces or substitutes for the Licensed Work's core functionality:
+  persistent memory with scoring and decay, sprint orchestration,
+  requirements lifecycle management, phase gates, or agent team
+  coordination for AI coding agents.
+
+  For clarity, the following uses are always permitted:
+  - Using TRW in your own software development projects
+  - Integrating TRW into your development workflow
+  - Building applications, tools, or services that use TRW internally
+  - Modifying TRW for your own non-competing use
+  - Evaluating, testing, and benchmarking TRW
+
+Change Date:  2030-03-21
+
+Change License:  Apache License, Version 2.0
+
+Notice:
+
+  The Business Source License (this document, or the "License") is not
+  an Open Source license. However, the Licensed Work will eventually be
+  made available under the Change License, as stated in this License.
+
+  License text copyright (c) 2017 MariaDB Corporation Ab, All Rights
+  Reserved. "Business Source License" is a trademark of MariaDB
+  Corporation Ab.
+
+  For the full BSL 1.1 license text, see:
+  https://mariadb.com/bsl11/
+
+SPDX-License-Identifier: BUSL-1.1

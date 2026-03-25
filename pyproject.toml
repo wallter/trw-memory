@@ -60,8 +60,9 @@ dev = [
 [project.urls]
 Homepage = "https://trwframework.com"
 Documentation = "https://trwframework.com/docs"
-Repository = "https://github.com/trw-framework/trw-memory"
-Issues = "https://github.com/trw-framework/trw-memory/issues"
+Repository = "https://github.com/wallter/trw-memory"
+Issues = "https://github.com/wallter/trw-memory/issues"
+Changelog = "https://github.com/wallter/trw-memory/blob/main/CHANGELOG.md"
 
 [project.scripts]
 trw-memory = "trw_memory.cli:main"

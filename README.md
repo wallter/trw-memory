@@ -3,13 +3,13 @@
 Persistent memory engine with hybrid retrieval, tiered storage, and semantic dedup for AI agents.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
-[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC_BY--NC--SA_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+[![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-orange.svg)](LICENSE)
 
 ## What It Does
 
 TRW-Memory is a standalone memory engine that gives AI coding agents persistent, searchable knowledge storage. It stores learnings (patterns, gotchas, architecture decisions) in SQLite with optional YAML backup, and retrieves them using hybrid search that combines keyword matching (BM25) with dense vector similarity.
 
-Designed as the storage backend for [trw-mcp](../trw-mcp/), but usable independently by any AI agent framework that needs persistent memory with recall.
+Designed as the storage backend for [trw-mcp](https://github.com/wallter/trw-mcp), but usable independently by any AI agent framework that needs persistent memory with recall.
 
 ## Features
 
@@ -32,7 +32,11 @@ Designed as the storage backend for [trw-mcp](../trw-mcp/), but usable independe
 ## Quick Start
 
 ```bash
-# Install from source
+# Install from PyPI
+pip install trw-memory
+
+# Or install from source
+git clone https://github.com/wallter/trw-memory.git
 cd trw-memory
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
@@ -312,7 +316,7 @@ trw-memory-server  # Starts MCP server (stdio transport)
 
 ## Integration with trw-mcp
 
-When used as the backend for [trw-mcp](../trw-mcp/):
+When used as the backend for [trw-mcp](https://github.com/wallter/trw-mcp):
 
 - `trw_learn` delegates to `SQLiteBackend.store()` via `memory_adapter.py` (YAML dual-write as backup)
 - `trw_recall` delegates to `SQLiteBackend.search()` / `list_entries()` as the sole query path
@@ -366,4 +370,4 @@ pip install -e ".[dev]"
 
 ## License
 
-[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) -- see [LICENSE](../LICENSE).
+[Business Source License 1.1](LICENSE) -- source-available, free for non-competing use. Converts to Apache 2.0 on 2030-03-21.
