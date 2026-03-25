@@ -1,6 +1,10 @@
 # trw-memory
 
-Standalone persistent memory engine for AI agents — hybrid retrieval (BM25 + dense vectors), tiered storage (SQLite primary, YAML secondary), semantic dedup, and knowledge-graph traversal. Used by trw-mcp as its memory backend via `memory_adapter.py`.
+Standalone persistent memory engine for AI agents — part of [TRW Framework](https://trwframework.com).
+
+**Public repo**: [github.com/wallter/trw-memory](https://github.com/wallter/trw-memory) | **PyPI**: `pip install trw-memory`
+
+Hybrid retrieval (BM25 + dense vectors), tiered storage (SQLite primary, YAML secondary), semantic dedup, and knowledge-graph traversal. Used by [trw-mcp](https://github.com/wallter/trw-mcp) as its memory backend.
 
 ## Build & Test
 
