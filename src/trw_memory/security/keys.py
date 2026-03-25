@@ -11,7 +11,6 @@ from __future__ import annotations
 import contextlib
 import os
 import stat
-
 from pathlib import Path
 
 import structlog
