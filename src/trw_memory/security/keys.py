@@ -28,10 +28,9 @@ from trw_memory.storage.interface import StorageBackend
 try:
     import keyring as _keyring
 
-    _keyring: types.ModuleType | None = _keyring
     _KEYRING_AVAILABLE = True
 except ImportError:
-    _keyring = None
+    _keyring = None  # type: ignore[assignment]
     _KEYRING_AVAILABLE = False
 
 logger = structlog.get_logger(__name__)
