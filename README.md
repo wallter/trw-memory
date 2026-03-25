@@ -1,32 +1,33 @@
 # trw-memory
 
-Persistent memory engine with hybrid retrieval, tiered storage, and semantic dedup for AI agents.
+**AI agent memory engine** — persistent memory for AI agents with hybrid search (BM25 + vectors), Q-learning scoring, Ebbinghaus decay curves, tiered storage, and knowledge graph. The standalone memory backend powering [TRW Framework](https://trwframework.com).
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
-[![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-orange.svg)](LICENSE)
+[![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-orange.svg)](https://trwframework.com/license)
+[![Docs](https://img.shields.io/badge/docs-trwframework.com-blue)](https://trwframework.com/docs)
 
 ## Part of TRW Framework
 
-trw-memory is the standalone memory engine for [TRW (The Real Work)](https://trwframework.com) — a methodology layer for AI-assisted development. It works alongside [trw-mcp](https://github.com/wallter/trw-mcp), the MCP server that provides 24 tools built on this engine.
+trw-memory is the standalone memory engine for [TRW (The Real Work)](https://trwframework.com) — a methodology layer for AI-assisted development that turns stateless agents into self-improving systems through [knowledge compounding](https://trwframework.com/docs). It works alongside [trw-mcp](https://github.com/wallter/trw-mcp), the MCP server that provides 24 tools built on this engine.
 
-- **trw-memory** (this repo): Standalone memory engine with hybrid retrieval, scoring, and lifecycle
+- **trw-memory** (this repo): Standalone AI agent memory engine with hybrid retrieval, scoring, and lifecycle
 - **trw-mcp**: MCP server with 24 tools, 24 skills, 18 agents — uses trw-memory as its backend
 
 ## What It Does
 
-TRW-Memory is a standalone memory engine that gives AI coding agents persistent, searchable knowledge storage. It stores learnings (patterns, gotchas, architecture decisions) in SQLite with optional YAML backup, and retrieves them using hybrid search that combines keyword matching (BM25) with dense vector similarity.
+TRW-Memory is a standalone **persistent memory engine for AI agents** that gives coding agents searchable, long-lived knowledge storage. It stores learnings (patterns, gotchas, architecture decisions) in SQLite with optional YAML backup, and retrieves them using [hybrid search](https://trwframework.com/docs) that combines keyword matching (BM25) with dense vector similarity.
 
-Designed as the storage backend for [trw-mcp](https://github.com/wallter/trw-mcp), but usable independently by any AI agent framework that needs persistent memory with recall.
+Designed as the storage backend for [trw-mcp](https://github.com/wallter/trw-mcp) and [TRW Framework](https://trwframework.com), but usable independently by any AI agent framework that needs persistent memory with recall.
 
 ## Features
 
 - **MemoryClient SDK** -- High-level async Python client with store/recall/forget/search
-- **Hybrid Search** -- BM25 keyword matching + dense vector similarity via sqlite-vec, combined with Reciprocal Rank Fusion (RRF)
-- **Tiered Storage** -- Hot/warm/cold tiers with automatic promotion/demotion based on access patterns and impact scores
-- **Semantic Dedup** -- Detects and merges near-duplicate learnings using cosine similarity (0.85 threshold)
-- **Knowledge Graph** -- Tag co-occurrence and similarity edges, BFS traversal, importance boost/decay, cross-validation propagation
+- **Hybrid Search (BM25 + vector)** -- BM25 keyword matching + dense vector similarity via sqlite-vec, combined with Reciprocal Rank Fusion (RRF). [Learn more](https://trwframework.com/docs)
+- **Tiered Storage** -- Hot/warm/cold tiers with automatic promotion/demotion based on access patterns and impact scores. [Architecture details](https://trwframework.com/docs)
+- **Semantic Deduplication** -- Detects and merges near-duplicate learnings using cosine similarity (0.85 threshold)
+- **Knowledge Graph for AI** -- Tag co-occurrence and similarity edges, BFS traversal, importance boost/decay, cross-validation propagation. [Docs](https://trwframework.com/docs)
 - **LLM Consolidation** -- Episodic-to-semantic consolidation via complete-linkage clustering and LLM summarization
-- **Scoring Engine** -- Q-learning with EMA updates, Ebbinghaus forgetting curve, Bayesian MACLA calibration
+- **Q-learning Memory Scoring** -- Q-learning with EMA updates, [Ebbinghaus forgetting curve](https://trwframework.com/docs) applied at query time, Bayesian MACLA calibration
 - **Remote Sync** -- Publish/fetch learnings across installations with vector clock conflict resolution and SSE live updates
 - **Security** -- AES-256-GCM field encryption, PII detection/redaction, memory poisoning detection (z-score anomaly), RBAC, audit trail
 - **Agent Integration** -- `register_tools()` for any agent framework, `@auto_recall` decorator
@@ -242,7 +243,9 @@ from trw_memory.storage.yaml_backend import YAMLBackend
 backend = YAMLBackend(entries_dir=".trw/learnings")
 ```
 
-### Hybrid Retrieval Pipeline
+### Hybrid Search: BM25 + Vector
+
+The hybrid search pipeline combines sparse keyword retrieval with dense semantic search — ensuring strong results for both exact-match queries and conceptually similar queries. [Read the full architecture docs](https://trwframework.com/docs).
 
 ```
 Query --> BM25 (keyword, rank-bm25) --+
@@ -254,15 +257,17 @@ The pipeline gracefully degrades: if BM25 is unavailable, only dense search runs
 
 ### Scoring System
 
-Learning utility is computed from multiple signals:
+Learning utility is computed from multiple signals. [Full scoring documentation](https://trwframework.com/docs):
 
 - **Q-learning**: Exponential moving average updated from outcome events (success/failure/mixed)
-- **Ebbinghaus decay**: Time-based forgetting curve applied at query time (not mutated in storage)
+- **Ebbinghaus forgetting curve**: Time-based [Ebbinghaus decay](https://trwframework.com/docs) applied at query time (not mutated in storage) — entries naturally fade unless reinforced by recall
 - **Access recency boost**: Recently accessed entries score higher
 - **Impact score**: Author-assigned importance (0.0-1.0)
 - **Bayesian calibration**: MACLA calibration for impact score accuracy
 
 ### Tiered Storage
+
+Automatic hot/warm/cold tiering keeps frequently-used memories fast and archives stale ones. [Architecture overview](https://trwframework.com/docs):
 
 | Tier | Criteria | Storage | Latency |
 |------|----------|---------|---------|
@@ -323,13 +328,15 @@ trw-memory-server  # Starts MCP server (stdio transport)
 
 ## Integration with trw-mcp
 
-When used as the backend for [trw-mcp](https://github.com/wallter/trw-mcp):
+[trw-mcp](https://github.com/wallter/trw-mcp) is the MCP server layer of [TRW Framework](https://trwframework.com) — it exposes 24 tools, 24 skills, and 18 agents to Claude Code and other AI coding tools. trw-memory serves as its memory backend:
 
 - `trw_learn` delegates to `SQLiteBackend.store()` via `memory_adapter.py` (YAML dual-write as backup)
 - `trw_recall` delegates to `SQLiteBackend.search()` / `list_entries()` as the sole query path
 - Scoring functions (`compute_utility_score`, `update_q_value`, `apply_time_decay`, `bayesian_calibrate`) are canonical in trw-memory and re-exported by trw-mcp
 - One-time YAML-to-SQLite migration runs automatically on first access
 - Optional vector search via `LocalEmbeddingProvider` + `rrf_fuse` when `sentence-transformers` is installed
+
+[Read more about the full TRW Framework architecture](https://trwframework.com/docs).
 
 ## Development
 
@@ -377,4 +384,8 @@ pip install -e ".[dev]"
 
 ## License
 
-[Business Source License 1.1](LICENSE) -- source-available, free for non-competing use. Converts to Apache 2.0 on 2030-03-21.
+[Business Source License 1.1](https://trwframework.com/license) -- source-available, free for non-competing use. Converts to Apache 2.0 on 2030-03-21.
+
+---
+
+Built with [TRW Framework](https://trwframework.com) · [Documentation](https://trwframework.com/docs) · [License](https://trwframework.com/license)
