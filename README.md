@@ -5,6 +5,13 @@ Persistent memory engine with hybrid retrieval, tiered storage, and semantic ded
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-orange.svg)](LICENSE)
 
+## Part of TRW Framework
+
+trw-memory is the standalone memory engine for [TRW (The Real Work)](https://trwframework.com) — a methodology layer for AI-assisted development. It works alongside [trw-mcp](https://github.com/wallter/trw-mcp), the MCP server that provides 24 tools built on this engine.
+
+- **trw-memory** (this repo): Standalone memory engine with hybrid retrieval, scoring, and lifecycle
+- **trw-mcp**: MCP server with 24 tools, 24 skills, 18 agents — uses trw-memory as its backend
+
 ## What It Does
 
 TRW-Memory is a standalone memory engine that gives AI coding agents persistent, searchable knowledge storage. It stores learnings (patterns, gotchas, architecture decisions) in SQLite with optional YAML backup, and retrieves them using hybrid search that combines keyword matching (BM25) with dense vector similarity.

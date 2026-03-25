@@ -25,3 +25,12 @@ coverage.xml
 
 # TRW runtime state
 .trw/
+
+# Internal Claude Code settings — not for public consumption
+.claude/
+
+# Internal PRD/sprint docs — development artefacts, not part of the public package
+docs/
+
+# Scratch workspace
+scratch/

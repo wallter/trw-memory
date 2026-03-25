@@ -53,7 +53,7 @@ def derive_namespace_key(master_key: bytes, namespace: str) -> bytes:
         salt=None,
         info=namespace.encode("utf-8"),
     )
-    return hkdf.derive(master_key)
+    return bytes(hkdf.derive(master_key))
 
 
 def encrypt_field(plaintext: str, key: bytes) -> str:
@@ -103,7 +103,7 @@ def decrypt_field(ciphertext_b64: str, key: bytes) -> str:
     nonce = payload[:_NONCE_LENGTH]
     ct_with_tag = payload[_NONCE_LENGTH:]
     aesgcm = AESGCM(key)
-    plaintext_bytes = aesgcm.decrypt(nonce, ct_with_tag, None)
+    plaintext_bytes = bytes(aesgcm.decrypt(nonce, ct_with_tag, None))
     return plaintext_bytes.decode("utf-8")
 
 

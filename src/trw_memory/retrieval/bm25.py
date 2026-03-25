@@ -20,7 +20,7 @@ import structlog
 from trw_memory.models.memory import MemoryEntry
 
 try:
-    from rank_bm25 import BM25Okapi  # type: ignore[import-untyped]
+    from rank_bm25 import BM25Okapi
 
     _BM25_AVAILABLE = True
 except ImportError:

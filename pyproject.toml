@@ -167,6 +167,46 @@ strict = true
 warn_return_any = true
 warn_unused_configs = true
 
+# Optional dependencies that lack type stubs — ignore on a per-module basis
+# so `mypy --strict` passes even when a minimal `.[dev]` install is used.
+# Each override uses a separate table entry because mypy requires the module
+# field to be a glob string (not a list) in older versions.
+[[tool.mypy.overrides]]
+module = "sentence_transformers"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "sentence_transformers.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "rank_bm25"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "sqlite_vec"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "keyring"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "fastmcp"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "fastmcp.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "cryptography"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "cryptography.*"
+ignore_missing_imports = true
+
 [tool.coverage.run]
 source = ["trw_memory"]
 omit = ["*/server.py"]

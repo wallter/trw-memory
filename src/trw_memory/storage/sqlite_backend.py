@@ -41,7 +41,7 @@ from trw_memory.storage._shared import (
 from trw_memory.storage.interface import StorageBackend
 
 try:
-    import sqlite_vec  # type: ignore[import-untyped]
+    import sqlite_vec
 
     _SQLITE_VEC_AVAILABLE = True
 except ImportError:

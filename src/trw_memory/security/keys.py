@@ -25,10 +25,10 @@ from trw_memory.security.encryption import (
 )
 from trw_memory.storage.interface import StorageBackend
 
-_keyring: types.ModuleType | None
 try:
     import keyring as _keyring
 
+    _keyring: types.ModuleType | None = _keyring
     _KEYRING_AVAILABLE = True
 except ImportError:
     _keyring = None
