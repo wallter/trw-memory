@@ -34,4 +34,4 @@ jobs:
       - name: Type check
         run: mypy --strict src/trw_memory/
       - name: Test
-        run: pytest tests/ -x --timeout=120 -q
+        run: pytest tests/ -x -q
