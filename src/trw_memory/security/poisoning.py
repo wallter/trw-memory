@@ -13,6 +13,10 @@ from collections import Counter
 from datetime import datetime, timezone
 from enum import Enum
 
+import structlog
+
+logger = structlog.get_logger(__name__)
+
 from pydantic import BaseModel, ConfigDict
 
 from trw_memory.models.memory import MemoryEntry
