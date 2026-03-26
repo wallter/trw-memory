@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 
 class MemoryStatus(str, Enum):
@@ -51,8 +51,8 @@ class Assertion(BaseModel):
 
     @field_validator("pattern")
     @classmethod
-    def _validate_pattern(cls, v: str, info: object) -> str:
-        values = info.data  # type: ignore[union-attr]
+    def _validate_pattern(cls, v: str, info: ValidationInfo) -> str:
+        values = info.data
         assertion_type = values.get("type", "")
         # grep types require non-empty pattern
         if assertion_type in (
