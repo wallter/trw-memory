@@ -23,13 +23,9 @@ from typing import ClassVar
 import structlog
 
 from trw_memory.exceptions import StorageError
-from trw_memory.models.memory import Assertion, MemoryEntry, MemoryStatus
-from trw_memory.storage._parsing import (
-    parse_dt,
-    parse_json_dict_int,
-    parse_json_dict_str,
-    parse_json_list,
-)
+from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.storage._row_mapper import entry_to_row, row_to_entry
+from trw_memory.storage._schema import ensure_schema, ensure_vec_table
 from trw_memory.storage._shared import (
     DICT_FIELDS,
     ENTRY_COLUMNS,
@@ -50,74 +46,7 @@ except ImportError:
 logger = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# DDL
-# ---------------------------------------------------------------------------
-
-_CREATE_MEMORIES = """
-CREATE TABLE IF NOT EXISTS memories (
-    id                TEXT PRIMARY KEY,
-    content           TEXT NOT NULL,
-    detail            TEXT DEFAULT '',
-    tags              TEXT DEFAULT '[]',
-    evidence          TEXT DEFAULT '[]',
-    importance        REAL DEFAULT 0.5,
-    status            TEXT DEFAULT 'active',
-    recurrence        INTEGER DEFAULT 1,
-    namespace         TEXT DEFAULT 'default',
-    created_at        TEXT NOT NULL,
-    updated_at        TEXT NOT NULL,
-    last_accessed_at  TEXT,
-    access_count      INTEGER DEFAULT 0,
-    q_value           REAL DEFAULT 0.5,
-    q_observations    INTEGER DEFAULT 0,
-    source            TEXT DEFAULT 'agent',
-    source_identity   TEXT DEFAULT '',
-    merged_from       TEXT DEFAULT '[]',
-    consolidated_from TEXT DEFAULT '[]',
-    consolidated_into TEXT,
-    metadata          TEXT DEFAULT '{}',
-    vector_clock      TEXT DEFAULT '{}',
-    remote_id         TEXT,
-    published_to_platform INTEGER DEFAULT 0,
-    pending_delete    INTEGER DEFAULT 0,
-    cross_validated   INTEGER DEFAULT 0,
-    outcome_history   TEXT DEFAULT '[]',
-    assertions        TEXT DEFAULT '[]'
-)
-"""
-
-_CREATE_IDX_NAMESPACE = "CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace)"
-_CREATE_IDX_STATUS = "CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)"
-
-_CREATE_GRAPH_EDGES = """
-CREATE TABLE IF NOT EXISTS memory_graph_edges (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_id   TEXT NOT NULL,
-    target_id   TEXT NOT NULL,
-    edge_type   TEXT NOT NULL,
-    weight      REAL NOT NULL CHECK (weight >= 0.0 AND weight <= 1.0),
-    created_at  TEXT NOT NULL,
-    UNIQUE (source_id, target_id, edge_type)
-)
-"""
-
-_CREATE_IDX_MGE_SOURCE = "CREATE INDEX IF NOT EXISTS idx_mge_source ON memory_graph_edges(source_id, edge_type)"
-_CREATE_IDX_MGE_TARGET = "CREATE INDEX IF NOT EXISTS idx_mge_target ON memory_graph_edges(target_id, edge_type)"
-
-_CREATE_NAMESPACES = """
-CREATE TABLE IF NOT EXISTS memory_namespaces (
-    namespace_id  TEXT PRIMARY KEY,
-    team_id       TEXT,
-    created_at    TEXT NOT NULL,
-    expires_at    TEXT,
-    status        TEXT NOT NULL DEFAULT 'active'
-)
-"""
-
-_CREATE_IDX_MN_STATUS = "CREATE INDEX IF NOT EXISTS idx_mn_status ON memory_namespaces(status, expires_at)"
-
-# ---------------------------------------------------------------------------
-# Row <-> MemoryEntry helpers
+# Column helpers
 # ---------------------------------------------------------------------------
 
 _COLUMNS = ENTRY_COLUMNS
@@ -125,125 +54,6 @@ _COLUMNS_SQL = ", ".join(_COLUMNS)
 
 # Allowlist for UPDATE: all columns except immutable ones.
 _VALID_UPDATE_COLUMNS: frozenset[str] = frozenset(_COLUMNS) - IMMUTABLE_FIELDS
-
-
-def _row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
-    """Convert a SQLite row tuple to a :class:`MemoryEntry`.
-
-    The column order must match :data:`_COLUMNS`.
-    """
-    (
-        id_,
-        content,
-        detail,
-        tags_json,
-        evidence_json,
-        importance,
-        status,
-        recurrence,
-        namespace,
-        created_at_s,
-        updated_at_s,
-        last_accessed_s,
-        access_count,
-        q_value,
-        q_obs,
-        source,
-        source_identity,
-        merged_json,
-        cons_from_json,
-        consolidated_into,
-        metadata_json,
-        vector_clock_json,
-        remote_id,
-        published_raw,
-        pending_del_raw,
-        cross_val_raw,
-        outcome_json,
-        assertions_json,
-    ) = row
-
-    # Deserialise assertions from JSON (PRD-CORE-086)
-    # strict=False is required because the JSON round-trip stores enum values
-    # as strings, and Assertion has strict=True on the model.
-    assertions: list[Assertion] = []
-    if assertions_json and assertions_json != "[]":
-        try:
-            assertions = [
-                Assertion.model_validate(a, strict=False)
-                for a in json.loads(str(assertions_json))
-            ]
-        except (json.JSONDecodeError, ValueError):
-            assertions = []
-
-    return MemoryEntry(
-        id=str(id_),
-        content=str(content),
-        detail=str(detail) if detail else "",
-        tags=parse_json_list(tags_json),
-        evidence=parse_json_list(evidence_json),
-        importance=float(str(importance)),
-        status=MemoryStatus(str(status)),
-        recurrence=int(str(recurrence)),
-        namespace=str(namespace),
-        created_at=parse_dt(created_at_s),
-        updated_at=parse_dt(updated_at_s),
-        last_accessed_at=parse_dt(last_accessed_s) if last_accessed_s else None,
-        access_count=int(str(access_count)),
-        q_value=float(str(q_value)),
-        q_observations=int(str(q_obs)),
-        source=str(source),
-        source_identity=str(source_identity) if source_identity else "",
-        merged_from=parse_json_list(merged_json),
-        consolidated_from=parse_json_list(cons_from_json),
-        consolidated_into=str(consolidated_into) if consolidated_into else None,
-        metadata=parse_json_dict_str(metadata_json),
-        vector_clock=parse_json_dict_int(vector_clock_json),
-        remote_id=str(remote_id) if remote_id else None,
-        published_to_platform=bool(int(str(published_raw))) if published_raw else False,
-        pending_delete=bool(int(str(pending_del_raw))) if pending_del_raw else False,
-        cross_validated=bool(int(str(cross_val_raw))) if cross_val_raw else False,
-        outcome_history=parse_json_list(outcome_json),
-        assertions=assertions,
-    )
-
-
-def _entry_to_row(entry: MemoryEntry) -> tuple[object, ...]:
-    """Convert a :class:`MemoryEntry` to an INSERT/REPLACE row tuple."""
-    # Pydantic v2: use_enum_values=True + strict=True can leave the field
-    # as an enum instance in some code paths.  Safely extract the value.
-    raw_status = entry.status
-    status_val = raw_status.value if isinstance(raw_status, MemoryStatus) else str(raw_status)
-    return (
-        entry.id,
-        entry.content,
-        entry.detail,
-        json.dumps(entry.tags),
-        json.dumps(entry.evidence),
-        entry.importance,
-        status_val,
-        entry.recurrence,
-        entry.namespace,
-        entry.created_at.isoformat(),
-        entry.updated_at.isoformat(),
-        entry.last_accessed_at.isoformat() if entry.last_accessed_at else None,
-        entry.access_count,
-        entry.q_value,
-        entry.q_observations,
-        entry.source,
-        entry.source_identity,
-        json.dumps(entry.merged_from),
-        json.dumps(entry.consolidated_from),
-        entry.consolidated_into,
-        json.dumps(entry.metadata),
-        json.dumps(entry.vector_clock),
-        entry.remote_id,
-        int(entry.published_to_platform),
-        int(entry.pending_delete),
-        int(entry.cross_validated),
-        json.dumps(entry.outcome_history),
-        json.dumps([a.model_dump() for a in entry.assertions]) if entry.assertions else "[]",
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -282,14 +92,14 @@ class SQLiteBackend(StorageBackend):
         if sync_result and sync_result[0] not in ("1", 1):
             logger.warning("synchronous_normal_not_set", got=sync_result[0] if sync_result else None)
 
-        self._ensure_schema()
+        ensure_schema(self._conn)
 
         if _SQLITE_VEC_AVAILABLE:
             try:
                 self._conn.enable_load_extension(True)
                 sqlite_vec.load(self._conn)
                 self._conn.enable_load_extension(False)
-                self._ensure_vec_table()
+                ensure_vec_table(self._conn, self._dim)
                 self._vec_available = True
                 logger.debug("sqlite_vec_loaded", db=str(db_path))
             except (sqlite3.Error, OSError):
@@ -297,70 +107,6 @@ class SQLiteBackend(StorageBackend):
                 logger.debug("sqlite_vec_load_failed", db=str(db_path), exc_info=True)
         else:
             logger.debug("sqlite_vec_unavailable", reason="not_installed")
-
-    # ------------------------------------------------------------------
-    # Schema
-    # ------------------------------------------------------------------
-
-    def _ensure_schema(self) -> None:
-        cursor = self._conn.cursor()
-        try:
-            cursor.execute(_CREATE_MEMORIES)
-            cursor.execute(_CREATE_GRAPH_EDGES)
-            cursor.execute(_CREATE_NAMESPACES)
-
-            # Migration: rename columns from older schema versions.
-            # Must run BEFORE index creation since indexes reference new names.
-            _rename_cols = [
-                ("memories", "impact", "importance"),
-                ("memory_graph_edges", "relation", "edge_type"),
-            ]
-            for table, old_name, new_name in _rename_cols:
-                with contextlib.suppress(sqlite3.OperationalError):
-                    cursor.execute(f"ALTER TABLE {table} RENAME COLUMN {old_name} TO {new_name}")
-
-            cursor.execute(_CREATE_IDX_NAMESPACE)
-            cursor.execute(_CREATE_IDX_STATUS)
-            cursor.execute(_CREATE_IDX_MGE_SOURCE)
-            cursor.execute(_CREATE_IDX_MGE_TARGET)
-
-            # Migration: add missing columns to memory_namespaces
-            for col_name, col_def in [
-                ("team_id", "TEXT"),
-                ("expires_at", "TEXT"),
-                ("status", "TEXT NOT NULL DEFAULT 'active'"),
-            ]:
-                with contextlib.suppress(sqlite3.OperationalError):
-                    cursor.execute(f"ALTER TABLE memory_namespaces ADD COLUMN {col_name} {col_def}")
-
-            cursor.execute(_CREATE_IDX_MN_STATUS)
-
-            # Migration: add new columns for sync + graph (Sprint 37)
-            _migrate_cols = [
-                ("vector_clock", "TEXT DEFAULT '{}'"),
-                ("remote_id", "TEXT"),
-                ("published_to_platform", "INTEGER DEFAULT 0"),
-                ("pending_delete", "INTEGER DEFAULT 0"),
-                ("cross_validated", "INTEGER DEFAULT 0"),
-                ("outcome_history", "TEXT DEFAULT '[]'"),
-                ("assertions", "TEXT DEFAULT '[]'"),
-            ]
-            for col_name, col_def in _migrate_cols:
-                with contextlib.suppress(sqlite3.OperationalError):
-                    cursor.execute(f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}")
-            self._conn.commit()
-        finally:
-            cursor.close()
-
-    def _ensure_vec_table(self) -> None:
-        self._conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(embedding float[{self._dim}])")
-        # Companion table to map rowid <-> entry_id
-        self._conn.execute(
-            "CREATE TABLE IF NOT EXISTS vec_index ("
-            "rowid INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "entry_id TEXT UNIQUE NOT NULL)"
-        )
-        self._conn.commit()
 
     # ------------------------------------------------------------------
     # Public property
@@ -423,7 +169,7 @@ class SQLiteBackend(StorageBackend):
         sql = f"INSERT OR REPLACE INTO memories ({_COLUMNS_SQL}) VALUES ({placeholders})"  # noqa: S608 — _COLUMNS_SQL is a static constant (no user input); values are parameterized
         try:
             with self._lock:
-                self._conn.execute(sql, _entry_to_row(entry))
+                self._conn.execute(sql, entry_to_row(entry))
                 self._conn.commit()
             logger.debug("memory_stored", entry_id=entry.id)
         except (sqlite3.Error, json.JSONDecodeError) as exc:
@@ -450,7 +196,7 @@ class SQLiteBackend(StorageBackend):
                 row = self._conn.execute(sql, (entry_id,)).fetchone()
             if row is None:
                 return None
-            return _row_to_entry(tuple(row))
+            return row_to_entry(tuple(row))
         except (sqlite3.Error, ValueError, KeyError) as exc:
             raise StorageError(
                 f"Failed to get entry {entry_id}: {exc}",
@@ -614,7 +360,7 @@ class SQLiteBackend(StorageBackend):
         try:
             with self._lock:
                 rows = self._conn.execute(sql, params).fetchall()
-            results = [_row_to_entry(tuple(r)) for r in rows]
+            results = [row_to_entry(tuple(r)) for r in rows]
 
             # Post-filter by tags (all-of semantics)
             if tags:
@@ -689,7 +435,7 @@ class SQLiteBackend(StorageBackend):
         try:
             with self._lock:
                 rows = self._conn.execute(sql, params).fetchall()
-            return [_row_to_entry(tuple(r)) for r in rows]
+            return [row_to_entry(tuple(r)) for r in rows]
         except (sqlite3.Error, ValueError, KeyError) as exc:
             raise StorageError(
                 f"Failed to list entries: {exc}",

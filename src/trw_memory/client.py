@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Protocol, TypedDict, runtime_checkable
 
+import structlog
+
 from trw_memory.exceptions import (
     MemoryConnectionError,
     MemoryNotFoundError,
@@ -31,6 +33,8 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.storage.interface import StorageBackend
+
+logger = structlog.get_logger(__name__)
 
 
 def _make_id() -> str:
@@ -159,6 +163,13 @@ class MemoryClient:
                 config = MemoryConfig()
                 self._backend = _create_local_backend(config, namespace)
                 self._resolved_mode = "local"
+                logger.debug(
+                    "client_initialized",
+                    op="init",
+                    namespace=namespace,
+                    mode=self._resolved_mode,
+                    backend=config.storage_backend,
+                )
             except (OSError, ValueError, ImportError) as exc:
                 if mode == "local":
                     raise MemoryConnectionError(f"Failed to create local backend: {exc}") from exc
@@ -233,6 +244,15 @@ class MemoryClient:
         async with self._lock:
             self._get_backend().store(entry)
 
+        logger.debug(
+            "memory_stored",
+            op="store",
+            memory_id=memory_id,
+            namespace=self._namespace,
+            content_len=len(content),
+            tag_count=len(tags or []),
+            importance=importance,
+        )
         return StoreResultDict(
             memory_id=memory_id,
             namespace=self._namespace,
@@ -278,7 +298,15 @@ class MemoryClient:
         ]
 
         results.sort(key=lambda r: float(r["score"]), reverse=True)
-        return results[:limit]
+        final = results[:limit]
+        logger.debug(
+            "memory_recalled",
+            op="recall",
+            query=query[:80],
+            namespace=self._namespace,
+            result_count=len(final),
+        )
+        return final
 
     async def forget(self, memory_id: str) -> ForgetResultDict:
         """Delete a memory entry.
@@ -302,6 +330,12 @@ class MemoryClient:
                 raise MemoryNotFoundError(f"Memory entry {memory_id!r} not found in namespace {self._namespace!r}")
             backend.delete(memory_id)
 
+        logger.debug(
+            "memory_forgotten",
+            op="forget",
+            memory_id=memory_id,
+            namespace=self._namespace,
+        )
         return ForgetResultDict(
             memory_id=memory_id,
             status="deleted",
@@ -353,7 +387,16 @@ class MemoryClient:
             results.append(_entry_to_result(entry, score=entry.importance))
 
         results.sort(key=lambda r: float(r["score"]), reverse=True)
-        return results[:limit]
+        final = results[:limit]
+        logger.debug(
+            "memory_searched",
+            op="search",
+            namespace=self._namespace,
+            tag_filter=tags,
+            min_importance=min_importance,
+            result_count=len(final),
+        )
+        return final
 
     # ------------------------------------------------------------------
     # Tool registration (FR09)
@@ -485,6 +528,7 @@ class MemoryClient:
                         raw = await client.recall(str(query), limit=limit)
                         memories = [m for m in raw if float(m["score"]) >= min_score]
                 except Exception:  # broad catch: fail-open recall decorator
+                    logger.debug("auto_recall_failed", op="auto_recall", exc_info=True)
                     memories = []
 
                 kwargs["recalled_memories"] = memories
@@ -516,3 +560,4 @@ class MemoryClient:
         if self._backend is not None:
             self._backend.close()
             self._backend = None
+            logger.debug("client_closed", op="close", namespace=self._namespace)

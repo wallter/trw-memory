@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from trw_memory.models.memory import Assertion, AssertionType, MemoryEntry
+from trw_memory.storage._schema import ensure_schema
 from trw_memory.storage._shared import ENTRY_COLUMNS
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
@@ -114,10 +115,10 @@ class TestMigration:
         backend.close()
 
     def test_idempotent_migration(self, tmp_path: Path) -> None:
-        """Running _ensure_schema twice should not error."""
+        """Running ensure_schema twice should not error."""
         backend = SQLiteBackend(tmp_path / "idempotent.db")
-        # Call _ensure_schema again — should not raise
-        backend._ensure_schema()
+        # Call ensure_schema again — should not raise
+        ensure_schema(backend._conn)
         # Verify column still exists
         cursor = backend._conn.execute("PRAGMA table_info(memories)")
         columns = {row[1] for row in cursor.fetchall()}
