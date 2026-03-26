@@ -380,6 +380,45 @@ class TestRegisterTools:
 # ---------------------------------------------------------------------------
 
 
+class TestAutoRecallDecorator:
+    """Tests for the auto_recall decorator fail-open behavior."""
+
+    async def test_auto_recall_injects_memories(self, client: MemoryClient) -> None:
+        """When backend works, recalled memories are injected."""
+        await client.store("test pattern for recall", importance=0.8)
+
+        @client.auto_recall(query_from="topic", limit=5)
+        async def my_func(topic: str, recalled_memories: list[Any] | None = None) -> list[Any]:
+            return recalled_memories or []
+
+        result = await my_func(topic="test pattern")
+        assert isinstance(result, list)
+
+    async def test_auto_recall_fail_open_on_broken_backend(self, client: MemoryClient) -> None:
+        """When backend raises, decorator injects empty list (fail-open)."""
+        # Store something first so we know recall would normally work
+        await client.store("something", importance=0.5)
+
+        @client.auto_recall(query_from="topic", limit=5)
+        async def my_func(topic: str, recalled_memories: list[Any] | None = None) -> list[Any]:
+            return recalled_memories or []
+
+        # Close the backend to force an error on recall
+        await client.close()
+        result = await my_func(topic="anything")
+        assert result == []  # fail-open: empty list, no exception
+
+    async def test_auto_recall_missing_query_key(self, client: MemoryClient) -> None:
+        """When query_from key is absent, injects empty list."""
+
+        @client.auto_recall(query_from="missing_key", limit=5)
+        async def my_func(recalled_memories: list[Any] | None = None) -> list[Any]:
+            return recalled_memories or []
+
+        result = await my_func()
+        assert result == []
+
+
 class TestYAMLBackend:
     async def test_store_and_recall_yaml(self, yaml_client: MemoryClient) -> None:
         await yaml_client.store("yaml content", tags=["yaml"])
