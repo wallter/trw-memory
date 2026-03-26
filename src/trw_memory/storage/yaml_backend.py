@@ -88,7 +88,7 @@ def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
     def _float(key: str, default: float = 0.5) -> float:
         val = data.get(key, default)
         try:
-            return float(val)  # type: ignore[arg-type]
+            return float(str(val))
         except (TypeError, ValueError):
             return default
 
