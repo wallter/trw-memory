@@ -13,6 +13,10 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+
+import structlog
+
+logger = structlog.get_logger(__name__)
 from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field

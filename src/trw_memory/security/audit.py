@@ -12,7 +12,10 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import structlog
 from pydantic import BaseModel, ConfigDict, Field
+
+logger = structlog.get_logger(__name__)
 
 from trw_memory.exceptions import StorageError
 
