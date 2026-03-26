@@ -60,9 +60,8 @@ class Assertion(BaseModel):
             AssertionType.GREP_ABSENT,
             "grep_present",
             "grep_absent",
-        ):
-            if not v or len(v.strip()) == 0:
-                raise ValueError("grep assertion types require a non-empty pattern")
+        ) and (not v or len(v.strip()) == 0):
+            raise ValueError("grep assertion types require a non-empty pattern")
         # pattern length cap for security (ReDoS mitigation)
         if len(v) > 500:
             raise ValueError(f"pattern exceeds 500 character limit ({len(v)} chars)")
