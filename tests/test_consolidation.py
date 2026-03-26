@@ -11,10 +11,8 @@ from trw_memory.lifecycle.consolidation import (
     _archive_originals,
     _create_consolidated_entry,
     _mean_pairwise_similarity,
-    _parse_consolidation_response,
     _redact_paths,
     _summarize_cluster_fallback,
-    _summarize_cluster_llm,
     consolidate_cycle,
     find_clusters,
 )
@@ -192,57 +190,6 @@ class TestRedactPaths:
     def test_redacts_tmp_path(self) -> None:
         result = _redact_paths("temp file /tmp/abc123")
         assert "[REDACTED_PATH]" in result
-
-
-# ---------------------------------------------------------------------------
-# _parse_consolidation_response
-# ---------------------------------------------------------------------------
-
-
-class TestParseConsolidationResponse:
-    def test_valid_json_line(self) -> None:
-        response = '{"summary": "foo", "detail": "bar"}'
-        result = _parse_consolidation_response(response)
-        assert result == {"summary": "foo", "detail": "bar"}
-
-    def test_json_embedded_in_text(self) -> None:
-        response = 'Some text\n{"summary": "hello", "detail": "world"}\nmore text'
-        result = _parse_consolidation_response(response)
-        assert result is not None
-        assert result["summary"] == "hello"
-
-    def test_missing_fields_returns_none(self) -> None:
-        response = '{"summary": "only summary"}'
-        result = _parse_consolidation_response(response)
-        assert result is None
-
-    def test_invalid_json_returns_none(self) -> None:
-        response = "{not valid json}"
-        result = _parse_consolidation_response(response)
-        assert result is None
-
-    def test_empty_response_returns_none(self) -> None:
-        assert _parse_consolidation_response("") is None
-
-    def test_non_json_line_skipped(self) -> None:
-        response = 'just text\n{"summary": "s", "detail": "d"}'
-        result = _parse_consolidation_response(response)
-        assert result == {"summary": "s", "detail": "d"}
-
-
-# ---------------------------------------------------------------------------
-# _summarize_cluster_llm (stub)
-# ---------------------------------------------------------------------------
-
-
-class TestSummarizeClusterLlm:
-    def test_always_returns_none(self) -> None:
-        cluster = [
-            _make_entry("e1", content="content 1"),
-            _make_entry("e2", content="content 2"),
-        ]
-        result = _summarize_cluster_llm(cluster)
-        assert result is None
 
 
 # ---------------------------------------------------------------------------
