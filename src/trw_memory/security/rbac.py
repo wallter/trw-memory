@@ -13,7 +13,11 @@ from enum import Enum
 from functools import wraps
 from typing import ParamSpec, TypeVar
 
+import structlog
+
 from trw_memory.exceptions import AuthorizationError, ConfigError
+
+logger = structlog.get_logger(__name__)
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -93,6 +97,7 @@ def require_permission(
             if not isinstance(role, Role):
                 role = Role(role)
             if not check_permission(role, permission):
+                logger.warning("authorization_denied", op="rbac", role=role.value, permission=permission.value)
                 raise AuthorizationError(f"Permission denied: role {role.value!r} lacks {permission.value!r} permission")
             return func(*args, **kwargs)
 
