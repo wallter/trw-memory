@@ -21,8 +21,9 @@ from typing import Any
 import structlog
 
 _SENSITIVE_PATTERNS: frozenset[str] = frozenset({
-    "password", "secret", "token", "api_key", "apikey",
-    "authorization", "credential", "private_key", "access_key",
+    "password", "passwd", "secret", "token", "api_key", "apikey",
+    "authorization", "cookie", "credential", "private_key", "access_key",
+    "session_id",
 })
 
 _SENSITIVE_VALUE_RE = re.compile(
