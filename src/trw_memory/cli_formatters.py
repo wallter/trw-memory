@@ -69,8 +69,8 @@ def format_results(results: Sequence[Mapping[str, object]], fmt: str = "table") 
     rows: list[str] = [header, sep]
     for r in results:
         mid = str(r.get("memory_id", "?"))[:12]
-        score = float(r.get("score", 0.0))  # type: ignore[arg-type]
-        importance = float(r.get("importance", 0.0))  # type: ignore[arg-type]
+        score = float(str(r.get("score", 0.0)))
+        importance = float(str(r.get("importance", 0.0)))
         raw_tags = r.get("tags", [])
         tags = _format_tags(raw_tags if isinstance(raw_tags, list) else [])[:16]
         content = _truncate(str(r.get("content", "")))
