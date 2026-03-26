@@ -247,6 +247,7 @@ class MemoryClient:
         logger.debug(
             "memory_stored",
             op="store",
+            outcome="success",
             memory_id=memory_id,
             namespace=self._namespace,
             content_len=len(content),
@@ -302,6 +303,7 @@ class MemoryClient:
         logger.debug(
             "memory_recalled",
             op="recall",
+            outcome="success",
             query=query[:80],
             namespace=self._namespace,
             result_count=len(final),
@@ -333,6 +335,7 @@ class MemoryClient:
         logger.debug(
             "memory_forgotten",
             op="forget",
+            outcome="success",
             memory_id=memory_id,
             namespace=self._namespace,
         )
@@ -391,6 +394,7 @@ class MemoryClient:
         logger.debug(
             "memory_searched",
             op="search",
+            outcome="success",
             namespace=self._namespace,
             tag_filter=tags,
             min_importance=min_importance,
@@ -528,7 +532,7 @@ class MemoryClient:
                         raw = await client.recall(str(query), limit=limit)
                         memories = [m for m in raw if float(m["score"]) >= min_score]
                 except Exception:  # broad catch: fail-open recall decorator
-                    logger.debug("auto_recall_failed", op="auto_recall", exc_info=True)
+                    logger.debug("auto_recall_failed", op="auto_recall", outcome="failure", exc_info=True)
                     memories = []
 
                 kwargs["recalled_memories"] = memories
