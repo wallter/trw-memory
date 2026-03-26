@@ -92,21 +92,22 @@ def check_duplicate(
         logger.debug("dedup_embed_unavailable", text_len=len(new_text))
         return DedupResult("store", None, 0.0)
 
-    # Compare against all active entries
+    # Filter to active entries and batch-embed for O(1) provider calls
+    active_entries = [e for e in entries if e.status == MemoryStatus.ACTIVE]
+    if not active_entries:
+        return DedupResult("store", None, 0.0)
+
+    entry_texts = [e.content + " " + e.detail for e in active_entries]
+    entry_vectors = embedder.embed_batch(entry_texts)
+
     best_similarity = 0.0
     best_id: str | None = None
 
-    for entry in entries:
-        # Only compare against active entries
-        if entry.status != MemoryStatus.ACTIVE:
+    for entry, vec in zip(active_entries, entry_vectors, strict=True):
+        if vec is None:
             continue
 
-        entry_text = entry.content + " " + entry.detail
-        entry_vector = embedder.embed(entry_text)
-        if entry_vector is None:
-            continue
-
-        sim = cosine_similarity(new_vector, entry_vector)
+        sim = cosine_similarity(new_vector, vec)
         if sim > best_similarity:
             best_similarity = sim
             best_id = entry.id
