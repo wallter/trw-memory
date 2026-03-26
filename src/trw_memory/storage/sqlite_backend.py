@@ -23,7 +23,7 @@ from typing import ClassVar
 import structlog
 
 from trw_memory.exceptions import StorageError
-from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.models.memory import Assertion, MemoryEntry, MemoryStatus
 from trw_memory.storage._parsing import (
     parse_dt,
     parse_json_dict_int,
@@ -81,7 +81,8 @@ CREATE TABLE IF NOT EXISTS memories (
     published_to_platform INTEGER DEFAULT 0,
     pending_delete    INTEGER DEFAULT 0,
     cross_validated   INTEGER DEFAULT 0,
-    outcome_history   TEXT DEFAULT '[]'
+    outcome_history   TEXT DEFAULT '[]',
+    assertions        TEXT DEFAULT '[]'
 )
 """
 
@@ -159,7 +160,21 @@ def _row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         pending_del_raw,
         cross_val_raw,
         outcome_json,
+        assertions_json,
     ) = row
+
+    # Deserialise assertions from JSON (PRD-CORE-086)
+    # strict=False is required because the JSON round-trip stores enum values
+    # as strings, and Assertion has strict=True on the model.
+    assertions: list[Assertion] = []
+    if assertions_json and assertions_json != "[]":
+        try:
+            assertions = [
+                Assertion.model_validate(a, strict=False)
+                for a in json.loads(str(assertions_json))
+            ]
+        except (json.JSONDecodeError, ValueError):
+            assertions = []
 
     return MemoryEntry(
         id=str(id_),
@@ -189,6 +204,7 @@ def _row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         pending_delete=bool(int(str(pending_del_raw))) if pending_del_raw else False,
         cross_validated=bool(int(str(cross_val_raw))) if cross_val_raw else False,
         outcome_history=parse_json_list(outcome_json),
+        assertions=assertions,
     )
 
 
@@ -226,6 +242,7 @@ def _entry_to_row(entry: MemoryEntry) -> tuple[object, ...]:
         int(entry.pending_delete),
         int(entry.cross_validated),
         json.dumps(entry.outcome_history),
+        json.dumps([a.model_dump() for a in entry.assertions]) if entry.assertions else "[]",
     )
 
 
@@ -326,6 +343,7 @@ class SQLiteBackend(StorageBackend):
                 ("pending_delete", "INTEGER DEFAULT 0"),
                 ("cross_validated", "INTEGER DEFAULT 0"),
                 ("outcome_history", "TEXT DEFAULT '[]'"),
+                ("assertions", "TEXT DEFAULT '[]'"),
             ]
             for col_name, col_def in _migrate_cols:
                 with contextlib.suppress(sqlite3.OperationalError):

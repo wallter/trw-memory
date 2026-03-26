@@ -45,6 +45,7 @@ ENTRY_COLUMNS: tuple[str, ...] = (
     "pending_delete",
     "cross_validated",
     "outcome_history",
+    "assertions",
 )
 
 #: Fields that must never be changed via ``update()``.
@@ -58,6 +59,7 @@ LIST_FIELDS: frozenset[str] = frozenset(
         "merged_from",
         "consolidated_from",
         "outcome_history",
+        "assertions",
     }
 )
 

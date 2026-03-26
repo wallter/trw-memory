@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class MemoryStatus(str, Enum):
@@ -19,6 +19,75 @@ class MemoryStatus(str, Enum):
     RESOLVED = "resolved"
     OBSOLETE = "obsolete"
     ARCHIVED = "archived"
+
+
+class AssertionType(str, Enum):
+    """Type of executable assertion attached to a memory entry."""
+
+    GREP_PRESENT = "grep_present"
+    GREP_ABSENT = "grep_absent"
+    GLOB_EXISTS = "glob_exists"
+    GLOB_ABSENT = "glob_absent"
+
+
+class Assertion(BaseModel):
+    """Machine-verifiable assertion attached to a memory entry.
+
+    Executes grep/glob patterns against the codebase to verify
+    knowledge is still true. Read-only, safe — no shell commands.
+    """
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    type: AssertionType
+    pattern: str = Field(default="", description="Regex pattern for grep types; ignored for glob types")
+    target: str = Field(min_length=1, description="Glob pattern for file matching, relative to project root")
+    last_result: bool | None = Field(default=None, description="Result of last verification run")
+    last_verified_at: datetime | None = None
+    last_evidence: str = Field(default="", description="Human-readable verification evidence")
+    first_failed_at: datetime | None = Field(
+        default=None, description="When this assertion first started failing consecutively"
+    )
+
+    @field_validator("pattern")
+    @classmethod
+    def _validate_pattern(cls, v: str, info: object) -> str:
+        values = info.data  # type: ignore[union-attr]
+        assertion_type = values.get("type", "")
+        # grep types require non-empty pattern
+        if assertion_type in (
+            AssertionType.GREP_PRESENT,
+            AssertionType.GREP_ABSENT,
+            "grep_present",
+            "grep_absent",
+        ):
+            if not v or len(v.strip()) == 0:
+                raise ValueError("grep assertion types require a non-empty pattern")
+        # pattern length cap for security (ReDoS mitigation)
+        if len(v) > 500:
+            raise ValueError(f"pattern exceeds 500 character limit ({len(v)} chars)")
+        return v
+
+    @field_validator("target")
+    @classmethod
+    def _validate_target(cls, v: str) -> str:
+        if v.startswith("/"):
+            raise ValueError("absolute paths not allowed in assertion targets")
+        if ".." in v.split("/"):
+            raise ValueError("path traversal (..) not allowed in assertion targets")
+        return v
+
+
+class AssertionResult(BaseModel):
+    """Result of running a single assertion against the codebase."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    type: AssertionType
+    pattern: str = ""
+    target: str = ""
+    passed: bool | None = Field(default=None, description="True=passed, False=failed, None=could not verify")
+    evidence: str = Field(default="", description="Human-readable evidence")
 
 
 class MemoryEntry(BaseModel):
@@ -73,6 +142,9 @@ class MemoryEntry(BaseModel):
 
     # Arbitrary metadata
     metadata: dict[str, str] = Field(default_factory=dict)
+
+    # Executable assertions (PRD-CORE-086)
+    assertions: list[Assertion] = Field(default_factory=list, description="Machine-verifiable assertions")
 
 
 class MemoryIndex(BaseModel):
