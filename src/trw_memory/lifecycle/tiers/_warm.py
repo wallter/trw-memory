@@ -102,20 +102,14 @@ class WarmTierStore:
         logger.debug("warm_tier_add", entry_id=entry_id, has_embedding=embedding is not None)
 
     def _warm_sidecar_upsert(self, entry_id: str, entry_data: dict[str, object]) -> None:
-        """Write entry metadata to the warm sidecar JSONL for keyword search."""
+        """Write entry metadata to the warm sidecar JSONL for keyword search.
+
+        Optimized: for new entries (not already in sidecar), appends directly
+        without reading/rewriting the entire file. For updates to existing
+        entries, falls back to full read-filter-write.
+        """
         sidecar = self._warm_sidecar_path()
-        records: list[dict[str, object]] = []
-        if sidecar.exists():
-            for line in sidecar.read_text(encoding="utf-8").splitlines():
-                line_s = line.strip()
-                if not line_s:
-                    continue
-                try:
-                    rec = json.loads(line_s)
-                    if str(rec.get("id", "")) != entry_id:
-                        records.append(rec)
-                except json.JSONDecodeError:
-                    continue
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
 
         # Use 'content' (MemoryEntry) or fall back to 'summary' (legacy)
         summary = str(entry_data.get("content", entry_data.get("summary", "")))
@@ -124,8 +118,46 @@ class WarmTierStore:
             "summary": summary,
             "tags": entry_data.get("tags", []),
         }
+
+        # Fast path: if sidecar doesn't exist or entry is new, just append
+        if not sidecar.exists():
+            sidecar.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            return
+
+        # Check if entry already exists (scan once)
+        existing_lines = sidecar.read_text(encoding="utf-8").splitlines()
+        entry_exists = False
+        for line in existing_lines:
+            line_s = line.strip()
+            if not line_s:
+                continue
+            try:
+                rec = json.loads(line_s)
+                if str(rec.get("id", "")) == entry_id:
+                    entry_exists = True
+                    break
+            except json.JSONDecodeError:
+                continue
+
+        if not entry_exists:
+            # Append-only: O(1) write for new entries
+            with sidecar.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+            return
+
+        # Update path: filter out old record and rewrite (O(N) — infrequent)
+        records: list[dict[str, object]] = []
+        for line in existing_lines:
+            line_s = line.strip()
+            if not line_s:
+                continue
+            try:
+                rec = json.loads(line_s)
+                if str(rec.get("id", "")) != entry_id:
+                    records.append(rec)
+            except json.JSONDecodeError:
+                continue
         records.append(record)
-        sidecar.parent.mkdir(parents=True, exist_ok=True)
         sidecar.write_text(
             "\n".join(json.dumps(r) for r in records) + "\n",
             encoding="utf-8",
