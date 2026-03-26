@@ -786,6 +786,32 @@ class TestRetryQueue:
         assert queue.enqueue("M-001", {"summary": "test"})
         assert queue_path.exists()
 
+    def test_corrupt_jsonl_lines_are_skipped(self, tmp_path: Path) -> None:
+        """Corrupt JSONL lines should be logged and skipped, not crash dequeue."""
+        queue_path = tmp_path / "queue.jsonl"
+        # Write a mix of valid and corrupt lines
+        queue_path.write_text(
+            '{"entry_id": "M-001", "data": {"summary": "valid"}, "retries": 0}\n'
+            "not valid json at all\n"
+            '{"entry_id": "M-002", "data": {"summary": "also valid"}, "retries": 0}\n',
+            encoding="utf-8",
+        )
+        queue = RetryQueue(queue_path)
+        # Depth should count only valid records
+        assert queue.depth() == 2
+
+    def test_empty_lines_in_queue_are_harmless(self, tmp_path: Path) -> None:
+        """Empty lines in the JSONL file should not cause errors."""
+        queue_path = tmp_path / "queue.jsonl"
+        queue_path.write_text(
+            '{"entry_id": "M-001", "data": {"summary": "test"}, "retries": 0}\n'
+            "\n"
+            "\n",
+            encoding="utf-8",
+        )
+        queue = RetryQueue(queue_path)
+        assert queue.depth() == 1
+
 
 # ===========================================================================
 # FR03: SSE Subscriber
