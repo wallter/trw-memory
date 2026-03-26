@@ -2,6 +2,25 @@
 
 All notable changes to the TRW Memory package.
 
+## [0.4.0] — 2026-03-26
+
+### Added
+
+- **Executable assertions** (PRD-CORE-086) — machine-verifiable grep/glob assertions attached to memory entries that execute against the codebase to detect stale knowledge. Inspired by [membase-4-claude](https://github.com/mike-remakerdigital/membase-4-claude).
+  - `AssertionType` enum: `grep_present`, `grep_absent`, `glob_exists`, `glob_absent`
+  - `Assertion` Pydantic model with security validators (path traversal rejection, 500-char pattern cap, absolute path rejection)
+  - `AssertionResult` model for verification outcomes (passed/failed/unverifiable)
+  - `assertions` field on `MemoryEntry` (default empty list, backward-compatible)
+  - `verify_assertions()` pure function engine in `lifecycle/verification.py` — uses `pathlib.glob()` + `re.search()` only (no shell commands)
+  - Default exclude list: `.git`, `__pycache__`, `node_modules`, `.egg-info`, `dist`
+  - Binary file detection (null byte check in first 512 bytes), 1MB file size cap
+  - Graceful degradation when `project_root` is unavailable or regex is invalid
+  - Structured `structlog` timing instrumentation on verification runs
+- **SQLite schema migration** — `assertions TEXT DEFAULT '[]'` column added via existing `_ensure_schema()` migration pattern. Idempotent, backward-compatible with pre-migration databases.
+- **76 new tests** across 10 test files covering models, SQLite round-trip, all 4 verification types, graceful degradation, and security.
+
+---
+
 ## [0.3.0] — 2026-03-19
 
 ### Added
