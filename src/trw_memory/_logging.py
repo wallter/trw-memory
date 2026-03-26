@@ -120,3 +120,13 @@ def configure_logging(
         wrapper_class=structlog.make_filtering_bound_logger(level),
         logger_factory=structlog.stdlib.LoggerFactory(),
     )
+
+    # Bind service version to all log records for incident triage
+    try:
+        from importlib.metadata import version as _get_version
+
+        structlog.contextvars.bind_contextvars(
+            service_version=_get_version("trw-memory"),
+        )
+    except Exception:  # justified: best-effort — version binding is non-critical
+        pass
