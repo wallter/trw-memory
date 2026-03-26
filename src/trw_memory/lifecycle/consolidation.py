@@ -8,7 +8,6 @@ Original entries are archived after consolidation.
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -175,44 +174,8 @@ def find_clusters(
 
 
 # ---------------------------------------------------------------------------
-# FR02 — LLM-Powered Cluster Summarization (stub — fallback handles all)
-# ---------------------------------------------------------------------------
-
-
-def _parse_consolidation_response(response: str) -> dict[str, str] | None:
-    """Extract {"summary": ..., "detail": ...} from an LLM response string."""
-    for line in response.strip().split("\n"):
-        line_s = line.strip()
-        if not line_s.startswith("{"):
-            continue
-        try:
-            parsed = json.loads(line_s)
-            if "summary" in parsed and "detail" in parsed:
-                return {
-                    "summary": str(parsed["summary"]),
-                    "detail": str(parsed["detail"]),
-                }
-        except ValueError:
-            continue
-    return None
-
-
-def _summarize_cluster_llm(
-    cluster: list[MemoryEntry],
-) -> dict[str, str] | None:
-    """Stub LLM summarization — always returns None; fallback handles all cases.
-
-    Args:
-        cluster: List of MemoryEntry objects representing the cluster.
-
-    Returns:
-        None (always — LLM summarization not available in standalone package).
-    """
-    return None
-
-
-# ---------------------------------------------------------------------------
-# FR05 — Graceful Degradation Without LLM
+# FR02/FR05 — Cluster Summarization (longest-entry selection)
+# Future: LLM summarization hook point — see consolidation design docs
 # ---------------------------------------------------------------------------
 
 
@@ -478,15 +441,11 @@ def consolidate_cycle(
     for cluster in clusters:
         cluster_ids = [e.id for e in cluster]
         try:
-            # FR02: LLM summarization (stub) with FR05 fallback
-            llm_result = _summarize_cluster_llm(cluster)
-            if llm_result is not None:
-                content = llm_result["summary"]
-                detail = llm_result["detail"]
-            else:
-                fallback = _summarize_cluster_fallback(cluster)
-                content = fallback["summary"]
-                detail = fallback["detail"]
+            # FR02/FR05: Cluster summarization (longest-entry selection)
+            # Future: LLM summarization hook point — see consolidation design docs
+            fallback = _summarize_cluster_fallback(cluster)
+            content = fallback["summary"]
+            detail = fallback["detail"]
 
             # FR03: Create consolidated entry
             new_entry = _create_consolidated_entry(cluster, content, detail, storage, ns)

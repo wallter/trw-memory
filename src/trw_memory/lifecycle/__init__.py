@@ -1,7 +1,6 @@
 """Lifecycle management — scoring, tiers, dedup, consolidation."""
 
 from trw_memory.lifecycle.consolidation import (
-    _parse_consolidation_response,
     _redact_paths,
     complete_linkage_cluster,
     consolidate_cycle,
@@ -29,7 +28,6 @@ __all__ = [
     "DedupResult",
     "TierManager",
     "TierSweepResult",
-    "_parse_consolidation_response",
     "_redact_paths",
     "apply_time_decay",
     "batch_dedup",

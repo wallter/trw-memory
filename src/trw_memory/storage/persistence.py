@@ -7,7 +7,6 @@ All file-level persistence goes through this module.  Writes are atomic
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import os
 import tempfile
@@ -20,6 +19,15 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 from trw_memory.exceptions import StorageError
+
+# fcntl is POSIX-only (Linux/macOS). On Windows it is unavailable;
+# file locking is skipped in that case (acceptable for single-process use).
+try:
+    import fcntl
+
+    _FCNTL_AVAILABLE = True
+except ImportError:
+    _FCNTL_AVAILABLE = False
 
 logger = structlog.get_logger(__name__)
 
@@ -86,11 +94,13 @@ def read_yaml(path: Path) -> dict[str, object]:
         raise StorageError(f"YAML file not found: {path}", path=str(path))
     try:
         with path.open("r", encoding="utf-8") as fh:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
+            if _FCNTL_AVAILABLE:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
             try:
                 data = _new_yaml().load(fh)
             finally:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                if _FCNTL_AVAILABLE:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
     except (OSError, YAMLError, ValueError, TypeError) as exc:
         raise StorageError(
             f"Failed to read YAML: {exc}",
@@ -129,11 +139,13 @@ def write_yaml(path: Path, data: dict[str, object]) -> None:
         tmp_path = Path(tmp_path_str)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                if _FCNTL_AVAILABLE:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
                 try:
                     _new_yaml().dump(data, fh)
                 finally:
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    if _FCNTL_AVAILABLE:
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
             # fd is now closed by os.fdopen context manager
             tmp_path.rename(path)
         except Exception:  # broad catch: must clean temp file on any failure
@@ -168,12 +180,14 @@ def append_jsonl(path: Path, record: dict[str, object]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(record, default=json_serializer) + "\n"
         with path.open("a", encoding="utf-8") as fh:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            if _FCNTL_AVAILABLE:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
             try:
                 fh.write(line)
                 fh.flush()
             finally:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                if _FCNTL_AVAILABLE:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         logger.debug("jsonl_appended", path=str(path))
     except (OSError, ValueError, TypeError) as exc:
         raise StorageError(
@@ -212,8 +226,10 @@ def lock_for_rmw(path: Path) -> Generator[Path, None, None]:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_fh = lock_path.open("w", encoding="utf-8")
     try:
-        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        if _FCNTL_AVAILABLE:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
         yield path
     finally:
-        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        if _FCNTL_AVAILABLE:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
         lock_fh.close()
