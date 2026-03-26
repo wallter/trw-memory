@@ -101,13 +101,12 @@ def _verify_single(
     """Verify a single assertion."""
     if assertion.type in (AssertionType.GREP_PRESENT, "grep_present"):
         return _verify_grep(assertion, project_root, excludes, expect_present=True)
-    elif assertion.type in (AssertionType.GREP_ABSENT, "grep_absent"):
+    if assertion.type in (AssertionType.GREP_ABSENT, "grep_absent"):
         return _verify_grep(assertion, project_root, excludes, expect_present=False)
-    elif assertion.type in (AssertionType.GLOB_EXISTS, "glob_exists"):
+    if assertion.type in (AssertionType.GLOB_EXISTS, "glob_exists"):
         return _verify_glob(assertion, project_root, excludes, expect_exists=True)
-    elif assertion.type in (AssertionType.GLOB_ABSENT, "glob_absent"):
+    if assertion.type in (AssertionType.GLOB_ABSENT, "glob_absent"):
         return _verify_glob(assertion, project_root, excludes, expect_exists=False)
-    else:
         return AssertionResult(
             type=assertion.type, pattern=assertion.pattern,
             target=assertion.target, passed=None,
