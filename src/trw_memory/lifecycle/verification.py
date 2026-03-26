@@ -8,14 +8,15 @@ PRD-CORE-086 FR04: verify_assertions() engine.
 
 from __future__ import annotations
 
-import logging
 import re
 import time
 from pathlib import Path
 
+import structlog
+
 from trw_memory.models.memory import Assertion, AssertionResult, AssertionType
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # Default directories to exclude from file scanning
 DEFAULT_EXCLUDES: frozenset[str] = frozenset({
@@ -71,7 +72,7 @@ def verify_assertions(
         try:
             result = _verify_single(assertion, project_root, excludes)
         except Exception as exc:
-            logger.debug("assertion verification error", exc_info=exc)
+            logger.debug("assertion_verification_error", exc_info=True)
             result = AssertionResult(
                 type=assertion.type, pattern=assertion.pattern,
                 target=assertion.target, passed=None,
@@ -80,12 +81,14 @@ def verify_assertions(
         results.append(result)
 
     duration_ms = (time.monotonic() - start_time) * 1000
-    logger.debug(
-        "assertion_verification_complete: count=%d duration_ms=%.1f passing=%d failing=%d",
-        len(assertions),
-        round(duration_ms, 1),
-        sum(1 for r in results if r.passed is True),
-        sum(1 for r in results if r.passed is False),
+    logger.info(
+        "assertion_verification_complete",
+        assertion_count=len(assertions),
+        duration_ms=round(duration_ms, 1),
+        passing=sum(1 for r in results if r.passed is True),
+        failing=sum(1 for r in results if r.passed is False),
+        skipped=sum(1 for r in results if r.passed is None),
+        project_root=str(project_root),
     )
     return results
 
@@ -142,7 +145,7 @@ def _verify_grep(
         except OSError:
             continue
         if size > MAX_FILE_SIZE_BYTES:
-            logger.debug("file exceeds size limit: path=%s size=%d", str(path), size)
+            logger.debug("file_exceeds_size_limit", path=str(path), size=size)
             continue
 
         # Binary check
@@ -216,7 +219,7 @@ def _iter_files(
     try:
         candidates = list(project_root.glob(target))
     except (ValueError, OSError) as e:
-        logger.debug("glob error: target=%s error=%s", target, str(e))
+        logger.debug("glob_error", target=target, error=str(e))
         return []
 
     return [
