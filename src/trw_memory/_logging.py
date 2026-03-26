@@ -109,6 +109,10 @@ def configure_logging(
     else:
         renderer = structlog.dev.ConsoleRenderer(colors=sys.stderr.isatty())
 
+    # Suppress noisy third-party loggers below WARNING
+    for noisy in ("sentence_transformers", "huggingface_hub", "torch", "httpcore", "httpx"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     logging.basicConfig(
         format="%(message)s", level=level,
         handlers=[logging.StreamHandler(sys.stderr)],
