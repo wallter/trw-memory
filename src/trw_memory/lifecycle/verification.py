@@ -107,11 +107,11 @@ def _verify_single(
         return _verify_glob(assertion, project_root, excludes, expect_exists=True)
     if assertion.type in (AssertionType.GLOB_ABSENT, "glob_absent"):
         return _verify_glob(assertion, project_root, excludes, expect_exists=False)
-        return AssertionResult(
-            type=assertion.type, pattern=assertion.pattern,
-            target=assertion.target, passed=None,
-            evidence=f"unknown assertion type: {assertion.type}",
-        )
+    return AssertionResult(
+        type=assertion.type, pattern=assertion.pattern,
+        target=assertion.target, passed=None,
+        evidence=f"unknown assertion type: {assertion.type}",
+    )
 
 
 def _verify_grep(
