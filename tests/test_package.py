@@ -64,7 +64,9 @@ def test_all_exports_complete() -> None:
     import trw_memory
 
     expected = {
+        "AuthorizationError",
         "ConfigError",
+        "DimensionMismatchError",
         "MemoryClient",
         "MemoryConfig",
         "MemoryConnectionError",
@@ -87,7 +89,9 @@ def test_all_exports_complete() -> None:
 def test_exceptions_inherit_properly() -> None:
     """Custom exceptions have correct hierarchy."""
     from trw_memory import (
+        AuthorizationError,
         ConfigError,
+        DimensionMismatchError,
         MemoryConnectionError,
         MemoryError,
         MemoryNotFoundError,
@@ -101,6 +105,8 @@ def test_exceptions_inherit_properly() -> None:
     assert issubclass(MemoryConnectionError, MemoryError)
     assert issubclass(MemoryNotFoundError, MemoryError)
     assert issubclass(ToolAlreadyRegisteredError, MemoryError)
+    assert issubclass(AuthorizationError, MemoryError)
+    assert issubclass(DimensionMismatchError, MemoryError)
 
 
 def test_memory_status_is_enum() -> None:

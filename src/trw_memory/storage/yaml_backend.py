@@ -21,6 +21,8 @@ from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage._parsing import parse_dt, parse_json_dict_str, parse_json_list
 from trw_memory.storage._shared import (
+    ENTRY_COLUMNS,
+    IMMUTABLE_FIELDS,
     serialize_update_value,
     validate_update_fields,
 )
@@ -29,29 +31,8 @@ from trw_memory.storage.persistence import lock_for_rmw, read_yaml, write_yaml
 
 logger = structlog.get_logger(__name__)
 
-_VALID_UPDATE_FIELDS: frozenset[str] = frozenset(
-    {
-        "content",
-        "detail",
-        "tags",
-        "evidence",
-        "importance",
-        "status",
-        "recurrence",
-        "namespace",
-        "updated_at",
-        "last_accessed_at",
-        "access_count",
-        "q_value",
-        "q_observations",
-        "source",
-        "source_identity",
-        "merged_from",
-        "consolidated_from",
-        "consolidated_into",
-        "metadata",
-    }
-)
+# Allowlist for UPDATE: all columns except immutable ones (derived from shared constants).
+_VALID_UPDATE_FIELDS: frozenset[str] = frozenset(ENTRY_COLUMNS) - IMMUTABLE_FIELDS
 
 
 # ---------------------------------------------------------------------------

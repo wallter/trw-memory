@@ -6,7 +6,6 @@ to a persistent JSONL file and re-attempted on the next drain cycle.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import threading
 from collections.abc import Callable
@@ -133,8 +132,10 @@ class RetryQueue:
         entries: list[QueueRecord] = []
         for line in self._path.read_text().strip().splitlines():
             if line.strip():
-                with contextlib.suppress(json.JSONDecodeError):
+                try:
                     entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    logger.warning("retry_queue_corrupt_record_dropped", line_preview=line[:100])
         return entries
 
     def _append(self, record: QueueRecord) -> None:

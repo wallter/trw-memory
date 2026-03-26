@@ -13,7 +13,7 @@ from enum import Enum
 from functools import wraps
 from typing import ParamSpec, TypeVar
 
-from trw_memory.exceptions import ConfigError
+from trw_memory.exceptions import AuthorizationError, ConfigError
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -93,7 +93,7 @@ def require_permission(
             if not isinstance(role, Role):
                 role = Role(role)
             if not check_permission(role, permission):
-                raise ConfigError(f"Permission denied: role {role.value!r} lacks {permission.value!r} permission")
+                raise AuthorizationError(f"Permission denied: role {role.value!r} lacks {permission.value!r} permission")
             return func(*args, **kwargs)
 
         return wrapper

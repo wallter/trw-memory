@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from trw_memory.exceptions import ConfigError
+from trw_memory.exceptions import AuthorizationError, ConfigError
 from trw_memory.security import (
     ROLE_PERMISSIONS,
     Permission,
@@ -334,7 +334,7 @@ class TestRequirePermissionDeny:
         def write_data(*, role: Role) -> str:
             return "written"
 
-        with pytest.raises(ConfigError, match="Permission denied"):
+        with pytest.raises(AuthorizationError, match="Permission denied"):
             write_data(role=Role.READER)
 
     def test_reader_cannot_call_delete_function(self) -> None:
@@ -342,7 +342,7 @@ class TestRequirePermissionDeny:
         def delete_data(*, role: Role) -> str:
             return "deleted"
 
-        with pytest.raises(ConfigError, match="Permission denied"):
+        with pytest.raises(AuthorizationError, match="Permission denied"):
             delete_data(role=Role.READER)
 
     def test_reader_cannot_call_admin_function(self) -> None:
@@ -350,7 +350,7 @@ class TestRequirePermissionDeny:
         def admin_op(*, role: Role) -> str:
             return "done"
 
-        with pytest.raises(ConfigError, match="Permission denied"):
+        with pytest.raises(AuthorizationError, match="Permission denied"):
             admin_op(role=Role.READER)
 
     def test_writer_cannot_call_delete_function(self) -> None:
@@ -358,7 +358,7 @@ class TestRequirePermissionDeny:
         def delete_data(*, role: Role) -> str:
             return "deleted"
 
-        with pytest.raises(ConfigError, match="Permission denied"):
+        with pytest.raises(AuthorizationError, match="Permission denied"):
             delete_data(role=Role.WRITER)
 
     def test_writer_cannot_call_admin_function(self) -> None:
@@ -366,7 +366,7 @@ class TestRequirePermissionDeny:
         def admin_op(*, role: Role) -> str:
             return "done"
 
-        with pytest.raises(ConfigError, match="Permission denied"):
+        with pytest.raises(AuthorizationError, match="Permission denied"):
             admin_op(role=Role.WRITER)
 
     def test_error_message_contains_role_name(self) -> None:
@@ -374,7 +374,7 @@ class TestRequirePermissionDeny:
         def delete_fn(*, role: Role) -> None:
             pass
 
-        with pytest.raises(ConfigError, match="reader"):
+        with pytest.raises(AuthorizationError, match="reader"):
             delete_fn(role=Role.READER)
 
     def test_error_message_contains_permission_name(self) -> None:
@@ -382,7 +382,7 @@ class TestRequirePermissionDeny:
         def delete_fn(*, role: Role) -> None:
             pass
 
-        with pytest.raises(ConfigError, match="delete"):
+        with pytest.raises(AuthorizationError, match="delete"):
             delete_fn(role=Role.READER)
 
     def test_decorated_function_not_called_on_deny(self) -> None:
@@ -392,7 +392,7 @@ class TestRequirePermissionDeny:
         def side_effect_fn(*, role: Role) -> None:
             called.append(True)
 
-        with pytest.raises(ConfigError):
+        with pytest.raises(AuthorizationError):
             side_effect_fn(role=Role.READER)
 
         assert called == []
@@ -472,7 +472,7 @@ class TestRequirePermissionStringRole:
         def write_fn(*, role: object) -> None:
             pass
 
-        with pytest.raises(ConfigError, match="Permission denied"):
+        with pytest.raises(AuthorizationError, match="Permission denied"):
             write_fn(role="reader")  # type: ignore[arg-type]
 
 
@@ -495,7 +495,7 @@ class TestRequirePermissionAsync:
         async def async_write(*, role: Role) -> str:
             return "async-written"
 
-        with pytest.raises(ConfigError, match="Permission denied"):
+        with pytest.raises(AuthorizationError, match="Permission denied"):
             await async_write(role=Role.READER)
 
     async def test_async_function_name_preserved(self) -> None:
@@ -526,7 +526,7 @@ def test_deny_matrix_via_decorator(role: Role, perm: Permission) -> None:
     def guarded(*, role: Role) -> None:
         pass
 
-    with pytest.raises(ConfigError, match="Permission denied"):
+    with pytest.raises(AuthorizationError, match="Permission denied"):
         guarded(role=role)
 
 

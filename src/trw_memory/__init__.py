@@ -9,7 +9,9 @@ logging.getLogger(__name__).addHandler(logging.NullHandler())
 from trw_memory._version import __version__
 from trw_memory.client import MemoryClient
 from trw_memory.exceptions import (
+    AuthorizationError,
     ConfigError,
+    DimensionMismatchError,
     MemoryConnectionError,
     MemoryError,
     MemoryNotFoundError,
@@ -22,7 +24,9 @@ from trw_memory.models.memory import MemoryEntry, MemoryIndex, MemoryStatus
 from trw_memory.namespace import namespace_to_path, validate_namespace
 
 __all__ = [
+    "AuthorizationError",
     "ConfigError",
+    "DimensionMismatchError",
     "MemoryClient",
     "MemoryConfig",
     "MemoryConnectionError",

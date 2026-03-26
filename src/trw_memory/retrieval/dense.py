@@ -118,7 +118,7 @@ def dense_search(
         try:
             score = cosine_similarity(q_vec, stored)
             results.append((entry_id, score))
-        except (ValueError, ZeroDivisionError):
+        except (DimensionMismatchError, ZeroDivisionError):
             logger.debug("dense_search_entry_skipped", entry_id=entry_id)
             continue
 

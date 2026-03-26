@@ -11,7 +11,7 @@ import math
 
 import pytest
 
-from trw_memory.exceptions import DimensionMismatchError
+from trw_memory.exceptions import DimensionMismatchError, MemoryError
 from trw_memory.retrieval.dense import cosine_similarity
 
 
@@ -23,21 +23,20 @@ class TestDimensionMismatchError:
         with pytest.raises(DimensionMismatchError, match="Dimension mismatch"):
             cosine_similarity([1.0, 2.0, 3.0], [1.0, 2.0])
 
-    def test_dimension_mismatch_is_value_error_subclass(self) -> None:
-        """DimensionMismatchError is a ValueError subclass, so catching
-        ValueError still works for backward compatibility."""
-        with pytest.raises(ValueError):
+    def test_dimension_mismatch_is_memory_error_subclass(self) -> None:
+        """DimensionMismatchError is a MemoryError subclass."""
+        with pytest.raises(MemoryError):
             cosine_similarity([1.0], [1.0, 2.0])
 
-    def test_dimension_mismatch_distinguishable_from_value_error(self) -> None:
-        """DimensionMismatchError can be caught separately from generic ValueError."""
+    def test_dimension_mismatch_distinguishable_from_generic_exception(self) -> None:
+        """DimensionMismatchError can be caught separately from generic Exception."""
         try:
             cosine_similarity([1.0, 2.0, 3.0], [1.0, 2.0])
             pytest.fail("Should have raised DimensionMismatchError")
         except DimensionMismatchError:
             pass  # This is the expected path
-        except ValueError:
-            pytest.fail("Caught generic ValueError instead of DimensionMismatchError")
+        except Exception:
+            pytest.fail("Caught generic Exception instead of DimensionMismatchError")
 
 
 class TestCosineOrthogonality:

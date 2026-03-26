@@ -98,7 +98,7 @@ def check_duplicate(
 
     for entry in entries:
         # Only compare against active entries
-        if str(entry.status) != "active":
+        if entry.status != MemoryStatus.ACTIVE:
             continue
 
         entry_text = entry.content + " " + entry.detail
@@ -244,7 +244,7 @@ def batch_dedup(
     # Load all active entries with their embeddings
     active_entries: list[tuple[MemoryEntry, list[float] | None]] = []
     for entry in entries:
-        if str(entry.status) != "active":
+        if entry.status != MemoryStatus.ACTIVE:
             continue
         text = entry.content + " " + entry.detail
         vec = embedder.embed(text)

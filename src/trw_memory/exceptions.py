@@ -36,5 +36,9 @@ class ToolAlreadyRegisteredError(MemoryError):
     """Raised when register_tools() is called twice."""
 
 
-class DimensionMismatchError(ValueError):
+class AuthorizationError(MemoryError):
+    """Raised when a permission check fails."""
+
+
+class DimensionMismatchError(MemoryError):
     """Raised when vectors have incompatible dimensions."""

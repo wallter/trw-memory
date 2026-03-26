@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from trw_memory.exceptions import StorageError
+from trw_memory.exceptions import DimensionMismatchError, StorageError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryIndex, MemoryStatus
 from trw_memory.retrieval.bm25 import bm25_search
@@ -395,7 +395,7 @@ class TestCosineSimilarity:
     def test_cosine_dimension_mismatch_raises(self) -> None:
         a = [1.0, 2.0, 3.0]
         b = [1.0, 2.0]
-        with pytest.raises(ValueError, match="Dimension mismatch"):
+        with pytest.raises(DimensionMismatchError, match="Dimension mismatch"):
             cosine_similarity(a, b)
 
     def test_identical_vectors_returns_one(self) -> None:
@@ -422,7 +422,7 @@ class TestCosineSimilarity:
     def test_parametrized_dimension_mismatch(self, len_a: int, len_b: int) -> None:
         a = [1.0] * len_a
         b = [1.0] * len_b
-        with pytest.raises(ValueError):
+        with pytest.raises(DimensionMismatchError):
             cosine_similarity(a, b)
 
 
