@@ -6,7 +6,7 @@ All notable changes to the TRW Memory package.
 
 ### Added
 
-- **Executable assertions** (PRD-CORE-086) — machine-verifiable grep/glob assertions attached to memory entries that execute against the codebase to detect stale knowledge. Inspired by [membase-4-claude](https://github.com/mike-remakerdigital/membase-4-claude).
+- **Executable assertions** (PRD-CORE-086) — machine-verifiable grep/glob assertions attached to memory entries that execute against the codebase to detect stale knowledge.
   - `AssertionType` enum: `grep_present`, `grep_absent`, `glob_exists`, `glob_absent`
   - `Assertion` Pydantic model with security validators (path traversal rejection, 500-char pattern cap, absolute path rejection)
   - `AssertionResult` model for verification outcomes (passed/failed/unverifiable)
