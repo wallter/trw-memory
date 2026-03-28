@@ -33,9 +33,8 @@ Designed as the storage backend for [trw-mcp](https://github.com/wallter/trw-mcp
 - **Agent Integration** -- `register_tools()` for any agent framework, `@auto_recall` decorator
 - **Framework Integrations** -- LangChain memory, LlamaIndex reader/writer, CrewAI component, OpenAI-compatible adapter
 - **CLI** -- Full command-line interface for store, recall, search, forget, consolidate, export/import
-- **REST API** -- FastAPI server with CRUD, search, namespace management, and background jobs
 - **MCP Tools** -- 6 tools for store, recall, search, consolidate, forget, and status
-- **Dual Storage Backends** -- SQLite with FTS5 (primary) + YAML (backup) with one-time migration
+- **Dual Storage Backends** -- SQLite with keyword search (primary) + YAML (backup) with one-time migration
 
 ## Quick Start
 
@@ -49,9 +48,11 @@ cd trw-memory
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# With all optional features (embeddings, vectors, BM25, LLM, API)
+# With all optional features (embeddings, vectors, BM25, LLM)
 pip install -e ".[all]"
 ```
+
+By default, memories are stored in `.memory/` relative to the current directory. Override with `MEMORY_STORAGE_PATH` env var.
 
 ### MemoryClient (recommended)
 
@@ -134,27 +135,42 @@ results = backend.search("query", top_k=10, namespace="default")
 src/trw_memory/
   client.py              # MemoryClient SDK (recommended entry point)
   cli.py                 # CLI entry point (trw-memory command)
-  config.py              # MemoryConfig (pydantic-settings, env var override)
-  graph.py               # Knowledge graph (similarity/tag/consolidation edges, BFS)
-  server.py              # FastMCP MCP server entry point
+  cli_parser.py          # Argument parsing for CLI
+  cli_formatters.py      # Output formatting for CLI
   decorators.py          # @auto_recall decorator
   exceptions.py          # Custom exception hierarchy
+  graph.py               # Knowledge graph (similarity/tag/consolidation edges, BFS)
   namespace.py           # Namespace validation
+  server.py              # FastMCP MCP server entry point
   storage/
-    sqlite_backend.py    # Primary: SQLite with FTS5, WAL mode, sqlite-vec vectors
+    sqlite_backend.py    # Primary: SQLite with keyword search, WAL mode, sqlite-vec vectors
     yaml_backend.py      # Legacy: per-entry YAML files (backup/migration)
     interface.py         # Abstract StorageBackend protocol
     persistence.py       # Atomic read/write helpers
+    _schema.py           # DDL schema definitions
+    _row_mapper.py       # Row-to-model mapping
+    _shared.py           # Shared storage utilities
+    _parsing.py          # Query/filter parsing helpers
   retrieval/
     bm25.py              # BM25Okapi sparse retrieval (rank-bm25)
     dense.py             # Cosine similarity dense vector search
     fusion.py            # Reciprocal Rank Fusion (RRF, k=60)
     pipeline.py          # hybrid_search() orchestrator (BM25 + dense + RRF)
+  embeddings/
+    interface.py         # Embedding provider protocol
+    local.py             # Local sentence-transformers provider
   lifecycle/
     scoring.py           # Q-learning, Ebbinghaus decay, Bayesian calibration
-    tiers.py             # Hot/warm/cold tier management (LRU, sweep, archive)
     dedup.py             # Semantic dedup (cosine threshold, merge/skip logic)
     consolidation.py     # LLM clustering + summarization (episodic-to-semantic)
+    verification.py      # Entry verification utilities
+    _utils.py            # Shared lifecycle helpers
+    tiers/               # Hot/warm/cold tier management
+      _manager.py        # Tier assignment and transitions
+      _sweep.py          # Periodic sweep logic (promote/demote/purge)
+      _scoring.py        # Tier-specific scoring
+      _warm.py           # Warm tier operations
+      _cold.py           # Cold tier archival
   sync/
     remote.py            # Publish/fetch to platform backend
     conflict.py          # Vector clock comparison + three-way merge
@@ -167,13 +183,6 @@ src/trw_memory/
     audit.py             # Append-only security event audit trail
     rbac.py              # Role-based access control for namespaces
     keys.py              # Master key derivation and rotation
-  api/
-    app.py               # FastAPI app factory
-    auth.py              # API key middleware
-    router_memories.py   # CRUD + search endpoints
-    router_namespaces.py # Namespace management
-    router_jobs.py       # Background job management
-    router_health.py     # Health check
   tools/                 # 6 MCP tool implementations
     store.py             # memory_store (validate + dedup + write)
     recall.py            # memory_recall (hybrid search + graph traversal)
@@ -201,7 +210,7 @@ src/trw_memory/
     from_trw.py          # YAML-to-SQLite migration from trw-mcp format
 ```
 
-**78 source files, ~11,650 lines of code**
+**81 source files, ~12,150 lines of code**
 
 ## API Reference
 
@@ -210,7 +219,7 @@ src/trw_memory/
 | Name | Module | Description |
 |------|--------|-------------|
 | `MemoryClient` | `client` | High-level async SDK (store/recall/forget/search) |
-| `SQLiteBackend` | `storage.sqlite_backend` | Primary storage with FTS5, WAL, and sqlite-vec vectors |
+| `SQLiteBackend` | `storage.sqlite_backend` | Primary storage with keyword search, WAL, and sqlite-vec vectors |
 | `YAMLBackend` | `storage.yaml_backend` | File-based storage (backup/migration) |
 | `hybrid_search()` | `retrieval.pipeline` | BM25 + dense vector search with RRF fusion |
 | `bm25_search()` | `retrieval.bm25` | BM25Okapi sparse keyword retrieval |
@@ -225,7 +234,7 @@ src/trw_memory/
 
 ### Storage Backends
 
-**SQLite** (recommended) -- Fast, transactional, supports FTS5 full-text search, knowledge graph edges, and optional sqlite-vec vector similarity:
+**SQLite** (recommended) -- Fast, transactional, supports keyword search, knowledge graph edges, and optional sqlite-vec vector similarity:
 
 ```python
 from trw_memory.storage.sqlite_backend import SQLiteBackend
@@ -253,7 +262,7 @@ Query --> BM25 (keyword, rank-bm25) --+
 Query --> Dense (cosine, sqlite-vec) --+
 ```
 
-The pipeline gracefully degrades: if BM25 is unavailable, only dense search runs (and vice versa). If neither is available, falls back to the storage backend's built-in FTS5 keyword search.
+The pipeline gracefully degrades: if BM25 is unavailable, only dense search runs (and vice versa). If neither is available, falls back to the storage backend's built-in keyword search (case-insensitive `LIKE` matching).
 
 ### Scoring System
 
@@ -272,7 +281,7 @@ Automatic hot/warm/cold tiering keeps frequently-used memories fast and archives
 | Tier | Criteria | Storage | Latency |
 |------|----------|---------|---------|
 | Hot | Created/accessed in last 7 days | In-memory LRU cache | <1ms |
-| Warm | 8-90 days, impact >= 0.3 | SQLite + FTS5 index | <50ms |
+| Warm | 8-90 days, impact >= 0.3 | SQLite + keyword index | <50ms |
 | Cold | 90+ days OR impact < 0.3 | YAML archive (partitioned by year/month) | <200ms |
 
 Entries are automatically promoted/demoted during periodic sweeps. Cold-tier entries remain queryable.
@@ -287,27 +296,6 @@ Entries are automatically promoted/demoted during periodic sweeps. Cold-tier ent
 | Access control | Role-based (admin/editor/viewer) per namespace |
 | Audit trail | Append-only security event log |
 | Key management | Master key derivation, per-namespace keys, rotation support |
-
-### REST API
-
-When installed with `[api]` extra:
-
-```bash
-trw-memory-api  # Starts FastAPI server
-```
-
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/memories` | POST | Store a new memory entry |
-| `/memories/{id}` | GET | Retrieve a specific entry |
-| `/memories/{id}` | PATCH | Update an entry |
-| `/memories/{id}` | DELETE | Delete an entry |
-| `/memories/search` | POST | Search with filters |
-| `/namespaces` | GET | List namespaces |
-| `/namespaces/{ns}` | DELETE | Delete namespace and entries |
-| `/jobs/consolidate` | POST | Trigger consolidation |
-| `/jobs/sweep` | POST | Trigger tier sweep |
-| `/health` | GET | Health check |
 
 ### MCP Tools
 
@@ -344,10 +332,10 @@ trw-memory-server  # Starts MCP server (stdio transport)
 # Install dev dependencies
 pip install -e ".[dev]"
 
-# Run full test suite (1,314 tests, >=80% coverage required)
+# Run full test suite (1,401 tests, >=85% coverage required)
 .venv/bin/python -m pytest tests/ -v --cov=trw_memory --cov-report=term-missing
 
-# Type checking (strict mode, 78 files)
+# Type checking (strict mode, 81 files)
 .venv/bin/python -m mypy --strict src/trw_memory/
 
 # Targeted testing
@@ -356,7 +344,7 @@ pip install -e ".[dev]"
 .venv/bin/python -m pytest tests/test_storage_sqlite.py -v
 ```
 
-**Current metrics**: 1,314 tests, 91% coverage, mypy strict clean.
+**Current metrics**: 1,401 tests, ~90% coverage, mypy strict clean.
 
 ### Optional Dependencies
 
@@ -367,11 +355,10 @@ pip install -e ".[dev]"
 | `[vectors]` | sqlite-vec | Vector similarity search in SQLite |
 | `[bm25]` | rank-bm25 | BM25 keyword search |
 | `[llm]` | anthropic | LLM-augmented consolidation |
-| `[api]` | fastapi, uvicorn | REST API server |
 | `[langchain]` | langchain-core | LangChain memory integration |
 | `[llamaindex]` | llama-index-core | LlamaIndex reader/writer |
 | `[crewai]` | crewai | CrewAI memory component |
-| `[all]` | mcp + embeddings + vectors + bm25 + llm + api | Full feature set |
+| `[all]` | mcp + embeddings + vectors + bm25 + llm | Full feature set |
 | `[dev]` | pytest, mypy, ruff, coverage, etc. | Testing and linting |
 
 ### Entry Points
@@ -380,7 +367,6 @@ pip install -e ".[dev]"
 |---------|---------|
 | `trw-memory` | CLI for store/recall/search/forget/consolidate/export/import |
 | `trw-memory-server` | MCP server (stdio transport) |
-| `trw-memory-api` | FastAPI REST server |
 
 ## License
 
