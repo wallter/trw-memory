@@ -348,7 +348,7 @@ def memory_decay_pass(
             conn.commit()
         except Exception:
             conn.rollback()
-            logger.error("memory_decay_pass_failed", exc_info=True)
+            logger.exception("memory_decay_pass_failed")
             raise
 
     return {

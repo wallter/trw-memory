@@ -64,9 +64,8 @@ def memory_status_impl(
             try:
                 ns_count = backend.count(namespace=ns)
                 namespaces[ns] = ns_count
-            except Exception:  # broad catch: best-effort namespace count, per-item skip intentional  # noqa: PERF203, S110
+            except Exception:  # broad catch: best-effort namespace count, per-item skip intentional  # noqa: PERF203
                 logger.debug("memory_status_ns_count_failed", namespace=ns, exc_info=True)
-                pass
 
         # Also include active entry count
         try:
@@ -75,9 +74,8 @@ def memory_status_impl(
                 limit=10_000,
             )
             namespaces["__active__"] = len(active_entries)
-        except Exception:  # broad catch: best-effort active count  # noqa: S110
+        except Exception:  # broad catch: best-effort active count
             logger.debug("memory_status_active_count_failed", exc_info=True)
-            pass
 
     config_summary: dict[str, object] = {
         "storage_backend": cfg.storage_backend,

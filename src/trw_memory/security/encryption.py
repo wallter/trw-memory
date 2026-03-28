@@ -15,9 +15,9 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-logger = structlog.get_logger(__name__)
-
 from trw_memory.models.memory import MemoryEntry
+
+logger = structlog.get_logger(__name__)
 
 # AES-256 key length in bytes
 _KEY_LENGTH = 32

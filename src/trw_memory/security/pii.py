@@ -13,16 +13,15 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-
-import structlog
-
-logger = structlog.get_logger(__name__)
 from enum import Enum
 
+import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
 from trw_memory.exceptions import MemoryError
 from trw_memory.models.memory import MemoryEntry
+
+logger = structlog.get_logger(__name__)
 
 
 class PIIType(str, Enum):
