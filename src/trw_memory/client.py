@@ -291,7 +291,7 @@ class MemoryClient:
         async with self._lock:
             entries = self._get_backend().search(
                 query,
-                top_k=limit,
+                top_k=limit * 3,  # over-fetch to allow for min_score post-filtering
                 tags=tags,
                 namespace=self._namespace,
             )
