@@ -177,6 +177,9 @@ class MemoryClient:
         if mode == "auto" and self._backend is None:
             raise MemoryConnectionError("No connection mode available. Tried: local.")
 
+    def __repr__(self) -> str:
+        return f"MemoryClient(namespace={self._namespace!r}, mode={self._resolved_mode!r})"
+
     @property
     def resolved_mode(self) -> str:
         """The actual transport mode in use."""
@@ -293,10 +296,18 @@ class MemoryClient:
                 namespace=self._namespace,
             )
 
-        # Score by importance (keyword match already filtered by backend)
-        results: list[MemoryResultDict] = [
-            _entry_to_result(entry, score=entry.importance) for entry in entries if entry.importance >= min_score
-        ]
+        # Score by TF relevance blended with importance (0.7 TF + 0.3 importance)
+        query_terms = set(query.lower().split())
+        results: list[MemoryResultDict] = []
+        for entry in entries:
+            if not query_terms:
+                tf_score = entry.importance
+            else:
+                text_tokens = f"{entry.content} {entry.detail} {' '.join(entry.tags)}".lower().split()
+                matches = sum(1 for t in text_tokens if t in query_terms)
+                tf_score = min(1.0, matches / max(len(text_tokens), 1) * 10) * 0.7 + entry.importance * 0.3
+            if tf_score >= min_score:
+                results.append(_entry_to_result(entry, score=round(tf_score, 4)))
 
         results.sort(key=lambda r: float(r["score"]), reverse=True)
         final = results[:limit]

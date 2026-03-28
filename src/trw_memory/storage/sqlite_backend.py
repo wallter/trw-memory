@@ -112,6 +112,9 @@ class SQLiteBackend(StorageBackend):
     # Public property
     # ------------------------------------------------------------------
 
+    def __repr__(self) -> str:
+        return f"SQLiteBackend(db_path={self._db_path!r}, vec={self._vec_available})"
+
     @property
     def vec_available(self) -> bool:
         """``True`` when sqlite-vec is loaded and the virtual table exists."""

@@ -189,6 +189,9 @@ class YAMLBackend(StorageBackend):
         self._dir.mkdir(parents=True, exist_ok=True)
         logger.debug("yaml_backend_init", entries_dir=str(entries_dir))
 
+    def __repr__(self) -> str:
+        return f"YAMLBackend(entries_dir={self._dir!r})"
+
     def _path(self, entry_id: str) -> Path:
         candidate = (self._dir / f"{entry_id}.yaml").resolve()
         if not candidate.is_relative_to(self._dir.resolve()):
