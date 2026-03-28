@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from trw_memory.models.memory import MemoryStatus
+from trw_memory.models.memory import Assertion, MemoryStatus
 
 # ---------------------------------------------------------------------------
 # Field definitions
@@ -106,8 +106,6 @@ def serialize_update_value(key: str, val: object) -> list[object] | dict[str, st
     """
     # Assertions need model_dump(), not str() — Pydantic models have complex structure
     if key == "assertions" and isinstance(val, list):
-        from trw_memory.models.memory import Assertion
-
         return [a.model_dump() if isinstance(a, Assertion) else a for a in val]
     if key in LIST_FIELDS and isinstance(val, list):
         return [str(v) for v in val]

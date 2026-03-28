@@ -37,6 +37,12 @@ from trw_memory.storage.interface import StorageBackend
 logger = structlog.get_logger(__name__)
 
 
+# Recall scoring: blend term-frequency relevance with stored importance.
+_TF_WEIGHT: float = 0.7
+_IMPORTANCE_WEIGHT: float = 0.3
+_TF_SCALE: float = 10.0  # amplify raw TF ratio to [0, 1] range
+
+
 def _make_id() -> str:
     """Generate a unique memory ID with M- prefix."""
     return f"M-{uuid.uuid4().hex[:8]}"
@@ -305,7 +311,7 @@ class MemoryClient:
             else:
                 text_tokens = f"{entry.content} {entry.detail} {' '.join(entry.tags)}".lower().split()
                 matches = sum(1 for t in text_tokens if t in query_terms)
-                tf_score = min(1.0, matches / max(len(text_tokens), 1) * 10) * 0.7 + entry.importance * 0.3
+                tf_score = min(1.0, matches / max(len(text_tokens), 1) * _TF_SCALE) * _TF_WEIGHT + entry.importance * _IMPORTANCE_WEIGHT
             if tf_score >= min_score:
                 results.append(_entry_to_result(entry, score=round(tf_score, 4)))
 
