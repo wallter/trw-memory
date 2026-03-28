@@ -23,10 +23,10 @@ cd trw-memory
 
 ## Test Count & Performance
 
-- **1,326 tests** across 38 files
-- **Collection**: ~12s
+- **1,401 tests** across 49 files
+- **Collection**: ~0.4s
 - **Full suite**: ~5-8 minutes
-- **Coverage threshold**: 80%
+- **Coverage threshold**: 85%
 
 ## Package Architecture
 
@@ -42,50 +42,43 @@ trw-memory is a standalone memory engine with these modules:
 | `security/` | `test_security*.py` | Encryption for entry fields |
 | `tools/` | `test_tools*.py` | MCP tool wrappers |
 
-## No conftest.py
+## Shared Fixtures (conftest.py)
 
-This package currently has **no `tests/conftest.py`**. Each test file manages its own fixtures. When adding tests:
+`tests/conftest.py` provides common fixtures — prefer these over per-file factories:
 
-- Use `tmp_path` for any test that creates SQLite databases or YAML files
-- Create in-memory SQLite backends: `SQLiteBackend(":memory:")`
-- Don't rely on shared fixtures — each file is self-contained
+- `sqlite_backend(tmp_path)` — disk-backed SQLiteBackend (integration tests)
+- `sqlite_memory_backend()` — in-memory SQLiteBackend (unit tests)
+- `memory_client(tmp_path)` — MemoryClient with isolated SQLite storage
+- `yaml_memory_client(tmp_path)` — MemoryClient with isolated YAML storage
+- `make_entry(**kwargs)` — factory for `MemoryEntry` with sensible defaults
+- `make_entry_dict(**kwargs)` — factory for serialised entry dicts
+- `memory_config(tmp_path)` — `MemoryConfig` pointing to temp storage
 
 ## Testing Patterns
 
 ### SQLite Backend Tests
 ```python
-def test_store_and_recall(tmp_path):
-    db_path = tmp_path / "test.db"
-    backend = SQLiteBackend(str(db_path))
-    backend.initialize()
+from trw_memory.storage.sqlite_backend import SQLiteBackend
+from trw_memory.models.memory import MemoryEntry
 
-    entry_id = backend.store({"summary": "test", "tags": ["unit"]})
-    result = backend.recall(entry_id)
-    assert result["summary"] == "test"
+def test_store_and_get(tmp_path):
+    backend = SQLiteBackend(tmp_path / "test.db")
+    entry = MemoryEntry(id="M-001", content="test content", ...)
+    backend.store(entry)
+    result = backend.get("M-001")
+    assert result is not None
+    assert result.content == "test content"
 ```
 
-### YAML Backend Tests
+### Using conftest fixtures
 ```python
-def test_yaml_roundtrip(tmp_path):
-    yaml_dir = tmp_path / "entries"
-    yaml_dir.mkdir()
-    backend = YAMLBackend(str(yaml_dir))
+from tests.conftest import make_entry
 
-    backend.store("test-id", {"summary": "test"})
-    result = backend.recall("test-id")
-    assert result["summary"] == "test"
-```
-
-### Hybrid Search Tests
-```python
-def test_hybrid_search():
-    # In-memory index for speed
-    index = HybridIndex()
-    index.add("id1", "Python testing best practices")
-    index.add("id2", "JavaScript deployment guide")
-
-    results = index.search("Python testing")
-    assert results[0].id == "id1"
+def test_with_factory(sqlite_backend):
+    entry = make_entry(content="use absolute paths", tags=["gotcha"])
+    sqlite_backend.store(entry)
+    results = sqlite_backend.search("absolute", top_k=10)
+    assert len(results) == 1
 ```
 
 ## Known Gotchas
