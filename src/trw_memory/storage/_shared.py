@@ -90,11 +90,12 @@ def validate_update_fields(
             raise ValueError(key)
 
 
-def serialize_update_value(key: str, val: object) -> list[str] | dict[str, str] | str | object:
+def serialize_update_value(key: str, val: object) -> list[object] | dict[str, str] | str | object:
     """Normalise a single update value for storage.
 
     Handles:
-    - ``list`` fields in :data:`LIST_FIELDS` -> kept as list (caller wraps for format)
+    - ``assertions`` list -> each item serialised via ``model_dump()``
+    - ``list`` fields in :data:`LIST_FIELDS` -> kept as list of strings
     - ``dict`` fields in :data:`DICT_FIELDS` -> kept as dict
     - ``datetime`` -> ISO-8601 string
     - ``MemoryStatus`` -> its ``.value`` string
@@ -103,6 +104,11 @@ def serialize_update_value(key: str, val: object) -> list[str] | dict[str, str] 
     format-specific encoding (e.g. ``json.dumps`` for SQLite, plain
     list/dict for YAML).
     """
+    # Assertions need model_dump(), not str() — Pydantic models have complex structure
+    if key == "assertions" and isinstance(val, list):
+        from trw_memory.models.memory import Assertion
+
+        return [a.model_dump() if isinstance(a, Assertion) else a for a in val]
     if key in LIST_FIELDS and isinstance(val, list):
         return [str(v) for v in val]
     if key in DICT_FIELDS and isinstance(val, dict):
