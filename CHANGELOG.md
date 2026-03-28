@@ -2,6 +2,31 @@
 
 All notable changes to the TRW Memory package.
 
+## [0.5.0] — 2026-03-28
+
+### Fixed
+
+- **YAML backend field parity** (PRD-FIX-058) — 7 `MemoryEntry` fields were silently dropped during YAML serialization/deserialization: `vector_clock`, `remote_id`, `published_to_platform`, `pending_delete`, `cross_validated`, `outcome_history`, `assertions`. All 7 now round-trip correctly through both `_entry_to_dict()` and `_dict_to_entry()`. Backward-compatible with pre-fix YAML files (missing fields load as defaults).
+- **`serialize_update_value()` Assertion data loss** — `backend.update(id, assertions=[...])` silently dropped all `Assertion` objects by converting them to repr strings via the generic `LIST_FIELDS` path. Now handles `assertions` key with `model_dump()`. Discovered by independent Sonnet audit.
+- **`MemoryClient.recall()` scoring** (PRD-QUAL-046 FR06) — Results were ranked by raw `importance` instead of query relevance. Now uses TF-based relevance blended with importance (0.7 TF + 0.3 importance).
+- **`MemoryClient.recall()` over-fetch** — Backend search now fetches `limit * 3` to prevent under-delivery when `min_score` post-filtering removes entries.
+- **README documentation integrity** (PRD-FIX-057) — Removed non-existent REST API module, `[api]` extra, `trw-memory-api` entry point, and FTS5 claims. Updated architecture tree (verified all 62 paths exist). Updated metrics to 81 files, 1,418 tests, ~90% coverage.
+- **Broken test fixtures** (PRD-QUAL-046 FR01) — `conftest.py` fixtures called non-existent `db.initialize()`; fixed to yield/close pattern.
+- **tests/CLAUDE.md accuracy** — Removed "No conftest.py" claim, documented actual shared fixtures, corrected test counts.
+
+### Added
+
+- **`py.typed` marker** (PEP 561) — Enables downstream type checking for consumers.
+- **`__repr__`** on `MemoryClient`, `SQLiteBackend`, `YAMLBackend` — Shows namespace/mode, db_path/vec, entries_dir for debuggability.
+- **18 YAML field parity tests** — Round-trip tests for all 7 fields, backward compatibility, edge cases, and direct assertions update regression test.
+
+### Changed
+
+- **`DedupResult.action`** type from `str` to `Literal["skip", "merge", "store"]` for type safety.
+- **14 ruff lint violations resolved** — E402 import ordering in security modules, G201 `logger.error` → `logger.exception` in graph.py, PIE790 unnecessary pass, unused noqa directives.
+
+---
+
 ## [0.4.0] — 2026-03-26
 
 ### Added
