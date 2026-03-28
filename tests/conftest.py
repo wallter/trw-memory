@@ -19,6 +19,7 @@ To classify a test file:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,7 +32,7 @@ import pytest
 
 
 @pytest.fixture()
-def sqlite_backend(tmp_path: Path) -> Any:
+def sqlite_backend(tmp_path: Path) -> Iterator[Any]:
     """Return an initialized SQLiteBackend using a temp-dir database.
 
     Use this in integration tests that need a real disk-backed store.
@@ -40,21 +41,21 @@ def sqlite_backend(tmp_path: Path) -> Any:
     from trw_memory.storage.sqlite_backend import SQLiteBackend
 
     db = SQLiteBackend(tmp_path / "test.db")
-    db.initialize()
-    return db
+    yield db
+    db.close()
 
 
 @pytest.fixture()
-def sqlite_memory_backend() -> Any:
+def sqlite_memory_backend() -> Iterator[Any]:
     """Return an initialized in-memory SQLiteBackend.
 
     Use this in unit tests — no filesystem I/O, safe for the unit tier.
     """
     from trw_memory.storage.sqlite_backend import SQLiteBackend
 
-    db = SQLiteBackend(":memory:")
-    db.initialize()
-    return db
+    db = SQLiteBackend(Path(":memory:"))
+    yield db
+    db.close()
 
 
 # ---------------------------------------------------------------------------

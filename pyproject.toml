@@ -145,7 +145,7 @@ unfixable = ["F841"]  # never auto-delete "unused" variables (could be side-effe
 "src/trw_memory/cli.py" = ["ASYNC230", "ASYNC240", "G201", "TRY400"]  # CLI: blocking I/O fine, structured error logging at boundary
 "**/__init__.py" = ["F401", "E402"]  # re-exports after NullHandler init are intentional
 "**/conftest.py" = ["PT"]
-"src/trw_memory/_logging.py" = ["ANN401"]  # structlog processor convention
+"src/trw_memory/_logging.py" = ["ANN401", "S110"]  # structlog processor convention; S110: best-effort version binding
 
 [tool.ruff.lint.isort]
 known-first-party = ["trw_memory"]
