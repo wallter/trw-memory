@@ -41,7 +41,10 @@ _VALID_UPDATE_FIELDS: frozenset[str] = frozenset(ENTRY_COLUMNS) - IMMUTABLE_FIEL
 
 
 def _parse_assertions(raw: object) -> list[Assertion]:
-    """Deserialise assertions from YAML data."""
+    """Deserialise assertions from YAML data.
+
+    Skips malformed items with a debug log rather than failing the entire entry.
+    """
     if not raw or not isinstance(raw, list):
         return []
     result: list[Assertion] = []
@@ -50,6 +53,7 @@ def _parse_assertions(raw: object) -> list[Assertion]:
             try:
                 result.append(Assertion.model_validate(item, strict=False))
             except (ValueError, KeyError):
+                logger.debug("yaml_assertion_parse_skipped", item=item)
                 continue
     return result
 
@@ -159,7 +163,7 @@ def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
         consolidated_into=consolidated_into,
         metadata=_str_dict("metadata"),
         vector_clock=parse_json_dict_int(data.get("vector_clock", {})),
-        remote_id=str(data.get("remote_id", "")) if data.get("remote_id") else None,
+        remote_id=str(remote_id_raw) if (remote_id_raw := data.get("remote_id")) else None,
         published_to_platform=bool(data.get("published_to_platform", False)),
         pending_delete=bool(data.get("pending_delete", False)),
         cross_validated=bool(data.get("cross_validated", False)),
