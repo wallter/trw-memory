@@ -18,8 +18,8 @@ from pathlib import Path
 import structlog
 
 from trw_memory.exceptions import StorageError
-from trw_memory.models.memory import MemoryEntry, MemoryStatus
-from trw_memory.storage._parsing import parse_dt, parse_json_dict_str, parse_json_list
+from trw_memory.models.memory import Assertion, MemoryEntry, MemoryStatus
+from trw_memory.storage._parsing import parse_dt, parse_json_dict_int, parse_json_dict_str, parse_json_list
 from trw_memory.storage._shared import (
     ENTRY_COLUMNS,
     IMMUTABLE_FIELDS,
@@ -38,6 +38,20 @@ _VALID_UPDATE_FIELDS: frozenset[str] = frozenset(ENTRY_COLUMNS) - IMMUTABLE_FIEL
 # ---------------------------------------------------------------------------
 # Serialisation helpers
 # ---------------------------------------------------------------------------
+
+
+def _parse_assertions(raw: object) -> list[Assertion]:
+    """Deserialise assertions from YAML data."""
+    if not raw or not isinstance(raw, list):
+        return []
+    result: list[Assertion] = []
+    for item in raw:
+        if isinstance(item, dict):
+            try:
+                result.append(Assertion.model_validate(item, strict=False))
+            except (ValueError, KeyError):
+                continue
+    return result
 
 
 def _entry_to_dict(entry: MemoryEntry) -> dict[str, object]:
@@ -65,6 +79,13 @@ def _entry_to_dict(entry: MemoryEntry) -> dict[str, object]:
         "consolidated_from": list(entry.consolidated_from),
         "consolidated_into": entry.consolidated_into,
         "metadata": dict(entry.metadata),
+        "vector_clock": dict(entry.vector_clock),
+        "remote_id": entry.remote_id,
+        "published_to_platform": entry.published_to_platform,
+        "pending_delete": entry.pending_delete,
+        "cross_validated": entry.cross_validated,
+        "outcome_history": list(entry.outcome_history),
+        "assertions": [a.model_dump() for a in entry.assertions] if entry.assertions else [],
     }
 
 
@@ -137,6 +158,13 @@ def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
         consolidated_from=_str_list("consolidated_from"),
         consolidated_into=consolidated_into,
         metadata=_str_dict("metadata"),
+        vector_clock=parse_json_dict_int(data.get("vector_clock", {})),
+        remote_id=str(data.get("remote_id", "")) if data.get("remote_id") else None,
+        published_to_platform=bool(data.get("published_to_platform", False)),
+        pending_delete=bool(data.get("pending_delete", False)),
+        cross_validated=bool(data.get("cross_validated", False)),
+        outcome_history=_str_list("outcome_history"),
+        assertions=_parse_assertions(data.get("assertions", [])),
     )
 
 
