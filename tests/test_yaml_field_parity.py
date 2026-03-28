@@ -396,3 +396,35 @@ class TestUpdatePreservesNewFields:
         assert loaded.vector_clock == {"node1": 10}
         assert loaded.published_to_platform is True
         assert len(loaded.assertions) == 1
+
+    def test_update_assertions_directly(self, backend: YAMLBackend) -> None:
+        """Regression: update(assertions=[...]) must not destroy Assertion objects.
+
+        serialize_update_value() previously called str() on Assertion models,
+        producing repr strings instead of dicts, silently dropping all assertions.
+        """
+        entry = MemoryEntry(
+            id="M-upd-assert",
+            content="direct assertion update test",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        backend.store(entry)
+
+        new_assertions = [
+            Assertion(
+                type=AssertionType.GLOB_EXISTS,
+                pattern="",
+                target="src/**/*.py",
+            )
+        ]
+        result = backend.update("M-upd-assert", assertions=new_assertions)
+        assert result is not None
+        assert len(result.assertions) == 1
+        assert result.assertions[0].target == "src/**/*.py"
+
+        # Verify persistence
+        loaded = backend.get("M-upd-assert")
+        assert loaded is not None
+        assert len(loaded.assertions) == 1
+        assert loaded.assertions[0].target == "src/**/*.py"
