@@ -24,7 +24,6 @@ from trw_memory.models.memory import (
     Assertion,
     AssertionType,
     MemoryEntry,
-    MemoryStatus,
 )
 from trw_memory.storage.yaml_backend import YAMLBackend
 
@@ -428,3 +427,137 @@ class TestUpdatePreservesNewFields:
         assert loaded is not None
         assert len(loaded.assertions) == 1
         assert loaded.assertions[0].target == "src/**/*.py"
+
+
+# ---------------------------------------------------------------------------
+# True legacy backward compatibility: YAML file with no new keys
+# ---------------------------------------------------------------------------
+
+
+class TestTrueLegacyYAML:
+    """Load a YAML file that was written before the 7-field fix (no new keys at all)."""
+
+    def test_legacy_yaml_without_new_keys(self, backend: YAMLBackend) -> None:
+        """A hand-crafted YAML file missing all 7 new keys loads with defaults."""
+        from trw_memory.storage.persistence import write_yaml
+
+        legacy_data: dict[str, object] = {
+            "id": "M-legacy-1",
+            "content": "legacy entry from v0.4.0",
+            "detail": "",
+            "tags": ["old"],
+            "evidence": [],
+            "importance": 0.7,
+            "status": "active",
+            "recurrence": 1,
+            "namespace": "default",
+            "created_at": "2026-01-15T10:00:00+00:00",
+            "updated_at": "2026-01-15T10:00:00+00:00",
+            "last_accessed_at": None,
+            "access_count": 0,
+            "q_value": 0.5,
+            "q_observations": 0,
+            "source": "agent",
+            "source_identity": "",
+            "merged_from": [],
+            "consolidated_from": [],
+            "consolidated_into": None,
+            "metadata": {},
+            # Intentionally NO: vector_clock, remote_id, published_to_platform,
+            # pending_delete, cross_validated, outcome_history, assertions
+        }
+        write_yaml(backend._dir / "M-legacy-1.yaml", legacy_data)
+
+        loaded = backend.get("M-legacy-1")
+        assert loaded is not None
+        assert loaded.content == "legacy entry from v0.4.0"
+        assert loaded.vector_clock == {}
+        assert loaded.remote_id is None
+        assert loaded.published_to_platform is False
+        assert loaded.pending_delete is False
+        assert loaded.cross_validated is False
+        assert loaded.outcome_history == []
+        assert loaded.assertions == []
+
+
+# ---------------------------------------------------------------------------
+# Malformed assertion data handling
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedAssertions:
+    """_parse_assertions gracefully handles malformed data."""
+
+    def test_assertions_with_non_dict_items(self, backend: YAMLBackend) -> None:
+        """List containing non-dict items should be skipped."""
+        from trw_memory.storage.persistence import write_yaml
+
+        data: dict[str, object] = {
+            "id": "M-bad-assert",
+            "content": "bad assertions",
+            "created_at": "2026-01-15T10:00:00+00:00",
+            "updated_at": "2026-01-15T10:00:00+00:00",
+            "assertions": ["not_a_dict", 42, None],
+        }
+        write_yaml(backend._dir / "M-bad-assert.yaml", data)
+
+        loaded = backend.get("M-bad-assert")
+        assert loaded is not None
+        assert loaded.assertions == []
+
+    def test_assertions_with_invalid_dict(self, backend: YAMLBackend) -> None:
+        """Dict that fails Assertion validation is skipped, valid ones kept."""
+        from trw_memory.storage.persistence import write_yaml
+
+        data: dict[str, object] = {
+            "id": "M-mixed-assert",
+            "content": "mixed assertions",
+            "created_at": "2026-01-15T10:00:00+00:00",
+            "updated_at": "2026-01-15T10:00:00+00:00",
+            "assertions": [
+                {"type": "grep_present", "pattern": "valid", "target": "src/**/*.py"},
+                {"type": "invalid_type", "pattern": "bad", "target": "x"},
+            ],
+        }
+        write_yaml(backend._dir / "M-mixed-assert.yaml", data)
+
+        loaded = backend.get("M-mixed-assert")
+        assert loaded is not None
+        assert len(loaded.assertions) == 1
+        assert loaded.assertions[0].pattern == "valid"
+
+
+# ---------------------------------------------------------------------------
+# SQLite backend: assertions update parity
+# ---------------------------------------------------------------------------
+
+
+class TestSQLiteAssertionsUpdate:
+    """Verify assertions survive update() on SQLite backend too."""
+
+    def test_sqlite_update_assertions_directly(self, tmp_path: Path) -> None:
+        """Same regression test as YAML but for SQLite backend."""
+        from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+        db = SQLiteBackend(tmp_path / "test.db")
+        entry = MemoryEntry(
+            id="M-sql-assert",
+            content="sqlite assertions update",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        db.store(entry)
+
+        new_assertions = [
+            Assertion(type=AssertionType.GLOB_EXISTS, pattern="", target="src/**/*.py")
+        ]
+        result = db.update("M-sql-assert", assertions=new_assertions)
+        assert result is not None
+        assert len(result.assertions) == 1
+        assert result.assertions[0].target == "src/**/*.py"
+
+        # Verify persistence
+        loaded = db.get("M-sql-assert")
+        assert loaded is not None
+        assert len(loaded.assertions) == 1
+        db.close()
