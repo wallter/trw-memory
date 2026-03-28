@@ -8,7 +8,7 @@ Gracefully degrades to no-op when embeddings are unavailable.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import structlog
 
@@ -29,7 +29,7 @@ class DedupResult(NamedTuple):
         similarity: Highest cosine similarity found (0.0 when no match).
     """
 
-    action: str  # "skip" | "merge" | "store"
+    action: Literal["skip", "merge", "store"]
     existing_id: str | None
     similarity: float
 
