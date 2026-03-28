@@ -332,7 +332,7 @@ trw-memory-server  # Starts MCP server (stdio transport)
 # Install dev dependencies
 pip install -e ".[dev]"
 
-# Run full test suite (1,418 tests, >=85% coverage required)
+# Run full test suite (1,423 tests, >=85% coverage required)
 .venv/bin/python -m pytest tests/ -v --cov=trw_memory --cov-report=term-missing
 
 # Type checking (strict mode, 81 files)
@@ -344,7 +344,7 @@ pip install -e ".[dev]"
 .venv/bin/python -m pytest tests/test_storage_sqlite.py -v
 ```
 
-**Current metrics**: 1,418 tests, ~90% coverage, mypy strict clean.
+**Current metrics**: 1,423 tests, ~90% coverage, mypy strict clean.
 
 ### Optional Dependencies
 

@@ -18,7 +18,7 @@ All notable changes to the TRW Memory package.
 
 - **`py.typed` marker** (PEP 561) — Enables downstream type checking for consumers.
 - **`__repr__`** on `MemoryClient`, `SQLiteBackend`, `YAMLBackend` — Shows namespace/mode, db_path/vec, entries_dir for debuggability.
-- **18 YAML field parity tests** — Round-trip tests for all 7 fields, backward compatibility, edge cases, and direct assertions update regression test.
+- **22 YAML field parity tests** — Round-trip tests for all 7 fields, backward compatibility, edge cases, and direct assertions update regression test.
 
 ### Changed
 
