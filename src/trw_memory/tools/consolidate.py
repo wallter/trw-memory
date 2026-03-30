@@ -17,7 +17,7 @@ import structlog
 from trw_memory.exceptions import ConfigError, StorageError
 from trw_memory.lifecycle.consolidation import consolidate_cycle
 from trw_memory.models.memory import MemoryStatus
-from trw_memory.namespace import validate_namespace
+from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools._types import McpServer
 

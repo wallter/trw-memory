@@ -2,6 +2,27 @@
 
 All notable changes to the TRW Memory package.
 
+## [0.6.0] — 2026-03-29
+
+### Changed
+
+- **CLI error boundary decorator** — All CLI subcommands now use `_cli_error_boundary` decorator for uniform error handling instead of per-command try/except blocks. Error messages show `Error: <message>` format consistently.
+- **Namespace module reorganized** — Removed `trw_memory.namespace` backward-compatibility shim. Canonical imports are now `trw_memory.namespaces.path_mapping` and `trw_memory.namespaces.validation`. Top-level exports (`from trw_memory import validate_namespace`) are unchanged.
+- **Storage interface extracted** — New `storage/interface.py` with abstract base protocol for storage backends, improving type safety and testability.
+- **YAML backend simplified** — Refactored to use the extracted storage interface, reducing coupling.
+- **Security keys refactored** — `security/keys.py` module cleaned up with improved key management.
+- **Typed test fixtures** — `conftest.py` fixtures now return concrete types (`SQLiteBackend`, `MemoryClient`, `MemoryConfig`, `MemoryEntry`) instead of `Any`. Imports moved to module level.
+- **Memory entry ID length** — IDs now use 16 hex chars (`M-` + 16) instead of 8, reducing collision probability.
+- **Source field validation** — Non-standard `source` values (e.g., `"synthetic"`) are coerced to `"agent"` by the model validator.
+- **Deprecated lint rules removed** — Removed `ANN101` and `ANN102` from ruff ignore list (deprecated in ruff).
+
+### Added
+
+- **6 new PRD test files** — `test_prd_fix_059_fra.py`, `test_prd_fix_059_frb.py`, `test_prd_fix_060.py`, `test_prd_qual_053.py`, `test_prd_qual_054_a.py`, `test_prd_qual_054_b.py`.
+- **CLI export refactored** — `entry_to_export_dict()` uses `MemoryEntry.to_dict()` for consistent serialization.
+
+---
+
 ## [0.5.0] — 2026-03-28
 
 ### Fixed

@@ -13,7 +13,7 @@ import structlog
 
 from trw_memory.exceptions import ConfigError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
-from trw_memory.namespace import validate_namespace
+from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools._types import McpServer
 
@@ -62,7 +62,7 @@ def memory_store_impl(
             "status": "invalid",
         }
 
-    entry_id = "M-" + uuid4().hex
+    entry_id = "M-" + uuid4().hex[:16]
     now = datetime.now(timezone.utc)
 
     entry = MemoryEntry(

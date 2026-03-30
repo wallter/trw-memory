@@ -34,8 +34,12 @@ ROLE_TAG_PREFIX: str = "role:"
 
 
 def _make_id() -> str:
-    """Generate a unique memory ID with ``M-`` prefix."""
-    return f"M-{uuid.uuid4().hex[:8]}"
+    """Generate a unique memory ID with ``M-`` prefix and 16 hex characters.
+
+    Uses 64 bits of entropy from UUID4, giving collision probability
+    < 0.0001% at 1 million entries (birthday paradox).
+    """
+    return f"M-{uuid.uuid4().hex[:16]}"
 
 
 def resolve_backend(
@@ -117,5 +121,5 @@ def make_entry(
         metadata=metadata or {},
         created_at=now,
         updated_at=now,
-        source=source,
+        source=source,  # type: ignore[arg-type]  # validator coerces unknown values to "agent"
     )

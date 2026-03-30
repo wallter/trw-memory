@@ -26,33 +26,34 @@ from typing import Any
 
 import pytest
 
+from trw_memory.client import MemoryClient
+from trw_memory.models.config import MemoryConfig
+from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.storage.sqlite_backend import SQLiteBackend
+
 # ---------------------------------------------------------------------------
 # SQLiteBackend fixture
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
-def sqlite_backend(tmp_path: Path) -> Iterator[Any]:
+def sqlite_backend(tmp_path: Path) -> Iterator[SQLiteBackend]:
     """Return an initialized SQLiteBackend using a temp-dir database.
 
     Use this in integration tests that need a real disk-backed store.
     For unit tests that need a backend, use ``sqlite_memory_backend`` instead.
     """
-    from trw_memory.storage.sqlite_backend import SQLiteBackend
-
     db = SQLiteBackend(tmp_path / "test.db")
     yield db
     db.close()
 
 
 @pytest.fixture()
-def sqlite_memory_backend() -> Iterator[Any]:
+def sqlite_memory_backend() -> Iterator[SQLiteBackend]:
     """Return an initialized in-memory SQLiteBackend.
 
     Use this in unit tests — no filesystem I/O, safe for the unit tier.
     """
-    from trw_memory.storage.sqlite_backend import SQLiteBackend
-
     db = SQLiteBackend(Path(":memory:"))
     yield db
     db.close()
@@ -64,24 +65,20 @@ def sqlite_memory_backend() -> Iterator[Any]:
 
 
 @pytest.fixture()
-def memory_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+def memory_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient:
     """Return a MemoryClient backed by a SQLite store in ``tmp_path``.
 
     Sets ``MEMORY_STORAGE_PATH`` and ``MEMORY_STORAGE_BACKEND`` env vars so
     the client does not accidentally write to the real user store.
     """
-    from trw_memory.client import MemoryClient
-
     monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "mem_storage"))
     monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
     return MemoryClient(namespace="default", mode="local")
 
 
 @pytest.fixture()
-def yaml_memory_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+def yaml_memory_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient:
     """Return a MemoryClient backed by a YAML store in ``tmp_path``."""
-    from trw_memory.client import MemoryClient
-
     monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "yaml_storage"))
     monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "yaml")
     return MemoryClient(namespace="default", mode="local")
@@ -104,12 +101,12 @@ def make_entry(
     recurrence: int = 1,
     access_count: int = 0,
     source: str = "agent",
-    status: str = "active",
+    status: MemoryStatus = MemoryStatus.ACTIVE,
     created_at: datetime | None = None,
     last_accessed_at: datetime | None = None,
     namespace: str = "default",
     metadata: dict[str, str] | None = None,
-) -> Any:
+) -> MemoryEntry:
     """Create a ``MemoryEntry`` with sensible defaults.
 
     This is the canonical factory for unit tests — it avoids repetitive
@@ -121,8 +118,6 @@ def make_entry(
         entry = make_entry(content="use absolute paths", tags=["gotcha"])
         assert entry.importance == 0.5
     """
-    from trw_memory.models.memory import MemoryEntry
-
     now = datetime.now(timezone.utc)
     return MemoryEntry(
         id=entry_id,
@@ -134,8 +129,8 @@ def make_entry(
         q_observations=q_observations,
         recurrence=recurrence,
         access_count=access_count,
-        source=source,
-        status=status,  # type: ignore[arg-type]
+        source=source,  # type: ignore[arg-type]  # validator coerces str to Literal
+        status=status,
         created_at=created_at or now,
         last_accessed_at=last_accessed_at or now,
         namespace=namespace,
@@ -188,12 +183,10 @@ def make_entry_dict(
 
 
 @pytest.fixture()
-def memory_config(tmp_path: Path) -> Any:
+def memory_config(tmp_path: Path) -> MemoryConfig:
     """Return a MemoryConfig pointing to ``tmp_path`` for storage.
 
     Avoids hardcoding paths in tests that need a config object but don't
     care about the storage backend specifics.
     """
-    from trw_memory.models.config import MemoryConfig
-
     return MemoryConfig(storage_path=str(tmp_path / "mem"))

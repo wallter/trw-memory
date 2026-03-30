@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from trw_memory.exceptions import ConfigError
-from trw_memory.namespace import namespace_to_path, validate_namespace
+from trw_memory.namespaces.path_mapping import namespace_to_path
+from trw_memory.namespaces.validation import validate_namespace
 
 
 class TestValidateNamespace:

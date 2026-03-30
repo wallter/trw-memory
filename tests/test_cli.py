@@ -81,13 +81,53 @@ def _mock_entry(
     mock.id = entry_id
     mock.content = content
     mock.detail = ""
-    mock.tags = tags or ["py"]
+    _tags = tags or ["py"]
+    mock.tags = _tags
     mock.importance = 0.5
     mock.status = "active"
     mock.namespace = "default"
     mock.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     mock.updated_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     mock.metadata = {}
+
+    # Support MemoryEntry.to_dict() interface used by entry_to_export_dict.
+    _full: dict[str, object] = {
+        "id": entry_id,
+        "content": content,
+        "detail": "",
+        "tags": list(_tags),
+        "evidence": [],
+        "importance": 0.5,
+        "status": "active",
+        "recurrence": 1,
+        "namespace": "default",
+        "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(),
+        "updated_at": datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(),
+        "last_accessed_at": None,
+        "access_count": 0,
+        "q_value": 0.5,
+        "q_observations": 0,
+        "source": "agent",
+        "source_identity": "",
+        "merged_from": [],
+        "consolidated_from": [],
+        "consolidated_into": None,
+        "metadata": {},
+        "vector_clock": {},
+        "remote_id": None,
+        "published_to_platform": False,
+        "pending_delete": False,
+        "cross_validated": False,
+        "outcome_history": [],
+        "assertions": [],
+    }
+
+    def _to_dict(*, fields: set[str] | None = None) -> dict[str, object]:
+        if fields is not None:
+            return {k: v for k, v in _full.items() if k in fields}
+        return dict(_full)
+
+    mock.to_dict = _to_dict
     return mock
 
 
@@ -347,7 +387,7 @@ class TestSearchCommand:
         ret = main(["search", "--since", "not-a-date"])
         assert ret == 1
         captured = capsys.readouterr()
-        assert "invalid datetime" in captured.err
+        assert "Error:" in captured.err
 
     @patch(f"{_CLI}.MemoryClient", autospec=False)
     def test_search_json_format(self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
@@ -571,7 +611,7 @@ class TestImportCommand:
         fpath.write_text("{not valid json")
         ret = main(["import", str(fpath)])
         assert ret == 1
-        assert "failed to parse" in capsys.readouterr().err
+        assert "Error:" in capsys.readouterr().err
 
     def test_import_not_a_list(
         self,

@@ -18,6 +18,17 @@ from datetime import datetime, timedelta, timezone
 
 import structlog
 
+__all__ = [
+    "apply_importance_boost",
+    "apply_importance_decay",
+    "create_consolidation_edges",
+    "create_similarity_edges",
+    "create_tag_cooccurrence_edges",
+    "detect_cross_validation",
+    "graph_query",
+    "memory_decay_pass",
+]
+
 from trw_memory.exceptions import DimensionMismatchError
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.dense import cosine_similarity

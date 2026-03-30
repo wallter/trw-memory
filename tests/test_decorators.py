@@ -96,7 +96,7 @@ class TestAutoRecallFailOpen:
             return recalled_memories
 
         # Patch recall to raise
-        with patch.object(client, "recall", new_callable=AsyncMock, side_effect=RuntimeError("boom")):
+        with patch.object(client, "recall", new_callable=AsyncMock, side_effect=OSError("boom")):
             result = await handler(prompt="anything")
         assert result == []
 

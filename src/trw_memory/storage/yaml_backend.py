@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal, cast
 
 import structlog
 
@@ -60,37 +61,7 @@ def _parse_assertions(raw: object) -> list[Assertion]:
 
 def _entry_to_dict(entry: MemoryEntry) -> dict[str, object]:
     """Serialise a :class:`MemoryEntry` to a plain dict suitable for YAML."""
-    status_val = str(entry.status)
-    return {
-        "id": entry.id,
-        "content": entry.content,
-        "detail": entry.detail,
-        "tags": list(entry.tags),
-        "evidence": list(entry.evidence),
-        "importance": entry.importance,
-        "status": status_val,
-        "recurrence": entry.recurrence,
-        "namespace": entry.namespace,
-        "created_at": entry.created_at.isoformat(),
-        "updated_at": entry.updated_at.isoformat(),
-        "last_accessed_at": (entry.last_accessed_at.isoformat() if entry.last_accessed_at else None),
-        "access_count": entry.access_count,
-        "q_value": entry.q_value,
-        "q_observations": entry.q_observations,
-        "source": entry.source,
-        "source_identity": entry.source_identity,
-        "merged_from": list(entry.merged_from),
-        "consolidated_from": list(entry.consolidated_from),
-        "consolidated_into": entry.consolidated_into,
-        "metadata": dict(entry.metadata),
-        "vector_clock": dict(entry.vector_clock),
-        "remote_id": entry.remote_id,
-        "published_to_platform": entry.published_to_platform,
-        "pending_delete": entry.pending_delete,
-        "cross_validated": entry.cross_validated,
-        "outcome_history": list(entry.outcome_history),
-        "assertions": [a.model_dump() for a in entry.assertions] if entry.assertions else [],
-    }
+    return entry.to_dict()
 
 
 def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
@@ -156,7 +127,7 @@ def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
         access_count=_int("access_count", 0),
         q_value=_float("q_value", 0.5),
         q_observations=_int("q_observations", 0),
-        source=_str("source", "agent"),
+        source=cast("Literal['human', 'agent', 'tool', 'consolidated']", _str("source", "agent")),
         source_identity=_str("source_identity"),
         merged_from=_str_list("merged_from"),
         consolidated_from=_str_list("consolidated_from"),
@@ -445,5 +416,61 @@ class YAMLBackend(StorageBackend):
         results.sort(key=lambda e: e.updated_at.isoformat(), reverse=True)
         return results[:limit]
 
+    # ------------------------------------------------------------------
+    # Namespace operations (override ABC defaults)
+    # ------------------------------------------------------------------
+
+    def list_namespaces(self) -> list[str]:
+        """Return all distinct namespaces across stored YAML entries.
+
+        Performs an O(N) scan of all YAML files, extracting the ``namespace``
+        field from each.  Silently skips corrupt files.
+
+        Returns:
+            Sorted list of unique namespace strings.
+        """
+        namespaces: set[str] = set()
+        for entry in self._load_all():
+            namespaces.add(entry.namespace)
+        return sorted(namespaces)
+
+    def delete_by_namespace(self, namespace: str) -> int:
+        """Delete all YAML entry files belonging to *namespace*.
+
+        Performs an O(N) scan to identify matching entries, then removes
+        their files from disk.
+
+        Args:
+            namespace: The namespace whose entries should be removed.
+
+        Returns:
+            Number of entry files deleted.
+
+        Raises:
+            StorageError: If a file deletion fails for a reason other than
+                the file already being absent.
+        """
+        deleted = 0
+        for entry in self._load_all():
+            if entry.namespace == namespace:
+                path = self._path(entry.id)
+                try:
+                    path.unlink()
+                    deleted += 1
+                except FileNotFoundError:
+                    pass  # already gone — race-safe
+                except OSError as exc:
+                    raise StorageError(
+                        f"Failed to delete entry {entry.id!r} during namespace cleanup: {exc}",
+                        path=str(path),
+                    ) from exc
+        if deleted > 0:
+            logger.debug(
+                "namespace_deleted",
+                namespace=namespace,
+                entries_deleted=deleted,
+            )
+        return deleted
+
     def close(self) -> None:
-        """No-op for the YAML backend."""
+        """No-op for the YAML backend — no resources to release."""

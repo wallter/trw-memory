@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
+import inspect
 import json
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,9 +32,48 @@ from trw_memory.client import MemoryClient, _create_local_backend
 from trw_memory.lifecycle.consolidation import consolidate_cycle
 from trw_memory.models.config import MemoryConfig
 
+__all__ = ["main"]
+
 logger = structlog.get_logger(__name__)
 
 
+def _cli_error_boundary(fn: Callable[..., object]) -> Callable[..., object]:
+    """Wrap a CLI subcommand with uniform error handling.
+
+    Catches all exceptions, prints to stderr, logs with structlog,
+    and raises ``SystemExit(1)``.  ``SystemExit`` is re-raised unchanged.
+
+    Works with both sync and async callables.
+    """
+
+    @functools.wraps(fn)
+    async def async_wrapper(*args: object, **kwargs: object) -> object:
+        try:
+            return await fn(*args, **kwargs)  # type: ignore[misc]
+        except SystemExit:
+            raise
+        except Exception as exc:
+            logger.error("cli_command_failed", command=fn.__name__, error=str(exc), exc_info=True)
+            print(f"Error: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+
+    @functools.wraps(fn)
+    def sync_wrapper(*args: object, **kwargs: object) -> object:
+        try:
+            return fn(*args, **kwargs)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            logger.error("cli_command_failed", command=fn.__name__, error=str(exc), exc_info=True)
+            print(f"Error: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+
+    import asyncio as _asyncio
+
+    return async_wrapper if _asyncio.iscoroutinefunction(fn) else sync_wrapper
+
+
+@_cli_error_boundary
 async def _handle_store(args: argparse.Namespace) -> int:
     """Handle the 'store' subcommand."""
     client = MemoryClient(namespace=args.namespace, mode="local")
@@ -44,160 +86,124 @@ async def _handle_store(args: argparse.Namespace) -> int:
         )
         print(format_store_result(result))
         return 0
-    except Exception as exc:  # broad catch: CLI error boundary
-        print(f"Error: {exc}", file=sys.stderr)
-        logger.error("cli_store_failed", error=str(exc), exc_info=True)
-        return 1
     finally:
         await client.close()
 
 
+@_cli_error_boundary
 async def _handle_recall(args: argparse.Namespace) -> int:
     """Handle the 'recall' subcommand."""
     client = MemoryClient(namespace=args.namespace, mode="local")
     try:
-        tags = args.tags or None
         results = await client.recall(
             query=args.query,
             limit=args.limit,
-            tags=tags,
+            tags=args.tags or None,
         )
         print(format_results(results, fmt=args.fmt))
         return 0
-    except Exception as exc:  # broad catch: CLI error boundary
-        print(f"Error: {exc}", file=sys.stderr)
-        logger.error("cli_recall_failed", error=str(exc), exc_info=True)
-        return 1
     finally:
         await client.close()
 
 
+@_cli_error_boundary
 async def _handle_search(args: argparse.Namespace) -> int:
     """Handle the 'search' subcommand."""
     since: datetime | None = None
     if args.since:
-        try:
-            since = datetime.fromisoformat(args.since).replace(tzinfo=timezone.utc)
-        except ValueError:
-            print(f"Error: invalid datetime format: {args.since}", file=sys.stderr)
-            logger.error("cli_search_invalid_datetime", since=args.since)
-            return 1
+        since = datetime.fromisoformat(args.since).replace(tzinfo=timezone.utc)
 
     client = MemoryClient(namespace=args.namespace, mode="local")
     try:
-        tags = args.tags or None
         results = await client.search(
-            tags=tags,
+            tags=args.tags or None,
             min_importance=args.min_importance,
             since=since,
             limit=args.limit,
         )
         print(format_results(results, fmt=args.fmt))
         return 0
-    except Exception as exc:  # broad catch: CLI error boundary
-        print(f"Error: {exc}", file=sys.stderr)
-        logger.error("cli_search_failed", error=str(exc), exc_info=True)
-        return 1
     finally:
         await client.close()
 
 
+@_cli_error_boundary
 async def _handle_consolidate(args: argparse.Namespace) -> int:
     """Handle the 'consolidate' subcommand."""
+    config = MemoryConfig()
+    backend = _create_local_backend(config, args.namespace)
     try:
-        config = MemoryConfig()
-        backend = _create_local_backend(config, args.namespace)
-        try:
-            result = consolidate_cycle(
-                storage=backend,
-                embedder=None,
-                dry_run=args.dry_run,
-                namespace=args.namespace,
-                config=config,
-            )
-            print(json.dumps(result, indent=2, default=str))
-            return 0
-        finally:
-            backend.close()
-    except Exception as exc:  # broad catch: CLI error boundary
-        print(f"Error: {exc}", file=sys.stderr)
-        logger.error("cli_consolidate_failed", error=str(exc), exc_info=True)
-        return 1
+        result = consolidate_cycle(
+            storage=backend,
+            embedder=None,
+            dry_run=args.dry_run,
+            namespace=args.namespace,
+            config=config,
+        )
+        print(json.dumps(result, indent=2, default=str))
+        return 0
+    finally:
+        backend.close()
 
 
+@_cli_error_boundary
 async def _handle_export(args: argparse.Namespace) -> int:
     """Handle the 'export' subcommand."""
+    config = MemoryConfig()
+    backend = _create_local_backend(config, args.namespace)
     try:
-        config = MemoryConfig()
-        backend = _create_local_backend(config, args.namespace)
-        try:
-            entries = backend.list_entries(namespace=args.namespace, limit=10000)
-            data = [entry_to_export_dict(e) for e in entries]
+        entries = backend.list_entries(namespace=args.namespace, limit=10000)
+        data = [entry_to_export_dict(e) for e in entries]
 
-            if args.fmt == "yaml":
-                from ruamel.yaml import YAML
+        if args.fmt == "yaml":
+            from ruamel.yaml import YAML
 
-                yaml = YAML()
-                yaml.default_flow_style = False
-                if args.output:
-                    with open(args.output, "w", encoding="utf-8") as f:
-                        yaml.dump(data, f)
-                else:
-                    yaml.dump(data, sys.stdout)
+            yaml = YAML()
+            yaml.default_flow_style = False
+            if args.output:
+                with open(args.output, "w", encoding="utf-8") as f:
+                    yaml.dump(data, f)
             else:
-                text = json.dumps(data, indent=2, default=str)
-                if args.output:
-                    Path(args.output).write_text(text, encoding="utf-8")
-                else:
-                    print(text)
+                yaml.dump(data, sys.stdout)
+        else:
+            text = json.dumps(data, indent=2, default=str)
+            if args.output:
+                Path(args.output).write_text(text, encoding="utf-8")
+            else:
+                print(text)
 
-            print(format_export_summary(len(data), args.output), file=sys.stderr)
-            return 0
-        finally:
-            backend.close()
-    except Exception as exc:  # broad catch: CLI error boundary
-        print(f"Error: {exc}", file=sys.stderr)
-        logger.error("cli_export_failed", error=str(exc), exc_info=True)
-        return 1
+        print(format_export_summary(len(data), args.output), file=sys.stderr)
+        return 0
+    finally:
+        backend.close()
 
 
+@_cli_error_boundary
 async def _handle_import(args: argparse.Namespace) -> int:
     """Handle the 'import' subcommand."""
     file_path = Path(args.path)
     if not file_path.exists():
         print(f"Error: file not found: {args.path}", file=sys.stderr)
-        logger.error("cli_import_file_not_found", path=args.path)
         return 1
 
     raw_text = file_path.read_text(encoding="utf-8")
 
-    try:
-        if file_path.suffix in (".yaml", ".yml"):
-            from ruamel.yaml import YAML
+    if file_path.suffix in (".yaml", ".yml"):
+        from ruamel.yaml import YAML
 
-            yaml = YAML()
-            data = yaml.load(raw_text)
-        else:
-            data = json.loads(raw_text)
-    except (json.JSONDecodeError, ValueError) as exc:
-        print(f"Error: failed to parse {args.path}: {exc}", file=sys.stderr)
-        logger.error("cli_import_parse_failed", path=args.path, error=str(exc), exc_info=True)
-        return 1
+        yaml = YAML()
+        data = yaml.load(raw_text)
+    else:
+        data = json.loads(raw_text)
 
     if not isinstance(data, list):
         print("Error: expected a JSON/YAML array of entries", file=sys.stderr)
-        logger.error("cli_import_invalid_format", reason="expected_array")
         return 1
 
-    try:
-        from trw_memory.integrations._backend import make_entry
+    from trw_memory.integrations._backend import make_entry
 
-        config = MemoryConfig()
-        backend = _create_local_backend(config, args.namespace)
-    except Exception as exc:  # broad catch: CLI error boundary
-        print(f"Error: {exc}", file=sys.stderr)
-        logger.error("cli_import_setup_failed", error=str(exc), exc_info=True)
-        return 1
+    config = MemoryConfig()
+    backend = _create_local_backend(config, args.namespace)
 
     imported = 0
     skipped = 0
@@ -207,7 +213,6 @@ async def _handle_import(args: argparse.Namespace) -> int:
                 continue
 
             if args.merge:
-                # Check if entry already exists by direct ID lookup
                 eid = entry_data.get("id", "")
                 if eid:
                     existing = backend.get(eid)
@@ -238,37 +243,30 @@ async def _handle_import(args: argparse.Namespace) -> int:
 
         print(format_import_summary(imported, skipped))
         return 0
-    except Exception as exc:  # broad catch: CLI error boundary
-        print(f"Error: {exc}", file=sys.stderr)
-        logger.error("cli_import_failed", error=str(exc), exc_info=True)
-        return 1
     finally:
         backend.close()
 
 
+@_cli_error_boundary
 async def _handle_status(args: argparse.Namespace) -> int:
     """Handle the 'status' subcommand."""
+    config = MemoryConfig()
+    backend = _create_local_backend(config, args.namespace)
     try:
-        config = MemoryConfig()
-        backend = _create_local_backend(config, args.namespace)
-        try:
-            count = backend.count(namespace=args.namespace)
-            status_info = StatusDict(
-                namespace=args.namespace,
-                entry_count=count,
-                backend=config.storage_backend,
-                storage_path=config.storage_path,
-            )
-            print(format_status(status_info, fmt=args.fmt))
-            return 0
-        finally:
-            backend.close()
-    except Exception as exc:  # broad catch: CLI error boundary
-        print(f"Error: {exc}", file=sys.stderr)
-        logger.error("cli_status_failed", error=str(exc), exc_info=True)
-        return 1
+        count = backend.count(namespace=args.namespace)
+        status_info = StatusDict(
+            namespace=args.namespace,
+            entry_count=count,
+            backend=config.storage_backend,
+            storage_path=config.storage_path,
+        )
+        print(format_status(status_info, fmt=args.fmt))
+        return 0
+    finally:
+        backend.close()
 
 
+@_cli_error_boundary
 async def _handle_forget(args: argparse.Namespace) -> int:
     """Handle the 'forget' subcommand."""
     client = MemoryClient(namespace=args.namespace, mode="local")
@@ -277,17 +275,13 @@ async def _handle_forget(args: argparse.Namespace) -> int:
         mid = result.get("memory_id", "")
         print(f"Deleted: {mid}")
         return 0
-    except Exception as exc:  # broad catch: CLI error boundary
-        print(f"Error: {exc}", file=sys.stderr)
-        logger.error("cli_forget_failed", error=str(exc), exc_info=True)
-        return 1
     finally:
         await client.close()
 
 
 async def _dispatch(args: argparse.Namespace) -> int:
     """Route to the appropriate handler based on subcommand."""
-    handlers = {
+    handlers: dict[str, Callable[..., object]] = {
         "store": _handle_store,
         "recall": _handle_recall,
         "search": _handle_search,
@@ -302,7 +296,15 @@ async def _dispatch(args: argparse.Namespace) -> int:
         print(f"Unknown command: {args.command}", file=sys.stderr)
         logger.error("cli_unknown_command", command=args.command)
         return 1
-    return await handler(args)
+    try:
+        coro = handler(args)
+        if inspect.isawaitable(coro):
+            rc = await coro
+        else:
+            rc = coro
+        return rc if isinstance(rc, int) else 1
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 1
 
 
 def main(argv: list[str] | None = None) -> int:

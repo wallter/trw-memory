@@ -6,10 +6,17 @@ Designed as the standalone replacement for TRW's LearningEntry.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+
+_logger = logging.getLogger(__name__)
+
+# Valid source values for MemoryEntry provenance tracking.
+_VALID_SOURCES = frozenset({"human", "agent", "tool", "consolidated"})
 
 
 class MemoryStatus(str, Enum):
@@ -55,12 +62,9 @@ class Assertion(BaseModel):
         values = info.data
         assertion_type = values.get("type", "")
         # grep types require non-empty pattern
-        if assertion_type in (
-            AssertionType.GREP_PRESENT,
-            AssertionType.GREP_ABSENT,
-            "grep_present",
-            "grep_absent",
-        ) and (not v or len(v.strip()) == 0):
+        # Note: use_enum_values=True normalizes enum members to their string
+        # values, so we only need to compare against the string forms.
+        if assertion_type in ("grep_present", "grep_absent") and (not v or len(v.strip()) == 0):
             raise ValueError("grep assertion types require a non-empty pattern")
         # pattern length cap for security (ReDoS mitigation)
         if len(v) > 500:
@@ -119,8 +123,24 @@ class MemoryEntry(BaseModel):
     q_observations: int = Field(ge=0, default=0)
 
     # Provenance
-    source: str = Field(default="agent", description="Origin: 'human', 'agent', 'tool', 'consolidated'")
+    source: Literal["human", "agent", "tool", "consolidated"] = Field(
+        default="agent", description="Origin: 'human', 'agent', 'tool', 'consolidated'"
+    )
     source_identity: str = Field(default="", description="Name of source agent/user")
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _coerce_unknown_source(cls, v: object) -> str:
+        """Coerce unknown source values to 'agent' for backward compatibility.
+
+        Existing data may contain arbitrary source strings from before the
+        Literal constraint was introduced. Rather than breaking on load, we
+        silently fall back to 'agent' and log a warning.
+        """
+        if not isinstance(v, str) or v not in _VALID_SOURCES:
+            _logger.warning("unknown source value %r coerced to 'agent'", v)
+            return "agent"
+        return v
 
     # Sync fields (PRD-CORE-047)
     vector_clock: dict[str, int] = Field(default_factory=dict, description="node_id -> counter for conflict resolution")
@@ -144,6 +164,50 @@ class MemoryEntry(BaseModel):
 
     # Executable assertions (PRD-CORE-086)
     assertions: list[Assertion] = Field(default_factory=list, description="Machine-verifiable assertions")
+
+    def to_dict(self, *, fields: set[str] | None = None) -> dict[str, object]:
+        """Serialize this entry to a plain dict.
+
+        Args:
+            fields: If provided, include only these field names.
+                When None, all fields are included.
+
+        Returns:
+            Dict suitable for YAML/JSON serialization.
+        """
+        full: dict[str, object] = {
+            "id": self.id,
+            "content": self.content,
+            "detail": self.detail,
+            "tags": list(self.tags),
+            "evidence": list(self.evidence),
+            "importance": self.importance,
+            "status": str(self.status),
+            "recurrence": self.recurrence,
+            "namespace": self.namespace,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+            "last_accessed_at": self.last_accessed_at.isoformat() if self.last_accessed_at else None,
+            "access_count": self.access_count,
+            "q_value": self.q_value,
+            "q_observations": self.q_observations,
+            "source": self.source,
+            "source_identity": self.source_identity,
+            "merged_from": list(self.merged_from),
+            "consolidated_from": list(self.consolidated_from),
+            "consolidated_into": self.consolidated_into,
+            "metadata": dict(self.metadata),
+            "vector_clock": dict(self.vector_clock),
+            "remote_id": self.remote_id,
+            "published_to_platform": self.published_to_platform,
+            "pending_delete": self.pending_delete,
+            "cross_validated": self.cross_validated,
+            "outcome_history": list(self.outcome_history),
+            "assertions": [a.model_dump() for a in self.assertions] if self.assertions else [],
+        }
+        if fields is not None:
+            return {k: v for k, v in full.items() if k in fields}
+        return full
 
 
 class MemoryIndex(BaseModel):

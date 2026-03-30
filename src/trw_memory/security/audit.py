@@ -203,3 +203,4 @@ class AuditLog:
         line = json.dumps(record_data, sort_keys=True, default=str) + "\n"
         with self._path.open("a", encoding="utf-8") as fh:
             fh.write(line)
+            fh.flush()

@@ -48,6 +48,10 @@ def rrf_fuse(
     if not rankings:
         return []
 
+    if k < 1:
+        logger.warning("rrf_k_invalid", k=k, default=60)
+        k = 60
+
     fused_scores: dict[str, float] = {}
     for ranking in rankings:
         for rank, (entry_id, _) in enumerate(ranking):
