@@ -21,7 +21,8 @@ from trw_memory.exceptions import (
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.events import MemoryEvent, MemoryEventType
 from trw_memory.models.memory import MemoryEntry, MemoryIndex, MemoryStatus
-from trw_memory.namespace import namespace_to_path, validate_namespace
+from trw_memory.namespaces.path_mapping import namespace_to_path
+from trw_memory.namespaces.validation import validate_namespace
 
 __all__ = [
     "AuthorizationError",

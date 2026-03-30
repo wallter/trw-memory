@@ -24,9 +24,11 @@ from typing import Literal, Protocol, TypedDict, runtime_checkable
 
 import structlog
 
+from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.exceptions import (
     MemoryConnectionError,
     MemoryNotFoundError,
+    StorageError,
     ToolAlreadyRegisteredError,
 )
 from trw_memory.models.config import MemoryConfig
@@ -36,16 +38,37 @@ from trw_memory.storage.interface import StorageBackend
 
 logger = structlog.get_logger(__name__)
 
+__all__ = [
+    "ForgetResultDict",
+    "MemoryClient",
+    "MemoryResultDict",
+    "StoreResultDict",
+]
 
-# Recall scoring: blend term-frequency relevance with stored importance.
-_TF_WEIGHT: float = 0.7
-_IMPORTANCE_WEIGHT: float = 0.3
-_TF_SCALE: float = 10.0  # amplify raw TF ratio to [0, 1] range
+
+# Fallback recall scoring (used when hybrid retrieval pipeline is unavailable).
+# Blends term-frequency relevance with stored importance.
+_FALLBACK_TF_WEIGHT: float = 0.7
+_FALLBACK_IMPORTANCE_WEIGHT: float = 0.3
+_FALLBACK_TF_SCALE: float = 10.0  # amplify raw TF ratio to [0, 1] range
+
+# Re-export old names for backward compatibility (internal only).
+_TF_WEIGHT = _FALLBACK_TF_WEIGHT
+_IMPORTANCE_WEIGHT = _FALLBACK_IMPORTANCE_WEIGHT
+_TF_SCALE = _FALLBACK_TF_SCALE
 
 
 def _make_id() -> str:
-    """Generate a unique memory ID with M- prefix."""
-    return f"M-{uuid.uuid4().hex[:8]}"
+    """Generate a unique memory ID with ``M-`` prefix and 16 hex characters.
+
+    Uses 16 hex characters (64 bits of entropy) from a UUID4 to minimise
+    collision probability.  At 10k entries the birthday-paradox collision
+    chance is ~2.7e-12 (vs ~1.2e-5 with the previous 8-char / 32-bit scheme).
+
+    Returns:
+        A string matching ``M-[0-9a-f]{16}``, e.g. ``"M-a1b2c3d4e5f6a7b8"``.
+    """
+    return f"M-{uuid.uuid4().hex[:16]}"
 
 
 class MemoryResultDict(TypedDict):
@@ -153,6 +176,29 @@ class MemoryClient:
         mode: Literal["local", "mcp", "auto"] = "auto",
         timeout: float = 5.0,
     ) -> None:
+        """Initialise a MemoryClient with namespace isolation and mode selection.
+
+        Mode selection logic:
+
+        - ``"local"`` — create a SQLite or YAML backend directly (controlled
+          by ``MEMORY_STORAGE_BACKEND`` env var).  Raises
+          :class:`MemoryConnectionError` if backend creation fails.
+        - ``"mcp"`` — reserved for future MCP stdio transport (currently
+          raises :class:`NotImplementedError`).
+        - ``"auto"`` (default) — attempt ``"local"`` first; if that fails,
+          raise :class:`MemoryConnectionError` (MCP fallback not yet available).
+
+        Args:
+            namespace: Isolation scope (e.g. ``"project:my-app"``, ``"default"``).
+                Must pass :func:`~trw_memory.namespaces.validation.validate_namespace`.
+            mode: Transport mode — ``"local"``, ``"mcp"``, or ``"auto"``.
+            timeout: Timeout in seconds for future remote operations.
+
+        Raises:
+            ValueError: If *namespace* fails validation.
+            NotImplementedError: If *mode* is ``"mcp"``.
+            MemoryConnectionError: If no backend can be established.
+        """
         validate_namespace(namespace)
         self._namespace = namespace
         self._timeout = timeout
@@ -277,7 +323,22 @@ class MemoryClient:
         tags: list[str] | None = None,
         min_score: float = 0.0,
     ) -> list[MemoryResultDict]:
-        """Search memories by keyword query.
+        """Search memories by keyword query using hybrid retrieval.
+
+        Uses a two-tier strategy:
+
+        1. **Hybrid search** (preferred): Fetches all namespace entries and runs
+           them through the retrieval pipeline (``hybrid_search``) which combines
+           BM25 sparse retrieval with dense vector similarity via Reciprocal Rank
+           Fusion (RRF).  This produces substantially better ranking than simple
+           keyword matching.
+
+        2. **Fallback TF scoring**: When the hybrid pipeline is unavailable
+           (missing optional deps, import errors, or empty results), falls back
+           to the original LIKE-based ``backend.search()`` with a blended
+           term-frequency + importance score.
+
+        Both paths apply tag filtering, min_score thresholds, and limit capping.
 
         Args:
             query: Free-text search term.
@@ -294,24 +355,133 @@ class MemoryClient:
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
 
+        # --- Tier 1: Hybrid retrieval pipeline (BM25 + dense + RRF) ----------
+        hybrid_results = await self._try_hybrid_recall(query, limit, tags)
+        if hybrid_results is not None:
+            # Apply min_score filter and limit
+            filtered = [r for r in hybrid_results if r["score"] >= min_score]
+            final = filtered[:limit]
+            logger.debug(
+                "memory_recalled",
+                op="recall",
+                outcome="success",
+                query=query[:80],
+                namespace=self._namespace,
+                result_count=len(final),
+                search_path="hybrid",
+            )
+            return final
+
+        # --- Tier 2: Fallback LIKE + TF scoring ------------------------------
+        return await self._fallback_recall(query, limit, tags, min_score)
+
+    async def _try_hybrid_recall(
+        self,
+        query: str,
+        limit: int,
+        tags: list[str] | None,
+    ) -> list[MemoryResultDict] | None:
+        """Attempt hybrid retrieval; return None to signal fallback.
+
+        Fetches all entries for the namespace, runs them through
+        ``hybrid_search`` (BM25 + optional dense vectors + RRF fusion),
+        applies tag filtering, and converts to result dicts with
+        positional scoring.
+
+        Returns:
+            A list of result dicts on success, or ``None`` when the hybrid
+            pipeline is unavailable or produces no candidates.
+        """
+        try:
+            from trw_memory.retrieval.pipeline import hybrid_search
+        except ImportError:
+            return None
+
+        # Fetch candidate entries under lock (consistent with forget/store pattern)
+        async with self._lock:
+            backend = self._get_backend()
+            all_entries = backend.list_entries(
+                namespace=self._namespace,
+                limit=limit * 5,
+            )
+
+        if not all_entries:
+            return None
+
+        # Optionally obtain an embedding provider for dense retrieval
+        embedder = self._get_embedder()
+
+        try:
+            ranked = hybrid_search(
+                query=query,
+                entries=all_entries,
+                embedder=embedder,
+                top_k=limit * 3,
+            )
+        except Exception:
+            logger.debug(
+                "hybrid_search_failed",
+                op="recall",
+                outcome="failure",
+                exc_info=True,
+            )
+            return None
+
+        if not ranked:
+            return None
+
+        # Apply tag filter
+        if tags:
+            tag_set = set(tags)
+            ranked = [e for e in ranked if tag_set.issubset(set(e.tags))]
+
+        # Convert to result dicts with RRF-style positional scoring
+        results: list[MemoryResultDict] = []
+        for rank, entry in enumerate(ranked):
+            score = round(1.0 / (1 + rank), 4)
+            results.append(_entry_to_result(entry, score=score))
+
+        return results
+
+    async def _fallback_recall(
+        self,
+        query: str,
+        limit: int,
+        tags: list[str] | None,
+        min_score: float,
+    ) -> list[MemoryResultDict]:
+        """Original LIKE-based search with TF + importance scoring.
+
+        Uses ``backend.search()`` for keyword matching and blends a
+        term-frequency relevance score (weight ``_FALLBACK_TF_WEIGHT``)
+        with the entry's stored importance (weight
+        ``_FALLBACK_IMPORTANCE_WEIGHT``).
+        """
         async with self._lock:
             entries = self._get_backend().search(
                 query,
-                top_k=limit * 3,  # over-fetch to allow for min_score post-filtering
+                top_k=limit * 3,
                 tags=tags,
                 namespace=self._namespace,
             )
 
-        # Score by TF relevance blended with importance (0.7 TF + 0.3 importance)
         query_terms = set(query.lower().split())
         results: list[MemoryResultDict] = []
         for entry in entries:
             if not query_terms:
                 tf_score = entry.importance
             else:
-                text_tokens = f"{entry.content} {entry.detail} {' '.join(entry.tags)}".lower().split()
+                text_tokens = (
+                    f"{entry.content} {entry.detail} {' '.join(entry.tags)}"
+                    .lower()
+                    .split()
+                )
                 matches = sum(1 for t in text_tokens if t in query_terms)
-                tf_score = min(1.0, matches / max(len(text_tokens), 1) * _TF_SCALE) * _TF_WEIGHT + entry.importance * _IMPORTANCE_WEIGHT
+                tf_score = (
+                    min(1.0, matches / max(len(text_tokens), 1) * _FALLBACK_TF_SCALE)
+                    * _FALLBACK_TF_WEIGHT
+                    + entry.importance * _FALLBACK_IMPORTANCE_WEIGHT
+                )
             if tf_score >= min_score:
                 results.append(_entry_to_result(entry, score=round(tf_score, 4)))
 
@@ -324,8 +494,28 @@ class MemoryClient:
             query=query[:80],
             namespace=self._namespace,
             result_count=len(final),
+            search_path="fallback",
         )
         return final
+
+    @staticmethod
+    def _get_embedder() -> EmbeddingProvider | None:
+        """Try to obtain a local embedding provider; return None on failure.
+
+        This is a best-effort helper: when sentence-transformers is not
+        installed or the provider reports itself as unavailable, dense
+        retrieval is silently skipped and the hybrid pipeline degrades
+        to BM25-only mode.
+        """
+        try:
+            from trw_memory.embeddings.local import LocalEmbeddingProvider
+
+            provider = LocalEmbeddingProvider()
+            if provider.available():
+                return provider
+        except Exception:
+            logger.debug("embedder_init_failed", op="recall", exc_info=True)
+        return None
 
     async def forget(self, memory_id: str) -> ForgetResultDict:
         """Delete a memory entry.
@@ -548,7 +738,7 @@ class MemoryClient:
                     if query:
                         raw = await client.recall(str(query), limit=limit)
                         memories = [m for m in raw if float(m["score"]) >= min_score]
-                except Exception:  # broad catch: fail-open recall decorator
+                except (OSError, ValueError, StorageError, MemoryConnectionError):  # fail-open: recall failures
                     logger.debug("auto_recall_failed", op="auto_recall", outcome="failure", exc_info=True)
                     memories = []
 

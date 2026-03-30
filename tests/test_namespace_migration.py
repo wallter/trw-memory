@@ -1,4 +1,4 @@
-"""Tests for namespace package migration — backward compat and new imports."""
+"""Tests for namespace package — canonical imports and NamespaceManager."""
 
 from __future__ import annotations
 
@@ -11,20 +11,8 @@ from trw_memory.exceptions import ConfigError
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 
-class TestBackwardCompatImports:
-    """Old imports from trw_memory.namespace still work."""
-
-    def test_validate_namespace_from_old_module(self) -> None:
-        """from trw_memory.namespace import validate_namespace works."""
-        from trw_memory.namespace import validate_namespace
-
-        assert validate_namespace("default") == "default"
-
-    def test_namespace_to_path_from_old_module(self) -> None:
-        """from trw_memory.namespace import namespace_to_path works."""
-        from trw_memory.namespace import namespace_to_path
-
-        assert namespace_to_path("global") == Path("global")
+class TestTopLevelExports:
+    """Top-level imports from trw_memory work."""
 
     def test_top_level_exports_still_work(self) -> None:
         """from trw_memory import validate_namespace still works."""
@@ -34,8 +22,8 @@ class TestBackwardCompatImports:
         assert namespace_to_path("project:abc") == Path("project/abc")
 
 
-class TestNewPackageImports:
-    """New imports from trw_memory.namespaces work."""
+class TestCanonicalPackageImports:
+    """Imports from trw_memory.namespaces work."""
 
     def test_validate_namespace_from_package(self) -> None:
         """from trw_memory.namespaces import validate_namespace works."""

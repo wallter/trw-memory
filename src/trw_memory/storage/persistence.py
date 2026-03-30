@@ -233,3 +233,4 @@ def lock_for_rmw(path: Path) -> Generator[Path, None, None]:
         if _FCNTL_AVAILABLE:
             fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
         lock_fh.close()
+        lock_path.unlink(missing_ok=True)

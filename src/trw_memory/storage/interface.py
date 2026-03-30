@@ -156,6 +156,79 @@ class StorageBackend(ABC):
         """
         ...
 
+    # -- Non-abstract extension points (safe defaults) ----------------------
+
+    def list_namespaces(self) -> list[str]:
+        """Return all distinct namespaces that have stored entries.
+
+        Subclasses that support multi-namespace storage should override this
+        to query their underlying store.  The default returns an empty list,
+        which is safe for single-namespace or in-memory backends.
+
+        Returns:
+            Sorted list of unique namespace strings.  Empty if the backend
+            does not track namespaces or has no entries.
+        """
+        return []
+
+    def delete_by_namespace(self, namespace: str) -> int:
+        """Delete all entries belonging to *namespace*.
+
+        Subclasses that support bulk-delete should override this for
+        efficiency.  The default returns ``0`` (no entries deleted) and
+        performs no I/O.
+
+        Args:
+            namespace: The namespace whose entries should be removed.
+
+        Returns:
+            Number of entries actually deleted.  ``0`` if the namespace
+            does not exist or the backend does not support this operation.
+        """
+        return 0
+
+    def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:  # noqa: B027
+        """Insert or update a dense vector associated with *entry_id*.
+
+        Backends that support vector search (e.g. via ``sqlite-vec``) should
+        override this.  The default is a silent no-op so that callers do not
+        need to guard against missing vector support.
+
+        Args:
+            entry_id: The memory entry id to associate the vector with.
+            embedding: Dense float vector.  Length must match the backend's
+                configured dimensionality.
+
+        Raises:
+            StorageError: If the upsert fails (only in overriding backends).
+        """
+
+    def search_vectors(
+        self,
+        query_embedding: list[float],
+        top_k: int = 25,
+    ) -> list[tuple[str, float]]:
+        """KNN search over stored dense vectors.
+
+        Backends that support vector search should override this.  The default
+        returns an empty list so that callers can always call this method
+        without checking for vector support.
+
+        Args:
+            query_embedding: Query vector.  Length must match the backend's
+                configured dimensionality.
+            top_k: Maximum number of nearest neighbours to return.
+
+        Returns:
+            List of ``(entry_id, distance)`` tuples sorted by distance
+            ascending (closest first).  Empty if the backend has no vector
+            support or no vectors are stored.
+
+        Raises:
+            StorageError: If the search fails (only in overriding backends).
+        """
+        return []
+
     # -- Context manager (non-abstract) ------------------------------------
 
     def __enter__(self) -> StorageBackend:

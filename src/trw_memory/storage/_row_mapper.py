@@ -7,6 +7,7 @@ The column order is defined by :data:`trw_memory.storage._shared.ENTRY_COLUMNS`.
 from __future__ import annotations
 
 import json
+from typing import Literal, cast
 
 from trw_memory.models.memory import Assertion, MemoryEntry, MemoryStatus
 from trw_memory.storage._parsing import (
@@ -15,6 +16,9 @@ from trw_memory.storage._parsing import (
     parse_json_dict_str,
     parse_json_list,
 )
+
+# Source provenance values accepted by MemoryEntry.
+_SourceType = Literal["human", "agent", "tool", "consolidated"]
 
 
 def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
@@ -83,7 +87,7 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         access_count=int(str(access_count)),
         q_value=float(str(q_value)),
         q_observations=int(str(q_obs)),
-        source=str(source),
+        source=cast("_SourceType", str(source)),
         source_identity=str(source_identity) if source_identity else "",
         merged_from=parse_json_list(merged_json),
         consolidated_from=parse_json_list(cons_from_json),
@@ -91,9 +95,9 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         metadata=parse_json_dict_str(metadata_json),
         vector_clock=parse_json_dict_int(vector_clock_json),
         remote_id=str(remote_id) if remote_id else None,
-        published_to_platform=bool(int(str(published_raw))) if published_raw else False,
-        pending_delete=bool(int(str(pending_del_raw))) if pending_del_raw else False,
-        cross_validated=bool(int(str(cross_val_raw))) if cross_val_raw else False,
+        published_to_platform=bool(published_raw),
+        pending_delete=bool(pending_del_raw),
+        cross_validated=bool(cross_val_raw),
         outcome_history=parse_json_list(outcome_json),
         assertions=assertions,
     )

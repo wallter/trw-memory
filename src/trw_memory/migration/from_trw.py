@@ -224,7 +224,7 @@ def from_learning_entry(data: dict[str, object]) -> MemoryEntry:
         access_count=access_count,
         q_value=q_value,
         q_observations=q_observations,
-        source=source,
+        source=source,  # type: ignore[arg-type]  # validator coerces unknown values to "agent"
         source_identity=source_identity,
         merged_from=merged_from,
         consolidated_from=consolidated_from,

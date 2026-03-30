@@ -68,9 +68,26 @@ def _read_key_from_env() -> bytes | None:
         raise ConfigError(f"Invalid hex in {_ENV_VAR}: {exc}") from exc
 
 
+def _validate_key_path(path: Path) -> Path:
+    """Validate a key file path against traversal attacks.
+
+    Args:
+        path: Raw path (may contain ``~`` or ``..``).
+
+    Returns:
+        Resolved, validated path.
+
+    Raises:
+        ConfigError: If the path contains ``..`` traversal components.
+    """
+    if ".." in path.parts:
+        raise ConfigError(f"Path traversal detected in key_file_path: {path}")
+    return path.expanduser().resolve()
+
+
 def _key_file_path(config: MemoryConfig) -> Path:
     """Resolve the key file path from config."""
-    return Path(config.key_file_path).expanduser()
+    return _validate_key_path(Path(config.key_file_path))
 
 
 def _read_key_from_file(config: MemoryConfig) -> bytes | None:

@@ -95,7 +95,7 @@ class TestCorpusGeneration:
             assert len(entry.tags) >= 2
             assert 0.1 <= entry.importance <= 1.0
             assert entry.namespace == "benchmark"
-            assert entry.source == "synthetic"
+            assert entry.source == "agent"  # "synthetic" coerced to "agent" by source validator
             assert entry.recurrence >= 1
 
     def test_generate_corpus_large(self) -> None:

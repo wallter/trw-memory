@@ -235,7 +235,7 @@ class TestBackendHelper:
     def test_make_entry_generates_id(self) -> None:
         entry = make_entry(content="test", namespace="ns")
         assert entry.id.startswith("M-")
-        assert len(entry.id) == 10  # M- + 8 hex chars
+        assert len(entry.id) == 18  # M- + 16 hex chars
 
     def test_make_entry_sets_timestamps(self) -> None:
         entry = make_entry(content="test")

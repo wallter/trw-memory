@@ -10,9 +10,14 @@ import math
 from datetime import datetime, timezone
 from typing import NamedTuple
 
+import structlog
+
+from trw_memory.exceptions import DimensionMismatchError
 from trw_memory.lifecycle._utils import days_since_access as _days_since_access
 from trw_memory.models.config import MemoryConfig
 from trw_memory.retrieval.dense import cosine_similarity
+
+logger = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Result types
@@ -84,7 +89,11 @@ def compute_importance_score(
 
     # Relevance: cosine similarity when both embeddings present, else token overlap
     if query_embedding is not None and entry_embedding is not None:
-        relevance = max(0.0, cosine_similarity(query_embedding, entry_embedding))
+        try:
+            relevance = max(0.0, cosine_similarity(query_embedding, entry_embedding))
+        except (DimensionMismatchError, ZeroDivisionError):
+            logger.debug("scoring_dimension_mismatch", entry_id=entry.get("id", ""))
+            relevance = 0.0
     else:
         # Token overlap ratio fallback
         entry_text = str(entry.get("content", "")).lower() + " " + str(entry.get("detail", "")).lower()

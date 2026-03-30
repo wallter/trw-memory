@@ -141,16 +141,9 @@ def format_import_summary(imported: int, skipped: int) -> str:
 
 
 def entry_to_export_dict(entry: MemoryEntry) -> dict[str, object]:
-    """Convert a MemoryEntry to a serializable dict for export."""
-    return {
-        "id": entry.id,
-        "content": entry.content,
-        "detail": entry.detail,
-        "tags": list(entry.tags),
-        "importance": entry.importance,
-        "status": str(entry.status),
-        "namespace": entry.namespace,
-        "created_at": entry.created_at.isoformat(),
-        "updated_at": entry.updated_at.isoformat(),
-        "metadata": dict(entry.metadata) if entry.metadata else {},
-    }
+    """Convert a MemoryEntry to a serializable dict for lossless export.
+
+    Includes all 28 fields to enable full backup/restore via CLI
+    export/import.
+    """
+    return entry.to_dict()
