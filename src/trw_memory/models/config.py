@@ -78,6 +78,7 @@ class MemoryConfig(BaseSettings):
     # Audit
     audit_enabled: bool = Field(default=True, description="Enable audit logging of all memory operations")
     audit_log_path: str = Field(default=".memory/audit.jsonl", description="Path to JSONL audit log file")
+    fsync_on_append: bool = Field(default=False, description="Call os.fsync() after each audit log write for crash safety")
 
     # PII
     pii_enabled: bool = Field(default=True, description="Enable PII detection in memory content")
