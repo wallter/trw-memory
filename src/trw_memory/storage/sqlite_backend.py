@@ -86,7 +86,7 @@ class SQLiteBackend(StorageBackend):
         try:
             self._conn = self._open_and_configure(db_path)
         except sqlite3.DatabaseError:
-            logger.error("db_corrupt_detected", db=str(db_path), action="auto_recover")
+            logger.exception("db_corrupt_detected", db=str(db_path), action="auto_recover")
             self._conn = self.recover_db(db_path)
             self.recovered = True
 
@@ -177,7 +177,7 @@ class SQLiteBackend(StorageBackend):
             old_conn.row_factory = sqlite3.Row
             try:
                 rows = old_conn.execute(
-                    "SELECT * FROM memories"  # noqa: S608 — static query
+                    "SELECT * FROM memories"
                 ).fetchall()
                 recovered_rows = len(rows)
             except sqlite3.DatabaseError:
