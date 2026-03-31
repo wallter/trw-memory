@@ -82,11 +82,13 @@ class SQLiteBackend(StorageBackend):
 
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
+        self.recovered = False
         try:
             self._conn = self._open_and_configure(db_path)
         except sqlite3.DatabaseError:
             logger.error("db_corrupt_detected", db=str(db_path), action="auto_recover")
             self._conn = self.recover_db(db_path)
+            self.recovered = True
 
         ensure_schema(self._conn)
 
