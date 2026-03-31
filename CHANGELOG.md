@@ -2,6 +2,17 @@
 
 All notable changes to the TRW Memory package.
 
+## [0.6.2] — 2026-03-31
+
+### Added
+
+- **`MemoryConfig.fsync_on_append`** — New config flag to enable `os.fsync()` on audit log appends for durability.
+- **`MemoryConfig.__repr__`** — Shows storage_backend, path, encryption, rbac at a glance.
+- **`MemoryEntry.__repr__`** — Shows id, content preview, tags, importance.
+- **13 new tests** in `test_qual_054_dx_polish.py` covering repr, fsync, and config validation.
+
+---
+
 ## [0.6.1] — 2026-03-31
 
 ### Fixed
