@@ -6,12 +6,10 @@ MemoryEntry __repr__, MemoryConfig fsync_on_append, path traversal.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
-
 
 # --- FR02: Config weight validation ---
 

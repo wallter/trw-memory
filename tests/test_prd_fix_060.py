@@ -10,14 +10,12 @@ Covers all 5 FRs:
 
 from __future__ import annotations
 
-import importlib
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from trw_memory.models.memory import Assertion, AssertionType, MemoryEntry, MemoryStatus
-
 
 # ---------------------------------------------------------------------------
 # FR-01: namespace.py shim removed

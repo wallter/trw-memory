@@ -6,7 +6,6 @@ test_prd_qual_053.py — the ge=0.0/le=1.0 constraints are in place.
 
 from __future__ import annotations
 
-import sys
 from io import StringIO
 from unittest.mock import patch
 
@@ -14,7 +13,6 @@ import pytest
 
 from trw_memory.cli import _cli_error_boundary
 from trw_memory.retrieval.fusion import rrf_fuse
-
 
 # ---------------------------------------------------------------------------
 # FR-01: _cli_error_boundary decorator
