@@ -175,14 +175,14 @@ class TestKeyPathValidation:
         """Paths containing '..' must be rejected."""
         from trw_memory.security.keys import _validate_key_path
 
-        with pytest.raises(Exception, match="[Tt]raversal"):
+        with pytest.raises(Exception, match=r"[Tt]raversal"):
             _validate_key_path(Path("../../etc/passwd"))
 
     def test_key_path_traversal_in_middle_rejected(self) -> None:
         """Paths with '..' in the middle must be rejected."""
         from trw_memory.security.keys import _validate_key_path
 
-        with pytest.raises(Exception, match="[Tt]raversal"):
+        with pytest.raises(Exception, match=r"[Tt]raversal"):
             _validate_key_path(Path("/home/user/../../../etc/shadow"))
 
     def test_key_path_valid_accepted(self) -> None:

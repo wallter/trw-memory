@@ -50,7 +50,6 @@ def _force_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
 
 async def _coro_none() -> None:
     """Async helper that returns None -- used by _force_fallback."""
-    return None
 
 
 # ---------------------------------------------------------------------------
