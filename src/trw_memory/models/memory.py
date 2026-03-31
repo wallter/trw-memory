@@ -165,6 +165,14 @@ class MemoryEntry(BaseModel):
     # Executable assertions (PRD-CORE-086)
     assertions: list[Assertion] = Field(default_factory=list, description="Machine-verifiable assertions")
 
+    def __repr__(self) -> str:
+        """Concise repr showing key identifying fields."""
+        preview = self.content[:40] + "..." if len(self.content) > 40 else self.content
+        return (
+            f"MemoryEntry(id={self.id!r}, content={preview!r}, "
+            f"tags={self.tags!r}, importance={self.importance:.2f})"
+        )
+
     def to_dict(self, *, fields: set[str] | None = None) -> dict[str, object]:
         """Serialize this entry to a plain dict.
 

@@ -45,8 +45,9 @@ class AuditLog:
     of all fields *except* ``record_hash`` itself).
     """
 
-    def __init__(self, log_path: Path) -> None:
+    def __init__(self, log_path: Path, *, fsync: bool = False) -> None:
         self._path = log_path
+        self._fsync = fsync
         self._last_hash = self._read_last_hash()
 
     # ------------------------------------------------------------------
@@ -204,3 +205,7 @@ class AuditLog:
         with self._path.open("a", encoding="utf-8") as fh:
             fh.write(line)
             fh.flush()
+            if self._fsync:
+                import os
+
+                os.fsync(fh.fileno())
