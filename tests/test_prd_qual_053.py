@@ -18,7 +18,6 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError
 
-
 # ---------------------------------------------------------------------------
 # FR-01: Config Literal Types and Weight Bounds
 # ---------------------------------------------------------------------------

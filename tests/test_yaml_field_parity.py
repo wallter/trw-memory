@@ -27,7 +27,6 @@ from trw_memory.models.memory import (
 )
 from trw_memory.storage.yaml_backend import YAMLBackend
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

@@ -8,11 +8,10 @@ FR-07: Code quality — __all__ exports, MemoryConfig __repr__.
 
 from __future__ import annotations
 
-import io
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 

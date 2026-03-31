@@ -16,12 +16,11 @@ import pytest
 import structlog
 
 from trw_memory.client import (
-    MemoryClient,
     _FALLBACK_IMPORTANCE_WEIGHT,
     _FALLBACK_TF_SCALE,
     _FALLBACK_TF_WEIGHT,
+    MemoryClient,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -162,6 +161,7 @@ class TestRecallHybridPath:
         the positional scoring formula without depending on BM25 IDF behavior.
         """
         from conftest import make_entry
+
         from trw_memory.models.memory import MemoryStatus
 
         e1 = make_entry(entry_id="M-001", content="first match", status=MemoryStatus.ACTIVE)
@@ -434,7 +434,7 @@ class TestScoringConstants:
 
     def test_backward_compat_aliases_exist(self) -> None:
         """Old constant names still exist for backward compatibility."""
-        from trw_memory.client import _TF_WEIGHT, _IMPORTANCE_WEIGHT, _TF_SCALE
+        from trw_memory.client import _IMPORTANCE_WEIGHT, _TF_SCALE, _TF_WEIGHT
 
         assert _TF_WEIGHT == _FALLBACK_TF_WEIGHT
         assert _IMPORTANCE_WEIGHT == _FALLBACK_IMPORTANCE_WEIGHT
