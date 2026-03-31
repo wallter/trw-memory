@@ -117,6 +117,8 @@ class SQLiteBackend(StorageBackend):
         """
         conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30.0)
         conn.row_factory = sqlite3.Row
+        # busy_timeout prevents SQLITE_BUSY under multi-process contention.
+        conn.execute("PRAGMA busy_timeout = 30000")
 
         wal_result = conn.execute("PRAGMA journal_mode=WAL").fetchone()
         if wal_result and wal_result[0] != "wal":
