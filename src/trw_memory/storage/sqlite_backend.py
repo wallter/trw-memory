@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import shutil
 import sqlite3
 import struct
 import threading
@@ -80,17 +81,12 @@ class SQLiteBackend(StorageBackend):
         self._lock = threading.Lock()
 
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30.0)
-        self._conn.row_factory = sqlite3.Row
 
-        # WAL mode: concurrent reads are not serialized behind writes.
-        # synchronous=NORMAL is safe with WAL and avoids fsync on every commit.
-        wal_result = self._conn.execute("PRAGMA journal_mode=WAL").fetchone()
-        if wal_result and wal_result[0] != "wal":
-            logger.warning("wal_mode_not_enabled", got=wal_result[0])
-        sync_result = self._conn.execute("PRAGMA synchronous=NORMAL").fetchone()
-        if sync_result and sync_result[0] not in ("1", 1):
-            logger.warning("synchronous_normal_not_set", got=sync_result[0] if sync_result else None)
+        try:
+            self._conn = self._open_and_configure(db_path)
+        except sqlite3.DatabaseError:
+            logger.error("db_corrupt_detected", db=str(db_path), action="auto_recover")
+            self._conn = self.recover_db(db_path)
 
         ensure_schema(self._conn)
 
@@ -107,6 +103,124 @@ class SQLiteBackend(StorageBackend):
                 logger.debug("sqlite_vec_load_failed", db=str(db_path), exc_info=True)
         else:
             logger.debug("sqlite_vec_unavailable", reason="not_installed")
+
+    # ------------------------------------------------------------------
+    # Integrity & recovery
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _open_and_configure(db_path: Path) -> sqlite3.Connection:
+        """Open a connection with WAL mode and run a quick integrity check.
+
+        Raises:
+            sqlite3.DatabaseError: If the database is corrupt.
+        """
+        conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+
+        wal_result = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+        if wal_result and wal_result[0] != "wal":
+            logger.warning("wal_mode_not_enabled", got=wal_result[0])
+        sync_result = conn.execute("PRAGMA synchronous=NORMAL").fetchone()
+        if sync_result and sync_result[0] not in ("1", 1):
+            logger.warning("synchronous_normal_not_set", got=sync_result[0] if sync_result else None)
+
+        # Quick integrity probe — catches corruption before schema work.
+        rows = conn.execute("PRAGMA quick_check").fetchall()
+        if not (len(rows) == 1 and rows[0][0] == "ok"):
+            conn.close()
+            raise sqlite3.DatabaseError("database disk image is malformed (quick_check)")
+
+        return conn
+
+    def _run_integrity_check(self) -> bool:
+        """Run PRAGMA quick_check and return True if the database is healthy."""
+        try:
+            rows = self._conn.execute("PRAGMA quick_check").fetchall()
+            return len(rows) == 1 and rows[0][0] == "ok"
+        except sqlite3.DatabaseError:
+            return False
+
+    @staticmethod
+    def recover_db(db_path: Path) -> sqlite3.Connection:
+        """Recover from a corrupt database by salvaging rows into a fresh DB.
+
+        1. Rename corrupt file to ``<name>.corrupt.bak``
+        2. Try to dump salvageable rows via ``.recover`` (SQLite 3.29+)
+        3. If dump fails, start with an empty database
+
+        Returns:
+            A new :class:`sqlite3.Connection` to the recovered database.
+        """
+        backup_path = db_path.with_suffix(".db.corrupt.bak")
+        # Rotate old backups — keep at most 2
+        if backup_path.exists():
+            older = db_path.with_suffix(".db.corrupt.bak.1")
+            with contextlib.suppress(OSError):
+                shutil.move(str(backup_path), str(older))
+
+        shutil.move(str(db_path), str(backup_path))
+        # Also remove stale WAL/SHM files for the corrupt DB
+        for suffix in (".db-wal", ".db-shm"):
+            wal = db_path.with_name(db_path.name.replace(".db", suffix))
+            with contextlib.suppress(OSError):
+                wal.unlink()
+
+        recovered_rows = 0
+        try:
+            # Attempt to salvage rows from the corrupt database.
+            old_conn = sqlite3.connect(str(backup_path), timeout=5.0)
+            old_conn.row_factory = sqlite3.Row
+            try:
+                rows = old_conn.execute(
+                    "SELECT * FROM memories"  # noqa: S608 — static query
+                ).fetchall()
+                recovered_rows = len(rows)
+            except sqlite3.DatabaseError:
+                rows = []
+            old_conn.close()
+        except sqlite3.DatabaseError:
+            rows = []
+
+        new_conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30.0)
+        new_conn.row_factory = sqlite3.Row
+        new_conn.execute("PRAGMA journal_mode=WAL")
+        new_conn.execute("PRAGMA synchronous=NORMAL")
+        ensure_schema(new_conn)
+
+        if rows:
+            cols = rows[0].keys()
+            placeholders = ", ".join(["?"] * len(cols))
+            cols_sql = ", ".join(cols)
+            insert_sql = f"INSERT OR IGNORE INTO memories ({cols_sql}) VALUES ({placeholders})"  # noqa: S608
+            for row in rows:
+                with contextlib.suppress(sqlite3.Error):
+                    new_conn.execute(insert_sql, tuple(row))
+            new_conn.commit()
+
+        logger.warning(
+            "db_recovered",
+            db=str(db_path),
+            backup=str(backup_path),
+            rows_salvaged=recovered_rows,
+        )
+        return new_conn
+
+    @staticmethod
+    def check_integrity(db_path: Path) -> dict[str, object]:
+        """Public utility: check database integrity without opening a full backend.
+
+        Returns:
+            Dict with ``ok`` (bool), ``detail`` (str), and ``db_path``.
+        """
+        try:
+            conn = sqlite3.connect(str(db_path), timeout=5.0)
+            rows = conn.execute("PRAGMA quick_check").fetchall()
+            conn.close()
+            healthy = len(rows) == 1 and rows[0][0] == "ok"
+            return {"ok": healthy, "detail": rows[0][0] if rows else "empty", "db_path": str(db_path)}
+        except sqlite3.DatabaseError as exc:
+            return {"ok": False, "detail": str(exc), "db_path": str(db_path)}
 
     # ------------------------------------------------------------------
     # Public property

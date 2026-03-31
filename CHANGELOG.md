@@ -2,6 +2,21 @@
 
 All notable changes to the TRW Memory package.
 
+## [0.6.1] — 2026-03-31
+
+### Fixed
+
+- **SQLite corruption auto-recovery** — `SQLiteBackend` now runs `PRAGMA quick_check` on startup and automatically recovers from "database disk image is malformed" errors. Corrupt databases are renamed to `.corrupt.bak` (with rotation), salvageable rows are copied to a fresh database, and stale WAL/SHM files are cleaned up.
+- **Runtime corruption resilience** — `store_learning()` and `recall_learnings()` catch corruption errors mid-session, reset the backend singleton, recover the database, and retry the operation once before propagating the error.
+
+### Added
+
+- **`SQLiteBackend.recover_db()`** — Public static method to recover a corrupt database, salvage rows, and return a fresh connection.
+- **`SQLiteBackend.check_integrity()`** — Public static utility to check database health without opening a full backend.
+- **10 new tests** in `test_db_recovery.py` covering integrity checks, row salvage, WAL cleanup, backup rotation, and auto-recovery on init.
+
+---
+
 ## [0.6.0] — 2026-03-29
 
 ### Changed
