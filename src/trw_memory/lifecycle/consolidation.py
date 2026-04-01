@@ -254,12 +254,18 @@ def _create_consolidated_entry(
 
     consolidated_from = [e.id for e in cluster]
 
+    # Inherit provenance from highest-importance source (PRD-CORE-099)
+    best_source = max(cluster, key=lambda e: e.importance)
+
     now = datetime.now(timezone.utc)
     entry = MemoryEntry(
         id=entry_id,
         content=content,
         detail=detail,
         source="consolidated",
+        source_identity=best_source.source_identity,
+        client_profile=best_source.client_profile,
+        model_id=best_source.model_id,
         consolidated_from=consolidated_from,
         importance=importance,
         tags=tags,

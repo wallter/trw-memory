@@ -190,6 +190,8 @@ def from_learning_entry(data: dict[str, object]) -> MemoryEntry:
     namespace = _safe_str(data.get("namespace"), "default")
     source = _safe_str(data.get("source"), "agent")
     source_identity = _safe_str(data.get("source_identity"), "")
+    client_profile = _safe_str(data.get("client_profile"), "")
+    model_id = _safe_str(data.get("model_id"), "")
     consolidated_into: str | None = _safe_str(data.get("consolidated_into")) or None
 
     # --- list fields ----------------------------------------------------------
@@ -226,6 +228,8 @@ def from_learning_entry(data: dict[str, object]) -> MemoryEntry:
         q_observations=q_observations,
         source=source,  # type: ignore[arg-type]  # validator coerces unknown values to "agent"
         source_identity=source_identity,
+        client_profile=client_profile,
+        model_id=model_id,
         merged_from=merged_from,
         consolidated_from=consolidated_from,
         consolidated_into=consolidated_into,
