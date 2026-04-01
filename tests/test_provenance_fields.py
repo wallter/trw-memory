@@ -1,13 +1,14 @@
 """Tests for PRD-CORE-099 provenance fields (client_profile, model_id).
 
 Validates schema migration, model fields, row mapper round-trip,
-and backward compatibility with entries that lack the new columns.
+YAML backend round-trip, and backward compatibility.
 """
 
 from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage._row_mapper import entry_to_row, row_to_entry
@@ -178,5 +179,45 @@ class TestProvenanceRowMapper:
         )
         row = entry_to_row(original)
         restored = row_to_entry(row)
+        assert restored.client_profile == ""
+        assert restored.model_id == ""
+
+
+class TestProvenanceYamlBackend:
+    """YAML backend round-trip for provenance fields."""
+
+    def test_yaml_round_trip(self, tmp_path: Path) -> None:
+        """YAMLBackend write → read preserves client_profile and model_id."""
+        from trw_memory.storage.yaml_backend import YAMLBackend
+
+        backend = YAMLBackend(tmp_path)
+        entry = MemoryEntry(
+            id="yaml-prov-001",
+            content="yaml provenance test",
+            created_at=_NOW,
+            updated_at=_NOW,
+            client_profile="claude-code",
+            model_id="claude-opus-4-6",
+        )
+        backend.store(entry)
+        restored = backend.get("yaml-prov-001")
+        assert restored is not None
+        assert restored.client_profile == "claude-code"
+        assert restored.model_id == "claude-opus-4-6"
+
+    def test_yaml_empty_provenance_round_trip(self, tmp_path: Path) -> None:
+        """YAMLBackend correctly round-trips entries with empty provenance."""
+        from trw_memory.storage.yaml_backend import YAMLBackend
+
+        backend = YAMLBackend(tmp_path)
+        entry = MemoryEntry(
+            id="yaml-prov-002",
+            content="empty provenance yaml",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+        backend.store(entry)
+        restored = backend.get("yaml-prov-002")
+        assert restored is not None
         assert restored.client_profile == ""
         assert restored.model_id == ""

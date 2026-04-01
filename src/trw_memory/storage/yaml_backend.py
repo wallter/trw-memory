@@ -129,6 +129,8 @@ def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
         q_observations=_int("q_observations", 0),
         source=cast("Literal['human', 'agent', 'tool', 'consolidated']", _str("source", "agent")),
         source_identity=_str("source_identity"),
+        client_profile=_str("client_profile"),
+        model_id=_str("model_id"),
         merged_from=_str_list("merged_from"),
         consolidated_from=_str_list("consolidated_from"),
         consolidated_into=consolidated_into,
