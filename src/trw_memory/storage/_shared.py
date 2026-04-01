@@ -35,6 +35,8 @@ ENTRY_COLUMNS: tuple[str, ...] = (
     "q_observations",
     "source",
     "source_identity",
+    "client_profile",
+    "model_id",
     "merged_from",
     "consolidated_from",
     "consolidated_into",

@@ -105,13 +105,14 @@ class TestFR02EntryToDict:
             "id", "content", "detail", "tags", "evidence", "importance",
             "status", "recurrence", "namespace", "created_at", "updated_at",
             "last_accessed_at", "access_count", "q_value", "q_observations",
-            "source", "source_identity", "merged_from", "consolidated_from",
+            "source", "source_identity", "client_profile", "model_id",
+            "merged_from", "consolidated_from",
             "consolidated_into", "metadata", "vector_clock", "remote_id",
             "published_to_platform", "pending_delete", "cross_validated",
             "outcome_history", "assertions",
         }
         assert set(result.keys()) == expected_keys
-        assert len(result) == 28
+        assert len(result) == 30
 
         # Verify types of serialized values
         assert result["id"] == "M-TEST-001"
@@ -277,6 +278,8 @@ class TestFR05BooleanConversion:
             0,                  # q_observations
             "agent",            # source
             "",                 # source_identity
+            "",                 # client_profile
+            "",                 # model_id
             "[]",               # merged_from (JSON)
             "[]",               # consolidated_from (JSON)
             None,               # consolidated_into
@@ -318,6 +321,8 @@ class TestFR05BooleanConversion:
             0,
             "agent",
             "",
+            "",                 # client_profile
+            "",                 # model_id
             "[]",
             "[]",
             None,

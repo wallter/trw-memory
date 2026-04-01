@@ -127,6 +127,14 @@ class MemoryEntry(BaseModel):
         default="agent", description="Origin: 'human', 'agent', 'tool', 'consolidated'"
     )
     source_identity: str = Field(default="", description="Name of source agent/user")
+    client_profile: str = Field(
+        default="",
+        description="IDE/client that created this entry (e.g., 'claude-code', 'opencode', 'cursor')",
+    )
+    model_id: str = Field(
+        default="",
+        description="AI model that created this entry (e.g., 'claude-opus-4-6', 'claude-sonnet-4-6')",
+    )
 
     @field_validator("source", mode="before")
     @classmethod
@@ -201,6 +209,8 @@ class MemoryEntry(BaseModel):
             "q_observations": self.q_observations,
             "source": self.source,
             "source_identity": self.source_identity,
+            "client_profile": self.client_profile,
+            "model_id": self.model_id,
             "merged_from": list(self.merged_from),
             "consolidated_from": list(self.consolidated_from),
             "consolidated_into": self.consolidated_into,

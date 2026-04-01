@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS memories (
     q_observations    INTEGER DEFAULT 0,
     source            TEXT DEFAULT 'agent',
     source_identity   TEXT DEFAULT '',
+    client_profile    TEXT DEFAULT '',
+    model_id          TEXT DEFAULT '',
     merged_from       TEXT DEFAULT '[]',
     consolidated_from TEXT DEFAULT '[]',
     consolidated_into TEXT,
@@ -132,6 +134,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             ("cross_validated", "INTEGER DEFAULT 0"),
             ("outcome_history", "TEXT DEFAULT '[]'"),
             ("assertions", "TEXT DEFAULT '[]'"),
+        ]
+        # Migration: add provenance columns (PRD-CORE-099)
+        _migrate_cols += [
+            ("client_profile", "TEXT DEFAULT ''"),
+            ("model_id", "TEXT DEFAULT ''"),
         ]
         for col_name, col_def in _migrate_cols:
             with contextlib.suppress(sqlite3.OperationalError):
