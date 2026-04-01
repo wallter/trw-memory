@@ -35,7 +35,7 @@ class TestEntryColumnsCount:
     """Verify ENTRY_COLUMNS tuple size matches expectations."""
 
     def test_entry_columns_count(self) -> None:
-        assert len(ENTRY_COLUMNS) == 28
+        assert len(ENTRY_COLUMNS) == 30
         assert ENTRY_COLUMNS[-1] == "assertions"
 
 
