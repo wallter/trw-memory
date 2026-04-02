@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS memories (
     anchor_validity   REAL DEFAULT 1.0,
     type              TEXT DEFAULT 'pattern',
     nudge_line        TEXT DEFAULT '',
-    expires           TEXT DEFAULT '',
+    expires_at        TEXT DEFAULT '',
     confidence        TEXT DEFAULT 'unverified',
     task_type         TEXT DEFAULT '',
     domain            TEXT DEFAULT '[]',
@@ -115,6 +115,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         # Must run BEFORE index creation since indexes reference new names.
         _rename_cols = [
             ("memories", "impact", "importance"),
+            ("memories", "expires", "expires_at"),
             ("memory_graph_edges", "relation", "edge_type"),
         ]
         for table, old_name, new_name in _rename_cols:
@@ -156,7 +157,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         _migrate_cols += [
             ("type", "TEXT DEFAULT 'pattern'"),
             ("nudge_line", "TEXT DEFAULT ''"),
-            ("expires", "TEXT DEFAULT ''"),
+            ("expires_at", "TEXT DEFAULT ''"),
             ("confidence", "TEXT DEFAULT 'unverified'"),
             ("task_type", "TEXT DEFAULT ''"),
             ("domain", "TEXT DEFAULT '[]'"),

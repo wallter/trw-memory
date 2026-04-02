@@ -68,8 +68,8 @@ def test_expires_at_column_mapping() -> None:
     entry = MemoryEntry(id="L-rnd3", content="expires test", expires="2026-12-31")
     row = _entry_to_full_row(entry)
 
-    # Find expires column position in ENTRY_COLUMNS
-    expires_idx = ENTRY_COLUMNS.index("expires")
+    # Find expires_at column position in ENTRY_COLUMNS
+    expires_idx = ENTRY_COLUMNS.index("expires_at")
     assert row[expires_idx] == "2026-12-31", f"Expected '2026-12-31' at index {expires_idx}, got {row[expires_idx]!r}"
 
     restored = row_to_entry(row)

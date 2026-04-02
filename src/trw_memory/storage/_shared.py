@@ -53,7 +53,7 @@ ENTRY_COLUMNS: tuple[str, ...] = (
     "anchor_validity",
     "type",
     "nudge_line",
-    "expires",
+    "expires_at",
     "confidence",
     "task_type",
     "domain",

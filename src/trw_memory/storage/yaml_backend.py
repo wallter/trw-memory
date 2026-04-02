@@ -33,7 +33,7 @@ from trw_memory.storage.persistence import lock_for_rmw, read_yaml, write_yaml
 logger = structlog.get_logger(__name__)
 
 # Allowlist for UPDATE: all columns except immutable ones (derived from shared constants).
-_VALID_UPDATE_FIELDS: frozenset[str] = frozenset(ENTRY_COLUMNS) - IMMUTABLE_FIELDS
+_VALID_UPDATE_FIELDS: frozenset[str] = (frozenset(ENTRY_COLUMNS) - IMMUTABLE_FIELDS) | frozenset({"expires"})
 
 
 # ---------------------------------------------------------------------------

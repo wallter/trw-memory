@@ -51,10 +51,13 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 _COLUMNS = ENTRY_COLUMNS
-_COLUMNS_SQL = ", ".join(_COLUMNS)
+_SELECT_COLUMNS_SQL = ", ".join(
+    "expires_at AS expires" if column == "expires_at" else column for column in _COLUMNS
+)
+_INSERT_COLUMNS_SQL = ", ".join(_COLUMNS)
 
 # Allowlist for UPDATE: all columns except immutable ones.
-_VALID_UPDATE_COLUMNS: frozenset[str] = frozenset(_COLUMNS) - IMMUTABLE_FIELDS
+_VALID_UPDATE_COLUMNS: frozenset[str] = (frozenset(_COLUMNS) - IMMUTABLE_FIELDS) | frozenset({"expires"})
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +290,7 @@ class SQLiteBackend(StorageBackend):
             StorageError: If the write fails.
         """
         placeholders = ", ".join(["?"] * len(_COLUMNS))
-        sql = f"INSERT OR REPLACE INTO memories ({_COLUMNS_SQL}) VALUES ({placeholders})"  # noqa: S608 — _COLUMNS_SQL is a static constant (no user input); values are parameterized
+        sql = f"INSERT OR REPLACE INTO memories ({_INSERT_COLUMNS_SQL}) VALUES ({placeholders})"  # noqa: S608 — _INSERT_COLUMNS_SQL is a static constant (no user input); values are parameterized
         try:
             with self._lock:
                 self._conn.execute(sql, entry_to_row(entry))
@@ -311,7 +314,7 @@ class SQLiteBackend(StorageBackend):
         Raises:
             StorageError: If the query fails.
         """
-        sql = f"SELECT {_COLUMNS_SQL} FROM memories WHERE id = ?"  # noqa: S608 — _COLUMNS_SQL is a static constant; entry_id is a parameterized ?
+        sql = f"SELECT {_SELECT_COLUMNS_SQL} FROM memories WHERE id = ?"  # noqa: S608 — _SELECT_COLUMNS_SQL is a static constant; entry_id is a parameterized ?
         try:
             with self._lock:
                 row = self._conn.execute(sql, (entry_id,)).fetchone()
@@ -363,7 +366,8 @@ class SQLiteBackend(StorageBackend):
                 ) from None
 
             for key, val in field_dict.items():
-                set_parts.append(f"{key} = ?")
+                sql_key = "expires_at" if key == "expires" else key
+                set_parts.append(f"{sql_key} = ?")
                 normalised = serialize_update_value(key, val)
                 # SQLite needs JSON strings for list/dict columns
                 if (key in LIST_FIELDS and isinstance(normalised, list)) or (
@@ -473,7 +477,7 @@ class SQLiteBackend(StorageBackend):
         params: list[object] = like_params + filter_params
 
         sql = (
-            f"SELECT {_COLUMNS_SQL} FROM memories WHERE {where_sql} "  # noqa: S608 — _COLUMNS_SQL and where_sql are built from static constants and ? placeholders only
+            f"SELECT {_SELECT_COLUMNS_SQL} FROM memories WHERE {where_sql} "  # noqa: S608 — _SELECT_COLUMNS_SQL and where_sql are built from static constants and ? placeholders only
             f"ORDER BY importance DESC, updated_at DESC LIMIT ?"
         )
         params.append(top_k)
@@ -548,7 +552,7 @@ class SQLiteBackend(StorageBackend):
             namespace=namespace,
         )
         sql = (
-            f"SELECT {_COLUMNS_SQL} FROM memories WHERE {where_sql} "  # noqa: S608 — _COLUMNS_SQL and where_sql are built from static constants and ? placeholders only
+            f"SELECT {_SELECT_COLUMNS_SQL} FROM memories WHERE {where_sql} "  # noqa: S608 — _SELECT_COLUMNS_SQL and where_sql are built from static constants and ? placeholders only
             f"ORDER BY updated_at DESC LIMIT ?"
         )
         params.append(limit)
