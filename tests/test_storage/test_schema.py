@@ -169,3 +169,69 @@ def test_migration_on_pre_existing_db(tmp_path: pytest.TempPathFactory) -> None:
     # SQLite default fills NULL for existing rows — may be NULL or 'pattern'
     # The important thing is the column exists
     conn.close()
+
+
+def test_legacy_expires_column_renamed_to_expires_at() -> None:
+    """Existing typed-learning DBs with `expires` are migrated to `expires_at`."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute("""
+        CREATE TABLE memories (
+            id TEXT PRIMARY KEY,
+            content TEXT NOT NULL,
+            detail TEXT DEFAULT '',
+            tags TEXT DEFAULT '[]',
+            evidence TEXT DEFAULT '[]',
+            importance REAL DEFAULT 0.5,
+            status TEXT DEFAULT 'active',
+            recurrence INTEGER DEFAULT 1,
+            namespace TEXT DEFAULT 'default',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_accessed_at TEXT,
+            access_count INTEGER DEFAULT 0,
+            q_value REAL DEFAULT 0.5,
+            q_observations INTEGER DEFAULT 0,
+            source TEXT DEFAULT 'agent',
+            source_identity TEXT DEFAULT '',
+            client_profile TEXT DEFAULT '',
+            model_id TEXT DEFAULT '',
+            merged_from TEXT DEFAULT '[]',
+            consolidated_from TEXT DEFAULT '[]',
+            consolidated_into TEXT,
+            metadata TEXT DEFAULT '{}',
+            vector_clock TEXT DEFAULT '{}',
+            remote_id TEXT,
+            published_to_platform INTEGER DEFAULT 0,
+            pending_delete INTEGER DEFAULT 0,
+            cross_validated INTEGER DEFAULT 0,
+            outcome_history TEXT DEFAULT '[]',
+            assertions TEXT DEFAULT '[]',
+            anchors TEXT DEFAULT '[]',
+            anchor_validity REAL DEFAULT 1.0,
+            type TEXT DEFAULT 'pattern',
+            nudge_line TEXT DEFAULT '',
+            expires TEXT DEFAULT '',
+            confidence TEXT DEFAULT 'unverified',
+            task_type TEXT DEFAULT '',
+            domain TEXT DEFAULT '[]',
+            phase_origin TEXT DEFAULT '',
+            phase_affinity TEXT DEFAULT '[]',
+            team_origin TEXT DEFAULT '',
+            protection_tier TEXT DEFAULT 'normal'
+        )
+    """)
+    conn.execute(
+        "INSERT INTO memories (id, content, created_at, updated_at, expires) VALUES (?,?,?,?,?)",
+        ("L-exp", "content", "2026-01-01T00:00:00", "2026-01-01T00:00:00", "2026-12-31"),
+    )
+    conn.commit()
+
+    ensure_schema(conn)
+
+    cols = _get_column_names(conn)
+    assert "expires_at" in cols
+    assert "expires" not in cols
+    row = conn.execute("SELECT expires_at FROM memories WHERE id = 'L-exp'").fetchone()
+    assert row is not None
+    assert row[0] == "2026-12-31"
+    conn.close()

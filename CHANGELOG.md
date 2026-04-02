@@ -2,6 +2,21 @@
 
 All notable changes to the TRW Memory package.
 
+## [0.6.5] — 2026-04-02
+
+### Fixed
+
+- **Typed-learning expiry column normalized** — the SQLite `memories` schema now uses `expires_at` consistently, matching the migration contract and storage tests.
+- **Legacy DB migration preserved** — `ensure_schema()` now renames pre-existing `expires` columns to `expires_at` before adding missing typed-learning fields, preserving stored expiry values during upgrade.
+- **SQLite API compatibility retained** — the backend maps the physical `expires_at` column back to the public `MemoryEntry.expires` field on reads and updates, so callers do not need to change.
+
+### Validation
+
+- Full `trw-memory` package suite passed: `1633` passed.
+- Focused storage regression coverage passed for schema, row mapping, provenance, assertion columns, and PRD-FIX-060 serialization.
+
+---
+
 ## [0.6.3] — 2026-04-01
 
 ### Improved
