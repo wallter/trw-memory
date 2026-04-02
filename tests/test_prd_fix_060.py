@@ -98,21 +98,55 @@ class TestFR02EntryToDict:
         )
 
     def test_memory_entry_to_dict_all_fields(self, sample_entry: MemoryEntry) -> None:
-        """to_dict() includes all 28 fields of MemoryEntry."""
+        """to_dict() includes all 42 fields of MemoryEntry (PRD-CORE-110/111)."""
         result = sample_entry.to_dict()
 
         expected_keys = {
-            "id", "content", "detail", "tags", "evidence", "importance",
-            "status", "recurrence", "namespace", "created_at", "updated_at",
-            "last_accessed_at", "access_count", "q_value", "q_observations",
-            "source", "source_identity", "client_profile", "model_id",
-            "merged_from", "consolidated_from",
-            "consolidated_into", "metadata", "vector_clock", "remote_id",
-            "published_to_platform", "pending_delete", "cross_validated",
-            "outcome_history", "assertions",
+            "id",
+            "content",
+            "detail",
+            "tags",
+            "evidence",
+            "importance",
+            "status",
+            "recurrence",
+            "namespace",
+            "created_at",
+            "updated_at",
+            "last_accessed_at",
+            "access_count",
+            "q_value",
+            "q_observations",
+            "source",
+            "source_identity",
+            "client_profile",
+            "model_id",
+            "merged_from",
+            "consolidated_from",
+            "consolidated_into",
+            "metadata",
+            "vector_clock",
+            "remote_id",
+            "published_to_platform",
+            "pending_delete",
+            "cross_validated",
+            "outcome_history",
+            "assertions",
+            "anchors",
+            "anchor_validity",
+            "type",
+            "nudge_line",
+            "expires",
+            "confidence",
+            "task_type",
+            "domain",
+            "phase_origin",
+            "phase_affinity",
+            "team_origin",
+            "protection_tier",
         }
         assert set(result.keys()) == expected_keys
-        assert len(result) == 30
+        assert len(result) == 42
 
         # Verify types of serialized values
         assert result["id"] == "M-TEST-001"
@@ -259,38 +293,50 @@ class TestFR05BooleanConversion:
         from trw_memory.storage._row_mapper import row_to_entry
 
         now_iso = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc).isoformat()
-        # Build a row tuple matching ENTRY_COLUMNS order
+        # Build a row tuple matching ENTRY_COLUMNS order (42 columns)
         row = (
-            "M-BOOL-001",       # id
-            "content",          # content
-            "detail",           # detail
-            "[]",               # tags (JSON)
-            "[]",               # evidence (JSON)
-            0.5,                # importance
-            "active",           # status
-            1,                  # recurrence
-            "default",          # namespace
-            now_iso,            # created_at
-            now_iso,            # updated_at
-            None,               # last_accessed_at
-            0,                  # access_count
-            0.5,                # q_value
-            0,                  # q_observations
-            "agent",            # source
-            "",                 # source_identity
-            "",                 # client_profile
-            "",                 # model_id
-            "[]",               # merged_from (JSON)
-            "[]",               # consolidated_from (JSON)
-            None,               # consolidated_into
-            "{}",               # metadata (JSON)
-            "{}",               # vector_clock (JSON)
-            None,               # remote_id
-            1,                  # published_to_platform (SQLite int)
-            0,                  # pending_delete (SQLite int)
-            1,                  # cross_validated (SQLite int)
-            "[]",               # outcome_history (JSON)
-            "[]",               # assertions (JSON)
+            "M-BOOL-001",  # id
+            "content",  # content
+            "detail",  # detail
+            "[]",  # tags (JSON)
+            "[]",  # evidence (JSON)
+            0.5,  # importance
+            "active",  # status
+            1,  # recurrence
+            "default",  # namespace
+            now_iso,  # created_at
+            now_iso,  # updated_at
+            None,  # last_accessed_at
+            0,  # access_count
+            0.5,  # q_value
+            0,  # q_observations
+            "agent",  # source
+            "",  # source_identity
+            "",  # client_profile
+            "",  # model_id
+            "[]",  # merged_from (JSON)
+            "[]",  # consolidated_from (JSON)
+            None,  # consolidated_into
+            "{}",  # metadata (JSON)
+            "{}",  # vector_clock (JSON)
+            None,  # remote_id
+            1,  # published_to_platform (SQLite int)
+            0,  # pending_delete (SQLite int)
+            1,  # cross_validated (SQLite int)
+            "[]",  # outcome_history (JSON)
+            "[]",  # assertions (JSON)
+            "[]",  # anchors (JSON)
+            1.0,  # anchor_validity
+            "pattern",  # type
+            "",  # nudge_line
+            "",  # expires
+            "unverified",  # confidence
+            "",  # task_type
+            "[]",  # domain_json
+            "",  # phase_origin
+            "[]",  # phase_affinity_json
+            "",  # team_origin
+            "normal",  # protection_tier
         )
 
         entry = row_to_entry(row)
@@ -321,17 +367,17 @@ class TestFR05BooleanConversion:
             0,
             "agent",
             "",
-            "",                 # client_profile
-            "",                 # model_id
+            "",  # client_profile
+            "",  # model_id
             "[]",
             "[]",
             None,
             "{}",
             "{}",
             None,
-            None,   # published_to_platform = None
-            None,   # pending_delete = None
-            None,   # cross_validated = None
+            None,  # published_to_platform = None
+            None,  # pending_delete = None
+            None,  # cross_validated = None
             "[]",
             "[]",
         )

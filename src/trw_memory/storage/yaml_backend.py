@@ -19,7 +19,7 @@ from typing import Literal, cast
 import structlog
 
 from trw_memory.exceptions import StorageError
-from trw_memory.models.memory import Assertion, MemoryEntry, MemoryStatus
+from trw_memory.models.memory import Anchor, Assertion, MemoryEntry, MemoryStatus
 from trw_memory.storage._parsing import parse_dt, parse_json_dict_int, parse_json_dict_str, parse_json_list
 from trw_memory.storage._shared import (
     ENTRY_COLUMNS,
@@ -111,6 +111,18 @@ def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
     consolidated_into_raw = data.get("consolidated_into")
     consolidated_into: str | None = str(consolidated_into_raw) if consolidated_into_raw else None
 
+    anchors_raw = data.get("anchors")
+    anchors: list[Anchor] = []
+    if anchors_raw:
+        try:
+            anchors = [Anchor.model_validate(a) for a in anchors_raw] if isinstance(anchors_raw, list) else []
+        except (ValueError, KeyError):
+            logger.debug("yaml_anchor_parse_skipped", anchors=anchors_raw)
+            anchors = []
+
+    anchor_validity_raw = data.get("anchor_validity")
+    anchor_validity = float(str(anchor_validity_raw)) if anchor_validity_raw else 1.0
+
     return MemoryEntry(
         id=_str("id"),
         content=_str("content"),
@@ -142,6 +154,18 @@ def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
         cross_validated=bool(data.get("cross_validated", False)),
         outcome_history=_str_list("outcome_history"),
         assertions=_parse_assertions(data.get("assertions", [])),
+        anchors=anchors,
+        anchor_validity=anchor_validity,
+        type=_str("type", "pattern"),  # type: ignore[arg-type]
+        nudge_line=_str("nudge_line", ""),
+        expires=_str("expires", ""),
+        confidence=_str("confidence", "unverified"),  # type: ignore[arg-type]
+        task_type=_str("task_type", ""),
+        domain=_str_list("domain"),
+        phase_origin=_str("phase_origin", ""),
+        phase_affinity=_str_list("phase_affinity"),
+        team_origin=_str("team_origin", ""),
+        protection_tier=_str("protection_tier", "normal"),  # type: ignore[arg-type]
     )
 
 
@@ -185,7 +209,12 @@ class YAMLBackend(StorageBackend):
             try:
                 data = read_yaml(yaml_file)
                 entries.append(_dict_to_entry(data))
-            except (OSError, StorageError, ValueError, KeyError):  # per-item error handling: skip corrupt YAML files, load the rest  # noqa: PERF203
+            except (
+                OSError,
+                StorageError,
+                ValueError,
+                KeyError,
+            ):  # per-item error handling: skip corrupt YAML files, load the rest
                 logger.warning("yaml_backend_skip_corrupt", path=str(yaml_file))
         return entries
 

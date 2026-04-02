@@ -37,13 +37,41 @@ class AssertionType(str, Enum):
     GLOB_ABSENT = "glob_absent"
 
 
+# PRD-CORE-110: Memory entry type classifications
+class MemoryType(str, Enum):
+    """Type classification for memory entries."""
+
+    INCIDENT = "incident"
+    PATTERN = "pattern"
+    CONVENTION = "convention"
+    HYPOTHESIS = "hypothesis"
+    WORKAROUND = "workaround"
+
+
+# PRD-CORE-110: Confidence levels for memory validation
+class Confidence(str, Enum):
+    """Validation confidence level for memory entries."""
+
+    UNVERIFIED = "unverified"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    VERIFIED = "verified"
+
+
+# PRD-CORE-110: Protection tiers for memory entries
+class ProtectionTier(str, Enum):
+    """Protection level for memory entries."""
+
+    CRITICAL = "critical"
+    HIGH = "high"
+    NORMAL = "normal"
+    LOW = "low"
+    PROTECTED = "protected"
+    PERMANENT = "permanent"
+
+
 class Assertion(BaseModel):
-    """Machine-verifiable assertion attached to a memory entry.
-
-    Executes grep/glob patterns against the codebase to verify
-    knowledge is still true. Read-only, safe — no shell commands.
-    """
-
     model_config = ConfigDict(use_enum_values=True)
 
     type: AssertionType
@@ -93,6 +121,57 @@ class AssertionResult(BaseModel):
     evidence: str = Field(default="", description="Human-readable evidence")
 
 
+class Anchor(BaseModel):
+    """Code symbol anchor for validation (PRD-CORE-111).
+
+    Anchors capture code symbols (functions, classes, methods) that
+    provide factual grounding for learnings. When the referenced
+    code changes or disappears, the learning becomes stale.
+    """
+
+    model_config = ConfigDict(use_enum_values=True, strict=True)
+
+    file: str = Field(
+        min_length=1,
+        description="Relative path to the source file containing the symbol",
+    )
+    symbol_name: str = Field(
+        min_length=1,
+        description="Name of the symbol (function, class, method, etc.)",
+    )
+
+    @field_validator("symbol_name")
+    @classmethod
+    def _validate_symbol_name(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("symbol_name must not be empty or whitespace")
+        return v
+
+    symbol_type: Literal["function", "method", "class", "const", "type", "impl"] = Field(
+        default="function",
+        description="Type of symbol being anchored",
+    )
+    signature: str = Field(default="", description="Full signature line (truncated to 200 chars)")
+    line_range: tuple[int, int] | None = Field(
+        default=None,
+        description="Line range (start, end) where the symbol is defined",
+    )
+
+    @field_validator("file")
+    @classmethod
+    def _validate_file(cls, v: str) -> str:
+        if v.startswith("/"):
+            raise ValueError("Anchor.file must be a relative path, not absolute")
+        return v
+
+    @field_validator("signature", mode="before")
+    @classmethod
+    def _truncate_signature(cls, v: str) -> str:
+        if len(v) > 200:
+            return v[:200]
+        return v
+
+
 class MemoryEntry(BaseModel):
     """Individual memory entry stored in the memory system.
 
@@ -100,7 +179,7 @@ class MemoryEntry(BaseModel):
     produce and consume these entries.
     """
 
-    model_config = ConfigDict(strict=True, use_enum_values=True)
+    model_config = ConfigDict(use_enum_values=True, populate_by_name=True)
 
     id: str = Field(min_length=1)
     content: str = Field(description="Core knowledge statement (was 'summary' in LearningEntry)")
@@ -150,6 +229,74 @@ class MemoryEntry(BaseModel):
             return "agent"
         return v
 
+    @field_validator("nudge_line", mode="before")
+    @classmethod
+    def _truncate_nudge_line(cls, v: str) -> str:
+        """Truncate nudge_line to max 80 chars, preferring word boundaries within [60,80)."""
+        if len(v) <= 80:
+            return v
+        # Try to truncate at a word boundary within [60, 80)
+        for i in range(60, 80):
+            if v[i] == " ":
+                return v[:i] + "\u2026"
+        # No space found: hard-cut at 80 chars without ellipsis
+        return v[:80]
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def _coerce_type(cls, v: object) -> MemoryType:
+        """Coerce string values to MemoryType enum."""
+        if isinstance(v, str):
+            try:
+                return MemoryType(v)
+            except ValueError:
+                raise ValueError(f"type must be one of {', '.join([t.value for t in MemoryType])}")
+        if isinstance(v, MemoryType):
+            return v
+        raise ValueError(f"type must be a string or MemoryType enum, got {type(v).__name__}")
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _coerce_confidence(cls, v: object) -> Confidence:
+        """Coerce string values to Confidence enum."""
+        if isinstance(v, str):
+            try:
+                return Confidence(v)
+            except ValueError:
+                raise ValueError(f"confidence must be one of {', '.join([c.value for c in Confidence])}")
+        if isinstance(v, Confidence):
+            return v
+        raise ValueError(f"confidence must be a string or Confidence enum, got {type(v).__name__}")
+
+    @field_validator("protection_tier", mode="before")
+    @classmethod
+    def _coerce_protection_tier(cls, v: object) -> ProtectionTier:
+        """Coerce string values to ProtectionTier enum."""
+        if isinstance(v, str):
+            try:
+                return ProtectionTier(v)
+            except ValueError:
+                raise ValueError(f"protection_tier must be one of {', '.join([p.value for p in ProtectionTier])}")
+        if isinstance(v, ProtectionTier):
+            return v
+        raise ValueError(f"protection_tier must be a string or ProtectionTier enum, got {type(v).__name__}")
+
+    @field_validator("domain")
+    @classmethod
+    def _validate_domain(cls, v: list[str]) -> list[str]:
+        """Validate domain list length."""
+        if len(v) > 20:
+            raise ValueError("domain may have at most 20 entries")
+        return v
+
+    @field_validator("phase_affinity")
+    @classmethod
+    def _validate_phase_affinity(cls, v: list[str]) -> list[str]:
+        """Validate phase_affinity list length."""
+        if len(v) > 6:
+            raise ValueError("phase_affinity may have at most 6 entries")
+        return v
+
     # Sync fields (PRD-CORE-047)
     vector_clock: dict[str, int] = Field(default_factory=dict, description="node_id -> counter for conflict resolution")
     remote_id: str | None = None
@@ -170,16 +317,29 @@ class MemoryEntry(BaseModel):
     # Arbitrary metadata
     metadata: dict[str, str] = Field(default_factory=dict)
 
+    # PRD-CORE-110: Typed entries with metadata
+    type: MemoryType = Field(default=MemoryType.PATTERN, description="Type classification")
+    nudge_line: str = Field(default="", description="Nudge text for summary (max 80 chars)")
+    expires: str = Field(default="", description="Expiration date/condition")
+    confidence: Confidence = Field(default=Confidence.UNVERIFIED, description="Validation confidence")
+    task_type: str = Field(default="", description="Task type identifier")
+    domain: list[str] = Field(default_factory=list, description="Domain tags (max 20)")
+    phase_origin: str = Field(default="", description="Origin phase")
+    phase_affinity: list[str] = Field(default_factory=list, description="Phase affinities (max 6)")
+    team_origin: str = Field(default="", description="Team identifier")
+    protection_tier: ProtectionTier = Field(default=ProtectionTier.NORMAL, description="Protection level")
+
     # Executable assertions (PRD-CORE-086)
     assertions: list[Assertion] = Field(default_factory=list, description="Machine-verifiable assertions")
+
+    # PRD-CORE-111: Code-grounded anchors
+    anchors: list[Anchor] = Field(default_factory=list, description="Code symbol anchors for validation", max_length=3)
+    anchor_validity: float = Field(ge=0.0, le=1.0, default=1.0, description="Computed validity score (0.0-1.0)")
 
     def __repr__(self) -> str:
         """Concise repr showing key identifying fields."""
         preview = self.content[:40] + "..." if len(self.content) > 40 else self.content
-        return (
-            f"MemoryEntry(id={self.id!r}, content={preview!r}, "
-            f"tags={self.tags!r}, importance={self.importance:.2f})"
-        )
+        return f"MemoryEntry(id={self.id!r}, content={preview!r}, tags={self.tags!r}, importance={self.importance:.2f})"
 
     def to_dict(self, *, fields: set[str] | None = None) -> dict[str, object]:
         """Serialize this entry to a plain dict.
@@ -198,7 +358,7 @@ class MemoryEntry(BaseModel):
             "tags": list(self.tags),
             "evidence": list(self.evidence),
             "importance": self.importance,
-            "status": str(self.status),
+            "status": self.status.value if hasattr(self.status, "value") else self.status,
             "recurrence": self.recurrence,
             "namespace": self.namespace,
             "created_at": self.created_at.isoformat(),
@@ -214,6 +374,18 @@ class MemoryEntry(BaseModel):
             "merged_from": list(self.merged_from),
             "consolidated_from": list(self.consolidated_from),
             "consolidated_into": self.consolidated_into,
+            "type": self.type.value if hasattr(self.type, "value") else self.type,
+            "nudge_line": self.nudge_line,
+            "expires": self.expires,
+            "confidence": self.confidence.value if hasattr(self.confidence, "value") else self.confidence,
+            "task_type": self.task_type,
+            "domain": list(self.domain),
+            "phase_origin": self.phase_origin,
+            "phase_affinity": list(self.phase_affinity),
+            "team_origin": self.team_origin,
+            "protection_tier": self.protection_tier.value
+            if hasattr(self.protection_tier, "value")
+            else self.protection_tier,
             "metadata": dict(self.metadata),
             "vector_clock": dict(self.vector_clock),
             "remote_id": self.remote_id,
@@ -222,6 +394,8 @@ class MemoryEntry(BaseModel):
             "cross_validated": self.cross_validated,
             "outcome_history": list(self.outcome_history),
             "assertions": [a.model_dump() for a in self.assertions] if self.assertions else [],
+            "anchors": [a.model_dump() for a in self.anchors],
+            "anchor_validity": self.anchor_validity,
         }
         if fields is not None:
             return {k: v for k, v in full.items() if k in fields}

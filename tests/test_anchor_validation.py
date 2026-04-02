@@ -1,0 +1,104 @@
+"""Tests for compute_anchor_validity (PRD-CORE-111).
+
+Covers:
+- All anchors valid returns 1.0
+- Partial validity returns correct fraction
+- Empty anchor list returns 1.0
+- All anchors missing returns 0.0
+- File exists but symbol not in content returns 0.0
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from trw_memory.lifecycle.anchor_validation import compute_anchor_validity
+
+
+def test_3_of_3_valid_returns_1(tmp_path: Path) -> None:
+    """3 anchors, all files+symbols exist -> 1.0."""
+    (tmp_path / "a.py").write_text("def foo(): pass")
+    (tmp_path / "b.py").write_text("class Bar: pass")
+    (tmp_path / "c.py").write_text("def baz(): pass")
+
+    anchors = [
+        {"file": "a.py", "symbol_name": "foo"},
+        {"file": "b.py", "symbol_name": "Bar"},
+        {"file": "c.py", "symbol_name": "baz"},
+    ]
+    assert compute_anchor_validity(anchors, tmp_path) == 1.0
+
+
+def test_2_of_3_returns_067(tmp_path: Path) -> None:
+    """3 anchors, 2 valid, 1 missing file -> 0.67."""
+    (tmp_path / "a.py").write_text("def foo(): pass")
+    (tmp_path / "b.py").write_text("class Bar: pass")
+    # c.py does not exist
+
+    anchors = [
+        {"file": "a.py", "symbol_name": "foo"},
+        {"file": "b.py", "symbol_name": "Bar"},
+        {"file": "c.py", "symbol_name": "baz"},
+    ]
+    result = compute_anchor_validity(anchors, tmp_path)
+    assert result == pytest.approx(0.67, abs=0.01)
+
+
+def test_0_anchors_returns_1(tmp_path: Path) -> None:
+    """Empty anchor list returns 1.0 (no anchors = no staleness)."""
+    assert compute_anchor_validity([], tmp_path) == 1.0
+
+
+def test_all_missing_returns_0(tmp_path: Path) -> None:
+    """3 anchors, all files missing -> 0.0."""
+    anchors = [
+        {"file": "missing_a.py", "symbol_name": "foo"},
+        {"file": "missing_b.py", "symbol_name": "Bar"},
+        {"file": "missing_c.py", "symbol_name": "baz"},
+    ]
+    assert compute_anchor_validity(anchors, tmp_path) == 0.0
+
+
+def test_file_exists_but_symbol_missing(tmp_path: Path) -> None:
+    """File exists but symbol name is not in content -> 0.0."""
+    (tmp_path / "module.py").write_text("def other_function(): pass")
+
+    anchors = [
+        {"file": "module.py", "symbol_name": "missing_symbol"},
+    ]
+    assert compute_anchor_validity(anchors, tmp_path) == 0.0
+
+
+def test_1_of_2_valid_returns_05(tmp_path: Path) -> None:
+    """2 anchors, 1 valid -> 0.5."""
+    (tmp_path / "good.py").write_text("def present_fn(): pass")
+
+    anchors = [
+        {"file": "good.py", "symbol_name": "present_fn"},
+        {"file": "bad.py", "symbol_name": "absent_fn"},
+    ]
+    assert compute_anchor_validity(anchors, tmp_path) == 0.5
+
+
+def test_symbol_in_comment_counts(tmp_path: Path) -> None:
+    """Symbol name appearing in a comment also counts as found."""
+    (tmp_path / "mod.py").write_text("# References MyClass\nclass Other: pass")
+    anchors = [{"file": "mod.py", "symbol_name": "MyClass"}]
+    assert compute_anchor_validity(anchors, tmp_path) == 1.0
+
+
+def test_empty_symbol_name_not_counted(tmp_path: Path) -> None:
+    """Anchor with empty symbol_name is not counted as valid."""
+    (tmp_path / "mod.py").write_text("def foo(): pass")
+    anchors = [{"file": "mod.py", "symbol_name": ""}]
+    # empty symbol_name skipped -> 0/1 = 0.0
+    assert compute_anchor_validity(anchors, tmp_path) == 0.0
+
+
+def test_project_root_as_string(tmp_path: Path) -> None:
+    """project_root can be passed as a str."""
+    (tmp_path / "mod.py").write_text("MY_CONST = 42")
+    anchors = [{"file": "mod.py", "symbol_name": "MY_CONST"}]
+    assert compute_anchor_validity(anchors, str(tmp_path)) == 1.0

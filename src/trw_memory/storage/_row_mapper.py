@@ -9,7 +9,15 @@ from __future__ import annotations
 import json
 from typing import Literal, cast
 
-from trw_memory.models.memory import Assertion, MemoryEntry, MemoryStatus
+from trw_memory.models.memory import (
+    Anchor,
+    Assertion,
+    Confidence,
+    MemoryEntry,
+    MemoryStatus,
+    MemoryType,
+    ProtectionTier,
+)
 from trw_memory.storage._parsing import (
     parse_dt,
     parse_json_dict_int,
@@ -58,6 +66,18 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         cross_val_raw,
         outcome_json,
         assertions_json,
+        anchors_json,
+        anchor_validity,
+        type_,
+        nudge_line,
+        expires,
+        confidence,
+        task_type,
+        domain_json,
+        phase_origin,
+        phase_affinity_json,
+        team_origin,
+        protection_tier,
     ) = row
 
     # Deserialise assertions from JSON (PRD-CORE-086)
@@ -66,10 +86,7 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
     assertions: list[Assertion] = []
     if assertions_json and assertions_json != "[]":
         try:
-            assertions = [
-                Assertion.model_validate(a, strict=False)
-                for a in json.loads(str(assertions_json))
-            ]
+            assertions = [Assertion.model_validate(a, strict=False) for a in json.loads(str(assertions_json))]
         except (json.JSONDecodeError, ValueError):
             assertions = []
 
@@ -80,7 +97,7 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         tags=parse_json_list(tags_json),
         evidence=parse_json_list(evidence_json),
         importance=float(str(importance)),
-        status=MemoryStatus(str(status)),
+        status=MemoryStatus(status),
         recurrence=int(str(recurrence)),
         namespace=str(namespace),
         created_at=parse_dt(created_at_s),
@@ -104,15 +121,27 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         cross_validated=bool(cross_val_raw),
         outcome_history=parse_json_list(outcome_json),
         assertions=assertions,
+        anchors=[Anchor.model_validate(a) for a in json.loads(str(anchors_json))]
+        if anchors_json and anchors_json != "[]"
+        else [],
+        anchor_validity=float(str(anchor_validity)) if anchor_validity else 1.0,
+        type=MemoryType(type_),
+        nudge_line=str(nudge_line) if nudge_line else "",
+        expires=str(expires) if expires else "",
+        confidence=Confidence(confidence),
+        task_type=str(task_type) if task_type else "",
+        domain=parse_json_list(domain_json),
+        phase_origin=str(phase_origin) if phase_origin else "",
+        phase_affinity=parse_json_list(phase_affinity_json),
+        team_origin=str(team_origin) if team_origin else "",
+        protection_tier=ProtectionTier(protection_tier),
     )
 
 
 def entry_to_row(entry: MemoryEntry) -> tuple[object, ...]:
     """Convert a :class:`MemoryEntry` to an INSERT/REPLACE row tuple."""
-    # Pydantic v2: use_enum_values=True + strict=True can leave the field
-    # as an enum instance in some code paths.  Safely extract the value.
-    raw_status = entry.status
-    status_val = raw_status.value if isinstance(raw_status, MemoryStatus) else str(raw_status)
+    # Pydantic v2: use_enum_values=True converts enum instances to their string values,
+    # so we use the fields directly without .value calls.
     return (
         entry.id,
         entry.content,
@@ -120,7 +149,7 @@ def entry_to_row(entry: MemoryEntry) -> tuple[object, ...]:
         json.dumps(entry.tags),
         json.dumps(entry.evidence),
         entry.importance,
-        status_val,
+        entry.status,
         entry.recurrence,
         entry.namespace,
         entry.created_at.isoformat(),
@@ -144,4 +173,16 @@ def entry_to_row(entry: MemoryEntry) -> tuple[object, ...]:
         int(entry.cross_validated),
         json.dumps(entry.outcome_history),
         json.dumps([a.model_dump() for a in entry.assertions]) if entry.assertions else "[]",
+        json.dumps([a.model_dump() for a in entry.anchors]) if entry.anchors else "[]",
+        entry.anchor_validity,
+        entry.type,
+        entry.nudge_line or "",
+        entry.expires or "",
+        entry.confidence,
+        entry.task_type or "",
+        json.dumps(entry.domain),
+        entry.phase_origin or "",
+        json.dumps(entry.phase_affinity),
+        entry.team_origin or "",
+        entry.protection_tier,
     )

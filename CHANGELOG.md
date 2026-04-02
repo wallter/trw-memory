@@ -2,6 +2,14 @@
 
 All notable changes to the TRW Memory package.
 
+## [0.6.3] — 2026-04-01
+
+### Improved
+
+- **`compute_anchor_validity()` type safety** — Now accepts both `list[Anchor]` (Pydantic models) and `list[dict[str, object]]` (raw dicts) via `Union` type. Uses attribute access for Anchor instances and `.get()` for dicts, eliminating the need for callers to convert between formats.
+
+---
+
 ## [0.6.2] — 2026-03-31
 
 ### Added
