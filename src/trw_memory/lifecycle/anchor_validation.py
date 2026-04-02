@@ -8,13 +8,12 @@ valid (or there are no anchors), 0.0 when all are invalid.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Union
 
 from trw_memory.models.memory import Anchor
 
 
 def compute_anchor_validity(
-    anchors: Union[list[Anchor], list[dict[str, object]]],
+    anchors: list[Anchor] | list[dict[str, object]],
     project_root: str | Path,
 ) -> float:
     """Compute what fraction of anchors still point to valid symbols.

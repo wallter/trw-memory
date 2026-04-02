@@ -28,7 +28,7 @@ def generate_compact_id(
     Raises:
         RuntimeError: If max_retries exceeded (collision space exhausted).
     """
-    for attempt in range(max_retries):
+    for _attempt in range(max_retries):
         suffix = "".join(secrets.choice(_BASE62) for _ in range(length))
         candidate = f"{prefix}-{suffix}"
         if existing_ids is None or candidate not in existing_ids:

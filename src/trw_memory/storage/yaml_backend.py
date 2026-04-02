@@ -209,7 +209,7 @@ class YAMLBackend(StorageBackend):
             try:
                 data = read_yaml(yaml_file)
                 entries.append(_dict_to_entry(data))
-            except (
+            except (  # noqa: PERF203
                 OSError,
                 StorageError,
                 ValueError,

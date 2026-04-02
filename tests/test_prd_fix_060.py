@@ -380,6 +380,18 @@ class TestFR05BooleanConversion:
             None,  # cross_validated = None
             "[]",
             "[]",
+            "[]",  # anchors_json
+            None,  # anchor_validity
+            "pattern",  # type_
+            "",  # nudge_line
+            "",  # expires
+            "medium",  # confidence
+            None,  # task_type
+            "[]",  # domain_json
+            None,  # phase_origin
+            "[]",  # phase_affinity_json
+            "",  # team_origin
+            "normal",  # protection_tier
         )
 
         entry = row_to_entry(row)

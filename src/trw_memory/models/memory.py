@@ -259,8 +259,8 @@ class MemoryEntry(BaseModel):
         if isinstance(v, str):
             try:
                 return MemoryType(v)
-            except ValueError:
-                raise ValueError(f"type must be one of {', '.join([t.value for t in MemoryType])}")
+            except ValueError as err:
+                raise ValueError(f"type must be one of {', '.join([t.value for t in MemoryType])}") from err
         if isinstance(v, MemoryType):
             return v
         raise ValueError(f"type must be a string or MemoryType enum, got {type(v).__name__}")
@@ -272,8 +272,8 @@ class MemoryEntry(BaseModel):
         if isinstance(v, str):
             try:
                 return Confidence(v)
-            except ValueError:
-                raise ValueError(f"confidence must be one of {', '.join([c.value for c in Confidence])}")
+            except ValueError as err:
+                raise ValueError(f"confidence must be one of {', '.join([c.value for c in Confidence])}") from err
         if isinstance(v, Confidence):
             return v
         raise ValueError(f"confidence must be a string or Confidence enum, got {type(v).__name__}")
@@ -285,8 +285,8 @@ class MemoryEntry(BaseModel):
         if isinstance(v, str):
             try:
                 return ProtectionTier(v)
-            except ValueError:
-                raise ValueError(f"protection_tier must be one of {', '.join([p.value for p in ProtectionTier])}")
+            except ValueError as err:
+                raise ValueError(f"protection_tier must be one of {', '.join([p.value for p in ProtectionTier])}") from err
         if isinstance(v, ProtectionTier):
             return v
         raise ValueError(f"protection_tier must be a string or ProtectionTier enum, got {type(v).__name__}")
