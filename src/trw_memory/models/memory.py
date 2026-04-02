@@ -157,6 +157,16 @@ class Anchor(BaseModel):
         description="Line range (start, end) where the symbol is defined",
     )
 
+    @field_validator("line_range", mode="before")
+    @classmethod
+    def _coerce_line_range(cls, v: object) -> tuple[int, int] | None:
+        """Coerce list to tuple for JSON/SQLite round-trip compatibility."""
+        if v is None:
+            return None
+        if isinstance(v, list) and len(v) == 2:
+            return (int(v[0]), int(v[1]))
+        return v  # type: ignore[return-value]
+
     @field_validator("file")
     @classmethod
     def _validate_file(cls, v: str) -> str:
