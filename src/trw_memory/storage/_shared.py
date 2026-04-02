@@ -8,8 +8,9 @@ serialisation logic used by both :mod:`sqlite_backend` and
 from __future__ import annotations
 
 from datetime import datetime
+from typing import cast
 
-from trw_memory.models.memory import Assertion, MemoryStatus
+from trw_memory.models.memory import Anchor, Assertion, Confidence, MemoryStatus, MemoryType, ProtectionTier
 
 # ---------------------------------------------------------------------------
 # Field definitions
@@ -48,6 +49,18 @@ ENTRY_COLUMNS: tuple[str, ...] = (
     "cross_validated",
     "outcome_history",
     "assertions",
+    "anchors",
+    "anchor_validity",
+    "type",
+    "nudge_line",
+    "expires",
+    "confidence",
+    "task_type",
+    "domain",
+    "phase_origin",
+    "phase_affinity",
+    "team_origin",
+    "protection_tier",
 )
 
 #: Fields that must never be changed via ``update()``.
@@ -62,6 +75,9 @@ LIST_FIELDS: frozenset[str] = frozenset(
         "consolidated_from",
         "outcome_history",
         "assertions",
+        "anchors",
+        "domain",
+        "phase_affinity",
     }
 )
 
@@ -92,15 +108,17 @@ def validate_update_fields(
             raise ValueError(key)
 
 
-def serialize_update_value(key: str, val: object) -> list[object] | dict[str, str] | str | object:
+def serialize_update_value(key: str, val: object) -> list[object] | dict[str, str] | str:
     """Normalise a single update value for storage.
 
     Handles:
     - ``assertions`` list -> each item serialised via ``model_dump()``
+    - ``anchors`` list -> each item serialised via ``model_dump()``
     - ``list`` fields in :data:`LIST_FIELDS` -> kept as list of strings
     - ``dict`` fields in :data:`DICT_FIELDS` -> kept as dict
     - ``datetime`` -> ISO-8601 string
     - ``MemoryStatus`` -> its ``.value`` string
+    - ``MemoryType``, ``Confidence``, ``ProtectionTier`` -> their ``.value`` string
 
     Returns the normalised value. The caller is responsible for
     format-specific encoding (e.g. ``json.dumps`` for SQLite, plain
@@ -109,6 +127,9 @@ def serialize_update_value(key: str, val: object) -> list[object] | dict[str, st
     # Assertions need model_dump(), not str() — Pydantic models have complex structure
     if key == "assertions" and isinstance(val, list):
         return [a.model_dump() if isinstance(a, Assertion) else a for a in val]
+    # Anchors are list[Anchor] and need JSON serialization with model_dump()
+    if key == "anchors" and isinstance(val, list):
+        return [a.model_dump() if isinstance(a, Anchor) else a for a in val]
     if key in LIST_FIELDS and isinstance(val, list):
         return [str(v) for v in val]
     if key in DICT_FIELDS and isinstance(val, dict):
@@ -117,4 +138,6 @@ def serialize_update_value(key: str, val: object) -> list[object] | dict[str, st
         return val.isoformat()
     if isinstance(val, MemoryStatus):
         return val.value
-    return val
+    if isinstance(val, (MemoryType, Confidence, ProtectionTier)):
+        return cast("str", val.value)
+    return cast("list[object] | dict[str, str] | str", val)

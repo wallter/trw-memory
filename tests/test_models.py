@@ -148,10 +148,10 @@ def test_memory_entry_negative_recurrence_raises() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_memory_entry_strict_mode_string_importance_raises() -> None:
-    """strict=True means passing "0.5" (str) for a float field must fail."""
-    with pytest.raises(ValidationError):
-        MemoryEntry(id="M-strict", content="test", importance="0.5")  # type: ignore[arg-type]
+def test_memory_entry_coerces_string_importance() -> None:
+    """String value for importance is coerced to float."""
+    entry = MemoryEntry(id="M-coerce", content="test", importance="0.5")  # pyright: ignore[reportArgumentType]
+    assert entry.importance == 0.5
 
 
 # ---------------------------------------------------------------------------

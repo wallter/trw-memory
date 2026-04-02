@@ -45,7 +45,19 @@ CREATE TABLE IF NOT EXISTS memories (
     pending_delete    INTEGER DEFAULT 0,
     cross_validated   INTEGER DEFAULT 0,
     outcome_history   TEXT DEFAULT '[]',
-    assertions        TEXT DEFAULT '[]'
+    assertions        TEXT DEFAULT '[]',
+    anchors           TEXT DEFAULT '[]',
+    anchor_validity   REAL DEFAULT 1.0,
+    type              TEXT DEFAULT 'pattern',
+    nudge_line        TEXT DEFAULT '',
+    expires           TEXT DEFAULT '',
+    confidence        TEXT DEFAULT 'unverified',
+    task_type         TEXT DEFAULT '',
+    domain            TEXT DEFAULT '[]',
+    phase_origin      TEXT DEFAULT '',
+    phase_affinity    TEXT DEFAULT '[]',
+    team_origin       TEXT DEFAULT '',
+    protection_tier   TEXT DEFAULT 'normal'
 )
 """
 
@@ -140,6 +152,24 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             ("client_profile", "TEXT DEFAULT ''"),
             ("model_id", "TEXT DEFAULT ''"),
         ]
+        # Migration: add PRD-CORE-110 typed entry fields
+        _migrate_cols += [
+            ("type", "TEXT DEFAULT 'pattern'"),
+            ("nudge_line", "TEXT DEFAULT ''"),
+            ("expires", "TEXT DEFAULT ''"),
+            ("confidence", "TEXT DEFAULT 'unverified'"),
+            ("task_type", "TEXT DEFAULT ''"),
+            ("domain", "TEXT DEFAULT '[]'"),
+            ("phase_origin", "TEXT DEFAULT ''"),
+            ("phase_affinity", "TEXT DEFAULT '[]'"),
+            ("team_origin", "TEXT DEFAULT ''"),
+            ("protection_tier", "TEXT DEFAULT 'normal'"),
+        ]
+        # Migration: add PRD-CORE-111 anchor fields
+        _migrate_cols += [
+            ("anchors", "TEXT DEFAULT '[]'"),
+            ("anchor_validity", "REAL DEFAULT 1.0"),
+        ]
         for col_name, col_def in _migrate_cols:
             with contextlib.suppress(sqlite3.OperationalError):
                 cursor.execute(f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}")
@@ -158,8 +188,6 @@ def ensure_vec_table(conn: sqlite3.Connection, dim: int) -> None:
     conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(embedding float[{dim}])")
     # Companion table to map rowid <-> entry_id
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS vec_index ("
-        "rowid INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "entry_id TEXT UNIQUE NOT NULL)"
+        "CREATE TABLE IF NOT EXISTS vec_index (rowid INTEGER PRIMARY KEY AUTOINCREMENT, entry_id TEXT UNIQUE NOT NULL)"
     )
     conn.commit()
