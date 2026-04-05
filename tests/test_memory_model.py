@@ -61,9 +61,9 @@ def test_type_enum_validation() -> None:
 
 
 def test_type_enum_validation_empty() -> None:
-    """Empty string type raises ValidationError."""
-    with pytest.raises(ValidationError):
-        MemoryEntry(id="L-x", content="c", type="")
+    """Empty string type coerces to PATTERN (backward compat)."""
+    entry = MemoryEntry(id="L-x", content="c", type="")
+    assert entry.type == "pattern"
 
 
 # ---------------------------------------------------------------------------

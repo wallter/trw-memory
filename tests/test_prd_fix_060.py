@@ -98,7 +98,7 @@ class TestFR02EntryToDict:
         )
 
     def test_memory_entry_to_dict_all_fields(self, sample_entry: MemoryEntry) -> None:
-        """to_dict() includes all 42 fields of MemoryEntry (PRD-CORE-110/111)."""
+        """to_dict() includes all 45 fields of MemoryEntry (PRD-CORE-110/111)."""
         result = sample_entry.to_dict()
 
         expected_keys = {
@@ -144,9 +144,12 @@ class TestFR02EntryToDict:
             "phase_affinity",
             "team_origin",
             "protection_tier",
+            "sessions_surfaced",
+            "avg_rework_delta",
+            "outcome_correlation",
         }
         assert set(result.keys()) == expected_keys
-        assert len(result) == 42
+        assert len(result) == 45
 
         # Verify types of serialized values
         assert result["id"] == "M-TEST-001"
@@ -337,6 +340,9 @@ class TestFR05BooleanConversion:
             "[]",  # phase_affinity_json
             "",  # team_origin
             "normal",  # protection_tier
+            0,  # sessions_surfaced
+            None,  # avg_rework_delta
+            "",  # outcome_correlation
         )
 
         entry = row_to_entry(row)
@@ -392,6 +398,9 @@ class TestFR05BooleanConversion:
             "[]",  # phase_affinity_json
             "",  # team_origin
             "normal",  # protection_tier
+            0,  # sessions_surfaced
+            None,  # avg_rework_delta
+            "",  # outcome_correlation
         )
 
         entry = row_to_entry(row)
