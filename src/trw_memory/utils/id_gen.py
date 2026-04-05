@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 import string
 
 _BASE62 = string.ascii_letters + string.digits  # a-zA-Z0-9, 62 chars
+_logger = logging.getLogger(__name__)
 
 
 def generate_compact_id(
@@ -33,6 +35,12 @@ def generate_compact_id(
         candidate = f"{prefix}-{suffix}"
         if existing_ids is None or candidate not in existing_ids:
             return candidate
+        _logger.debug(
+            "id_collision_retry: attempt=%d candidate=%s prefix=%s",
+            _attempt + 1,
+            candidate,
+            prefix,
+        )
     raise RuntimeError(
         f"generate_compact_id: exceeded {max_retries} retries for prefix={prefix!r}; "
         "collision space may be exhausted"

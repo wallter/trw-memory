@@ -66,12 +66,13 @@ CREATE_IDX_STATUS = "CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(
 
 CREATE_GRAPH_EDGES = """
 CREATE TABLE IF NOT EXISTS memory_graph_edges (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_id   TEXT NOT NULL,
-    target_id   TEXT NOT NULL,
-    edge_type   TEXT NOT NULL,
-    weight      REAL NOT NULL CHECK (weight >= 0.0 AND weight <= 1.0),
-    created_at  TEXT NOT NULL,
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id       TEXT NOT NULL,
+    target_id       TEXT NOT NULL,
+    edge_type       TEXT NOT NULL,
+    weight          REAL NOT NULL CHECK (weight >= 0.0 AND weight <= 1.0),
+    created_at      TEXT NOT NULL,
+    edge_metadata   TEXT DEFAULT '{}',
     UNIQUE (source_id, target_id, edge_type)
 )
 """
@@ -174,6 +175,13 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         for col_name, col_def in _migrate_cols:
             with contextlib.suppress(sqlite3.OperationalError):
                 cursor.execute(f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}")
+
+        # Migration: add edge_metadata column for PRD-CORE-107 typed edges
+        with contextlib.suppress(sqlite3.OperationalError):
+            cursor.execute(
+                "ALTER TABLE memory_graph_edges ADD COLUMN edge_metadata TEXT DEFAULT '{}'"
+            )
+
         conn.commit()
     finally:
         cursor.close()
