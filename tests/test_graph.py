@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS memory_graph_edges (
     edge_type   TEXT NOT NULL,
     weight      REAL NOT NULL CHECK (weight >= 0.0 AND weight <= 1.0),
     created_at  TEXT NOT NULL,
+    edge_metadata TEXT DEFAULT '{}',
     UNIQUE (source_id, target_id, edge_type)
 )
 """

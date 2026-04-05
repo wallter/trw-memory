@@ -57,7 +57,10 @@ CREATE TABLE IF NOT EXISTS memories (
     phase_origin      TEXT DEFAULT '',
     phase_affinity    TEXT DEFAULT '[]',
     team_origin       TEXT DEFAULT '',
-    protection_tier   TEXT DEFAULT 'normal'
+    protection_tier   TEXT DEFAULT 'normal',
+    sessions_surfaced INTEGER DEFAULT 0,
+    avg_rework_delta  TEXT DEFAULT NULL,
+    outcome_correlation TEXT DEFAULT ''
 )
 """
 
@@ -171,6 +174,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         _migrate_cols += [
             ("anchors", "TEXT DEFAULT '[]'"),
             ("anchor_validity", "REAL DEFAULT 1.0"),
+        ]
+        # Migration: add PRD-CORE-108 outcome attribution fields
+        _migrate_cols += [
+            ("sessions_surfaced", "INTEGER DEFAULT 0"),
+            ("avg_rework_delta", "TEXT DEFAULT NULL"),
+            ("outcome_correlation", "TEXT DEFAULT ''"),
         ]
         for col_name, col_def in _migrate_cols:
             with contextlib.suppress(sqlite3.OperationalError):

@@ -61,6 +61,9 @@ ENTRY_COLUMNS: tuple[str, ...] = (
     "phase_affinity",
     "team_origin",
     "protection_tier",
+    "sessions_surfaced",
+    "avg_rework_delta",
+    "outcome_correlation",
 )
 
 #: Fields that must never be changed via ``update()``.
