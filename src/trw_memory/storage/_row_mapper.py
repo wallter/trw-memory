@@ -78,6 +78,9 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         phase_affinity_json,
         team_origin,
         protection_tier,
+        sessions_surfaced,
+        avg_rework_delta_raw,
+        outcome_correlation_raw,
     ) = row
 
     # Deserialise assertions from JSON (PRD-CORE-086)
@@ -135,6 +138,9 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         phase_affinity=parse_json_list(phase_affinity_json),
         team_origin=str(team_origin) if team_origin else "",
         protection_tier=ProtectionTier(protection_tier),
+        sessions_surfaced=int(str(sessions_surfaced)) if sessions_surfaced else 0,
+        avg_rework_delta=float(str(avg_rework_delta_raw)) if avg_rework_delta_raw else None,
+        outcome_correlation=str(outcome_correlation_raw) if outcome_correlation_raw else "",
     )
 
 
@@ -185,4 +191,7 @@ def entry_to_row(entry: MemoryEntry) -> tuple[object, ...]:
         json.dumps(entry.phase_affinity),
         entry.team_origin or "",
         entry.protection_tier,
+        entry.sessions_surfaced,
+        str(entry.avg_rework_delta) if entry.avg_rework_delta is not None else None,
+        entry.outcome_correlation or "",
     )

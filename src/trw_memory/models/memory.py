@@ -347,6 +347,11 @@ class MemoryEntry(BaseModel):
     team_origin: str = Field(default="", description="Team identifier")
     protection_tier: ProtectionTier = Field(default=ProtectionTier.NORMAL, description="Protection level")
 
+    # PRD-CORE-108: Outcome attribution fields
+    sessions_surfaced: int = Field(ge=0, default=0, description="Sessions this entry was surfaced in")
+    avg_rework_delta: float | None = Field(default=None, description="Rolling average rework impact delta")
+    outcome_correlation: str = Field(default="", description="Causal outcome attribution category")
+
     # Executable assertions (PRD-CORE-086)
     assertions: list[Assertion] = Field(default_factory=list, description="Machine-verifiable assertions")
 
@@ -414,6 +419,9 @@ class MemoryEntry(BaseModel):
             "assertions": [a.model_dump() for a in self.assertions] if self.assertions else [],
             "anchors": [a.model_dump() for a in self.anchors],
             "anchor_validity": self.anchor_validity,
+            "sessions_surfaced": self.sessions_surfaced,
+            "avg_rework_delta": self.avg_rework_delta,
+            "outcome_correlation": self.outcome_correlation,
         }
         if fields is not None:
             return {k: v for k, v in full.items() if k in fields}
