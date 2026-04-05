@@ -259,6 +259,8 @@ class MemoryEntry(BaseModel):
     def _coerce_type(cls, v: object) -> MemoryType:
         """Coerce string values to MemoryType enum."""
         if isinstance(v, str):
+            if not v:  # Empty string -> default (backward compat)
+                return MemoryType.PATTERN
             try:
                 return MemoryType(v)
             except ValueError as err:
@@ -272,6 +274,8 @@ class MemoryEntry(BaseModel):
     def _coerce_confidence(cls, v: object) -> Confidence:
         """Coerce string values to Confidence enum."""
         if isinstance(v, str):
+            if not v:  # Empty string -> default (backward compat)
+                return Confidence.UNVERIFIED
             try:
                 return Confidence(v)
             except ValueError as err:
@@ -285,6 +289,8 @@ class MemoryEntry(BaseModel):
     def _coerce_protection_tier(cls, v: object) -> ProtectionTier:
         """Coerce string values to ProtectionTier enum."""
         if isinstance(v, str):
+            if not v:  # Empty string -> default (backward compat)
+                return ProtectionTier.NORMAL
             try:
                 return ProtectionTier(v)
             except ValueError as err:
