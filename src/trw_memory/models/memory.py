@@ -172,6 +172,8 @@ class Anchor(BaseModel):
     def _validate_file(cls, v: str) -> str:
         if v.startswith("/"):
             raise ValueError("Anchor.file must be a relative path, not absolute")
+        if ".." in v.split("/"):
+            raise ValueError("path traversal (..) not allowed in anchor file paths")
         return v
 
     @field_validator("signature", mode="before")
