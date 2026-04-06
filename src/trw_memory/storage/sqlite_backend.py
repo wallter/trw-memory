@@ -36,6 +36,7 @@ from trw_memory.storage._shared import (
     validate_update_fields,
 )
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.sync.delta import DeltaTracker
 
 try:
     import sqlite_vec
@@ -289,6 +290,11 @@ class SQLiteBackend(StorageBackend):
         Raises:
             StorageError: If the write fails.
         """
+        # Auto dirty-mark for sync pipeline (PRD-INFRA-051)
+        entry.sync_seq = (entry.sync_seq or 0) + 1
+        entry.sync_hash = DeltaTracker.compute_sync_hash(entry)
+        entry.last_synced_at = None
+
         placeholders = ", ".join(["?"] * len(_COLUMNS))
         sql = f"INSERT OR REPLACE INTO memories ({_INSERT_COLUMNS_SQL}) VALUES ({placeholders})"  # noqa: S608 — _INSERT_COLUMNS_SQL is a static constant (no user input); values are parameterized
         try:
@@ -364,6 +370,16 @@ class SQLiteBackend(StorageBackend):
                     f"Invalid update field: {ve.args[0]!r}",
                     path=str(self._db_path),
                 ) from None
+
+            # Mark dirty for sync pipeline (PRD-INFRA-051)
+            # Skip when the caller is explicitly setting sync fields (e.g. mark_synced)
+            if "sync_seq" not in field_dict and "last_synced_at" not in field_dict:
+                current = self._conn.execute(
+                    "SELECT sync_seq FROM memories WHERE id = ?", (entry_id,)
+                ).fetchone()
+                if current:
+                    field_dict["sync_seq"] = (current[0] or 0) + 1
+                    field_dict["last_synced_at"] = None
 
             for key, val in field_dict.items():
                 sql_key = "expires_at" if key == "expires" else key

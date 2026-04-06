@@ -60,7 +60,10 @@ CREATE TABLE IF NOT EXISTS memories (
     protection_tier   TEXT DEFAULT 'normal',
     sessions_surfaced INTEGER DEFAULT 0,
     avg_rework_delta  TEXT DEFAULT NULL,
-    outcome_correlation TEXT DEFAULT ''
+    outcome_correlation TEXT DEFAULT '',
+    sync_hash         TEXT DEFAULT '',
+    sync_seq          INTEGER DEFAULT 0,
+    last_synced_at    TEXT
 )
 """
 
@@ -181,9 +184,18 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             ("avg_rework_delta", "TEXT DEFAULT NULL"),
             ("outcome_correlation", "TEXT DEFAULT ''"),
         ]
+        # Migration: add PRD-INFRA-051 sync pipeline delta tracking
+        _migrate_cols += [
+            ("sync_hash", "TEXT DEFAULT ''"),
+            ("sync_seq", "INTEGER DEFAULT 0"),
+            ("last_synced_at", "TEXT"),
+        ]
         for col_name, col_def in _migrate_cols:
             with contextlib.suppress(sqlite3.OperationalError):
                 cursor.execute(f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}")
+
+        with contextlib.suppress(sqlite3.OperationalError):
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_sync_seq ON memories(sync_seq)")
 
         # Migration: add edge_metadata column for PRD-CORE-107 typed edges
         with contextlib.suppress(sqlite3.OperationalError):

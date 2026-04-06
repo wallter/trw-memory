@@ -98,7 +98,7 @@ class TestFR02EntryToDict:
         )
 
     def test_memory_entry_to_dict_all_fields(self, sample_entry: MemoryEntry) -> None:
-        """to_dict() includes all 45 fields of MemoryEntry (PRD-CORE-110/111)."""
+        """to_dict() includes all 48 fields of MemoryEntry (PRD-CORE-110/111 + PRD-INFRA-051)."""
         result = sample_entry.to_dict()
 
         expected_keys = {
@@ -129,6 +129,9 @@ class TestFR02EntryToDict:
             "remote_id",
             "published_to_platform",
             "pending_delete",
+            "sync_hash",
+            "sync_seq",
+            "last_synced_at",
             "cross_validated",
             "outcome_history",
             "assertions",
@@ -149,7 +152,7 @@ class TestFR02EntryToDict:
             "outcome_correlation",
         }
         assert set(result.keys()) == expected_keys
-        assert len(result) == 45
+        assert len(result) == 48
 
         # Verify types of serialized values
         assert result["id"] == "M-TEST-001"
@@ -296,7 +299,7 @@ class TestFR05BooleanConversion:
         from trw_memory.storage._row_mapper import row_to_entry
 
         now_iso = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc).isoformat()
-        # Build a row tuple matching ENTRY_COLUMNS order (42 columns)
+        # Build a row tuple matching ENTRY_COLUMNS order (48 columns)
         row = (
             "M-BOOL-001",  # id
             "content",  # content
@@ -343,6 +346,9 @@ class TestFR05BooleanConversion:
             0,  # sessions_surfaced
             None,  # avg_rework_delta
             "",  # outcome_correlation
+            "",  # sync_hash (PRD-INFRA-051)
+            0,  # sync_seq (PRD-INFRA-051)
+            None,  # last_synced_at (PRD-INFRA-051)
         )
 
         entry = row_to_entry(row)
@@ -401,6 +407,9 @@ class TestFR05BooleanConversion:
             0,  # sessions_surfaced
             None,  # avg_rework_delta
             "",  # outcome_correlation
+            "",  # sync_hash (PRD-INFRA-051)
+            0,  # sync_seq (PRD-INFRA-051)
+            None,  # last_synced_at (PRD-INFRA-051)
         )
 
         entry = row_to_entry(row)
