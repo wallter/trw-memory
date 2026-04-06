@@ -321,6 +321,11 @@ class MemoryEntry(BaseModel):
     published_to_platform: bool = False
     pending_delete: bool = False
 
+    # Sync pipeline fields (PRD-INFRA-051)
+    sync_hash: str = ""
+    sync_seq: int = 0
+    last_synced_at: datetime | None = None
+
     # Graph fields (PRD-CORE-048)
     cross_validated: bool = False
     outcome_history: list[str] = Field(
@@ -414,6 +419,9 @@ class MemoryEntry(BaseModel):
             "remote_id": self.remote_id,
             "published_to_platform": self.published_to_platform,
             "pending_delete": self.pending_delete,
+            "sync_hash": self.sync_hash,
+            "sync_seq": self.sync_seq,
+            "last_synced_at": self.last_synced_at.isoformat() if self.last_synced_at else None,
             "cross_validated": self.cross_validated,
             "outcome_history": list(self.outcome_history),
             "assertions": [a.model_dump() for a in self.assertions] if self.assertions else [],

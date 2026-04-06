@@ -29,6 +29,7 @@ from trw_memory.storage._shared import (
 )
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.persistence import lock_for_rmw, read_yaml, write_yaml
+from trw_memory.sync.delta import DeltaTracker
 
 logger = structlog.get_logger(__name__)
 
@@ -166,6 +167,9 @@ def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
         phase_affinity=_str_list("phase_affinity"),
         team_origin=_str("team_origin", ""),
         protection_tier=_str("protection_tier", "normal"),  # type: ignore[arg-type]
+        sync_hash=_str("sync_hash", ""),
+        sync_seq=_int("sync_seq", 0),
+        last_synced_at=parse_dt(data.get("last_synced_at")) if data.get("last_synced_at") else None,
     )
 
 
@@ -231,6 +235,11 @@ class YAMLBackend(StorageBackend):
         Raises:
             StorageError: If the write fails.
         """
+        # Auto dirty-mark for sync pipeline (PRD-INFRA-051)
+        entry.sync_seq = (entry.sync_seq or 0) + 1
+        entry.sync_hash = DeltaTracker.compute_sync_hash(entry)
+        entry.last_synced_at = None
+
         path = self._path(entry.id)
         write_yaml(path, _entry_to_dict(entry))
         logger.debug("yaml_entry_stored", entry_id=entry.id)

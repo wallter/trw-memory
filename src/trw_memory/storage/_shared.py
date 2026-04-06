@@ -64,6 +64,9 @@ ENTRY_COLUMNS: tuple[str, ...] = (
     "sessions_surfaced",
     "avg_rework_delta",
     "outcome_correlation",
+    "sync_hash",
+    "sync_seq",
+    "last_synced_at",
 )
 
 #: Fields that must never be changed via ``update()``.

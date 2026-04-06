@@ -63,8 +63,8 @@ def test_migration_idempotent() -> None:
 
 
 def test_entry_columns_count_42() -> None:
-    """ENTRY_COLUMNS must contain exactly 45 entries after adding outcome attribution fields."""
-    assert len(ENTRY_COLUMNS) == 45, f"Expected 45, got {len(ENTRY_COLUMNS)}: {ENTRY_COLUMNS}"
+    """ENTRY_COLUMNS must contain exactly 48 entries after adding sync pipeline fields."""
+    assert len(ENTRY_COLUMNS) == 48, f"Expected 48, got {len(ENTRY_COLUMNS)}: {ENTRY_COLUMNS}"
 
 
 def test_entry_columns_contains_new_fields() -> None:

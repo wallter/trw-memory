@@ -81,6 +81,9 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         sessions_surfaced,
         avg_rework_delta_raw,
         outcome_correlation_raw,
+        sync_hash_raw,
+        sync_seq_raw,
+        last_synced_at_raw,
     ) = row
 
     # Deserialise assertions from JSON (PRD-CORE-086)
@@ -141,6 +144,9 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         sessions_surfaced=int(str(sessions_surfaced)) if sessions_surfaced else 0,
         avg_rework_delta=float(str(avg_rework_delta_raw)) if avg_rework_delta_raw else None,
         outcome_correlation=str(outcome_correlation_raw) if outcome_correlation_raw else "",
+        sync_hash=str(sync_hash_raw) if sync_hash_raw else "",
+        sync_seq=int(str(sync_seq_raw)) if sync_seq_raw else 0,
+        last_synced_at=parse_dt(last_synced_at_raw) if last_synced_at_raw else None,
     )
 
 
@@ -194,4 +200,7 @@ def entry_to_row(entry: MemoryEntry) -> tuple[object, ...]:
         entry.sessions_surfaced,
         str(entry.avg_rework_delta) if entry.avg_rework_delta is not None else None,
         entry.outcome_correlation or "",
+        entry.sync_hash or "",
+        entry.sync_seq,
+        entry.last_synced_at.isoformat() if entry.last_synced_at else None,
     )

@@ -35,8 +35,8 @@ class TestEntryColumnsCount:
     """Verify ENTRY_COLUMNS tuple size matches expectations."""
 
     def test_entry_columns_count(self) -> None:
-        assert len(ENTRY_COLUMNS) == 45
-        assert ENTRY_COLUMNS[-1] == "outcome_correlation"
+        assert len(ENTRY_COLUMNS) == 48
+        assert ENTRY_COLUMNS[-1] == "last_synced_at"
 
 
 class TestFreshDbSchema:
