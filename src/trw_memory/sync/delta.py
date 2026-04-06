@@ -24,6 +24,7 @@ _HASH_FIELDS = (
     "confidence",
     "domain",
     "phase_affinity",
+    "metadata",
 )
 
 
@@ -38,6 +39,16 @@ class DeltaTracker:
         # Stable serialization
         raw = json.dumps(canonical, sort_keys=True, default=str)
         return hashlib.sha256(raw.encode()).hexdigest()
+
+    @staticmethod
+    def mark_dirty(entry_id: str, backend: StorageBackend) -> None:
+        """Mark a single entry as dirty (needs re-sync)."""
+        entry = backend.get(entry_id)
+        if entry is None:
+            return
+        new_seq = entry.sync_seq + 1
+        new_hash = DeltaTracker.compute_sync_hash(entry)
+        backend.update(entry_id, sync_seq=new_seq, sync_hash=new_hash, last_synced_at=None)
 
     @staticmethod
     def get_dirty_entries(backend: StorageBackend, since_seq: int = 0) -> list[MemoryEntry]:
