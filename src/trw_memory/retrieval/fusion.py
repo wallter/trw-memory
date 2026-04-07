@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import structlog
 
+__all__ = ["rrf_fuse"]
+
 logger = structlog.get_logger(__name__)
 
 

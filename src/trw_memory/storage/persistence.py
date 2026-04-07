@@ -31,6 +31,13 @@ except ImportError:
 
 logger = structlog.get_logger(__name__)
 
+__all__ = [
+    "json_serializer",
+    "read_yaml",
+    "write_yaml",
+    "append_jsonl",
+    "lock_for_rmw",
+]
 
 # ---------------------------------------------------------------------------
 # Internal YAML factory
