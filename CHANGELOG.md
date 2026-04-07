@@ -2,6 +2,22 @@
 
 All notable changes to the TRW Memory package.
 
+## [0.6.6] — 2026-04-07
+
+### Added
+
+- **Sync delta tracking** (PHASE-BACKEND-INTELLIGENCE, PRD-INFRA-051)
+  - 3 new fields on MemoryEntry: `sync_hash`, `sync_seq`, `last_synced_at`
+  - SQLite schema migration with `idx_memories_sync_seq` index
+  - ENTRY_COLUMNS expanded from 45 to 48
+  - `sync/delta.py` — DeltaTracker with compute_sync_hash, get_dirty_entries, mark_synced, mark_dirty
+  - Auto dirty-marking in SQLiteBackend.store() and update()
+  - YAML backend preserves sync fields via to_dict()
+
+### Validation
+
+- Full `trw-memory` package suite passed: `1778` passed.
+
 ## [0.6.5] — 2026-04-02
 
 ### Fixed
