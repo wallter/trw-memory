@@ -543,6 +543,28 @@ class SQLiteBackend(StorageBackend):
                 path=str(self._db_path),
             ) from exc
 
+    def entries_with_assertions(self) -> list[MemoryEntry]:
+        """Return all entries that have non-empty assertions (PRD-CORE-086 FR07).
+
+        Used by ``trw_session_start`` to compute assertion health summary
+        from cached ``last_result`` fields without running verification I/O.
+
+        Returns:
+            List of MemoryEntry objects that have at least one assertion.
+        """
+        try:
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT * FROM memories WHERE assertions IS NOT NULL AND assertions != '[]'",
+                ).fetchall()
+            return [row_to_entry(row) for row in rows]
+        except sqlite3.Error as exc:
+            logger.debug("entries_with_assertions_query_failed", exc_info=True)
+            raise StorageError(
+                f"Failed to query entries with assertions: {exc}",
+                path=str(self._db_path),
+            ) from exc
+
     def list_entries(
         self,
         *,
