@@ -11,6 +11,8 @@ from typing import Literal
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+__all__ = ["MemoryConfig"]
+
 
 class MemoryConfig(BaseSettings):
     """Configuration for the trw-memory package.

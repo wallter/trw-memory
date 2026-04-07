@@ -13,6 +13,19 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
+__all__ = [
+    "Anchor",
+    "Assertion",
+    "AssertionResult",
+    "AssertionType",
+    "Confidence",
+    "MemoryEntry",
+    "MemoryIndex",
+    "MemoryStatus",
+    "MemoryType",
+    "ProtectionTier",
+]
+
 _logger = logging.getLogger(__name__)
 
 # Valid source values for MemoryEntry provenance tracking.
