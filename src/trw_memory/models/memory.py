@@ -85,7 +85,7 @@ class ProtectionTier(str, Enum):
 
 
 class Assertion(BaseModel):
-    model_config = ConfigDict(use_enum_values=True)
+    model_config = ConfigDict(strict=True, use_enum_values=True)
 
     type: AssertionType
     pattern: str = Field(default="", description="Regex pattern for grep types; ignored for glob types")
