@@ -186,14 +186,69 @@ class TestInitAutoRecovery:
         backend.store(entry)
         backend.close()
 
-        # Corrupt it
+        # Corrupt it (header overwrite — _db_has_data returns False)
         _corrupt_db(db_path)
 
         # Constructor should detect corruption and auto-recover
         backend2 = SQLiteBackend(db_path)
         # Database should be healthy after recovery
         assert backend2._run_integrity_check() is True
+        assert backend2.recovered is True
+        assert backend2.integrity_warning is False
         backend2.close()
 
         # Backup should exist
         assert db_path.with_suffix(".db.corrupt.bak").exists()
+
+    def test_preserves_db_with_data_on_transient_failure(self, tmp_path: Path, monkeypatch: object) -> None:
+        """When quick_check fails but DB has readable data, open anyway
+        instead of destroying the database with auto-recovery."""
+        from unittest.mock import patch
+
+        db_path = tmp_path / "memory.db"
+
+        # Create valid DB with data
+        backend = SQLiteBackend(db_path)
+        entry = _make_entry("L-preserve", "must not be lost")
+        backend.store(entry)
+        backend.close()
+
+        # Simulate transient quick_check failure by patching
+        # _open_and_configure to always raise, while _db_has_data
+        # returns True (DB file is fine, just quick_check fails)
+        def _failing_open(db_path_arg: Path) -> None:
+            raise sqlite3.DatabaseError("simulated transient failure")
+
+        with patch.object(SQLiteBackend, "_open_and_configure", staticmethod(_failing_open)):
+            backend2 = SQLiteBackend(db_path)
+            # Should NOT auto-recover — DB has data
+            assert backend2.recovered is False
+            assert backend2.integrity_warning is True
+
+            # Data should still be accessible
+            result = backend2.get("L-preserve")
+            assert result is not None
+            assert result.content == "must not be lost"
+            backend2.close()
+
+            # No backup should be created
+            assert not db_path.with_suffix(".db.corrupt.bak").exists()
+
+    def test_db_has_data_returns_false_for_empty(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "empty.db"
+        # Create empty DB (just schema, no rows)
+        backend = SQLiteBackend(db_path)
+        backend.close()
+        assert SQLiteBackend._db_has_data(db_path) is False
+
+    def test_db_has_data_returns_true_for_populated(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "populated.db"
+        backend = SQLiteBackend(db_path)
+        backend.store(_make_entry("L-data", "has data"))
+        backend.close()
+        assert SQLiteBackend._db_has_data(db_path) is True
+
+    def test_db_has_data_returns_false_for_garbage(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "garbage.db"
+        db_path.write_bytes(b"\x00" * 4096)
+        assert SQLiteBackend._db_has_data(db_path) is False
