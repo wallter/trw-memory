@@ -32,7 +32,7 @@ def _mat_vec_mul(mat: list[list[float]], vec: list[float]) -> list[float]:
 
 def _vec_dot(a: list[float], b: list[float]) -> float:
     """Dot product of two vectors."""
-    return sum(x * y for x, y in zip(a, b))
+    return sum(x * y for x, y in zip(a, b, strict=True))
 
 
 def _outer_product(a: list[float], b: list[float]) -> list[list[float]]:
@@ -133,7 +133,7 @@ class ContextualBanditSelector:
         # Using uniform random here; callers who need TS should maintain a
         # BanditSelector alongside the ContextualBanditSelector.
         if context_vector is None:
-            selected = random.choice(eligible_ids)
+            selected = random.choice(eligible_ids)  # noqa: S311
             _logger.info(
                 "linucb_no_context_random_fallback",
                 selected=selected,
@@ -176,7 +176,7 @@ class ContextualBanditSelector:
         relative_spread = (max_score - min_score) / ref
 
         if relative_spread < 0.01:
-            selected = random.choice(eligible_ids)
+            selected = random.choice(eligible_ids)  # noqa: S311
             _logger.debug(
                 "contextual_degenerate_scores",
                 spread=round(relative_spread, 6),

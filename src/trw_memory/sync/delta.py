@@ -83,6 +83,6 @@ class DeltaTracker:
                 result = backend.update(eid, last_synced_at=now)
                 if result is not None:
                     count += 1
-            except Exception:
+            except Exception:  # noqa: S110, PERF203
                 pass
         return count

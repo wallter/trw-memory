@@ -32,11 +32,11 @@ except ImportError:
 logger = structlog.get_logger(__name__)
 
 __all__ = [
+    "append_jsonl",
     "json_serializer",
+    "lock_for_rmw",
     "read_yaml",
     "write_yaml",
-    "append_jsonl",
-    "lock_for_rmw",
 ]
 
 # ---------------------------------------------------------------------------
