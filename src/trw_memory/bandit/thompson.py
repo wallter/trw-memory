@@ -155,9 +155,9 @@ class BanditSelector:
         # --- Floor exploration: override top arm with probability ----------
         exploration = False
         selected = top_arm
-        if len(eligible_ids) > 1 and random.random() < self._floor_exploration:
+        if len(eligible_ids) > 1 and random.random() < self._floor_exploration:  # noqa: S311
             non_top = [a for a in eligible_ids if a != top_arm]
-            selected = random.choice(non_top)
+            selected = random.choice(non_top)  # noqa: S311
             exploration = True
             logger.debug(
                 "floor_exploration_triggered",

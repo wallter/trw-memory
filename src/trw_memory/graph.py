@@ -460,7 +460,7 @@ def get_conflicts(
         {
             "source_id": row[0],
             "target_id": row[1],
-            "edge_metadata": row[2] if row[2] else "{}",
+            "edge_metadata": row[2] or "{}",
         }
         for row in rows
     ]
