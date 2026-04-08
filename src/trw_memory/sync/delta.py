@@ -83,6 +83,6 @@ class DeltaTracker:
                 result = backend.update(eid, last_synced_at=now)
                 if result is not None:
                     count += 1
-            except Exception:  # noqa: BLE001 — best-effort marking
+            except Exception:
                 pass
         return count

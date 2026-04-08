@@ -192,7 +192,7 @@ class SQLiteBackend(StorageBackend):
             try:
                 count = conn.execute("SELECT count(*) FROM memories").fetchone()[0]
                 conn.close()
-                return count > 0
+                return bool(count > 0)
             except sqlite3.Error:
                 conn.close()
                 return False
