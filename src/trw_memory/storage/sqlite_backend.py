@@ -87,12 +87,26 @@ class SQLiteBackend(StorageBackend):
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.recovered = False
+        self.integrity_warning = False
         try:
             self._conn = self._open_and_configure(db_path)
         except sqlite3.DatabaseError:
-            logger.exception("db_corrupt_detected", db=str(db_path), action="auto_recover")
-            self._conn = self.recover_db(db_path)
-            self.recovered = True
+            # quick_check failed — but this can be transient (WAL contention,
+            # concurrent MCP server access). Check if DB actually has data
+            # before destroying it with auto-recovery.
+            if self._db_has_data(db_path):
+                logger.warning(
+                    "db_integrity_check_failed_but_has_data",
+                    db=str(db_path),
+                    action="open_anyway",
+                    hint="quick_check failed but DB has rows — likely transient WAL contention, not corruption",
+                )
+                self._conn = self._open_without_integrity_check(db_path)
+                self.integrity_warning = True
+            else:
+                logger.exception("db_corrupt_detected", db=str(db_path), action="auto_recover")
+                self._conn = self.recover_db(db_path)
+                self.recovered = True
 
         ensure_schema(self._conn)
 
@@ -118,9 +132,14 @@ class SQLiteBackend(StorageBackend):
     def _open_and_configure(db_path: Path) -> sqlite3.Connection:
         """Open a connection with WAL mode and run a quick integrity check.
 
+        Retries once on quick_check failure to handle transient WAL contention
+        (e.g., MCP server mid-checkpoint while trw-maintain opens the DB).
+
         Raises:
-            sqlite3.DatabaseError: If the database is corrupt.
+            sqlite3.DatabaseError: If the database fails integrity check twice.
         """
+        import time
+
         conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30.0, cached_statements=0)
         conn.row_factory = sqlite3.Row
         # busy_timeout prevents SQLITE_BUSY under multi-process contention.
@@ -133,13 +152,52 @@ class SQLiteBackend(StorageBackend):
         if sync_result and sync_result[0] not in ("1", 1):
             logger.warning("synchronous_normal_not_set", got=sync_result[0] if sync_result else None)
 
-        # Quick integrity probe — catches corruption before schema work.
-        rows = conn.execute("PRAGMA quick_check").fetchall()
-        if not (len(rows) == 1 and rows[0][0] == "ok"):
-            conn.close()
-            raise sqlite3.DatabaseError("database disk image is malformed (quick_check)")
+        # Quick integrity probe with retry — transient WAL contention can
+        # cause false positives on the first attempt.
+        for attempt in range(2):
+            rows = conn.execute("PRAGMA quick_check").fetchall()
+            if len(rows) == 1 and rows[0][0] == "ok":
+                return conn
+            if attempt == 0:
+                logger.warning(
+                    "integrity_check_retry",
+                    db=str(db_path),
+                    detail=rows[0][0] if rows else "empty",
+                )
+                time.sleep(1.0)  # Allow WAL checkpoint to complete
 
+        conn.close()
+        raise sqlite3.DatabaseError("database disk image is malformed (quick_check failed twice)")
+
+    @staticmethod
+    def _open_without_integrity_check(db_path: Path) -> sqlite3.Connection:
+        """Open a connection skipping integrity check — used when DB has data
+        but quick_check fails (likely transient WAL contention)."""
+        conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30.0, cached_statements=0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 30000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         return conn
+
+    @staticmethod
+    def _db_has_data(db_path: Path) -> bool:
+        """Check if a database file has any rows, without integrity check.
+
+        Used to prevent auto-recovery from destroying a DB that has data
+        but fails quick_check due to transient WAL contention.
+        """
+        try:
+            conn = sqlite3.connect(str(db_path), timeout=5.0)
+            try:
+                count = conn.execute("SELECT count(*) FROM memories").fetchone()[0]
+                conn.close()
+                return count > 0
+            except sqlite3.Error:
+                conn.close()
+                return False
+        except sqlite3.Error:
+            return False
 
     def _run_integrity_check(self) -> bool:
         """Run PRAGMA quick_check and return True if the database is healthy."""
