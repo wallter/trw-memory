@@ -35,6 +35,7 @@ def memory_recall_impl(
     include_namespaces: list[str] | None = None,
     graph_depth: int = 0,
     conn: sqlite3.Connection | None = None,
+    token_budget: int | None = None,
 ) -> dict[str, object]:
     """Core implementation of memory_recall (callable without MCP).
 
@@ -50,12 +51,23 @@ def memory_recall_impl(
             depth and include related entries in the response.
         conn: SQLite connection for graph queries. If None and graph_depth > 0,
             the backend's internal connection is used (SQLiteBackend only).
+        token_budget: If provided, truncate results to fit within this token
+            budget.  Must be a positive integer.  ``None`` disables budget
+            fitting (all results returned up to *limit*).
 
     Returns:
         {"memories": list[dict], "total_matches": int, "query": str,
+         "tokens_used": int, "tokens_budget": int | None,
+         "tokens_truncated": bool,
          "related": list[dict] (when graph_depth > 0)}
         or {"error": str, "status": "invalid"} on validation failure.
+
+    Raises:
+        ValueError: If *token_budget* is not ``None`` and <= 0.
     """
+    if token_budget is not None and token_budget <= 0:
+        raise ValueError(f"token_budget must be positive, got {token_budget}")
+
     try:
         validate_namespace(namespace)
     except ConfigError as exc:
@@ -111,18 +123,41 @@ def memory_recall_impl(
 
     result_dicts = ranked_dicts[:limit]
 
+    # Apply token budget fitting
+    from trw_memory.retrieval.token_budget import (
+        apply_token_budget,
+        estimate_entry_tokens,
+    )
+
+    tokens_used = 0
+    tokens_truncated = False
+
+    if token_budget is not None and result_dicts:
+        result_dicts, tokens_used, tokens_truncated = apply_token_budget(
+            result_dicts, token_budget
+        )
+    else:
+        # Compute informational tokens_used even without a budget
+        tokens_used = sum(estimate_entry_tokens(d) for d in result_dicts)
+
     logger.debug(
         "memory_recall",
         query=query[:80] if query else "(wildcard)",
         namespace=namespace,
         total_candidates=len(all_entries),
         returned=len(result_dicts),
+        tokens_used=tokens_used,
+        tokens_budget=token_budget,
+        tokens_truncated=tokens_truncated,
     )
 
     response: dict[str, object] = {
         "memories": result_dicts,
         "total_matches": len(result_dicts),
         "query": query,
+        "tokens_used": tokens_used,
+        "tokens_budget": token_budget,
+        "tokens_truncated": tokens_truncated,
     }
 
     # Graph traversal for related entries
@@ -189,6 +224,7 @@ def register_recall_tool(mcp: McpServer) -> None:
         tags: list[str] | None = None,
         include_namespaces: list[str] | None = None,
         graph_depth: int = 0,
+        token_budget: int | None = None,
     ) -> dict[str, object]:
         """Search memory entries using hybrid BM25 + vector retrieval.
 
@@ -201,9 +237,14 @@ def register_recall_tool(mcp: McpServer) -> None:
             include_namespaces: Additional namespaces to search alongside primary.
             graph_depth: If > 0, include graph-related entries via BFS traversal
                 from the result set (max depth 3).
+            token_budget: If provided, truncate results to fit within this
+                token budget. Must be a positive integer. Returns metadata
+                about token usage in the response.
 
         Returns:
             {"memories": [...], "total_matches": int, "query": str,
+             "tokens_used": int, "tokens_budget": int | None,
+             "tokens_truncated": bool,
              "related": [...] (when graph_depth > 0)}
         """
         cfg = MemoryConfig()
@@ -218,6 +259,7 @@ def register_recall_tool(mcp: McpServer) -> None:
                 tags=tags,
                 include_namespaces=include_namespaces,
                 graph_depth=graph_depth,
+                token_budget=token_budget,
             )
 
     mcp.tool()(memory_recall)

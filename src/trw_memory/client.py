@@ -322,6 +322,8 @@ class MemoryClient:
         limit: int = 10,
         tags: list[str] | None = None,
         min_score: float = 0.0,
+        *,
+        token_budget: int | None = None,
     ) -> list[MemoryResultDict]:
         """Search memories by keyword query using hybrid retrieval.
 
@@ -338,22 +340,29 @@ class MemoryClient:
            to the original LIKE-based ``backend.search()`` with a blended
            term-frequency + importance score.
 
-        Both paths apply tag filtering, min_score thresholds, and limit capping.
+        Both paths apply tag filtering, min_score thresholds, limit capping,
+        and optional token budget fitting.
 
         Args:
             query: Free-text search term.
             limit: Maximum number of results (must be >= 1).
             tags: If provided, results must contain all listed tags.
             min_score: Minimum score threshold for results.
+            token_budget: If provided, truncate results to fit within this
+                token budget.  Must be a positive integer.  When the budget
+                is too small for all results, at least one result is always
+                returned (minimum-one guarantee).
 
         Returns:
             List of result dicts ordered by score descending.
 
         Raises:
-            ValueError: If *limit* < 1.
+            ValueError: If *limit* < 1 or *token_budget* <= 0.
         """
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
+        if token_budget is not None and token_budget <= 0:
+            raise ValueError(f"token_budget must be positive, got {token_budget}")
 
         # --- Tier 1: Hybrid retrieval pipeline (BM25 + dense + RRF) ----------
         hybrid_results = await self._try_hybrid_recall(query, limit, tags)
@@ -361,6 +370,7 @@ class MemoryClient:
             # Apply min_score filter and limit
             filtered = [r for r in hybrid_results if r["score"] >= min_score]
             final = filtered[:limit]
+            final = self._apply_budget(final, token_budget)
             logger.debug(
                 "memory_recalled",
                 op="recall",
@@ -373,7 +383,36 @@ class MemoryClient:
             return final
 
         # --- Tier 2: Fallback LIKE + TF scoring ------------------------------
-        return await self._fallback_recall(query, limit, tags, min_score)
+        results = await self._fallback_recall(query, limit, tags, min_score)
+        return self._apply_budget(results, token_budget)
+
+    @staticmethod
+    def _apply_budget(
+        results: list[MemoryResultDict],
+        token_budget: int | None,
+    ) -> list[MemoryResultDict]:
+        """Apply token budget filtering to recall results.
+
+        When *token_budget* is ``None``, returns *results* unchanged.
+
+        Args:
+            results: Ordered list of result dicts.
+            token_budget: Maximum token budget, or ``None`` to skip.
+
+        Returns:
+            Filtered list of results that fit within the budget.
+        """
+        if token_budget is None or not results:
+            return results
+
+        from trw_memory.retrieval.token_budget import apply_token_budget
+
+        # MemoryResultDict is a TypedDict — cast to dict[str, object] for the
+        # budget function, then cast back.  The underlying dicts are the same
+        # objects so no copy overhead.
+        raw: list[dict[str, object]] = list(results)  # type: ignore[arg-type]
+        filtered, _used, _truncated = apply_token_budget(raw, token_budget)
+        return filtered  # type: ignore[return-value]
 
     async def _try_hybrid_recall(
         self,
