@@ -7,6 +7,11 @@ Public API:
 - :func:`~trw_memory.retrieval.dense.cosine_similarity` — vector similarity helper
 - :func:`~trw_memory.retrieval.fusion.rrf_fuse` — Reciprocal Rank Fusion
 - :func:`~trw_memory.retrieval.pipeline.hybrid_search` — combined pipeline
+- :func:`~trw_memory.retrieval.token_budget.estimate_tokens` — word-count token estimate
+- :func:`~trw_memory.retrieval.token_budget.estimate_entry_tokens` — entry-level token cost
+- :func:`~trw_memory.retrieval.token_budget.apply_token_budget` — budget-fit a result list
+- :data:`~trw_memory.retrieval.token_budget.TOKEN_MULTIPLIER` — tokens-per-word ratio
+- :data:`~trw_memory.retrieval.token_budget.METADATA_OVERHEAD` — fixed per-entry overhead
 """
 
 from __future__ import annotations
@@ -15,11 +20,23 @@ from trw_memory.retrieval.bm25 import bm25_search
 from trw_memory.retrieval.dense import cosine_similarity, dense_search
 from trw_memory.retrieval.fusion import rrf_fuse
 from trw_memory.retrieval.pipeline import hybrid_search
+from trw_memory.retrieval.token_budget import (
+    METADATA_OVERHEAD as METADATA_OVERHEAD,
+    TOKEN_MULTIPLIER as TOKEN_MULTIPLIER,
+    apply_token_budget as apply_token_budget,
+    estimate_entry_tokens as estimate_entry_tokens,
+    estimate_tokens as estimate_tokens,
+)
 
 __all__ = [
+    "METADATA_OVERHEAD",
+    "TOKEN_MULTIPLIER",
+    "apply_token_budget",
     "bm25_search",
     "cosine_similarity",
     "dense_search",
+    "estimate_entry_tokens",
+    "estimate_tokens",
     "hybrid_search",
     "rrf_fuse",
 ]
