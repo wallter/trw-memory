@@ -117,18 +117,17 @@ def memory_recall_impl(
     query_tokens = query.lower().split() if query else []
     ranked_dicts = rank_by_utility(entry_dicts, query_tokens, lambda_weight=0.4)
 
-    # Apply min_score filter and limit
+    # Apply min_score filter
     if min_score > 0.0:
         ranked_dicts = [d for d in ranked_dicts if entry_utility(d) >= min_score]
 
-    result_dicts = ranked_dicts[:limit]
-
-    # Apply token budget fitting
+    # Token budget fitting BEFORE limit cap (PRD-CORE-123 FR03)
     from trw_memory.retrieval.token_budget import (
         apply_token_budget,
         estimate_entry_tokens,
     )
 
+    result_dicts = ranked_dicts
     tokens_used = 0
     tokens_truncated = False
 
@@ -137,8 +136,10 @@ def memory_recall_impl(
             result_dicts, token_budget
         )
     else:
-        # Compute informational tokens_used even without a budget
         tokens_used = sum(estimate_entry_tokens(d) for d in result_dicts)
+
+    # Apply limit cap AFTER token budget
+    result_dicts = result_dicts[:limit]
 
     logger.debug(
         "memory_recall",
