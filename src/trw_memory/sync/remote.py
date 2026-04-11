@@ -7,7 +7,8 @@ they never raise exceptions to the caller.
 
 from __future__ import annotations
 
-from typing import TypedDict
+import json
+from typing import TypedDict, cast
 
 import httpx
 import structlog
@@ -15,6 +16,7 @@ import structlog
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.pii import anonymize_installation_id, redact_paths, strip_pii
+from trw_memory.sync.retry_queue import RetryQueue
 
 logger = structlog.get_logger(__name__)
 
@@ -95,6 +97,17 @@ def publish_memory(
     if embedding:
         payload["embedding"] = embedding
 
+    return _publish_payload(cast(dict[str, object], payload), cfg, entry_id=entry.id)
+
+
+def _publish_payload(
+    payload: dict[str, object],
+    cfg: MemoryConfig,
+    *,
+    entry_id: str = "",
+) -> bool:
+    """Publish a prepared payload to the remote platform."""
+
     headers: dict[str, str] = {}
     if cfg.platform_api_key:
         headers["Authorization"] = f"Bearer {cfg.platform_api_key}"
@@ -108,17 +121,29 @@ def publish_memory(
                 headers=headers,
             )
             if 200 <= resp.status_code < 300:
-                logger.debug("memory_published", entry_id=entry.id)
+                logger.debug("memory_published", entry_id=entry_id)
                 return True
             logger.warning(
                 "memory_publish_failed",
-                entry_id=entry.id,
+                entry_id=entry_id,
                 status=resp.status_code,
             )
             return False
     except (httpx.HTTPError, OSError, ConnectionError):
-        logger.debug("memory_publish_error", entry_id=entry.id, exc_info=True)
+        logger.debug("memory_publish_error", entry_id=entry_id, exc_info=True)
         return False
+
+
+def drain_retry_queue(queue: RetryQueue, cfg: MemoryConfig) -> dict[str, int]:
+    """Drain queued publish payloads when sync is enabled and reachable."""
+    if cfg.local_only or not cfg.sync_enabled or not cfg.platform_url:
+        return {"drained": 0, "failed": 0, "skipped": queue.depth()}
+    return queue.drain(lambda payload: _publish_payload(payload, cfg))
+
+
+def clear_retry_queue(queue: RetryQueue) -> None:
+    """Clear all queued publish payloads."""
+    queue.clear()
 
 
 def fetch_shared_memories(
@@ -167,8 +192,14 @@ def fetch_shared_memories(
                 return []
 
             raw = resp.json()
-            results: list[dict[str, object]] = raw if isinstance(raw, list) else raw.get("results", [])
-    except (httpx.HTTPError, OSError, ConnectionError):
+            if isinstance(raw, list):
+                results = [item for item in raw if isinstance(item, dict)]
+            elif isinstance(raw, dict):
+                wrapped = raw.get("results", [])
+                results = [item for item in wrapped if isinstance(item, dict)] if isinstance(wrapped, list) else []
+            else:
+                return []
+    except (httpx.HTTPError, OSError, ConnectionError, json.JSONDecodeError, ValueError):
         logger.debug("memory_fetch_error", exc_info=True)
         return []
 

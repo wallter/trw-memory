@@ -36,7 +36,12 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.storage.interface import StorageBackend
-from trw_memory.sync.remote import _anonymize_entry, fetch_shared_memories, publish_memory
+from trw_memory.sync.remote import (
+    _anonymize_entry,
+    drain_retry_queue,
+    fetch_shared_memories,
+    publish_memory,
+)
 from trw_memory.sync.retry_queue import RetryQueue
 
 logger = structlog.get_logger(__name__)
@@ -204,6 +209,7 @@ class MemoryClient:
         self._config = MemoryConfig()
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._retry_queue = RetryQueue(Path(self._config.storage_path) / "sync_queue.jsonl")
+        self._retry_drain_started = False
 
         if mode == "mcp":
             raise NotImplementedError("MCP mode is not yet implemented")
@@ -972,6 +978,9 @@ class MemoryClient:
 
     async def __aenter__(self) -> MemoryClient:
         """Enter the async context manager."""
+        if self._should_start_retry_drain():
+            self._retry_drain_started = True
+            self._schedule_background_task(self._drain_retry_queue())
         return self
 
     async def __aexit__(
@@ -991,3 +1000,26 @@ class MemoryClient:
             self._backend.close()
             self._backend = None
             logger.debug("client_closed", op="close", namespace=self._namespace)
+
+    def _should_start_retry_drain(self) -> bool:
+        """Return whether entering a client session should drain queued publishes."""
+        return (
+            not self._retry_drain_started
+            and not self._config.local_only
+            and self._config.sync_enabled
+            and bool(self._config.platform_url)
+            and self._retry_queue.depth() > 0
+        )
+
+    async def _drain_retry_queue(self) -> None:
+        """Best-effort background drain for queued publish payloads."""
+        result = await asyncio.to_thread(drain_retry_queue, self._retry_queue, self._config)
+        logger.debug(
+            "memory_sync_queue_drained",
+            op="session_start",
+            outcome="success",
+            namespace=self._namespace,
+            drained=result["drained"],
+            failed=result["failed"],
+            skipped=result["skipped"],
+        )
