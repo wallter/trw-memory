@@ -415,18 +415,21 @@ class TestSearchCommand:
 
 class TestConsolidateCommand:
     @patch(f"{_CLI}.consolidate_cycle")
+    @patch(f"{_CLI}.get_local_embedder")
     @patch(f"{_CLI}._create_local_backend")
     @patch(f"{_CLI}.MemoryConfig")
     def test_consolidate_success(
         self,
         mock_config_cls: MagicMock,
         mock_backend_fn: MagicMock,
+        mock_get_local_embedder: MagicMock,
         mock_cycle: MagicMock,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         mock_config_cls.return_value = MagicMock()
         mock_backend = MagicMock()
         mock_backend_fn.return_value = mock_backend
+        mock_get_local_embedder.return_value = MagicMock()
         mock_cycle.return_value = {"status": "no_clusters", "consolidated_count": 0}
 
         ret = main(["consolidate"])
@@ -436,22 +439,52 @@ class TestConsolidateCommand:
         mock_backend.close.assert_called_once()
 
     @patch(f"{_CLI}.consolidate_cycle")
+    @patch(f"{_CLI}.get_local_embedder")
     @patch(f"{_CLI}._create_local_backend")
     @patch(f"{_CLI}.MemoryConfig")
     def test_consolidate_dry_run(
         self,
         mock_config_cls: MagicMock,
         mock_backend_fn: MagicMock,
+        mock_get_local_embedder: MagicMock,
         mock_cycle: MagicMock,
     ) -> None:
         mock_config_cls.return_value = MagicMock()
         mock_backend_fn.return_value = MagicMock()
+        mock_get_local_embedder.return_value = MagicMock()
         mock_cycle.return_value = {"dry_run": True, "clusters": [], "consolidated_count": 0}
         ret = main(["consolidate", "--dry-run"])
         assert ret == 0
         call_kwargs = mock_cycle.call_args
         assert call_kwargs is not None
         assert call_kwargs.kwargs.get("dry_run")
+
+    @patch(f"{_CLI}.consolidate_cycle")
+    @patch(f"{_CLI}.get_local_embedder")
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
+    def test_consolidate_passes_resolved_embedder(
+        self,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
+        mock_get_local_embedder: MagicMock,
+        mock_cycle: MagicMock,
+    ) -> None:
+        fake_config = MagicMock()
+        fake_config.embedding_model = "test-model"
+        fake_config.embedding_dim = 123
+        mock_config_cls.return_value = fake_config
+        mock_backend_fn.return_value = MagicMock()
+        fake_embedder = MagicMock()
+        mock_get_local_embedder.return_value = fake_embedder
+        mock_cycle.return_value = {"status": "no_clusters", "consolidated_count": 0}
+
+        ret = main(["consolidate"])
+
+        assert ret == 0
+        mock_get_local_embedder.assert_called_once_with(model_name="test-model", dim=123)
+        kwargs = mock_cycle.call_args.kwargs
+        assert kwargs["embedder"] is fake_embedder
 
     @patch(f"{_CLI}.MemoryConfig", side_effect=RuntimeError("config fail"))
     def test_consolidate_error(

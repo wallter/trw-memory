@@ -29,6 +29,7 @@ from trw_memory.cli_formatters import (
 )
 from trw_memory.cli_parser import build_parser
 from trw_memory.client import MemoryClient, _create_local_backend
+from trw_memory.embeddings import get_local_embedder
 from trw_memory.lifecycle.consolidation import consolidate_cycle
 from trw_memory.models.config import MemoryConfig
 
@@ -133,9 +134,10 @@ async def _handle_consolidate(args: argparse.Namespace) -> int:
     config = MemoryConfig()
     backend = _create_local_backend(config, args.namespace)
     try:
+        embedder = get_local_embedder(model_name=config.embedding_model, dim=config.embedding_dim)
         result = consolidate_cycle(
             storage=backend,
-            embedder=None,
+            embedder=embedder,
             dry_run=args.dry_run,
             namespace=args.namespace,
             config=config,
