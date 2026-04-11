@@ -104,10 +104,8 @@ def register_search_tool(mcp: McpServer) -> None:
     Args:
         mcp: FastMCP server instance (imported lazily to keep fastmcp optional).
     """
-    from pathlib import Path as _Path
-
+    from trw_memory.integrations._backend import create_backend_from_config
     from trw_memory.models.config import MemoryConfig
-    from trw_memory.storage.sqlite_backend import SQLiteBackend
 
     async def memory_search(
         namespace: str = "project:default",
@@ -131,8 +129,7 @@ def register_search_tool(mcp: McpServer) -> None:
             {"entries": [...], "total": int, "offset": int, "limit": int}
         """
         cfg = MemoryConfig()
-        db_path = _Path(cfg.storage_path) / cfg.sqlite_db_name
-        with SQLiteBackend(db_path, dim=cfg.embedding_dim) as backend:
+        with create_backend_from_config(cfg, namespace) as backend:
             return memory_search_impl(
                 namespace,
                 backend=backend,

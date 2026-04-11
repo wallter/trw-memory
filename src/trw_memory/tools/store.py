@@ -104,10 +104,8 @@ def register_store_tool(mcp: McpServer) -> None:
     Args:
         mcp: FastMCP server instance (imported lazily to keep fastmcp optional).
     """
-    from pathlib import Path
-
+    from trw_memory.integrations._backend import create_backend_from_config
     from trw_memory.models.config import MemoryConfig
-    from trw_memory.storage.sqlite_backend import SQLiteBackend
 
     @mcp.tool()
     async def memory_store(
@@ -132,8 +130,7 @@ def register_store_tool(mcp: McpServer) -> None:
             {"memory_id": str, "status": "stored", "namespace": str}
         """
         cfg = MemoryConfig()
-        db_path = Path(cfg.storage_path) / cfg.sqlite_db_name
-        with SQLiteBackend(db_path, dim=cfg.embedding_dim) as backend:
+        with create_backend_from_config(cfg, namespace) as backend:
             return memory_store_impl(
                 content,
                 namespace,

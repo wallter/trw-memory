@@ -22,6 +22,7 @@ __all__ = [
     "DEFAULT_LIST_LIMIT",
     "ROLE_TAG_PREFIX",
     "create_backend",
+    "create_backend_from_config",
     "make_entry",
     "resolve_backend",
 ]
@@ -84,6 +85,14 @@ def create_backend(
     else:
         config = MemoryConfig()
 
+    return create_backend_from_config(config, namespace)
+
+
+def create_backend_from_config(
+    config: MemoryConfig,
+    namespace: str,
+) -> StorageBackend:
+    """Create a sync :class:`StorageBackend` from an existing config object."""
     base = Path(config.storage_path)
     ns_dir = namespace.replace(":", "_")
 

@@ -104,9 +104,7 @@ def register_status_tool(mcp: McpServer) -> None:
     Args:
         mcp: FastMCP server instance (imported lazily to keep fastmcp optional).
     """
-    from pathlib import Path
-
-    from trw_memory.storage.sqlite_backend import SQLiteBackend
+    from trw_memory.integrations._backend import create_backend_from_config
 
     @mcp.tool()
     async def memory_status(
@@ -122,8 +120,8 @@ def register_status_tool(mcp: McpServer) -> None:
             {"total_entries": int, "namespaces": dict, "config": dict}
         """
         cfg = MemoryConfig()
-        db_path = Path(cfg.storage_path) / cfg.sqlite_db_name
-        with SQLiteBackend(db_path, dim=cfg.embedding_dim) as backend:
+        backend_namespace = namespace or "default"
+        with create_backend_from_config(cfg, backend_namespace) as backend:
             return memory_status_impl(
                 namespace,
                 backend=backend,
