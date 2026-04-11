@@ -75,6 +75,7 @@ def _make_config(
     platform_url: str = "https://api.example.com",
     platform_api_key: str = "test-key-123",
     sync_min_importance: float = 0.7,
+    local_only: bool = False,
 ) -> MemoryConfig:
     """Create a MemoryConfig for testing."""
     return MemoryConfig(
@@ -82,6 +83,7 @@ def _make_config(
         platform_url=platform_url,
         platform_api_key=platform_api_key,
         sync_min_importance=sync_min_importance,
+        local_only=local_only,
     )
 
 
@@ -480,6 +482,12 @@ class TestPublishMemory:
         entry = _make_entry(importance=0.9)
         assert publish_memory(entry, cfg) is False
 
+    def test_returns_false_when_local_only_enabled(self) -> None:
+        """No HTTP call when local_only=True."""
+        cfg = _make_config(local_only=True)
+        entry = _make_entry(importance=0.9)
+        assert publish_memory(entry, cfg) is False
+
     def test_returns_false_when_platform_url_empty(self) -> None:
         """No HTTP call when platform_url is empty string."""
         cfg = _make_config(platform_url="")
@@ -575,6 +583,11 @@ class TestFetchSharedMemories:
         cfg = _make_config(sync_enabled=False)
         assert fetch_shared_memories("query", cfg) == []
 
+    def test_returns_empty_when_local_only_enabled(self) -> None:
+        """Returns [] when local_only=True."""
+        cfg = _make_config(local_only=True)
+        assert fetch_shared_memories("query", cfg) == []
+
     def test_returns_empty_when_platform_url_empty(self) -> None:
         """Returns [] when platform_url is empty."""
         cfg = _make_config(platform_url="")
@@ -603,8 +616,8 @@ class TestFetchSharedMemories:
         cfg = _make_config()
         results = fetch_shared_memories("query", cfg)
         assert len(results) == 2
-        assert results[0]["content"].startswith("[shared] ")
-        assert results[1]["content"].startswith("[shared] ")
+        assert str(results[0]["content"]).startswith("[shared] ")
+        assert str(results[1]["content"]).startswith("[shared] ")
         assert results[0]["source"] == "shared"
 
     @patch("trw_memory.sync.remote.httpx.Client")
@@ -623,7 +636,7 @@ class TestFetchSharedMemories:
         local = [_make_entry(content="Existing local knowledge")]
         results = fetch_shared_memories("query", cfg, local_entries=local)
         assert len(results) == 1
-        assert "Use caching" in results[0]["content"]
+        assert "Use caching" in str(results[0]["content"])
 
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_respects_limit_parameter(self, mock_client_cls: MagicMock) -> None:
@@ -824,6 +837,13 @@ class TestSSESubscriber:
     def test_start_does_nothing_when_sync_disabled(self) -> None:
         """No thread started when sync_enabled=False."""
         cfg = _make_config(sync_enabled=False)
+        sub = SSESubscriber(cfg, on_event=lambda data: None)
+        sub.start()
+        assert sub._thread is None
+
+    def test_start_does_nothing_when_local_only_enabled(self) -> None:
+        """No thread started when local_only=True."""
+        cfg = _make_config(local_only=True)
         sub = SSESubscriber(cfg, on_event=lambda data: None)
         sub.start()
         assert sub._thread is None

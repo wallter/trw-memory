@@ -41,6 +41,10 @@ class SSESubscriber:
 
     def start(self) -> None:
         """Start the SSE subscription in a daemon thread."""
+        if self._cfg.local_only:
+            logger.debug("sse_subscriber_skipped_local_only")
+            return
+
         if not self._cfg.sync_enabled or not self._cfg.platform_url:
             return
 
