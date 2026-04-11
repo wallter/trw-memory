@@ -623,6 +623,10 @@ class SQLiteBackend(StorageBackend):
                 path=str(self._db_path),
             ) from exc
 
+    def count_with_assertions(self) -> list[MemoryEntry]:
+        """Backward-compatible alias for PRD-CORE-086 FR07 traceability."""
+        return self.entries_with_assertions()
+
     def list_entries(
         self,
         *,
