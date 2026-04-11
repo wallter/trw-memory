@@ -801,3 +801,45 @@ class SQLiteBackend(StorageBackend):
         except sqlite3.Error:
             logger.debug("vector_search_error", exc_info=True)
             return []
+
+    def get_stored_embeddings(self, entry_ids: list[str]) -> dict[str, list[float]]:
+        """Load stored vectors for the requested entry IDs.
+
+        Returns an empty dict when sqlite-vec is unavailable or when none of the
+        requested IDs currently have persisted vectors.
+        """
+        if not self._vec_available or not entry_ids:
+            return {}
+
+        placeholders = ", ".join(["?"] * len(entry_ids))
+        sql = f"""  -- noqa: S608 - placeholder count is derived from entry_ids length only
+            SELECT vi.entry_id, vm.embedding
+            FROM vec_memories vm
+            JOIN vec_index vi ON vm.rowid = vi.rowid
+            WHERE vi.entry_id IN ({placeholders})
+        """
+        try:
+            with self._lock:
+                rows = self._conn.execute(sql, entry_ids).fetchall()
+        except sqlite3.Error:
+            logger.debug("vector_load_error", exc_info=True)
+            return {}
+
+        embeddings: dict[str, list[float]] = {}
+        for row in rows:
+            raw = row[1]
+            if raw is None:
+                continue
+            # sqlite-vec stores float arrays as packed blobs; unpack them here so
+            # the retrieval layer receives the same list[float] shape as embed().
+            blob = bytes(raw)
+            if len(blob) % 4 != 0:
+                logger.debug(
+                    "vector_load_skipped_invalid_blob",
+                    entry_id=str(row[0]),
+                    blob_len=len(blob),
+                )
+                continue
+            dim = len(blob) // 4
+            embeddings[str(row[0])] = list(struct.unpack(f"{dim}f", blob))
+        return embeddings

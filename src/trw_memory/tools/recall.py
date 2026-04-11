@@ -13,8 +13,10 @@ import sqlite3
 
 import structlog
 
+from trw_memory.embeddings import get_local_embedder
 from trw_memory.exceptions import ConfigError
 from trw_memory.lifecycle.scoring import entry_utility, rank_by_utility
+from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.retrieval import hybrid_search
@@ -36,6 +38,7 @@ def memory_recall_impl(
     graph_depth: int = 0,
     conn: sqlite3.Connection | None = None,
     token_budget: int | None = None,
+    config: MemoryConfig | None = None,
 ) -> dict[str, object]:
     """Core implementation of memory_recall (callable without MCP).
 
@@ -101,9 +104,16 @@ def memory_recall_impl(
 
     # Retrieve via hybrid search (gracefully degrades to BM25-only or empty)
     if query and all_entries:
+        cfg = config or MemoryConfig()
+        embedder = get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim)
+        # dense_search() needs the stored vector map, not just the entry IDs, so
+        # tool recall must hydrate the embeddings before calling hybrid_search().
+        stored_embeddings = backend.get_stored_embeddings([entry.id for entry in all_entries])
         ranked = hybrid_search(
             query=query,
             entries=all_entries,
+            embedder=embedder,
+            stored_embeddings=stored_embeddings or None,
             top_k=limit * 4,  # over-fetch before score filtering
         )
     else:
@@ -213,7 +223,6 @@ def register_recall_tool(mcp: McpServer) -> None:
         mcp: FastMCP server instance (imported lazily to keep fastmcp optional).
     """
     from trw_memory.integrations._backend import create_backend_from_config
-    from trw_memory.models.config import MemoryConfig
 
     async def memory_recall(
         query: str,
@@ -258,6 +267,7 @@ def register_recall_tool(mcp: McpServer) -> None:
                 include_namespaces=include_namespaces,
                 graph_depth=graph_depth,
                 token_budget=token_budget,
+                config=cfg,
             )
 
     mcp.tool()(memory_recall)
