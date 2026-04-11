@@ -9,6 +9,7 @@ from __future__ import annotations
 import structlog
 
 from trw_memory.exceptions import ConfigError
+from trw_memory.integrations._backend import discover_namespace_backends
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.validation import validate_namespace
@@ -48,17 +49,22 @@ def memory_status_impl(
         except ConfigError as exc:
             return {"error": str(exc), "status": "invalid"}
 
-    try:
-        total_entries = backend.count(namespace=namespace)
-    except Exception as exc:  # broad catch: tool error boundary
-        logger.exception("memory_status_count_failed", error=str(exc))
-        return {"error": f"storage error: {exc}", "status": "error"}
-
     # Build namespace breakdown
-    namespaces: dict[str, object] = {}
+    namespaces: dict[str, int] = {}
     if namespace is not None:
+        try:
+            total_entries = backend.count(namespace=namespace)
+        except Exception as exc:  # broad catch: tool error boundary
+            logger.exception("memory_status_count_failed", error=str(exc))
+            return {"error": f"storage error: {exc}", "status": "error"}
         namespaces[namespace] = total_entries
-    else:
+    elif config is None:
+        try:
+            total_entries = backend.count(namespace=None)
+        except Exception as exc:  # broad catch: tool error boundary
+            logger.exception("memory_status_count_failed", error=str(exc))
+            return {"error": f"storage error: {exc}", "status": "error"}
+
         # Try to count a few common namespaces
         for ns in _COMMON_NAMESPACES:
             try:
@@ -76,6 +82,29 @@ def memory_status_impl(
             namespaces["__active__"] = len(active_entries)
         except Exception:  # broad catch: best-effort active count
             logger.debug("memory_status_active_count_failed", exc_info=True)
+    else:
+        try:
+            total_entries = 0
+            active_entry_count = 0
+            with discover_namespace_backends(cfg) as stores:
+                for store_namespaces, store_backend in stores:
+                    for store_namespace in store_namespaces:
+                        ns_count = store_backend.count(namespace=store_namespace)
+                        total_entries += ns_count
+                        existing = namespaces.get(store_namespace, 0)
+                        namespaces[store_namespace] = int(existing) + ns_count
+
+                    active_entry_count += len(
+                        store_backend.list_entries(
+                            status=MemoryStatus.ACTIVE,
+                            limit=10_000,
+                        )
+                    )
+        except Exception as exc:  # broad catch: tool error boundary
+            logger.exception("memory_status_count_failed", error=str(exc))
+            return {"error": f"storage error: {exc}", "status": "error"}
+
+        namespaces["__active__"] = active_entry_count
 
     config_summary: dict[str, object] = {
         "storage_backend": cfg.storage_backend,

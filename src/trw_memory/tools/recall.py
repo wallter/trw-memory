@@ -10,6 +10,8 @@ and they are appended under a "related" key in the response.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
+from contextlib import ExitStack
 
 import structlog
 
@@ -31,6 +33,7 @@ def memory_recall_impl(
     namespace: str,
     *,
     backend: StorageBackend,
+    namespace_backend_factory: Callable[[str], StorageBackend] | None = None,
     limit: int = 25,
     min_score: float = 0.0,
     tags: list[str] | None = None,
@@ -46,6 +49,8 @@ def memory_recall_impl(
         query: Free-text search query. Empty string returns all active entries.
         namespace: Primary namespace to search (e.g., "project:default").
         backend: Storage backend instance.
+        namespace_backend_factory: Optional factory for opening additional
+            namespace-scoped backends when include_namespaces is provided.
         limit: Maximum number of results to return.
         min_score: Minimum utility score threshold (0.0 = no filter).
         tags: If provided, only entries containing ALL of these tags are returned.
@@ -87,15 +92,32 @@ def memory_recall_impl(
 
     all_namespaces = [namespace, *extra_ns]
 
-    # Gather active entries across all requested namespaces
+    # Namespace-scoped local backends can only see one store at a time, so
+    # cross-namespace recall must reopen the requested namespaces explicitly.
     all_entries = []
-    for ns in all_namespaces:
-        ns_entries = backend.list_entries(
-            status=MemoryStatus.ACTIVE,
-            namespace=ns,
-            limit=10_000,
-        )
-        all_entries.extend(ns_entries)
+    stored_embeddings: dict[str, list[float]] = {}
+    seen_namespaces: set[str] = set()
+    with ExitStack() as stack:
+        for ns in all_namespaces:
+            if ns in seen_namespaces:
+                continue
+            seen_namespaces.add(ns)
+
+            ns_backend = backend
+            if ns != namespace and namespace_backend_factory is not None:
+                ns_backend = stack.enter_context(namespace_backend_factory(ns))
+
+            ns_entries = ns_backend.list_entries(
+                status=MemoryStatus.ACTIVE,
+                namespace=ns,
+                limit=10_000,
+            )
+            all_entries.extend(ns_entries)
+
+            if query and ns_entries:
+                stored_embeddings.update(
+                    ns_backend.get_stored_embeddings([entry.id for entry in ns_entries])
+                )
 
     # Apply tag filter
     if tags:
@@ -108,7 +130,6 @@ def memory_recall_impl(
         embedder = get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim)
         # dense_search() needs the stored vector map, not just the entry IDs, so
         # tool recall must hydrate the embeddings before calling hybrid_search().
-        stored_embeddings = backend.get_stored_embeddings([entry.id for entry in all_entries])
         ranked = hybrid_search(
             query=query,
             entries=all_entries,
@@ -261,6 +282,7 @@ def register_recall_tool(mcp: McpServer) -> None:
                 query,
                 namespace,
                 backend=backend,
+                namespace_backend_factory=lambda extra_ns: create_backend_from_config(cfg, extra_ns),
                 limit=limit,
                 min_score=min_score,
                 tags=tags,
