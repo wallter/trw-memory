@@ -18,11 +18,11 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from trw_memory.client import MemoryClient
+from trw_memory.client import MemoryClient, MemoryResultDict, StoreResultDict
 from trw_memory.exceptions import (
     MemoryNotFoundError,
     ToolAlreadyRegisteredError,
@@ -137,6 +137,52 @@ class TestStore:
         result = await client.store("summary", detail="extended explanation", tags=["a"])
         assert result["status"] == "stored"
 
+    async def test_store_sync_publish_marks_entry_as_published(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
+        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
+        monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
+        client = MemoryClient(namespace="default", mode="local")
+
+        with patch("trw_memory.client.publish_memory", return_value=True):
+            stored = await client.store("publish this entry", importance=0.9)
+            await client.close()
+
+        reopened = MemoryClient(namespace="default", mode="local")
+        entry = reopened._get_backend().get(stored["memory_id"])
+        assert entry is not None
+        assert entry.published_to_platform is True
+        await reopened.close()
+
+    async def test_store_sync_failure_enqueues_retry_payload(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
+        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
+        monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
+        client = MemoryClient(namespace="default", mode="local")
+
+        with (
+            patch("trw_memory.client.publish_memory", return_value=False),
+            patch("trw_memory.client._anonymize_entry", return_value={"summary": "queued"}),
+        ):
+            stored = await client.store("queue this entry", importance=0.9)
+            await client.close()
+
+        queue = client._retry_queue
+        assert queue.depth() == 1
+        lines = (Path(tmp_path) / "storage" / "sync_queue.jsonl").read_text(encoding="utf-8").splitlines()
+        assert stored["memory_id"] in lines[0]
+
 
 # ---------------------------------------------------------------------------
 # recall() tests (FR03)
@@ -188,6 +234,39 @@ class TestRecall:
         results = await client.recall("score entry", min_score=0.5)
         for r in results:
             assert r["score"] >= 0.5
+
+    async def test_recall_include_shared_appends_remote_results(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
+        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
+        monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
+        client = MemoryClient(namespace="default", mode="local")
+        await client.store("local entry", importance=0.8)
+        shared_result = {
+            "memory_id": "remote-1",
+            "content": "[shared] remote entry",
+            "detail": "remote detail",
+            "tags": ["shared"],
+            "importance": 0.6,
+            "score": 0.55,
+            "namespace": "team:shared",
+            "created_at": "",
+            "updated_at": "",
+            "source": "shared",
+        }
+
+        with patch("trw_memory.client.fetch_shared_memories", return_value=[shared_result]) as fetch_mock:
+            results = await client.recall("entry", include_shared=True)
+
+        assert fetch_mock.called
+        assert any(result["source"] == "shared" for result in results)
+        assert results[0]["source"] == "local"
+        await client.close()
 
 
 # ---------------------------------------------------------------------------
@@ -285,14 +364,14 @@ class TestThreadSafety:
     async def test_concurrent_store_and_recall(self, client: MemoryClient) -> None:
         """Concurrent store + recall should not raise or corrupt data."""
 
-        async def store_batch(prefix: str, count: int) -> list[dict[str, str]]:
+        async def store_batch(prefix: str, count: int) -> list[StoreResultDict]:
             results = []
             for i in range(count):
                 r = await client.store(f"{prefix} entry {i}", importance=0.5)
                 results.append(r)
             return results
 
-        async def recall_batch(count: int) -> list[list[dict[str, Any]]]:
+        async def recall_batch(count: int) -> list[list[MemoryResultDict]]:
             results = []
             for _ in range(count):
                 r = await client.recall("entry", limit=50)
@@ -370,7 +449,7 @@ class TestRegisterTools:
             client.register_tools(agent)
 
     def test_incompatible_agent_raises_type_error(self, client: MemoryClient) -> None:
-        agent = object()  # No register_tool or tool
+        agent: Any = object()  # No register_tool or tool
         with pytest.raises(TypeError, match=r"register_tool.*tool"):
             client.register_tools(agent)
 
