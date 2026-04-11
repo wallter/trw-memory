@@ -15,6 +15,7 @@ import structlog
 
 from trw_memory.lifecycle.scoring import entry_utility
 from trw_memory.models.config import MemoryConfig
+from trw_memory.storage.interface import StorageBackend
 
 logger = structlog.get_logger(__name__)
 
@@ -72,6 +73,41 @@ def rank_by_utility(
 
     scored.sort(key=lambda x: x[0], reverse=True)
     return [e for _, e in scored]
+
+
+def record_recall_access(
+    backend: StorageBackend,
+    entry_ids: list[str],
+    *,
+    accessed_at: datetime | None = None,
+) -> None:
+    """Record recall-time access for the entries that were actually returned.
+
+    Utility scoring already depends on ``access_count`` and
+    ``last_accessed_at``. Updating only the final returned IDs keeps recall
+    bookkeeping aligned with user-visible results instead of inflating scores
+    for over-fetched candidates that were never surfaced.
+    """
+    if not entry_ids:
+        return
+
+    touch_time = accessed_at or datetime.now(timezone.utc)
+    seen_ids: set[str] = set()
+    for entry_id in entry_ids:
+        if entry_id in seen_ids:
+            continue
+        seen_ids.add(entry_id)
+
+        entry = backend.get(entry_id)
+        if entry is None:
+            logger.debug("recall_access_missing_entry", memory_id=entry_id)
+            continue
+
+        backend.update(
+            entry_id,
+            access_count=entry.access_count + 1,
+            last_accessed_at=touch_time,
+        )
 
 
 # ---------------------------------------------------------------------------

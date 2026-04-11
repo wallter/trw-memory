@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -97,6 +98,27 @@ async def test_client_recall_passes_stored_embeddings_to_hybrid_search(client: M
     assert hybrid_search_mock.call_args.kwargs["stored_embeddings"] == {"M-001": [0.9, 0.1, 0.0]}
 
 
+async def test_client_recall_updates_access_metadata_only_for_returned_entries(client: MemoryClient) -> None:
+    """Client recall should mark surfaced entries without touching other rows."""
+    stored_target = await client.store("target context", importance=0.9)
+    stored_other = await client.store("unrelated background", importance=0.2)
+
+    results = await client.recall("target", limit=1)
+
+    backend = client._backend
+    assert backend is not None
+    touched = backend.get(stored_target["memory_id"])
+    untouched = backend.get(stored_other["memory_id"])
+
+    assert results[0]["memory_id"] == stored_target["memory_id"]
+    assert touched is not None
+    assert touched.access_count == 1
+    assert touched.last_accessed_at is not None
+    assert untouched is not None
+    assert untouched.access_count == 0
+    assert untouched.last_accessed_at is None
+
+
 def test_memory_store_impl_upserts_vector_when_embedder_available() -> None:
     """memory_store_impl persists vectors through the backend when available."""
     backend = MagicMock()
@@ -165,6 +187,34 @@ def test_memory_recall_impl_uses_configured_embedder_settings() -> None:
         memory_recall_impl("pydantic", "project:default", backend=backend, config=config)
 
     embedder_mock.assert_called_once_with(model_name="custom-model", dim=768)
+
+
+def test_memory_recall_impl_updates_access_metadata_only_for_returned_entries(tmp_path: Path) -> None:
+    """Tool recall should update surfaced rows after filtering and limit capping."""
+    from trw_memory.integrations._backend import create_backend_from_config, make_entry
+
+    config = MemoryConfig(storage_path=str(tmp_path / "storage"))
+    target_entry = make_entry("highest utility", namespace="project:default", importance=0.9)
+    other_entry = make_entry("lower utility", namespace="project:default", importance=0.1)
+
+    with create_backend_from_config(config, "project:default") as backend:
+        backend.store(target_entry)
+        backend.store(other_entry)
+
+        result = memory_recall_impl("", "project:default", backend=backend, limit=1, config=config)
+
+        touched = backend.get(target_entry.id)
+        untouched = backend.get(other_entry.id)
+
+    memories = cast(list[dict[str, object]], result["memories"])
+    assert result["total_matches"] == 1
+    assert memories[0]["id"] == target_entry.id
+    assert touched is not None
+    assert touched.access_count == 1
+    assert touched.last_accessed_at is not None
+    assert untouched is not None
+    assert untouched.access_count == 0
+    assert untouched.last_accessed_at is None
 
 
 def test_client_get_embedder_uses_configured_settings(
