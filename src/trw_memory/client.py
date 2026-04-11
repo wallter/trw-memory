@@ -141,19 +141,9 @@ def _create_local_backend(config: MemoryConfig, namespace: str) -> StorageBacken
     Returns:
         Configured StorageBackend instance.
     """
-    base = Path(config.storage_path)
+    from trw_memory.integrations._backend import create_backend_from_config
 
-    if config.storage_backend == "sqlite":
-        from trw_memory.storage.sqlite_backend import SQLiteBackend
-
-        db_path = base / namespace.replace(":", "_") / config.sqlite_db_name
-        return SQLiteBackend(db_path=db_path, dim=config.embedding_dim)
-
-    # YAML fallback
-    from trw_memory.storage.yaml_backend import YAMLBackend
-
-    entries_dir = base / namespace.replace(":", "_") / "entries"
-    return YAMLBackend(entries_dir=entries_dir)
+    return create_backend_from_config(config, namespace)
 
 
 # Type alias for the async tool functions produced by _make_tool_functions.
