@@ -7,6 +7,8 @@ async.  This module provides a thin sync wrapper around
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +22,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_LIST_LIMIT",
+    "discover_namespace_backends",
     "ROLE_TAG_PREFIX",
     "create_backend",
     "create_backend_from_config",
@@ -106,6 +109,55 @@ def create_backend_from_config(
 
     entries_dir = base / ns_dir / "entries"
     return YAMLBackend(entries_dir=entries_dir)
+
+
+@contextmanager
+def discover_namespace_backends(
+    config: MemoryConfig,
+) -> Iterator[list[tuple[list[str], StorageBackend]]]:
+    """Open every on-disk namespace store and expose its actual namespaces.
+
+    The local backend layout uses one directory per namespace, but the directory
+    name is a lossy encoding of the namespace string. To build truthful
+    cross-namespace views we must open each store and read the stored namespace
+    value rather than guessing it from the folder name.
+    """
+    from contextlib import ExitStack
+
+    base = Path(config.storage_path)
+    if not base.exists():
+        yield []
+        return
+
+    with ExitStack() as stack:
+        stores: list[tuple[list[str], StorageBackend]] = []
+
+        if config.storage_backend == "sqlite":
+            from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+            for candidate in sorted(base.iterdir()):
+                db_path = candidate / config.sqlite_db_name
+                if not candidate.is_dir() or not db_path.exists():
+                    continue
+                store_backend: StorageBackend = stack.enter_context(
+                    SQLiteBackend(db_path=db_path, dim=config.embedding_dim)
+                )
+                namespaces = store_backend.list_namespaces()
+                if namespaces:
+                    stores.append((namespaces, store_backend))
+        else:
+            from trw_memory.storage.yaml_backend import YAMLBackend
+
+            for candidate in sorted(base.iterdir()):
+                entries_dir = candidate / "entries"
+                if not candidate.is_dir() or not entries_dir.is_dir():
+                    continue
+                yaml_backend: StorageBackend = stack.enter_context(YAMLBackend(entries_dir=entries_dir))
+                namespaces = yaml_backend.list_namespaces()
+                if namespaces:
+                    stores.append((namespaces, yaml_backend))
+
+        yield stores
 
 
 def make_entry(
