@@ -10,6 +10,7 @@ high-importance entries are copied to the project namespace.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 import structlog
@@ -28,7 +29,9 @@ logger = structlog.get_logger(__name__)
 
 def _promote_team_memories(
     namespace: str,
-    backend: StorageBackend,
+    source_backend: StorageBackend,
+    *,
+    target_backend: StorageBackend | None = None,
     promotion_threshold: float = 0.7,
 ) -> dict[str, object]:
     """Promote high-impact team memories to the project namespace.
@@ -39,19 +42,22 @@ def _promote_team_memories(
 
     Args:
         namespace: Team namespace (e.g., "team:sprint-37").
-        backend: Storage backend instance.
+        source_backend: Backend that owns the team namespace entries.
+        target_backend: Backend that should receive promoted project entries.
+            Defaults to ``source_backend`` for tests or shared-store backends.
         promotion_threshold: Minimum importance to promote (default 0.7).
 
     Returns:
         {"promoted_count": int, "discarded_count": int, "namespace_id": str,
          "completed_at": str}
     """
-    entries = backend.list_entries(
+    entries = source_backend.list_entries(
         status=MemoryStatus.ACTIVE,
         namespace=namespace,
         limit=10_000,
     )
 
+    project_backend = target_backend or source_backend
     promoted_count = 0
     discarded_count = 0
     now = datetime.now(timezone.utc)
@@ -68,7 +74,7 @@ def _promote_team_memories(
                     "updated_at": now,
                 }
             )
-            backend.store(promoted)
+            project_backend.store(promoted)
             promoted_count += 1
         else:
             discarded_count += 1
@@ -94,6 +100,7 @@ def memory_consolidate_impl(
     backend: StorageBackend,
     dry_run: bool = False,
     config: MemoryConfig | None = None,
+    namespace_backend_factory: Callable[[str], StorageBackend] | None = None,
 ) -> dict[str, object]:
     """Core implementation of memory_consolidate (callable without MCP).
 
@@ -102,6 +109,8 @@ def memory_consolidate_impl(
         backend: Storage backend instance.
         dry_run: If True, preview clusters without modifying storage.
         config: Optional MemoryConfig. When omitted, the default config is loaded.
+        namespace_backend_factory: Optional backend factory used when team namespace
+            promotion must write into a different namespace store.
 
     Returns:
         {"clusters_found": int, "entries_consolidated": int, "dry_run": bool}
@@ -114,7 +123,16 @@ def memory_consolidate_impl(
 
     # Team namespace promotion: copy high-impact entries to project namespace
     if namespace.startswith("team:"):
-        return _promote_team_memories(namespace, backend)
+        project_backend = namespace_backend_factory("project:default") if namespace_backend_factory else backend
+        try:
+            return _promote_team_memories(
+                namespace,
+                backend,
+                target_backend=project_backend,
+            )
+        finally:
+            if project_backend is not backend:
+                project_backend.close()
 
     cfg = config or MemoryConfig()
     embedder = get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim)
@@ -185,4 +203,5 @@ def register_consolidate_tool(mcp: McpServer) -> None:
                 backend=backend,
                 dry_run=dry_run,
                 config=cfg,
+                namespace_backend_factory=lambda extra_ns: create_backend_from_config(cfg, extra_ns),
             )

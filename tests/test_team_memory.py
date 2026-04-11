@@ -7,7 +7,10 @@ from team namespaces to the project namespace.
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
+from trw_memory.integrations._backend import create_backend_from_config
+from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools.consolidate import _promote_team_memories, memory_consolidate_impl
@@ -220,3 +223,31 @@ class TestConsolidateImplTeamDispatch:
 
         assert result["promoted_count"] == 1  # only e2 at 0.9
         assert result["discarded_count"] == 1  # e1 at 0.5
+
+    def test_team_namespace_promotion_writes_to_project_backend(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path))
+
+        team_backend = create_backend_from_config(cfg, "team:sprint-37")
+        try:
+            team_backend.store(_make_entry("e1", importance=0.8))
+
+            result = memory_consolidate_impl(
+                "team:sprint-37",
+                backend=team_backend,
+                config=cfg,
+                namespace_backend_factory=lambda ns: create_backend_from_config(cfg, ns),
+            )
+
+            assert result["promoted_count"] == 1
+            assert team_backend.get("promoted-e1") is None
+        finally:
+            team_backend.close()
+
+        project_backend = create_backend_from_config(cfg, "project:default")
+        try:
+            promoted = project_backend.get("promoted-e1")
+            assert promoted is not None
+            assert promoted.namespace == "project:default"
+            assert promoted.source_identity == "team:sprint-37"
+        finally:
+            project_backend.close()
