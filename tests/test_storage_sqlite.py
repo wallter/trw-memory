@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.models.memory import Assertion, AssertionType, MemoryEntry, MemoryStatus
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 # ---------------------------------------------------------------------------
@@ -239,6 +239,25 @@ class TestListEntries:
 
     def test_list_entries_empty_store_returns_empty(self, backend: SQLiteBackend) -> None:
         assert backend.list_entries() == []
+
+
+class TestEntriesWithAssertions:
+    def test_count_with_assertions_returns_only_assertion_entries(self, backend: SQLiteBackend) -> None:
+        with_assertions = make_entry("a1").model_copy(
+            update={
+                "assertions": [
+                    Assertion(type=AssertionType.GLOB_EXISTS, pattern="", target="src/main.py")
+                ]
+            }
+        )
+        without_assertions = make_entry("a2")
+
+        backend.store(with_assertions)
+        backend.store(without_assertions)
+
+        results = backend.count_with_assertions()
+        assert len(results) == 1
+        assert results[0].id == "a1"
 
 
 # ---------------------------------------------------------------------------
