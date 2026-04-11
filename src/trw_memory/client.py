@@ -20,7 +20,7 @@ import uuid
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Protocol, TypedDict, runtime_checkable
+from typing import Literal, Protocol, TypedDict, cast, runtime_checkable
 
 import structlog
 
@@ -36,6 +36,8 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.sync.remote import _anonymize_entry, fetch_shared_memories, publish_memory
+from trw_memory.sync.retry_queue import RetryQueue
 
 logger = structlog.get_logger(__name__)
 
@@ -84,6 +86,7 @@ class MemoryResultDict(TypedDict):
     created_at: str
     updated_at: str
     namespace: str
+    source: str
 
 
 class StoreResultDict(TypedDict):
@@ -129,6 +132,7 @@ def _entry_to_result(entry: MemoryEntry, score: float = 0.0) -> MemoryResultDict
         created_at=entry.created_at.isoformat(),
         updated_at=entry.updated_at.isoformat(),
         namespace=entry.namespace,
+        source="local",
     )
 
 
@@ -198,6 +202,8 @@ class MemoryClient:
         self._backend: StorageBackend | None = None
         self._resolved_mode: str = ""
         self._config = MemoryConfig()
+        self._background_tasks: set[asyncio.Task[None]] = set()
+        self._retry_queue = RetryQueue(Path(self._config.storage_path) / "sync_queue.jsonl")
 
         if mode == "mcp":
             raise NotImplementedError("MCP mode is not yet implemented")
@@ -322,6 +328,8 @@ class MemoryClient:
             tag_count=len(tags or []),
             importance=importance,
         )
+        if self._should_attempt_remote_publish(entry):
+            self._schedule_background_task(self._publish_entry(entry, embedding))
         return StoreResultDict(
             memory_id=memory_id,
             namespace=self._namespace,
@@ -336,6 +344,7 @@ class MemoryClient:
         tags: list[str] | None = None,
         min_score: float = 0.0,
         *,
+        include_shared: bool = False,
         token_budget: int | None = None,
     ) -> list[MemoryResultDict]:
         """Search memories by keyword query using hybrid retrieval.
@@ -383,6 +392,8 @@ class MemoryClient:
             # Apply min_score filter and limit
             filtered = [r for r in hybrid_results if r["score"] >= min_score]
             final = filtered[:limit]
+            if include_shared:
+                final = await self._merge_shared_results(query, final, limit)
             final = self._apply_budget(final, token_budget)
             await self._record_recall_access(final)
             logger.debug(
@@ -398,6 +409,8 @@ class MemoryClient:
 
         # --- Tier 2: Fallback LIKE + TF scoring ------------------------------
         results = await self._fallback_recall(query, limit, tags, min_score)
+        if include_shared:
+            results = await self._merge_shared_results(query, results, limit)
         final = self._apply_budget(results, token_budget)
         await self._record_recall_access(final)
         return final
@@ -560,7 +573,7 @@ class MemoryClient:
 
     async def _record_recall_access(self, results: list[MemoryResultDict]) -> None:
         """Persist access metadata for the entries that were actually returned."""
-        entry_ids = [result["memory_id"] for result in results]
+        entry_ids = [result["memory_id"] for result in results if result.get("source", "local") == "local"]
         if not entry_ids:
             return
 
@@ -581,6 +594,141 @@ class MemoryClient:
             model_name=self._config.embedding_model,
             dim=self._config.embedding_dim,
         )
+
+    def _should_attempt_remote_publish(self, entry: MemoryEntry) -> bool:
+        """Return whether this entry should attempt the remote publish path."""
+        return (
+            not self._config.local_only
+            and self._config.sync_enabled
+            and bool(self._config.platform_url)
+            and entry.importance >= self._config.sync_min_importance
+        )
+
+    def _schedule_background_task(self, coro: Coroutine[object, object, None]) -> None:
+        """Track a background task so shutdown can await sync side effects safely."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _publish_entry(self, entry: MemoryEntry, embedding: list[float] | None) -> None:
+        """Best-effort remote publish for a freshly stored entry."""
+        published = await asyncio.to_thread(
+            functools.partial(
+                publish_memory,
+                entry,
+                self._config,
+                embedding=embedding,
+            )
+        )
+        if published:
+            async with self._lock:
+                backend = self._get_backend()
+                backend.update(entry.id, published_to_platform=True)
+            return
+
+        payload = await asyncio.to_thread(_anonymize_entry, entry, "")
+        if embedding is not None:
+            payload["embedding"] = embedding
+        queue_payload = cast(dict[str, object], payload)
+        enqueued = await asyncio.to_thread(self._retry_queue.enqueue, entry.id, queue_payload)
+        if not enqueued:
+            logger.warning(
+                "memory_sync_queue_full",
+                op="store",
+                outcome="failure",
+                memory_id=entry.id,
+                namespace=self._namespace,
+            )
+
+    async def _merge_shared_results(
+        self,
+        query: str,
+        local_results: list[MemoryResultDict],
+        limit: int,
+    ) -> list[MemoryResultDict]:
+        """Fetch shared memories and append them after local results."""
+        try:
+            local_entries = await self._load_entries_for_results(local_results)
+            embedder = self._get_embedder()
+            query_embedding: list[float] | None = None
+            if embedder is not None and query.strip():
+                query_embedding = await asyncio.to_thread(embedder.embed, query)
+
+            shared = await asyncio.to_thread(
+                functools.partial(
+                    fetch_shared_memories,
+                    query,
+                    self._config,
+                    embedding=query_embedding,
+                    limit=limit,
+                    local_entries=local_entries,
+                )
+            )
+        except Exception:
+            # Shared recall must never block or break local recall; the local
+            # path is the contract, and remote enrichment is opportunistic.
+            logger.debug(
+                "memory_shared_recall_failed",
+                op="recall",
+                outcome="failure",
+                namespace=self._namespace,
+                exc_info=True,
+            )
+            return local_results
+        return [*local_results, *(self._shared_result_to_result(item) for item in shared)]
+
+    async def _load_entries_for_results(self, results: list[MemoryResultDict]) -> list[MemoryEntry]:
+        """Materialize local entries for dedup against shared results."""
+        result_ids = [result["memory_id"] for result in results if result.get("source", "local") == "local"]
+        if not result_ids:
+            return []
+
+        async with self._lock:
+            backend = self._get_backend()
+            loaded: list[MemoryEntry] = []
+            for entry_id in result_ids:
+                entry = backend.get(entry_id)
+                if entry is not None:
+                    loaded.append(entry)
+            return loaded
+
+    @staticmethod
+    def _shared_result_to_result(result: dict[str, object]) -> MemoryResultDict:
+        """Normalize a shared remote result into the client result shape."""
+        memory_id = str(result.get("memory_id", result.get("id", result.get("remote_id", ""))))
+        detail = str(result.get("detail", ""))
+        raw_tags = result.get("tags", [])
+        tags = [str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else []
+        importance_raw = result.get("importance", result.get("impact", 0.0))
+        score_raw = result.get("score", importance_raw)
+        namespace = str(result.get("namespace", "shared"))
+        created_at = str(result.get("created_at", ""))
+        updated_at = str(result.get("updated_at", created_at))
+        source = str(result.get("source", "shared"))
+        return MemoryResultDict(
+            memory_id=memory_id,
+            content=str(result.get("content", "")),
+            detail=detail,
+            tags=tags,
+            importance=MemoryClient._coerce_float(importance_raw),
+            score=MemoryClient._coerce_float(score_raw),
+            created_at=created_at,
+            updated_at=updated_at,
+            namespace=namespace,
+            source=source,
+        )
+
+    @staticmethod
+    def _coerce_float(value: object) -> float:
+        """Convert loosely typed payload values into floats with a safe default."""
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                return 0.0
+        return 0.0
 
     async def forget(self, memory_id: str) -> ForgetResultDict:
         """Delete a memory entry.
@@ -689,8 +837,12 @@ class MemoryClient:
         ) -> StoreResultDict:
             return await client.store(content, tags=tags, importance=importance)
 
-        async def memory_recall(query: str, limit: int = 10) -> list[MemoryResultDict]:
-            return await client.recall(query, limit=limit)
+        async def memory_recall(
+            query: str,
+            limit: int = 10,
+            include_shared: bool = False,
+        ) -> list[MemoryResultDict]:
+            return await client.recall(query, limit=limit, include_shared=include_shared)
 
         async def memory_forget(memory_id: str) -> ForgetResultDict:
             return await client.forget(memory_id)
@@ -833,6 +985,8 @@ class MemoryClient:
 
     async def close(self) -> None:
         """Close the underlying backend and release resources."""
+        if self._background_tasks:
+            await asyncio.gather(*list(self._background_tasks), return_exceptions=True)
         if self._backend is not None:
             self._backend.close()
             self._backend = None
