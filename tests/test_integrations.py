@@ -9,6 +9,7 @@ Test count target: >= 40 test functions.
 from __future__ import annotations
 
 import importlib
+import importlib.metadata
 import importlib.machinery
 import sys
 import types
@@ -64,7 +65,7 @@ def sample_entry() -> MemoryEntry:
 def _make_langchain_mocks() -> dict[str, types.ModuleType]:
     """Create mock modules for langchain_core."""
     lc_core = types.ModuleType("langchain_core")
-    lc_core.__spec__ = importlib.machinery.ModuleSpec("langchain_core", None)  # type: ignore[attr-defined]
+    lc_core.__spec__ = importlib.machinery.ModuleSpec("langchain_core", None)
 
     lc_history = types.ModuleType("langchain_core.chat_history")
 
@@ -108,9 +109,9 @@ def _make_llamaindex_mocks() -> dict[str, types.ModuleType]:
     import enum
 
     li_core = types.ModuleType("llama_index")
-    li_core.__spec__ = importlib.machinery.ModuleSpec("llama_index", None)  # type: ignore[attr-defined]
+    li_core.__spec__ = importlib.machinery.ModuleSpec("llama_index", None)
     li_core_mod = types.ModuleType("llama_index.core")
-    li_core_mod.__spec__ = importlib.machinery.ModuleSpec("llama_index.core", None)  # type: ignore[attr-defined]
+    li_core_mod.__spec__ = importlib.machinery.ModuleSpec("llama_index.core", None)
 
     li_llms = types.ModuleType("llama_index.core.llms")
 
@@ -168,7 +169,7 @@ def _make_llamaindex_mocks() -> dict[str, types.ModuleType]:
 def _make_crewai_mocks() -> dict[str, types.ModuleType]:
     """Create mock modules for crewai."""
     crewai_mod = types.ModuleType("crewai")
-    crewai_mod.__spec__ = importlib.machinery.ModuleSpec("crewai", None)  # type: ignore[attr-defined]
+    crewai_mod.__spec__ = importlib.machinery.ModuleSpec("crewai", None)
     return {"crewai": crewai_mod}
 
 
@@ -217,11 +218,19 @@ def _import_llamaindex_adapter(
 def _import_crewai_adapter(
     mocks: dict[str, types.ModuleType],
 ) -> types.ModuleType:
-    return _import_adapter(
-        "trw_memory.integrations.crewai",
-        "trw_memory.integrations.crewai",
-        mocks,
-    )
+    orig_version = importlib.metadata.version
+
+    def _patched_version(name: str) -> str:
+        if name == "crewai":
+            return "0.74.0"
+        return orig_version(name)
+
+    with patch("importlib.metadata.version", side_effect=_patched_version):
+        return _import_adapter(
+            "trw_memory.integrations.crewai",
+            "trw_memory.integrations.crewai",
+            mocks,
+        )
 
 
 # ===================================================================
@@ -290,12 +299,12 @@ class TestLangChainAdapter:
     def _setup_mocks(self) -> None:
         self.mocks = _make_langchain_mocks()
         self.mod = _import_langchain_adapter(self.mocks)
-        self.HumanMessage = self.mocks["langchain_core.messages"].HumanMessage  # type: ignore[attr-defined]
-        self.AIMessage = self.mocks["langchain_core.messages"].AIMessage  # type: ignore[attr-defined]
+        self.HumanMessage = self.mocks["langchain_core.messages"].HumanMessage
+        self.AIMessage = self.mocks["langchain_core.messages"].AIMessage
 
     def test_is_subclass_of_base(self) -> None:
         """UT-LC-01: TRWChatMessageHistory is a subclass of BaseChatMessageHistory."""
-        BaseCls = self.mocks["langchain_core.chat_history"].BaseChatMessageHistory  # type: ignore[attr-defined]
+        BaseCls = self.mocks["langchain_core.chat_history"].BaseChatMessageHistory
         assert issubclass(self.mod.TRWChatMessageHistory, BaseCls)
 
     def test_session_id_stored(self, tmp_backend: Any) -> None:
@@ -335,6 +344,15 @@ class TestLangChainAdapter:
 
         history.clear()
         assert history.messages == []
+
+    def test_messages_respect_max_results(self, tmp_backend: Any) -> None:
+        """messages returns only the most recent max_results items."""
+        history = self.mod.TRWChatMessageHistory(session_id="s1", max_results=2, backend=tmp_backend)
+        for i in range(4):
+            history.add_messages([self.HumanMessage(f"msg-{i}")])
+
+        msgs = history.messages
+        assert [m.content for m in msgs] == ["msg-2", "msg-3"]
 
     def test_session_isolation(self, tmp_backend: Any) -> None:
         """UT-LC-06: Messages from different sessions don't interfere."""
@@ -414,12 +432,12 @@ class TestLlamaIndexAdapter:
     def _setup_mocks(self) -> None:
         self.mocks = _make_llamaindex_mocks()
         self.mod = _import_llamaindex_adapter(self.mocks)
-        self.ChatMessage = self.mocks["llama_index.core.llms"].ChatMessage  # type: ignore[attr-defined]
-        self.MessageRole = self.mocks["llama_index.core.llms"].MessageRole  # type: ignore[attr-defined]
+        self.ChatMessage = self.mocks["llama_index.core.llms"].ChatMessage
+        self.MessageRole = self.mocks["llama_index.core.llms"].MessageRole
 
     def test_is_subclass_of_base(self) -> None:
         """UT-LI-01: TRWChatStore extends BaseChatStore."""
-        BaseCls = self.mocks["llama_index.core.storage.chat_store.base"].BaseChatStore  # type: ignore[attr-defined]
+        BaseCls = self.mocks["llama_index.core.storage.chat_store.base"].BaseChatStore
         assert issubclass(self.mod.TRWChatStore, BaseCls)
 
     def test_class_name(self) -> None:
@@ -464,6 +482,15 @@ class TestLlamaIndexAdapter:
         keys = store.get_keys()
         assert keys == ["session-a", "session-b"]
 
+    def test_get_messages_respects_message_limit(self, tmp_backend: Any) -> None:
+        """get_messages returns only the most recent message_limit items."""
+        store = self.mod.TRWChatStore(namespace="test", message_limit=2, backend=tmp_backend)
+        for i in range(4):
+            store.add_message("s1", self.ChatMessage(content=f"msg-{i}"))
+
+        msgs = store.get_messages("s1")
+        assert [m.content for m in msgs] == ["msg-2", "msg-3"]
+
     def test_set_messages_replaces(self, tmp_backend: Any) -> None:
         """UT-LI-04: set_messages replaces existing messages."""
         store = self.mod.TRWChatStore(namespace="test", backend=tmp_backend)
@@ -497,6 +524,19 @@ class TestLlamaIndexAdapter:
         assert store.delete_message("s1", 5) is None
         assert store.delete_message("s1", -1) is None
 
+    def test_delete_message_with_message_limit_preserves_older_history(self, tmp_backend: Any) -> None:
+        """Deleting from the visible window must not drop older hidden messages."""
+        store = self.mod.TRWChatStore(namespace="test", message_limit=2, backend=tmp_backend)
+        for i in range(4):
+            store.add_message("s1", self.ChatMessage(content=f"msg-{i}"))
+
+        removed = store.delete_message("s1", 0)
+        assert removed is not None
+        assert removed.content == "msg-2"
+
+        all_messages = self.mod.TRWChatStore(namespace="test", message_limit=10, backend=tmp_backend).get_messages("s1")
+        assert [message.content for message in all_messages] == ["msg-0", "msg-1", "msg-3"]
+
     def test_import_error_without_llamaindex(self) -> None:
         """UT-LI-08: ImportError raised when llama-index-core not installed."""
         for key in list(sys.modules.keys()):
@@ -516,6 +556,28 @@ class TestLlamaIndexAdapter:
             for key in list(sys.modules.keys()):
                 if key.startswith("trw_memory.integrations.llamaindex"):
                     del sys.modules[key]
+
+    def test_get_keys_scans_full_namespace_not_default_limit(self, tmp_backend: Any) -> None:
+        """get_keys must not stop at the adapter default list window."""
+        store = self.mod.TRWChatStore(namespace="test", backend=tmp_backend)
+        for key in ["session-a", "session-b", "session-c"]:
+            store.add_message(key, self.ChatMessage(content=key))
+
+        with patch("trw_memory.integrations._backend.DEFAULT_LIST_LIMIT", 1):
+            assert store.get_keys() == ["session-a", "session-b", "session-c"]
+
+    def test_delete_messages_scans_full_namespace_not_default_limit(self, tmp_backend: Any) -> None:
+        """delete_messages must remove all key entries even with a tiny list window."""
+        store = self.mod.TRWChatStore(namespace="test", backend=tmp_backend)
+        for i in range(3):
+            store.add_message("s1", self.ChatMessage(content=f"msg-{i}"))
+
+        with patch("trw_memory.integrations._backend.DEFAULT_LIST_LIMIT", 1):
+            deleted = store.delete_messages("s1")
+
+        assert deleted is not None
+        assert [message.content for message in deleted] == ["msg-0", "msg-1", "msg-2"]
+        assert store.get_messages("s1") == []
 
 
 # ===================================================================
@@ -585,6 +647,17 @@ class TestCrewAIAdapter:
         storage.reset()
         assert tmp_backend.count(namespace="default") == 0
 
+    def test_reset_uses_bulk_namespace_delete(self, tmp_backend: Any) -> None:
+        """reset() should clear the namespace through the backend bulk path."""
+        storage = self.mod.TRWCrewStorage(namespace="default", backend=tmp_backend)
+        with patch.object(tmp_backend, "delete_by_namespace", wraps=tmp_backend.delete_by_namespace) as delete_namespace:
+            storage.save("entry 1")
+            storage.save("entry 2")
+            storage.reset()
+
+        delete_namespace.assert_called_once_with("default")
+        assert tmp_backend.count(namespace="default") == 0
+
     def test_save_with_metadata(self, tmp_backend: Any) -> None:
         """UT-CA-06: save() passes metadata to backend."""
         storage = self.mod.TRWCrewStorage(namespace="default", backend=tmp_backend)
@@ -601,6 +674,15 @@ class TestCrewAIAdapter:
 
         results = storage.search("topic", limit=3)
         assert len(results) <= 3
+
+    def test_search_applies_metadata_filter(self, tmp_backend: Any) -> None:
+        """search() applies exact-match metadata filters."""
+        storage = self.mod.TRWCrewStorage(namespace="default", backend=tmp_backend)
+        storage.save("auth finding", metadata={"team": "auth"})
+        storage.save("billing finding", metadata={"team": "billing"})
+
+        results = storage.search("finding", filter={"team": "auth"})
+        assert [result["context"] for result in results] == ["auth finding"]
 
     def test_import_error_without_crewai(self) -> None:
         """UT-CA-08: ImportError raised when crewai not installed."""
@@ -621,6 +703,18 @@ class TestCrewAIAdapter:
             for key in list(sys.modules.keys()):
                 if key.startswith("trw_memory.integrations.crewai"):
                     del sys.modules[key]
+
+    def test_import_error_with_too_old_crewai_version(self) -> None:
+        """CrewAI adapter rejects versions older than the documented floor."""
+        for key in list(sys.modules.keys()):
+            if key.startswith("trw_memory.integrations.crewai"):
+                del sys.modules[key]
+
+        mocks = _make_crewai_mocks()
+        with patch.dict(sys.modules, mocks):
+            with patch("importlib.metadata.version", return_value="0.73.9"):
+                with pytest.raises(ImportError, match="crewai>=0.74.0"):
+                    importlib.import_module("trw_memory.integrations.crewai")
 
     def test_context_manager(self, tmp_backend: Any) -> None:
         """Context manager calls close() on exit."""
@@ -815,10 +909,11 @@ class TestFactory:
                 return orig_find_spec(name, *a, **kw)
 
             with patch("importlib.util.find_spec", side_effect=_patched_find_spec):
-                from trw_memory.integrations.factory import get_adapter
+                with patch("importlib.metadata.version", return_value="0.74.0"):
+                    from trw_memory.integrations.factory import get_adapter
 
-                cls = get_adapter("crewai")
-                assert cls.__name__ == "TRWCrewStorage"
+                    cls = get_adapter("crewai")
+                    assert cls.__name__ == "TRWCrewStorage"
 
     def test_get_adapter_vscode_no_extras(self) -> None:
         """UT-FA-05: get_adapter('vscode') returns LocalMemoryAdapter without extras."""
@@ -864,8 +959,8 @@ class TestIntegration:
         """IT-01: LangChain save + load round-trip."""
         mocks = _make_langchain_mocks()
         mod = _import_langchain_adapter(mocks)
-        HumanMessage = mocks["langchain_core.messages"].HumanMessage  # type: ignore[attr-defined]
-        AIMessage = mocks["langchain_core.messages"].AIMessage  # type: ignore[attr-defined]
+        HumanMessage = mocks["langchain_core.messages"].HumanMessage
+        AIMessage = mocks["langchain_core.messages"].AIMessage
 
         history = mod.TRWChatMessageHistory(session_id="round-trip", backend=tmp_backend)
         history.add_messages(
@@ -884,8 +979,8 @@ class TestIntegration:
         """IT-02: LlamaIndex add_message + get_messages round-trip."""
         mocks = _make_llamaindex_mocks()
         mod = _import_llamaindex_adapter(mocks)
-        ChatMessage = mocks["llama_index.core.llms"].ChatMessage  # type: ignore[attr-defined]
-        MessageRole = mocks["llama_index.core.llms"].MessageRole  # type: ignore[attr-defined]
+        ChatMessage = mocks["llama_index.core.llms"].ChatMessage
+        MessageRole = mocks["llama_index.core.llms"].MessageRole
 
         store = mod.TRWChatStore(namespace="test", backend=tmp_backend)
         store.add_message(

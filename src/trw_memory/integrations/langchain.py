@@ -33,6 +33,7 @@ except ImportError as exc:
 from trw_memory.integrations._mixin import BackendOwnerMixin
 
 if TYPE_CHECKING:
+    from trw_memory.models.memory import MemoryEntry
     from trw_memory.storage.interface import StorageBackend
 
 _TAG_PREFIX = "lc:session:"
@@ -48,6 +49,8 @@ class TRWChatMessageHistory(BackendOwnerMixin, BaseChatMessageHistory):  # type:
     Args:
         session_id: Unique conversation identifier used to scope messages.
         namespace: trw-memory namespace for storage isolation.
+        max_results: Maximum number of most-recent messages returned from
+            ``messages``.
         storage_path: Override for the storage directory.
         backend: Pre-existing backend (for testing).  If ``None``, one is
             created from *namespace* and *storage_path*.
@@ -58,6 +61,7 @@ class TRWChatMessageHistory(BackendOwnerMixin, BaseChatMessageHistory):  # type:
         session_id: str,
         *,
         namespace: str = "default",
+        max_results: int = 20,
         storage_path: str | None = None,
         backend: StorageBackend | None = None,
     ) -> None:
@@ -65,6 +69,7 @@ class TRWChatMessageHistory(BackendOwnerMixin, BaseChatMessageHistory):  # type:
 
         self._session_id = session_id
         self._namespace = namespace
+        self._max_results = max_results
         self._session_tag = f"{_TAG_PREFIX}{session_id}"
         self._backend, self._owns_backend = resolve_backend(
             namespace,
@@ -82,14 +87,13 @@ class TRWChatMessageHistory(BackendOwnerMixin, BaseChatMessageHistory):  # type:
     @property
     def messages(self) -> list[BaseMessage]:
         """Return all messages for this session in chronological order."""
-        from trw_memory.integrations._backend import DEFAULT_LIST_LIMIT, ROLE_TAG_PREFIX
+        from trw_memory.integrations._backend import ROLE_TAG_PREFIX
 
-        entries = self._backend.list_entries(
-            namespace=self._namespace,
-            limit=DEFAULT_LIST_LIMIT,
-        )
+        entries = self._list_namespace_entries()
         session_entries = [e for e in entries if self._session_tag in e.tags]
         session_entries.sort(key=lambda e: e.created_at)
+        if self._max_results > 0:
+            session_entries = session_entries[-self._max_results :]
 
         result: list[BaseMessage] = []
         for entry in session_entries:
@@ -121,14 +125,24 @@ class TRWChatMessageHistory(BackendOwnerMixin, BaseChatMessageHistory):  # type:
 
     def clear(self) -> None:
         """Remove all messages for this session."""
-        from trw_memory.integrations._backend import DEFAULT_LIST_LIMIT
-
-        entries = self._backend.list_entries(
-            namespace=self._namespace,
-            limit=DEFAULT_LIST_LIMIT,
-        )
+        entries = self._list_namespace_entries()
         for entry in entries:
             if self._session_tag in entry.tags:
                 self._backend.delete(entry.id)
+
+    def _list_namespace_entries(self) -> list[MemoryEntry]:
+        """Return a full namespace snapshot for adapter-local filtering.
+
+        The adapter tags multiple conversations into one namespace, so a fixed
+        list window can hide older entries and make session-scoped reads or
+        clears incomplete once the namespace grows.
+        """
+        from trw_memory.integrations._backend import DEFAULT_LIST_LIMIT
+
+        namespace_count = self._backend.count(namespace=self._namespace)
+        return self._backend.list_entries(
+            namespace=self._namespace,
+            limit=max(DEFAULT_LIST_LIMIT, namespace_count),
+        )
 
     # Resource management inherited from BackendOwnerMixin.

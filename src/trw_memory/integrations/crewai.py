@@ -19,6 +19,7 @@ Requires ``crewai >= 0.74.0``::
 
 from __future__ import annotations
 
+import importlib.metadata
 import importlib.util
 from typing import TYPE_CHECKING, TypedDict
 
@@ -30,6 +31,34 @@ except (ValueError, ModuleNotFoundError):
 
 if _crewai_spec is None:
     raise ImportError('crewai is required for the CrewAI adapter. Install it with: pip install "trw-memory[crewai]"')
+
+_MIN_CREWAI_VERSION = (0, 74, 0)
+
+
+def _parse_version(version: str) -> tuple[int, ...]:
+    """Extract a comparable numeric prefix from a version string."""
+    numbers: list[int] = []
+    for part in version.replace("-", ".").split("."):
+        digits = "".join(char for char in part if char.isdigit())
+        if not digits:
+            break
+        numbers.append(int(digits))
+    return tuple(numbers)
+
+
+try:
+    _crewai_version = importlib.metadata.version("crewai")
+except importlib.metadata.PackageNotFoundError as exc:
+    raise ImportError(
+        'crewai metadata is required for the CrewAI adapter. Install it with: pip install "trw-memory[crewai]"'
+    ) from exc
+
+if _parse_version(_crewai_version) < _MIN_CREWAI_VERSION:
+    raise ImportError(
+        f'crewai>={_MIN_CREWAI_VERSION[0]}.{_MIN_CREWAI_VERSION[1]}.{_MIN_CREWAI_VERSION[2]} '
+        f'is required for the CrewAI adapter (found {_crewai_version}). '
+        'Install it with: pip install "trw-memory[crewai]"'
+    )
 
 from trw_memory.integrations._mixin import BackendOwnerMixin
 
@@ -129,7 +158,7 @@ class TRWCrewStorage(BackendOwnerMixin):
         Args:
             query: Free-text search string.
             limit: Maximum number of results.
-            filter: Optional metadata filters (not yet implemented).
+            filter: Optional exact-match metadata filters.
             score_threshold: Minimum importance for results.
 
         Returns:
@@ -142,6 +171,7 @@ class TRWCrewStorage(BackendOwnerMixin):
             namespace=self._namespace,
         )
 
+        str_filter = {str(key): str(value) for key, value in filter.items()} if filter else None
         results = [
             CrewSearchResult(
                 id=entry.id,
@@ -151,18 +181,17 @@ class TRWCrewStorage(BackendOwnerMixin):
             )
             for entry in entries
             if entry.importance >= score_threshold
+            and (
+                str_filter is None
+                or all(entry.metadata.get(key) == value for key, value in str_filter.items())
+            )
         ]
         return results
 
     def reset(self) -> None:
         """Clear all stored memories in this namespace."""
-        from trw_memory.integrations._backend import DEFAULT_LIST_LIMIT
-
-        entries = self._backend.list_entries(
-            namespace=self._namespace,
-            limit=DEFAULT_LIST_LIMIT,
-        )
-        for entry in entries:
-            self._backend.delete(entry.id)
+        deleted = self._backend.delete_by_namespace(self._namespace)
+        if deleted == 0:
+            return
 
     # Resource management inherited from BackendOwnerMixin.
