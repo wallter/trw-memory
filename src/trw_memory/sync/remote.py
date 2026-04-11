@@ -79,6 +79,10 @@ def publish_memory(
     Returns ``True`` on success, ``False`` on failure (entry should be queued
     for retry).  Fail-open: never raises exceptions.
     """
+    if cfg.local_only:
+        logger.debug("memory_publish_skipped_local_only", entry_id=entry.id)
+        return False
+
     if not cfg.sync_enabled or not cfg.platform_url:
         return False
 
@@ -130,6 +134,10 @@ def fetch_shared_memories(
     Deduplicates against *local_entries* by content string match.
     Fail-open: returns empty list on any error.
     """
+    if cfg.local_only:
+        logger.debug("memory_fetch_skipped_local_only")
+        return []
+
     if not cfg.sync_enabled or not cfg.platform_url:
         return []
 
