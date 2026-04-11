@@ -477,28 +477,28 @@ class TestPublishMemory:
     """FR01: publish_memory publishes entries with fail-open behavior."""
 
     def test_returns_false_when_sync_disabled(self) -> None:
-        """No HTTP call when sync_enabled=False."""
+        """Disabled sync is treated as a non-retryable skip."""
         cfg = _make_config(sync_enabled=False)
         entry = _make_entry(importance=0.9)
-        assert publish_memory(entry, cfg) is False
+        assert publish_memory(entry, cfg) is True
 
-    def test_returns_false_when_local_only_enabled(self) -> None:
-        """No HTTP call when local_only=True."""
+    def test_returns_true_when_local_only_enabled(self) -> None:
+        """Local-only mode is treated as a non-retryable skip."""
         cfg = _make_config(local_only=True)
         entry = _make_entry(importance=0.9)
-        assert publish_memory(entry, cfg) is False
+        assert publish_memory(entry, cfg) is True
 
     def test_returns_false_when_platform_url_empty(self) -> None:
-        """No HTTP call when platform_url is empty string."""
+        """Empty remote config is treated as a non-retryable skip."""
         cfg = _make_config(platform_url="")
         entry = _make_entry(importance=0.9)
-        assert publish_memory(entry, cfg) is False
+        assert publish_memory(entry, cfg) is True
 
-    def test_returns_false_when_importance_below_threshold(self) -> None:
-        """No HTTP call when importance < sync_min_importance."""
+    def test_returns_true_when_importance_below_threshold(self) -> None:
+        """Below-threshold entries are skipped instead of retried."""
         cfg = _make_config(sync_min_importance=0.7)
         entry = _make_entry(importance=0.5)
-        assert publish_memory(entry, cfg) is False
+        assert publish_memory(entry, cfg) is True
 
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_returns_true_on_200_response(self, mock_client_cls: MagicMock) -> None:

@@ -125,11 +125,23 @@ class TierManager:
 
             # Evict LRU if over capacity
             if len(self._hot) > cfg.hot_max_entries:
-                evicted_id, evicted_entry = self._hot.popitem(last=False)
+                evicted_id = next(iter(self._hot))
+                evicted_entry = self._hot[evicted_id]
                 # The hot tier is only an acceleration layer. When capacity forces
                 # an eviction, the entry must be demoted into warm storage so the
                 # tier transition preserves data instead of silently dropping it.
-                self.warm_add(evicted_id, evicted_entry.model_dump(), None)
+                try:
+                    self.warm_add(evicted_id, evicted_entry.model_dump(), None)
+                except (OSError, ValueError):
+                    logger.warning(
+                        "hot_tier_evict_deferred",
+                        evicted_id=evicted_id,
+                        reason="warm_add_failed",
+                        capacity=cfg.hot_max_entries,
+                        exc_info=True,
+                    )
+                    return
+                self._hot.popitem(last=False)
                 logger.debug(
                     "hot_tier_evict",
                     evicted_id=evicted_id,
