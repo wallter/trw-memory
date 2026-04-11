@@ -75,6 +75,7 @@ class TestGrepPresentEdgeCases:
         ]
         results = verify_assertions(assertions, tmp_path)
         assert results[0].passed is False  # Oversized file skipped
+        assert "file exceeds 1MB limit" in results[0].evidence
 
     def test_default_excludes_applied(self, tmp_path: Path) -> None:
         # Create file in __pycache__ which is in DEFAULT_EXCLUDES
