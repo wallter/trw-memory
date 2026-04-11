@@ -121,6 +121,15 @@ def test_round_trip_nudge_line() -> None:
     assert restored.nudge_line == "Short nudge"
 
 
+def test_round_trip_session_count() -> None:
+    """Dedicated session_count survives row round-trip independently of access_count."""
+    entry = MemoryEntry(id="L-sess1", content="session count", access_count=9, session_count=4)
+    row = _entry_to_full_row(entry)
+    restored = row_to_entry(row)
+    assert restored.access_count == 9
+    assert restored.session_count == 4
+
+
 def test_round_trip_team_origin() -> None:
     """team_origin and task_type survive round-trip."""
     entry = MemoryEntry(

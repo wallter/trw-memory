@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS memories (
     updated_at        TEXT NOT NULL,
     last_accessed_at  TEXT,
     access_count      INTEGER DEFAULT 0,
+    session_count     INTEGER DEFAULT 0,
     q_value           REAL DEFAULT 0.5,
     q_observations    INTEGER DEFAULT 0,
     source            TEXT DEFAULT 'agent',
@@ -162,6 +163,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         ]
         # Migration: add PRD-CORE-110 typed entry fields
         _migrate_cols += [
+            ("session_count", "INTEGER DEFAULT 0"),
             ("type", "TEXT DEFAULT 'pattern'"),
             ("nudge_line", "TEXT DEFAULT ''"),
             ("expires_at", "TEXT DEFAULT ''"),

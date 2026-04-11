@@ -33,7 +33,7 @@ def _get_column_names(conn: sqlite3.Connection) -> set[str]:
 
 
 def test_migration_adds_columns() -> None:
-    """ensure_schema creates all 10 PRD-CORE-110 typed learning columns."""
+    """ensure_schema creates typed-learning columns plus session_count."""
     conn = sqlite3.connect(":memory:")
     ensure_schema(conn)
     cols = _get_column_names(conn)
@@ -48,6 +48,7 @@ def test_migration_adds_columns() -> None:
         "phase_affinity",
         "team_origin",
         "protection_tier",
+        "session_count",
     }
     for col in expected_new:
         assert col in cols, f"Column {col!r} missing from memories table"
@@ -62,13 +63,13 @@ def test_migration_idempotent() -> None:
     assert "type" in cols
 
 
-def test_entry_columns_count_42() -> None:
-    """ENTRY_COLUMNS must contain exactly 48 entries after adding sync pipeline fields."""
-    assert len(ENTRY_COLUMNS) == 48, f"Expected 48, got {len(ENTRY_COLUMNS)}: {ENTRY_COLUMNS}"
+def test_entry_columns_count_49() -> None:
+    """ENTRY_COLUMNS must contain exactly 49 entries after adding session_count."""
+    assert len(ENTRY_COLUMNS) == 49, f"Expected 49, got {len(ENTRY_COLUMNS)}: {ENTRY_COLUMNS}"
 
 
 def test_entry_columns_contains_new_fields() -> None:
-    """ENTRY_COLUMNS includes all 10 new typed-learning column names."""
+    """ENTRY_COLUMNS includes typed-learning columns plus session_count."""
     expected_new = {
         "type",
         "nudge_line",
@@ -80,6 +81,7 @@ def test_entry_columns_contains_new_fields() -> None:
         "phase_affinity",
         "team_origin",
         "protection_tier",
+        "session_count",
     }
     col_set = set(ENTRY_COLUMNS)
     for col in expected_new:
