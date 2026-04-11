@@ -406,6 +406,40 @@ class TestContextManager:
         await client.close()
         await client.close()  # Should not raise
 
+    async def test_async_context_manager_drains_retry_queue(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "ctx"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
+        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
+        monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
+
+        seed_client = MemoryClient(namespace="default", mode="local")
+        with (
+            patch("trw_memory.client.publish_memory", return_value=False),
+            patch("trw_memory.client._anonymize_entry", return_value={"summary": "queued"}),
+        ):
+            await seed_client.store("queue this entry", importance=0.9)
+            await seed_client.close()
+
+        with patch("trw_memory.sync.remote.httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_response = MagicMock(status_code=200)
+            mock_client.post.return_value = mock_response
+            mock_client.__enter__.return_value = mock_client
+            mock_client.__exit__.return_value = False
+            mock_client_cls.return_value = mock_client
+
+            async with MemoryClient(namespace="default", mode="local"):
+                pass
+
+        reopened = MemoryClient(namespace="default", mode="local")
+        assert reopened._retry_queue.depth() == 0
+        await reopened.close()
+
 
 # ---------------------------------------------------------------------------
 # register_tools() tests (FR09)

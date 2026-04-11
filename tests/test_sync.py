@@ -34,6 +34,8 @@ from trw_memory.sync.remote import (
     FETCH_TIMEOUT,
     PUBLISH_TIMEOUT,
     _anonymize_entry,
+    clear_retry_queue,
+    drain_retry_queue,
     fetch_shared_memories,
     publish_memory,
 )
@@ -683,6 +685,28 @@ class TestFetchSharedMemories:
         assert len(results) == 1
         assert results[0]["content"] == "[shared] A finding"
 
+    @patch("trw_memory.sync.remote.httpx.Client")
+    def test_returns_empty_on_invalid_json(self, mock_client_cls: MagicMock) -> None:
+        """Malformed JSON responses fail open to local-only behavior."""
+        mock_client = MagicMock()
+        mock_response = MagicMock(status_code=200)
+        mock_response.json.side_effect = json.JSONDecodeError("bad", "x", 0)
+        mock_client.post.return_value = mock_response
+        mock_client.__enter__.return_value = mock_client
+        mock_client.__exit__.return_value = False
+        mock_client_cls.return_value = mock_client
+
+        cfg = _make_config()
+        assert fetch_shared_memories("query", cfg) == []
+
+    @patch("trw_memory.sync.remote.httpx.Client")
+    def test_returns_empty_on_unexpected_json_shape(self, mock_client_cls: MagicMock) -> None:
+        """Unexpected JSON shapes are ignored instead of crashing recall."""
+        _mock_httpx_client(mock_client_cls, status_code=200, json_data="not-a-result-list")
+
+        cfg = _make_config()
+        assert fetch_shared_memories("query", cfg) == []
+
 
 # ===========================================================================
 # FR06: Retry Queue
@@ -824,6 +848,37 @@ class TestRetryQueue:
         )
         queue = RetryQueue(queue_path)
         assert queue.depth() == 1
+
+    def test_drain_retry_queue_republishes_payloads(self, tmp_path: Path) -> None:
+        """The remote helper drains queued payloads through the publish transport."""
+        queue = RetryQueue(tmp_path / "queue.jsonl")
+        queue.enqueue("M-001", {"summary": "test"})
+
+        with patch("trw_memory.sync.remote.httpx.Client") as mock_client_cls:
+            _mock_httpx_client(mock_client_cls, status_code=200)
+            result = drain_retry_queue(queue, _make_config())
+
+        assert result == {"drained": 1, "failed": 0, "skipped": 0}
+        assert queue.depth() == 0
+
+    def test_drain_retry_queue_skips_when_sync_disabled(self, tmp_path: Path) -> None:
+        """Drain helper leaves the queue intact when sync is disabled."""
+        queue = RetryQueue(tmp_path / "queue.jsonl")
+        queue.enqueue("M-001", {"summary": "test"})
+
+        result = drain_retry_queue(queue, _make_config(sync_enabled=False))
+
+        assert result == {"drained": 0, "failed": 0, "skipped": 1}
+        assert queue.depth() == 1
+
+    def test_clear_retry_queue_helper_empties_file(self, tmp_path: Path) -> None:
+        """The remote helper delegates to the queue clear operation."""
+        queue = RetryQueue(tmp_path / "queue.jsonl")
+        queue.enqueue("M-001", {"summary": "test"})
+
+        clear_retry_queue(queue)
+
+        assert queue.depth() == 0
 
 
 # ===========================================================================
