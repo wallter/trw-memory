@@ -5,8 +5,9 @@ Tests the *_impl functions directly without requiring a running FastMCP server.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.tools.consolidate import memory_consolidate_impl
 from trw_memory.tools.status import memory_status_impl
@@ -169,6 +170,33 @@ class TestMemoryConsolidateImpl:
         result = memory_consolidate_impl("project:default", backend=backend)
         assert "entries_consolidated" in result
         assert isinstance(result["entries_consolidated"], int)
+
+    @patch("trw_memory.tools.consolidate.consolidate_cycle")
+    @patch("trw_memory.tools.consolidate.get_local_embedder")
+    def test_resolves_embedder_from_config(
+        self,
+        mock_get_local_embedder: MagicMock,
+        mock_consolidate_cycle: MagicMock,
+    ) -> None:
+        backend = _mock_backend()
+        fake_embedder = MagicMock()
+        mock_get_local_embedder.return_value = fake_embedder
+        mock_consolidate_cycle.return_value = {
+            "clusters_found": 0,
+            "consolidated_count": 0,
+            "dry_run": False,
+        }
+
+        memory_consolidate_impl("project:default", backend=backend)
+
+        kwargs = mock_consolidate_cycle.call_args.kwargs
+        assert kwargs["embedder"] is fake_embedder
+        cfg = kwargs["config"]
+        assert isinstance(cfg, MemoryConfig)
+        mock_get_local_embedder.assert_called_once_with(
+            model_name=cfg.embedding_model,
+            dim=cfg.embedding_dim,
+        )
 
 
 # ---------------------------------------------------------------------------

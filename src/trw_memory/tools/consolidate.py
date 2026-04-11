@@ -14,8 +14,10 @@ from datetime import datetime, timezone
 
 import structlog
 
+from trw_memory.embeddings import get_local_embedder
 from trw_memory.exceptions import ConfigError, StorageError
 from trw_memory.lifecycle.consolidation import consolidate_cycle
+from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.storage.interface import StorageBackend
@@ -91,6 +93,7 @@ def memory_consolidate_impl(
     *,
     backend: StorageBackend,
     dry_run: bool = False,
+    config: MemoryConfig | None = None,
 ) -> dict[str, object]:
     """Core implementation of memory_consolidate (callable without MCP).
 
@@ -98,6 +101,7 @@ def memory_consolidate_impl(
         namespace: Namespace to consolidate within (e.g., "project:default").
         backend: Storage backend instance.
         dry_run: If True, preview clusters without modifying storage.
+        config: Optional MemoryConfig. When omitted, the default config is loaded.
 
     Returns:
         {"clusters_found": int, "entries_consolidated": int, "dry_run": bool}
@@ -112,12 +116,18 @@ def memory_consolidate_impl(
     if namespace.startswith("team:"):
         return _promote_team_memories(namespace, backend)
 
+    cfg = config or MemoryConfig()
+    embedder = get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim)
+
     try:
         result = consolidate_cycle(
             backend,
-            embedder=None,  # graceful degradation — no clusters without embedder
+            # Public consolidate entrypoints must resolve the embedder here; the
+            # lifecycle engine only clusters when an embedder is explicitly present.
+            embedder=embedder,
             dry_run=dry_run,
             namespace=namespace,
+            config=cfg,
         )
     except (StorageError, ValueError) as exc:
         logger.exception("memory_consolidate_failed", namespace=namespace, error=str(exc))
@@ -149,7 +159,6 @@ def register_consolidate_tool(mcp: McpServer) -> None:
         mcp: FastMCP server instance (imported lazily to keep fastmcp optional).
     """
     from trw_memory.integrations._backend import create_backend_from_config
-    from trw_memory.models.config import MemoryConfig
 
     @mcp.tool()
     async def memory_consolidate(
@@ -175,4 +184,5 @@ def register_consolidate_tool(mcp: McpServer) -> None:
                 namespace,
                 backend=backend,
                 dry_run=dry_run,
+                config=cfg,
             )
