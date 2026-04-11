@@ -31,6 +31,7 @@ except ImportError as exc:
     ) from exc
 
 if TYPE_CHECKING:
+    from trw_memory.models.memory import MemoryEntry
     from trw_memory.storage.interface import StorageBackend
 
 _TAG_PREFIX = "li:key:"
@@ -44,6 +45,8 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
 
     Args:
         namespace: trw-memory namespace for storage isolation.
+        message_limit: Maximum number of most-recent messages returned from
+            ``get_messages``.
         storage_path: Override for the storage directory.
         backend: Pre-existing backend (for testing).
     """
@@ -59,6 +62,7 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
         self,
         namespace: str = "default",
         *,
+        message_limit: int = 100,
         storage_path: str | None = None,
         backend: StorageBackend | None = None,
         **kwargs: object,
@@ -67,6 +71,7 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
 
         super().__init__(**kwargs)
         self.namespace = namespace
+        self._message_limit = message_limit
         self._storage_path = storage_path
         self._backend, self._owns_backend = resolve_backend(
             namespace,
@@ -96,28 +101,13 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
 
     def get_messages(self, key: str) -> list[ChatMessage]:
         """Retrieve all messages for *key* in chronological order."""
-        from trw_memory.integrations._backend import DEFAULT_LIST_LIMIT, ROLE_TAG_PREFIX
-
-        key_tag = f"{_TAG_PREFIX}{key}"
-        entries = self._backend_or_raise.list_entries(
-            namespace=self.namespace,
-            limit=DEFAULT_LIST_LIMIT,
-        )
-        matched = [e for e in entries if key_tag in e.tags]
-        matched.sort(key=lambda e: e.created_at)
+        matched = self._get_key_entries(key)
+        if self._message_limit > 0:
+            matched = matched[-self._message_limit :]
 
         result: list[ChatMessage] = []
         for entry in matched:
-            role = MessageRole.USER
-            for tag in entry.tags:
-                if tag.startswith(ROLE_TAG_PREFIX):
-                    role_str = tag[len(ROLE_TAG_PREFIX) :]
-                    try:
-                        role = MessageRole(role_str)
-                    except ValueError:
-                        role = MessageRole.USER
-                    break
-            result.append(ChatMessage(role=role, content=entry.content))
+            result.append(ChatMessage(role=self._message_role(entry), content=entry.content))
         return result
 
     def add_message(
@@ -144,34 +134,35 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
 
     def delete_messages(self, key: str) -> list[ChatMessage] | None:
         """Remove all messages for *key*.  Returns the deleted messages."""
-        from trw_memory.integrations._backend import DEFAULT_LIST_LIMIT, ROLE_TAG_PREFIX
+        from trw_memory.integrations._backend import ROLE_TAG_PREFIX
 
-        key_tag = f"{_TAG_PREFIX}{key}"
-        entries = self._backend_or_raise.list_entries(
-            namespace=self.namespace,
-            limit=DEFAULT_LIST_LIMIT,
-        )
+        entries = self._get_key_entries(key)
         deleted: list[ChatMessage] = []
         for entry in entries:
-            if key_tag in entry.tags:
-                role = MessageRole.USER
-                for tag in entry.tags:
-                    if tag.startswith(ROLE_TAG_PREFIX):
-                        with contextlib.suppress(ValueError):
-                            role = MessageRole(tag[len(ROLE_TAG_PREFIX) :])
-                        break
-                deleted.append(ChatMessage(role=role, content=entry.content))
-                self._backend_or_raise.delete(entry.id)
+            role = MessageRole.USER
+            for tag in entry.tags:
+                if tag.startswith(ROLE_TAG_PREFIX):
+                    with contextlib.suppress(ValueError):
+                        role = MessageRole(tag[len(ROLE_TAG_PREFIX) :])
+                    break
+            deleted.append(ChatMessage(role=role, content=entry.content))
+            self._backend_or_raise.delete(entry.id)
         return deleted or None
 
     def delete_message(self, key: str, idx: int) -> ChatMessage | None:
         """Remove the message at *idx* from *key*'s collection."""
-        messages = self.get_messages(key)
-        if idx < 0 or idx >= len(messages):
+        entries = self._get_key_entries(key)
+        if self._message_limit > 0:
+            visible_entries = entries[-self._message_limit :]
+        else:
+            visible_entries = entries
+        if idx < 0 or idx >= len(visible_entries):
             return None
-        removed = messages[idx]
-        remaining = messages[:idx] + messages[idx + 1 :]
-        self.set_messages(key, remaining)
+        target = visible_entries[idx]
+        removed = ChatMessage(role=self._message_role(target), content=target.content)
+        # Delete the selected entry in place so bounded reads do not rewrite and
+        # silently truncate older history outside the visible message window.
+        self._backend_or_raise.delete(target.id)
         return removed
 
     def delete_last_message(self, key: str) -> ChatMessage | None:
@@ -183,18 +174,43 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
 
     def get_keys(self) -> list[str]:
         """Return all existing conversation keys."""
-        from trw_memory.integrations._backend import DEFAULT_LIST_LIMIT
-
-        entries = self._backend_or_raise.list_entries(
-            namespace=self.namespace,
-            limit=DEFAULT_LIST_LIMIT,
-        )
+        entries = self._list_namespace_entries()
         keys: set[str] = set()
         for entry in entries:
             for tag in entry.tags:
                 if tag.startswith(_TAG_PREFIX):
                     keys.add(tag[len(_TAG_PREFIX) :])
         return sorted(keys)
+
+    def _get_key_entries(self, key: str) -> list[MemoryEntry]:
+        """Return all stored entries for *key* in chronological order."""
+        key_tag = f"{_TAG_PREFIX}{key}"
+        entries = self._list_namespace_entries()
+        matched = [entry for entry in entries if key_tag in entry.tags]
+        matched.sort(key=lambda entry: entry.created_at)
+        return matched
+
+    def _list_namespace_entries(self) -> list[MemoryEntry]:
+        """Return a full namespace snapshot for adapter-local filtering."""
+        from trw_memory.integrations._backend import DEFAULT_LIST_LIMIT
+
+        namespace_count = self._backend_or_raise.count(namespace=self.namespace)
+        return self._backend_or_raise.list_entries(
+            namespace=self.namespace,
+            limit=max(DEFAULT_LIST_LIMIT, namespace_count),
+        )
+
+    def _message_role(self, entry: MemoryEntry) -> MessageRole:
+        """Recover a stored LlamaIndex role tag, defaulting safely to USER."""
+        from trw_memory.integrations._backend import ROLE_TAG_PREFIX
+
+        role = MessageRole.USER
+        for tag in entry.tags:
+            if tag.startswith(ROLE_TAG_PREFIX):
+                with contextlib.suppress(ValueError):
+                    role = MessageRole(tag[len(ROLE_TAG_PREFIX) :])
+                break
+        return role
 
     # -- Resource management ------------------------------------------------
 
