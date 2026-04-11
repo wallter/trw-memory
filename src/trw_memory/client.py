@@ -196,21 +196,21 @@ class MemoryClient:
         self._tools_registered = False
         self._backend: StorageBackend | None = None
         self._resolved_mode: str = ""
+        self._config = MemoryConfig()
 
         if mode == "mcp":
             raise NotImplementedError("MCP mode is not yet implemented")
 
         if mode in ("local", "auto"):
             try:
-                config = MemoryConfig()
-                self._backend = _create_local_backend(config, namespace)
+                self._backend = _create_local_backend(self._config, namespace)
                 self._resolved_mode = "local"
                 logger.debug(
                     "client_initialized",
                     op="init",
                     namespace=namespace,
                     mode=self._resolved_mode,
-                    backend=config.storage_backend,
+                    backend=self._config.storage_backend,
                 )
             except (OSError, ValueError, ImportError) as exc:
                 if mode == "local":
@@ -286,8 +286,30 @@ class MemoryClient:
             source="agent",
         )
 
+        # Persist the dense vector on the normal write path so later recall can
+        # actually use hybrid ranking instead of silently degrading to BM25-only.
+        embedder = self._get_embedder()
+        embedding = embedder.embed(f"{entry.content} {entry.detail}") if embedder is not None else None
+
         async with self._lock:
-            self._get_backend().store(entry)
+            backend = self._get_backend()
+            backend.store(entry)
+            if embedding is not None:
+                try:
+                    backend.upsert_vector(entry.id, embedding)
+                except Exception as exc:
+                    # Keep store() atomic: callers should never see a failed
+                    # write while the primary row is still committed.
+                    try:
+                        backend.delete(entry.id)
+                    except Exception:
+                        logger.exception("memory_store_vector_rollback_failed", memory_id=entry.id)
+                        raise StorageError(
+                            f"failed to persist vector for {entry.id!r}; rollback did not complete cleanly"
+                        ) from exc
+                    raise StorageError(
+                        f"failed to persist vector for {entry.id!r}; entry write was rolled back"
+                    ) from exc
 
         logger.debug(
             "memory_stored",
@@ -433,6 +455,10 @@ class MemoryClient:
                 namespace=self._namespace,
                 limit=limit * 5,
             )
+            # The hybrid pipeline only runs dense similarity when callers supply
+            # the stored vectors explicitly; loading them here keeps recall
+            # aligned with the vectors written during store().
+            stored_embeddings = backend.get_stored_embeddings([entry.id for entry in all_entries])
 
         if not all_entries:
             return None
@@ -445,6 +471,7 @@ class MemoryClient:
                 query=query,
                 entries=all_entries,
                 embedder=embedder,
+                stored_embeddings=stored_embeddings or None,
                 top_k=limit * 3,
             )
         except Exception:
@@ -527,8 +554,7 @@ class MemoryClient:
         )
         return final
 
-    @staticmethod
-    def _get_embedder() -> EmbeddingProvider | None:
+    def _get_embedder(self) -> EmbeddingProvider | None:
         """Try to obtain a local embedding provider; return None on failure.
 
         This is a best-effort helper: when sentence-transformers is not
@@ -536,15 +562,12 @@ class MemoryClient:
         retrieval is silently skipped and the hybrid pipeline degrades
         to BM25-only mode.
         """
-        try:
-            from trw_memory.embeddings.local import LocalEmbeddingProvider
+        from trw_memory.embeddings import get_local_embedder
 
-            provider = LocalEmbeddingProvider()
-            if provider.available():
-                return provider
-        except Exception:
-            logger.debug("embedder_init_failed", op="recall", exc_info=True)
-        return None
+        return get_local_embedder(
+            model_name=self._config.embedding_model,
+            dim=self._config.embedding_dim,
+        )
 
     async def forget(self, memory_id: str) -> ForgetResultDict:
         """Delete a memory entry.

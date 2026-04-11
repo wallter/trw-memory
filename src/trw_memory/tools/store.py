@@ -11,7 +11,9 @@ from uuid import uuid4
 
 import structlog
 
-from trw_memory.exceptions import ConfigError
+from trw_memory.embeddings import get_local_embedder
+from trw_memory.exceptions import ConfigError, StorageError
+from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.storage.interface import StorageBackend
@@ -29,6 +31,7 @@ def memory_store_impl(
     importance: float = 0.5,
     detail: str = "",
     metadata: dict[str, str] | None = None,
+    config: MemoryConfig | None = None,
 ) -> dict[str, object]:
     """Core implementation of memory_store (callable without MCP).
 
@@ -80,6 +83,26 @@ def memory_store_impl(
 
     try:
         backend.store(entry)
+        # Mirror MemoryClient.store(): tool writes should populate vectors too,
+        # otherwise tool-created memories rank differently from SDK-created ones.
+        cfg = config or MemoryConfig()
+        embedder = get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim)
+        if embedder is not None:
+            try:
+                embedding = embedder.embed(f"{entry.content} {entry.detail}")
+                if embedding is not None:
+                    backend.upsert_vector(entry.id, embedding)
+            except Exception as exc:
+                try:
+                    backend.delete(entry.id)
+                except Exception:
+                    logger.exception("memory_store_vector_rollback_failed", entry_id=entry_id)
+                    raise StorageError(
+                        f"failed to persist vector for {entry_id!r}; rollback did not complete cleanly"
+                    ) from exc
+                raise StorageError(
+                    f"failed to persist vector for {entry_id!r}; entry write was rolled back"
+                ) from exc
     except Exception as exc:  # broad catch: tool error boundary
         logger.exception("memory_store_failed", entry_id=entry_id, error=str(exc))
         return {"error": f"storage error: {exc}", "status": "error"}
@@ -105,8 +128,6 @@ def register_store_tool(mcp: McpServer) -> None:
         mcp: FastMCP server instance (imported lazily to keep fastmcp optional).
     """
     from trw_memory.integrations._backend import create_backend_from_config
-    from trw_memory.models.config import MemoryConfig
-
     @mcp.tool()
     async def memory_store(
         content: str,
@@ -139,4 +160,5 @@ def register_store_tool(mcp: McpServer) -> None:
                 importance=importance,
                 detail=detail,
                 metadata=metadata,
+                config=cfg,
             )

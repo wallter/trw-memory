@@ -184,7 +184,7 @@ src/trw_memory/
     rbac.py              # Role-based access control for namespaces
     keys.py              # Master key derivation and rotation
   tools/                 # 6 MCP tool implementations
-    store.py             # memory_store (validate + dedup + write)
+    store.py             # memory_store (validate + write + optional vector persistence)
     recall.py            # memory_recall (hybrid search + graph traversal)
     search.py            # memory_search (filter-based listing)
     forget.py            # memory_forget (namespace-scoped deletion)
@@ -307,7 +307,7 @@ trw-memory-server  # Starts MCP server (stdio transport)
 
 | Tool | Purpose |
 |------|---------|
-| `memory_store` | Store entry with dedup check and embedding |
+| `memory_store` | Store entry with optional embedding/vector persistence |
 | `memory_recall` | Hybrid retrieval with optional graph traversal |
 | `memory_search` | Filter-based listing (tags, importance, date range) |
 | `memory_forget` | Namespace-scoped deletion |

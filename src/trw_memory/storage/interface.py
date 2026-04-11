@@ -229,6 +229,15 @@ class StorageBackend(ABC):
         """
         return []
 
+    def get_stored_embeddings(self, entry_ids: list[str]) -> dict[str, list[float]]:
+        """Return stored dense vectors for the requested entry IDs.
+
+        Backends with vector persistence should override this. The default
+        returns an empty mapping so callers can opt into dense retrieval
+        without branching on backend capabilities.
+        """
+        return {}
+
     # -- Context manager (non-abstract) ------------------------------------
 
     def __enter__(self) -> StorageBackend:

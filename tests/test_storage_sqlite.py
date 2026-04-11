@@ -584,6 +584,24 @@ class TestDeleteVectorAbsentRow:
         assert preserved.content == "test content"
 
 
+class TestStoredEmbeddings:
+    def test_get_stored_embeddings_returns_empty_when_vec_unavailable(self, backend: SQLiteBackend) -> None:
+        if backend._vec_available:
+            pytest.skip("sqlite-vec available; use round-trip test instead")
+        assert backend.get_stored_embeddings(["missing"]) == {}
+
+    def test_get_stored_embeddings_round_trip(self, backend: SQLiteBackend) -> None:
+        pytest.importorskip("sqlite_vec")
+        entry = make_entry("vec-entry", "vector content")
+        backend.store(entry)
+        backend.upsert_vector(entry.id, [0.1] * backend._dim)
+
+        embeddings = backend.get_stored_embeddings([entry.id, "missing"])
+
+        assert set(embeddings) == {entry.id}
+        assert embeddings[entry.id] == pytest.approx([0.1] * backend._dim)
+
+
 class TestListEntriesCombinedFilters:
     """FR03: list_entries with combined status + namespace filters."""
 

@@ -38,6 +38,7 @@ def _mock_backend(entries: list[MemoryEntry] | None = None) -> MagicMock:
     backend = MagicMock()
     entries = entries or []
     backend.list_entries.return_value = entries
+    backend.get_stored_embeddings.return_value = {}
     backend.search.return_value = entries
     backend.get.return_value = entries[0] if entries else None
     backend.delete.return_value = True

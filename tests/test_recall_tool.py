@@ -19,6 +19,8 @@ from trw_memory.retrieval.token_budget import estimate_entry_tokens
 def _make_backend_with_entries(entries: list[dict[str, object]]) -> MagicMock:
     """Create a mock StorageBackend that returns the given entries."""
     backend = MagicMock()
+    backend.list_entries.return_value = []
+    backend.get_stored_embeddings.return_value = {}
     backend.search.return_value = [
         MagicMock(
             id=e.get("id", f"M-{i}"),
@@ -54,6 +56,8 @@ class TestMemoryRecallImplTokenBudget:
         from trw_memory.tools.recall import memory_recall_impl
 
         backend = MagicMock()
+        backend.list_entries.return_value = []
+        backend.get_stored_embeddings.return_value = {}
         backend.search.return_value = []
 
         result = memory_recall_impl(
@@ -75,6 +79,8 @@ class TestMemoryRecallImplTokenBudget:
         from trw_memory.tools.recall import memory_recall_impl
 
         backend = MagicMock()
+        backend.list_entries.return_value = []
+        backend.get_stored_embeddings.return_value = {}
         backend.search.return_value = []
 
         result = memory_recall_impl(
@@ -93,6 +99,8 @@ class TestMemoryRecallImplTokenBudget:
         from trw_memory.tools.recall import memory_recall_impl
 
         backend = MagicMock()
+        backend.list_entries.return_value = []
+        backend.get_stored_embeddings.return_value = {}
         backend.search.return_value = []
 
         with pytest.raises(ValueError, match="token_budget must be positive"):
@@ -122,6 +130,7 @@ class TestMemoryRecallImplTokenBudget:
         first_cost = estimate_entry_tokens(entries[0])
 
         backend = MagicMock()
+        backend.get_stored_embeddings.return_value = {}
         # Mock search to return entry-like objects
         mock_entries = []
         for e in entries:
@@ -133,6 +142,7 @@ class TestMemoryRecallImplTokenBudget:
             mock_entry.impact = e["impact"]
             mock_entry.to_dict.return_value = e
             mock_entries.append(mock_entry)
+        backend.list_entries.return_value = []
         backend.search.return_value = mock_entries
 
         # Budget just fits first entry
