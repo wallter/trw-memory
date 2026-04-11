@@ -187,6 +187,17 @@ class TestHotTier:
         assert mgr.hot_size == 3
         assert mgr.hot_get("e1") is None  # LRU was evicted
 
+    def test_hot_capacity_eviction_demotes_entry_to_warm_tier(self, mgr: TierManager) -> None:
+        mgr.hot_put("e1", _make_entry("e1"))
+        mgr.hot_put("e2", _make_entry("e2"))
+        mgr.hot_put("e3", _make_entry("e3"))
+
+        mgr.hot_put("e4", _make_entry("e4"))
+
+        warm_results = mgr.warm_search(["e1"], None)
+        warm_ids = [str(row["id"]) for row in warm_results]
+        assert "e1" in warm_ids
+
     def test_hot_put_refresh_existing(self, mgr: TierManager) -> None:
         entry = _make_entry("e1")
         mgr.hot_put("e1", entry)
