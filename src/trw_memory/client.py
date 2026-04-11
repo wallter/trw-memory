@@ -31,6 +31,7 @@ from trw_memory.exceptions import (
     StorageError,
     ToolAlreadyRegisteredError,
 )
+from trw_memory.lifecycle._recall import record_recall_access
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.validation import validate_namespace
@@ -383,6 +384,7 @@ class MemoryClient:
             filtered = [r for r in hybrid_results if r["score"] >= min_score]
             final = filtered[:limit]
             final = self._apply_budget(final, token_budget)
+            await self._record_recall_access(final)
             logger.debug(
                 "memory_recalled",
                 op="recall",
@@ -396,7 +398,9 @@ class MemoryClient:
 
         # --- Tier 2: Fallback LIKE + TF scoring ------------------------------
         results = await self._fallback_recall(query, limit, tags, min_score)
-        return self._apply_budget(results, token_budget)
+        final = self._apply_budget(results, token_budget)
+        await self._record_recall_access(final)
+        return final
 
     @staticmethod
     def _apply_budget(
@@ -553,6 +557,15 @@ class MemoryClient:
             search_path="fallback",
         )
         return final
+
+    async def _record_recall_access(self, results: list[MemoryResultDict]) -> None:
+        """Persist access metadata for the entries that were actually returned."""
+        entry_ids = [result["memory_id"] for result in results]
+        if not entry_ids:
+            return
+
+        async with self._lock:
+            record_recall_access(self._get_backend(), entry_ids)
 
     def _get_embedder(self) -> EmbeddingProvider | None:
         """Try to obtain a local embedding provider; return None on failure.

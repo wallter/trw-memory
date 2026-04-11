@@ -17,6 +17,7 @@ import structlog
 
 from trw_memory.embeddings import get_local_embedder
 from trw_memory.exceptions import ConfigError
+from trw_memory.lifecycle._recall import record_recall_access
 from trw_memory.lifecycle.scoring import entry_utility, rank_by_utility
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
@@ -171,6 +172,10 @@ def memory_recall_impl(
 
     # Apply limit cap AFTER token budget
     result_dicts = result_dicts[:limit]
+    record_recall_access(
+        backend,
+        [str(result["id"]) for result in result_dicts if "id" in result],
+    )
 
     logger.debug(
         "memory_recall",
