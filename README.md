@@ -26,7 +26,7 @@ Designed as the storage backend for [trw-mcp](https://github.com/wallter/trw-mcp
 - **Tiered Storage** -- Hot/warm/cold tiers with automatic promotion/demotion based on access patterns and impact scores. [Architecture details](https://trwframework.com/docs)
 - **Semantic Deduplication** -- Detects and merges near-duplicate learnings using cosine similarity (0.85 threshold)
 - **Knowledge Graph for AI** -- Tag co-occurrence and similarity edges, BFS traversal, importance boost/decay, cross-validation propagation. [Docs](https://trwframework.com/docs)
-- **LLM Consolidation** -- Episodic-to-semantic consolidation via complete-linkage clustering and LLM summarization
+- **Memory Consolidation** -- Episodic-to-semantic consolidation via clustering with the current shipped path using heuristic/fallback summarization
 - **Q-learning Memory Scoring** -- Q-learning with EMA updates, [Ebbinghaus forgetting curve](https://trwframework.com/docs) applied at query time, Bayesian MACLA calibration
 - **Remote Sync** -- Publish/fetch learnings across installations with vector clock conflict resolution and SSE live updates
 - **Security** -- AES-256-GCM field encryption, PII detection/redaction, memory poisoning detection (z-score anomaly), RBAC, audit trail
@@ -162,7 +162,7 @@ src/trw_memory/
   lifecycle/
     scoring.py           # Q-learning, Ebbinghaus decay, Bayesian calibration
     dedup.py             # Semantic dedup (cosine threshold, merge/skip logic)
-    consolidation.py     # LLM clustering + summarization (episodic-to-semantic)
+    consolidation.py     # Consolidation clustering with fallback summarization
     verification.py      # Entry verification utilities
     _utils.py            # Shared lifecycle helpers
     tiers/               # Hot/warm/cold tier management
