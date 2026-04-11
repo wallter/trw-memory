@@ -203,6 +203,7 @@ def from_learning_entry(data: dict[str, object]) -> MemoryEntry:
     # --- numeric fields -------------------------------------------------------
     recurrence = _safe_int(data.get("recurrence"), 1)
     access_count = _safe_int(data.get("access_count"), 0)
+    session_count = _safe_int(data.get("session_count"), 0)
     q_value = _safe_float(data.get("q_value"), 0.5)
     q_value = max(0.0, min(1.0, q_value))
     q_observations = _safe_int(data.get("q_observations"), 0)
@@ -224,6 +225,7 @@ def from_learning_entry(data: dict[str, object]) -> MemoryEntry:
         updated_at=updated_at,
         last_accessed_at=last_accessed_at,
         access_count=access_count,
+        session_count=session_count,
         q_value=q_value,
         q_observations=q_observations,
         source=source,  # type: ignore[arg-type]  # validator coerces unknown values to "agent"

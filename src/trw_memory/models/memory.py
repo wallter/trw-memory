@@ -221,6 +221,7 @@ class MemoryEntry(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_accessed_at: datetime | None = None
     access_count: int = Field(ge=0, default=0)
+    session_count: int = Field(ge=0, default=0)
 
     # Scoring
     q_value: float = Field(ge=0.0, le=1.0, default=0.5)
@@ -406,6 +407,7 @@ class MemoryEntry(BaseModel):
             "updated_at": self.updated_at.isoformat(),
             "last_accessed_at": self.last_accessed_at.isoformat() if self.last_accessed_at else None,
             "access_count": self.access_count,
+            "session_count": self.session_count,
             "q_value": self.q_value,
             "q_observations": self.q_observations,
             "source": self.source,

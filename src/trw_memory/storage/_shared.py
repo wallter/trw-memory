@@ -32,6 +32,7 @@ ENTRY_COLUMNS: tuple[str, ...] = (
     "updated_at",
     "last_accessed_at",
     "access_count",
+    "session_count",
     "q_value",
     "q_observations",
     "source",
