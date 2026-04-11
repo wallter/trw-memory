@@ -76,18 +76,20 @@ def publish_memory(
 ) -> bool:
     """Publish a memory entry to the remote platform (FR01).
 
-    Returns ``True`` on success, ``False`` on failure (entry should be queued
-    for retry).  Fail-open: never raises exceptions.
+    Returns ``True`` when the publish is handled without retry, including
+    deliberate no-op cases such as local-only mode, disabled sync, empty remote
+    config, or importance below the publish threshold. Returns ``False`` only
+    for retryable remote failures. Fail-open: never raises exceptions.
     """
     if cfg.local_only:
         logger.debug("memory_publish_skipped_local_only", entry_id=entry.id)
-        return False
+        return True
 
     if not cfg.sync_enabled or not cfg.platform_url:
-        return False
+        return True
 
     if entry.importance < cfg.sync_min_importance:
-        return False
+        return True
 
     payload = _anonymize_entry(entry, project_root)
     if embedding:

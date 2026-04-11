@@ -198,6 +198,25 @@ class TestHotTier:
         warm_ids = [str(row["id"]) for row in warm_results]
         assert "e1" in warm_ids
 
+    def test_hot_capacity_eviction_keeps_entry_when_warm_demote_fails(self, mgr: TierManager) -> None:
+        mgr.hot_put("e1", _make_entry("e1"))
+        mgr.hot_put("e2", _make_entry("e2"))
+        mgr.hot_put("e3", _make_entry("e3"))
+
+        original_warm_add = mgr.warm_add
+
+        def _fail_once(entry_id: str, entry_data: dict[str, object], embedding: list[float] | None) -> None:
+            raise OSError("disk full")
+
+        mgr.warm_add = _fail_once  # type: ignore[method-assign]
+        try:
+            mgr.hot_put("e4", _make_entry("e4"))
+        finally:
+            mgr.warm_add = original_warm_add  # type: ignore[method-assign]
+
+        assert mgr.hot_size == 4
+        assert mgr.hot_get("e1") is not None
+
     def test_hot_put_refresh_existing(self, mgr: TierManager) -> None:
         entry = _make_entry("e1")
         mgr.hot_put("e1", entry)
