@@ -132,6 +132,7 @@ def _verify_grep(
         )
 
     matching_files: list[str] = []
+    oversized_files: list[str] = []
     scanned = 0
 
     for path in _iter_files(project_root, assertion.target, excludes):
@@ -145,6 +146,7 @@ def _verify_grep(
             continue
         if size > MAX_FILE_SIZE_BYTES:
             logger.debug("file_exceeds_size_limit", path=str(path), size=size)
+            oversized_files.append(f"file exceeds 1MB limit: {path.relative_to(project_root)}")
             continue
 
         # Binary check
@@ -167,10 +169,14 @@ def _verify_grep(
             evidence = f"pattern found in {len(matching_files)} file(s): {', '.join(matching_files[:5])}"
         else:
             evidence = f"pattern not found in {scanned} file(s) matching '{assertion.target}'"
+            if oversized_files:
+                evidence = f"{evidence}; skipped {', '.join(oversized_files[:5])}"
     else:
         passed = len(matching_files) == 0
         if passed:
             evidence = f"pattern correctly absent from {scanned} file(s) matching '{assertion.target}'"
+            if oversized_files:
+                evidence = f"{evidence}; skipped {', '.join(oversized_files[:5])}"
         else:
             evidence = f"pattern unexpectedly found in {len(matching_files)} file(s): {', '.join(matching_files[:5])}"
 
