@@ -96,6 +96,13 @@ class TestRecallSchema:
         assert limit["minimum"] == 1
         assert limit["default"] == 10
 
+    def test_graph_depth_and_org_memory_properties(self) -> None:
+        props = get_memory_recall_schema()["parameters"]["properties"]
+        assert props["graph_depth"]["type"] == "integer"
+        assert props["graph_depth"]["maximum"] == 3
+        assert props["include_org_memories"]["type"] == "boolean"
+        assert props["include_org_memories"]["default"] is True
+
 
 class TestSearchSchema:
     def test_structure(self) -> None:

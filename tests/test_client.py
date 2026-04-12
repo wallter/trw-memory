@@ -433,26 +433,29 @@ class TestRecall:
 
         with create_backend_from_config(cfg, "project:other") as storage:
             remote_backend = cast(SQLiteBackend, storage)
-            remote_backend.store(
-                MemoryEntry(
-                    id="M-org",
-                    content="deployment lesson from another project",
-                    namespace="project:other",
-                    importance=0.85,
-                    cross_validated=True,
-                )
+            org_entry = MemoryEntry(
+                id="M-org",
+                content="deployment lesson from another project",
+                namespace="project:other",
+                importance=0.85,
+                cross_validated=True,
             )
+            remote_backend.store(org_entry)
 
-            @contextmanager
-            def fake_discover(*_args: object, **_kwargs: object) -> Iterator[object]:
-                yield [(["project:other"], remote_backend)]
-
-            with patch("trw_memory.integrations._backend.discover_namespace_backends", fake_discover):
+            with patch("trw_memory.client.list_org_shared_entries", return_value=[org_entry]):
                 results = await client.recall("", include_org_memories=True)
 
         assert any(result["source"] == "org" for result in results)
         assert results[0]["source"] == "local"
         assert any(result["namespace"] == "project:other" for result in results)
+        backend = cast(SQLiteBackend, client._get_backend())
+        current_entry = backend.get(results[0]["memory_id"])
+        with create_backend_from_config(cfg, "project:other") as reopened_storage:
+            remote_entry = cast(SQLiteBackend, reopened_storage).get("M-org")
+        assert current_entry is not None
+        assert remote_entry is not None
+        assert current_entry.access_count == 1
+        assert remote_entry.access_count == 1
         await client.close()
 
     async def test_recall_include_shared_appends_remote_results(

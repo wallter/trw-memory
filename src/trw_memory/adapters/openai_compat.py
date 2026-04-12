@@ -93,6 +93,18 @@ def get_memory_recall_schema() -> dict[str, Any]:
                     "default": "default",
                     "description": "Namespace to search within",
                 },
+                "include_org_memories": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Append cross-validated memories from sibling project namespaces",
+                },
+                "graph_depth": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 3,
+                    "default": 0,
+                    "description": "When > 0, include graph-related memories up to this traversal depth",
+                },
             },
             "required": ["query"],
         },

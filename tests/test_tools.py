@@ -138,6 +138,33 @@ class TestMemoryRecallImpl:
 
         assert "related" not in result
 
+    def test_graph_depth_positive_returns_related_entry_payloads(self) -> None:
+        import sqlite3
+
+        root = _make_entry("M-root", content="root entry")
+        related = _make_entry("M-related", content="related entry")
+        backend = _mock_backend([root])
+        backend.get.side_effect = lambda entry_id: {"M-root": root, "M-related": related}.get(entry_id)
+
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE memory_graph_edges (source_id TEXT, target_id TEXT, edge_type TEXT, weight REAL)"
+        )
+        conn.execute(
+            "INSERT INTO memory_graph_edges (source_id, target_id, edge_type, weight) VALUES (?, ?, ?, ?)",
+            ("M-root", "M-related", "similarity", 0.91),
+        )
+        conn.commit()
+
+        result = memory_recall_impl("", "project:default", backend=backend, graph_depth=1, conn=conn)
+
+        related_items = cast(list[dict[str, object]], result["related"])
+        assert related_items[0]["id"] == "M-related"
+        assert related_items[0]["content"] == "related entry"
+        assert related_items[0]["edge_type"] == "similarity"
+        assert related_items[0]["depth"] == 1
+        conn.close()
+
     def test_include_org_memories_appends_cross_validated_project_entries(self, tmp_path: Path) -> None:
         cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
 
@@ -174,6 +201,7 @@ class TestMemoryRecallImpl:
                     "",
                     "project:default",
                     backend=current_backend,
+                    namespace_backend_factory=lambda ns: create_backend_from_config(cfg, ns),
                     include_org_memories=True,
                     config=cfg,
                 )
@@ -183,6 +211,12 @@ class TestMemoryRecallImpl:
             assert memories[0]["namespace"] == "project:default"
             assert memories[1]["namespace"] == "project:other"
             assert memories[1]["scope"] == "org"
+            local_entry = current_backend.get("M-local")
+            remote_entry = remote_backend.get("M-org")
+            assert local_entry is not None
+            assert remote_entry is not None
+            assert local_entry.access_count == 1
+            assert remote_entry.access_count == 1
 
 
 # ---------------------------------------------------------------------------

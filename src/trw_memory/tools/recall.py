@@ -213,10 +213,7 @@ def memory_recall_impl(
 
     # Apply limit cap AFTER token budget
     result_dicts = result_dicts[:limit]
-    record_recall_access(
-        backend,
-        [str(result["id"]) for result in result_dicts if "id" in result],
-    )
+    _record_access_by_namespace(result_dicts, backend, namespace, namespace_backend_factory)
 
     logger.debug(
         "memory_recall",
@@ -300,7 +297,7 @@ def _graph_related(
     depth: int,
     backend: StorageBackend,
     conn: sqlite3.Connection | None,
-) -> list[dict[str, str | int | float]]:
+) -> list[dict[str, object]]:
     """Query the knowledge graph for entries related to the recall results.
 
     Args:
@@ -310,8 +307,8 @@ def _graph_related(
         conn: Explicit SQLite connection, or None.
 
     Returns:
-        List of {"id": str, "depth": int, "edge_type": str, "weight": float}
-        for each related node discovered.
+        Related entry dicts augmented with graph metadata (`depth`, `edge_type`,
+        `weight`). Entries missing from storage are skipped.
     """
     from trw_memory.graph import graph_query
 
@@ -326,10 +323,47 @@ def _graph_related(
     root_ids = [str(d["id"]) for d in result_dicts if "id" in d]
 
     try:
-        return graph_query(effective_conn, root_ids, depth=depth)
+        related_nodes = graph_query(effective_conn, root_ids, depth=depth)
     except (sqlite3.Error, ValueError, KeyError):
         logger.debug("graph_related_error", exc_info=True)
         return []
+
+    hydrated: list[dict[str, object]] = []
+    for node in related_nodes:
+        entry = backend.get(str(node["id"]))
+        if entry is None:
+            continue
+        item = entry.model_dump(mode="json")
+        item.update(node)
+        hydrated.append(item)
+    return hydrated
+
+
+def _record_access_by_namespace(
+    result_dicts: list[dict[str, object]],
+    backend: StorageBackend,
+    namespace: str,
+    namespace_backend_factory: Callable[[str], StorageBackend] | None,
+) -> None:
+    """Persist access metadata for returned entries across namespace stores."""
+    grouped: dict[str, list[str]] = {}
+    for result in result_dicts:
+        if "id" not in result:
+            continue
+        result_namespace = str(result.get("namespace", namespace))
+        grouped.setdefault(result_namespace, []).append(str(result["id"]))
+
+    if not grouped:
+        return
+
+    with ExitStack() as stack:
+        for result_namespace, ids in grouped.items():
+            target_backend = backend
+            if result_namespace != namespace:
+                if namespace_backend_factory is None:
+                    continue
+                target_backend = stack.enter_context(namespace_backend_factory(result_namespace))
+            record_recall_access(target_backend, ids)
 
 
 def register_recall_tool(mcp: McpServer) -> None:

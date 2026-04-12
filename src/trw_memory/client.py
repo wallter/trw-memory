@@ -680,12 +680,22 @@ class MemoryClient:
 
     async def _record_recall_access(self, results: list[MemoryResultDict]) -> None:
         """Persist access metadata for the entries that were actually returned."""
-        entry_ids = [result["memory_id"] for result in results if result.get("source", "local") == "local"]
-        if not entry_ids:
+        grouped: dict[str, list[str]] = {}
+        for result in results:
+            if result.get("source") == "shared":
+                continue
+            grouped.setdefault(result["namespace"], []).append(result["memory_id"])
+
+        if not grouped:
             return
 
         async with self._lock:
-            record_recall_access(self._get_backend(), entry_ids)
+            for namespace, entry_ids in grouped.items():
+                if namespace == self._namespace:
+                    record_recall_access(self._get_backend(), entry_ids)
+                    continue
+                with _create_local_backend(self._config, namespace) as backend:
+                    record_recall_access(backend, entry_ids)
 
     def _get_embedder(self) -> EmbeddingProvider | None:
         """Try to obtain a local embedding provider; return None on failure.
