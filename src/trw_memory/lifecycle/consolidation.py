@@ -19,7 +19,7 @@ import structlog
 
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.exceptions import StorageError
-from trw_memory.graph import update_entry_graph
+from trw_memory.graph import schedule_graph_update
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.retrieval.dense import cosine_similarity
@@ -300,16 +300,16 @@ def _create_consolidated_entry(
                 f"failed to persist vector for {entry.id!r}; entry write was rolled back"
             ) from exc
     try:
-        # Consolidation lineage edges should never prevent the consolidated entry
-        # itself from being persisted.
-        update_entry_graph(
+        # Consolidation lineage edges are secondary structure and should not keep
+        # the consolidated entry itself on the write path.
+        schedule_graph_update(
             entry,
             storage,
             embedding=embedding,
             config=getattr(storage, "_config", None),
         )
-    except (StorageError, sqlite3.Error, ValueError):
-        logger.warning("consolidation_graph_update_failed", entry_id=entry.id, exc_info=True)
+    except RuntimeError:
+        logger.warning("consolidation_graph_schedule_failed", entry_id=entry.id, exc_info=True)
 
     logger.info(
         "consolidation_entry_created",

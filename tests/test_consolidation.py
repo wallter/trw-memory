@@ -11,6 +11,7 @@ import pytest
 
 import trw_memory.lifecycle.consolidation as consolidation_module
 from trw_memory.exceptions import StorageError
+from trw_memory.graph import wait_for_graph_updates
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.lifecycle.consolidation import (
     _archive_originals,
@@ -333,6 +334,7 @@ class TestCreateConsolidatedEntry:
                 storage,
                 embedder=_make_embedder(vectors=[_V1]),
             )
+            wait_for_graph_updates()
 
             edge_rows = storage._conn.execute(
                 "SELECT source_id, target_id, edge_type FROM memory_graph_edges "

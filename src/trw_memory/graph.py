@@ -11,6 +11,8 @@ import sqlite3
 import threading
 from collections import deque
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from time import monotonic
 
 import structlog
 
@@ -30,10 +32,12 @@ __all__ = [
     "list_org_shared_entries",
     "memory_decay_pass",
     "propagate_impact",
+    "schedule_graph_update",
     "update_entry_graph",
+    "wait_for_graph_updates",
 ]
 
-from trw_memory.exceptions import DimensionMismatchError
+from trw_memory.exceptions import DimensionMismatchError, StorageError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.retrieval.dense import cosine_similarity
@@ -81,6 +85,8 @@ _PROPAGATION_RATES: dict[str, float] = {
 _NEGATIVE_MULTIPLIER = 0.5
 _ENTRY_UPDATE_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _ENTRY_UPDATE_LOCKS_GUARD = threading.Lock()
+_BACKGROUND_GRAPH_THREADS: set[threading.Thread] = set()
+_BACKGROUND_GRAPH_THREADS_GUARD = threading.Lock()
 
 
 def _optional_lock(lock: threading.Lock | None) -> contextlib.AbstractContextManager[bool]:
@@ -88,6 +94,105 @@ def _optional_lock(lock: threading.Lock | None) -> contextlib.AbstractContextMan
     if lock is not None:
         return lock
     return contextlib.nullcontext(True)
+
+
+def _track_graph_thread(thread: threading.Thread) -> None:
+    with _BACKGROUND_GRAPH_THREADS_GUARD:
+        _BACKGROUND_GRAPH_THREADS.add(thread)
+
+
+def _untrack_graph_thread(thread: threading.Thread) -> None:
+    with _BACKGROUND_GRAPH_THREADS_GUARD:
+        _BACKGROUND_GRAPH_THREADS.discard(thread)
+
+
+def _derive_graph_config(
+    backend: StorageBackend,
+    config: MemoryConfig | None,
+) -> MemoryConfig | None:
+    if config is not None:
+        return config
+
+    from trw_memory.storage.sqlite_backend import SQLiteBackend
+    from trw_memory.storage.yaml_backend import YAMLBackend
+
+    if isinstance(backend, SQLiteBackend):
+        db_path = Path(str(backend._db_path))
+        return MemoryConfig(
+            storage_backend="sqlite",
+            storage_path=str(db_path.parent.parent),
+            sqlite_db_name=db_path.name,
+            embedding_dim=backend._dim,
+        )
+
+    if isinstance(backend, YAMLBackend):
+        entries_dir = Path(str(backend._dir))
+        return MemoryConfig(
+            storage_backend="yaml",
+            storage_path=str(entries_dir.parent.parent),
+        )
+
+    return None
+
+
+def _run_scheduled_graph_update(
+    entry: MemoryEntry,
+    config: MemoryConfig,
+    embedding: list[float] | None,
+) -> None:
+    from trw_memory.integrations._backend import create_backend_from_config
+
+    # Reopen the namespace backend inside the worker so the caller can return
+    # immediately without sharing a soon-to-close SQLite connection across threads.
+    with create_backend_from_config(config, entry.namespace) as backend:
+        update_entry_graph(entry, backend, embedding=embedding, config=config)
+
+
+def schedule_graph_update(
+    entry: MemoryEntry,
+    backend: StorageBackend,
+    *,
+    embedding: list[float] | None = None,
+    config: MemoryConfig | None = None,
+) -> bool:
+    """Dispatch best-effort graph enrichment off the write critical path."""
+    resolved_config = _derive_graph_config(backend, config)
+    if resolved_config is None:
+        logger.debug("graph_update_skipped", entry_id=entry.id, reason="missing_background_config")
+        return False
+
+    def worker() -> None:
+        try:
+            _run_scheduled_graph_update(entry, resolved_config, embedding)
+        except (StorageError, sqlite3.Error, ValueError):
+            logger.warning("graph_update_background_failed", entry_id=entry.id, exc_info=True)
+        finally:
+            _untrack_graph_thread(threading.current_thread())
+
+    thread = threading.Thread(
+        target=worker,
+        name=f"trw-memory-graph-{entry.id}",
+        daemon=True,
+    )
+    _track_graph_thread(thread)
+    thread.start()
+    return True
+
+
+def wait_for_graph_updates(timeout: float = 5.0) -> None:
+    """Block until scheduled graph-update threads finish or *timeout* elapses."""
+    deadline = monotonic() + timeout
+    while True:
+        with _BACKGROUND_GRAPH_THREADS_GUARD:
+            threads = [thread for thread in _BACKGROUND_GRAPH_THREADS if thread.is_alive()]
+        if not threads:
+            return
+
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise TimeoutError("timed out waiting for background graph updates")
+
+        threads[0].join(min(0.05, remaining))
 
 
 def update_entry_graph(

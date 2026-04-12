@@ -14,7 +14,7 @@ import structlog
 
 from trw_memory.embeddings import get_local_embedder
 from trw_memory.exceptions import ConfigError, StorageError
-from trw_memory.graph import update_entry_graph
+from trw_memory.graph import schedule_graph_update
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
@@ -111,11 +111,11 @@ def memory_store_impl(
                     f"failed to persist vector for {entry_id!r}; entry write was rolled back"
                 ) from exc
         try:
-            # Graph enrichment is a secondary index over the stored entry. Log
-            # failures explicitly, but do not roll back the canonical row/vector.
-            update_entry_graph(entry, backend, embedding=embedding, config=cfg)
-        except (StorageError, sqlite3.Error, ValueError):
-            logger.warning("memory_store_graph_update_failed", entry_id=entry_id, exc_info=True)
+            # Graph enrichment is a secondary index over the stored entry, so we
+            # dispatch it after the canonical row/vector write succeeds.
+            schedule_graph_update(entry, backend, embedding=embedding, config=cfg)
+        except RuntimeError:
+            logger.warning("memory_store_graph_schedule_failed", entry_id=entry_id, exc_info=True)
     except Exception as exc:  # broad catch: tool error boundary
         logger.exception("memory_store_failed", entry_id=entry_id, error=str(exc))
         return {"error": f"storage error: {exc}", "status": "error"}
