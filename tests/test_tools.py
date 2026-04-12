@@ -11,13 +11,16 @@ from pathlib import Path
 from typing import Iterator, cast
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools.forget import memory_forget_impl
-from trw_memory.tools.recall import memory_recall_impl
+from trw_memory.tools.recall import _merge_tier_entries, memory_recall_impl
+from trw_memory.tools.store import memory_store_impl
 from trw_memory.tools.search import memory_search_impl
 
 # ---------------------------------------------------------------------------
@@ -279,6 +282,409 @@ class TestMemoryRecallImpl:
             memories = cast(list[dict[str, object]], result["memories"])
             assert [memory["namespace"] for memory in memories] == ["project:default"]
 
+    def test_recall_promotes_cold_tier_hit_through_tool_surface(self, tmp_path: Path) -> None:
+        from trw_memory.lifecycle.tiers._runtime import get_tier_manager
+        from trw_memory.storage.persistence import write_yaml
+
+        cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path))
+        with create_backend_from_config(cfg, "project:default") as backend:
+            manager = get_tier_manager(cfg, "project:default")
+            cold_partition = manager._cold_dir() / "2026" / "04"
+            cold_partition.mkdir(parents=True, exist_ok=True)
+            cold_file = cold_partition / "tool-cold.yaml"
+            write_yaml(
+                cold_file,
+                MemoryEntry(
+                    id="M-tool-cold",
+                    content="tool cold archive lesson",
+                    namespace="project:default",
+                    tags=["cold"],
+                ).model_dump(mode="json"),
+            )
+
+            result = memory_recall_impl(
+                "tool cold archive",
+                "project:default",
+                backend=backend,
+                config=cfg,
+            )
+
+            memories = cast(list[dict[str, object]], result["memories"])
+            assert any(memory["id"] == "M-tool-cold" for memory in memories)
+            assert not cold_file.exists()
+            assert backend.get("M-tool-cold") is not None
+            warm_ids = [str(item["id"]) for item in manager.warm_search(["tool"], None)]
+            assert "M-tool-cold" in warm_ids
+
+    def test_recall_restores_cold_hit_into_warm_vector_index(self, tmp_path: Path) -> None:
+        from trw_memory.lifecycle.tiers._runtime import get_tier_manager
+        from trw_memory.storage.persistence import write_yaml
+
+        class _FakeWarmBackend:
+            def __init__(self) -> None:
+                self.vectors: dict[str, list[float]] = {}
+
+            def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:
+                self.vectors[entry_id] = embedding
+
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
+        with create_backend_from_config(cfg, "project:default") as backend:
+            manager = get_tier_manager(cfg, "project:default")
+            cold_partition = manager._cold_dir() / "2026" / "04"
+            cold_partition.mkdir(parents=True, exist_ok=True)
+            cold_file = cold_partition / "tool-cold-vector.yaml"
+            payload = MemoryEntry(
+                id="M-tool-cold-vector",
+                content="tool keyword promoted vector lesson",
+                namespace="project:default",
+                tags=["cold"],
+            ).model_dump(mode="json")
+            payload["_warm_embedding"] = [1.0, 0.0]
+            write_yaml(cold_file, payload)
+
+            fake_backend = _FakeWarmBackend()
+            manager._warm_store._get_warm_backend = lambda dim=None: fake_backend  # type: ignore[assignment,return-value]
+            result = memory_recall_impl(
+                "keyword promoted",
+                "project:default",
+                backend=backend,
+                config=cfg,
+            )
+
+            memories = cast(list[dict[str, object]], result["memories"])
+            assert any(memory["id"] == "M-tool-cold-vector" for memory in memories)
+            assert fake_backend.vectors["M-tool-cold-vector"] == [1.0, 0.0]
+
+    def test_recall_does_not_surface_cold_hit_when_promotion_fails(self, tmp_path: Path) -> None:
+        from trw_memory.lifecycle.tiers._runtime import get_tier_manager
+        from trw_memory.storage.persistence import write_yaml
+
+        cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path))
+        with create_backend_from_config(cfg, "project:default") as backend:
+            manager = get_tier_manager(cfg, "project:default")
+            cold_partition = manager._cold_dir() / "2026" / "04"
+            cold_partition.mkdir(parents=True, exist_ok=True)
+            cold_file = cold_partition / "tool-cold-fail.yaml"
+            write_yaml(
+                cold_file,
+                MemoryEntry(
+                    id="M-tool-cold-fail",
+                    content="tool cold rollback lesson",
+                    namespace="project:default",
+                    tags=["cold"],
+                ).model_dump(mode="json"),
+            )
+
+            original_warm_add = manager._cold_store._warm_store.warm_add
+
+            def _fail_warm_add(entry_id: str, entry_data: dict[str, object], embedding: list[float] | None) -> None:
+                raise OSError("warm unavailable")
+
+            manager._cold_store._warm_store.warm_add = _fail_warm_add  # type: ignore[method-assign]
+            try:
+                result = memory_recall_impl(
+                    "tool cold rollback",
+                    "project:default",
+                    backend=backend,
+                    config=cfg,
+                )
+            finally:
+                manager._cold_store._warm_store.warm_add = original_warm_add  # type: ignore[method-assign]
+
+            memories = cast(list[dict[str, object]], result["memories"])
+            assert not any(memory["id"] == "M-tool-cold-fail" for memory in memories)
+            assert cold_file.exists()
+            assert backend.get("M-tool-cold-fail") is None
+
+    def test_recall_does_not_leave_sqlite_canonical_copy_when_promotion_fails(self, tmp_path: Path) -> None:
+        from trw_memory.lifecycle.tiers._runtime import get_tier_manager
+        from trw_memory.storage.persistence import write_yaml
+
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
+        with create_backend_from_config(cfg, "project:default") as backend:
+            manager = get_tier_manager(cfg, "project:default")
+            cold_partition = manager._cold_dir() / "2026" / "04"
+            cold_partition.mkdir(parents=True, exist_ok=True)
+            cold_file = cold_partition / "tool-cold-sqlite-fail.yaml"
+            write_yaml(
+                cold_file,
+                MemoryEntry(
+                    id="M-tool-cold-sqlite-fail",
+                    content="tool sqlite rollback lesson",
+                    namespace="project:default",
+                    tags=["cold"],
+                ).model_dump(mode="json"),
+            )
+
+            original_warm_add = manager._cold_store._warm_store.warm_add
+
+            def _fail_warm_add(entry_id: str, entry_data: dict[str, object], embedding: list[float] | None) -> None:
+                raise OSError("warm unavailable")
+
+            manager._cold_store._warm_store.warm_add = _fail_warm_add  # type: ignore[method-assign]
+            try:
+                result = memory_recall_impl(
+                    "tool sqlite rollback",
+                    "project:default",
+                    backend=backend,
+                    config=cfg,
+                )
+            finally:
+                manager._cold_store._warm_store.warm_add = original_warm_add  # type: ignore[method-assign]
+
+            memories = cast(list[dict[str, object]], result["memories"])
+            assert not any(memory["id"] == "M-tool-cold-sqlite-fail" for memory in memories)
+            assert cold_file.exists()
+            assert backend.get("M-tool-cold-sqlite-fail") is None
+
+    def test_recall_does_not_leave_sqlite_canonical_copy_when_archive_delete_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from trw_memory.lifecycle.tiers._runtime import get_tier_manager
+        from trw_memory.storage.persistence import write_yaml
+
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
+        with create_backend_from_config(cfg, "project:default") as backend:
+            manager = get_tier_manager(cfg, "project:default")
+            cold_partition = manager._cold_dir() / "2026" / "04"
+            cold_partition.mkdir(parents=True, exist_ok=True)
+            cold_file = cold_partition / "tool-cold-sqlite-unlink-fail.yaml"
+            write_yaml(
+                cold_file,
+                MemoryEntry(
+                    id="M-tool-cold-sqlite-unlink-fail",
+                    content="tool sqlite archive delete rollback lesson",
+                    namespace="project:default",
+                    tags=["cold"],
+                ).model_dump(mode="json"),
+            )
+
+            original_unlink = Path.unlink
+
+            def _fail_archive_delete(path: Path, *, missing_ok: bool = False) -> None:
+                if path == cold_file:
+                    raise OSError("archive delete failed")
+                original_unlink(path, missing_ok=missing_ok)
+
+            monkeypatch.setattr(Path, "unlink", _fail_archive_delete)
+            try:
+                result = memory_recall_impl(
+                    "archive delete rollback",
+                    "project:default",
+                    backend=backend,
+                    config=cfg,
+                )
+            finally:
+                monkeypatch.setattr(Path, "unlink", original_unlink)
+
+            memories = cast(list[dict[str, object]], result["memories"])
+            assert not any(memory["id"] == "M-tool-cold-sqlite-unlink-fail" for memory in memories)
+            assert cold_file.exists()
+            assert backend.get("M-tool-cold-sqlite-unlink-fail") is None
+
+    def test_recall_force_deletes_yaml_canonical_copy_when_primary_rollback_delete_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from trw_memory.lifecycle.tiers._runtime import get_tier_manager
+        from trw_memory.storage.persistence import write_yaml
+
+        cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path))
+        with create_backend_from_config(cfg, "project:default") as backend:
+            manager = get_tier_manager(cfg, "project:default")
+            cold_partition = manager._cold_dir() / "2026" / "04"
+            cold_partition.mkdir(parents=True, exist_ok=True)
+            cold_file = cold_partition / "tool-cold-yaml-double-fail.yaml"
+            write_yaml(
+                cold_file,
+                MemoryEntry(
+                    id="M-tool-cold-yaml-double-fail",
+                    content="tool yaml canonical cleanup fallback lesson",
+                    namespace="project:default",
+                    tags=["cold"],
+                ).model_dump(mode="json"),
+            )
+
+            original_unlink = Path.unlink
+
+            def _fail_archive_delete(path: Path, *, missing_ok: bool = False) -> None:
+                if path == cold_file:
+                    raise OSError("archive delete failed")
+                original_unlink(path, missing_ok=missing_ok)
+
+            def _fail_primary_delete(_entry_id: str) -> bool:
+                raise OSError("primary rollback delete failed")
+
+            monkeypatch.setattr(Path, "unlink", _fail_archive_delete)
+            monkeypatch.setattr(backend, "delete", _fail_primary_delete)
+            try:
+                result = memory_recall_impl(
+                    "yaml canonical cleanup fallback",
+                    "project:default",
+                    backend=backend,
+                    config=cfg,
+                )
+            finally:
+                monkeypatch.setattr(Path, "unlink", original_unlink)
+
+            memories = cast(list[dict[str, object]], result["memories"])
+            assert not any(memory["id"] == "M-tool-cold-yaml-double-fail" for memory in memories)
+            assert cold_file.exists()
+            assert backend.get("M-tool-cold-yaml-double-fail") is None
+
+    def test_recall_force_deletes_sqlite_canonical_copy_when_primary_rollback_delete_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from trw_memory.lifecycle.tiers._runtime import get_tier_manager
+        from trw_memory.storage.persistence import write_yaml
+
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
+        with create_backend_from_config(cfg, "project:default") as backend:
+            manager = get_tier_manager(cfg, "project:default")
+            cold_partition = manager._cold_dir() / "2026" / "04"
+            cold_partition.mkdir(parents=True, exist_ok=True)
+            cold_file = cold_partition / "tool-cold-sqlite-double-fail.yaml"
+            write_yaml(
+                cold_file,
+                MemoryEntry(
+                    id="M-tool-cold-sqlite-double-fail",
+                    content="tool sqlite canonical cleanup fallback lesson",
+                    namespace="project:default",
+                    tags=["cold"],
+                ).model_dump(mode="json"),
+            )
+
+            original_unlink = Path.unlink
+
+            def _fail_archive_delete(path: Path, *, missing_ok: bool = False) -> None:
+                if path == cold_file:
+                    raise OSError("archive delete failed")
+                original_unlink(path, missing_ok=missing_ok)
+
+            def _fail_primary_delete(_entry_id: str) -> bool:
+                raise OSError("primary rollback delete failed")
+
+            monkeypatch.setattr(Path, "unlink", _fail_archive_delete)
+            monkeypatch.setattr(backend, "delete", _fail_primary_delete)
+            try:
+                result = memory_recall_impl(
+                    "canonical cleanup fallback",
+                    "project:default",
+                    backend=backend,
+                    config=cfg,
+                )
+            finally:
+                monkeypatch.setattr(Path, "unlink", original_unlink)
+
+            memories = cast(list[dict[str, object]], result["memories"])
+            assert not any(memory["id"] == "M-tool-cold-sqlite-double-fail" for memory in memories)
+            assert cold_file.exists()
+            assert backend.get("M-tool-cold-sqlite-double-fail") is None
+
+    def test_recall_surfaces_semantic_warm_tier_hit(self, tmp_path: Path) -> None:
+        from trw_memory.lifecycle.tiers._runtime import get_tier_manager
+
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
+        with create_backend_from_config(cfg, "project:default") as backend:
+            manager = get_tier_manager(cfg, "project:default")
+            manager.warm_add(
+                "M-semantic",
+                MemoryEntry(
+                    id="M-semantic",
+                    content="opaque title",
+                    detail="vector-only match",
+                    namespace="project:default",
+                    importance=0.9,
+                    q_value=0.95,
+                    q_observations=5,
+                ).model_dump(mode="json"),
+                [1.0, 0.0],
+            )
+
+            fake_embedder = MagicMock()
+            fake_embedder.embed.return_value = [1.0, 0.0]
+
+            with patch("trw_memory.tools.recall.get_local_embedder", return_value=fake_embedder):
+                result = memory_recall_impl(
+                    "semantic query",
+                    "project:default",
+                    backend=backend,
+                    config=cfg,
+                )
+
+            memories = cast(list[dict[str, object]], result["memories"])
+            assert [memory["id"] for memory in memories] == ["M-semantic"]
+
+    def test_recall_refreshes_hot_recency_for_ttl(self, tmp_path: Path) -> None:
+        from trw_memory.lifecycle.tiers._runtime import get_tier_manager
+
+        cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path), hot_ttl_days=7, hot_max_entries=5)
+        with create_backend_from_config(cfg, "project:default") as backend:
+            manager = get_tier_manager(cfg, "project:default")
+            stale_time = datetime.now(timezone.utc) - timedelta(days=30)
+            entry = MemoryEntry(
+                id="M-tool-hot-ttl",
+                content="tool ttl refresh lesson",
+                namespace="project:default",
+                last_accessed_at=stale_time,
+            )
+            backend.store(entry)
+            manager.warm_add("M-tool-hot-ttl", entry.model_dump(mode="json"), None)
+
+            result = memory_recall_impl(
+                "tool ttl refresh",
+                "project:default",
+                backend=backend,
+                config=cfg,
+            )
+
+            memories = cast(list[dict[str, object]], result["memories"])
+            assert any(memory["id"] == "M-tool-hot-ttl" for memory in memories)
+            hot_entry = manager.hot_get("M-tool-hot-ttl")
+            assert hot_entry is not None
+            sweep_result = manager.sweep(config=cfg)
+            assert sweep_result.demoted == 0
+
+    def test_merge_tier_entries_reranks_by_composite_score(self) -> None:
+        cfg = MemoryConfig()
+        merged = _merge_tier_entries(
+            [
+                {
+                    "id": "M-local",
+                    "content": "deploy lesson",
+                    "detail": "stale local result",
+                    "importance": 0.1,
+                    "q_value": 0.1,
+                    "q_observations": 5,
+                    "last_accessed_at": (datetime.now(timezone.utc) - timedelta(days=60)).isoformat(),
+                    "score": 0.9,
+                    "namespace": "project:default",
+                }
+            ],
+            [
+                {
+                    "id": "M-tier",
+                    "content": "deploy lesson",
+                    "detail": "fresh tier result",
+                    "importance": 0.9,
+                    "q_value": 0.95,
+                    "q_observations": 5,
+                    "last_accessed_at": datetime.now(timezone.utc).isoformat(),
+                    "score": 0.2,
+                    "namespace": "project:default",
+                }
+            ],
+            ["deploy"],
+            cfg,
+            None,
+        )
+        assert [str(entry["id"]) for entry in merged] == ["M-tier", "M-local"]
+
 
 # ---------------------------------------------------------------------------
 # memory_search_impl
@@ -398,3 +804,21 @@ class TestMemoryForgetImpl:
         result = memory_forget_impl("  ", None, "project:default", backend=backend)
         assert result["status"] == "invalid"
         assert "non-empty" in str(result.get("error", "")).lower()
+
+    def test_forget_removes_entry_from_tier_runtime(self, tmp_path: Path) -> None:
+        from trw_memory.lifecycle.tiers._runtime import get_tier_manager
+
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
+        with create_backend_from_config(cfg, "project:default") as backend:
+            stored = memory_store_impl("tool tracked entry", "project:default", backend=backend, config=cfg)
+            memory_id = cast(str, stored["memory_id"])
+            manager = get_tier_manager(cfg, "project:default")
+
+            warm_ids = [str(item["id"]) for item in manager.warm_search(["tracked"], None)]
+            assert memory_id in warm_ids
+
+            result = memory_forget_impl(memory_id, None, "project:default", backend=backend, config=cfg)
+
+            assert result["deleted"] == 1
+            warm_ids_after = [str(item["id"]) for item in manager.warm_search(["tracked"], None)]
+            assert memory_id not in warm_ids_after

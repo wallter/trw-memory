@@ -148,7 +148,7 @@ class BanditSelector:
         top_arm: str | None = None
         top_index = 0
         top_sample = -1.0
-        runner_up_id: str | None = None
+        runner_up_id = None
         runner_up_sample: float | None = None
         for index, arm_id in enumerate(eligible_ids):
             arm = self._arms[arm_id]
