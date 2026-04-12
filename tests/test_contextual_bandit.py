@@ -17,12 +17,60 @@ from trw_memory.bandit.contextual import ContextualBanditSelector
 # ---------------------------------------------------------------------------
 
 
+def test_select_no_context_uses_thompson_not_random() -> None:
+    """With context_vector=None, selection uses Thompson Sampling not uniform random.
+
+    After training the Thompson fallback (via update with no context), the
+    arm with higher reward should be selected more often than chance.
+    This verifies FR02: 'fall back to non-contextual Thompson Sampling'.
+    """
+    selector = ContextualBanditSelector(feature_dim=3)
+    arms = ["arm_good", "arm_bad"]
+
+    for _ in range(30):
+        selector.update("arm_good", reward=0.9, context_vector=None)
+        selector.update("arm_bad", reward=0.1, context_vector=None)
+
+    counts: dict[str, int] = {"arm_good": 0, "arm_bad": 0}
+    n_trials = 200
+    for _ in range(n_trials):
+        selected_id, _ = selector.select(arms, context_vector=None)
+        counts[selected_id] = counts.get(selected_id, 0) + 1
+
+    good_rate = counts["arm_good"] / n_trials
+    assert good_rate > 0.60, (
+        f"Expected arm_good selected > 60% after training, got {good_rate:.2f}"
+    )
+
+
+def test_thompson_state_serialized_in_to_dict() -> None:
+    """Thompson fallback state is included in to_dict() output."""
+    selector = ContextualBanditSelector(feature_dim=2)
+    selector.update("arm_a", reward=0.9, context_vector=None)
+
+    data = selector.to_dict()
+    assert "thompson_state" in data
+    assert "arms" in data["thompson_state"]
+
+
+def test_thompson_state_restored_in_from_dict() -> None:
+    """Thompson fallback state is restored from from_dict()."""
+    selector = ContextualBanditSelector(feature_dim=2)
+    selector.update("arm_a", reward=0.9, context_vector=None)
+    selector.update("arm_b", reward=0.1, context_vector=None)
+
+    data = selector.to_dict()
+    restored = ContextualBanditSelector.from_dict(data)
+
+    assert len(restored._thompson._arms) == 2
+    assert "arm_a" in restored._thompson._arms
+
+
 def test_select_no_context_random() -> None:
-    """With context_vector=None, selection is random (no crash)."""
+    """With context_vector=None, selection returns a valid arm (no crash)."""
     selector = ContextualBanditSelector(feature_dim=3)
     arms = ["a", "b", "c"]
 
-    # Should not crash and should return a valid arm
     selected_id, score = selector.select(arms, context_vector=None)
     assert selected_id in arms
     assert isinstance(score, float)

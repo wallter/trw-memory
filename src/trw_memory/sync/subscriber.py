@@ -14,6 +14,7 @@ import httpx
 import structlog
 
 from trw_memory.models.config import MemoryConfig
+from trw_memory.sync.remote import is_valid_platform_url
 
 logger = structlog.get_logger(__name__)
 
@@ -46,6 +47,9 @@ class SSESubscriber:
             return
 
         if not self._cfg.sync_enabled or not self._cfg.platform_url:
+            return
+        if not is_valid_platform_url(self._cfg.platform_url):
+            logger.warning("sse_subscriber_invalid_platform_url")
             return
 
         self._thread = threading.Thread(
@@ -99,8 +103,8 @@ class SSESubscriber:
                 if not isinstance(raw, dict):
                     return
                 data: dict[str, object] = raw
-                event_type = data.get("type", "")
-                if event_type == "learning_published":
+                event_type = str(data.get("type", ""))
+                if event_type in {"learning_published", "learning_updated", "learning_retired"}:
                     self._on_event(data)
                     logger.debug(
                         "sse_event_received",

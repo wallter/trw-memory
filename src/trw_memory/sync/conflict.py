@@ -100,8 +100,10 @@ def resolve_conflict(
     merged_clock = merge_clocks(local.vector_clock, remote.vector_clock)
     merged_importance = max(local.importance, remote.importance)
 
-    # Build merged_from tracking
-    merged_from = list(set(local.merged_from + remote.merged_from))
+    # Preserve the actual source nodes involved in the concurrent edit rather
+    # than any previously aggregated ancestry lists; callers need the causal
+    # participants for follow-up review and audit trails.
+    merged_from = sorted(set(local.vector_clock) | set(remote.vector_clock))
 
     now = datetime.now(timezone.utc).isoformat()
     outcome = f"conflict_merged:local={local.id}:remote={remote.id}:timestamp={now}"
