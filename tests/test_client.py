@@ -15,10 +15,11 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Iterator, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,6 +29,8 @@ from trw_memory.exceptions import (
     MemoryNotFoundError,
     ToolAlreadyRegisteredError,
 )
+from trw_memory.integrations._backend import create_backend_from_config
+from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.storage.sqlite_backend import SQLiteBackend
@@ -160,6 +163,7 @@ class TestStore:
 
     async def test_store_populates_similarity_and_tag_edges(self, client: MemoryClient) -> None:
         backend = cast(SQLiteBackend, client._get_backend())
+        vector = [1.0, *([0.0] * (backend._dim - 1))]
         backend.store(
             MemoryEntry(
                 id="M-existing",
@@ -168,10 +172,10 @@ class TestStore:
                 tags=["python", "async", "sqlite"],
             )
         )
-        backend.upsert_vector("M-existing", [1.0, 0.0, 0.0, 0.0])
+        backend.upsert_vector("M-existing", vector)
 
         fake_embedder = MagicMock()
-        fake_embedder.embed.return_value = [1.0, 0.0, 0.0, 0.0]
+        fake_embedder.embed.return_value = vector
 
         with patch.object(client, "_get_embedder", return_value=fake_embedder):
             stored = await client.store("new memory", tags=["python", "async", "graph"])
@@ -204,6 +208,59 @@ class TestStore:
 
         assert stored["status"] == "stored"
         assert tuple(row) == ("sprint-24", None, "active")
+        await client.close()
+
+    async def test_store_cross_validates_matching_project_entries(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        client = MemoryClient(namespace="project:default", mode="local")
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path / "storage"))
+
+        with create_backend_from_config(cfg, "project:other") as storage:
+            remote_backend = cast(SQLiteBackend, storage)
+            remote_backend.store(
+                MemoryEntry(
+                    id="M-remote",
+                    content="shared operational lesson",
+                    namespace="project:other",
+                    importance=0.6,
+                )
+            )
+
+            fake_embedder = MagicMock()
+            fake_embedder.embed.return_value = [1.0, 0.0, 0.0, 0.0]
+
+            @contextmanager
+            def fake_discover(*_args: object, **_kwargs: object) -> Iterator[object]:
+                yield [(["project:other"], remote_backend)]
+
+            with (
+                patch.object(
+                    remote_backend,
+                    "get_stored_embeddings",
+                    return_value={"M-remote": [1.0, 0.0, 0.0, 0.0]},
+                ),
+                patch.object(client, "_get_embedder", return_value=fake_embedder),
+                patch("trw_memory.integrations._backend.discover_namespace_backends", fake_discover),
+            ):
+                stored = await client.store("shared operational lesson", importance=0.6)
+
+            backend = cast(SQLiteBackend, client._get_backend())
+            current_entry = backend.get(stored["memory_id"])
+            remote_entry = remote_backend.get("M-remote")
+            assert current_entry is not None
+            assert remote_entry is not None
+            assert current_entry.cross_validated is True
+            assert remote_entry.cross_validated is True
+            assert current_entry.importance == 0.65
+            assert remote_entry.importance == 0.65
+            assert any("cross_validated:project_id=other" in item for item in current_entry.outcome_history)
+            assert any("cross_validated:project_id=default" in item for item in remote_entry.outcome_history)
+
         await client.close()
 
     async def test_store_sync_publish_marks_entry_as_published(

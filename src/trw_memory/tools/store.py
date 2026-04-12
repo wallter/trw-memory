@@ -113,7 +113,7 @@ def memory_store_impl(
         try:
             # Graph enrichment is a secondary index over the stored entry. Log
             # failures explicitly, but do not roll back the canonical row/vector.
-            update_entry_graph(entry, backend, embedding=embedding)
+            update_entry_graph(entry, backend, embedding=embedding, config=cfg)
         except (StorageError, sqlite3.Error, ValueError):
             logger.warning("memory_store_graph_update_failed", entry_id=entry_id, exc_info=True)
     except Exception as exc:  # broad catch: tool error boundary
