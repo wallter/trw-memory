@@ -41,6 +41,7 @@ from trw_memory.lifecycle.tiers._runtime import (
     remember_entry_data_in_tiers,
     remember_entry_in_tiers,
     remove_entry_from_tiers,
+    tier_runtime_enabled,
     tier_candidates,
     warmup_tier_manager,
 )
@@ -269,7 +270,8 @@ class MemoryClient:
                     mode=self._resolved_mode,
                     backend=self._config.storage_backend,
                 )
-                self._tier_manager = warmup_tier_manager(self._config, namespace, self._backend)
+                if tier_runtime_enabled(self._config):
+                    self._tier_manager = warmup_tier_manager(self._config, namespace, self._backend)
             except (OSError, ValueError, ImportError) as exc:
                 if mode == "local":
                     raise MemoryConnectionError(f"Failed to create local backend: {exc}") from exc
@@ -481,8 +483,11 @@ class MemoryClient:
                     namespace=self._namespace,
                 )
                 return []
-            tier_local_results = self._tier_results(backend, query, tags, limit, query_embedding)
-            self._tier_manager = get_tier_manager(self._config, self._namespace)
+            if tier_runtime_enabled(self._config):
+                tier_local_results = self._tier_results(backend, query, tags, limit, query_embedding)
+                self._tier_manager = get_tier_manager(self._config, self._namespace)
+            else:
+                tier_local_results = []
 
         # --- Tier 1: Hybrid retrieval pipeline (BM25 + dense + RRF) ----------
         hybrid_results = await self._try_hybrid_recall(query, limit, tags)

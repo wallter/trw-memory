@@ -29,6 +29,11 @@ def supports_tier_runtime(backend: object) -> bool:
     return backend.__class__.__module__.startswith("trw_memory.storage.")
 
 
+def tier_runtime_enabled(config: MemoryConfig) -> bool:
+    """Return whether the Hot/Warm/Cold runtime can persist safely for this config."""
+    return not config.encryption_enabled
+
+
 def get_tier_manager(config: MemoryConfig, namespace: str) -> TierManager:
     """Return the process-local TierManager for a namespace."""
     key = (str(Path(config.storage_path).resolve()), config.storage_backend, namespace)
@@ -73,6 +78,8 @@ def remember_entry_in_tiers(
     embedding: list[float] | None = None,
 ) -> None:
     """Mirror a freshly written entry into the runtime tier system."""
+    if not tier_runtime_enabled(config):
+        return
     manager = get_tier_manager(config, namespace)
     manager.hot_put(entry.id, entry)
     try:
@@ -83,6 +90,8 @@ def remember_entry_in_tiers(
 
 def remember_entry_data_in_tiers(config: MemoryConfig, entry_data: dict[str, object]) -> None:
     """Mirror a serialized entry payload into the runtime tier system."""
+    if not tier_runtime_enabled(config):
+        return
     try:
         entry = MemoryEntry.model_validate(entry_data)
     except Exception:
@@ -93,6 +102,8 @@ def remember_entry_data_in_tiers(config: MemoryConfig, entry_data: dict[str, obj
 
 def remove_entry_from_tiers(config: MemoryConfig, namespace: str, entry_id: str) -> None:
     """Delete an entry from the runtime tier system."""
+    if not tier_runtime_enabled(config):
+        return
     manager = get_tier_manager(config, namespace)
     manager.hot_remove(entry_id)
     try:
@@ -112,6 +123,8 @@ def tier_candidates(
     query_embedding: list[float] | None = None,
 ) -> list[dict[str, object]]:
     """Collect full-entry candidates from the tier runtime."""
+    if not tier_runtime_enabled(config):
+        return []
     manager = warmup_tier_manager(config, namespace, backend)
     query_tokens = [token for token in query.lower().split() if token]
     
