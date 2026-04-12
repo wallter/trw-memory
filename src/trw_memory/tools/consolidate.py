@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 
 import structlog
 
+from trw_memory.integrations._backend import discover_namespace_backends
 from trw_memory.embeddings import get_local_embedder
 from trw_memory.exceptions import ConfigError, StorageError
 from trw_memory.lifecycle.consolidation import consolidate_cycle
@@ -25,6 +26,7 @@ from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools._types import McpServer
 
 logger = structlog.get_logger(__name__)
+TEAM_NAMESPACE_WILDCARD = "team:*"
 
 
 def _promote_team_memories(
@@ -94,6 +96,56 @@ def _promote_team_memories(
     }
 
 
+def _promote_all_team_namespaces(
+    cfg: MemoryConfig,
+    *,
+    namespace_backend_factory: Callable[[str], StorageBackend] | None = None,
+) -> dict[str, object]:
+    """Promote all discovered team namespaces and aggregate their summaries."""
+    namespace_results: list[dict[str, object]] = []
+    seen_namespaces: set[str] = set()
+
+    with discover_namespace_backends(cfg) as stores:
+        for namespaces, store_backend in stores:
+            for namespace in namespaces:
+                if not namespace.startswith("team:") or namespace in seen_namespaces:
+                    continue
+                seen_namespaces.add(namespace)
+
+                project_backend = namespace_backend_factory("project:default") if namespace_backend_factory else store_backend
+                try:
+                    namespace_results.append(
+                        _promote_team_memories(
+                            namespace,
+                            store_backend,
+                            target_backend=project_backend,
+                        )
+                    )
+                finally:
+                    if project_backend is not store_backend:
+                        project_backend.close()
+
+    if not namespace_results:
+        logger.debug("team_namespace_wildcard_skipped", reason="no_team_namespaces")
+        return {
+            "promoted_count": 0,
+            "discarded_count": 0,
+            "namespace_id": TEAM_NAMESPACE_WILDCARD,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "namespaces": [],
+            "status": "skipped",
+            "skipped_reason": "no_team_namespaces",
+        }
+
+    return {
+        "promoted_count": sum(int(str(result["promoted_count"])) for result in namespace_results),
+        "discarded_count": sum(int(str(result["discarded_count"])) for result in namespace_results),
+        "namespace_id": TEAM_NAMESPACE_WILDCARD,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "namespaces": namespace_results,
+    }
+
+
 def memory_consolidate_impl(
     namespace: str,
     *,
@@ -116,6 +168,13 @@ def memory_consolidate_impl(
         {"clusters_found": int, "entries_consolidated": int, "dry_run": bool}
         or {"error": str, "status": "invalid"} on validation failure.
     """
+    if namespace == TEAM_NAMESPACE_WILDCARD:
+        cfg = config or MemoryConfig()
+        return _promote_all_team_namespaces(
+            cfg,
+            namespace_backend_factory=namespace_backend_factory,
+        )
+
     try:
         validate_namespace(namespace)
     except ConfigError as exc:
@@ -201,7 +260,8 @@ def register_consolidate_tool(mcp: McpServer) -> None:
             {"clusters_found": int, "entries_consolidated": int, "dry_run": bool}
         """
         cfg = MemoryConfig()
-        with create_backend_from_config(cfg, namespace) as backend:
+        backend_namespace = "default" if namespace == TEAM_NAMESPACE_WILDCARD else namespace
+        with create_backend_from_config(cfg, backend_namespace) as backend:
             return memory_consolidate_impl(
                 namespace,
                 backend=backend,
