@@ -17,6 +17,7 @@ import structlog
 
 from trw_memory.embeddings import get_local_embedder
 from trw_memory.exceptions import ConfigError
+from trw_memory.graph import list_org_shared_entries
 from trw_memory.lifecycle._recall import record_recall_access
 from trw_memory.lifecycle.scoring import entry_utility, rank_by_utility
 from trw_memory.models.config import MemoryConfig
@@ -41,6 +42,7 @@ def memory_recall_impl(
     min_score: float = 0.0,
     tags: list[str] | None = None,
     include_namespaces: list[str] | None = None,
+    include_org_memories: bool = True,
     graph_depth: int = 0,
     conn: sqlite3.Connection | None = None,
     token_budget: int | None = None,
@@ -58,6 +60,8 @@ def memory_recall_impl(
         min_score: Minimum utility score threshold (0.0 = no filter).
         tags: If provided, only entries containing ALL of these tags are returned.
         include_namespaces: Additional namespaces to search alongside primary.
+        include_org_memories: If True, append cross-validated high-importance
+            memories from sibling local project namespaces.
         graph_depth: If > 0, run BFS graph traversal from result IDs up to this
             depth and include related entries in the response.
         conn: SQLite connection for graph queries. If None and graph_depth > 0,
@@ -179,7 +183,24 @@ def memory_recall_impl(
         estimate_entry_tokens,
     )
 
+    cfg = config or MemoryConfig()
     result_dicts = ranked_dicts
+    if include_org_memories:
+        result_dicts.extend(
+            _org_memory_results(
+                cfg,
+                namespace,
+                query,
+                tags,
+                min_score=min_score,
+                exclude_keys={
+                    (str(result.get("namespace", namespace)), str(result["id"]))
+                    for result in result_dicts
+                    if "id" in result
+                },
+                limit=limit,
+            )
+        )
     tokens_used = 0
     tokens_truncated = False
 
@@ -223,6 +244,55 @@ def memory_recall_impl(
         response["related"] = related
 
     return response
+
+
+def _org_memory_results(
+    config: MemoryConfig,
+    namespace: str,
+    query: str,
+    tags: list[str] | None,
+    min_score: float,
+    *,
+    exclude_keys: set[tuple[str, str]],
+    limit: int,
+) -> list[dict[str, object]]:
+    """Build additive org-wide recall results from sibling project stores."""
+    org_entries = list_org_shared_entries(
+        config,
+        namespace,
+        exclude_keys=exclude_keys,
+        limit=max(limit, 25),
+    )
+    if not org_entries:
+        return []
+
+    query_tokens = query.lower().split() if query else []
+    tag_set = set(tags or [])
+    org_results = []
+    for entry in org_entries:
+        if tag_set and not tag_set.issubset(set(entry.tags)):
+            continue
+        if query_tokens and not _entry_matches_query(entry.model_dump(mode="json"), query_tokens):
+            continue
+
+        item = entry.model_dump(mode="json")
+        item["scope"] = "org"
+        if min_score > 0.0 and entry_utility(item, config=config) < min_score:
+            continue
+        org_results.append(item)
+
+    return rank_by_utility(org_results, query_tokens, lambda_weight=0.4, config=config)
+
+
+def _entry_matches_query(entry: dict[str, object], query_tokens: list[str]) -> bool:
+    """Return whether any query token appears in content, detail, or tags."""
+    if not query_tokens:
+        return True
+    content = str(entry.get("content", "")).lower()
+    detail = str(entry.get("detail", "")).lower()
+    raw_tags = entry.get("tags", [])
+    tag_text = " ".join(str(tag).lower() for tag in raw_tags) if isinstance(raw_tags, list) else ""
+    return any(token in f"{content} {detail} {tag_text}" for token in query_tokens)
 
 
 def _graph_related(
@@ -277,6 +347,7 @@ def register_recall_tool(mcp: McpServer) -> None:
         min_score: float = 0.0,
         tags: list[str] | None = None,
         include_namespaces: list[str] | None = None,
+        include_org_memories: bool = True,
         graph_depth: int = 0,
         token_budget: int | None = None,
     ) -> dict[str, object]:
@@ -289,6 +360,8 @@ def register_recall_tool(mcp: McpServer) -> None:
             min_score: Minimum utility score filter (0.0 = no filter).
             tags: Filter to entries containing ALL of these tags.
             include_namespaces: Additional namespaces to search alongside primary.
+            include_org_memories: If True, append org-wide cross-validated
+                sibling-project memories after local matches.
             graph_depth: If > 0, include graph-related entries via BFS traversal
                 from the result set (max depth 3).
             token_budget: If provided, truncate results to fit within this
@@ -312,6 +385,7 @@ def register_recall_tool(mcp: McpServer) -> None:
                 min_score=min_score,
                 tags=tags,
                 include_namespaces=include_namespaces,
+                include_org_memories=include_org_memories,
                 graph_depth=graph_depth,
                 token_budget=token_budget,
                 config=cfg,

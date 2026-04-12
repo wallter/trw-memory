@@ -420,6 +420,41 @@ class TestRecall:
         for r in results:
             assert r["score"] >= 0.5
 
+    async def test_recall_include_org_memories_appends_cross_validated_entries(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        client = MemoryClient(namespace="project:default", mode="local")
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path / "storage"))
+        await client.store("deployment lesson", importance=0.7)
+
+        with create_backend_from_config(cfg, "project:other") as storage:
+            remote_backend = cast(SQLiteBackend, storage)
+            remote_backend.store(
+                MemoryEntry(
+                    id="M-org",
+                    content="deployment lesson from another project",
+                    namespace="project:other",
+                    importance=0.85,
+                    cross_validated=True,
+                )
+            )
+
+            @contextmanager
+            def fake_discover(*_args: object, **_kwargs: object) -> Iterator[object]:
+                yield [(["project:other"], remote_backend)]
+
+            with patch("trw_memory.integrations._backend.discover_namespace_backends", fake_discover):
+                results = await client.recall("", include_org_memories=True)
+
+        assert any(result["source"] == "org" for result in results)
+        assert results[0]["source"] == "local"
+        assert any(result["namespace"] == "project:other" for result in results)
+        await client.close()
+
     async def test_recall_include_shared_appends_remote_results(
         self,
         tmp_path: Path,

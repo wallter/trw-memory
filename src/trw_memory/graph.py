@@ -27,6 +27,7 @@ __all__ = [
     "filter_conflicts",
     "get_conflicts",
     "graph_query",
+    "list_org_shared_entries",
     "memory_decay_pass",
     "propagate_impact",
     "update_entry_graph",
@@ -282,6 +283,49 @@ def _apply_cross_project_validation(
 
     _persist_cross_validated_entry(backend, entry, updated_entry)
     return matched_projects
+
+
+def list_org_shared_entries(
+    config: MemoryConfig,
+    namespace: str,
+    *,
+    min_importance: float = 0.8,
+    limit: int = 25,
+    exclude_keys: set[tuple[str, str]] | None = None,
+) -> list[MemoryEntry]:
+    """Return high-importance cross-validated memories from sibling projects."""
+    current_project = _project_scope_key(namespace)
+    if current_project is None:
+        return []
+
+    from trw_memory.integrations._backend import discover_namespace_backends
+
+    seen = set(exclude_keys or set())
+    matches: list[MemoryEntry] = []
+
+    with discover_namespace_backends(config) as stores:
+        for namespaces, backend in stores:
+            for candidate_namespace in namespaces:
+                project_id = _project_scope_key(candidate_namespace)
+                if project_id is None or project_id == current_project:
+                    continue
+
+                entries = backend.list_entries(
+                    status=MemoryStatus.ACTIVE,
+                    namespace=candidate_namespace,
+                    limit=10_000,
+                )
+                for entry in entries:
+                    entry_key = (entry.namespace, entry.id)
+                    if entry_key in seen:
+                        continue
+                    if not entry.cross_validated or entry.importance < min_importance:
+                        continue
+                    seen.add(entry_key)
+                    matches.append(entry)
+
+    matches.sort(key=lambda entry: (entry.importance, entry.updated_at), reverse=True)
+    return matches[:limit]
 
 
 def create_similarity_edges(

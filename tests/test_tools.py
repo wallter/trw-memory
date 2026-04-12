@@ -5,10 +5,11 @@ Tests the *_impl functions directly without requiring a running FastMCP server.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import cast
-from unittest.mock import MagicMock
+from typing import Iterator, cast
+from unittest.mock import MagicMock, patch
 
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
@@ -129,6 +130,59 @@ class TestMemoryRecallImpl:
 
             assert result["memories"] == []
             assert result["namespace_expired"] is True
+
+    def test_graph_depth_zero_omits_related_field(self) -> None:
+        backend = _mock_backend([_make_entry()])
+
+        result = memory_recall_impl("test", "project:default", backend=backend, graph_depth=0)
+
+        assert "related" not in result
+
+    def test_include_org_memories_appends_cross_validated_project_entries(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
+
+        with (
+            create_backend_from_config(cfg, "project:default") as current_storage,
+            create_backend_from_config(cfg, "project:other") as remote_storage,
+        ):
+            current_backend = cast(SQLiteBackend, current_storage)
+            remote_backend = cast(SQLiteBackend, remote_storage)
+
+            current_backend.store(
+                MemoryEntry(
+                    id="M-local",
+                    content="deployment lesson",
+                    namespace="project:default",
+                )
+            )
+            remote_backend.store(
+                MemoryEntry(
+                    id="M-org",
+                    content="deployment lesson from another project",
+                    namespace="project:other",
+                    importance=0.85,
+                    cross_validated=True,
+                )
+            )
+
+            @contextmanager
+            def fake_discover(_cfg: MemoryConfig) -> Iterator[object]:
+                yield [(["project:other"], remote_backend)]
+
+            with patch("trw_memory.integrations._backend.discover_namespace_backends", fake_discover):
+                result = memory_recall_impl(
+                    "",
+                    "project:default",
+                    backend=current_backend,
+                    include_org_memories=True,
+                    config=cfg,
+                )
+
+            memories = cast(list[dict[str, object]], result["memories"])
+            assert len(memories) == 2
+            assert memories[0]["namespace"] == "project:default"
+            assert memories[1]["namespace"] == "project:other"
+            assert memories[1]["scope"] == "org"
 
 
 # ---------------------------------------------------------------------------
