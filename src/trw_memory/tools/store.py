@@ -7,12 +7,20 @@ stores it via the backend, and returns the memory_id and status.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Literal
 from uuid import uuid4
 
 import structlog
 
 from trw_memory.embeddings import get_local_embedder
-from trw_memory.exceptions import ConfigError, StorageError
+from trw_memory.exceptions import (
+    ConfigError,
+    PIIBlockError,
+    PoisoningError,
+    RateLimitError,
+    SchemaValidationError,
+    StorageError,
+)
 from trw_memory.graph import schedule_graph_update
 from trw_memory.lifecycle.tiers._runtime import remember_entry_in_tiers, supports_tier_runtime
 from trw_memory.models.config import MemoryConfig
@@ -20,6 +28,7 @@ from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.security.rbac import Permission, require_namespace_permission
+from trw_memory.security.runtime import append_audit_event, prepare_entry_for_store, store_quarantined_entry
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools._types import McpServer
@@ -37,6 +46,10 @@ def memory_store_impl(
     detail: str = "",
     metadata: dict[str, str] | None = None,
     config: MemoryConfig | None = None,
+    source: Literal["human", "agent", "tool", "consolidated"] = "tool",
+    source_identity: str = "",
+    session_id: str = "",
+    entry_id: str | None = None,
 ) -> dict[str, object]:
     """Core implementation of memory_store (callable without MCP).
 
@@ -72,23 +85,68 @@ def memory_store_impl(
             "status": "invalid",
         }
 
-    entry_id = "M-" + uuid4().hex[:16]
+    entry_id = entry_id or ("M-" + uuid4().hex[:16])
     now = datetime.now(timezone.utc)
-
-    entry = MemoryEntry(
-        id=entry_id,
-        content=content.strip(),
-        detail=detail,
-        tags=tags or [],
-        importance=importance,
-        metadata=metadata or {},
-        namespace=namespace,
-        status=MemoryStatus.ACTIVE,
-        created_at=now,
-        updated_at=now,
-    )
+    existing = backend.get(entry_id) if entry_id is not None else None
+    entry_metadata = dict(existing.metadata) if existing is not None else {}
+    entry_metadata.update(metadata or {})
+    if existing is None:
+        entry = MemoryEntry(
+            id=entry_id,
+            content=content.strip(),
+            detail=detail,
+            tags=tags or [],
+            importance=importance,
+            metadata=entry_metadata,
+            namespace=namespace,
+            status=MemoryStatus.ACTIVE,
+            created_at=now,
+            updated_at=now,
+            source=source,
+            source_identity=source_identity,
+        )
+    else:
+        entry = existing.model_copy(
+            update={
+                "content": content.strip(),
+                "detail": detail,
+                "tags": tags or [],
+                "importance": importance,
+                "metadata": entry_metadata,
+                "updated_at": now,
+                "source": source,
+                "source_identity": source_identity or existing.source_identity,
+            }
+        )
 
     try:
+        decision = prepare_entry_for_store(entry, backend=backend, config=cfg, session_id=session_id)
+        if decision.quarantined:
+            store_quarantined_entry(cfg, decision.entry)
+            append_audit_event(
+                cfg,
+                "quarantine",
+                entry_id=decision.entry.id,
+                actor=decision.entry.source_identity or decision.entry.source,
+                namespace=namespace,
+                data={
+                    "stored": False,
+                    "quarantined": True,
+                    "anomaly_dimension": decision.anomaly_dimension,
+                    "z_score": decision.anomaly_z_score,
+                },
+            )
+            return {
+                "memory_id": decision.entry.id,
+                "status": "quarantined",
+                "namespace": namespace,
+                "stored": False,
+                "quarantined": True,
+                "anomaly_dimension": decision.anomaly_dimension,
+                "z_score": decision.anomaly_z_score,
+            }
+
+        entry = decision.entry
         if namespace.startswith("team:") and isinstance(backend, SQLiteBackend):
             NamespaceManager(backend).ensure_team_namespace(namespace, created_at=now)
         backend.store(entry)
@@ -120,7 +178,22 @@ def memory_store_impl(
             logger.warning("memory_store_graph_schedule_failed", entry_id=entry_id, exc_info=True)
         if supports_tier_runtime(backend):
             remember_entry_in_tiers(cfg, namespace, entry, embedding)
-    except Exception as exc:  # broad catch: tool error boundary
+        append_audit_event(
+            cfg,
+            decision.op,
+            entry_id=entry.id,
+            actor=entry.source_identity or entry.source,
+            namespace=namespace,
+            data={
+                "status": "updated" if decision.op == "update" else "stored",
+                "session_id": session_id,
+                "pii_types": sorted({match.pii_type for match in decision.pii_matches}),
+                "quarantined": False,
+            },
+        )
+    except (PIIBlockError, PoisoningError, RateLimitError, SchemaValidationError) as exc:
+        return {"error": str(exc), "status": "blocked", "namespace": namespace}
+    except (StorageError, RuntimeError, ValueError) as exc:
         logger.exception("memory_store_failed", entry_id=entry_id, error=str(exc))
         return {"error": f"storage error: {exc}", "status": "error"}
 
@@ -133,7 +206,7 @@ def memory_store_impl(
 
     return {
         "memory_id": entry_id,
-        "status": "stored",
+        "status": "updated" if decision.op == "update" else "stored",
         "namespace": namespace,
     }
 
@@ -153,6 +226,9 @@ def register_store_tool(mcp: McpServer) -> None:
         importance: float = 0.5,
         detail: str = "",
         metadata: dict[str, str] | None = None,
+        source_identity: str = "",
+        session_id: str = "",
+        entry_id: str | None = None,
     ) -> dict[str, object]:
         """Store a new memory entry in the memory system.
 
@@ -178,4 +254,7 @@ def register_store_tool(mcp: McpServer) -> None:
                 detail=detail,
                 metadata=metadata,
                 config=cfg,
+                source_identity=source_identity,
+                session_id=session_id,
+                entry_id=entry_id,
             )

@@ -19,6 +19,7 @@ from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
+from trw_memory.security.audit import AuditLog
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools.forget import memory_forget_impl
 from trw_memory.tools.recall import _merge_tier_entries, memory_recall_impl
@@ -74,6 +75,75 @@ class TestMemoryStoreImpl:
             match=r"Role 'reader' does not have store permission on namespace 'project:default'\.",
         ):
             memory_store_impl("blocked write", "project:default", backend=backend, config=cfg)
+
+    def test_store_blocks_api_keys_before_backend_write(self, tmp_path: Path) -> None:
+        backend = _mock_backend()
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
+
+        result = memory_store_impl(
+            "api token sk-abcdefghijklmnopqrstuvwxyz",
+            "project:default",
+            backend=backend,
+            config=cfg,
+        )
+
+        assert result["status"] == "blocked"
+        assert backend.store.called is False
+        audit_records = AuditLog(Path(cfg.audit_log_path)).read_all()
+        assert audit_records[-1].op == "reject"
+
+    def test_store_quarantines_anomalous_entries(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"), poisoning_z_threshold=1.0)
+
+        with create_backend_from_config(cfg, "project:default") as backend:
+            for index in range(20):
+                backend.store(
+                    MemoryEntry(
+                        id=f"M-seed-{index}",
+                        content="normal content",
+                        namespace="project:default",
+                        source_identity="seed",
+                    )
+                )
+
+            result = memory_store_impl(
+                "A" * 5000,
+                "project:default",
+                backend=backend,
+                config=cfg,
+                source_identity="alice",
+            )
+            quarantined = memory_search_impl(
+                "project:default",
+                backend=backend,
+                config=cfg,
+                status="quarantined",
+                actor="alice",
+            )
+
+        assert result["status"] == "quarantined"
+        assert quarantined["total"] == 1
+        entries = cast("list[dict[str, object]]", quarantined["entries"])
+        assert entries[0]["metadata"]["quarantined"] == "true"
+
+    def test_forget_actor_deletes_matching_entries_and_audits(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
+
+        with create_backend_from_config(cfg, "project:default") as backend:
+            backend.store(
+                MemoryEntry(id="M-alice", content="alice entry", namespace="project:default", source_identity="alice")
+            )
+            backend.store(MemoryEntry(id="M-bob", content="bob entry", namespace="project:default", source_identity="bob"))
+
+            result = memory_forget_impl(None, None, "project:default", backend=backend, config=cfg, actor="alice")
+
+            remaining = memory_search_impl("project:default", backend=backend, config=cfg, actor="alice")
+
+        assert result["entries_deleted"] == 1
+        assert remaining["total"] == 0
+        audit_records = AuditLog(Path(cfg.audit_log_path)).read_all()
+        assert audit_records[-1].op == "forget"
+        assert audit_records[-1].data["entries_deleted"] == 1
 
 
 # ---------------------------------------------------------------------------

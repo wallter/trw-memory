@@ -53,6 +53,13 @@ from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.retrieval.dense import cosine_similarity
 from trw_memory.security.pii import anonymize_installation_id
 from trw_memory.security.rbac import Permission, require_namespace_permission
+from trw_memory.security.runtime import (
+    append_audit_event,
+    delete_quarantined_entries,
+    list_quarantined_entries,
+    prepare_entry_for_store,
+    store_quarantined_entry,
+)
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.sync.conflict import init_clock
@@ -130,6 +137,10 @@ class StoreResultDict(TypedDict):
     namespace: str
     status: str
     timestamp: str
+    quarantined: NotRequired[bool]
+    stored: NotRequired[bool]
+    anomaly_dimension: NotRequired[str]
+    z_score: NotRequired[float]
 
 
 class ForgetResultDict(TypedDict):
@@ -315,6 +326,11 @@ class MemoryClient:
         importance: float = 0.5,
         detail: str = "",
         metadata: dict[str, str] | None = None,
+        *,
+        source: Literal["human", "agent", "tool", "consolidated"] = "agent",
+        source_identity: str = "",
+        session_id: str = "",
+        entry_id: str | None = None,
     ) -> StoreResultDict:
         """Store a new memory entry.
 
@@ -338,35 +354,85 @@ class MemoryClient:
         self._require_permission(Permission.WRITE, "store")
         self._maybe_start_retry_drain()
 
-        memory_id = _make_id()
-        now = datetime.now(timezone.utc)
-        entry_metadata = dict(metadata or {})
-        entry_metadata.setdefault("installation_id", self._installation_id)
-
-        entry = MemoryEntry(
-            id=memory_id,
-            content=content.strip(),
-            detail=detail,
-            tags=tags or [],
-            importance=importance,
-            namespace=self._namespace,
-            metadata=entry_metadata,
-            created_at=now,
-            updated_at=now,
-            source="agent",
-            # We need a stable local node marker even before the backend grows
-            # first-class sync metadata, otherwise concurrent local edits have no
-            # causal anchor at all.
-            vector_clock=init_clock(self._local_node_id),
-        )
-
-        # Persist the dense vector on the normal write path so later recall can
-        # actually use hybrid ranking instead of silently degrading to BM25-only.
-        embedder = self._get_embedder()
-        embedding = embedder.embed(f"{entry.content} {entry.detail}") if embedder is not None else None
-
+        memory_id = entry_id or _make_id()
         async with self._lock:
             backend = self._get_backend()
+            existing = backend.get(memory_id) if entry_id is not None else None
+            now = datetime.now(timezone.utc)
+            entry_metadata = dict(existing.metadata) if existing is not None else {}
+            entry_metadata.update(metadata or {})
+            entry_metadata.setdefault("installation_id", self._installation_id)
+
+            if existing is None:
+                entry = MemoryEntry(
+                    id=memory_id,
+                    content=content.strip(),
+                    detail=detail,
+                    tags=tags or [],
+                    importance=importance,
+                    namespace=self._namespace,
+                    metadata=entry_metadata,
+                    created_at=now,
+                    updated_at=now,
+                    source=source,
+                    source_identity=source_identity,
+                    # We need a stable local node marker even before the backend grows
+                    # first-class sync metadata, otherwise concurrent local edits have no
+                    # causal anchor at all.
+                    vector_clock=init_clock(self._local_node_id),
+                )
+            else:
+                entry = existing.model_copy(
+                    update={
+                        "content": content.strip(),
+                        "detail": detail,
+                        "tags": tags or [],
+                        "importance": importance,
+                        "metadata": entry_metadata,
+                        "updated_at": now,
+                        "source": source,
+                        "source_identity": source_identity or existing.source_identity,
+                        "vector_clock": init_clock(self._local_node_id),
+                    }
+                )
+
+            decision = prepare_entry_for_store(
+                entry,
+                backend=backend,
+                config=self._config,
+                session_id=session_id,
+            )
+            if decision.quarantined:
+                store_quarantined_entry(self._config, decision.entry)
+                append_audit_event(
+                    self._config,
+                    "quarantine",
+                    entry_id=decision.entry.id,
+                    actor=decision.entry.source_identity or decision.entry.source,
+                    namespace=self._namespace,
+                    data={
+                        "stored": False,
+                        "quarantined": True,
+                        "anomaly_dimension": decision.anomaly_dimension,
+                        "z_score": decision.anomaly_z_score,
+                    },
+                )
+                return StoreResultDict(
+                    memory_id=decision.entry.id,
+                    namespace=self._namespace,
+                    status="quarantined",
+                    timestamp=now.isoformat(),
+                    quarantined=True,
+                    stored=False,
+                    anomaly_dimension=decision.anomaly_dimension,
+                    z_score=decision.anomaly_z_score,
+                )
+
+            entry = decision.entry
+            # Persist the dense vector on the normal write path so later recall can
+            # actually use hybrid ranking instead of silently degrading to BM25-only.
+            embedder = self._get_embedder()
+            embedding = embedder.embed(f"{entry.content} {entry.detail}") if embedder is not None else None
             if self._namespace.startswith("team:") and isinstance(backend, SQLiteBackend):
                 NamespaceManager(backend).ensure_team_namespace(self._namespace, created_at=now)
             backend.store(entry)
@@ -393,6 +459,19 @@ class MemoryClient:
             except RuntimeError:
                 logger.warning("memory_store_graph_schedule_failed", memory_id=entry.id, exc_info=True)
             remember_entry_in_tiers(self._config, self._namespace, entry, embedding)
+            append_audit_event(
+                self._config,
+                decision.op,
+                entry_id=entry.id,
+                actor=entry.source_identity or entry.source,
+                namespace=self._namespace,
+                data={
+                    "status": "updated" if decision.op == "update" else "stored",
+                    "session_id": session_id,
+                    "pii_types": sorted({match.pii_type for match in decision.pii_matches}),
+                    "quarantined": False,
+                },
+            )
 
         logger.debug(
             "memory_stored",
@@ -409,7 +488,7 @@ class MemoryClient:
         return StoreResultDict(
             memory_id=memory_id,
             namespace=self._namespace,
-            status="stored",
+            status="updated" if decision.op == "update" else "stored",
             timestamp=now.isoformat(),
         )
 
@@ -1158,12 +1237,35 @@ class MemoryClient:
             backend = self._get_backend()
             existing = backend.get(memory_id)
             if existing is None:
-                raise MemoryNotFoundError(f"Memory entry {memory_id!r} not found")
+                quarantined_deleted = delete_quarantined_entries(
+                    self._config,
+                    namespace=self._namespace,
+                    memory_id=memory_id,
+                )
+                if quarantined_deleted == 0:
+                    raise MemoryNotFoundError(f"Memory entry {memory_id!r} not found")
+                append_audit_event(
+                    self._config,
+                    "forget",
+                    entry_id=memory_id,
+                    actor="",
+                    namespace=self._namespace,
+                    data={"entries_deleted": quarantined_deleted, "quarantined": True},
+                )
+                return ForgetResultDict(memory_id=memory_id, status="deleted", namespace=self._namespace)
             if existing.namespace != self._namespace:
                 raise MemoryNotFoundError(f"Memory entry {memory_id!r} not found in namespace {self._namespace!r}")
             remote_id = existing.remote_id
             backend.delete(memory_id)
             remove_entry_from_tiers(self._config, self._namespace, memory_id)
+            append_audit_event(
+                self._config,
+                "forget",
+                entry_id=memory_id,
+                actor=existing.source_identity,
+                namespace=self._namespace,
+                data={"entries_deleted": 1, "quarantined": False},
+            )
         if remote_id:
             self._schedule_background_task(self._retire_remote_entry(memory_id, remote_id))
 
@@ -1186,6 +1288,9 @@ class MemoryClient:
         min_importance: float = 0.0,
         since: datetime | None = None,
         limit: int = 50,
+        *,
+        actor: str | None = None,
+        status: str | None = None,
     ) -> list[MemoryResultDict]:
         """Search memories with filters.
 
@@ -1205,20 +1310,34 @@ class MemoryClient:
             raise ValueError(f"limit must be >= 1, got {limit}")
         if not 0.0 <= min_importance <= 1.0:
             raise ValueError(f"min_importance must be in [0.0, 1.0], got {min_importance}")
+        if status is not None and status not in {"active", "resolved", "obsolete", "archived", "quarantined"}:
+            raise ValueError(f"status must be one of active/resolved/obsolete/archived/quarantined, got {status!r}")
         self._require_permission(Permission.READ, "search")
         self._maybe_start_retry_drain()
         await self._apply_pending_remote_retirements()
 
-        async with self._lock:
-            entries = self._get_backend().list_entries(
+        if status == "quarantined":
+            entries = list_quarantined_entries(
+                self._config,
                 namespace=self._namespace,
-                limit=limit * 5,  # over-fetch to allow for post-filtering
+                actor=actor,
+                limit=limit * 5,
             )
+        else:
+            async with self._lock:
+                entries = self._get_backend().list_entries(
+                    namespace=self._namespace,
+                    limit=limit * 5,  # over-fetch to allow for post-filtering
+                )
 
         # Post-filter
         tag_set: set[str] = set(tags) if tags else set()
         results: list[MemoryResultDict] = []
         for entry in entries:
+            if actor is not None and entry.source_identity != actor:
+                continue
+            if status is not None and status != "quarantined" and entry.status.value != status:
+                continue
             if entry.importance < min_importance:
                 continue
             if tag_set and not tag_set.issubset(set(entry.tags)):

@@ -13,6 +13,7 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.security.rbac import Permission, require_namespace_permission
+from trw_memory.security.runtime import list_quarantined_entries
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools._types import McpServer
 
@@ -20,6 +21,8 @@ logger = structlog.get_logger(__name__)
 
 # Valid status values for user-supplied strings
 _VALID_STATUSES = {s.value for s in MemoryStatus}
+_SPECIAL_STATUSES = {"quarantined"}
+_MAX_SEARCH_LIMIT = 500
 
 
 def memory_search_impl(
@@ -32,6 +35,7 @@ def memory_search_impl(
     sort_by: str = "updated_at",
     offset: int = 0,
     limit: int = 50,
+    actor: str | None = None,
 ) -> dict[str, object]:
     """Core implementation of memory_search (callable without MCP).
 
@@ -54,29 +58,44 @@ def memory_search_impl(
         return {"error": str(exc), "status": "invalid"}
     cfg = config or MemoryConfig()
     require_namespace_permission(cfg, namespace, Permission.READ, "search")
+    if limit < 1 or limit > _MAX_SEARCH_LIMIT:
+        return {"error": f"limit must be in [1, {_MAX_SEARCH_LIMIT}]", "status": "invalid"}
+    if offset < 0:
+        return {"error": "offset must be >= 0", "status": "invalid"}
 
     # Validate status string
     memory_status: MemoryStatus | None = None
     if status is not None:
-        if status not in _VALID_STATUSES:
+        if status not in _VALID_STATUSES | _SPECIAL_STATUSES:
             return {
-                "error": f"Invalid status {status!r}. Must be one of: {sorted(_VALID_STATUSES)}",
+                "error": f"Invalid status {status!r}. Must be one of: {sorted(_VALID_STATUSES | _SPECIAL_STATUSES)}",
                 "status": "invalid",
             }
-        memory_status = MemoryStatus(status)
+        if status != "quarantined":
+            memory_status = MemoryStatus(status)
 
     # Fetch all matching entries (apply status + namespace, handle pagination here)
-    fetch_limit = max(limit + offset, 500)
-    entries = backend.list_entries(
-        status=memory_status,
-        namespace=namespace,
-        limit=fetch_limit,
-    )
+    fetch_limit = min(max(limit + offset, 500), 10_000)
+    if status == "quarantined":
+        entries = list_quarantined_entries(
+            cfg,
+            namespace=namespace,
+            actor=actor,
+            limit=fetch_limit,
+        )
+    else:
+        entries = backend.list_entries(
+            status=memory_status,
+            namespace=namespace,
+            limit=fetch_limit,
+        )
 
     # Apply tag filter in Python (not all backends support tag filtering in list_entries)
     if tags:
         tag_set = set(tags)
         entries = [e for e in entries if tag_set.issubset(set(e.tags))]
+    if actor is not None:
+        entries = [e for e in entries if e.source_identity == actor]
 
     total = len(entries)
 
@@ -119,6 +138,7 @@ def register_search_tool(mcp: McpServer) -> None:
         sort_by: str = "updated_at",
         offset: int = 0,
         limit: int = 50,
+        actor: str | None = None,
     ) -> dict[str, object]:
         """List and filter memory entries with pagination.
 
@@ -144,6 +164,7 @@ def register_search_tool(mcp: McpServer) -> None:
                 sort_by=sort_by,
                 offset=offset,
                 limit=limit,
+                actor=actor,
             )
 
     mcp.tool()(memory_search)
