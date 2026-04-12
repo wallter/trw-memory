@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from typing import cast
 
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
@@ -251,3 +252,65 @@ class TestConsolidateImplTeamDispatch:
             assert promoted.source_identity == "team:sprint-37"
         finally:
             project_backend.close()
+
+    def test_team_wildcard_promotes_all_discovered_team_namespaces(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path))
+
+        for namespace, entry_id, importance in (
+            ("team:sprint-37-impl", "e1", 0.8),
+            ("team:sprint-37-test", "e2", 0.9),
+            ("team:sprint-37-test", "e3", 0.2),
+        ):
+            backend = create_backend_from_config(cfg, namespace)
+            try:
+                backend.store(_make_entry(entry_id, importance=importance, namespace=namespace))
+            finally:
+                backend.close()
+
+        default_backend = create_backend_from_config(cfg, "default")
+        try:
+            result = memory_consolidate_impl(
+                "team:*",
+                backend=default_backend,
+                config=cfg,
+                namespace_backend_factory=lambda ns: create_backend_from_config(cfg, ns),
+            )
+        finally:
+            default_backend.close()
+
+        assert result["promoted_count"] == 2
+        assert result["discarded_count"] == 1
+        assert result["namespace_id"] == "team:*"
+        namespaces = cast(list[dict[str, object]], result["namespaces"])
+        per_namespace = {str(item["namespace_id"]): item for item in namespaces}
+        assert per_namespace["team:sprint-37-impl"]["promoted_count"] == 1
+        assert per_namespace["team:sprint-37-test"]["promoted_count"] == 1
+        assert per_namespace["team:sprint-37-test"]["discarded_count"] == 1
+
+        project_backend = create_backend_from_config(cfg, "project:default")
+        try:
+            assert project_backend.get("promoted-e1") is not None
+            assert project_backend.get("promoted-e2") is not None
+            assert project_backend.get("promoted-e3") is None
+        finally:
+            project_backend.close()
+
+    def test_team_wildcard_skips_when_no_team_namespaces_exist(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path))
+
+        default_backend = create_backend_from_config(cfg, "default")
+        try:
+            result = memory_consolidate_impl(
+                "team:*",
+                backend=default_backend,
+                config=cfg,
+                namespace_backend_factory=lambda ns: create_backend_from_config(cfg, ns),
+            )
+        finally:
+            default_backend.close()
+
+        assert result["status"] == "skipped"
+        assert result["skipped_reason"] == "no_team_namespaces"
+        assert result["promoted_count"] == 0
+        assert result["discarded_count"] == 0
+        assert result["namespaces"] == []
