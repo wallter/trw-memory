@@ -6,8 +6,10 @@ Uses an in-memory SQLite database with the DDL from sqlite_backend.py.
 
 from __future__ import annotations
 
+import multiprocessing
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -180,6 +182,12 @@ def _count_edges(conn: sqlite3.Connection) -> int:
     """Count total edges in the graph table."""
     row = conn.execute("SELECT COUNT(*) FROM memory_graph_edges").fetchone()
     return int(row[0]) if row else 0
+
+
+def _merge_cross_validation_in_subprocess(storage_path: str, project_id: str) -> None:
+    cfg = MemoryConfig(storage_backend="sqlite", storage_path=storage_path)
+    with create_backend_from_config(cfg, "project:default") as storage:
+        _merge_cross_validated_entry(storage, "e1", project_id, 0.97)
 
 
 # Vectors for testing: v1 and v2 are nearly identical (high cosine sim)
@@ -502,6 +510,50 @@ class TestApplyImportanceBoost:
             assert sum("importance_boost" in item for item in updated.outcome_history) == 2
             assert sum("cross_validated:project_id=" in item for item in updated.outcome_history) == 2
 
+    def test_cross_process_cross_validation_merges_both_project_boosts(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
+
+        with create_backend_from_config(cfg, "project:default") as storage:
+            storage.store(_make_entry("e1", importance=0.5))
+
+        processes = [
+            multiprocessing.Process(
+                target=_merge_cross_validation_in_subprocess,
+                args=(str(tmp_path), project_id),
+            )
+            for project_id in ("project-a", "project-b")
+        ]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=10)
+            assert process.exitcode == 0
+
+        with create_backend_from_config(cfg, "project:default") as storage:
+            updated = storage.get("e1")
+            assert updated is not None
+            assert updated.importance == 0.6
+            assert updated.cross_validated is True
+            assert sum("importance_boost" in item for item in updated.outcome_history) == 2
+            assert sum("cross_validated:project_id=" in item for item in updated.outcome_history) == 2
+
+    def test_twenty_sequential_boosts_cap_at_one_without_drift(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
+
+        with create_backend_from_config(cfg, "project:default") as storage:
+            storage.store(_make_entry("e1", importance=0.0))
+            observed: list[float] = []
+
+            for idx in range(20):
+                updated, applied = _merge_cross_validated_entry(storage, "e1", f"project-{idx}", 0.97)
+                assert applied is True
+                assert updated is not None
+                observed.append(updated.importance)
+
+            assert observed[-1] == 1.0
+            assert max(observed) == 1.0
+            assert all(value <= 1.0 for value in observed)
+
 
 class TestApplyImportanceDecay:
     def test_reduces_by_delta(self) -> None:
@@ -536,6 +588,10 @@ class TestMemoryDecayPass:
         row = conn.execute("SELECT importance FROM memories WHERE id = 'e1'").fetchone()
         assert row is not None
         assert abs(row[0] - 0.7) < 0.001  # 0.8 - 0.1
+
+        history_row = conn.execute("SELECT outcome_history FROM memories WHERE id = 'e1'").fetchone()
+        assert history_row is not None
+        assert "new_value=0.7000" in str(history_row[0])
 
     def test_skips_non_cross_validated_entries(self) -> None:
         conn = _make_conn()
@@ -757,3 +813,23 @@ class TestMemoryDecayPassBatch:
             if row and abs(row[0] - 0.7) < 0.001:  # 0.8 - 0.1 = 0.7
                 decayed_count += 1
         assert decayed_count == 3
+
+
+class TestGraphQueryPerformance:
+    def test_graph_query_p95_under_100ms_for_1000_nodes_and_5000_edges(self) -> None:
+        conn = _make_conn()
+        for node in range(1000):
+            for edge_idx in range(5):
+                target = (node + edge_idx + 1) % 1000
+                _insert_edge(conn, f"n{node}", f"n{target}", "similarity", 0.9)
+
+        timings_ms: list[float] = []
+        for _ in range(20):
+            started = time.perf_counter()
+            results = graph_query(conn, ["n0"], depth=3)
+            timings_ms.append((time.perf_counter() - started) * 1000)
+            assert results
+
+        p95_index = max(int(len(timings_ms) * 0.95) - 1, 0)
+        p95_ms = sorted(timings_ms)[p95_index]
+        assert p95_ms < 100

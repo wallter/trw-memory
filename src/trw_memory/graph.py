@@ -314,6 +314,21 @@ def _entry_update_lock(backend: StorageBackend, entry_id: str) -> threading.Lock
         return _ENTRY_UPDATE_LOCKS.setdefault(key, threading.Lock())
 
 
+def _backend_update_guard(backend: StorageBackend) -> contextlib.AbstractContextManager[Path | None]:
+    """Return a cross-process guard for backend RMW updates when the store has a stable on-disk path."""
+    from trw_memory.storage.persistence import lock_for_rmw
+
+    db_path = getattr(backend, "_db_path", None)
+    if isinstance(db_path, Path):
+        return lock_for_rmw(db_path)
+
+    entries_dir = getattr(backend, "_dir", None)
+    if isinstance(entries_dir, Path):
+        return lock_for_rmw(entries_dir / ".graph-update")
+
+    return contextlib.nullcontext()
+
+
 def _merge_cross_validated_entry(
     backend: StorageBackend,
     entry_id: str,
@@ -321,7 +336,9 @@ def _merge_cross_validated_entry(
     similarity: float,
 ) -> tuple[MemoryEntry | None, bool]:
     """Atomically append a single project's validation and boost once."""
-    with _entry_update_lock(backend, entry_id):
+    # The thread lock prevents same-process races; the file-backed guard closes the
+    # remaining gap where two separate processes open the same store concurrently.
+    with _entry_update_lock(backend, entry_id), _backend_update_guard(backend):
         current = backend.get(entry_id)
         if current is None:
             return None, False
@@ -744,7 +761,7 @@ def memory_decay_pass(
     cutoff = (datetime.now(timezone.utc) - timedelta(days=cutoff_days)).isoformat()
 
     rows = conn.execute(
-        "SELECT id FROM memories WHERE cross_validated = 1 "
+        "SELECT id, importance FROM memories WHERE cross_validated = 1 "
         "AND (last_accessed_at IS NULL OR last_accessed_at < ?) "
         "LIMIT ?",
         (cutoff, batch_size),
@@ -765,13 +782,17 @@ def memory_decay_pass(
     batch_now = datetime.now(timezone.utc).isoformat()
     with _optional_lock(lock):
         try:
-            for (entry_id,) in rows:
-                outcome = f"importance_decay:delta=-{DECAY_DELTA:.2f}:reason=unused_90d:timestamp={batch_now}"
+            for entry_id, raw_importance in rows:
+                new_value = max(round(float(raw_importance) - DECAY_DELTA, 4), 0.0)
+                outcome = (
+                    f"importance_decay:delta=-{DECAY_DELTA:.2f}:"
+                    f"reason=unused_90d:new_value={new_value:.4f}:timestamp={batch_now}"
+                )
                 conn.execute(
-                    "UPDATE memories SET importance = MAX(importance - ?, 0.0), "
+                    "UPDATE memories SET importance = ?, "
                     "outcome_history = json_insert(outcome_history, '$[#]', ?) "
                     "WHERE id = ?",
-                    (DECAY_DELTA, outcome, entry_id),
+                    (new_value, outcome, entry_id),
                 )
                 decayed += 1
             conn.commit()
