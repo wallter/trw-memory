@@ -245,16 +245,18 @@ class TestStore:
             release_update.wait(timeout=1.0)
             return {"similarity_edges": 0, "tag_edges": 0, "consolidation_edges": 0, "cross_validated_projects": 0}
 
-        with patch("trw_memory.graph.update_entry_graph", side_effect=slow_graph_update):
+        with (
+            patch.object(client, "_get_embedder", return_value=None),
+            patch("trw_memory.graph.update_entry_graph", side_effect=slow_graph_update),
+        ):
             started = time.perf_counter()
             stored = await client.store("background graph update")
             elapsed = time.perf_counter() - started
+            release_update.set()
+            await asyncio.to_thread(wait_for_graph_updates)
 
-        assert stored["status"] == "stored"
-        assert elapsed < 0.1
-
-        release_update.set()
-        await asyncio.to_thread(wait_for_graph_updates)
+            assert stored["status"] == "stored"
+            assert elapsed < 0.1
 
     async def test_store_cross_validates_matching_project_entries(
         self,
