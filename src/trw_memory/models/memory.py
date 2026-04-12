@@ -378,6 +378,11 @@ class MemoryEntry(BaseModel):
     anchors: list[Anchor] = Field(default_factory=list, description="Code symbol anchors for validation", max_length=3)
     anchor_validity: float = Field(ge=0.0, le=1.0, default=1.0, description="Computed validity score (0.0-1.0)")
 
+    # PRD-CORE-132: Feedback lifecycle counters
+    recall_count: int = Field(ge=0, default=0, description="Number of times this entry was returned by recall")
+    helpful_count: int = Field(ge=0, default=0, description="Number of times marked helpful by the user")
+    unhelpful_count: int = Field(ge=0, default=0, description="Number of times marked unhelpful by the user")
+
     def __repr__(self) -> str:
         """Concise repr showing key identifying fields."""
         preview = self.content[:40] + "..." if len(self.content) > 40 else self.content
@@ -445,6 +450,9 @@ class MemoryEntry(BaseModel):
             "sessions_surfaced": self.sessions_surfaced,
             "avg_rework_delta": self.avg_rework_delta,
             "outcome_correlation": self.outcome_correlation,
+            "recall_count": self.recall_count,
+            "helpful_count": self.helpful_count,
+            "unhelpful_count": self.unhelpful_count,
         }
         if fields is not None:
             return {k: v for k, v in full.items() if k in fields}

@@ -64,7 +64,10 @@ CREATE TABLE IF NOT EXISTS memories (
     outcome_correlation TEXT DEFAULT '',
     sync_hash         TEXT DEFAULT '',
     sync_seq          INTEGER DEFAULT 0,
-    last_synced_at    TEXT
+    last_synced_at    TEXT,
+    recall_count      INTEGER DEFAULT 0,
+    helpful_count     INTEGER DEFAULT 0,
+    unhelpful_count   INTEGER DEFAULT 0
 )
 """
 
@@ -191,6 +194,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             ("sync_hash", "TEXT DEFAULT ''"),
             ("sync_seq", "INTEGER DEFAULT 0"),
             ("last_synced_at", "TEXT"),
+        ]
+        # Migration: add PRD-CORE-132 feedback lifecycle counters
+        _migrate_cols += [
+            ("recall_count", "INTEGER DEFAULT 0"),
+            ("helpful_count", "INTEGER DEFAULT 0"),
+            ("unhelpful_count", "INTEGER DEFAULT 0"),
         ]
         for col_name, col_def in _migrate_cols:
             with contextlib.suppress(sqlite3.OperationalError):

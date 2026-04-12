@@ -85,6 +85,9 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         sync_hash_raw,
         sync_seq_raw,
         last_synced_at_raw,
+        recall_count_raw,
+        helpful_count_raw,
+        unhelpful_count_raw,
     ) = row
 
     # Deserialise assertions from JSON (PRD-CORE-086)
@@ -149,6 +152,9 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         sync_hash=str(sync_hash_raw) if sync_hash_raw else "",
         sync_seq=int(str(sync_seq_raw)) if sync_seq_raw else 0,
         last_synced_at=parse_dt(last_synced_at_raw) if last_synced_at_raw else None,
+        recall_count=int(str(recall_count_raw)) if recall_count_raw else 0,
+        helpful_count=int(str(helpful_count_raw)) if helpful_count_raw else 0,
+        unhelpful_count=int(str(unhelpful_count_raw)) if unhelpful_count_raw else 0,
     )
 
 
@@ -206,4 +212,7 @@ def entry_to_row(entry: MemoryEntry) -> tuple[object, ...]:
         entry.sync_hash or "",
         entry.sync_seq,
         entry.last_synced_at.isoformat() if entry.last_synced_at else None,
+        entry.recall_count,
+        entry.helpful_count,
+        entry.unhelpful_count,
     )
