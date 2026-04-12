@@ -29,6 +29,7 @@ import pytest
 from trw_memory.client import SHARED_EVENT_CACHE_MAX, MemoryClient, MemoryResultDict, StoreResultDict
 from trw_memory.exceptions import (
     AuthorizationError,
+    EncryptionUnavailableError,
     MemoryNotFoundError,
     ToolAlreadyRegisteredError,
 )
@@ -76,6 +77,18 @@ class TestConstructor:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "s"))
         c = MemoryClient(namespace="default", mode="auto")
         assert c.resolved_mode == "local"
+
+    def test_local_mode_raises_when_sqlite_encryption_requested(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "s"))
+        monkeypatch.setenv("MEMORY_ENCRYPTION_ENABLED", "true")
+
+        with pytest.raises(
+            EncryptionUnavailableError,
+            match=r"SQLCipher is required when memory_encryption_enabled=True\. Install with: pip install trw-memory\[encryption\]",
+        ):
+            MemoryClient(namespace="default", mode="local")
 
     def test_mcp_mode_raises_not_implemented(self) -> None:
         with pytest.raises(NotImplementedError, match="MCP mode"):

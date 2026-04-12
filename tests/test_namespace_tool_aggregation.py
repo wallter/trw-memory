@@ -7,7 +7,8 @@ from typing import cast
 
 import pytest
 
-from trw_memory.integrations._backend import create_backend_from_config, make_entry
+from trw_memory.exceptions import EncryptionUnavailableError
+from trw_memory.integrations._backend import create_backend_from_config, discover_namespace_backends, make_entry
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.tools.recall import memory_recall_impl
@@ -76,3 +77,15 @@ def test_memory_status_global_aggregates_all_namespace_stores(tmp_path: Path) ->
         "global": 1,
         "__active__": 2,
     }
+
+
+def test_discover_namespace_backends_raises_when_encryption_requested(tmp_path: Path) -> None:
+    """Namespace discovery must fail closed when encrypted sqlite is requested."""
+    cfg = MemoryConfig(storage_path=str(tmp_path), encryption_enabled=True)
+
+    with pytest.raises(
+        EncryptionUnavailableError,
+        match=r"SQLCipher is required when memory_encryption_enabled=True\. Install with: pip install trw-memory\[encryption\]",
+    ):
+        with discover_namespace_backends(cfg):
+            pytest.fail("discover_namespace_backends should fail closed before yielding stores")
