@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import time
 
 import pytest
 
@@ -287,6 +288,19 @@ class TestIncrementSessionCounts:
 
         commit_count = sum(1 for statement in statements if statement.upper().startswith("COMMIT"))
         assert commit_count == 1
+
+    def test_increment_session_counts_stays_under_latency_budget_for_25_rows(self, backend: SQLiteBackend) -> None:
+        for index in range(25):
+            backend.store(make_entry(f"L-lat{index:04d}"))
+
+        entry_ids = [f"L-lat{index:04d}" for index in range(25)]
+
+        start = time.perf_counter()
+        updated = backend.increment_session_counts(entry_ids)
+        elapsed = time.perf_counter() - start
+
+        assert updated == 25
+        assert elapsed < 0.05
 
 
 # ---------------------------------------------------------------------------
