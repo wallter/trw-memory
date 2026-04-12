@@ -33,6 +33,7 @@ from trw_memory.exceptions import (
     EncryptionUnavailableError,
     MemoryNotFoundError,
     PIIBlockError,
+    SchemaValidationError,
     ToolAlreadyRegisteredError,
 )
 from trw_memory.graph import wait_for_graph_updates
@@ -210,11 +211,11 @@ class TestStore:
         assert "timestamp" in result
 
     async def test_store_empty_content_raises(self, client: MemoryClient) -> None:
-        with pytest.raises(ValueError, match="content must not be empty"):
+        with pytest.raises(SchemaValidationError, match="content"):
             await client.store("")
 
     async def test_store_whitespace_only_raises(self, client: MemoryClient) -> None:
-        with pytest.raises(ValueError, match="content must not be empty"):
+        with pytest.raises(SchemaValidationError, match="content"):
             await client.store("   ")
 
 
@@ -253,11 +254,11 @@ class TestRbacEnforcement:
         assert deleted["status"] == "deleted"
 
     async def test_store_importance_too_low_raises(self, client: MemoryClient) -> None:
-        with pytest.raises(ValueError, match="importance"):
+        with pytest.raises(SchemaValidationError, match="importance"):
             await client.store("content", importance=-0.1)
 
     async def test_store_importance_too_high_raises(self, client: MemoryClient) -> None:
-        with pytest.raises(ValueError, match="importance"):
+        with pytest.raises(SchemaValidationError, match="importance"):
             await client.store("content", importance=1.1)
 
     async def test_store_with_metadata(self, client: MemoryClient) -> None:
@@ -282,7 +283,8 @@ class TestRbacEnforcement:
             await client.store("sk-abcdefghijklmnopqrstuvwxyz")
 
         audit_records = AuditLog(Path(client._config.audit_log_path)).read_all()
-        assert audit_records[-1].op == "reject"
+        assert audit_records[-1].op == "store_rejected"
+        assert audit_records[-1].data["reason"] == "pii_detected"
 
     async def test_store_same_id_updates_existing_entry(self, client: MemoryClient) -> None:
         created = await client.store("original", source_identity="alice", entry_id="M-fixed")
@@ -292,6 +294,72 @@ class TestRbacEnforcement:
         assert created["memory_id"] == "M-fixed"
         assert updated["status"] == "updated"
         assert [result["memory_id"] for result in results] == ["M-fixed"]
+
+    async def test_forget_actor_deletes_matching_entries(self, client: MemoryClient) -> None:
+        await client.store("alice one", source_identity="alice")
+        await client.store("alice two", source_identity="alice")
+        await client.store("bob entry", source_identity="bob")
+
+        result = await client.forget(actor="alice")
+        remaining = await client.search(actor="alice")
+
+        assert result["entries_deleted"] == 2
+        assert remaining == []
+
+    async def test_search_actor_scans_full_namespace_before_filtering(
+        self,
+        client: MemoryClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        entries = [MemoryEntry(id=f"M-seed-{index}", content="seed", namespace="default") for index in range(600)] + [
+            MemoryEntry(
+                id=f"M-alice-{index}",
+                content="alice memory",
+                namespace="default",
+                source_identity="alice",
+                importance=0.8,
+            )
+            for index in range(100)
+        ]
+        backend = MagicMock()
+        backend.count.return_value = len(entries)
+        backend.list_entries.side_effect = lambda **kwargs: entries[: int(kwargs["limit"])]
+        monkeypatch.setattr(client, "_get_backend", lambda: backend)
+
+        result = await client.search(actor="alice", limit=50)
+
+        assert len(result) == 50
+        assert all(str(item["memory_id"]).startswith("M-alice-") for item in result)
+
+    async def test_forget_actor_scans_full_namespace_before_deleting(
+        self,
+        client: MemoryClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        entries = [MemoryEntry(id=f"M-seed-{index}", content="seed", namespace="default") for index in range(10_050)] + [
+            MemoryEntry(
+                id=f"M-alice-{index}",
+                content="alice memory",
+                namespace="default",
+                source_identity="alice",
+            )
+            for index in range(20)
+        ]
+        deleted_ids: set[str] = set()
+        backend = MagicMock()
+        backend.count.return_value = len(entries)
+        backend.list_entries.side_effect = lambda **kwargs: [
+            entry for entry in entries if entry.id not in deleted_ids
+        ][: int(kwargs["limit"])]
+        backend.delete.side_effect = lambda entry_id: deleted_ids.add(entry_id) is None
+        monkeypatch.setattr(client, "_get_backend", lambda: backend)
+        monkeypatch.setattr("trw_memory.client.remove_entry_from_tiers", lambda *args, **kwargs: None)
+        monkeypatch.setattr("trw_memory.client.delete_quarantined_entries", lambda *args, **kwargs: 0)
+
+        result = await client.forget(actor="alice")
+
+        assert result["entries_deleted"] == 20
+        assert all(entry.id in deleted_ids for entry in entries[10_050:])
 
     async def test_store_populates_similarity_and_tag_edges(self, client: MemoryClient) -> None:
         backend = cast("SQLiteBackend", client._get_backend())
@@ -1359,10 +1427,15 @@ class TestSearch:
 
         result = await client.store("A" * 5000, source_identity="alice")
         quarantined = await client.search(actor="alice", status="quarantined")
+        audit_records = AuditLog(Path(client._config.audit_log_path)).read_all()
 
         assert result["status"] == "quarantined"
         assert len(quarantined) == 1
         assert quarantined[0]["memory_id"] == result["memory_id"]
+        assert quarantined[0]["anomaly_dimension"] == result["anomaly_dimension"]
+        assert quarantined[0]["z_score"] == result["z_score"]
+        assert audit_records[-1].op == "access"
+        assert audit_records[-1].actor == "alice"
 
     async def test_search_since_filter(self, client: MemoryClient) -> None:
         await client.store("old entry", importance=0.5)

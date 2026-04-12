@@ -13,7 +13,7 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.security.rbac import Permission, require_namespace_permission
-from trw_memory.security.runtime import list_quarantined_entries
+from trw_memory.security.runtime import append_audit_event, list_quarantined_entries
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools._types import McpServer
 
@@ -76,12 +76,14 @@ def memory_search_impl(
 
     # Fetch all matching entries (apply status + namespace, handle pagination here)
     fetch_limit = min(max(limit + offset, 500), 10_000)
+    if actor is not None and status != "quarantined":
+        fetch_limit = max(fetch_limit, backend.count(namespace=namespace))
     if status == "quarantined":
         entries = list_quarantined_entries(
             cfg,
             namespace=namespace,
             actor=actor,
-            limit=fetch_limit,
+            limit=max(fetch_limit, 10_000) if actor is not None else fetch_limit,
         )
     else:
         entries = backend.list_entries(
@@ -112,6 +114,18 @@ def memory_search_impl(
         offset=offset,
         limit=limit,
         returned=len(result_dicts),
+    )
+    append_audit_event(
+        cfg,
+        "access",
+        actor=actor or "",
+        namespace=namespace,
+        data={
+            "entries_returned": len(result_dicts),
+            "status": status or "",
+            "actor_filter": actor or "",
+            "tag_filter": tags or [],
+        },
     )
 
     return {
