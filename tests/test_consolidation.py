@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 from unittest.mock import MagicMock
 
 import pytest
 
 import trw_memory.lifecycle.consolidation as consolidation_module
 from trw_memory.exceptions import StorageError
+from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.lifecycle.consolidation import (
     _archive_originals,
     _create_consolidated_entry,
@@ -23,6 +24,7 @@ from trw_memory.lifecycle.consolidation import (
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.storage.yaml_backend import YAMLBackend
 
 # ---------------------------------------------------------------------------
@@ -314,6 +316,33 @@ class TestCreateConsolidatedEntry:
         result = _create_consolidated_entry(cluster, "summary", "detail", storage, embedder=embedder)
 
         assert storage.get_stored_embeddings([result.id])[result.id] == _V1
+
+    def test_persists_consolidation_edges_for_sqlite_backend(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path), embedding_dim=4)
+
+        with create_backend_from_config(cfg, "default") as sqlite_storage:
+            storage = cast(SQLiteBackend, sqlite_storage)
+            cluster = [_make_entry("e1"), _make_entry("e2")]
+            for entry in cluster:
+                storage.store(entry)
+
+            result = _create_consolidated_entry(
+                cluster,
+                "summary",
+                "detail",
+                storage,
+                embedder=_make_embedder(vectors=[_V1]),
+            )
+
+            edge_rows = storage._conn.execute(
+                "SELECT source_id, target_id, edge_type FROM memory_graph_edges "
+                "WHERE source_id = ? ORDER BY target_id",
+                (result.id,),
+            ).fetchall()
+            assert [tuple(row) for row in edge_rows] == [
+                (result.id, "e1", "consolidation"),
+                (result.id, "e2", "consolidation"),
+            ]
 
     def test_rolls_back_entry_when_vector_write_fails(self) -> None:
         storage = _InMemoryBackend()

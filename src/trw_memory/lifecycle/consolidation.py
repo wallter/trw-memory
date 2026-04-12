@@ -9,6 +9,7 @@ Original entries are archived after consolidation.
 from __future__ import annotations
 
 import re
+import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import TypeVar
@@ -18,6 +19,7 @@ import structlog
 
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.exceptions import StorageError
+from trw_memory.graph import update_entry_graph
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.retrieval.dense import cosine_similarity
@@ -280,6 +282,7 @@ def _create_consolidated_entry(
     )
 
     storage.store(entry)
+    embedding: list[float] | None = None
     if embedder is not None and embedder.available():
         try:
             embedding = embedder.embed(f"{entry.content} {entry.detail}")
@@ -296,6 +299,12 @@ def _create_consolidated_entry(
             raise StorageError(
                 f"failed to persist vector for {entry.id!r}; entry write was rolled back"
             ) from exc
+    try:
+        # Consolidation lineage edges should never prevent the consolidated entry
+        # itself from being persisted.
+        update_entry_graph(entry, storage, embedding=embedding)
+    except (StorageError, sqlite3.Error, ValueError):
+        logger.warning("consolidation_graph_update_failed", entry_id=entry.id, exc_info=True)
 
     logger.info(
         "consolidation_entry_created",

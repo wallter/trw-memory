@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import sqlite3
 import socket
 import threading
 import uuid
@@ -33,6 +34,7 @@ from trw_memory.exceptions import (
     StorageError,
     ToolAlreadyRegisteredError,
 )
+from trw_memory.graph import update_entry_graph
 from trw_memory.lifecycle._recall import record_recall_access
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -349,6 +351,12 @@ class MemoryClient:
                     raise StorageError(
                         f"failed to persist vector for {entry.id!r}; entry write was rolled back"
                     ) from exc
+            try:
+                # Graph edges enrich retrieval but should never invalidate the
+                # canonical stored row or its persisted embedding.
+                update_entry_graph(entry, backend, embedding=embedding)
+            except (StorageError, sqlite3.Error, ValueError):
+                logger.warning("memory_store_graph_update_failed", memory_id=entry.id, exc_info=True)
 
         logger.debug(
             "memory_stored",
