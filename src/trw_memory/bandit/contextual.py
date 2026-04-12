@@ -1,4 +1,4 @@
-"""Contextual bandit via LinUCB with random fallback.
+"""Contextual bandit via LinUCB with Thompson Sampling no-context fallback.
 
 General-purpose primitive -- no TRW/engineering-specific concepts.
 The caller provides opaque context feature vectors.
@@ -6,6 +6,9 @@ The caller provides opaque context feature vectors.
 Uses the LinUCB algorithm (Li et al., 2010) with Sherman-Morrison
 incremental inverse updates to avoid matrix inversion.  No numpy
 dependency -- all matrix operations are loop-based for small dimensions.
+
+When context_vector is None, falls back to the internal Thompson Sampling
+selector (FR01) rather than uniform random, satisfying PRD-CORE-105-FR02.
 """
 
 from __future__ import annotations
@@ -16,6 +19,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
+
+from trw_memory.bandit.thompson import BanditSelector
 
 _logger = structlog.get_logger(__name__)
 
@@ -77,6 +82,11 @@ class ContextualBanditSelector:
     UCB score for each arm given the current context and returns the arm
     with the highest score.
 
+    When ``context_vector`` is ``None``, selection falls back to an
+    internal Thompson Sampling selector (FR01) rather than uniform random.
+    This satisfies PRD-CORE-105-FR02: "When context_vector is None or
+    empty, the system SHALL fall back to non-contextual Thompson Sampling."
+
     Args:
         feature_dim: Dimension of the context feature vector.
         alpha: Exploration parameter controlling the UCB width.
@@ -86,6 +96,8 @@ class ContextualBanditSelector:
         self._feature_dim = feature_dim
         self._alpha = alpha
         self._arms: dict[str, ContextualArmState] = {}
+        # Internal Thompson Sampling selector for no-context fallback (FR02)
+        self._thompson: BanditSelector = BanditSelector()
 
     # -- internal helpers --------------------------------------------------
 
@@ -126,20 +138,19 @@ class ContextualBanditSelector:
             msg = "eligible_ids must not be empty"
             raise ValueError(msg)
 
-        # No context -> uniform random selection.
-        # NOTE: The spec says to fall back to Thompson Sampling (FR01), but
-        # LinUCB arms maintain A_inv / b parameters (not Beta posteriors), so
-        # a true TS fallback would require a separate BanditSelector instance.
-        # Using uniform random here; callers who need TS should maintain a
-        # BanditSelector alongside the ContextualBanditSelector.
+        # No context -> fall back to Thompson Sampling (FR02 requirement).
+        # The internal _thompson selector maintains Beta posteriors for all
+        # arms seen so far, so it learns from the no-context interactions.
         if context_vector is None:
-            selected = random.choice(eligible_ids)  # noqa: S311
+            decision = self._thompson.select(eligible_ids)
+            selected = decision.selected_id
             _logger.info(
-                "linucb_no_context_random_fallback",
+                "linucb_no_context_thompson_fallback",
                 selected=selected,
                 n_eligible=len(eligible_ids),
+                selection_probability=round(decision.selection_probability, 4),
             )
-            return selected, 0.0
+            return selected, decision.selection_probability
 
         if len(context_vector) != self._feature_dim:
             raise ValueError(
@@ -201,8 +212,10 @@ class ContextualBanditSelector:
     ) -> None:
         """Record a reward observation for *arm_id* given a context.
 
-        If *context_vector* is ``None``, the update is a no-op (no
-        context to learn from).
+        If *context_vector* is ``None``, the LinUCB A_inv/b update is
+        skipped (no context to learn from), but the internal Thompson
+        Sampling selector is updated so that no-context selections can
+        still learn from rewards.
 
         Uses the Sherman-Morrison formula for rank-1 update of A_inv:
             A_inv_new = A_inv - (A_inv @ x @ x^T @ A_inv) / (1 + x^T @ A_inv @ x)
@@ -211,8 +224,11 @@ class ContextualBanditSelector:
             arm_id: Identifier of the arm that was pulled.
             reward: Observed reward value.
             context_vector: Feature vector used when the arm was selected,
-                or ``None`` to skip the update.
+                or ``None`` to skip the LinUCB update (but not Thompson).
         """
+        # Always update Thompson fallback so no-context selections learn
+        self._thompson.update(arm_id, reward)
+
         if context_vector is None:
             return
 
@@ -241,6 +257,7 @@ class ContextualBanditSelector:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize selector state for JSON persistence."""
+        import json
         return {
             "feature_dim": self._feature_dim,
             "alpha": self._alpha,
@@ -252,6 +269,8 @@ class ContextualBanditSelector:
                 }
                 for arm_id, arm in self._arms.items()
             },
+            # Thompson fallback state for no-context selections (FR02)
+            "thompson_state": json.loads(self._thompson.to_json()),
         }
 
     @classmethod
@@ -261,6 +280,7 @@ class ContextualBanditSelector:
         Returns a fresh instance with default parameters on malformed
         input.
         """
+        import json
         try:
             feature_dim = int(data["feature_dim"])
             alpha = float(data["alpha"])
@@ -285,6 +305,17 @@ class ContextualBanditSelector:
                     b=b,
                     n_obs=n_obs,
                 )
+
+            # Restore Thompson fallback state if present (backward-compatible)
+            thompson_state = data.get("thompson_state")
+            if thompson_state is not None:
+                try:
+                    selector._thompson = BanditSelector.from_json(
+                        json.dumps(thompson_state)
+                    )
+                except Exception:  # justified: Thompson restore is best-effort
+                    _logger.debug("contextual_thompson_restore_failed", exc_info=True)
+                    selector._thompson = BanditSelector()
 
             return selector
         except (TypeError, ValueError, KeyError, IndexError, AttributeError):
