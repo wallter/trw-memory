@@ -290,10 +290,12 @@ class TestRbacEnforcement:
         created = await client.store("original", source_identity="alice", entry_id="M-fixed")
         updated = await client.store("replacement", source_identity="alice", entry_id="M-fixed")
         results = await client.recall("replacement", limit=5)
+        audit_records = AuditLog(Path(client._config.audit_log_path)).read_all()
 
         assert created["memory_id"] == "M-fixed"
         assert updated["status"] == "updated"
         assert [result["memory_id"] for result in results] == ["M-fixed"]
+        assert any(record.op == "update" and record.id == "M-fixed" for record in audit_records)
 
     async def test_forget_actor_deletes_matching_entries(self, client: MemoryClient) -> None:
         await client.store("alice one", source_identity="alice")
@@ -305,6 +307,14 @@ class TestRbacEnforcement:
 
         assert result["entries_deleted"] == 2
         assert remaining == []
+
+    async def test_forget_actor_with_zero_entries_returns_zero_and_audits(self, client: MemoryClient) -> None:
+        result = await client.forget(actor="ghost")
+        audit_records = AuditLog(Path(client._config.audit_log_path)).read_all()
+
+        assert result["entries_deleted"] == 0
+        assert audit_records[-1].op == "forget"
+        assert audit_records[-1].data["entries_deleted"] == 0
 
     async def test_search_actor_scans_full_namespace_before_filtering(
         self,

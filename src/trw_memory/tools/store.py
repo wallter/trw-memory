@@ -27,6 +27,7 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
+from trw_memory.security.poisoning import validate_store_inputs
 from trw_memory.security.rbac import Permission, require_namespace_permission
 from trw_memory.security.runtime import append_audit_event, prepare_entry_for_store, store_quarantined_entry
 from trw_memory.storage.interface import StorageBackend
@@ -48,8 +49,9 @@ def memory_store_impl(
     config: MemoryConfig | None = None,
     source: Literal["human", "agent", "tool", "consolidated"] = "tool",
     source_identity: str = "",
-    session_id: str = "",
+    session_id: str | None = None,
     entry_id: str | None = None,
+    raise_security_errors: bool = False,
 ) -> dict[str, object]:
     """Core implementation of memory_store (callable without MCP).
 
@@ -73,17 +75,20 @@ def memory_store_impl(
         return {"error": str(exc), "status": "invalid"}
     cfg = config or MemoryConfig()
     require_namespace_permission(cfg, namespace, Permission.WRITE, "store")
-
-    # Validate content
-    if not content or not content.strip():
-        return {"error": "content must be a non-empty string", "status": "invalid"}
-
-    # Validate importance range
-    if not (0.0 <= importance <= 1.0):
-        return {
-            "error": f"importance must be in [0.0, 1.0], got {importance}",
-            "status": "invalid",
-        }
+    try:
+        validate_store_inputs(content=content, detail=detail, tags=tags, metadata=metadata, importance=importance)
+    except SchemaValidationError as exc:
+        append_audit_event(
+            cfg,
+            "store_rejected",
+            entry_id=entry_id or "",
+            actor=source_identity or source,
+            namespace=namespace,
+            data={"reason": "schema_invalid", "failed_fields": exc.failed_fields, "session_id": session_id},
+        )
+        if raise_security_errors:
+            raise
+        return {"error": str(exc), "status": "blocked", "namespace": namespace}
 
     entry_id = entry_id or ("M-" + uuid4().hex[:16])
     now = datetime.now(timezone.utc)
@@ -192,6 +197,8 @@ def memory_store_impl(
             },
         )
     except (PIIBlockError, PoisoningError, RateLimitError, SchemaValidationError) as exc:
+        if raise_security_errors:
+            raise
         return {"error": str(exc), "status": "blocked", "namespace": namespace}
     except (StorageError, RuntimeError, ValueError) as exc:
         logger.exception("memory_store_failed", entry_id=entry_id, error=str(exc))
@@ -227,7 +234,7 @@ def register_store_tool(mcp: McpServer) -> None:
         detail: str = "",
         metadata: dict[str, str] | None = None,
         source_identity: str = "",
-        session_id: str = "",
+        session_id: str | None = None,
         entry_id: str | None = None,
     ) -> dict[str, object]:
         """Store a new memory entry in the memory system.
@@ -257,4 +264,5 @@ def register_store_tool(mcp: McpServer) -> None:
                 source_identity=source_identity,
                 session_id=session_id,
                 entry_id=entry_id,
+                raise_security_errors=True,
             )

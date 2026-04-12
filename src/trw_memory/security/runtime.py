@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import math
+import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from time import time
+
+import structlog
 
 from trw_memory.exceptions import PIIBlockError, RateLimitError
 from trw_memory.models.config import MemoryConfig
@@ -18,16 +23,30 @@ from trw_memory.storage.persistence import lock_for_rmw, read_yaml, write_yaml
 from trw_memory.storage.yaml_backend import YAMLBackend
 
 _NAMESPACE_METADATA_FILE = "namespace.txt"
-_BLOCKING_PII_TYPES = frozenset({PIIType.API_KEY, PIIType.CUSTOM})
+_BLOCKING_PII_TYPES = frozenset({PIIType.API_KEY})
 _REDACTED_PII_TYPES = frozenset(
     {
         PIIType.EMAIL,
-        PIIType.PHONE,
-        PIIType.SSN,
-        PIIType.CREDIT_CARD,
         PIIType.IP_ADDRESS,
+        PIIType.CUSTOM,
     }
 )
+_CODE_SNIPPET_PATTERNS = (
+    re.compile(r"\bdef\s+\w+\s*\("),
+    re.compile(r"\bclass\s+\w+"),
+    re.compile(r"\bimport\s+\w+"),
+    re.compile(r"\bfunction\s+\w+\s*\("),
+)
+_AUDIT_MAINTENANCE_CACHE: set[str] = set()
+logger = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class AnomalyStats:
+    """Rolling anomaly statistics persisted alongside the quarantine store."""
+
+    sample_count: int
+    dimensions: dict[str, dict[str, float]]
 
 
 @dataclass(frozen=True)
@@ -59,6 +78,7 @@ def append_audit_event(
     """Append an audit event when auditing is enabled."""
     if not config.audit_enabled:
         return
+    ensure_security_maintenance(config)
     get_audit_log(config).append(op, entry_id=entry_id, actor=actor, namespace=namespace, data=data or {})
 
 
@@ -67,32 +87,41 @@ def prepare_entry_for_store(
     *,
     backend: StorageBackend,
     config: MemoryConfig,
-    session_id: str = "",
+    session_id: str | None = None,
 ) -> PreparedStoreEntry:
     """Apply rate limits, PII handling, and anomaly scoring before a write."""
+    ensure_security_maintenance(config)
     actor = _actor_for_entry(entry)
     existing = backend.get(entry.id)
     op = "update" if existing is not None and existing.namespace == entry.namespace else "store"
+    flagged_entry = _flag_code_snippet(entry)
 
     try:
         enforce_write_rate_limit(config, session_id=session_id, actor=actor, namespace=entry.namespace, entry_id=entry.id)
-        validate_entry_payload(entry, max_chars=config.max_entry_chars)
-        secured_entry, pii_matches = _apply_runtime_pii_policy(entry, config)
-        anomaly = score_entry_anomaly(
+        validate_entry_payload(flagged_entry, max_chars=config.max_entry_chars)
+        secured_entry, pii_matches = _apply_runtime_pii_policy(flagged_entry, config)
+        anomaly, anomaly_stats = _score_entry_anomaly(
             secured_entry,
-            backend.list_entries(namespace=entry.namespace, limit=1_000),
-            z_threshold=config.poisoning_z_threshold,
+            backend,
+            config=config,
         )
     except Exception as exc:
         append_audit_event(
             config,
-            "reject",
+            "store_rejected",
             entry_id=entry.id,
             actor=actor,
             namespace=entry.namespace,
-            data={"reason": exc.__class__.__name__, "message": str(exc)},
+            data={
+                "reason": _rejection_reason(exc),
+                "session_id": session_id,
+                "retry_after": getattr(exc, "retry_after", 0.0),
+                "failed_fields": getattr(exc, "failed_fields", []),
+            },
         )
         raise
+
+    _write_anomaly_stats(config, anomaly_stats)
 
     if anomaly is None or not config.poisoning_detection_enabled:
         return PreparedStoreEntry(entry=secured_entry, op=op, pii_matches=tuple(pii_matches))
@@ -104,7 +133,7 @@ def prepare_entry_for_store(
                 "metadata": {
                     **secured_entry.metadata,
                     "anomaly_dimension": dimension,
-                    "anomaly_z_score": f"{z_score:.2f}",
+                    "z_score": f"{z_score:.2f}",
                 }
             }
         )
@@ -136,6 +165,7 @@ def list_quarantined_entries(
     limit: int = 100,
 ) -> list[MemoryEntry]:
     """Return quarantined entries filtered by namespace and actor."""
+    ensure_security_maintenance(config)
     root = Path(config.quarantine_path)
     if not root.exists():
         return []
@@ -171,6 +201,7 @@ def delete_quarantined_entries(
     memory_id: str | None = None,
 ) -> int:
     """Delete matching quarantined entries and return the count removed."""
+    ensure_security_maintenance(config)
     namespace_dir = _quarantine_namespace_dir(config, namespace)
     entries_dir = namespace_dir / "entries"
     if not entries_dir.exists():
@@ -192,7 +223,7 @@ def delete_quarantined_entries(
 def enforce_write_rate_limit(
     config: MemoryConfig,
     *,
-    session_id: str,
+    session_id: str | None,
     actor: str,
     namespace: str,
     entry_id: str,
@@ -211,25 +242,23 @@ def enforce_write_rate_limit(
             for key, value in sessions_raw.items():
                 if not isinstance(key, str) or not isinstance(value, list):
                     continue
-                sessions[key] = [float(item) for item in value if isinstance(item, (int, float))]
+                recent_for_session = [
+                    float(item) for item in value if isinstance(item, (int, float)) and now - float(item) < 60.0
+                ]
+                if recent_for_session:
+                    sessions[key] = recent_for_session
 
         recent = [stamp for stamp in sessions.get(session_id, []) if now - stamp < 60.0]
         if len(recent) >= config.max_memory_writes_per_minute:
+            retry_after = max(0.0, 60.0 - (now - recent[0])) if recent else 60.0
             raise RateLimitError(
-                f"session {session_id!r} exceeded {config.max_memory_writes_per_minute} memory writes per minute"
+                f"session {session_id!r} exceeded {config.max_memory_writes_per_minute} memory writes per minute",
+                retry_after=retry_after,
             )
         recent.append(now)
         sessions[session_id] = recent
+        sessions = {key: value for key, value in sessions.items() if value}
         write_yaml(state_path, {"sessions": sessions})
-
-    append_audit_event(
-        config,
-        "rate_limit_check",
-        entry_id=entry_id,
-        actor=actor,
-        namespace=namespace,
-        data={"session_id": session_id, "window_writes": len(recent)},
-    )
 
 
 def _apply_runtime_pii_policy(entry: MemoryEntry, config: MemoryConfig) -> tuple[MemoryEntry, list[PIIMatch]]:
@@ -252,8 +281,9 @@ def _apply_runtime_pii_policy(entry: MemoryEntry, config: MemoryConfig) -> tuple
 
     blocking = [match for match in all_matches if match.pii_type in _BLOCKING_PII_TYPES]
     if blocking:
-        pii_types = sorted({match.pii_type for match in blocking})
-        raise PIIBlockError(f"memory entry blocked by PII policy: {', '.join(pii_types)}")
+        detected_type = str(blocking[0].pii_type)
+        logger.warning("memory_store_pii_blocked", detected_type=detected_type, namespace=entry.namespace, entry_id=entry.id)
+        raise PIIBlockError(f"memory entry blocked by PII policy: {detected_type}", detected_type=detected_type)
 
     new_content = _replace_pii(entry.content, content_matches)
     new_detail = _replace_pii(entry.detail, detail_matches)
@@ -270,9 +300,9 @@ def _replace_pii(text: str, matches: list[PIIMatch]) -> str:
     result = text
     for match in sorted(matches, key=lambda item: item.start, reverse=True):
         if match.pii_type == PIIType.FILE_PATH:
-            replacement = f"<path:{_short_hash(match.value)}>"
+            replacement = _hash_path_components(match.value)
         elif match.pii_type in _REDACTED_PII_TYPES:
-            replacement = f"[REDACTED:{match.pii_type}]"
+            replacement = _redaction_marker(match.pii_type)
         else:
             continue
         result = result[: match.start] + replacement + result[match.end :]
@@ -281,6 +311,33 @@ def _replace_pii(text: str, matches: list[PIIMatch]) -> str:
 
 def _short_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
+def _hash_path_components(path_value: str) -> str:
+    is_windows = ":\\" in path_value
+    separator = "\\" if is_windows else "/"
+    components = [component for component in re.split(r"[\\/]+", path_value) if component]
+    hashed = [hashlib.sha256(component.encode("utf-8")).hexdigest()[:8] for component in components]
+    prefix = "C:\\" if is_windows and path_value[:2].isalpha() else ("/" if path_value.startswith("/") else "")
+    return prefix + separator.join(hashed)
+
+
+def _redaction_marker(pii_type: PIIType) -> str:
+    if pii_type == PIIType.EMAIL:
+        return "<email>"
+    if pii_type == PIIType.IP_ADDRESS:
+        return "<ip>"
+    if pii_type == PIIType.CUSTOM:
+        return "<custom_pii>"
+    return f"<{pii_type}>"
+
+
+def _flag_code_snippet(entry: MemoryEntry) -> MemoryEntry:
+    combined = f"{entry.content}\n{entry.detail}"
+    if any(pattern.search(combined) for pattern in _CODE_SNIPPET_PATTERNS):
+        if "code_snippet_flagged" not in entry.tags:
+            return entry.model_copy(update={"tags": [*entry.tags, "code_snippet_flagged"]})
+    return entry
 
 
 def _actor_for_entry(entry: MemoryEntry) -> str:
@@ -297,3 +354,72 @@ def _read_namespace_metadata(namespace_dir: Path) -> str | None:
         return None
     namespace = metadata_path.read_text(encoding="utf-8").strip()
     return namespace or None
+
+
+def _score_entry_anomaly(
+    entry: MemoryEntry,
+    backend: StorageBackend,
+    *,
+    config: MemoryConfig,
+) -> tuple[tuple[str, float] | None, AnomalyStats]:
+    reference_entries = backend.list_entries(namespace=entry.namespace, limit=1_000)
+    clean_reference = [candidate for candidate in reference_entries if candidate.metadata.get("quarantined") != "true"]
+    clean_reference.sort(key=lambda candidate: candidate.updated_at, reverse=True)
+    rolling = clean_reference[:100]
+    stats = _build_anomaly_stats(rolling)
+    anomaly = score_entry_anomaly(entry, rolling, z_threshold=config.poisoning_z_threshold)
+    return anomaly, stats
+
+
+def _build_anomaly_stats(entries: list[MemoryEntry]) -> AnomalyStats:
+    if not entries:
+        return AnomalyStats(sample_count=0, dimensions={})
+    lengths = [float(len((entry.content + entry.detail).encode("utf-8"))) for entry in entries]
+    tag_counts = [float(len(entry.tags)) for entry in entries]
+    importances = [float(entry.importance) for entry in entries]
+    return AnomalyStats(
+        sample_count=len(entries),
+        dimensions={
+            "entry_length": _series_stats(lengths),
+            "tag_count": _series_stats(tag_counts),
+            "importance": _series_stats(importances),
+        },
+    )
+
+
+def _series_stats(values: list[float]) -> dict[str, float]:
+    if not values:
+        return {"mean": 0.0, "std_dev": 0.0}
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / len(values)
+    return {"mean": mean, "std_dev": math.sqrt(variance)}
+
+
+def _write_anomaly_stats(config: MemoryConfig, stats: AnomalyStats) -> None:
+    stats_path = Path(config.quarantine_path).parent / "anomaly_stats.yaml"
+    payload: dict[str, object] = {
+        "version": "1.0",
+        "updated": datetime.now(timezone.utc).isoformat(),
+        "sample_count": stats.sample_count,
+        "dimensions": stats.dimensions,
+    }
+    write_yaml(stats_path, payload)
+
+
+def ensure_security_maintenance(config: MemoryConfig) -> None:
+    """Run once-per-process audit retention maintenance for a config path."""
+    cache_key = f"{config.audit_log_path}:{config.audit_retention_days}"
+    if cache_key in _AUDIT_MAINTENANCE_CACHE:
+        return
+    get_audit_log(config).compact(config.audit_retention_days)
+    _AUDIT_MAINTENANCE_CACHE.add(cache_key)
+
+
+def _rejection_reason(exc: Exception) -> str:
+    if isinstance(exc, RateLimitError):
+        return "rate_limited"
+    if isinstance(exc, PIIBlockError):
+        return "pii_detected"
+    if exc.__class__.__name__ == "SchemaValidationError":
+        return "schema_invalid"
+    return getattr(exc, "reason", exc.__class__.__name__)
