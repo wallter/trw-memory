@@ -148,6 +148,17 @@ class TestMemoryStoreImpl:
         assert audit_records[-2].data["entries_deleted"] == 1
         assert audit_records[-1].op == "access"
 
+    def test_forget_actor_with_zero_entries_still_audits(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
+
+        with create_backend_from_config(cfg, "project:default") as backend:
+            result = memory_forget_impl(None, None, "project:default", backend=backend, config=cfg, actor="ghost")
+
+        assert result["entries_deleted"] == 0
+        audit_records = AuditLog(Path(cfg.audit_log_path)).read_all()
+        assert audit_records[-1].op == "forget"
+        assert audit_records[-1].data["entries_deleted"] == 0
+
     def test_search_actor_scans_full_namespace_before_filtering(self, tmp_path: Path) -> None:
         cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
         entries = [_make_entry(f"M-seed-{index}", namespace="project:default") for index in range(600)] + [

@@ -345,7 +345,7 @@ class MemoryClient:
         *,
         source: Literal["human", "agent", "tool", "consolidated"] = "agent",
         source_identity: str = "",
-        session_id: str = "",
+        session_id: str | None = None,
         entry_id: str | None = None,
     ) -> StoreResultDict:
         """Store a new memory entry.

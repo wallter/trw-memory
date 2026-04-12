@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from trw_memory.security.audit import AuditLog, AuditRecord
+from trw_memory.security.audit import AuditLog, AuditRecord, audit_verify
 
 
 @pytest.fixture()
@@ -50,10 +52,14 @@ class TestAuditLogAppend:
 
 
 class TestAuditLogVerify:
+    def test_verify_chain_missing_file_returns_empty_valid_result(self, tmp_path: Path) -> None:
+        result = AuditLog(tmp_path / "missing.jsonl").verify_chain()
+        assert result == {"valid": True, "entries_checked": 0, "first_broken_at": None, "broken_hash": None}
+
     def test_verify_chain_returns_structured_result(self, audit_log: AuditLog) -> None:
         audit_log.append("store", entry_id="M-001")
         result = audit_log.verify_chain()
-        assert result == {"valid": True, "record_count": 1, "error": "", "first_bad_line": None}
+        assert result == {"valid": True, "entries_checked": 1, "first_broken_at": None, "broken_hash": None}
 
     def test_verify_chain_detects_tampering(self, audit_log: AuditLog, audit_path: Path) -> None:
         audit_log.append("store", entry_id="M-001")
@@ -67,12 +73,87 @@ class TestAuditLogVerify:
 
         result = AuditLog(audit_path).verify_chain()
         assert result["valid"] is False
-        assert result["first_bad_line"] == 2
+        assert result["first_broken_at"] == 2
+        assert result["broken_hash"] == tampered["hash"]
 
-    def test_compact_rechains_retained_suffix(self, audit_log: AuditLog) -> None:
+    def test_audit_verify_wrapper_matches_prd_contract(self, audit_log: AuditLog, audit_path: Path) -> None:
+        audit_log.append("store", entry_id="M-001")
+        assert audit_verify(audit_path) == {
+            "valid": True,
+            "entries_checked": 1,
+            "first_broken_at": None,
+            "broken_hash": None,
+        }
+
+    def test_compact_rechains_retained_suffix(self, audit_log: AuditLog, audit_path: Path) -> None:
         for index in range(3):
             audit_log.append("store", entry_id=f"M-{index}")
+        lines = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+        stale_ts = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+        for index in range(2):
+            lines[index]["ts"] = stale_ts
+        audit_path.write_text("\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
+
         retained = audit_log.compact(retention_days=365)
         records = audit_log.read_all()
-        assert retained == 3
+        assert retained == 1
+        assert [record.id for record in records] == ["M-2"]
         assert records[0].prev_hash == "0" * 64
+        assert audit_log.verify_chain()["valid"] is True
+
+    def test_compact_keeps_recent_records_when_nothing_expires(self, audit_log: AuditLog) -> None:
+        for index in range(3):
+            audit_log.append("store", entry_id=f"M-{index}")
+
+        retained = audit_log.compact(retention_days=365)
+        records = audit_log.read_all()
+
+        assert retained == 3
+        assert [record.id for record in records] == ["M-0", "M-1", "M-2"]
+        assert audit_log.verify_chain()["valid"] is True
+
+    def test_compact_all_records_expired_leaves_valid_empty_state(self, audit_log: AuditLog, audit_path: Path) -> None:
+        for index in range(2):
+            audit_log.append("store", entry_id=f"M-{index}")
+
+        lines = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+        stale_ts = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+        for line in lines:
+            line["ts"] = stale_ts
+        audit_path.write_text("\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
+
+        retained = audit_log.compact(retention_days=1)
+
+        assert retained == 0
+        assert audit_log.verify_chain() == {"valid": True, "entries_checked": 0, "first_broken_at": None, "broken_hash": None}
+
+    def test_concurrent_writes_preserve_valid_chain(self, audit_path: Path) -> None:
+        audit_log = AuditLog(audit_path)
+        barrier = threading.Barrier(8)
+
+        def _append(index: int) -> None:
+            barrier.wait()
+            audit_log.append("store", entry_id=f"M-{index}")
+
+        threads = [threading.Thread(target=_append, args=(index,)) for index in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        result = audit_log.verify_chain()
+        assert result["valid"] is True
+        assert result["entries_checked"] == 8
+
+    def test_verify_chain_empty_file_returns_empty_valid_result(self, audit_path: Path) -> None:
+        audit_path.write_text("", encoding="utf-8")
+        result = AuditLog(audit_path).verify_chain()
+        assert result == {"valid": True, "entries_checked": 0, "first_broken_at": None, "broken_hash": None}
+
+
+class TestAuditPaths:
+    def test_audit_log_path_differs_from_entry_storage(self, tmp_path: Path) -> None:
+        from trw_memory.models.config import MemoryConfig
+
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
+        assert Path(cfg.audit_log_path).parent != Path(cfg.storage_path)

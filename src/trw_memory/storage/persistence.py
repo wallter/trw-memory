@@ -231,7 +231,7 @@ def lock_for_rmw(path: Path) -> Generator[Path, None, None]:
     """
     lock_path = path.parent / f"{path.name}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_fh = lock_path.open("w", encoding="utf-8")
+    lock_fh = lock_path.open("a+", encoding="utf-8")
     try:
         if _FCNTL_AVAILABLE:
             fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
@@ -240,4 +240,5 @@ def lock_for_rmw(path: Path) -> Generator[Path, None, None]:
         if _FCNTL_AVAILABLE:
             fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
         lock_fh.close()
-        lock_path.unlink(missing_ok=True)
+        # Keep the lock file inode stable across callers; deleting it here allows
+        # concurrent open+flock sequences to target different inodes and bypass the lock.
