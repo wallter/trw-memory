@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING
 from trw_memory.exceptions import EncryptionUnavailableError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.security.encryption import derive_namespace_key
+from trw_memory.security.keys import get_master_key
 
 if TYPE_CHECKING:
     from trw_memory.storage.interface import StorageBackend
@@ -36,9 +38,6 @@ DEFAULT_LIST_LIMIT: int = 10_000
 
 #: Shared tag prefix for message roles (used by LangChain + LlamaIndex).
 ROLE_TAG_PREFIX: str = "role:"
-_SQLITE_ENCRYPTION_UNAVAILABLE = (
-    "SQLCipher is required when memory_encryption_enabled=True. Install with: pip install trw-memory[encryption]"
-)
 
 
 def _make_id() -> str:
@@ -104,12 +103,14 @@ def create_backend_from_config(
     ns_dir = namespace.replace(":", "_")
 
     if config.storage_backend == "sqlite":
-        if config.encryption_enabled:
-            raise EncryptionUnavailableError(_SQLITE_ENCRYPTION_UNAVAILABLE)
         from trw_memory.storage.sqlite_backend import SQLiteBackend
 
         db_path = base / ns_dir / config.sqlite_db_name
-        return SQLiteBackend(db_path=db_path, dim=config.embedding_dim)
+        sqlcipher_key_hex: str | None = None
+        if config.encryption_enabled:
+            master_key = get_master_key(config)
+            sqlcipher_key_hex = derive_namespace_key(master_key, namespace).hex()
+        return SQLiteBackend(db_path=db_path, dim=config.embedding_dim, sqlcipher_key_hex=sqlcipher_key_hex)
 
     from trw_memory.storage.yaml_backend import YAMLBackend
 
@@ -139,9 +140,10 @@ def discover_namespace_backends(
         stores: list[tuple[list[str], StorageBackend]] = []
 
         if config.storage_backend == "sqlite":
+            from trw_memory.storage.sqlite_backend import SQLCIPHER_REQUIRED_MESSAGE, SQLiteBackend
+
             if config.encryption_enabled:
-                raise EncryptionUnavailableError(_SQLITE_ENCRYPTION_UNAVAILABLE)
-            from trw_memory.storage.sqlite_backend import SQLiteBackend
+                raise EncryptionUnavailableError(SQLCIPHER_REQUIRED_MESSAGE)
 
             for candidate in sorted(base.iterdir()):
                 db_path = candidate / config.sqlite_db_name

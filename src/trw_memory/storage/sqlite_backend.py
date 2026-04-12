@@ -12,6 +12,7 @@ no-ops.
 from __future__ import annotations
 
 import contextlib
+import importlib
 import json
 import shutil
 import sqlite3
@@ -19,11 +20,11 @@ import struct
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import structlog
 
-from trw_memory.exceptions import StorageError
+from trw_memory.exceptions import EncryptionUnavailableError, StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage._row_mapper import entry_to_row, row_to_entry
 from trw_memory.storage._schema import ensure_schema, ensure_vec_table
@@ -46,6 +47,17 @@ except ImportError:
     _SQLITE_VEC_AVAILABLE = False
 
 logger = structlog.get_logger(__name__)
+SQLCIPHER_REQUIRED_MESSAGE = (
+    "SQLCipher is required when memory_encryption_enabled=True. Install with: pip install trw-memory[encryption]"
+)
+
+
+def _import_sqlcipher_driver() -> Any:
+    """Return a SQLCipher DB-API module or raise the standard startup error."""
+    for module_name in ("sqlcipher3.dbapi2", "pysqlcipher3.dbapi2"):
+        with contextlib.suppress(ImportError):
+            return importlib.import_module(module_name)
+    raise EncryptionUnavailableError(SQLCIPHER_REQUIRED_MESSAGE)
 
 # ---------------------------------------------------------------------------
 # Column helpers
@@ -78,34 +90,51 @@ class SQLiteBackend(StorageBackend):
 
     _DEFAULT_DIM: ClassVar[int] = 384
 
-    def __init__(self, db_path: Path, dim: int = 384) -> None:
+    def __init__(self, db_path: Path, dim: int = 384, *, sqlcipher_key_hex: str | None = None) -> None:
         self._db_path = db_path
         self._dim = dim
         self._vec_available = False
         self._lock = threading.Lock()
+        self._sqlcipher_key_hex = sqlcipher_key_hex
+        self._dbapi: Any = _import_sqlcipher_driver() if sqlcipher_key_hex is not None else sqlite3
 
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.recovered = False
         self.integrity_warning = False
         try:
-            self._conn = self._open_and_configure(db_path)
+            if self._sqlcipher_key_hex is None:
+                self._conn = self._open_and_configure(db_path)
+            else:
+                self._conn = self._open_and_configure(
+                    db_path,
+                    dbapi=self._dbapi,
+                    sqlcipher_key_hex=self._sqlcipher_key_hex,
+                )
         except sqlite3.DatabaseError:
             # quick_check failed — but this can be transient (WAL contention,
             # concurrent MCP server access). Check if DB actually has data
             # before destroying it with auto-recovery.
-            if self._db_has_data(db_path):
+            if self._db_has_data(db_path, dbapi=self._dbapi, sqlcipher_key_hex=self._sqlcipher_key_hex):
                 logger.warning(
                     "db_integrity_check_failed_but_has_data",
                     db=str(db_path),
                     action="open_anyway",
                     hint="quick_check failed but DB has rows — likely transient WAL contention, not corruption",
                 )
-                self._conn = self._open_without_integrity_check(db_path)
+                self._conn = self._open_without_integrity_check(
+                    db_path,
+                    dbapi=self._dbapi,
+                    sqlcipher_key_hex=self._sqlcipher_key_hex,
+                )
                 self.integrity_warning = True
             else:
                 logger.exception("db_corrupt_detected", db=str(db_path), action="auto_recover")
-                self._conn = self.recover_db(db_path)
+                self._conn = self.recover_db(
+                    db_path,
+                    dbapi=self._dbapi,
+                    sqlcipher_key_hex=self._sqlcipher_key_hex,
+                )
                 self.recovered = True
 
         ensure_schema(self._conn)
@@ -129,7 +158,37 @@ class SQLiteBackend(StorageBackend):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _open_and_configure(db_path: Path) -> sqlite3.Connection:
+    def _connect(
+        db_path: Path,
+        *,
+        dbapi: Any,
+        timeout: float,
+        check_same_thread: bool,
+        cached_statements: int | None = None,
+        sqlcipher_key_hex: str | None = None,
+    ) -> Any:
+        kwargs: dict[str, object] = {
+            "timeout": timeout,
+            "check_same_thread": check_same_thread,
+        }
+        if cached_statements is not None:
+            kwargs["cached_statements"] = cached_statements
+        conn = dbapi.connect(str(db_path), **kwargs)
+        conn.row_factory = sqlite3.Row
+        if sqlcipher_key_hex is not None:
+            if len(sqlcipher_key_hex) != 64 or any(ch not in "0123456789abcdef" for ch in sqlcipher_key_hex):
+                raise ValueError("sqlcipher_key_hex must be a 64-character lowercase hex string")
+            conn.execute(f'PRAGMA key = "x\'{sqlcipher_key_hex}\'"')  # noqa: S608
+            conn.execute("SELECT count(*) FROM sqlite_master")
+        return conn
+
+    @staticmethod
+    def _open_and_configure(
+        db_path: Path,
+        *,
+        dbapi: Any = sqlite3,
+        sqlcipher_key_hex: str | None = None,
+    ) -> Any:
         """Open a connection with WAL mode and run a quick integrity check.
 
         Retries once on quick_check failure to handle transient WAL contention
@@ -140,8 +199,14 @@ class SQLiteBackend(StorageBackend):
         """
         import time
 
-        conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30.0, cached_statements=0)
-        conn.row_factory = sqlite3.Row
+        conn = SQLiteBackend._connect(
+            db_path,
+            dbapi=dbapi,
+            timeout=30.0,
+            check_same_thread=False,
+            cached_statements=0,
+            sqlcipher_key_hex=sqlcipher_key_hex,
+        )
         # busy_timeout prevents SQLITE_BUSY under multi-process contention.
         conn.execute("PRAGMA busy_timeout = 30000")
 
@@ -170,25 +235,47 @@ class SQLiteBackend(StorageBackend):
         raise sqlite3.DatabaseError("database disk image is malformed (quick_check failed twice)")
 
     @staticmethod
-    def _open_without_integrity_check(db_path: Path) -> sqlite3.Connection:
+    def _open_without_integrity_check(
+        db_path: Path,
+        *,
+        dbapi: Any = sqlite3,
+        sqlcipher_key_hex: str | None = None,
+    ) -> Any:
         """Open a connection skipping integrity check — used when DB has data
         but quick_check fails (likely transient WAL contention)."""
-        conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30.0, cached_statements=0)
-        conn.row_factory = sqlite3.Row
+        conn = SQLiteBackend._connect(
+            db_path,
+            dbapi=dbapi,
+            timeout=30.0,
+            check_same_thread=False,
+            cached_statements=0,
+            sqlcipher_key_hex=sqlcipher_key_hex,
+        )
         conn.execute("PRAGMA busy_timeout = 30000")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         return conn
 
     @staticmethod
-    def _db_has_data(db_path: Path) -> bool:
+    def _db_has_data(
+        db_path: Path,
+        *,
+        dbapi: Any = sqlite3,
+        sqlcipher_key_hex: str | None = None,
+    ) -> bool:
         """Check if a database file has any rows, without integrity check.
 
         Used to prevent auto-recovery from destroying a DB that has data
         but fails quick_check due to transient WAL contention.
         """
         try:
-            conn = sqlite3.connect(str(db_path), timeout=5.0)
+            conn = SQLiteBackend._connect(
+                db_path,
+                dbapi=dbapi,
+                timeout=5.0,
+                check_same_thread=True,
+                sqlcipher_key_hex=sqlcipher_key_hex,
+            )
             try:
                 count = conn.execute("SELECT count(*) FROM memories").fetchone()[0]
                 conn.close()
@@ -208,7 +295,12 @@ class SQLiteBackend(StorageBackend):
             return False
 
     @staticmethod
-    def recover_db(db_path: Path) -> sqlite3.Connection:
+    def recover_db(
+        db_path: Path,
+        *,
+        dbapi: Any = sqlite3,
+        sqlcipher_key_hex: str | None = None,
+    ) -> Any:
         """Recover from a corrupt database by salvaging rows into a fresh DB.
 
         1. Rename corrupt file to ``<name>.corrupt.bak``
@@ -235,8 +327,13 @@ class SQLiteBackend(StorageBackend):
         recovered_rows = 0
         try:
             # Attempt to salvage rows from the corrupt database.
-            old_conn = sqlite3.connect(str(backup_path), timeout=5.0)
-            old_conn.row_factory = sqlite3.Row
+            old_conn = SQLiteBackend._connect(
+                backup_path,
+                dbapi=dbapi,
+                timeout=5.0,
+                check_same_thread=True,
+                sqlcipher_key_hex=sqlcipher_key_hex,
+            )
             try:
                 rows = old_conn.execute(
                     "SELECT * FROM memories"
@@ -248,8 +345,13 @@ class SQLiteBackend(StorageBackend):
         except sqlite3.DatabaseError:
             rows = []
 
-        new_conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30.0)
-        new_conn.row_factory = sqlite3.Row
+        new_conn = SQLiteBackend._connect(
+            db_path,
+            dbapi=dbapi,
+            timeout=30.0,
+            check_same_thread=False,
+            sqlcipher_key_hex=sqlcipher_key_hex,
+        )
         new_conn.execute("PRAGMA journal_mode=WAL")
         new_conn.execute("PRAGMA synchronous=NORMAL")
         ensure_schema(new_conn)
@@ -273,14 +375,25 @@ class SQLiteBackend(StorageBackend):
         return new_conn
 
     @staticmethod
-    def check_integrity(db_path: Path) -> dict[str, object]:
+    def check_integrity(
+        db_path: Path,
+        *,
+        dbapi: Any = sqlite3,
+        sqlcipher_key_hex: str | None = None,
+    ) -> dict[str, object]:
         """Public utility: check database integrity without opening a full backend.
 
         Returns:
             Dict with ``ok`` (bool), ``detail`` (str), and ``db_path``.
         """
         try:
-            conn = sqlite3.connect(str(db_path), timeout=5.0)
+            conn = SQLiteBackend._connect(
+                db_path,
+                dbapi=dbapi,
+                timeout=5.0,
+                check_same_thread=True,
+                sqlcipher_key_hex=sqlcipher_key_hex,
+            )
             rows = conn.execute("PRAGMA quick_check").fetchall()
             conn.close()
             healthy = len(rows) == 1 and rows[0][0] == "ok"
@@ -486,7 +599,7 @@ class SQLiteBackend(StorageBackend):
                 before = self._conn.total_changes
                 self._conn.executemany(sql, values)
                 self._conn.commit()
-                return self._conn.total_changes - before
+                return int(self._conn.total_changes - before)
         except sqlite3.Error as exc:
             raise StorageError(
                 f"Failed to increment session counts: {exc}",
@@ -513,7 +626,7 @@ class SQLiteBackend(StorageBackend):
                     self._delete_vector(entry_id)
                 self._conn.commit()
             logger.debug("memory_deleted", entry_id=entry_id, existed=deleted)
-            return deleted
+            return bool(deleted)
         except sqlite3.Error as exc:
             raise StorageError(
                 f"Failed to delete entry {entry_id}: {exc}",
@@ -537,7 +650,7 @@ class SQLiteBackend(StorageBackend):
             before = self._conn.total_changes
             self._delete_vector(entry_id)
             self._conn.commit()
-            return self._conn.total_changes > before
+            return bool(self._conn.total_changes > before)
 
     def vector_exists(self, entry_id: str) -> bool:
         """Return whether vec_index currently contains *entry_id*."""
@@ -757,7 +870,7 @@ class SQLiteBackend(StorageBackend):
                 namespace=namespace,
                 entries_deleted=deleted,
             )
-            return deleted
+            return int(deleted)
         except sqlite3.Error as exc:
             raise StorageError(
                 f"Failed to delete namespace {namespace!r}: {exc}",

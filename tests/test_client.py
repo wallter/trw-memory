@@ -15,6 +15,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import threading
 import time
 from collections.abc import Iterator
@@ -61,6 +62,34 @@ def yaml_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient
     return MemoryClient(namespace="default", mode="local")
 
 
+class _RecordingSQLCipherConnection:
+    def __init__(self, conn: sqlite3.Connection, statements: list[str]) -> None:
+        object.__setattr__(self, "_conn", conn)
+        object.__setattr__(self, "_statements", statements)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._conn, name)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        setattr(self._conn, name, value)
+
+    def execute(self, sql: str, *args: object) -> sqlite3.Cursor:
+        self._statements.append(sql)
+        return self._conn.execute(sql, *args)
+
+
+class _RecordingSQLCipherDBAPI:
+    Error = sqlite3.Error
+    DatabaseError = sqlite3.DatabaseError
+
+    def __init__(self, statements: list[str]) -> None:
+        self._statements = statements
+
+    def connect(self, database: str, **kwargs: object) -> _RecordingSQLCipherConnection:
+        conn = sqlite3.connect(database, **kwargs)
+        return _RecordingSQLCipherConnection(conn, self._statements)
+
+
 # ---------------------------------------------------------------------------
 # Constructor tests (FR01 + FR07)
 # ---------------------------------------------------------------------------
@@ -89,6 +118,28 @@ class TestConstructor:
             match=r"SQLCipher is required when memory_encryption_enabled=True\. Install with: pip install trw-memory\[encryption\]",
         ):
             MemoryClient(namespace="default", mode="local")
+
+    async def test_local_mode_uses_sqlcipher_key_first_and_disables_tier_sidecars(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        statements: list[str] = []
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_ENCRYPTION_ENABLED", "true")
+        monkeypatch.setenv("MEMORY_MASTER_KEY", "11" * 32)
+        monkeypatch.setattr(
+            "trw_memory.storage.sqlite_backend._import_sqlcipher_driver",
+            lambda: _RecordingSQLCipherDBAPI(statements),
+        )
+        monkeypatch.setattr(MemoryClient, "_get_embedder", lambda self: None)
+
+        client = MemoryClient(namespace="default", mode="local")
+        await client.store("encrypted runtime path")
+        results = await client.recall("encrypted")
+
+        assert results
+        assert results[0]["content"] == "encrypted runtime path"
+        assert statements[0].startswith('PRAGMA key = "x\'')
+        assert (tmp_path / "storage" / "default" / "memory" / "warm.jsonl").exists() is False
 
     def test_mcp_mode_raises_not_implemented(self) -> None:
         with pytest.raises(NotImplementedError, match="MCP mode"):

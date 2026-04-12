@@ -21,6 +21,8 @@ from trw_memory.lifecycle.tiers._sweep import execute_sweep
 from trw_memory.lifecycle.tiers._warm import WarmTierStore
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.security.encryption import derive_namespace_key
+from trw_memory.security.keys import get_master_key
 from trw_memory.storage.persistence import read_yaml
 
 logger = structlog.get_logger(__name__)
@@ -496,7 +498,12 @@ class TierManager:
         if config.storage_backend == "sqlite" and db_path.exists():
             from trw_memory.storage.sqlite_backend import SQLiteBackend
 
-            return SQLiteBackend(db_path, dim=config.embedding_dim)
+            sqlcipher_key_hex: str | None = None
+            if config.encryption_enabled:
+                master_key = get_master_key(config)
+                sqlcipher_key_hex = derive_namespace_key(master_key, self._namespace).hex()
+
+            return SQLiteBackend(db_path, dim=config.embedding_dim, sqlcipher_key_hex=sqlcipher_key_hex)
 
         from trw_memory.storage.yaml_backend import YAMLBackend
 
