@@ -19,9 +19,10 @@ from typing import Any
 
 import structlog
 
-from trw_memory.bandit.thompson import BanditSelector
+from trw_memory.bandit.thompson import BanditDecision, BanditSelector
 
 _logger = structlog.get_logger(__name__)
+_COMPACT_FLOAT_DIGITS = 6
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +48,48 @@ def _outer_product(a: list[float], b: list[float]) -> list[list[float]]:
 def _identity(d: int) -> list[list[float]]:
     """Create d x d identity matrix."""
     return [[1.0 if i == j else 0.0 for j in range(d)] for i in range(d)]
+
+
+def _normalize_scores(scores: dict[str, float]) -> dict[str, float]:
+    """Convert arbitrary arm scores into a stable probability-like distribution."""
+    if len(scores) == 1:
+        only_arm = next(iter(scores))
+        return {only_arm: 1.0}
+
+    min_score = min(scores.values())
+    shift = (-min_score) + 1e-9 if min_score <= 0.0 else 0.0
+    adjusted = {
+        arm_id: max(0.0, score + shift)
+        for arm_id, score in scores.items()
+    }
+    total = sum(adjusted.values())
+    if total <= 0.0:
+        uniform = 1.0 / len(scores)
+        return {arm_id: uniform for arm_id in scores}
+    return {arm_id: adjusted[arm_id] / total for arm_id in scores}
+
+
+def _round_float(value: float) -> float:
+    """Round persisted floats to keep JSON compact and deterministic."""
+    return round(float(value), _COMPACT_FLOAT_DIGITS)
+
+
+def _trim_trailing_defaults(values: list[float], default: float) -> list[float]:
+    """Drop trailing default values from compact vectors."""
+    trimmed = [_round_float(value) for value in values]
+    while trimmed and math.isclose(trimmed[-1], default, abs_tol=1e-12):
+        trimmed.pop()
+    return trimmed
+
+
+def _restore_vector(values: object, length: int, default: float) -> list[float]:
+    """Restore a compact vector to fixed length."""
+    restored = [default] * length
+    if not isinstance(values, list):
+        return restored
+    for index, value in enumerate(values[:length]):
+        restored[index] = float(value)
+    return restored
 
 
 # ---------------------------------------------------------------------------
@@ -137,72 +180,23 @@ class ContextualBanditSelector:
             msg = "eligible_ids must not be empty"
             raise ValueError(msg)
 
-        # No/empty context -> fall back to Thompson Sampling (FR02 requirement).
-        # The internal _thompson selector maintains Beta posteriors for all
-        # arms seen so far, so it learns from the no-context interactions.
-        if not context_vector:
-            decision = self._thompson.select(eligible_ids)
-            selected = decision.selected_id
-            _logger.info(
-                "linucb_no_context_thompson_fallback",
-                selected=selected,
-                n_eligible=len(eligible_ids),
-                selection_probability=round(decision.selection_probability, 4),
-            )
-            return selected, decision.selection_probability
-
-        if len(context_vector) != self._feature_dim:
-            raise ValueError(
-                f"context_vector dimension {len(context_vector)} != "
-                f"expected {self._feature_dim}"
-            )
-
-        x = context_vector
-
-        # Compute UCB score for each arm
-        scores: dict[str, float] = {}
-        for arm_id in eligible_ids:
-            arm = self._ensure_arm(arm_id)
-
-            # theta = A_inv @ b  (parameter estimate)
-            theta = _mat_vec_mul(arm.A_inv, arm.b)
-
-            # predicted reward = theta^T @ x
-            pred = _vec_dot(theta, x)
-
-            # exploration bonus = alpha * sqrt(x^T @ A_inv @ x)
-            a_inv_x = _mat_vec_mul(arm.A_inv, x)
-            exploration = self._alpha * math.sqrt(max(0.0, _vec_dot(x, a_inv_x)))
-
-            scores[arm_id] = pred + exploration
-
-        # Check for degeneracy: all scores within 1% of each other
-        score_vals = list(scores.values())
-        max_score = max(score_vals)
-        min_score = min(score_vals)
-
-        # Avoid division by zero when all scores are zero
-        ref = max(abs(max_score), abs(min_score), 1e-12)
-        relative_spread = (max_score - min_score) / ref
-
-        if relative_spread < 0.01:
-            decision = self._thompson.select(eligible_ids)
-            selected = decision.selected_id
-            _logger.debug(
-                "contextual_degenerate_scores",
-                spread=round(relative_spread, 6),
-                selected=selected,
-            )
-            return selected, decision.selection_probability
-
-        # Select arm with highest UCB score
-        selected = max(scores, key=lambda a: scores[a])
-        _logger.debug(
-            "contextual_linucb_select",
-            selected=selected,
-            score=round(scores[selected], 4),
+        decision, selected_score = self._select_decision_with_score(
+            eligible_ids,
+            context_vector=context_vector,
         )
-        return selected, scores[selected]
+        return decision.selected_id, selected_score
+
+    def select_decision(
+        self,
+        eligible_ids: list[str],
+        context_vector: list[float] | None = None,
+    ) -> BanditDecision:
+        """Return a Thompson-compatible decision envelope for live integrations."""
+        decision, _ = self._select_decision_with_score(
+            eligible_ids,
+            context_vector=context_vector,
+        )
+        return decision
 
     def update(
         self,
@@ -255,6 +249,10 @@ class ContextualBanditSelector:
 
         arm.n_obs += 1
 
+    def seed_thompson_fallback(self, selector: BanditSelector) -> None:
+        """Seed the internal Thompson fallback from an external selector state."""
+        self._thompson = BanditSelector.from_json(selector.to_json())
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize selector state for JSON persistence."""
         import json
@@ -272,6 +270,72 @@ class ContextualBanditSelector:
             # Thompson fallback state for no-context selections (FR02)
             "thompson_state": json.loads(self._thompson.to_json()),
         }
+
+    def to_compact_dict(self, *, max_arms: int = 16) -> dict[str, Any]:
+        """Serialize a bounded compact state for envelope persistence.
+
+        The shared state envelope uses a diagonal approximation of ``A_inv`` and
+        persists only the most-observed arms. This keeps storage bounded while
+        still restoring behaviorally real contextual state for frequently shown
+        learnings.
+        """
+        active_arms = sorted(
+            (
+                (arm_id, arm)
+                for arm_id, arm in self._arms.items()
+                if arm.n_obs > 0
+            ),
+            key=lambda item: (-item[1].n_obs, item[0]),
+        )[:max_arms]
+        return {
+            "feature_dim": self._feature_dim,
+            "alpha": self._alpha,
+            "max_arms": max_arms,
+            "arms": {
+                arm_id: {
+                    "d": _trim_trailing_defaults(
+                        [arm.A_inv[index][index] for index in range(self._feature_dim)],
+                        1.0,
+                    ),
+                    "b": _trim_trailing_defaults(arm.b, 0.0),
+                    "n": arm.n_obs,
+                }
+                for arm_id, arm in active_arms
+            },
+        }
+
+    @classmethod
+    def from_compact_dict(cls, data: dict[str, Any]) -> ContextualBanditSelector:
+        """Restore a compact envelope-persisted selector state."""
+        try:
+            selector = cls(
+                feature_dim=int(data["feature_dim"]),
+                alpha=float(data["alpha"]),
+            )
+            arms_data = data.get("arms", {})
+            if not isinstance(arms_data, dict):
+                return selector
+            for arm_id, arm_dict in arms_data.items():
+                if not isinstance(arm_dict, dict):
+                    continue
+                diagonal = _restore_vector(
+                    arm_dict.get("d"),
+                    selector._feature_dim,
+                    1.0,
+                )
+                b = _restore_vector(arm_dict.get("b"), selector._feature_dim, 0.0)
+                a_inv = _identity(selector._feature_dim)
+                for index, value in enumerate(diagonal):
+                    a_inv[index][index] = value
+                selector._arms[str(arm_id)] = ContextualArmState(
+                    A_inv=a_inv,
+                    b=b,
+                    n_obs=int(arm_dict.get("n", 0)),
+                )
+            return selector
+        except (TypeError, ValueError, KeyError):
+            _logger.warning("contextual_from_compact_failed", exc_info=True)
+            return cls(feature_dim=2, alpha=1.0)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ContextualBanditSelector:
@@ -321,3 +385,77 @@ class ContextualBanditSelector:
         except (TypeError, ValueError, KeyError, IndexError, AttributeError):
             _logger.warning("contextual_from_dict_failed", exc_info=True)
             return cls(feature_dim=2, alpha=1.0)
+
+    def _select_decision_with_score(
+        self,
+        eligible_ids: list[str],
+        *,
+        context_vector: list[float] | None,
+    ) -> tuple[BanditDecision, float]:
+        """Shared implementation for tuple- and decision-based selection."""
+        if not eligible_ids:
+            msg = "eligible_ids must not be empty"
+            raise ValueError(msg)
+
+        if not context_vector:
+            decision = self._thompson.select(eligible_ids)
+            _logger.info(
+                "linucb_no_context_thompson_fallback",
+                selected=decision.selected_id,
+                n_eligible=len(eligible_ids),
+                selection_probability=round(decision.selection_probability, 4),
+            )
+            return decision, decision.selection_probability
+
+        if len(context_vector) != self._feature_dim:
+            raise ValueError(
+                f"context_vector dimension {len(context_vector)} != "
+                f"expected {self._feature_dim}"
+            )
+
+        x = context_vector
+        scores: dict[str, float] = {}
+        for arm_id in eligible_ids:
+            arm = self._ensure_arm(arm_id)
+            theta = _mat_vec_mul(arm.A_inv, arm.b)
+            pred = _vec_dot(theta, x)
+            a_inv_x = _mat_vec_mul(arm.A_inv, x)
+            exploration = self._alpha * math.sqrt(max(0.0, _vec_dot(x, a_inv_x)))
+            scores[arm_id] = pred + exploration
+
+        score_vals = list(scores.values())
+        max_score = max(score_vals)
+        min_score = min(score_vals)
+        ref = max(abs(max_score), abs(min_score), 1e-12)
+        relative_spread = (max_score - min_score) / ref
+
+        if relative_spread < 0.01:
+            decision = self._thompson.select(eligible_ids)
+            _logger.debug(
+                "contextual_degenerate_scores",
+                spread=round(relative_spread, 6),
+                selected=decision.selected_id,
+            )
+            return decision, decision.selection_probability
+
+        ranked_ids = sorted(scores, key=scores.__getitem__, reverse=True)
+        selected = ranked_ids[0]
+        runner_up_id = ranked_ids[1] if len(ranked_ids) > 1 else None
+        probabilities = _normalize_scores(scores)
+        _logger.debug(
+            "contextual_linucb_select",
+            selected=selected,
+            score=round(scores[selected], 4),
+        )
+        return (
+            BanditDecision(
+                selected_id=selected,
+                selection_probability=probabilities[selected],
+                runner_up_id=runner_up_id,
+                runner_up_probability=(
+                    probabilities.get(runner_up_id) if runner_up_id is not None else None
+                ),
+                exploration=False,
+            ),
+            scores[selected],
+        )
