@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -43,13 +43,14 @@ def _sweep_hot_to_warm(
     stale_hot_ids = [
         entry_id
         for entry_id, entry in list(hot.items())
-        if _days_since_access(entry.model_dump(), today) > config.hot_ttl_days
+        if _days_since_access(entry.model_dump(mode="json"), today) > config.hot_ttl_days
     ]
 
     for entry_id in stale_hot_ids:
         try:
-            evicted = hot.pop(entry_id)
-            warm_add_fn(entry_id, evicted.model_dump(), None)
+            evicted = hot[entry_id]
+            warm_add_fn(entry_id, evicted.model_dump(mode="json"), None)
+            hot.pop(entry_id, None)
             demoted += 1
             logger.debug("sweep_hot_to_warm", entry_id=entry_id)
         except (OSError, StorageError, ValueError):  # noqa: PERF203 — per-entry error handling
@@ -60,10 +61,10 @@ def _sweep_hot_to_warm(
 
 
 def _sweep_warm_to_cold(
-    entries_dir: Path,
+    warm_entries: Iterable[dict[str, object]],
     config: MemoryConfig,
     today: date,
-    cold_archive_fn: Callable[[str, Path], None],
+    cold_archive_entry_fn: Callable[[str, dict[str, object]], None],
 ) -> tuple[int, int]:
     """Demote idle low-importance warm entries to cold tier.
 
@@ -72,33 +73,27 @@ def _sweep_warm_to_cold(
     demoted = 0
     errors = 0
 
-    if not entries_dir.exists():
-        return demoted, errors
-
-    for yaml_file in sorted(entries_dir.glob("*.yaml")):
-        if yaml_file.name == "index.yaml":
-            continue
+    for data in warm_entries:
         try:
-            data = read_yaml(yaml_file)
             entry_id = str(data.get("id", ""))
             if not entry_id or str(data.get("status", "active")) != "active":
                 continue
 
             days = _days_since_access(data, today)
-            importance = compute_importance_score(data, [], config=config)
-            if days > config.cold_threshold_days and importance < 0.22:
-                cold_archive_fn(entry_id, yaml_file)
+            utility_score = compute_importance_score(data, [], config=config)
+            if days > config.cold_threshold_days and utility_score < config.warm_archive_max_score:
+                cold_archive_entry_fn(entry_id, data)
                 demoted += 1
                 logger.debug(
                     "sweep_warm_to_cold",
                     entry_id=entry_id,
                     days=days,
-                    importance_score=importance,
+                    importance_score=utility_score,
                 )
         except (OSError, StorageError, ValueError):
             logger.warning(
                 "sweep_warm_to_cold_failed",
-                path=str(yaml_file),
+                entry_id=str(data.get("id", "")),
                 exc_info=True,
             )
             errors += 1
@@ -127,14 +122,14 @@ def _sweep_cold_to_purge(
             data = read_yaml(yaml_file)
             entry_id = str(data.get("id", ""))
             days = _days_since_access(data, today)
-            importance = compute_importance_score(data, [], config=config)
+            utility_score = compute_importance_score(data, [], config=config)
 
-            if days > config.retention_days and importance < 0.1:
+            if days > config.retention_days and utility_score < config.cold_purge_max_score:
                 audit_record: dict[str, object] = {
                     "entry_id": entry_id,
                     "purged_at": datetime.now(timezone.utc).isoformat(),
                     "days_idle": days,
-                    "importance_score": importance,
+                    "importance_score": utility_score,
                     "importance": float(str(data.get("importance", data.get("impact", 0.5)))),
                     "content": str(data.get("content", data.get("summary", ""))),
                 }
@@ -147,7 +142,7 @@ def _sweep_cold_to_purge(
                     "sweep_cold_purge",
                     entry_id=entry_id,
                     days=days,
-                    importance_score=importance,
+                    importance_score=utility_score,
                 )
         except (OSError, StorageError, ValueError):  # noqa: PERF203 — per-entry error handling
             logger.warning(
@@ -164,10 +159,10 @@ def execute_sweep(
     *,
     hot: OrderedDict[str, MemoryEntry],
     config: MemoryConfig,
-    entries_dir: Path,
+    warm_entries: list[dict[str, object]],
     base_dir: Path,
     warm_add_fn: Callable[[str, dict[str, object], list[float] | None], None],
-    cold_archive_fn: Callable[[str, Path], None],
+    cold_archive_entry_fn: Callable[[str, dict[str, object]], None],
     cold_dir: Path,
 ) -> TierSweepResult:
     """Execute lifecycle sweep across all tiers.
@@ -180,10 +175,10 @@ def execute_sweep(
     Args:
         hot: The hot tier OrderedDict (mutated in-place for evictions).
         config: MemoryConfig for threshold settings.
-        entries_dir: Directory containing warm-tier YAML entries.
+        warm_entries: Active canonical entries eligible for Warm->Cold evaluation.
         base_dir: Base directory for purge audit log.
         warm_add_fn: Callable(entry_id, entry_data, embedding) for warm add.
-        cold_archive_fn: Callable(entry_id, entry_path) for cold archive.
+        cold_archive_entry_fn: Callable(entry_id, entry_data) for cold archive.
         cold_dir: Base cold archive directory path.
 
     Returns:
@@ -193,7 +188,7 @@ def execute_sweep(
     purge_audit_path = base_dir / "memory" / "purge_audit.jsonl"
 
     demoted_hot, errors_hot = _sweep_hot_to_warm(hot, config, today, warm_add_fn)
-    demoted_warm, errors_warm = _sweep_warm_to_cold(entries_dir, config, today, cold_archive_fn)
+    demoted_warm, errors_warm = _sweep_warm_to_cold(warm_entries, config, today, cold_archive_entry_fn)
     purged, errors_cold = _sweep_cold_to_purge(cold_dir, config, today, purge_audit_path)
 
     total_errors = errors_hot + errors_warm + errors_cold

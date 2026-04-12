@@ -9,7 +9,7 @@ from __future__ import annotations
 import contextlib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import structlog
 
@@ -17,7 +17,11 @@ from trw_memory.exceptions import StorageError
 from trw_memory.lifecycle.tiers._warm import WarmTierStore
 from trw_memory.storage.persistence import read_yaml, write_yaml
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 logger = structlog.get_logger(__name__)
+_WARM_EMBEDDING_KEY = "_warm_embedding"
 
 
 class ColdTierStore:
@@ -48,6 +52,18 @@ class ColdTierStore:
         if ts is None:
             ts = datetime.now(timezone.utc)
         return self._cold_dir() / str(ts.year) / f"{ts.month:02d}"
+
+    @staticmethod
+    def _entry_partition_timestamp(entry_data: dict[str, object]) -> datetime | None:
+        """Return the entry creation timestamp used for cold archive partitioning."""
+        raw = entry_data.get("created_at", entry_data.get("created"))
+        if isinstance(raw, datetime):
+            return raw.astimezone(timezone.utc)
+        if isinstance(raw, str) and raw:
+            normalized = raw.replace("Z", "+00:00")
+            with contextlib.suppress(ValueError):
+                return datetime.fromisoformat(normalized).astimezone(timezone.utc)
+        return None
 
     def _assert_within_cold_dir(self, path: Path) -> None:
         """Guard against path traversal attacks on cold archive operations.
@@ -96,30 +112,82 @@ class ColdTierStore:
         # Path traversal guard
         self._assert_within_base_dir(entry_path)
 
-        partition = self._cold_partition()
-        partition.mkdir(parents=True, exist_ok=True)
-        dest = partition / entry_path.name
+        data = read_yaml(entry_path)
 
-        try:
-            data = read_yaml(entry_path)
-            write_yaml(dest, data)
-            # Remove from warm sidecar (best-effort)
-            with contextlib.suppress(OSError, ValueError):
-                self._warm_store.warm_remove(entry_id)
-            # Delete original
+        def _delete_source(_entry_id: str) -> bool | None:
             entry_path.unlink(missing_ok=True)
+            return None
+
+        def _verify_source_removed(_entry_id: str) -> bool:
+            return not entry_path.exists()
+
+        self.cold_archive_entry(
+            entry_id,
+            data,
+            delete_source_entry_fn=_delete_source,
+            verify_source_entry_removed_fn=_verify_source_removed,
+            source_path=entry_path,
+        )
+
+    def cold_archive_entry(
+        self,
+        entry_id: str,
+        entry_data: dict[str, object],
+        *,
+        delete_source_entry_fn: Callable[[str], bool | None] | None = None,
+        verify_source_entry_removed_fn: Callable[[str], bool] | None = None,
+        source_path: Path | None = None,
+    ) -> None:
+        """Archive an active entry payload into the cold tier."""
+        dest: Path | None = None
+        try:
+            archive_data, embedding = self._archive_payload(entry_id, entry_data)
+            partition = self._cold_partition(self._entry_partition_timestamp(archive_data))
+            partition.mkdir(parents=True, exist_ok=True)
+            dest_name = source_path.name if source_path is not None else f"{entry_id}.yaml"
+            dest = partition / dest_name
+            write_yaml(dest, archive_data)
+            warm_cleanup_confirmed = False
+            try:
+                warm_cleanup_confirmed = self._warm_store.warm_remove(entry_id)
+            except (OSError, ValueError):
+                warm_cleanup_confirmed = self._warm_store.purge_sidecar_entry(entry_id)
+            if not warm_cleanup_confirmed:
+                dest.unlink(missing_ok=True)
+                raise StorageError(f"warm cleanup failed for {entry_id}", path=str(dest))
+            if delete_source_entry_fn is not None:
+                source_cleanup_confirmed = False
+                try:
+                    delete_result = delete_source_entry_fn(entry_id)
+                    source_cleanup_confirmed = delete_result is not False
+                except (OSError, StorageError, ValueError):
+                    source_cleanup_confirmed = False
+                if verify_source_entry_removed_fn is not None:
+                    with contextlib.suppress(OSError, StorageError, ValueError):
+                        source_cleanup_confirmed = verify_source_entry_removed_fn(entry_id)
+                if not source_cleanup_confirmed:
+                    self._rollback_cold_archive_failure(entry_id, dest, entry_data, embedding)
+                    raise StorageError(f"source cleanup failed for {entry_id}", path=str(dest))
             logger.debug("cold_archive", entry_id=entry_id, dest=str(dest))
         except (OSError, StorageError):
             logger.warning(
                 "cold_archive_failed",
                 entry_id=entry_id,
-                src=str(entry_path),
-                dest=str(dest),
+                src=str(source_path) if source_path is not None else "",
+                dest=str(dest) if dest is not None else "",
                 exc_info=True,
             )
             raise
 
-    def cold_promote(self, entry_id: str) -> dict[str, object] | None:
+    def cold_promote(
+        self,
+        entry_id: str,
+        *,
+        restore_entry_fn: Callable[[dict[str, object]], None] | None = None,
+        delete_restored_entry_fn: Callable[[str], bool | None] | None = None,
+        force_delete_restored_entry_fn: Callable[[str], bool | None] | None = None,
+        verify_restored_entry_removed_fn: Callable[[str], bool] | None = None,
+    ) -> dict[str, object] | None:
         """Move a cold-tier entry back to warm tier on access.
 
         Locates the YAML in the cold archive by scanning for a file containing
@@ -144,30 +212,69 @@ class ColdTierStore:
             if str(data.get("id", "")) != entry_id:
                 continue
 
-            # Found -- update last_accessed_at and move to warm
-            data["last_accessed_at"] = datetime.now(timezone.utc).isoformat()
+            # Stage the promoted payload in memory so a failed promotion does not
+            # mutate the cold archive's retention metadata.
+            promoted_data = dict(data)
+            embedding = self._extract_archived_embedding(promoted_data)
+            promoted_data["last_accessed_at"] = datetime.now(timezone.utc).isoformat()
+            canonical_restore = restore_entry_fn or self._restore_to_entries_dir
+            canonical_delete = delete_restored_entry_fn or self._delete_from_entries_dir
+            canonical_force_delete = force_delete_restored_entry_fn or self._delete_from_entries_dir
+            restored = False
+            warm_added = False
             try:
-                write_yaml(yaml_file, data)
-                self._warm_store.warm_add(entry_id, data, None)
+                canonical_restore(promoted_data)
+                restored = True
+                self._warm_store.warm_add(entry_id, promoted_data, embedding)
+                warm_added = True
                 yaml_file.unlink(missing_ok=True)
                 logger.debug("cold_promote", entry_id=entry_id, src=str(yaml_file))
-                return data
+                return promoted_data
             except (OSError, StorageError):
-                logger.warning(
-                    "cold_promote_failed",
-                    entry_id=entry_id,
-                    path=str(yaml_file),
-                    exc_info=True,
-                )
+                if warm_added:
+                    warm_cleanup_confirmed = False
+                    try:
+                        warm_cleanup_confirmed = self._warm_store.warm_remove(entry_id)
+                    except (OSError, ValueError):
+                        warm_cleanup_confirmed = self._warm_store.purge_sidecar_entry(entry_id)
+                    if not warm_cleanup_confirmed:
+                        logger.warning("cold_promote_warm_rollback_incomplete", entry_id=entry_id, path=str(yaml_file))
+                if restored:
+                    rollback_confirmed = self._rollback_restored_entry(
+                        entry_id,
+                        canonical_delete=canonical_delete,
+                        canonical_force_delete=canonical_force_delete,
+                        verify_restored_entry_removed_fn=verify_restored_entry_removed_fn,
+                    )
+                    if not rollback_confirmed:
+                        logger.warning(
+                            "cold_promote_rollback_incomplete",
+                            entry_id=entry_id,
+                            path=str(yaml_file),
+                        )
+                logger.warning("cold_promote_failed", entry_id=entry_id, path=str(yaml_file), exc_info=True)
                 return None
 
         return None
 
-    def cold_search(self, query_tokens: list[str]) -> list[dict[str, object]]:
+    def cold_search(
+        self,
+        query_tokens: list[str],
+        *,
+        promote: bool = False,
+        top_k: int | None = None,
+        restore_entry_fn: Callable[[dict[str, object]], None] | None = None,
+        delete_restored_entry_fn: Callable[[str], bool | None] | None = None,
+        force_delete_restored_entry_fn: Callable[[str], bool | None] | None = None,
+        verify_restored_entry_removed_fn: Callable[[str], bool] | None = None,
+    ) -> list[dict[str, object]]:
         """Linear scan of the cold archive for keyword matches.
 
         Args:
             query_tokens: Tokens to match (case-insensitive).
+            promote: If True, promote matched entries back to warm storage before
+                returning them so recall-time cold hits repair the active tier set.
+            top_k: Optional maximum number of matches to return.
 
         Returns:
             List of matching entry dicts (includes all YAML fields).
@@ -186,10 +293,115 @@ class ColdTierStore:
                 continue
 
             text = str(data.get("content", data.get("summary", ""))).lower()
+            text += " " + str(data.get("detail", "")).lower()
             tags = [str(t).lower() for t in cast("list[object]", data.get("tags") or [])]
             text += " " + " ".join(tags)
 
             if any(tok in text for tok in lower_tokens):
-                results.append(data)
+                if promote:
+                    entry_id = str(data.get("id", ""))
+                    promoted_entry = self.cold_promote(
+                        entry_id,
+                        restore_entry_fn=restore_entry_fn,
+                        delete_restored_entry_fn=delete_restored_entry_fn,
+                        force_delete_restored_entry_fn=force_delete_restored_entry_fn,
+                        verify_restored_entry_removed_fn=verify_restored_entry_removed_fn,
+                    ) if entry_id else None
+                    if promoted_entry is None:
+                        continue
+                    results.append(promoted_entry)
+                else:
+                    results.append(self._sanitize_archived_entry(data))
+                if top_k is not None and len(results) >= top_k:
+                    break
 
         return results
+
+    def _archive_payload(
+        self,
+        entry_id: str,
+        entry_data: dict[str, object],
+    ) -> tuple[dict[str, object], list[float] | None]:
+        archive_data = dict(entry_data)
+        embedding = self._warm_store.get_embedding(entry_id)
+        if embedding is not None:
+            archive_data[_WARM_EMBEDDING_KEY] = embedding
+        return archive_data, embedding
+
+    def _extract_archived_embedding(self, entry_data: dict[str, object]) -> list[float] | None:
+        raw_embedding = entry_data.pop(_WARM_EMBEDDING_KEY, None)
+        if not isinstance(raw_embedding, list):
+            return None
+        values: list[float] = []
+        for value in raw_embedding:
+            if not isinstance(value, (int, float)):
+                return None
+            values.append(float(value))
+        return values
+
+    def _sanitize_archived_entry(self, entry_data: dict[str, object]) -> dict[str, object]:
+        sanitized = dict(entry_data)
+        sanitized.pop(_WARM_EMBEDDING_KEY, None)
+        return sanitized
+
+    def _rollback_cold_archive_failure(
+        self,
+        entry_id: str,
+        dest: Path,
+        entry_data: dict[str, object],
+        embedding: list[float] | None,
+    ) -> None:
+        cold_removed = False
+        with contextlib.suppress(OSError):
+            dest.unlink(missing_ok=True)
+            cold_removed = True
+        if not cold_removed:
+            logger.warning("cold_archive_rollback_incomplete", entry_id=entry_id, path=str(dest))
+        try:
+            self._warm_store.warm_add(entry_id, entry_data, embedding)
+        except (OSError, ValueError):
+            logger.warning("cold_archive_warm_restore_failed", entry_id=entry_id, exc_info=True)
+
+    def _rollback_restored_entry(
+        self,
+        entry_id: str,
+        *,
+        canonical_delete: Callable[[str], bool | None],
+        canonical_force_delete: Callable[[str], bool | None],
+        verify_restored_entry_removed_fn: Callable[[str], bool] | None,
+    ) -> bool:
+        with contextlib.suppress(OSError, StorageError, ValueError, RuntimeError):
+            canonical_delete(entry_id)
+
+        if self._restored_entry_removed(entry_id, verify_restored_entry_removed_fn):
+            return True
+
+        with contextlib.suppress(OSError, StorageError, ValueError, RuntimeError):
+            canonical_force_delete(entry_id)
+
+        return self._restored_entry_removed(entry_id, verify_restored_entry_removed_fn)
+
+    def _restored_entry_removed(
+        self,
+        entry_id: str,
+        verify_restored_entry_removed_fn: Callable[[str], bool] | None,
+    ) -> bool:
+        if verify_restored_entry_removed_fn is not None:
+            with contextlib.suppress(OSError, StorageError, ValueError):
+                return verify_restored_entry_removed_fn(entry_id)
+            return False
+        return not (self._base_dir / "entries" / f"{entry_id}.yaml").exists()
+
+    def _restore_to_entries_dir(self, entry_data: dict[str, object]) -> None:
+        """Default canonical restore for direct TierManager usage."""
+        entry_id = str(entry_data.get("id", ""))
+        if not entry_id:
+            raise ValueError("entry id required for canonical restore")
+        entries_dir = self._base_dir / "entries"
+        entries_dir.mkdir(parents=True, exist_ok=True)
+        write_yaml(entries_dir / f"{entry_id}.yaml", entry_data)
+
+    def _delete_from_entries_dir(self, entry_id: str) -> bool | None:
+        """Rollback helper for the default canonical restore path."""
+        (self._base_dir / "entries" / f"{entry_id}.yaml").unlink(missing_ok=True)
+        return None
