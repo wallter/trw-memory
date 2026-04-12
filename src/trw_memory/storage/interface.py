@@ -10,6 +10,7 @@ replacement.  Two implementations are provided:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime
 
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 
@@ -184,6 +185,21 @@ class StorageBackend(ABC):
         Returns:
             Number of entries actually deleted.  ``0`` if the namespace
             does not exist or the backend does not support this operation.
+        """
+        return 0
+
+    def increment_session_counts(self, entry_ids: list[str], *, updated_at: datetime | None = None) -> int:
+        """Increment ``session_count`` for multiple entries.
+
+        Backends that support bulk mutation should override this to perform the
+        work in a single transaction. The default is a safe no-op.
+
+        Args:
+            entry_ids: Distinct entry ids to increment.
+            updated_at: Optional timestamp to stamp onto updated rows.
+
+        Returns:
+            Number of rows updated.
         """
         return 0
 

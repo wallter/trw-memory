@@ -260,6 +260,35 @@ class TestEntriesWithAssertions:
         assert results[0].id == "a1"
 
 
+class TestIncrementSessionCounts:
+    def test_increment_session_counts_updates_existing_rows(self, backend: SQLiteBackend) -> None:
+        backend.store(make_entry("L-sess001"))
+        backend.store(make_entry("L-sess002"))
+
+        updated = backend.increment_session_counts(["L-sess001", "L-sess002"])
+
+        assert updated == 2
+        assert backend.get("L-sess001") is not None
+        assert backend.get("L-sess001").session_count == 1  # type: ignore[union-attr]
+        assert backend.get("L-sess002") is not None
+        assert backend.get("L-sess002").session_count == 1  # type: ignore[union-attr]
+
+    def test_increment_session_counts_uses_single_commit(self, backend: SQLiteBackend) -> None:
+        backend.store(make_entry("L-batch01"))
+        backend.store(make_entry("L-batch02"))
+        backend.store(make_entry("L-batch03"))
+
+        statements: list[str] = []
+        backend._conn.set_trace_callback(statements.append)
+        try:
+            backend.increment_session_counts(["L-batch01", "L-batch02", "L-batch03"])
+        finally:
+            backend._conn.set_trace_callback(None)
+
+        commit_count = sum(1 for statement in statements if statement.upper().startswith("COMMIT"))
+        assert commit_count == 1
+
+
 # ---------------------------------------------------------------------------
 # Search
 # ---------------------------------------------------------------------------

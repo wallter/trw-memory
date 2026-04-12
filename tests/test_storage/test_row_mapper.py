@@ -130,6 +130,17 @@ def test_round_trip_session_count() -> None:
     assert restored.session_count == 4
 
 
+def test_row_to_entry_defaults_missing_session_count_to_zero() -> None:
+    """Older rows without session_count data load with a safe zero default."""
+    entry = MemoryEntry(id="L-sess0", content="missing session count")
+    row = list(_entry_to_full_row(entry))
+    row[ENTRY_COLUMNS.index("session_count")] = None
+
+    restored = row_to_entry(tuple(row))
+
+    assert restored.session_count == 0
+
+
 def test_round_trip_team_origin() -> None:
     """team_origin and task_type survive round-trip."""
     entry = MemoryEntry(
