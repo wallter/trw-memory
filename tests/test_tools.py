@@ -218,6 +218,67 @@ class TestMemoryRecallImpl:
             assert local_entry.access_count == 1
             assert remote_entry.access_count == 1
 
+    def test_include_org_memories_skips_below_threshold_entries(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
+
+        with (
+            create_backend_from_config(cfg, "project:default") as current_storage,
+            create_backend_from_config(cfg, "project:other") as remote_storage,
+        ):
+            current_backend = cast(SQLiteBackend, current_storage)
+            remote_backend = cast(SQLiteBackend, remote_storage)
+
+            current_backend.store(MemoryEntry(id="M-local", content="deployment lesson", namespace="project:default"))
+            remote_backend.store(
+                MemoryEntry(
+                    id="M-org-low",
+                    content="low importance org entry",
+                    namespace="project:other",
+                    importance=0.79,
+                    cross_validated=True,
+                )
+            )
+
+            @contextmanager
+            def fake_discover(_cfg: MemoryConfig) -> Iterator[object]:
+                yield [(["project:other"], remote_backend)]
+
+            with patch("trw_memory.integrations._backend.discover_namespace_backends", fake_discover):
+                result = memory_recall_impl(
+                    "",
+                    "project:default",
+                    backend=current_backend,
+                    namespace_backend_factory=lambda ns: create_backend_from_config(cfg, ns),
+                    include_org_memories=True,
+                    config=cfg,
+                )
+
+            memories = cast(list[dict[str, object]], result["memories"])
+            assert [memory["namespace"] for memory in memories] == ["project:default"]
+
+    def test_include_org_memories_false_suppresses_org_entries(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
+
+        with create_backend_from_config(cfg, "project:default") as current_storage:
+            current_backend = cast(SQLiteBackend, current_storage)
+            current_backend.store(MemoryEntry(id="M-local", content="deployment lesson", namespace="project:default"))
+
+            with patch(
+                "trw_memory.graph.list_org_shared_entries",
+                side_effect=AssertionError("org lookup should be skipped"),
+            ):
+                result = memory_recall_impl(
+                    "",
+                    "project:default",
+                    backend=current_backend,
+                    namespace_backend_factory=lambda ns: create_backend_from_config(cfg, ns),
+                    include_org_memories=False,
+                    config=cfg,
+                )
+
+            memories = cast(list[dict[str, object]], result["memories"])
+            assert [memory["namespace"] for memory in memories] == ["project:default"]
+
 
 # ---------------------------------------------------------------------------
 # memory_search_impl

@@ -537,6 +537,11 @@ class MemoryClient:
         tag_set = set(tags or [])
         org_results: list[MemoryResultDict] = []
         for entry in org_entries:
+            # Re-apply the FR11 gate here instead of trusting the helper
+            # contract alone so patched/mocked callers cannot accidentally
+            # widen org recall beyond cross-validated high-importance entries.
+            if not entry.cross_validated or entry.importance < 0.8:
+                continue
             if tag_set and not tag_set.issubset(set(entry.tags)):
                 continue
 
