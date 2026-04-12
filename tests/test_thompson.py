@@ -361,6 +361,33 @@ def test_floor_exploration_propensities_sum_to_one() -> None:
     )
 
 
+def test_floor_exploration_runner_up_preserves_sample_ordering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runner-up remains the best sampled alternative when exploration overrides."""
+    selector = BanditSelector(cold_start_min=0, floor_exploration=1.0)
+    for arm in ("a", "b", "c"):
+        selector.update(arm, 0.5)
+
+    sample_iter = iter((0.9, 0.4, 0.2))
+    monkeypatch.setattr(random, "betavariate", lambda _a, _b: next(sample_iter))
+    monkeypatch.setattr(random, "random", lambda: 0.0)
+    monkeypatch.setattr(random, "randrange", lambda stop: 0)
+    monkeypatch.setattr(
+        selector,
+        "_estimate_propensities",
+        lambda eligible_ids: {"a": 0.7, "b": 0.2, "c": 0.1},
+    )
+
+    decision = selector.select(["a", "b", "c"])
+
+    assert decision.selected_id == "b"
+    assert decision.runner_up_id == "a"
+    assert decision.selection_probability == pytest.approx(0.2)
+    assert decision.runner_up_probability == pytest.approx(0.7)
+    assert decision.exploration is True
+
+
 def test_exposure_count_increments() -> None:
     """exposure_count increments with each update call."""
     selector = BanditSelector()
