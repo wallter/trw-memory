@@ -5,8 +5,9 @@ Tests the *_impl functions directly without requiring a running FastMCP server.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
-from typing import cast
+from typing import Iterator, cast
 from unittest.mock import MagicMock, patch
 
 from trw_memory.integrations._backend import create_backend_from_config
@@ -176,13 +177,14 @@ class TestMemoryStoreImpl:
 
         with create_backend_from_config(cfg, "team:sprint-37") as storage:
             backend = cast(SQLiteBackend, storage)
-            result = memory_store_impl(
-                "team discovery",
-                "team:sprint-37",
-                backend=backend,
-                tags=["team"],
-                config=cfg,
-            )
+            with patch("trw_memory.tools.store.get_local_embedder", return_value=None):
+                result = memory_store_impl(
+                    "team discovery",
+                    "team:sprint-37",
+                    backend=backend,
+                    tags=["team"],
+                    config=cfg,
+                )
 
             assert result["status"] == "stored"
             row = backend._conn.execute(
@@ -190,6 +192,58 @@ class TestMemoryStoreImpl:
                 ("team:sprint-37",),
             ).fetchone()
             assert tuple(row) == ("sprint-37", None, "active")
+
+    def test_store_cross_validates_matching_project_entries(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path), embedding_dim=4)
+
+        with (
+            create_backend_from_config(cfg, "project:default") as current_storage,
+            create_backend_from_config(cfg, "project:other") as remote_storage,
+        ):
+            current_backend = cast(SQLiteBackend, current_storage)
+            remote_backend = cast(SQLiteBackend, remote_storage)
+
+            remote_backend.store(
+                MemoryEntry(
+                    id="M-remote",
+                    content="shared operational lesson",
+                    namespace="project:other",
+                    importance=0.6,
+                )
+            )
+            remote_vectors: dict[str, list[float]] = {"M-remote": [1.0, 0.0, 0.0, 0.0]}
+
+            fake_embedder = MagicMock()
+            fake_embedder.embed.return_value = [1.0, 0.0, 0.0, 0.0]
+
+            @contextmanager
+            def fake_discover(_cfg: MemoryConfig) -> Iterator[object]:
+                yield [(["project:other"], remote_backend)]
+
+            with (
+                patch.object(remote_backend, "get_stored_embeddings", return_value=remote_vectors),
+                patch("trw_memory.tools.store.get_local_embedder", return_value=fake_embedder),
+                patch("trw_memory.integrations._backend.discover_namespace_backends", fake_discover),
+            ):
+                result = memory_store_impl(
+                    "shared operational lesson",
+                    "project:default",
+                    backend=current_backend,
+                    config=cfg,
+                    importance=0.6,
+                )
+
+            assert result["status"] == "stored"
+            stored_entry = current_backend.get(cast(str, result["memory_id"]))
+            remote_entry = remote_backend.get("M-remote")
+            assert stored_entry is not None
+            assert remote_entry is not None
+            assert stored_entry.cross_validated is True
+            assert remote_entry.cross_validated is True
+            assert stored_entry.importance == 0.65
+            assert remote_entry.importance == 0.65
+            assert any("cross_validated:project_id=other" in item for item in stored_entry.outcome_history)
+            assert any("cross_validated:project_id=default" in item for item in remote_entry.outcome_history)
 
 
 # ---------------------------------------------------------------------------

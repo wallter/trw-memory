@@ -302,7 +302,12 @@ def _create_consolidated_entry(
     try:
         # Consolidation lineage edges should never prevent the consolidated entry
         # itself from being persisted.
-        update_entry_graph(entry, storage, embedding=embedding)
+        update_entry_graph(
+            entry,
+            storage,
+            embedding=embedding,
+            config=getattr(storage, "_config", None),
+        )
     except (StorageError, sqlite3.Error, ValueError):
         logger.warning("consolidation_graph_update_failed", entry_id=entry.id, exc_info=True)
 

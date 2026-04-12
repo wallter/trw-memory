@@ -33,6 +33,7 @@ __all__ = [
 ]
 
 from trw_memory.exceptions import DimensionMismatchError
+from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.retrieval.dense import cosine_similarity
 from trw_memory.storage.interface import StorageBackend
@@ -91,6 +92,7 @@ def update_entry_graph(
     backend: StorageBackend,
     *,
     embedding: list[float] | None = None,
+    config: MemoryConfig | None = None,
 ) -> dict[str, int]:
     """Best-effort graph enrichment for a freshly written entry.
 
@@ -132,11 +134,154 @@ def update_entry_graph(
         conn,
         lock=lock,
     )
+    cross_validated_projects = _apply_cross_project_validation(
+        entry,
+        backend,
+        conn,
+        embedding=embedding,
+        config=config,
+    )
     return {
         "similarity_edges": similarity_edges,
         "tag_edges": tag_edges,
         "consolidation_edges": consolidation_edges,
+        "cross_validated_projects": cross_validated_projects,
     }
+
+
+def _project_scope_key(namespace: str) -> str | None:
+    """Return a stable project key for project-scoped namespaces."""
+    if namespace == "default":
+        return "default"
+    if namespace.startswith("project:"):
+        return namespace.split(":", 1)[1]
+    return None
+
+
+def _cross_validation_prefix(project_id: str) -> str:
+    return f"cross_validated:project_id={project_id}:"
+
+
+def _entry_has_cross_validation(entry: MemoryEntry, project_id: str) -> bool:
+    prefix = _cross_validation_prefix(project_id)
+    return any(event.startswith(prefix) for event in entry.outcome_history)
+
+
+def _append_cross_validation(entry: MemoryEntry, project_id: str, similarity: float) -> MemoryEntry:
+    now = datetime.now(timezone.utc)
+    outcome = (
+        f"cross_validated:project_id={project_id}:similarity={similarity:.4f}:"
+        f"timestamp={now.isoformat()}"
+    )
+    return entry.model_copy(
+        update={
+            "cross_validated": True,
+            "outcome_history": [*entry.outcome_history, outcome],
+            "updated_at": now,
+        }
+    )
+
+
+def _persist_cross_validated_entry(
+    backend: StorageBackend,
+    original: MemoryEntry,
+    updated: MemoryEntry,
+) -> None:
+    if updated == original:
+        return
+    backend.update(
+        original.id,
+        cross_validated=updated.cross_validated,
+        importance=updated.importance,
+        outcome_history=updated.outcome_history,
+        updated_at=updated.updated_at,
+    )
+
+
+def _apply_cross_project_validation(
+    entry: MemoryEntry,
+    backend: StorageBackend,
+    conn: sqlite3.Connection,
+    *,
+    embedding: list[float] | None = None,
+    config: MemoryConfig | None = None,
+) -> int:
+    """Cross-validate against sibling project stores when embeddings exist.
+
+    Package-local cross-project evidence comes from sibling on-disk project
+    namespaces. This keeps the feature usable without waiting on a platform-side
+    embedding feed while still failing closed when embeddings are unavailable.
+    """
+    if embedding is None:
+        return 0
+
+    current_project = _project_scope_key(entry.namespace)
+    if current_project is None:
+        return 0
+
+    from trw_memory.integrations._backend import discover_namespace_backends
+
+    cfg = config or MemoryConfig()
+    matched_projects = 0
+    updated_entry = entry
+
+    with discover_namespace_backends(cfg) as stores:
+        for namespaces, remote_backend in stores:
+            project_namespaces = [
+                namespace
+                for namespace in namespaces
+                if (project_id := _project_scope_key(namespace)) is not None and project_id != current_project
+            ]
+            for namespace in project_namespaces:
+                project_id = _project_scope_key(namespace)
+                if project_id is None:
+                    continue
+
+                remote_entries = remote_backend.list_entries(
+                    status=MemoryStatus.ACTIVE,
+                    namespace=namespace,
+                    limit=CANDIDATE_LIMIT,
+                )
+                if not remote_entries:
+                    continue
+
+                remote_embeddings = remote_backend.get_stored_embeddings([candidate.id for candidate in remote_entries])
+                remote_candidates = [
+                    (candidate, remote_embedding)
+                    for candidate in remote_entries
+                    if (remote_embedding := remote_embeddings.get(candidate.id)) is not None
+                ]
+                remote_payload = [
+                    (candidate.id, project_id, remote_embedding)
+                    for candidate, remote_embedding in remote_candidates
+                ]
+                if not detect_cross_validation(
+                    updated_entry,
+                    conn,
+                    embedding=embedding,
+                    remote_entries=remote_payload,
+                ):
+                    continue
+
+                for remote_entry, remote_embedding in remote_candidates:
+                    similarity = _safe_cosine_similarity(embedding, remote_embedding)
+                    if similarity <= CROSS_VALIDATION_THRESHOLD:
+                        continue
+
+                    if not _entry_has_cross_validation(updated_entry, project_id):
+                        updated_entry = _append_cross_validation(updated_entry, project_id, similarity)
+                        updated_entry = apply_importance_boost(updated_entry)
+                        matched_projects += 1
+
+                    if _entry_has_cross_validation(remote_entry, current_project):
+                        continue
+
+                    updated_remote = _append_cross_validation(remote_entry, current_project, similarity)
+                    updated_remote = apply_importance_boost(updated_remote)
+                    _persist_cross_validated_entry(remote_backend, remote_entry, updated_remote)
+
+    _persist_cross_validated_entry(backend, entry, updated_entry)
+    return matched_projects
 
 
 def create_similarity_edges(
