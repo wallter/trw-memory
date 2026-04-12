@@ -218,6 +218,7 @@ def _create_consolidated_entry(
     content: str,
     detail: str,
     storage: StorageBackend,
+    embedder: EmbeddingProvider | None = None,
     namespace: str = "default",
 ) -> MemoryEntry:
     """Create a new consolidated memory entry from a cluster.
@@ -279,6 +280,22 @@ def _create_consolidated_entry(
     )
 
     storage.store(entry)
+    if embedder is not None and embedder.available():
+        try:
+            embedding = embedder.embed(f"{entry.content} {entry.detail}")
+            if embedding is not None:
+                storage.upsert_vector(entry.id, embedding)
+        except Exception as exc:
+            try:
+                storage.delete(entry.id)
+            except Exception:
+                logger.exception("consolidation_vector_rollback_failed", entry_id=entry.id)
+                raise StorageError(
+                    f"failed to persist vector for {entry.id!r}; rollback did not complete cleanly"
+                ) from exc
+            raise StorageError(
+                f"failed to persist vector for {entry.id!r}; entry write was rolled back"
+            ) from exc
 
     logger.info(
         "consolidation_entry_created",
@@ -317,12 +334,14 @@ def _archive_originals(
 
     for entry in cluster:
         try:
-            storage.update(
+            updated = storage.update(
                 entry.id,
                 consolidated_into=consolidated_id,
                 status=MemoryStatus.ARCHIVED,
                 updated_at=datetime.now(timezone.utc),
             )
+            if updated is None:
+                raise StorageError(f"failed to archive original entry {entry.id!r}")
             processed.append(entry.id)
         except (StorageError, ValueError, RuntimeError) as exc:  # per-item error handling: re-raise but log each failure individually  # noqa: PERF203
             logger.exception(
@@ -366,6 +385,33 @@ def _mean_pairwise_similarity(
     return sum(pairs) / len(pairs) if pairs else 0.0
 
 
+def _restore_originals(
+    cluster: list[MemoryEntry],
+    storage: StorageBackend,
+) -> None:
+    """Restore original entries after a failed consolidation attempt."""
+    for entry in cluster:
+        storage.store(entry)
+
+
+def _rollback_consolidation(
+    cluster: list[MemoryEntry],
+    new_entry: MemoryEntry,
+    storage: StorageBackend,
+) -> None:
+    """Undo a partially applied consolidation so callers keep original data.
+
+    Consolidation creates a brand-new semantic memory and then mutates the
+    originals. If archival fails after the new entry is written, leaving both
+    sides in place would duplicate knowledge and silently mark only part of the
+    cluster as archived. Roll back to the pre-cycle state instead.
+    """
+    deleted = storage.delete(new_entry.id)
+    if not deleted:
+        raise StorageError(f"failed to delete partially consolidated entry {new_entry.id!r}")
+    _restore_originals(cluster, storage)
+
+
 # ---------------------------------------------------------------------------
 # Main Entry Point
 # ---------------------------------------------------------------------------
@@ -403,13 +449,22 @@ def consolidate_cycle(
         consolidated_count: 0}.
     """
     cfg = config or MemoryConfig()
+    entry_limit = min(max_entries, cfg.consolidation_max_per_cycle)
+
+    if not cfg.consolidation_enabled and not dry_run:
+        return {
+            "status": "disabled",
+            "clusters_found": 0,
+            "consolidated_count": 0,
+            "skipped_reason": "consolidation_disabled",
+        }
 
     clusters = find_clusters(
         storage,
         embedder,
         similarity_threshold=cfg.consolidation_similarity_threshold,
         min_cluster_size=cfg.consolidation_min_cluster,
-        max_entries=max_entries,
+        max_entries=entry_limit,
         namespace=namespace,
     )
 
@@ -431,6 +486,7 @@ def consolidate_cycle(
             "dry_run": True,
             "clusters": cluster_previews,
             "consolidated_count": 0,
+            "skipped_reason": "dry_run",
         }
 
     if not clusters:
@@ -446,6 +502,7 @@ def consolidate_cycle(
 
     for cluster in clusters:
         cluster_ids = [e.id for e in cluster]
+        new_entry: MemoryEntry | None = None
         try:
             # FR02/FR05: Cluster summarization (longest-entry selection)
             # Future: LLM summarization hook point — see consolidation design docs
@@ -454,7 +511,14 @@ def consolidate_cycle(
             detail = fallback["detail"]
 
             # FR03: Create consolidated entry
-            new_entry = _create_consolidated_entry(cluster, content, detail, storage, ns)
+            new_entry = _create_consolidated_entry(
+                cluster,
+                content,
+                detail,
+                storage,
+                embedder=embedder,
+                namespace=ns,
+            )
             consolidated_id = new_entry.id
 
             # FR04: Archive originals
@@ -462,6 +526,18 @@ def consolidate_cycle(
             consolidated_count += 1
 
         except Exception as exc:  # broad catch: per-cluster error boundary
+            if new_entry is not None:
+                try:
+                    _rollback_consolidation(cluster, new_entry, storage)
+                except Exception as rollback_exc:
+                    logger.exception(
+                        "consolidation_rollback_failed",
+                        cluster_ids=cluster_ids,
+                        consolidated_id=new_entry.id,
+                    )
+                    raise StorageError(
+                        f"consolidation rollback failed for cluster {cluster_ids}: {rollback_exc}"
+                    ) from rollback_exc
             logger.exception(
                 "consolidation_cluster_failed",
                 cluster_ids=cluster_ids,

@@ -497,6 +497,23 @@ class TestConsolidateCommand:
         captured = capsys.readouterr()
         assert "Error:" in captured.err
 
+    @patch(f"{_CLI}._create_local_backend")
+    @patch(f"{_CLI}.MemoryConfig")
+    def test_consolidate_rejects_invalid_namespace_before_backend_creation(
+        self,
+        mock_config_cls: MagicMock,
+        mock_backend_fn: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        mock_config_cls.return_value = MagicMock()
+
+        ret = main(["consolidate", "--namespace", "../../escape"])
+
+        assert ret == 1
+        captured = capsys.readouterr()
+        assert "Invalid namespace" in captured.err
+        mock_backend_fn.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # export subcommand

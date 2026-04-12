@@ -145,6 +145,8 @@ class TestMemoryConsolidateImpl:
         assert "entries_consolidated" in result
         assert "dry_run" in result
         assert result["dry_run"] is True
+        assert "clusters" in result
+        assert result["skipped_reason"] == "dry_run"
 
     def test_invalid_namespace_returns_error(self) -> None:
         backend = _mock_backend()
@@ -170,6 +172,27 @@ class TestMemoryConsolidateImpl:
         result = memory_consolidate_impl("project:default", backend=backend)
         assert "entries_consolidated" in result
         assert isinstance(result["entries_consolidated"], int)
+
+    @patch("trw_memory.tools.consolidate.consolidate_cycle")
+    @patch("trw_memory.tools.consolidate.get_local_embedder")
+    def test_disabled_result_passes_through_status(
+        self,
+        mock_get_local_embedder: MagicMock,
+        mock_consolidate_cycle: MagicMock,
+    ) -> None:
+        backend = _mock_backend()
+        mock_get_local_embedder.return_value = MagicMock()
+        mock_consolidate_cycle.return_value = {
+            "status": "disabled",
+            "clusters_found": 0,
+            "consolidated_count": 0,
+            "skipped_reason": "consolidation_disabled",
+        }
+
+        result = memory_consolidate_impl("project:default", backend=backend)
+
+        assert result["status"] == "disabled"
+        assert result["skipped_reason"] == "consolidation_disabled"
 
     @patch("trw_memory.tools.consolidate.consolidate_cycle")
     @patch("trw_memory.tools.consolidate.get_local_embedder")

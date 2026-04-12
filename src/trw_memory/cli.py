@@ -12,9 +12,10 @@ import functools
 import inspect
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import ParamSpec, TypeVar, cast, overload
 
 import structlog
 
@@ -32,13 +33,26 @@ from trw_memory.client import MemoryClient, _create_local_backend
 from trw_memory.embeddings import get_local_embedder
 from trw_memory.lifecycle.consolidation import consolidate_cycle
 from trw_memory.models.config import MemoryConfig
+from trw_memory.namespaces.validation import validate_namespace
+from trw_memory.storage.interface import StorageBackend
 
 __all__ = ["main"]
 
 logger = structlog.get_logger(__name__)
 
+P = ParamSpec("P")
+R = TypeVar("R")
 
-def _cli_error_boundary(fn: Callable[..., object]) -> Callable[..., object]:
+
+@overload
+def _cli_error_boundary(fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]: ...
+
+
+@overload
+def _cli_error_boundary(fn: Callable[P, R]) -> Callable[P, R]: ...
+
+
+def _cli_error_boundary(fn: Callable[P, object]) -> Callable[P, object]:
     """Wrap a CLI subcommand with uniform error handling.
 
     Catches all exceptions, prints to stderr, logs with structlog,
@@ -47,10 +61,13 @@ def _cli_error_boundary(fn: Callable[..., object]) -> Callable[..., object]:
     Works with both sync and async callables.
     """
 
+    async_fn = cast(Callable[P, Awaitable[object]], fn)
+    sync_fn = fn
+
     @functools.wraps(fn)
-    async def async_wrapper(*args: object, **kwargs: object) -> object:
+    async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> object:
         try:
-            return await fn(*args, **kwargs)  # type: ignore[misc]
+            return await async_fn(*args, **kwargs)
         except SystemExit:
             raise
         except Exception as exc:
@@ -59,9 +76,9 @@ def _cli_error_boundary(fn: Callable[..., object]) -> Callable[..., object]:
             raise SystemExit(1) from exc
 
     @functools.wraps(fn)
-    def sync_wrapper(*args: object, **kwargs: object) -> object:
+    def sync_wrapper(*args: P.args, **kwargs: P.kwargs) -> object:
         try:
-            return fn(*args, **kwargs)
+            return sync_fn(*args, **kwargs)
         except SystemExit:
             raise
         except Exception as exc:
@@ -71,7 +88,15 @@ def _cli_error_boundary(fn: Callable[..., object]) -> Callable[..., object]:
 
     import asyncio as _asyncio
 
-    return async_wrapper if _asyncio.iscoroutinefunction(fn) else sync_wrapper
+    if _asyncio.iscoroutinefunction(fn):
+        return cast(Callable[P, object], async_wrapper)
+    return cast(Callable[P, object], sync_wrapper)
+
+
+def _open_validated_backend(config: MemoryConfig, namespace: str) -> tuple[str, StorageBackend]:
+    """Validate namespace before backend creation to keep filesystem access scoped."""
+    validated_namespace = validate_namespace(namespace)
+    return validated_namespace, _create_local_backend(config, validated_namespace)
 
 
 @_cli_error_boundary
@@ -132,14 +157,14 @@ async def _handle_search(args: argparse.Namespace) -> int:
 async def _handle_consolidate(args: argparse.Namespace) -> int:
     """Handle the 'consolidate' subcommand."""
     config = MemoryConfig()
-    backend = _create_local_backend(config, args.namespace)
+    namespace, backend = _open_validated_backend(config, args.namespace)
     try:
         embedder = get_local_embedder(model_name=config.embedding_model, dim=config.embedding_dim)
         result = consolidate_cycle(
             storage=backend,
             embedder=embedder,
             dry_run=args.dry_run,
-            namespace=args.namespace,
+            namespace=namespace,
             config=config,
         )
         print(json.dumps(result, indent=2, default=str))
@@ -152,9 +177,9 @@ async def _handle_consolidate(args: argparse.Namespace) -> int:
 async def _handle_export(args: argparse.Namespace) -> int:
     """Handle the 'export' subcommand."""
     config = MemoryConfig()
-    backend = _create_local_backend(config, args.namespace)
+    namespace, backend = _open_validated_backend(config, args.namespace)
     try:
-        entries = backend.list_entries(namespace=args.namespace, limit=10000)
+        entries = backend.list_entries(namespace=namespace, limit=10000)
         data = [entry_to_export_dict(e) for e in entries]
 
         if args.fmt == "yaml":
@@ -205,7 +230,7 @@ async def _handle_import(args: argparse.Namespace) -> int:
     from trw_memory.integrations._backend import make_entry
 
     config = MemoryConfig()
-    backend = _create_local_backend(config, args.namespace)
+    namespace, backend = _open_validated_backend(config, args.namespace)
 
     imported = 0
     skipped = 0
@@ -235,7 +260,7 @@ async def _handle_import(args: argparse.Namespace) -> int:
 
             entry = make_entry(
                 content=content,
-                namespace=args.namespace,
+                namespace=namespace,
                 tags=tags,
                 importance=importance,
                 detail=detail,
@@ -253,11 +278,11 @@ async def _handle_import(args: argparse.Namespace) -> int:
 async def _handle_status(args: argparse.Namespace) -> int:
     """Handle the 'status' subcommand."""
     config = MemoryConfig()
-    backend = _create_local_backend(config, args.namespace)
+    namespace, backend = _open_validated_backend(config, args.namespace)
     try:
-        count = backend.count(namespace=args.namespace)
+        count = backend.count(namespace=namespace)
         status_info = StatusDict(
-            namespace=args.namespace,
+            namespace=namespace,
             entry_count=count,
             backend=config.storage_backend,
             storage_path=config.storage_path,

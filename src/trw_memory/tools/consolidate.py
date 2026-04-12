@@ -167,6 +167,10 @@ def memory_consolidate_impl(
         "clusters_found": clusters_found,
         "entries_consolidated": consolidated_count,
         "dry_run": bool(result.get("dry_run", dry_run)),
+        **({"clusters": result["clusters"]} if "clusters" in result else {}),
+        **({"status": str(result["status"])} if "status" in result else {}),
+        **({"skipped_reason": str(result["skipped_reason"])} if "skipped_reason" in result else {}),
+        **({"errors": result["errors"]} if "errors" in result else {}),
     }
 
 
