@@ -252,8 +252,9 @@ class TestStore:
                 )
             )
 
+            embedding = [1.0] + ([0.0] * 383)
             fake_embedder = MagicMock()
-            fake_embedder.embed.return_value = [1.0, 0.0, 0.0, 0.0]
+            fake_embedder.embed.return_value = embedding
 
             @contextmanager
             def fake_discover(*_args: object, **_kwargs: object) -> Iterator[object]:
@@ -263,7 +264,7 @@ class TestStore:
                 patch.object(
                     remote_backend,
                     "get_stored_embeddings",
-                    return_value={"M-remote": [1.0, 0.0, 0.0, 0.0]},
+                    return_value={"M-remote": embedding},
                 ),
                 patch.object(client, "_get_embedder", return_value=fake_embedder),
                 patch("trw_memory.integrations._backend.discover_namespace_backends", fake_discover),
