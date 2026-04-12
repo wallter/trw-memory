@@ -15,12 +15,13 @@ from pathlib import Path
 
 import structlog
 
-from trw_memory.exceptions import ConfigError
+from trw_memory.exceptions import ConfigError, MasterKeyNotFoundError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.security.encryption import (
     decrypt_entry_fields,
     derive_namespace_key,
     encrypt_entry_fields,
+    generate_master_key,
 )
 from trw_memory.storage.interface import StorageBackend
 
@@ -38,6 +39,13 @@ _SERVICE_NAME = "trw-memory"
 _KEY_ACCOUNT = "master-key"
 _KEY_LENGTH = 32
 _ENV_VAR = "MEMORY_MASTER_KEY"
+
+
+def _target_config_for_generated_key(config: MemoryConfig) -> MemoryConfig:
+    """Choose a writable target for auto-generated keys."""
+    if _KEYRING_AVAILABLE and _keyring is not None:
+        return config.model_copy(update={"key_source": "keyring"})
+    return config.model_copy(update={"key_source": "file"})
 
 
 def _read_key_from_keyring() -> bytes | None:
@@ -143,7 +151,14 @@ def get_master_key(config: MemoryConfig) -> bytes:
             logger.debug("master_key_loaded", source=source)
             return key
 
-    raise ConfigError(
+    if config.auto_generate_key:
+        key = generate_master_key()
+        target_config = _target_config_for_generated_key(config)
+        store_master_key(key, target_config)
+        logger.info("master_key_generated", target=target_config.key_source)
+        return key
+
+    raise MasterKeyNotFoundError(
         "No master key found. Set MEMORY_MASTER_KEY env var (hex), "
         f"place a 32-byte key at {_key_file_path(config)}, "
         "or install keyring and store via store_master_key()."

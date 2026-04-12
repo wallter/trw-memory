@@ -55,6 +55,7 @@ class _TRWConfigYamlSource(InitSettingsSource):
             mapped["sync_namespace"] = raw["sync_namespace"]
         if raw.get("platform_api_key") is not None:
             mapped["platform_api_key"] = raw["platform_api_key"]
+        _map_first("local_only", "local_only", "memory_local_only")
 
         direct_url = raw.get("platform_url")
         platform_urls = raw.get("platform_urls")
@@ -76,6 +77,9 @@ class _TRWConfigYamlSource(InitSettingsSource):
         _map_first("score_importance_weight", "score_importance_weight", "memory_score_w3")
         _map_first("warm_archive_max_score", "warm_archive_max_score")
         _map_first("cold_purge_max_score", "cold_purge_max_score")
+        _map_first("auto_generate_key", "auto_generate_key", "memory_auto_generate_key")
+        _map_first("rbac_mode", "rbac_mode", "memory_rbac_mode")
+        _map_first("key_rotation_backup", "key_rotation_backup", "memory_key_rotation_backup")
 
         super().__init__(settings_cls, mapped)
 
@@ -105,12 +109,15 @@ class MemoryConfig(BaseSettings):
     encryption_algorithm: str = Field(default="AES-256-GCM", description="Encryption algorithm for field-level encryption")
     key_source: Literal["keyring", "env", "file"] = Field(default="env", description="Source for encryption master key")
     key_file_path: str = Field(default="~/.trw-memory/master.key", description="Path to master key file when key_source='file'")
+    auto_generate_key: bool = Field(default=True, description="Generate and persist a master key if none exists")
+    key_rotation_backup: bool = Field(default=True, description="Create a backup before key rotation work")
 
     # Local-only mode
     local_only: bool = Field(default=True, description="Restrict to local storage only (no remote sync)")
 
     # RBAC
     rbac_enabled: bool = Field(default=False, description="Enable role-based access control")
+    rbac_mode: Literal["local", "remote"] = Field(default="local", description="RBAC enforcement layer")
     default_role: Literal["admin", "reader", "writer", "none"] = "admin"
     namespace_roles: dict[str, str] = Field(
         default_factory=dict,
@@ -203,6 +210,8 @@ class MemoryConfig(BaseSettings):
         """Treat explicit sync opt-in as the master gate unless local_only was also set."""
         if self.sync_enabled and self.local_only and "local_only" not in self.model_fields_set:
             self.local_only = False
+        if self.local_only and self.rbac_mode != "local":
+            self.rbac_mode = "local"
         return self
 
     @classmethod

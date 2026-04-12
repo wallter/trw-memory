@@ -223,6 +223,7 @@ def test_memory_config_defaults() -> None:
     assert cfg.storage_path == ".memory"
     assert cfg.sqlite_db_name == "memory.db"
     assert cfg.embedding_dim == 384
+    assert cfg.auto_generate_key is True
     assert cfg.bm25_candidates == 50
     assert cfg.vector_candidates == 50
     assert cfg.rrf_k == 60
@@ -235,6 +236,8 @@ def test_memory_config_defaults() -> None:
     assert cfg.consolidation_enabled is True
     assert cfg.consolidation_max_per_cycle == 50
     assert cfg.consolidation_interval_days == 7
+    assert cfg.key_rotation_backup is True
+    assert cfg.rbac_mode == "local"
 
 
 def test_memory_config_consolidation_min_cluster_requires_two() -> None:
@@ -321,6 +324,33 @@ def test_memory_config_reads_tier_fields_from_trw_config_yaml(tmp_path: Path, mo
     assert cfg.score_importance_weight == 0.3
 
 
+def test_memory_config_reads_security_fields_from_trw_config_yaml(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Framework config YAML should seed the package-local security knobs."""
+    trw_dir = tmp_path / ".trw"
+    trw_dir.mkdir()
+    (trw_dir / "config.yaml").write_text(
+        "\n".join(
+            [
+                "memory_auto_generate_key: false",
+                "memory_rbac_mode: remote",
+                "memory_key_rotation_backup: false",
+                "memory_local_only: false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    cfg = MemoryConfig()
+
+    assert cfg.auto_generate_key is False
+    assert cfg.rbac_mode == "remote"
+    assert cfg.key_rotation_backup is False
+
+
 def test_memory_config_env_overrides_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Explicit MEMORY_* env vars keep precedence over .trw/config.yaml."""
     trw_dir = tmp_path / ".trw"
@@ -360,6 +390,17 @@ def test_memory_config_explicit_local_only_is_preserved_with_sync_enabled(
 
     assert cfg.sync_enabled is True
     assert cfg.local_only is True
+
+
+def test_memory_config_local_only_forces_local_rbac_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remote RBAC must not remain effective when local-only is enabled."""
+    monkeypatch.setenv("MEMORY_LOCAL_ONLY", "true")
+    monkeypatch.setenv("MEMORY_RBAC_MODE", "remote")
+
+    cfg = MemoryConfig()
+
+    assert cfg.local_only is True
+    assert cfg.rbac_mode == "local"
 
 
 def test_memory_config_consolidation_enabled_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
