@@ -237,6 +237,7 @@ def test_memory_config_defaults() -> None:
     assert cfg.consolidation_max_per_cycle == 50
     assert cfg.consolidation_interval_days == 7
     assert cfg.key_rotation_backup is True
+    assert cfg.local_only is False
     assert cfg.rbac_mode == "local"
 
 
@@ -334,8 +335,12 @@ def test_memory_config_reads_security_fields_from_trw_config_yaml(
     (trw_dir / "config.yaml").write_text(
         "\n".join(
             [
+                "memory_encryption_enabled: true",
                 "memory_auto_generate_key: false",
+                "memory_rbac_enabled: true",
                 "memory_rbac_mode: remote",
+                "memory_namespace_roles:",
+                "  project:default: reader",
                 "memory_key_rotation_backup: false",
                 "memory_local_only: false",
             ]
@@ -346,8 +351,31 @@ def test_memory_config_reads_security_fields_from_trw_config_yaml(
 
     cfg = MemoryConfig()
 
+    assert cfg.encryption_enabled is True
     assert cfg.auto_generate_key is False
+    assert cfg.rbac_enabled is True
     assert cfg.rbac_mode == "remote"
+    assert cfg.namespace_roles == {"project:default": "reader"}
+    assert cfg.key_rotation_backup is False
+
+
+def test_memory_config_accepts_memory_prefixed_init_fields() -> None:
+    cfg = MemoryConfig(
+        memory_encryption_enabled=True,
+        memory_auto_generate_key=False,
+        memory_local_only=True,
+        memory_rbac_enabled=True,
+        memory_rbac_mode="remote",
+        memory_namespace_roles={"project:default": "reader"},
+        memory_key_rotation_backup=False,
+    )
+
+    assert cfg.encryption_enabled is True
+    assert cfg.auto_generate_key is False
+    assert cfg.local_only is True
+    assert cfg.rbac_enabled is True
+    assert cfg.rbac_mode == "local"
+    assert cfg.namespace_roles == {"project:default": "reader"}
     assert cfg.key_rotation_backup is False
 
 
@@ -369,8 +397,8 @@ def test_memory_config_env_overrides_yaml(tmp_path: Path, monkeypatch: pytest.Mo
     assert cfg.platform_api_key == "env-key"
 
 
-def test_memory_config_sync_enabled_disables_default_local_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Explicit sync opt-in should clear the default local-only guardrail."""
+def test_memory_config_sync_enabled_keeps_local_only_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sync opt-in should preserve the non-local-only default."""
     monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
 
     cfg = MemoryConfig()
@@ -382,25 +410,33 @@ def test_memory_config_sync_enabled_disables_default_local_only(monkeypatch: pyt
 def test_memory_config_explicit_local_only_is_preserved_with_sync_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Users can still force a local-only dry run even when sync is configured."""
+    """Explicit local-only must win over configured sync settings."""
     monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
     monkeypatch.setenv("MEMORY_LOCAL_ONLY", "true")
 
     cfg = MemoryConfig()
 
-    assert cfg.sync_enabled is True
+    assert cfg.sync_enabled is False
     assert cfg.local_only is True
 
 
 def test_memory_config_local_only_forces_local_rbac_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Remote RBAC must not remain effective when local-only is enabled."""
+    """Local-only must disable remote sync surfaces and force local RBAC."""
     monkeypatch.setenv("MEMORY_LOCAL_ONLY", "true")
     monkeypatch.setenv("MEMORY_RBAC_MODE", "remote")
+    monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
+    monkeypatch.setenv("MEMORY_SYNC_NAMESPACE", "org:test")
+    monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://platform.example.com")
+    monkeypatch.setenv("MEMORY_PLATFORM_API_KEY", "secret")
 
     cfg = MemoryConfig()
 
     assert cfg.local_only is True
     assert cfg.rbac_mode == "local"
+    assert cfg.sync_enabled is False
+    assert cfg.sync_namespace == ""
+    assert cfg.platform_url == ""
+    assert cfg.platform_api_key == ""
 
 
 def test_memory_config_consolidation_enabled_env_override(monkeypatch: pytest.MonkeyPatch) -> None:

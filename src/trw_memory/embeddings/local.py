@@ -23,9 +23,6 @@ logger = structlog.get_logger(__name__)
 
 _DEFAULT_MODEL = "all-MiniLM-L6-v2"
 _DEFAULT_DIM = 384
-_LOCAL_ONLY_ERROR_MESSAGE = "Operation blocked: memory_local_only=True disables all network access."
-
-
 class LocalEmbeddingProvider:
     """Sentence-transformers embedding provider with lazy model loading.
 
@@ -76,7 +73,11 @@ class LocalEmbeddingProvider:
             )
         except OSError as exc:
             if config.local_only:
-                raise LocalOnlyViolationError(_LOCAL_ONLY_ERROR_MESSAGE) from exc
+                raise LocalOnlyViolationError(
+                    f"Model '{self._model_name}' not found in local cache. Download is blocked "
+                    "(memory_local_only=True). Pre-download the model: "
+                    f"python -m sentence_transformers download {self._model_name}"
+                ) from exc
             logger.warning(
                 "embedding_model_load_failed",
                 model=self._model_name,

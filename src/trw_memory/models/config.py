@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import InitSettingsSource, PydanticBaseSettingsSource
 from ruamel.yaml import YAML
@@ -77,8 +77,11 @@ class _TRWConfigYamlSource(InitSettingsSource):
         _map_first("score_importance_weight", "score_importance_weight", "memory_score_w3")
         _map_first("warm_archive_max_score", "warm_archive_max_score")
         _map_first("cold_purge_max_score", "cold_purge_max_score")
+        _map_first("encryption_enabled", "encryption_enabled", "memory_encryption_enabled")
         _map_first("auto_generate_key", "auto_generate_key", "memory_auto_generate_key")
+        _map_first("rbac_enabled", "rbac_enabled", "memory_rbac_enabled")
         _map_first("rbac_mode", "rbac_mode", "memory_rbac_mode")
+        _map_first("namespace_roles", "namespace_roles", "memory_namespace_roles")
         _map_first("key_rotation_backup", "key_rotation_backup", "memory_key_rotation_backup")
 
         super().__init__(settings_cls, mapped)
@@ -105,22 +108,47 @@ class MemoryConfig(BaseSettings):
     embedding_model: str = Field(default="all-MiniLM-L6-v2", description="Sentence-transformer model for embeddings")
 
     # Encryption
-    encryption_enabled: bool = Field(default=False, description="Enable field-level encryption")
+    encryption_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("encryption_enabled", "memory_encryption_enabled"),
+        description="Enable field-level encryption",
+    )
     encryption_algorithm: str = Field(default="AES-256-GCM", description="Encryption algorithm for field-level encryption")
     key_source: Literal["keyring", "env", "file"] = Field(default="env", description="Source for encryption master key")
     key_file_path: str = Field(default="~/.trw-memory/master.key", description="Path to master key file when key_source='file'")
-    auto_generate_key: bool = Field(default=True, description="Generate and persist a master key if none exists")
-    key_rotation_backup: bool = Field(default=True, description="Create a backup before key rotation work")
+    auto_generate_key: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("auto_generate_key", "memory_auto_generate_key"),
+        description="Generate and persist a master key if none exists",
+    )
+    key_rotation_backup: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("key_rotation_backup", "memory_key_rotation_backup"),
+        description="Create a backup before key rotation work",
+    )
 
     # Local-only mode
-    local_only: bool = Field(default=True, description="Restrict to local storage only (no remote sync)")
+    local_only: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("local_only", "memory_local_only"),
+        description="Restrict to local storage only (no remote sync)",
+    )
 
     # RBAC
-    rbac_enabled: bool = Field(default=False, description="Enable role-based access control")
-    rbac_mode: Literal["local", "remote"] = Field(default="local", description="RBAC enforcement layer")
+    rbac_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("rbac_enabled", "memory_rbac_enabled"),
+        description="Enable role-based access control",
+    )
+    rbac_mode: Literal["local", "remote"] = Field(
+        default="local",
+        validation_alias=AliasChoices("rbac_mode", "memory_rbac_mode"),
+        description="RBAC enforcement layer",
+    )
     default_role: Literal["admin", "reader", "writer", "none"] = "admin"
     namespace_roles: dict[str, str] = Field(
         default_factory=dict,
+        validation_alias=AliasChoices("namespace_roles", "memory_namespace_roles"),
         description="Per-namespace role overrides used when RBAC is enabled",
     )
 
@@ -207,11 +235,14 @@ class MemoryConfig(BaseSettings):
 
     @model_validator(mode="after")
     def _enable_sync_turns_off_default_local_only(self) -> MemoryConfig:
-        """Treat explicit sync opt-in as the master gate unless local_only was also set."""
-        if self.sync_enabled and self.local_only and "local_only" not in self.model_fields_set:
-            self.local_only = False
+        """Apply local-only overrides to every shipped remote-capable config surface."""
         if self.local_only and self.rbac_mode != "local":
             self.rbac_mode = "local"
+        if self.local_only:
+            self.sync_enabled = False
+            self.sync_namespace = ""
+            self.platform_url = ""
+            self.platform_api_key = ""
         return self
 
     @classmethod

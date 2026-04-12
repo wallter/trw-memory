@@ -11,26 +11,48 @@ Coverage:
 from __future__ import annotations
 
 import base64
+import hashlib
+import sqlite3
+import time
+from collections.abc import Iterator
 from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from trw_memory.exceptions import AuthorizationError, KeyRotationError
+from trw_memory.integrations._backend import create_backend_from_config
+from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.tools.recall import memory_recall_impl
 from trw_memory.security import (
     decrypt_entry_fields,
     decrypt_field,
     derive_namespace_key,
+    derive_namespace_key_bytes,
     encrypt_entry_fields,
     encrypt_field,
     generate_master_key,
+    rotate_key,
 )
+from trw_memory.security.keys import clear_key_cache
 
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
 
 _KEY_LENGTH = 32
+
+
+@pytest.fixture(autouse=True)
+def clear_master_key_cache_fixture() -> Iterator[None]:
+    clear_key_cache()
+    yield
+    clear_key_cache()
 
 
 def _make_entry(
@@ -49,6 +71,86 @@ def _make_entry(
         created_at=now,
         updated_at=now,
     )
+
+
+class _StaticCursor:
+    def __init__(self, rows: list[tuple[object, ...]]) -> None:
+        self._rows = rows
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return self._rows
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        return self._rows[0] if self._rows else None
+
+
+class _RotatingSQLCipherConnection:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        statements: list[str],
+        db_path: Path,
+        *,
+        integrity_result: str = "ok",
+        mutate_on_rekey: bytes | None = None,
+    ) -> None:
+        object.__setattr__(self, "_conn", conn)
+        object.__setattr__(self, "_statements", statements)
+        object.__setattr__(self, "_db_path", db_path)
+        object.__setattr__(self, "_integrity_result", integrity_result)
+        object.__setattr__(self, "_mutate_on_rekey", mutate_on_rekey)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._conn, name)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        setattr(self._conn, name, value)
+
+    def execute(self, sql: str, *args: object) -> sqlite3.Cursor | _StaticCursor:
+        self._statements.append(sql)
+        normalized = sql.strip().upper()
+        if normalized.startswith("PRAGMA REKEY") and self._mutate_on_rekey is not None:
+            with self._db_path.open("ab") as handle:
+                handle.write(self._mutate_on_rekey)
+            return _StaticCursor([])
+        if normalized.startswith("PRAGMA INTEGRITY_CHECK"):
+            return _StaticCursor([(self._integrity_result,)])
+        return self._conn.execute(sql, *args)
+
+
+class _RotatingSQLCipherDBAPI:
+    Error = sqlite3.Error
+    DatabaseError = sqlite3.DatabaseError
+
+    def __init__(
+        self,
+        statements: list[str],
+        *,
+        integrity_result: str = "ok",
+        mutate_on_rekey: bytes | None = None,
+    ) -> None:
+        self._statements = statements
+        self._integrity_result = integrity_result
+        self._mutate_on_rekey = mutate_on_rekey
+
+    def connect(self, database: str, **kwargs: object) -> _RotatingSQLCipherConnection:
+        conn = sqlite3.connect(database, **kwargs)
+        return _RotatingSQLCipherConnection(
+            conn,
+            self._statements,
+            Path(database),
+            integrity_result=self._integrity_result,
+            mutate_on_rekey=self._mutate_on_rekey,
+        )
+
+
+def _load_real_sqlcipher_driver_or_skip() -> object:
+    from trw_memory.storage.sqlite_backend import _import_sqlcipher_driver
+
+    try:
+        return _import_sqlcipher_driver()
+    except Exception as exc:
+        pytest.skip(f"real SQLCipher driver unavailable: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -101,10 +203,12 @@ class TestDeriveNamespaceKey:
         k2 = derive_namespace_key(master2, "namespace")
         assert k1 != k2
 
-    def test_derived_key_is_32_bytes(self) -> None:
+    def test_derived_key_is_64_char_hex(self) -> None:
         master = generate_master_key()
         key = derive_namespace_key(master, "test-ns")
-        assert len(key) == _KEY_LENGTH
+        assert len(key) == 64
+        assert key == key.lower()
+        assert set(key) <= set("0123456789abcdef")
 
     def test_rejects_short_master_key(self) -> None:
         with pytest.raises(ValueError, match="master_key must be 32 bytes"):
@@ -117,12 +221,12 @@ class TestDeriveNamespaceKey:
     def test_empty_namespace_works(self) -> None:
         master = generate_master_key()
         key = derive_namespace_key(master, "")
-        assert len(key) == _KEY_LENGTH
+        assert len(key) == 64
 
     def test_unicode_namespace_works(self) -> None:
         master = generate_master_key()
         key = derive_namespace_key(master, "namespace-\u00e9toile")
-        assert len(key) == _KEY_LENGTH
+        assert len(key) == 64
 
     @pytest.mark.parametrize(
         "namespace",
@@ -131,8 +235,22 @@ class TestDeriveNamespaceKey:
     def test_parametrized_namespace_variants(self, namespace: str) -> None:
         master = generate_master_key()
         key = derive_namespace_key(master, namespace)
-        assert isinstance(key, bytes)
-        assert len(key) == _KEY_LENGTH
+        assert isinstance(key, str)
+        assert len(key) == 64
+
+    def test_matches_prd_hkdf_parameters(self) -> None:
+        master = bytes(range(32))
+        namespace = "global"
+        key = derive_namespace_key(master, namespace)
+        reference = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=hashlib.sha256(namespace.encode("utf-8")).digest(),
+            info=b"trw-memory-namespace-key-v1",
+        ).derive(master)
+
+        assert key == reference.hex()
+        assert derive_namespace_key_bytes(master, namespace) == reference
 
 
 # ---------------------------------------------------------------------------
@@ -396,8 +514,8 @@ class TestHkdfNamespaceIsolation:
     def test_same_master_different_namespaces_cannot_cross_decrypt(self) -> None:
         """Data encrypted with ns-A key must not decrypt with ns-B key."""
         master = generate_master_key()
-        key_a = derive_namespace_key(master, "namespace-A")
-        key_b = derive_namespace_key(master, "namespace-B")
+        key_a = derive_namespace_key_bytes(master, "namespace-A")
+        key_b = derive_namespace_key_bytes(master, "namespace-B")
 
         ciphertext = encrypt_field("secret for A only", key_a)
         with pytest.raises(InvalidTag):
@@ -413,7 +531,7 @@ class TestHkdfNamespaceIsolation:
     def test_long_namespace_string_derives_valid_key(self) -> None:
         master = generate_master_key()
         long_ns = "a" * 1000
-        key = derive_namespace_key(master, long_ns)
+        key = derive_namespace_key_bytes(master, long_ns)
         assert len(key) == _KEY_LENGTH
         # Must be usable for encrypt/decrypt
         ct = encrypt_field("data", key)
@@ -422,9 +540,307 @@ class TestHkdfNamespaceIsolation:
     def test_namespace_key_derivation_is_independent_of_content(self) -> None:
         """Two different data values produce different ciphertexts under the same key."""
         master = generate_master_key()
-        key = derive_namespace_key(master, "test-ns")
+        key = derive_namespace_key_bytes(master, "test-ns")
         ct1 = encrypt_field("content A", key)
         ct2 = encrypt_field("content B", key)
         assert ct1 != ct2
         assert decrypt_field(ct1, key) == "content A"
         assert decrypt_field(ct2, key) == "content B"
+
+
+class TestRotateKey:
+    def test_rotate_key_rekeys_db_and_persists_keyring_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        old_key = generate_master_key()
+        new_key = generate_master_key()
+        monkeypatch.setenv("MEMORY_MASTER_KEY", old_key.hex())
+        mock_keyring = MagicMock()
+
+        config = MemoryConfig(
+            storage_backend="sqlite",
+            storage_path=str(tmp_path / "storage"),
+            encryption_enabled=True,
+            key_source="keyring",
+            auto_generate_key=False,
+            rbac_enabled=True,
+        )
+        statements: list[str] = []
+        monkeypatch.setattr(
+            "trw_memory.storage.sqlite_backend._import_sqlcipher_driver",
+            lambda: _RotatingSQLCipherDBAPI(statements),
+        )
+
+        with (
+            patch("trw_memory.security.keys._keyring", mock_keyring),
+            patch("trw_memory.security.keys._KEYRING_AVAILABLE", True),
+        ):
+            backend = create_backend_from_config(config, "default")
+            backend.store(_make_entry(content="rotation target", detail="keep me"))
+            backend.close()
+
+            rotate_key("default", new_key.hex(), config)
+
+        db_path = Path(config.storage_path) / "default" / config.sqlite_db_name
+        assert Path(f"{db_path}.bak").exists()
+        mock_keyring.set_password.assert_called_with("trw-memory", "master", new_key.hex())
+        assert "PRAGMA wal_checkpoint(TRUNCATE)" in statements
+        assert "PRAGMA integrity_check" in statements
+        assert "PRAGMA cipher = 'aes-256-cbc'" in statements
+        assert "PRAGMA cipher_page_size = 4096" in statements
+        assert "PRAGMA kdf_iter = 256000" in statements
+        assert any(statement.startswith('PRAGMA rekey = "x\'') for statement in statements)
+
+    def test_rotate_key_restores_backup_on_integrity_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        old_key = generate_master_key()
+        new_key = generate_master_key()
+        monkeypatch.setenv("MEMORY_MASTER_KEY", old_key.hex())
+
+        config = MemoryConfig(
+            storage_backend="sqlite",
+            storage_path=str(tmp_path / "storage"),
+            encryption_enabled=True,
+            key_source="keyring",
+            auto_generate_key=False,
+            rbac_enabled=True,
+        )
+        monkeypatch.setattr(
+            "trw_memory.storage.sqlite_backend._import_sqlcipher_driver",
+            lambda: _RotatingSQLCipherDBAPI([]),
+        )
+
+        backend = create_backend_from_config(config, "default")
+        backend.store(_make_entry(content="rotation target", detail="keep me"))
+        backend.close()
+
+        db_path = Path(config.storage_path) / "default" / config.sqlite_db_name
+        original_bytes = db_path.read_bytes()
+        failure_statements: list[str] = []
+        monkeypatch.setattr(
+            "trw_memory.storage.sqlite_backend._import_sqlcipher_driver",
+            lambda: _RotatingSQLCipherDBAPI(
+                failure_statements,
+                integrity_result="disk image malformed",
+                mutate_on_rekey=b"corruption-marker",
+            ),
+        )
+
+        with pytest.raises(KeyRotationError, match="integrity check failed: disk image malformed"):
+            rotate_key("default", new_key.hex(), config)
+
+        assert Path(f"{db_path}.bak").exists()
+        assert db_path.read_bytes() == original_bytes
+        assert any(statement.startswith('PRAGMA rekey = "x\'') for statement in failure_statements)
+
+    def test_rotate_key_writes_keyring_when_configured(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        old_key = generate_master_key()
+        new_key = generate_master_key()
+        monkeypatch.setenv("MEMORY_MASTER_KEY", old_key.hex())
+        mock_keyring = MagicMock()
+        statements: list[str] = []
+        config = MemoryConfig(
+            storage_backend="sqlite",
+            storage_path=str(tmp_path / "storage"),
+            encryption_enabled=True,
+            key_source="env",
+            auto_generate_key=False,
+            rbac_enabled=True,
+        )
+        monkeypatch.setattr(
+            "trw_memory.storage.sqlite_backend._import_sqlcipher_driver",
+            lambda: _RotatingSQLCipherDBAPI(statements),
+        )
+
+        with (
+            patch("trw_memory.security.keys._keyring", mock_keyring),
+            patch("trw_memory.security.keys._KEYRING_AVAILABLE", True),
+        ):
+            backend = create_backend_from_config(config, "default")
+            backend.store(_make_entry(content="rotation target"))
+            backend.close()
+            rotate_key("default", new_key.hex(), config)
+
+        mock_keyring.set_password.assert_called_with("trw-memory", "master", new_key.hex())
+
+    @pytest.mark.parametrize("role", ["reader", "writer", "none"])
+    def test_rotate_key_rejects_non_admin_roles(self, role: str, tmp_path: Path) -> None:
+        config = MemoryConfig(
+            storage_backend="sqlite",
+            storage_path=str(tmp_path / "storage"),
+            encryption_enabled=True,
+            key_source="env",
+            auto_generate_key=False,
+            rbac_enabled=True,
+            default_role=role,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(AuthorizationError, match=f"Role '{role}' does not have rotate_key permission"):
+            rotate_key("default", generate_master_key().hex(), config)
+
+    def test_real_sqlcipher_driver_reports_cipher_version_and_rejects_plain_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trw_memory.storage.sqlite_backend import _apply_sqlcipher_pragmas
+
+        driver = _load_real_sqlcipher_driver_or_skip()
+        master_key = generate_master_key()
+        monkeypatch.setenv("MEMORY_MASTER_KEY", master_key.hex())
+
+        config = MemoryConfig(
+            storage_backend="sqlite",
+            storage_path=str(tmp_path / "storage"),
+            encryption_enabled=True,
+            key_source="env",
+            auto_generate_key=False,
+        )
+
+        backend = create_backend_from_config(config, "default")
+        backend.store(_make_entry(content="real sqlcipher"))
+        backend.close()
+
+        db_path = Path(config.storage_path) / "default" / config.sqlite_db_name
+        plain_conn = sqlite3.connect(str(db_path))
+        try:
+            with pytest.raises(sqlite3.DatabaseError):
+                plain_conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        finally:
+            plain_conn.close()
+
+        key_hex = derive_namespace_key(master_key, "default")
+        conn = driver.connect(str(db_path))
+        try:
+            conn.execute(f'PRAGMA key = "x\'{key_hex}\'"')
+            _apply_sqlcipher_pragmas(conn)
+            version = conn.execute("PRAGMA cipher_version").fetchone()[0]
+            cipher = conn.execute("PRAGMA cipher").fetchone()[0]
+            kdf_iter = conn.execute("PRAGMA kdf_iter").fetchone()[0]
+            assert version
+            assert str(cipher).lower() == "aes-256-cbc"
+            assert int(kdf_iter) == 256000
+            assert conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] > 0
+        finally:
+            conn.close()
+
+    def test_real_sqlcipher_rotation_rejects_old_key_after_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trw_memory.storage.sqlite_backend import _apply_sqlcipher_pragmas
+
+        driver = _load_real_sqlcipher_driver_or_skip()
+        old_key = generate_master_key()
+        new_key = generate_master_key()
+        monkeypatch.setenv("MEMORY_MASTER_KEY", old_key.hex())
+        mock_keyring = MagicMock()
+
+        config = MemoryConfig(
+            storage_backend="sqlite",
+            storage_path=str(tmp_path / "storage"),
+            encryption_enabled=True,
+            key_source="keyring",
+            auto_generate_key=False,
+            rbac_enabled=True,
+        )
+
+        with (
+            patch("trw_memory.security.keys._keyring", mock_keyring),
+            patch("trw_memory.security.keys._KEYRING_AVAILABLE", True),
+        ):
+            backend = create_backend_from_config(config, "default")
+            backend.store(_make_entry(content="rotation target"))
+            backend.close()
+            rotate_key("default", new_key.hex(), config)
+
+        db_path = Path(config.storage_path) / "default" / config.sqlite_db_name
+        old_conn = driver.connect(str(db_path))
+        try:
+            old_conn.execute(f'PRAGMA key = "x\'{derive_namespace_key(old_key, "default")}\'"')
+            _apply_sqlcipher_pragmas(old_conn)
+            with pytest.raises(sqlite3.DatabaseError):
+                old_conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        finally:
+            old_conn.close()
+
+        new_conn = driver.connect(str(db_path))
+        try:
+            new_conn.execute(f'PRAGMA key = "x\'{derive_namespace_key(new_key, "default")}\'"')
+            _apply_sqlcipher_pragmas(new_conn)
+            assert new_conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] > 0
+        finally:
+            new_conn.close()
+
+    def test_recall_encrypted_vs_unencrypted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _load_real_sqlcipher_driver_or_skip()
+        monkeypatch.setattr("trw_memory.tools.recall.get_local_embedder", lambda **_: None)
+
+        def _seed_and_measure(config: MemoryConfig) -> float:
+            with create_backend_from_config(config, "default") as backend:
+                for index in range(500):
+                    backend.store(_make_entry(entry_id=f"recall-{index}", content=f"needle {index}", detail="payload"))
+                durations: list[float] = []
+                for _ in range(1000):
+                    start = time.perf_counter()
+                    result = memory_recall_impl(
+                        query="needle",
+                        namespace="default",
+                        backend=backend,
+                        config=config,
+                    )
+                    assert result["total_matches"] >= 1
+                    durations.append(time.perf_counter() - start)
+                durations.sort()
+                return durations[int(len(durations) * 0.95)]
+
+        plain_config = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path / "plain"))
+        plain_time = _seed_and_measure(plain_config)
+
+        encrypted_key = generate_master_key()
+        monkeypatch.setenv("MEMORY_MASTER_KEY", encrypted_key.hex())
+        encrypted_config = MemoryConfig(
+            storage_backend="sqlite",
+            storage_path=str(tmp_path / "encrypted"),
+            encryption_enabled=True,
+            key_source="env",
+            auto_generate_key=False,
+        )
+        encrypted_time = _seed_and_measure(encrypted_config)
+
+        assert encrypted_time <= plain_time * 1.10
+
+    def test_rotate_key_100mb_database_completes_under_30s(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _load_real_sqlcipher_driver_or_skip()
+        old_key = generate_master_key()
+        new_key = generate_master_key()
+        monkeypatch.setenv("MEMORY_MASTER_KEY", old_key.hex())
+        mock_keyring = MagicMock()
+        payload = "x" * 5_000_000
+
+        config = MemoryConfig(
+            storage_backend="sqlite",
+            storage_path=str(tmp_path / "rotation-100mb"),
+            encryption_enabled=True,
+            key_source="keyring",
+            auto_generate_key=False,
+            rbac_enabled=True,
+        )
+
+        with (
+            patch("trw_memory.security.keys._keyring", mock_keyring),
+            patch("trw_memory.security.keys._KEYRING_AVAILABLE", True),
+        ):
+            with create_backend_from_config(config, "default") as backend:
+                for index in range(20):
+                    backend.store(_make_entry(entry_id=f"large-{index}", content=payload))
+
+            start = time.perf_counter()
+            rotate_key("default", new_key.hex(), config)
+            elapsed = time.perf_counter() - start
+
+        assert elapsed < 30.0

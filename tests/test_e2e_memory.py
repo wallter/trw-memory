@@ -385,12 +385,14 @@ class TestSecurity:
         from trw_memory.security.encryption import (
             decrypt_entry_fields,
             derive_namespace_key,
+            derive_namespace_key_bytes,
             encrypt_entry_fields,
             generate_master_key,
         )
 
         master_key = generate_master_key()
-        ns_key = derive_namespace_key(master_key, "test-ns")
+        assert len(derive_namespace_key(master_key, "test-ns")) == 64
+        ns_key = derive_namespace_key_bytes(master_key, "test-ns")
 
         entry = make_entry(
             entry_id="enc-test-1",

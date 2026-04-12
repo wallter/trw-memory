@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import cast
 
 import pytest
 
-from trw_memory.exceptions import EncryptionUnavailableError
 from trw_memory.integrations._backend import create_backend_from_config, discover_namespace_backends, make_entry
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
@@ -79,13 +79,26 @@ def test_memory_status_global_aggregates_all_namespace_stores(tmp_path: Path) ->
     }
 
 
-def test_discover_namespace_backends_raises_when_encryption_requested(tmp_path: Path) -> None:
-    """Namespace discovery must fail closed when encrypted sqlite is requested."""
+def test_discover_namespace_backends_reopens_encrypted_sqlite_stores(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Encrypted namespace discovery should use stored namespace metadata to reopen each store."""
+    monkeypatch.setenv("MEMORY_MASTER_KEY", "11" * 32)
+    monkeypatch.setattr("trw_memory.storage.sqlite_backend._import_sqlcipher_driver", lambda: sqlite3)
     cfg = MemoryConfig(storage_path=str(tmp_path), encryption_enabled=True)
 
-    with pytest.raises(
-        EncryptionUnavailableError,
-        match=r"SQLCipher is required when memory_encryption_enabled=True\. Install with: pip install trw-memory\[encryption\]",
-    ):
-        with discover_namespace_backends(cfg):
-            pytest.fail("discover_namespace_backends should fail closed before yielding stores")
+    with create_backend_from_config(cfg, "project:aaa") as primary_backend:
+        primary_backend.store(make_entry("primary active", namespace="project:aaa"))
+
+    with create_backend_from_config(cfg, "global") as global_backend:
+        global_backend.store(make_entry("global active", namespace="global"))
+
+    with discover_namespace_backends(cfg) as stores:
+        discovered = {
+            namespace
+            for namespaces, _backend in stores
+            for namespace in namespaces
+        }
+
+    assert discovered == {"project:aaa", "global"}

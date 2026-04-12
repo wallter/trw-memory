@@ -4,6 +4,7 @@ import structlog
 
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.embeddings.local import LocalEmbeddingProvider
+from trw_memory.exceptions import LocalOnlyViolationError
 
 logger = structlog.get_logger(__name__)
 
@@ -23,6 +24,8 @@ def get_local_embedder(
         )
         if provider.available():
             return provider
+    except LocalOnlyViolationError:
+        raise
     except Exception:
         logger.debug("embedder_init_failed", exc_info=True)
     return None

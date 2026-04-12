@@ -23,9 +23,11 @@ from trw_memory.security.encryption import (
     decrypt_entry_fields,
     decrypt_field,
     derive_namespace_key,
+    derive_namespace_key_bytes,
     encrypt_entry_fields,
     encrypt_field,
     generate_master_key,
+    rotate_key,
 )
 from trw_memory.security.keys import (
     get_master_key,
@@ -77,6 +79,7 @@ __all__ = [
     "decrypt_entry_fields",
     "decrypt_field",
     "derive_namespace_key",
+    "derive_namespace_key_bytes",
     "detect_pii",
     "encrypt_entry_fields",
     "encrypt_field",
@@ -86,6 +89,7 @@ __all__ = [
     "redact_text",
     "require_namespace_permission",
     "require_permission",
+    "rotate_key",
     "rotate_master_key",
     "shannon_entropy",
     "store_master_key",

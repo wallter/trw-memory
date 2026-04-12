@@ -14,6 +14,8 @@ Covers:
 from __future__ import annotations
 
 import json
+import socket
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -121,6 +123,20 @@ def _mock_httpx_client(
 
     mock_client_cls.return_value = mock_client
     return mock_client
+
+
+def test_local_only_blocks_immediately() -> None:
+    cfg = _make_config(local_only=True)
+    entry = _make_entry()
+
+    with patch.object(socket, "socket") as mock_socket:
+        start = time.perf_counter()
+        with pytest.raises(LocalOnlyViolationError, match="memory_local_only=True"):
+            publish_memory(entry, cfg)
+        elapsed = time.perf_counter() - start
+
+    mock_socket.assert_not_called()
+    assert elapsed < 0.005
 
 
 # ===========================================================================
