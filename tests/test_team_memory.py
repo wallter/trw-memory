@@ -10,11 +10,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import cast
 
+import pytest
+
+from trw_memory.exceptions import StorageError
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools.consolidate import _promote_team_memories, memory_consolidate_impl
+from trw_memory.tools.store import memory_store_impl
 
 # ---------------------------------------------------------------------------
 # In-memory backend for team promotion tests
@@ -253,6 +258,35 @@ class TestConsolidateImplTeamDispatch:
         finally:
             project_backend.close()
 
+    def test_team_promotion_marks_namespace_expiry_in_sqlite_metadata(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
+
+        with create_backend_from_config(cfg, "team:sprint-37") as storage:
+            team_backend = cast(SQLiteBackend, storage)
+            memory_store_impl(
+                "team discovery",
+                "team:sprint-37",
+                backend=team_backend,
+                importance=0.8,
+                config=cfg,
+            )
+
+            result = memory_consolidate_impl(
+                "team:sprint-37",
+                backend=team_backend,
+                config=cfg,
+                namespace_backend_factory=lambda ns: create_backend_from_config(cfg, ns),
+            )
+
+            assert result["promoted_count"] == 1
+            row = team_backend._conn.execute(
+                "SELECT expires_at, status FROM memory_namespaces WHERE namespace_id = ?",
+                ("team:sprint-37",),
+            ).fetchone()
+            assert row is not None
+            assert row[0] is not None
+            assert row[1] == "active"
+
     def test_team_wildcard_promotes_all_discovered_team_namespaces(self, tmp_path: Path) -> None:
         cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path))
 
@@ -314,3 +348,54 @@ class TestConsolidateImplTeamDispatch:
         assert result["promoted_count"] == 0
         assert result["discarded_count"] == 0
         assert result["namespaces"] == []
+
+    def test_team_wildcard_continues_when_one_namespace_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path))
+
+        for namespace, entry_id in (
+            ("team:sprint-37-impl", "e1"),
+            ("team:sprint-37-test", "e2"),
+        ):
+            backend = create_backend_from_config(cfg, namespace)
+            try:
+                backend.store(_make_entry(entry_id, importance=0.8, namespace=namespace))
+            finally:
+                backend.close()
+
+        def _mock_promote(
+            namespace: str,
+            source_backend: StorageBackend,
+            *,
+            target_backend: StorageBackend | None = None,
+            promotion_threshold: float = 0.7,
+        ) -> dict[str, object]:
+            del source_backend, target_backend, promotion_threshold
+            if namespace == "team:sprint-37-impl":
+                raise StorageError("promotion failed")
+            return {
+                "promoted_count": 1,
+                "discarded_count": 0,
+                "namespace_id": namespace,
+                "completed_at": datetime.now().isoformat(),
+            }
+
+        monkeypatch.setattr("trw_memory.tools.consolidate._promote_team_memories", _mock_promote)
+
+        default_backend = create_backend_from_config(cfg, "default")
+        try:
+            result = memory_consolidate_impl(
+                "team:*",
+                backend=default_backend,
+                config=cfg,
+                namespace_backend_factory=lambda ns: create_backend_from_config(cfg, ns),
+            )
+        finally:
+            default_backend.close()
+
+        assert result["status"] == "partial"
+        assert result["promoted_count"] == 1
+        assert len(cast(list[dict[str, str]], result["errors"])) == 1

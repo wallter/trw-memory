@@ -17,8 +17,10 @@ from trw_memory.exceptions import ConfigError, StorageError
 from trw_memory.graph import update_entry_graph
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools._types import McpServer
 
 logger = structlog.get_logger(__name__)
@@ -84,6 +86,8 @@ def memory_store_impl(
     )
 
     try:
+        if namespace.startswith("team:") and isinstance(backend, SQLiteBackend):
+            NamespaceManager(backend).ensure_team_namespace(namespace, created_at=now)
         backend.store(entry)
         embedding: list[float] | None = None
         # Mirror MemoryClient.store(): tool writes should populate vectors too,

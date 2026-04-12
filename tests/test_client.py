@@ -29,6 +29,7 @@ from trw_memory.exceptions import (
     ToolAlreadyRegisteredError,
 )
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 # ---------------------------------------------------------------------------
@@ -184,6 +185,26 @@ class TestStore:
         if backend._vec_available:
             expected.insert(0, ("similarity", 2))
         assert [tuple(row) for row in edge_rows] == expected
+
+    async def test_store_registers_team_namespace_lifecycle_row(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        client = MemoryClient(namespace="team:sprint-24", mode="local")
+
+        stored = await client.store("team finding", tags=["team"])
+        backend = cast(SQLiteBackend, client._get_backend())
+        row = backend._conn.execute(
+            "SELECT team_id, expires_at, status FROM memory_namespaces WHERE namespace_id = ?",
+            ("team:sprint-24",),
+        ).fetchone()
+
+        assert stored["status"] == "stored"
+        assert tuple(row) == ("sprint-24", None, "active")
+        await client.close()
 
     async def test_store_sync_publish_marks_entry_as_published(
         self,
@@ -374,6 +395,25 @@ class TestRecall:
         assert fetch_mock.called
         assert any(result["source"] == "shared" for result in results)
         assert results[0]["source"] == "local"
+        await client.close()
+
+    async def test_recall_returns_empty_for_expired_team_namespace(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        client = MemoryClient(namespace="team:sprint-24", mode="local")
+        await client.store("team finding", tags=["team"])
+
+        backend = cast(SQLiteBackend, client._get_backend())
+        NamespaceManager(backend).mark_team_namespace_completed(
+            "team:sprint-24",
+            completed_at=datetime.now(timezone.utc) - timedelta(days=2),
+        )
+
+        assert await client.recall("team") == []
         await client.close()
 
     async def test_recall_surfaces_cached_sse_publish(
