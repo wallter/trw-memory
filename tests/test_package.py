@@ -67,6 +67,7 @@ def test_all_exports_complete() -> None:
         "AuthorizationError",
         "ConfigError",
         "DimensionMismatchError",
+        "LocalOnlyViolationError",
         "MemoryClient",
         "MemoryConfig",
         "MemoryConnectionError",
@@ -92,6 +93,7 @@ def test_exceptions_inherit_properly() -> None:
         AuthorizationError,
         ConfigError,
         DimensionMismatchError,
+        LocalOnlyViolationError,
         MemoryConnectionError,
         MemoryError,
         MemoryNotFoundError,
@@ -107,6 +109,7 @@ def test_exceptions_inherit_properly() -> None:
     assert issubclass(ToolAlreadyRegisteredError, MemoryError)
     assert issubclass(AuthorizationError, MemoryError)
     assert issubclass(DimensionMismatchError, MemoryError)
+    assert issubclass(LocalOnlyViolationError, MemoryError)
 
 
 def test_memory_status_is_enum() -> None:

@@ -28,6 +28,7 @@ from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.retrieval import hybrid_search
+from trw_memory.security.rbac import Permission, require_namespace_permission
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools._types import McpServer
@@ -90,6 +91,8 @@ def memory_recall_impl(
         validate_namespace(namespace)
     except ConfigError as exc:
         return {"error": str(exc), "status": "invalid"}
+    cfg = config or MemoryConfig()
+    require_namespace_permission(cfg, namespace, Permission.READ, "recall")
 
     if namespace.startswith("team:") and isinstance(backend, SQLiteBackend):
         if NamespaceManager(backend).team_namespace_expired(namespace):
@@ -114,8 +117,6 @@ def memory_recall_impl(
             logger.debug("recall_invalid_namespace_skipped", namespace=ns)
 
     all_namespaces = [namespace, *extra_ns]
-    cfg = config or MemoryConfig()
-
     # Namespace-scoped local backends can only see one store at a time, so
     # cross-namespace recall must reopen the requested namespaces explicitly.
     all_entries = []

@@ -36,6 +36,9 @@ class TestRoleEnum:
     def test_admin_member_exists(self) -> None:
         assert hasattr(Role, "ADMIN")
 
+    def test_none_member_exists(self) -> None:
+        assert hasattr(Role, "NONE")
+
     def test_reader_value(self) -> None:
         assert Role.READER.value == "reader"
 
@@ -44,6 +47,9 @@ class TestRoleEnum:
 
     def test_admin_value(self) -> None:
         assert Role.ADMIN.value == "admin"
+
+    def test_none_value(self) -> None:
+        assert Role.NONE.value == "none"
 
     def test_role_is_str_subclass(self) -> None:
         assert isinstance(Role.READER, str)
@@ -59,12 +65,18 @@ class TestRoleEnum:
     def test_role_from_string_admin(self) -> None:
         assert Role("admin") is Role.ADMIN
 
+    def test_role_from_string_none(self) -> None:
+        assert Role("none") is Role.NONE
+
+    def test_role_helper_from_string_admin(self) -> None:
+        assert Role.from_string("ADMIN") is Role.ADMIN
+
     def test_role_invalid_string_raises(self) -> None:
         with pytest.raises(ValueError):
             Role("superuser")
 
-    def test_role_enum_has_exactly_three_members(self) -> None:
-        assert len(list(Role)) == 3
+    def test_role_enum_has_exactly_four_members(self) -> None:
+        assert len(list(Role)) == 4
 
     @pytest.mark.parametrize(
         "role,expected",
@@ -72,6 +84,7 @@ class TestRoleEnum:
             (Role.READER, "reader"),
             (Role.WRITER, "writer"),
             (Role.ADMIN, "admin"),
+            (Role.NONE, "none"),
         ],
     )
     def test_parametrized_role_string_values(self, role: Role, expected: str) -> None:
@@ -146,8 +159,8 @@ class TestRolePermissionsMatrix:
     def test_reader_lacks_admin(self) -> None:
         assert Permission.ADMIN not in ROLE_PERMISSIONS[Role.READER]
 
-    def test_writer_has_read(self) -> None:
-        assert Permission.READ in ROLE_PERMISSIONS[Role.WRITER]
+    def test_writer_lacks_read(self) -> None:
+        assert Permission.READ not in ROLE_PERMISSIONS[Role.WRITER]
 
     def test_writer_has_write(self) -> None:
         assert Permission.WRITE in ROLE_PERMISSIONS[Role.WRITER]
@@ -173,11 +186,14 @@ class TestRolePermissionsMatrix:
     def test_reader_has_exactly_one_permission(self) -> None:
         assert len(ROLE_PERMISSIONS[Role.READER]) == 1
 
-    def test_writer_has_exactly_two_permissions(self) -> None:
-        assert len(ROLE_PERMISSIONS[Role.WRITER]) == 2
+    def test_writer_has_exactly_one_permission(self) -> None:
+        assert len(ROLE_PERMISSIONS[Role.WRITER]) == 1
 
     def test_admin_has_all_four_permissions(self) -> None:
         assert len(ROLE_PERMISSIONS[Role.ADMIN]) == 4
+
+    def test_none_has_no_permissions(self) -> None:
+        assert len(ROLE_PERMISSIONS[Role.NONE]) == 0
 
     def test_all_roles_present_in_matrix(self) -> None:
         for role in Role:
@@ -208,8 +224,8 @@ class TestCheckPermission:
         assert check_permission(Role.READER, Permission.ADMIN) is False
 
     # Writer permissions
-    def test_writer_read_allowed(self) -> None:
-        assert check_permission(Role.WRITER, Permission.READ) is True
+    def test_writer_read_denied(self) -> None:
+        assert check_permission(Role.WRITER, Permission.READ) is False
 
     def test_writer_write_allowed(self) -> None:
         assert check_permission(Role.WRITER, Permission.WRITE) is True
@@ -233,6 +249,9 @@ class TestCheckPermission:
     def test_admin_admin_allowed(self) -> None:
         assert check_permission(Role.ADMIN, Permission.ADMIN) is True
 
+    def test_none_read_denied(self) -> None:
+        assert check_permission(Role.NONE, Permission.READ) is False
+
     def test_returns_bool_type(self) -> None:
         result = check_permission(Role.READER, Permission.READ)
         assert type(result) is bool
@@ -244,7 +263,7 @@ class TestCheckPermission:
             (Role.READER, Permission.WRITE, False),
             (Role.READER, Permission.DELETE, False),
             (Role.READER, Permission.ADMIN, False),
-            (Role.WRITER, Permission.READ, True),
+            (Role.WRITER, Permission.READ, False),
             (Role.WRITER, Permission.WRITE, True),
             (Role.WRITER, Permission.DELETE, False),
             (Role.WRITER, Permission.ADMIN, False),
@@ -252,6 +271,10 @@ class TestCheckPermission:
             (Role.ADMIN, Permission.WRITE, True),
             (Role.ADMIN, Permission.DELETE, True),
             (Role.ADMIN, Permission.ADMIN, True),
+            (Role.NONE, Permission.READ, False),
+            (Role.NONE, Permission.WRITE, False),
+            (Role.NONE, Permission.DELETE, False),
+            (Role.NONE, Permission.ADMIN, False),
         ],
     )
     def test_parametrized_all_combinations(self, role: Role, perm: Permission, expected: bool) -> None:
@@ -271,13 +294,6 @@ class TestRequirePermissionAllow:
 
         result = read_data(role=Role.READER)
         assert result == "data"
-
-    def test_writer_can_call_read_function(self) -> None:
-        @require_permission(Permission.READ)
-        def read_data(*, role: Role) -> str:
-            return "data"
-
-        assert read_data(role=Role.WRITER) == "data"
 
     def test_writer_can_call_write_function(self) -> None:
         @require_permission(Permission.WRITE)
@@ -334,7 +350,7 @@ class TestRequirePermissionDeny:
         def write_data(*, role: Role) -> str:
             return "written"
 
-        with pytest.raises(AuthorizationError, match="Permission denied"):
+        with pytest.raises(AuthorizationError, match="permission"):
             write_data(role=Role.READER)
 
     def test_reader_cannot_call_delete_function(self) -> None:
@@ -342,7 +358,7 @@ class TestRequirePermissionDeny:
         def delete_data(*, role: Role) -> str:
             return "deleted"
 
-        with pytest.raises(AuthorizationError, match="Permission denied"):
+        with pytest.raises(AuthorizationError, match="permission"):
             delete_data(role=Role.READER)
 
     def test_reader_cannot_call_admin_function(self) -> None:
@@ -350,7 +366,7 @@ class TestRequirePermissionDeny:
         def admin_op(*, role: Role) -> str:
             return "done"
 
-        with pytest.raises(AuthorizationError, match="Permission denied"):
+        with pytest.raises(AuthorizationError, match="permission"):
             admin_op(role=Role.READER)
 
     def test_writer_cannot_call_delete_function(self) -> None:
@@ -358,7 +374,7 @@ class TestRequirePermissionDeny:
         def delete_data(*, role: Role) -> str:
             return "deleted"
 
-        with pytest.raises(AuthorizationError, match="Permission denied"):
+        with pytest.raises(AuthorizationError, match="permission"):
             delete_data(role=Role.WRITER)
 
     def test_writer_cannot_call_admin_function(self) -> None:
@@ -366,8 +382,16 @@ class TestRequirePermissionDeny:
         def admin_op(*, role: Role) -> str:
             return "done"
 
-        with pytest.raises(AuthorizationError, match="Permission denied"):
+        with pytest.raises(AuthorizationError, match="permission"):
             admin_op(role=Role.WRITER)
+
+    def test_writer_cannot_call_read_function(self) -> None:
+        @require_permission(Permission.READ)
+        def read_data(*, role: Role) -> str:
+            return "data"
+
+        with pytest.raises(AuthorizationError, match="read"):
+            read_data(role=Role.WRITER)
 
     def test_error_message_contains_role_name(self) -> None:
         @require_permission(Permission.DELETE)
@@ -472,7 +496,7 @@ class TestRequirePermissionStringRole:
         def write_fn(*, role: object) -> None:
             pass
 
-        with pytest.raises(AuthorizationError, match="Permission denied"):
+        with pytest.raises(AuthorizationError, match="permission"):
             write_fn(role="reader")  # type: ignore[arg-type]
 
 
@@ -495,7 +519,7 @@ class TestRequirePermissionAsync:
         async def async_write(*, role: Role) -> str:
             return "async-written"
 
-        with pytest.raises(AuthorizationError, match="Permission denied"):
+        with pytest.raises(AuthorizationError, match="permission"):
             await async_write(role=Role.READER)
 
     async def test_async_function_name_preserved(self) -> None:
@@ -517,8 +541,13 @@ class TestRequirePermissionAsync:
         (Role.READER, Permission.WRITE),
         (Role.READER, Permission.DELETE),
         (Role.READER, Permission.ADMIN),
+        (Role.WRITER, Permission.READ),
         (Role.WRITER, Permission.DELETE),
         (Role.WRITER, Permission.ADMIN),
+        (Role.NONE, Permission.READ),
+        (Role.NONE, Permission.WRITE),
+        (Role.NONE, Permission.DELETE),
+        (Role.NONE, Permission.ADMIN),
     ],
 )
 def test_deny_matrix_via_decorator(role: Role, perm: Permission) -> None:
@@ -526,7 +555,7 @@ def test_deny_matrix_via_decorator(role: Role, perm: Permission) -> None:
     def guarded(*, role: Role) -> None:
         pass
 
-    with pytest.raises(AuthorizationError, match="Permission denied"):
+    with pytest.raises(AuthorizationError, match="permission"):
         guarded(role=role)
 
 
@@ -539,7 +568,6 @@ def test_deny_matrix_via_decorator(role: Role, perm: Permission) -> None:
     "role,perm",
     [
         (Role.READER, Permission.READ),
-        (Role.WRITER, Permission.READ),
         (Role.WRITER, Permission.WRITE),
         (Role.ADMIN, Permission.READ),
         (Role.ADMIN, Permission.WRITE),

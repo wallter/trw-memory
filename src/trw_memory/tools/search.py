@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import structlog
 
+from trw_memory.models.config import MemoryConfig
 from trw_memory.exceptions import ConfigError
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.validation import validate_namespace
+from trw_memory.security.rbac import Permission, require_namespace_permission
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools._types import McpServer
 
@@ -24,6 +26,7 @@ def memory_search_impl(
     namespace: str,
     *,
     backend: StorageBackend,
+    config: MemoryConfig | None = None,
     status: str | None = None,
     tags: list[str] | None = None,
     sort_by: str = "updated_at",
@@ -49,6 +52,8 @@ def memory_search_impl(
         validate_namespace(namespace)
     except ConfigError as exc:
         return {"error": str(exc), "status": "invalid"}
+    cfg = config or MemoryConfig()
+    require_namespace_permission(cfg, namespace, Permission.READ, "search")
 
     # Validate status string
     memory_status: MemoryStatus | None = None
@@ -133,6 +138,7 @@ def register_search_tool(mcp: McpServer) -> None:
             return memory_search_impl(
                 namespace,
                 backend=backend,
+                config=cfg,
                 status=status,
                 tags=tags,
                 sort_by=sort_by,

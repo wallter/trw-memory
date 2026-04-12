@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from trw_memory.exceptions import AuthorizationError
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
@@ -58,6 +59,23 @@ def _mock_backend(entries: list[MemoryEntry] | None = None) -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
+# memory_store_impl
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryStoreImpl:
+    def test_store_denied_for_reader_namespace_role(self) -> None:
+        backend = _mock_backend()
+        cfg = MemoryConfig(rbac_enabled=True, namespace_roles={"project:default": "reader"})
+
+        with pytest.raises(
+            AuthorizationError,
+            match=r"Role 'reader' does not have store permission on namespace 'project:default'\.",
+        ):
+            memory_store_impl("blocked write", "project:default", backend=backend, config=cfg)
+
+
+# ---------------------------------------------------------------------------
 # memory_recall_impl
 # ---------------------------------------------------------------------------
 
@@ -75,6 +93,16 @@ class TestMemoryRecallImpl:
         result = memory_recall_impl("query", "INVALID_NS", backend=backend)
         assert result["status"] == "invalid"
         assert "error" in result
+
+    def test_recall_denied_for_writer_namespace_role(self) -> None:
+        backend = _mock_backend()
+        cfg = MemoryConfig(rbac_enabled=True, namespace_roles={"project:default": "writer"})
+
+        with pytest.raises(
+            AuthorizationError,
+            match=r"Role 'writer' does not have recall permission on namespace 'project:default'\.",
+        ):
+            memory_recall_impl("query", "project:default", backend=backend, config=cfg)
 
     def test_empty_query_returns_all_active(self) -> None:
         entries = [_make_entry("M-001"), _make_entry("M-002")]
@@ -706,6 +734,16 @@ class TestMemorySearchImpl:
         assert result["status"] == "invalid"
         assert "error" in result
 
+    def test_search_denied_for_writer_namespace_role(self) -> None:
+        backend = _mock_backend()
+        cfg = MemoryConfig(rbac_enabled=True, namespace_roles={"project:default": "writer"})
+
+        with pytest.raises(
+            AuthorizationError,
+            match=r"Role 'writer' does not have search permission on namespace 'project:default'\.",
+        ):
+            memory_search_impl("project:default", backend=backend, config=cfg)
+
     def test_status_filter_active(self) -> None:
         entries = [
             _make_entry("M-001", status=MemoryStatus.ACTIVE),
@@ -770,6 +808,16 @@ class TestMemoryForgetImpl:
         backend = _mock_backend()
         result = memory_forget_impl("M-001", None, "INVALID!!", backend=backend)
         assert result["status"] == "invalid"
+
+    def test_forget_denied_for_reader_namespace_role(self) -> None:
+        backend = _mock_backend()
+        cfg = MemoryConfig(rbac_enabled=True, namespace_roles={"project:default": "reader"})
+
+        with pytest.raises(
+            AuthorizationError,
+            match=r"Role 'reader' does not have forget permission on namespace 'project:default'\.",
+        ):
+            memory_forget_impl("M-001", None, "project:default", backend=backend, config=cfg)
 
     def test_bulk_delete_via_query(self) -> None:
         entries = [_make_entry("M-001"), _make_entry("M-002")]

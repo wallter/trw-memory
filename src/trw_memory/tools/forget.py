@@ -12,6 +12,7 @@ from trw_memory.exceptions import ConfigError, StorageError
 from trw_memory.lifecycle.tiers._runtime import remove_entry_from_tiers, supports_tier_runtime
 from trw_memory.models.config import MemoryConfig
 from trw_memory.namespaces.validation import validate_namespace
+from trw_memory.security.rbac import Permission, require_namespace_permission
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools._types import McpServer
 
@@ -56,11 +57,12 @@ def memory_forget_impl(
         validate_namespace(namespace)
     except ConfigError as exc:
         return {"error": str(exc), "status": "invalid"}
+    cfg = config or MemoryConfig()
+    require_namespace_permission(cfg, namespace, Permission.DELETE, "forget")
 
     # --- Delete by ID (with namespace isolation) ---
     if memory_id:
         deleted_count = 0
-        cfg = config or MemoryConfig()
         try:
             entry = backend.get(memory_id)
             if entry is not None and entry.namespace == namespace:
@@ -92,7 +94,6 @@ def memory_forget_impl(
         return {"deleted": 0, "status": "ok"}
 
     deleted_count = 0
-    cfg = config or MemoryConfig()
     for entry in matches:
         try:
             if backend.delete(entry.id):

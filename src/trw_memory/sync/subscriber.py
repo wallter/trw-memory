@@ -13,6 +13,7 @@ from collections.abc import Callable
 import httpx
 import structlog
 
+from trw_memory.exceptions import LocalOnlyViolationError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.sync.remote import is_valid_platform_url
 
@@ -43,8 +44,8 @@ class SSESubscriber:
     def start(self) -> None:
         """Start the SSE subscription in a daemon thread."""
         if self._cfg.local_only:
-            logger.debug("sse_subscriber_skipped_local_only")
-            return
+            logger.warning("sse_subscriber_blocked_local_only")
+            raise LocalOnlyViolationError("Operation blocked: memory_local_only=True disables all network access.")
 
         if not self._cfg.sync_enabled or not self._cfg.platform_url:
             return

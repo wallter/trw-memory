@@ -51,6 +51,7 @@ from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.security.pii import anonymize_installation_id
+from trw_memory.security.rbac import Permission, require_namespace_permission
 from trw_memory.retrieval.dense import cosine_similarity
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.sqlite_backend import SQLiteBackend
@@ -298,6 +299,10 @@ class MemoryClient:
             raise MemoryConnectionError("Client is closed or has no backend")
         return self._backend
 
+    def _require_permission(self, permission: Permission, operation: str) -> None:
+        """Enforce the configured RBAC policy for a client operation."""
+        require_namespace_permission(self._config, self._namespace, permission, operation)
+
     # ------------------------------------------------------------------
     # Core operations
     # ------------------------------------------------------------------
@@ -329,6 +334,7 @@ class MemoryClient:
             raise ValueError("content must not be empty")
         if not 0.0 <= importance <= 1.0:
             raise ValueError(f"importance must be in [0.0, 1.0], got {importance}")
+        self._require_permission(Permission.WRITE, "store")
         self._maybe_start_retry_drain()
 
         memory_id = _make_id()
@@ -455,6 +461,7 @@ class MemoryClient:
             raise ValueError(f"limit must be >= 1, got {limit}")
         if token_budget is not None and token_budget <= 0:
             raise ValueError(f"token_budget must be positive, got {token_budget}")
+        self._require_permission(Permission.READ, "recall")
         self._maybe_start_retry_drain()
         await self._apply_pending_remote_retirements()
         embedder = self._get_embedder() if query.strip() else None
@@ -1138,6 +1145,7 @@ class MemoryClient:
             MemoryNotFoundError: If *memory_id* does not exist or belongs
                 to a different namespace.
         """
+        self._require_permission(Permission.DELETE, "forget")
         self._maybe_start_retry_drain()
         async with self._lock:
             backend = self._get_backend()
@@ -1190,6 +1198,7 @@ class MemoryClient:
             raise ValueError(f"limit must be >= 1, got {limit}")
         if not 0.0 <= min_importance <= 1.0:
             raise ValueError(f"min_importance must be in [0.0, 1.0], got {min_importance}")
+        self._require_permission(Permission.READ, "search")
         self._maybe_start_retry_drain()
         await self._apply_pending_remote_retirements()
 
