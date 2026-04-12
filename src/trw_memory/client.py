@@ -23,7 +23,7 @@ import uuid
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Protocol, TypedDict, cast, runtime_checkable
+from typing import Literal, NotRequired, Protocol, TypedDict, cast, runtime_checkable
 
 import structlog
 
@@ -36,6 +36,16 @@ from trw_memory.exceptions import (
 )
 from trw_memory.graph import list_org_shared_entries, schedule_graph_update
 from trw_memory.lifecycle._recall import record_recall_access
+from trw_memory.lifecycle.scoring import entry_utility
+from trw_memory.lifecycle.tiers._scoring import compute_importance_score
+from trw_memory.lifecycle.tiers._runtime import (
+    get_tier_manager,
+    remember_entry_data_in_tiers,
+    remember_entry_in_tiers,
+    remove_entry_from_tiers,
+    tier_candidates,
+    warmup_tier_manager,
+)
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.manager import NamespaceManager
@@ -104,6 +114,12 @@ class MemoryResultDict(TypedDict):
     updated_at: str
     namespace: str
     source: str
+    last_accessed_at: NotRequired[str]
+    q_value: NotRequired[float]
+    q_observations: NotRequired[int]
+    recurrence: NotRequired[int]
+    access_count: NotRequired[int]
+    _relevance_hint: NotRequired[float]
 
 
 class StoreResultDict(TypedDict):
@@ -150,6 +166,12 @@ def _entry_to_result(entry: MemoryEntry, score: float = 0.0) -> MemoryResultDict
         updated_at=entry.updated_at.isoformat(),
         namespace=entry.namespace,
         source="local",
+        last_accessed_at=entry.last_accessed_at.isoformat() if entry.last_accessed_at is not None else "",
+        q_value=entry.q_value,
+        q_observations=entry.q_observations,
+        recurrence=entry.recurrence,
+        access_count=entry.access_count,
+        _relevance_hint=score,
     )
 
 
@@ -231,6 +253,7 @@ class MemoryClient:
         self._pending_remote_retirements_lock = threading.Lock()
         self._sse_subscriber: SSESubscriber | None = None
         self._sse_subscriber_started = False
+        self._tier_manager = None
 
         if mode == "mcp":
             raise NotImplementedError("MCP mode is not yet implemented")
@@ -246,6 +269,7 @@ class MemoryClient:
                     mode=self._resolved_mode,
                     backend=self._config.storage_backend,
                 )
+                self._tier_manager = warmup_tier_manager(self._config, namespace, self._backend)
             except (OSError, ValueError, ImportError) as exc:
                 if mode == "local":
                     raise MemoryConnectionError(f"Failed to create local backend: {exc}") from exc
@@ -361,6 +385,7 @@ class MemoryClient:
                 schedule_graph_update(entry, backend, embedding=embedding, config=self._config)
             except RuntimeError:
                 logger.warning("memory_store_graph_schedule_failed", memory_id=entry.id, exc_info=True)
+            remember_entry_in_tiers(self._config, self._namespace, entry, embedding)
 
         logger.debug(
             "memory_stored",
@@ -432,6 +457,10 @@ class MemoryClient:
             raise ValueError(f"token_budget must be positive, got {token_budget}")
         self._maybe_start_retry_drain()
         await self._apply_pending_remote_retirements()
+        embedder = self._get_embedder() if query.strip() else None
+        query_embedding: list[float] | None = None
+        if embedder is not None:
+            query_embedding = await asyncio.to_thread(embedder.embed, query)
 
         async with self._lock:
             backend = self._get_backend()
@@ -443,19 +472,31 @@ class MemoryClient:
                         namespace=self._namespace,
                     )
                     return []
+            tier_local_results = self._tier_results(backend, query, tags, limit, query_embedding)
+            self._tier_manager = get_tier_manager(self._config, self._namespace)
 
         # --- Tier 1: Hybrid retrieval pipeline (BM25 + dense + RRF) ----------
         hybrid_results = await self._try_hybrid_recall(query, limit, tags)
         if hybrid_results is not None:
             # Apply min_score filter and limit
             filtered = [r for r in hybrid_results if r["score"] >= min_score]
-            final = filtered[:limit]
+            final = self._merge_tier_results(
+                filtered[:limit],
+                tier_local_results,
+                limit,
+                query.lower().split(),
+                self._config,
+                query_embedding,
+            )
+            if min_score > 0.0:
+                final = [result for result in final if result["score"] >= min_score]
             if include_org_memories:
                 final = await self._merge_org_results(query, final, limit, tags, min_score)
             if include_shared:
                 final = await self._merge_shared_results(query, final, limit)
             final = self._apply_budget(final, token_budget)
             await self._record_recall_access(final)
+            self._remember_results_in_tiers(final)
             logger.debug(
                 "memory_recalled",
                 op="recall",
@@ -469,12 +510,23 @@ class MemoryClient:
 
         # --- Tier 2: Fallback LIKE + TF scoring ------------------------------
         results = await self._fallback_recall(query, limit, tags, min_score)
+        results = self._merge_tier_results(
+            results,
+            tier_local_results,
+            limit,
+            query.lower().split(),
+            self._config,
+            query_embedding,
+        )
+        if min_score > 0.0:
+            results = [result for result in results if result["score"] >= min_score]
         if include_org_memories:
             results = await self._merge_org_results(query, results, limit, tags, min_score)
         if include_shared:
             results = await self._merge_shared_results(query, results, limit)
         final = self._apply_budget(results, token_budget)
         await self._record_recall_access(final)
+        self._remember_results_in_tiers(final)
         return final
 
     @staticmethod
@@ -701,6 +753,106 @@ class MemoryClient:
                     continue
                 with _create_local_backend(self._config, namespace) as backend:
                     record_recall_access(backend, entry_ids)
+
+    def _tier_results(
+        self,
+        backend: StorageBackend,
+        query: str,
+        tags: list[str] | None,
+        limit: int,
+        query_embedding: list[float] | None = None,
+    ) -> list[MemoryResultDict]:
+        """Collect local tier-managed candidates for this namespace."""
+        candidates = tier_candidates(
+            self._config,
+            self._namespace,
+            backend,
+            query=query,
+            tags=tags,
+            limit=limit,
+            query_embedding=query_embedding,
+        )
+        return [self._tier_result_from_entry(candidate) for candidate in candidates]
+
+    def _remember_results_in_tiers(self, results: list[MemoryResultDict]) -> None:
+        """Keep the hot/warm tiers aligned with the entries callers actually saw."""
+        recalled_at = datetime.now(timezone.utc).isoformat()
+        for result in results:
+            if result.get("source", "local") != "local":
+                continue
+            payload: dict[str, object] = {
+                "id": result["memory_id"],
+                "content": result["content"],
+                "detail": result["detail"],
+                "tags": result["tags"],
+                "importance": result["importance"],
+                "namespace": result["namespace"],
+                "last_accessed_at": recalled_at,
+            }
+            if result["created_at"]:
+                payload["created_at"] = result["created_at"]
+            if result["updated_at"]:
+                payload["updated_at"] = result["updated_at"]
+            remember_entry_data_in_tiers(self._config, payload)
+
+    @staticmethod
+    def _merge_tier_results(
+        local_results: list[MemoryResultDict],
+        tier_results: list[MemoryResultDict],
+        limit: int,
+        query_tokens: list[str],
+        config: MemoryConfig,
+        query_embedding: list[float] | None = None,
+    ) -> list[MemoryResultDict]:
+        """Merge tier-only candidates into the normal local recall results."""
+        merged = list(local_results)
+        seen_ids = {result["memory_id"] for result in local_results}
+        seen_content = {result["content"] for result in local_results}
+        for result in tier_results:
+            if result["memory_id"] in seen_ids or result["content"] in seen_content:
+                continue
+            merged.append(result)
+            seen_ids.add(result["memory_id"])
+            seen_content.add(result["content"])
+        for result in merged:
+            relevance_hint = result.get("_relevance_hint")
+            result["score"] = round(
+                compute_importance_score(
+                    cast(dict[str, object], result),
+                    query_tokens,
+                    query_embedding=query_embedding,
+                    config=config,
+                    relevance_hint=float(relevance_hint) if relevance_hint is not None else None,
+                ),
+                4,
+            )
+        merged.sort(key=lambda result: float(result["score"]), reverse=True)
+        return merged[:limit]
+
+    @staticmethod
+    def _tier_result_from_entry(entry: dict[str, object]) -> MemoryResultDict:
+        """Convert a tier-managed entry dict into the client recall result shape."""
+        raw_score = entry.get("score")
+        score = float(str(raw_score)) if raw_score is not None else entry_utility(entry)
+        raw_tags = entry.get("tags", [])
+        return MemoryResultDict(
+            memory_id=str(entry.get("id", entry.get("memory_id", ""))),
+            content=str(entry.get("content", "")),
+            detail=str(entry.get("detail", "")),
+            tags=[str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else [],
+            importance=MemoryClient._coerce_float(entry.get("importance", 0.0)),
+            score=round(score, 4),
+            created_at=str(entry.get("created_at", "")),
+            updated_at=str(entry.get("updated_at", entry.get("created_at", ""))),
+            namespace=str(entry.get("namespace", "default")),
+            source="local",
+            last_accessed_at=str(entry.get("last_accessed_at", "")),
+            q_value=MemoryClient._coerce_float(entry.get("q_value", 0.0)),
+            q_observations=int(str(entry.get("q_observations", 0))),
+            recurrence=int(str(entry.get("recurrence", 1))),
+            access_count=int(str(entry.get("access_count", 0))),
+            _relevance_hint=MemoryClient._coerce_float(entry.get("_tier_relevance", score)),
+        )
 
     def _get_embedder(self) -> EmbeddingProvider | None:
         """Try to obtain a local embedding provider; return None on failure.
@@ -996,6 +1148,7 @@ class MemoryClient:
                 raise MemoryNotFoundError(f"Memory entry {memory_id!r} not found in namespace {self._namespace!r}")
             remote_id = existing.remote_id
             backend.delete(memory_id)
+            remove_entry_from_tiers(self._config, self._namespace, memory_id)
         if remote_id:
             self._schedule_background_task(self._retire_remote_entry(memory_id, remote_id))
 

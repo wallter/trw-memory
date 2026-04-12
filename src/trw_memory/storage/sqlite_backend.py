@@ -529,6 +529,23 @@ class SQLiteBackend(StorageBackend):
         self._conn.execute("DELETE FROM vec_memories WHERE rowid = ?", (rowid,))
         self._conn.execute("DELETE FROM vec_index WHERE rowid = ?", (rowid,))
 
+    def delete_vector(self, entry_id: str) -> bool:
+        """Public vector-row deletion helper for warm-tier maintenance."""
+        if not self._vec_available:
+            return False
+        with self._lock:
+            before = self._conn.total_changes
+            self._delete_vector(entry_id)
+            self._conn.commit()
+            return self._conn.total_changes > before
+
+    def vector_exists(self, entry_id: str) -> bool:
+        """Return whether vec_index currently contains *entry_id*."""
+        if not self._vec_available:
+            return False
+        row = self._conn.execute("SELECT 1 FROM vec_index WHERE entry_id = ?", (entry_id,)).fetchone()
+        return row is not None
+
     def search(
         self,
         query: str,

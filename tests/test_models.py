@@ -228,6 +228,8 @@ def test_memory_config_defaults() -> None:
     assert cfg.rrf_k == 60
     assert cfg.dedup_enabled is True
     assert cfg.hot_max_entries == 50
+    assert cfg.warm_archive_max_score == 0.22
+    assert cfg.cold_purge_max_score == 0.1
     assert cfg.decay_half_life_days == 14.0
     assert cfg.q_learning_rate == 0.15
     assert cfg.consolidation_enabled is True
@@ -286,6 +288,37 @@ def test_memory_config_reads_trw_config_yaml(tmp_path: Path, monkeypatch: pytest
     assert cfg.platform_url == "https://platform.example.com"
     assert cfg.platform_api_key == "yaml-key"
     assert cfg.sync_namespace == "org:test"
+
+
+def test_memory_config_reads_tier_fields_from_trw_config_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Framework config YAML should seed tier settings when MEMORY_* vars are unset."""
+    trw_dir = tmp_path / ".trw"
+    trw_dir.mkdir()
+    (trw_dir / "config.yaml").write_text(
+        "\n".join(
+            [
+                "memory_hot_max_entries: 12",
+                "memory_hot_ttl_days: 3",
+                "memory_cold_threshold_days: 45",
+                "memory_retention_days: 180",
+                "memory_score_w1: 0.5",
+                "memory_score_w2: 0.2",
+                "memory_score_w3: 0.3",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    cfg = MemoryConfig()
+
+    assert cfg.hot_max_entries == 12
+    assert cfg.hot_ttl_days == 3
+    assert cfg.cold_threshold_days == 45
+    assert cfg.retention_days == 180
+    assert cfg.score_relevance_weight == 0.5
+    assert cfg.score_recency_weight == 0.2
+    assert cfg.score_importance_weight == 0.3
 
 
 def test_memory_config_env_overrides_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

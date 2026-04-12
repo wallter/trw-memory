@@ -40,6 +40,12 @@ class _TRWConfigYamlSource(InitSettingsSource):
         raw = _read_trw_config_yaml()
         mapped: dict[str, Any] = {}
 
+        def _map_first(target: str, *aliases: str) -> None:
+            for alias in aliases:
+                if raw.get(alias) is not None:
+                    mapped[target] = raw[alias]
+                    return
+
         sync_enabled = raw.get("sync_enabled", raw.get("platform_telemetry_enabled"))
         if sync_enabled is not None:
             mapped["sync_enabled"] = sync_enabled
@@ -58,6 +64,18 @@ class _TRWConfigYamlSource(InitSettingsSource):
             first_url = next((candidate for candidate in platform_urls if candidate), None)
             if first_url is not None:
                 mapped["platform_url"] = first_url
+
+        # Keep the standalone package configurable from the framework config
+        # file so tier policies can be changed without a package-local env file.
+        _map_first("hot_max_entries", "hot_max_entries", "memory_hot_max_entries")
+        _map_first("hot_ttl_days", "hot_ttl_days", "memory_hot_ttl_days")
+        _map_first("cold_threshold_days", "cold_threshold_days", "memory_cold_threshold_days")
+        _map_first("retention_days", "retention_days", "memory_retention_days")
+        _map_first("score_relevance_weight", "score_relevance_weight", "memory_score_w1")
+        _map_first("score_recency_weight", "score_recency_weight", "memory_score_w2")
+        _map_first("score_importance_weight", "score_importance_weight", "memory_score_w3")
+        _map_first("warm_archive_max_score", "warm_archive_max_score")
+        _map_first("cold_purge_max_score", "cold_purge_max_score")
 
         super().__init__(settings_cls, mapped)
 
@@ -110,6 +128,18 @@ class MemoryConfig(BaseSettings):
     hot_ttl_days: int = Field(default=7, gt=0, description="TTL in days for hot tier entries")
     cold_threshold_days: int = Field(default=90, gt=0, description="Days after which entries move to cold tier")
     retention_days: int = Field(default=365, gt=0, description="Days before entries are purged from cold tier")
+    warm_archive_max_score: float = Field(
+        default=0.22,
+        ge=0.0,
+        le=1.0,
+        description="Maximum composite tier score allowed before a warm entry is archived to cold storage",
+    )
+    cold_purge_max_score: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=1.0,
+        description="Maximum composite tier score allowed before a cold entry is purged",
+    )
 
     # Scoring
     decay_half_life_days: float = Field(default=14.0, gt=0.0, description="Half-life in days for recency decay")

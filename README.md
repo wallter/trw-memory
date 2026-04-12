@@ -23,7 +23,7 @@ Designed as the storage backend for [trw-mcp](https://github.com/wallter/trw-mcp
 
 - **MemoryClient SDK** -- High-level async Python client with store/recall/forget/search
 - **Hybrid Search (BM25 + vector)** -- BM25 keyword matching + dense vector similarity via sqlite-vec, combined with Reciprocal Rank Fusion (RRF). [Learn more](https://trwframework.com/docs)
-- **Tiered Storage** -- Hot/warm/cold tiers with automatic promotion/demotion based on access patterns and impact scores. [Architecture details](https://trwframework.com/docs)
+- **Tiered Storage** -- Hot/warm/cold tiers for fast recall, warm-sidecar persistence, recall-time cold promotion, and explicit sweep-based archiving/purging. [Architecture details](https://trwframework.com/docs)
 - **Semantic Deduplication** -- Detects and merges near-duplicate learnings using cosine similarity (0.85 threshold)
 - **Knowledge Graph for AI** -- Tag co-occurrence and similarity edges, BFS traversal, importance boost/decay, cross-validation propagation. [Docs](https://trwframework.com/docs)
 - **Memory Consolidation** -- Episodic-to-semantic consolidation via clustering with the current shipped path using heuristic/fallback summarization
@@ -276,15 +276,15 @@ Learning utility is computed from multiple signals. [Full scoring documentation]
 
 ### Tiered Storage
 
-Automatic hot/warm/cold tiering keeps frequently-used memories fast and archives stale ones. [Architecture overview](https://trwframework.com/docs):
+Hot/warm/cold tiering keeps frequently-used memories fast and archives stale ones. [Architecture overview](https://trwframework.com/docs):
 
 | Tier | Criteria | Storage | Latency |
 |------|----------|---------|---------|
-| Hot | Created/accessed in last 7 days | In-memory LRU cache | <1ms |
-| Warm | 8-90 days, impact >= 0.3 | SQLite + keyword index | <50ms |
-| Cold | 90+ days OR impact < 0.3 | YAML archive (partitioned by year/month) | <200ms |
+| Hot | Recently recalled entries | In-memory LRU cache | <1ms |
+| Warm | Active entries mirrored into the tier runtime | SQLite + JSONL sidecar with full entry payloads | <50ms |
+| Cold | Archived entries matched by recall or explicit sweep policy | YAML archive (partitioned by year/month) | <200ms |
 
-Entries are automatically promoted/demoted during periodic sweeps. Cold-tier entries remain queryable.
+Store/recall operations keep Hot/Warm in sync, Cold-tier hits are promoted back to Warm within the same recall, and `TierManager.sweep()` applies the configurable archive/purge policy when callers trigger a lifecycle sweep.
 
 ### Security
 

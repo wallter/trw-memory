@@ -12,6 +12,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 from contextlib import ExitStack
+from datetime import datetime, timezone
 
 import structlog
 
@@ -20,6 +21,8 @@ from trw_memory.exceptions import ConfigError
 from trw_memory.graph import list_org_shared_entries
 from trw_memory.lifecycle._recall import record_recall_access
 from trw_memory.lifecycle.scoring import entry_utility, rank_by_utility
+from trw_memory.lifecycle.tiers._scoring import compute_importance_score
+from trw_memory.lifecycle.tiers._runtime import remember_entry_data_in_tiers, supports_tier_runtime, tier_candidates
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
@@ -111,6 +114,7 @@ def memory_recall_impl(
             logger.debug("recall_invalid_namespace_skipped", namespace=ns)
 
     all_namespaces = [namespace, *extra_ns]
+    cfg = config or MemoryConfig()
 
     # Namespace-scoped local backends can only see one store at a time, so
     # cross-namespace recall must reopen the requested namespaces explicitly.
@@ -151,8 +155,8 @@ def memory_recall_impl(
 
     # Retrieve via hybrid search (gracefully degrades to BM25-only or empty)
     if query and all_entries:
-        cfg = config or MemoryConfig()
         embedder = get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim)
+        query_embedding = embedder.embed(query) if embedder is not None else None
         # dense_search() needs the stored vector map, not just the entry IDs, so
         # tool recall must hydrate the embeddings before calling hybrid_search().
         ranked = hybrid_search(
@@ -163,6 +167,7 @@ def memory_recall_impl(
             top_k=limit * 4,  # over-fetch before score filtering
         )
     else:
+        query_embedding = None
         # Empty query: return all entries sorted by utility
         ranked = all_entries
 
@@ -172,10 +177,23 @@ def memory_recall_impl(
     # Re-rank by utility using scoring layer
     query_tokens = query.lower().split() if query else []
     ranked_dicts = rank_by_utility(entry_dicts, query_tokens, lambda_weight=0.4)
+    tier_dicts: list[dict[str, object]] = []
+    if supports_tier_runtime(backend):
+        tier_dicts = tier_candidates(
+            cfg,
+            namespace,
+            backend,
+            query=query,
+            tags=tags,
+            limit=limit,
+            query_embedding=query_embedding,
+        )
+    if tier_dicts:
+        ranked_dicts = _merge_tier_entries(ranked_dicts, tier_dicts, query_tokens, cfg, query_embedding)
 
     # Apply min_score filter
     if min_score > 0.0:
-        ranked_dicts = [d for d in ranked_dicts if entry_utility(d) >= min_score]
+        ranked_dicts = [d for d in ranked_dicts if float(str(d.get("score", entry_utility(d)))) >= min_score]
 
     # Token budget fitting BEFORE limit cap (PRD-CORE-123 FR03)
     from trw_memory.retrieval.token_budget import (
@@ -183,7 +201,6 @@ def memory_recall_impl(
         estimate_entry_tokens,
     )
 
-    cfg = config or MemoryConfig()
     result_dicts = ranked_dicts
     if include_org_memories:
         result_dicts.extend(
@@ -214,6 +231,12 @@ def memory_recall_impl(
     # Apply limit cap AFTER token budget
     result_dicts = result_dicts[:limit]
     _record_access_by_namespace(result_dicts, backend, namespace, namespace_backend_factory)
+    if supports_tier_runtime(backend):
+        recalled_at = datetime.now(timezone.utc).isoformat()
+        for item in result_dicts:
+            tier_payload = dict(item)
+            tier_payload["last_accessed_at"] = recalled_at
+            remember_entry_data_in_tiers(cfg, tier_payload)
 
     logger.debug(
         "memory_recall",
@@ -241,6 +264,38 @@ def memory_recall_impl(
         response["related"] = related
 
     return response
+
+
+def _merge_tier_entries(
+    ranked_dicts: list[dict[str, object]],
+    tier_dicts: list[dict[str, object]],
+    query_tokens: list[str],
+    config: MemoryConfig,
+    query_embedding: list[float] | None,
+) -> list[dict[str, object]]:
+    """Merge tier-only matches into the main recall candidate set."""
+    merged: list[dict[str, object]] = list(ranked_dicts)
+    seen_keys = {
+        (str(item.get("namespace", "project:default")), str(item.get("id", "")))
+        for item in ranked_dicts
+    }
+    for item in tier_dicts:
+        key = (str(item.get("namespace", "project:default")), str(item.get("id", "")))
+        if key in seen_keys:
+            continue
+        merged.append(item)
+        seen_keys.add(key)
+    for item in merged:
+        relevance_hint = item.get("_tier_relevance")
+        item["score"] = compute_importance_score(
+            item,
+            query_tokens,
+            query_embedding=query_embedding,
+            config=config,
+            relevance_hint=float(str(relevance_hint)) if relevance_hint is not None else None,
+        )
+    merged.sort(key=lambda entry: float(str(entry.get("score", 0.0))), reverse=True)
+    return merged
 
 
 def _org_memory_results(
