@@ -465,6 +465,34 @@ class SQLiteBackend(StorageBackend):
                 path=str(self._db_path),
             ) from exc
 
+    def increment_session_counts(self, entry_ids: list[str], *, updated_at: datetime | None = None) -> int:
+        """Increment ``session_count`` for multiple entries in one transaction."""
+        if not entry_ids:
+            return 0
+
+        now = updated_at or datetime.now(timezone.utc)
+        values = [(now.isoformat(), entry_id) for entry_id in entry_ids]
+
+        try:
+            sql = """
+                UPDATE memories
+                SET session_count = COALESCE(session_count, 0) + 1,
+                    updated_at = ?,
+                    sync_seq = COALESCE(sync_seq, 0) + 1,
+                    last_synced_at = NULL
+                WHERE id = ?
+            """
+            with self._lock:
+                before = self._conn.total_changes
+                self._conn.executemany(sql, values)
+                self._conn.commit()
+                return self._conn.total_changes - before
+        except sqlite3.Error as exc:
+            raise StorageError(
+                f"Failed to increment session counts: {exc}",
+                path=str(self._db_path),
+            ) from exc
+
     def delete(self, entry_id: str) -> bool:
         """Remove an entry from the memories table (and vec_index if present).
 
