@@ -355,12 +355,13 @@ class MemoryClient:
                     raise StorageError(
                         f"failed to persist vector for {entry.id!r}; entry write was rolled back"
                     ) from exc
-                try:
-                    # Graph edges enrich retrieval but should never invalidate the
-                    # canonical stored row or its persisted embedding.
-                    update_entry_graph(entry, backend, embedding=embedding, config=self._config)
-                except (StorageError, sqlite3.Error, ValueError):
-                    logger.warning("memory_store_graph_update_failed", memory_id=entry.id, exc_info=True)
+            try:
+                # Graph enrichment must run even without embeddings so
+                # tag/co-occurrence and consolidation lineage stay consistent with
+                # the tool write path in BM25-only environments.
+                update_entry_graph(entry, backend, embedding=embedding, config=self._config)
+            except (StorageError, sqlite3.Error, ValueError):
+                logger.warning("memory_store_graph_update_failed", memory_id=entry.id, exc_info=True)
 
         logger.debug(
             "memory_stored",
