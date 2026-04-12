@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import random
+import time
 
 import pytest
 
@@ -327,12 +328,65 @@ def test_selection_probability_in_valid_range() -> None:
         selector.update(decision.selected_id, 0.5)
 
 
+def test_selection_probability_tracks_policy_propensity() -> None:
+    """selection_probability is an estimated policy propensity, not one sample draw."""
+    random.seed(12345)
+    selector = BanditSelector(cold_start_min=0, floor_exploration=0.0)
+
+    for _ in range(80):
+        selector.update("best", 1.0)
+        selector.update("other", 0.0)
+
+    decision = selector.select(["best", "other"])
+    assert decision.selected_id == "best"
+    assert decision.selection_probability > 0.9
+    assert decision.runner_up_probability is not None
+    assert decision.runner_up_probability < 0.1
+
+
+def test_floor_exploration_propensities_sum_to_one() -> None:
+    """Estimated propensities include floor-exploration mass."""
+    random.seed(54321)
+    selector = BanditSelector(cold_start_min=0, floor_exploration=0.12)
+
+    for _ in range(60):
+        selector.update("dominant", 1.0)
+        selector.update("other", 0.0)
+
+    decision = selector.select(["dominant", "other"])
+    assert decision.runner_up_probability is not None
+    assert decision.selection_probability + decision.runner_up_probability == pytest.approx(
+        1.0,
+        abs=0.08,
+    )
+
+
 def test_exposure_count_increments() -> None:
     """exposure_count increments with each update call."""
     selector = BanditSelector()
     for i in range(10):
         selector.update("arm-a", 0.5)
         assert selector._arms["arm-a"].exposure_count == i + 1
+
+
+def test_select_latency_p95_under_5ms_for_50_arms() -> None:
+    """Propensity estimation stays within the PRD latency budget."""
+    selector = BanditSelector(cold_start_min=0)
+    arms = [f"arm-{i}" for i in range(50)]
+
+    for idx, arm in enumerate(arms):
+        for _ in range(25):
+            selector.update(arm, 0.8 if idx == 0 else 0.4)
+
+    durations_ms: list[float] = []
+    for _ in range(100):
+        start = time.perf_counter()
+        selector.select(arms)
+        durations_ms.append((time.perf_counter() - start) * 1000)
+
+    durations_ms.sort()
+    p95_ms = durations_ms[94]
+    assert p95_ms < 5.0, f"select() p95 {p95_ms:.2f}ms exceeds 5ms budget"
 
 
 # ---------------------------------------------------------------------------

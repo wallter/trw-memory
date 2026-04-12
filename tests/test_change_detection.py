@@ -25,22 +25,15 @@ class TestDistributionShift:
     """Alarm must fire when the distribution shifts significantly."""
 
     def test_detects_distribution_shift(self) -> None:
-        """20 observations of 0.8 then sustained 0.2 -- alarm fires.
-
-        With default threshold=20.0 and a 0.6-magnitude shift, the
-        Page-Hinkley statistic accumulates gradually because the running
-        mean adapts.  We feed enough post-shift observations to exceed
-        the threshold.
-        """
+        """Default detector fires on the PRD acceptance sequence."""
         det = PageHinkleyDetector()
         alarm_fired = False
-        # 20 stable observations followed by up to 120 shift observations.
-        for i in range(140):
-            value = 0.8 if i < 20 else 0.2
+        for i in range(15):
+            value = 0.8 if i < 10 else 0.2
             if det.update(value):
                 alarm_fired = True
                 break
-        assert alarm_fired, "Alarm should fire when distribution shifts from 0.8 to 0.2"
+        assert alarm_fired, "Alarm should fire for [0.8]*10 + [0.2]*5"
 
     def test_detects_shift_with_sensitive_threshold(self) -> None:
         """With a lower threshold, shift is detected in fewer observations."""
@@ -131,6 +124,8 @@ class TestCustomThresholds:
         det = PageHinkleyDetector(delta=0.1, alarm_threshold=50.0)
         assert det._delta == 0.1
         assert det._alarm_threshold == 50.0
+        assert det._forgetting_factor == 0.95
+        assert det._min_observations == 10
 
 
 class TestSingleObservation:
@@ -144,6 +139,16 @@ class TestSingleObservation:
         """Even an extreme value as the very first observation cannot alarm."""
         det = PageHinkleyDetector()
         assert not det.update(100.0), "Single extreme observation should not trigger alarm"
+
+
+class TestInputClamping:
+    """Rewards are clamped to the bounded [0, 1] domain."""
+
+    def test_extreme_values_are_clamped(self) -> None:
+        det = PageHinkleyDetector()
+        det.update(-5.0)
+        det.update(5.0)
+        assert 0.0 <= det._sum <= 2.0
 
 
 class TestAlarmResetsState:
