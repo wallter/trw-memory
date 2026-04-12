@@ -9,6 +9,7 @@ Uses 3-sigma (z-score) thresholds to detect three classes of anomaly:
 from __future__ import annotations
 
 import math
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from enum import Enum
@@ -16,9 +17,16 @@ from enum import Enum
 import structlog
 from pydantic import BaseModel, ConfigDict
 
+from trw_memory.exceptions import PoisoningError, SchemaValidationError
 from trw_memory.models.memory import MemoryEntry
 
 logger = structlog.get_logger(__name__)
+_INJECTION_PATTERNS = (
+    re.compile(r"ignore (?:all )?previous instructions", re.IGNORECASE),
+    re.compile(r"<script\b", re.IGNORECASE),
+    re.compile(r"rm\s+-rf\s+/", re.IGNORECASE),
+    re.compile(r"system prompt", re.IGNORECASE),
+)
 
 
 class AnomalyType(str, Enum):
@@ -229,6 +237,64 @@ def quarantine_entry(entry: MemoryEntry) -> MemoryEntry:
     new_metadata["quarantined"] = "true"
     new_metadata["quarantined_at"] = now
     return entry.model_copy(update={"metadata": new_metadata})
+
+
+def validate_entry_payload(entry: MemoryEntry, *, max_chars: int) -> None:
+    """Apply write-time poisoning and schema validation checks to one entry."""
+    combined = f"{entry.content}{entry.detail}"
+    if len(combined) > max_chars:
+        raise SchemaValidationError(f"memory entry exceeds {max_chars} characters")
+    try:
+        entry.content.encode("utf-8")
+        entry.detail.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise SchemaValidationError("memory entry contains non-UTF-8 content") from exc
+    for pattern in _INJECTION_PATTERNS:
+        if pattern.search(combined):
+            raise PoisoningError(f"memory entry matched blocked injection pattern {pattern.pattern!r}")
+
+
+def score_entry_anomaly(
+    entry: MemoryEntry,
+    reference_entries: list[MemoryEntry],
+    *,
+    z_threshold: float,
+) -> tuple[str, float] | None:
+    """Return the strongest anomaly dimension for *entry*, or ``None``."""
+    clean_reference = [candidate for candidate in reference_entries if candidate.metadata.get("quarantined") != "true"]
+    if len(clean_reference) < 10:
+        return None
+
+    candidates: list[tuple[str, float, list[float]]] = [
+        (
+            "entry_length",
+            float(len(entry.content) + len(entry.detail)),
+            [float(len(candidate.content) + len(candidate.detail)) for candidate in clean_reference],
+        ),
+        (
+            "tag_count",
+            float(len(entry.tags)),
+            [float(len(candidate.tags)) for candidate in clean_reference],
+        ),
+        (
+            "importance",
+            float(entry.importance),
+            [float(candidate.importance) for candidate in clean_reference],
+        ),
+    ]
+
+    strongest: tuple[str, float] | None = None
+    for dimension, value, series in candidates:
+        mean, std = _mean_std(series)
+        if std == 0:
+            if value <= mean:
+                continue
+            z_score = float("inf")
+        else:
+            z_score = (value - mean) / std
+        if z_score >= z_threshold and (strongest is None or z_score > strongest[1]):
+            strongest = (dimension, round(z_score, 2) if math.isfinite(z_score) else z_threshold + 1.0)
+    return strongest
 
 
 # ---------------------------------------------------------------------------

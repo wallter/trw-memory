@@ -32,12 +32,14 @@ from trw_memory.exceptions import (
     AuthorizationError,
     EncryptionUnavailableError,
     MemoryNotFoundError,
+    PIIBlockError,
     ToolAlreadyRegisteredError,
 )
 from trw_memory.graph import wait_for_graph_updates
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.security.audit import AuditLog
 from trw_memory.security.keys import clear_key_cache
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.storage.sqlite_backend import SQLiteBackend
@@ -274,6 +276,22 @@ class TestRbacEnforcement:
     async def test_store_with_detail(self, client: MemoryClient) -> None:
         result = await client.store("summary", detail="extended explanation", tags=["a"])
         assert result["status"] == "stored"
+
+    async def test_store_blocks_api_keys_and_audits_rejection(self, client: MemoryClient) -> None:
+        with pytest.raises(PIIBlockError, match="blocked by PII policy"):
+            await client.store("sk-abcdefghijklmnopqrstuvwxyz")
+
+        audit_records = AuditLog(Path(client._config.audit_log_path)).read_all()
+        assert audit_records[-1].op == "reject"
+
+    async def test_store_same_id_updates_existing_entry(self, client: MemoryClient) -> None:
+        created = await client.store("original", source_identity="alice", entry_id="M-fixed")
+        updated = await client.store("replacement", source_identity="alice", entry_id="M-fixed")
+        results = await client.recall("replacement", limit=5)
+
+        assert created["memory_id"] == "M-fixed"
+        assert updated["status"] == "updated"
+        assert [result["memory_id"] for result in results] == ["M-fixed"]
 
     async def test_store_populates_similarity_and_tag_edges(self, client: MemoryClient) -> None:
         backend = cast("SQLiteBackend", client._get_backend())
@@ -1334,6 +1352,17 @@ class TestSearch:
         await client.store("untagged")
         results = await client.search(tags=["python"])
         assert all("python" in r["tags"] for r in results)
+
+    async def test_search_actor_and_quarantined_filters(self, client: MemoryClient) -> None:
+        for index in range(20):
+            await client.store(f"baseline {index}", source_identity="seed")
+
+        result = await client.store("A" * 5000, source_identity="alice")
+        quarantined = await client.search(actor="alice", status="quarantined")
+
+        assert result["status"] == "quarantined"
+        assert len(quarantined) == 1
+        assert quarantined[0]["memory_id"] == result["memory_id"]
 
     async def test_search_since_filter(self, client: MemoryClient) -> None:
         await client.store("old entry", importance=0.5)

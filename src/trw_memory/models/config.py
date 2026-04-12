@@ -197,17 +197,23 @@ class MemoryConfig(BaseSettings):
 
     # Audit
     audit_enabled: bool = Field(default=True, description="Enable audit logging of all memory operations")
-    audit_log_path: str = Field(default=".memory/audit.jsonl", description="Path to JSONL audit log file")
+    audit_log_path: str = Field(default="", description="Path to JSONL audit log file")
+    audit_retention_days: int = Field(default=365, gt=0, description="Days of audit history to retain before compaction")
     fsync_on_append: bool = Field(default=False, description="Call os.fsync() after each audit log write for crash safety")
 
     # PII
     pii_enabled: bool = Field(default=True, description="Enable PII detection in memory content")
     pii_action: Literal["block", "redact", "warn"] = "warn"
     pii_entropy_threshold: float = Field(default=4.5, gt=0.0, description="Shannon entropy threshold for PII detection")
+    pii_custom_patterns: list[str] = Field(default_factory=list, description="Additional regex patterns treated as custom PII")
 
     # Poisoning defense
     poisoning_detection_enabled: bool = Field(default=True, description="Enable statistical poisoning detection")
     poisoning_z_threshold: float = Field(default=3.0, gt=0.0, description="Z-score threshold for anomaly detection")
+    quarantine_path: str = Field(default="", description="Directory where quarantined entries are written")
+    max_entry_chars: int = Field(default=10_240, gt=0, description="Maximum combined content/detail character count")
+    max_memory_writes_per_minute: int = Field(default=10, ge=0, description="Per-session write limit enforced over a rolling minute")
+    rate_limit_state_path: str = Field(default="", description="Path to the persisted write-rate limiter state file")
 
     # Sync configuration (PRD-CORE-047)
     sync_enabled: bool = Field(default=False, description="Enable remote platform sync")
@@ -243,6 +249,18 @@ class MemoryConfig(BaseSettings):
             self.sync_namespace = ""
             self.platform_url = ""
             self.platform_api_key = ""
+        return self
+
+    @model_validator(mode="after")
+    def _derive_security_paths(self) -> MemoryConfig:
+        """Keep audit/quarantine/rate-limit files outside the active storage root."""
+        security_root = Path(self.storage_path).parent / ".trw" / "security"
+        if not self.audit_log_path:
+            self.audit_log_path = str(security_root / "audit.jsonl")
+        if not self.quarantine_path:
+            self.quarantine_path = str(security_root / "quarantine")
+        if not self.rate_limit_state_path:
+            self.rate_limit_state_path = str(security_root / "rate_limits.yaml")
         return self
 
     @classmethod

@@ -137,6 +137,24 @@ class TestDetectPII:
         key_matches = [m for m in matches if m.pii_type == PIIType.API_KEY]
         assert len(key_matches) >= 1
 
+    def test_detect_ip_address(self) -> None:
+        """IPv4 addresses are detected."""
+        matches = detect_pii("Server is reachable at 192.168.1.10")
+        ip_matches = [m for m in matches if m.pii_type == PIIType.IP_ADDRESS]
+        assert len(ip_matches) == 1
+
+    def test_detect_file_path(self) -> None:
+        """Absolute filesystem paths are detected."""
+        matches = detect_pii("Read /home/alice/.ssh/config for setup")
+        path_matches = [m for m in matches if m.pii_type == PIIType.FILE_PATH]
+        assert len(path_matches) == 1
+
+    def test_detect_custom_pattern(self) -> None:
+        """Custom regex patterns are surfaced as custom PII."""
+        matches = detect_pii("employee id EMP-12345", custom_patterns=[r"EMP-\d+"])
+        custom_matches = [m for m in matches if m.pii_type == PIIType.CUSTOM]
+        assert len(custom_matches) == 1
+
     def test_detect_high_entropy_string(self) -> None:
         """High-entropy tokens (mixed alphanumeric) are flagged."""
         # 30-char mixed-case+digits token — entropy ~4.9 bits/char

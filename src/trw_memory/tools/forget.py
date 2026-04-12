@@ -11,8 +11,10 @@ import structlog
 from trw_memory.exceptions import ConfigError, StorageError
 from trw_memory.lifecycle.tiers._runtime import remove_entry_from_tiers, supports_tier_runtime
 from trw_memory.models.config import MemoryConfig
+from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.security.rbac import Permission, require_namespace_permission
+from trw_memory.security.runtime import append_audit_event, delete_quarantined_entries
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools._types import McpServer
 
@@ -26,6 +28,7 @@ def memory_forget_impl(
     *,
     backend: StorageBackend,
     config: MemoryConfig | None = None,
+    actor: str | None = None,
 ) -> dict[str, object]:
     """Core implementation of memory_forget (callable without MCP).
 
@@ -47,9 +50,9 @@ def memory_forget_impl(
             "error": "memory_id must be non-empty when provided.",
             "status": "invalid",
         }
-    if not memory_id and not query:
+    if not memory_id and not query and not actor:
         return {
-            "error": "At least one of memory_id or query must be provided.",
+            "error": "At least one of memory_id, query, or actor must be provided.",
             "status": "invalid",
         }
 
@@ -60,9 +63,30 @@ def memory_forget_impl(
     cfg = config or MemoryConfig()
     require_namespace_permission(cfg, namespace, Permission.DELETE, "forget")
 
+    if actor:
+        entries = backend.list_entries(namespace=namespace, limit=10_000)
+        deleted_count = 0
+        for candidate in entries:
+            if candidate.source_identity != actor:
+                continue
+            if backend.delete(candidate.id):
+                deleted_count += 1
+                if supports_tier_runtime(backend):
+                    remove_entry_from_tiers(cfg, namespace, candidate.id)
+        deleted_count += delete_quarantined_entries(cfg, namespace=namespace, actor=actor)
+        append_audit_event(
+            cfg,
+            "forget",
+            actor=actor,
+            namespace=namespace,
+            data={"entries_deleted": deleted_count, "selector": "actor"},
+        )
+        return {"deleted": deleted_count, "entries_deleted": deleted_count, "status": "ok"}
+
     # --- Delete by ID (with namespace isolation) ---
     if memory_id:
         deleted_count = 0
+        entry: MemoryEntry | None = None
         try:
             entry = backend.get(memory_id)
             if entry is not None and entry.namespace == namespace:
@@ -70,6 +94,8 @@ def memory_forget_impl(
                 deleted_count = 1 if was_deleted else 0
                 if was_deleted and supports_tier_runtime(backend):
                     remove_entry_from_tiers(cfg, namespace, memory_id)
+            else:
+                deleted_count = delete_quarantined_entries(cfg, namespace=namespace, memory_id=memory_id)
         except StorageError as exc:
             logger.warning("memory_forget_delete_error", memory_id=memory_id, error=str(exc))
 
@@ -78,6 +104,14 @@ def memory_forget_impl(
             memory_id=memory_id,
             deleted=deleted_count,
             namespace=namespace,
+        )
+        append_audit_event(
+            cfg,
+            "forget",
+            entry_id=memory_id,
+            actor=entry.source_identity if entry is not None else "",
+            namespace=namespace,
+            data={"entries_deleted": deleted_count, "selector": "memory_id"},
         )
         return {"deleted": deleted_count, "status": "ok"}
 
@@ -110,6 +144,13 @@ def memory_forget_impl(
         deleted=deleted_count,
         namespace=namespace,
     )
+    append_audit_event(
+        cfg,
+        "forget",
+        actor="",
+        namespace=namespace,
+        data={"entries_deleted": deleted_count, "selector": "query", "query": query[:80]},
+    )
     return {"deleted": deleted_count, "status": "ok"}
 
 
@@ -124,6 +165,7 @@ def register_forget_tool(mcp: McpServer) -> None:
         memory_id: str | None = None,
         query: str | None = None,
         namespace: str = "project:default",
+        actor: str | None = None,
     ) -> dict[str, object]:
         """Delete memory entries by ID or bulk search query.
 
@@ -147,6 +189,7 @@ def register_forget_tool(mcp: McpServer) -> None:
                 namespace,
                 backend=backend,
                 config=cfg,
+                actor=actor,
             )
 
     mcp.tool()(memory_forget)

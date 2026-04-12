@@ -32,6 +32,9 @@ class PIIType(str, Enum):
     SSN = "ssn"
     CREDIT_CARD = "credit_card"
     API_KEY = "api_key"
+    IP_ADDRESS = "ip_address"
+    FILE_PATH = "file_path"
+    CUSTOM = "custom"
     HIGH_ENTROPY = "high_entropy"
 
 
@@ -88,6 +91,16 @@ _PII_PATTERNS: list[tuple[PIIType, re.Pattern[str], float]] = [
         ),
         0.9,
     ),
+    (
+        PIIType.IP_ADDRESS,
+        re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
+        0.85,
+    ),
+    (
+        PIIType.FILE_PATH,
+        re.compile(r"(?:[A-Za-z]:\\[^\s]+|/(?:[^/\s]+/)+[^/\s]+)"),
+        0.8,
+    ),
 ]
 
 # Minimum token length and entropy threshold for high-entropy detection
@@ -129,6 +142,7 @@ def shannon_entropy(text: str) -> float:
 def detect_pii(
     text: str,
     entropy_threshold: float = _DEFAULT_ENTROPY_THRESHOLD,
+    custom_patterns: list[str] | None = None,
 ) -> list[PIIMatch]:
     """Scan *text* for PII using regex patterns and entropy analysis.
 
@@ -151,6 +165,19 @@ def detect_pii(
                 start=m.start(),
                 end=m.end(),
                 confidence=confidence,
+            )
+            for m in pattern.finditer(text)
+        )
+
+    for raw_pattern in custom_patterns or []:
+        pattern = re.compile(raw_pattern)
+        matches.extend(
+            PIIMatch(
+                pii_type=PIIType.CUSTOM,
+                value=m.group(),
+                start=m.start(),
+                end=m.end(),
+                confidence=0.9,
             )
             for m in pattern.finditer(text)
         )

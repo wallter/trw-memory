@@ -58,3 +58,19 @@ class EncryptionUnavailableError(MemoryError):
 
 class KeyRotationError(MemoryError):
     """Raised when key rotation fails or cannot be safely completed."""
+
+
+class SchemaValidationError(MemoryError):
+    """Raised when a memory entry fails the write-time schema/policy contract."""
+
+
+class PIIBlockError(MemoryError):
+    """Raised when a memory entry is blocked by the configured PII policy."""
+
+
+class PoisoningError(MemoryError):
+    """Raised when content matches write-time poisoning or injection defenses."""
+
+
+class RateLimitError(MemoryError):
+    """Raised when a caller exceeds the configured memory write rate limit."""
