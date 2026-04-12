@@ -14,7 +14,6 @@ selector (FR01) rather than uniform random, satisfying PRD-CORE-105-FR02.
 from __future__ import annotations
 
 import math
-import random
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -138,10 +137,10 @@ class ContextualBanditSelector:
             msg = "eligible_ids must not be empty"
             raise ValueError(msg)
 
-        # No context -> fall back to Thompson Sampling (FR02 requirement).
+        # No/empty context -> fall back to Thompson Sampling (FR02 requirement).
         # The internal _thompson selector maintains Beta posteriors for all
         # arms seen so far, so it learns from the no-context interactions.
-        if context_vector is None:
+        if not context_vector:
             decision = self._thompson.select(eligible_ids)
             selected = decision.selected_id
             _logger.info(
@@ -187,13 +186,14 @@ class ContextualBanditSelector:
         relative_spread = (max_score - min_score) / ref
 
         if relative_spread < 0.01:
-            selected = random.choice(eligible_ids)  # noqa: S311
+            decision = self._thompson.select(eligible_ids)
+            selected = decision.selected_id
             _logger.debug(
                 "contextual_degenerate_scores",
                 spread=round(relative_spread, 6),
                 selected=selected,
             )
-            return selected, scores[selected]
+            return selected, decision.selection_probability
 
         # Select arm with highest UCB score
         selected = max(scores, key=lambda a: scores[a])
@@ -229,7 +229,7 @@ class ContextualBanditSelector:
         # Always update Thompson fallback so no-context selections learn
         self._thompson.update(arm_id, reward)
 
-        if context_vector is None:
+        if not context_vector:
             return
 
         arm = self._ensure_arm(arm_id)

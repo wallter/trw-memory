@@ -76,6 +76,23 @@ def test_select_no_context_random() -> None:
     assert isinstance(score, float)
 
 
+def test_select_empty_context_uses_thompson_fallback() -> None:
+    """Empty context vectors use the Thompson fallback too."""
+    selector = ContextualBanditSelector(feature_dim=2)
+    arms = ["arm_good", "arm_bad"]
+
+    for _ in range(30):
+        selector.update("arm_good", reward=0.9, context_vector=None)
+        selector.update("arm_bad", reward=0.1, context_vector=None)
+
+    counts = {"arm_good": 0, "arm_bad": 0}
+    for _ in range(200):
+        selected_id, _ = selector.select(arms, context_vector=[])
+        counts[selected_id] += 1
+
+    assert counts["arm_good"] > counts["arm_bad"]
+
+
 # ---------------------------------------------------------------------------
 # test_select_with_context
 # ---------------------------------------------------------------------------
@@ -141,7 +158,7 @@ def test_linucb_different_context_different_selection() -> None:
 
 
 def test_degenerate_scores_fallback(caplog: pytest.LogCaptureFixture) -> None:
-    """When all UCB scores within 1%, falls back to random."""
+    """When all UCB scores within 1%, falls back to Thompson."""
     selector = ContextualBanditSelector(feature_dim=2, alpha=1.0)
     arms = ["a", "b", "c"]
 
@@ -160,6 +177,23 @@ def test_degenerate_scores_fallback(caplog: pytest.LogCaptureFixture) -> None:
 
     # Re-configure structlog back to default to not pollute other tests
     structlog.reset_defaults()
+
+
+def test_degenerate_scores_fallback_uses_trained_thompson() -> None:
+    """Degenerate contextual scores defer to the Thompson fallback."""
+    selector = ContextualBanditSelector(feature_dim=2, alpha=1.0)
+    arms = ["arm_good", "arm_bad"]
+
+    for _ in range(40):
+        selector.update("arm_good", reward=0.95, context_vector=None)
+        selector.update("arm_bad", reward=0.05, context_vector=None)
+
+    counts = {"arm_good": 0, "arm_bad": 0}
+    for _ in range(200):
+        selected_id, _ = selector.select(arms, context_vector=[1.0, 0.0])
+        counts[selected_id] += 1
+
+    assert counts["arm_good"] > counts["arm_bad"]
 
 
 # ---------------------------------------------------------------------------

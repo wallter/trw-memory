@@ -40,7 +40,11 @@ class ArmState:
 
 @dataclass
 class BanditDecision:
-    """Result of a bandit ``select()`` call."""
+    """Result of a bandit ``select()`` call.
+
+    ``selection_probability`` and ``runner_up_probability`` are estimated
+    policy propensities, not single posterior samples.
+    """
 
     selected_id: str
     selection_probability: float
@@ -68,6 +72,9 @@ class BanditSelector:
     """
 
     _MAX_POOL_SIZE = 500
+    _PROPENSITY_MONTE_CARLO_SAMPLES = 96
+    _PRIOR_ALPHA = 2.0
+    _PRIOR_BETA = 1.0
 
     def __init__(
         self,
@@ -123,13 +130,7 @@ class BanditSelector:
         if cold_arms:
             # Pick the least-exposed cold-start arm (round-robin)
             selected = min(cold_arms, key=lambda a: self._arms[a].exposure_count)
-            sample_val = random.betavariate(
-                self._arms[selected].alpha,
-                self._arms[selected].beta,
-            )
-            runner_up_id, runner_up_prob = self._compute_runner_up(
-                eligible_ids, selected,
-            )
+            runner_up_id = self._compute_cold_start_runner_up(eligible_ids, selected)
             logger.debug(
                 "cold_start_selection",
                 arm=selected,
@@ -137,9 +138,9 @@ class BanditSelector:
             )
             return BanditDecision(
                 selected_id=selected,
-                selection_probability=sample_val,
+                selection_probability=1.0,
                 runner_up_id=runner_up_id,
-                runner_up_probability=runner_up_prob,
+                runner_up_probability=0.0 if runner_up_id is not None else None,
                 exploration=True,
             )
 
@@ -165,15 +166,18 @@ class BanditSelector:
                 selected=selected,
             )
 
-        runner_up_id, runner_up_prob = self._compute_runner_up(
+        runner_up_id, _ = self._compute_runner_up(
             eligible_ids, selected, samples=samples,
         )
+        propensities = self._estimate_propensities(eligible_ids)
 
         return BanditDecision(
             selected_id=selected,
-            selection_probability=samples[selected],
+            selection_probability=propensities[selected],
             runner_up_id=runner_up_id,
-            runner_up_probability=runner_up_prob,
+            runner_up_probability=(
+                propensities.get(runner_up_id) if runner_up_id is not None else None
+            ),
             exploration=exploration,
         )
 
@@ -198,10 +202,24 @@ class BanditSelector:
         arm.window.append(reward)
 
         # Recompute posterior from window
-        arm.alpha = 2.0 + sum(arm.window)
-        arm.beta = 1.0 + sum(1.0 - r for r in arm.window)
+        arm.alpha = self._PRIOR_ALPHA + sum(arm.window)
+        arm.beta = self._PRIOR_BETA + sum(1.0 - r for r in arm.window)
 
         arm.exposure_count += 1
+
+    def soft_reset_arm(self, arm_id: str) -> None:
+        """Soft-reset an arm posterior to the optimistic prior.
+
+        Keeps ``exposure_count`` intact so the caller can reset belief without
+        forcing the arm back through cold-start round-robin.
+        """
+        arm = self._arms.get(arm_id)
+        if arm is None:
+            self._arms[arm_id] = ArmState()
+            return
+        arm.alpha = self._PRIOR_ALPHA
+        arm.beta = self._PRIOR_BETA
+        arm.window = []
 
     def to_json(self) -> str:
         """Serialize the selector state (hyperparameters + arms) to JSON."""
@@ -246,8 +264,8 @@ class BanditSelector:
 
             for arm_id, arm_dict in arms_data.items():
                 selector._arms[arm_id] = ArmState(
-                    alpha=float(arm_dict.get("alpha", 2.0)),
-                    beta=float(arm_dict.get("beta", 1.0)),
+                    alpha=float(arm_dict.get("alpha", cls._PRIOR_ALPHA)),
+                    beta=float(arm_dict.get("beta", cls._PRIOR_BETA)),
                     window=[float(v) for v in arm_dict.get("window", [])],
                     exposure_count=int(arm_dict.get("exposure_count", 0)),
                 )
@@ -290,3 +308,38 @@ class BanditSelector:
             return None, None
         runner_up = max(others, key=lambda a: others[a])
         return runner_up, others[runner_up]
+
+    def _compute_cold_start_runner_up(
+        self,
+        eligible_ids: list[str],
+        selected_id: str,
+    ) -> str | None:
+        """Return the deterministic cold-start fallback arm."""
+        candidates = [arm_id for arm_id in eligible_ids if arm_id != selected_id]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda arm_id: self._arms[arm_id].exposure_count)
+
+    def _estimate_propensities(self, eligible_ids: list[str]) -> dict[str, float]:
+        """Estimate per-arm selection propensities via Monte Carlo simulation."""
+        if len(eligible_ids) == 1:
+            return {eligible_ids[0]: 1.0}
+
+        counts = {arm_id: 0 for arm_id in eligible_ids}
+        for _ in range(self._PROPENSITY_MONTE_CARLO_SAMPLES):
+            samples = {
+                arm_id: random.betavariate(
+                    self._arms[arm_id].alpha,
+                    self._arms[arm_id].beta,
+                )
+                for arm_id in eligible_ids
+            }
+            top_arm = max(samples, key=samples.__getitem__)
+            selected = top_arm
+            if random.random() < self._floor_exploration:  # noqa: S311
+                non_top = [arm_id for arm_id in eligible_ids if arm_id != top_arm]
+                selected = random.choice(non_top)  # noqa: S311
+            counts[selected] += 1
+
+        sample_count = float(self._PROPENSITY_MONTE_CARLO_SAMPLES)
+        return {arm_id: counts[arm_id] / sample_count for arm_id in eligible_ids}
