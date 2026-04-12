@@ -68,6 +68,9 @@ ENTRY_COLUMNS: tuple[str, ...] = (
     "sync_hash",
     "sync_seq",
     "last_synced_at",
+    "recall_count",
+    "helpful_count",
+    "unhelpful_count",
 )
 
 #: Fields that must never be changed via ``update()``.

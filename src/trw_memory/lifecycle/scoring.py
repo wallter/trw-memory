@@ -188,6 +188,35 @@ def compute_utility_score(
     return _clamp01(utility)
 
 
+# ---------------------------------------------------------------------------
+# Feedback-aware dynamic scoring (PRD-CORE-132 FR04)
+# ---------------------------------------------------------------------------
+
+
+def feedback_decay_score(
+    importance: float,
+    recall_count: int,
+    helpful_count: int,
+) -> float:
+    """Compute feedback-aware decay score.
+
+    Learnings recalled often but never marked helpful decay faster.
+    Helpful feedback counteracts decay.
+
+    Formula: importance * (0.95 ** (recall_count / max(1, helpful_count)))
+
+    Args:
+        importance: Base importance/impact score (0.0-1.0).
+        recall_count: Number of times this entry was recalled.
+        helpful_count: Number of times this entry was marked helpful.
+
+    Returns:
+        Decayed score in [0.0, 1.0].
+    """
+    exponent = recall_count / max(1, helpful_count)
+    return _clamp01(importance * (0.95 ** exponent))
+
+
 def entry_utility(
     entry: dict[str, object],
     config: MemoryConfig | None = None,
@@ -229,6 +258,12 @@ def entry_utility(
     # Double-decay fix (PRD-QUAL-032-FR03): apply_time_decay was removed here
     # because compute_utility_score() already applies Ebbinghaus exponential
     # decay internally via retention = exp(-decay_rate * days).
+
+    # PRD-CORE-132 FR04: Apply feedback-aware decay to base_impact
+    recall_ct = _int_field(entry, "recall_count", 0)
+    helpful_ct = _int_field(entry, "helpful_count", 0)
+    if recall_ct > 0:
+        base_impact = feedback_decay_score(base_impact, recall_ct, helpful_ct)
 
     return compute_utility_score(
         q_value=q_value,

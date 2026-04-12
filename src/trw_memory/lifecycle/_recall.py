@@ -106,6 +106,7 @@ def record_recall_access(
         backend.update(
             entry_id,
             access_count=entry.access_count + 1,
+            recall_count=entry.recall_count + 1,
             last_accessed_at=touch_time,
         )
 
