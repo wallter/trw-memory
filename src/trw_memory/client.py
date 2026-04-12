@@ -34,7 +34,7 @@ from trw_memory.exceptions import (
     StorageError,
     ToolAlreadyRegisteredError,
 )
-from trw_memory.graph import update_entry_graph
+from trw_memory.graph import list_org_shared_entries, update_entry_graph
 from trw_memory.lifecycle._recall import record_recall_access
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -388,6 +388,7 @@ class MemoryClient:
         tags: list[str] | None = None,
         min_score: float = 0.0,
         *,
+        include_org_memories: bool = True,
         include_shared: bool = False,
         token_budget: int | None = None,
     ) -> list[MemoryResultDict]:
@@ -449,6 +450,8 @@ class MemoryClient:
             # Apply min_score filter and limit
             filtered = [r for r in hybrid_results if r["score"] >= min_score]
             final = filtered[:limit]
+            if include_org_memories:
+                final = await self._merge_org_results(query, final, limit, tags, min_score)
             if include_shared:
                 final = await self._merge_shared_results(query, final, limit)
             final = self._apply_budget(final, token_budget)
@@ -466,6 +469,8 @@ class MemoryClient:
 
         # --- Tier 2: Fallback LIKE + TF scoring ------------------------------
         results = await self._fallback_recall(query, limit, tags, min_score)
+        if include_org_memories:
+            results = await self._merge_org_results(query, results, limit, tags, min_score)
         if include_shared:
             results = await self._merge_shared_results(query, results, limit)
         final = self._apply_budget(results, token_budget)
@@ -499,6 +504,51 @@ class MemoryClient:
         raw: list[dict[str, object]] = list(results)  # type: ignore[arg-type]
         filtered, _used, _truncated = apply_token_budget(raw, token_budget)
         return filtered  # type: ignore[return-value]
+
+    async def _merge_org_results(
+        self,
+        query: str,
+        local_results: list[MemoryResultDict],
+        limit: int,
+        tags: list[str] | None,
+        min_score: float,
+    ) -> list[MemoryResultDict]:
+        """Append cross-validated sibling-project memories after local results."""
+        try:
+            org_entries = await asyncio.to_thread(
+                functools.partial(
+                    list_org_shared_entries,
+                    self._config,
+                    self._namespace,
+                    exclude_keys={(result["namespace"], result["memory_id"]) for result in local_results},
+                    limit=max(limit, 25),
+                )
+            )
+        except Exception:
+            logger.debug(
+                "memory_org_recall_failed",
+                op="recall",
+                outcome="failure",
+                namespace=self._namespace,
+                exc_info=True,
+            )
+            return local_results
+
+        tag_set = set(tags or [])
+        org_results: list[MemoryResultDict] = []
+        for entry in org_entries:
+            if tag_set and not tag_set.issubset(set(entry.tags)):
+                continue
+
+            candidate = _entry_to_result(entry, score=entry.importance)
+            candidate["source"] = "org"
+            if query.strip() and not self._matches_query(candidate, query):
+                continue
+            if min_score > 0.0 and candidate["score"] < min_score:
+                continue
+            org_results.append(candidate)
+
+        return self._merge_shared_candidates(local_results, org_results)
 
     async def _try_hybrid_recall(
         self,
@@ -1024,9 +1074,15 @@ class MemoryClient:
         async def memory_recall(
             query: str,
             limit: int = 10,
+            include_org_memories: bool = True,
             include_shared: bool = False,
         ) -> list[MemoryResultDict]:
-            return await client.recall(query, limit=limit, include_shared=include_shared)
+            return await client.recall(
+                query,
+                limit=limit,
+                include_org_memories=include_org_memories,
+                include_shared=include_shared,
+            )
 
         async def memory_forget(memory_id: str) -> ForgetResultDict:
             return await client.forget(memory_id)
