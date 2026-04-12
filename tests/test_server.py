@@ -11,7 +11,12 @@ from __future__ import annotations
 
 import sys
 import types
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from trw_memory.exceptions import EncryptionUnavailableError, LocalOnlyViolationError
 
 
 def _make_fastmcp_mock() -> tuple[MagicMock, MagicMock, list[str]]:
@@ -83,6 +88,49 @@ class TestServerModule:
         """server.main must be callable."""
         server_mod, _, _ = _reload_server_with_mock()
         assert callable(server_mod.main)
+        sys.modules.pop("trw_memory.server", None)
+
+    def test_main_preflights_local_only_embedder(self) -> None:
+        """Local-only startup should fail before mcp.run when embeddings require download."""
+        server_mod, mcp_instance, _ = _reload_server_with_mock()
+        with (
+            patch(
+                "trw_memory.models.config.MemoryConfig",
+                return_value=SimpleNamespace(
+                    encryption_enabled=False,
+                    local_only=True,
+                    embedding_model="test-model",
+                    embedding_dim=384,
+                ),
+            ),
+            patch("trw_memory.embeddings.get_local_embedder", side_effect=LocalOnlyViolationError("blocked")),
+            pytest.raises(LocalOnlyViolationError, match="blocked"),
+        ):
+            server_mod.main()
+        mcp_instance.run.assert_not_called()
+        sys.modules.pop("trw_memory.server", None)
+
+    def test_main_preflights_sqlcipher_when_encryption_enabled(self) -> None:
+        """Encrypted startup should fail before mcp.run when SQLCipher is unavailable."""
+        server_mod, mcp_instance, _ = _reload_server_with_mock()
+        with (
+            patch(
+                "trw_memory.models.config.MemoryConfig",
+                return_value=SimpleNamespace(
+                    encryption_enabled=True,
+                    local_only=False,
+                    embedding_model="test-model",
+                    embedding_dim=384,
+                ),
+            ),
+            patch(
+                "trw_memory.storage.sqlite_backend._import_sqlcipher_driver",
+                side_effect=EncryptionUnavailableError("sqlcipher missing"),
+            ),
+            pytest.raises(EncryptionUnavailableError, match="sqlcipher missing"),
+        ):
+            server_mod.main()
+        mcp_instance.run.assert_not_called()
         sys.modules.pop("trw_memory.server", None)
 
     def test_six_tools_registered(self) -> None:

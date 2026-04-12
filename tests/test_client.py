@@ -38,6 +38,7 @@ from trw_memory.graph import wait_for_graph_updates
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.security.keys import clear_key_cache
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
@@ -60,6 +61,13 @@ def yaml_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient
     monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "yaml_storage"))
     monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "yaml")
     return MemoryClient(namespace="default", mode="local")
+
+
+@pytest.fixture(autouse=True)
+def clear_master_key_cache_fixture() -> Iterator[None]:
+    clear_key_cache()
+    yield
+    clear_key_cache()
 
 
 class _RecordingSQLCipherConnection:
@@ -139,6 +147,9 @@ class TestConstructor:
         assert results
         assert results[0]["content"] == "encrypted runtime path"
         assert statements[0].startswith('PRAGMA key = "x\'')
+        assert "PRAGMA cipher = 'aes-256-cbc'" in statements
+        assert "PRAGMA cipher_page_size = 4096" in statements
+        assert "PRAGMA kdf_iter = 256000" in statements
         assert (tmp_path / "storage" / "default" / "memory" / "warm.jsonl").exists() is False
 
     def test_mcp_mode_raises_not_implemented(self) -> None:

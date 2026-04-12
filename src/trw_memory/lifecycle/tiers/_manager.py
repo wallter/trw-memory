@@ -501,7 +501,7 @@ class TierManager:
             sqlcipher_key_hex: str | None = None
             if config.encryption_enabled:
                 master_key = get_master_key(config)
-                sqlcipher_key_hex = derive_namespace_key(master_key, self._namespace).hex()
+                sqlcipher_key_hex = derive_namespace_key(master_key, self._namespace)
 
             return SQLiteBackend(db_path, dim=config.embedding_dim, sqlcipher_key_hex=sqlcipher_key_hex)
 

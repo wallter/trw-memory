@@ -34,4 +34,13 @@ _register_tools()
 
 
 def main() -> None:
+    from trw_memory.embeddings import get_local_embedder
+    from trw_memory.models.config import MemoryConfig
+    from trw_memory.storage.sqlite_backend import _import_sqlcipher_driver
+
+    cfg = MemoryConfig()
+    if cfg.encryption_enabled:
+        _import_sqlcipher_driver()
+    if cfg.local_only:
+        get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim)
     mcp.run()

@@ -50,6 +50,9 @@ logger = structlog.get_logger(__name__)
 SQLCIPHER_REQUIRED_MESSAGE = (
     "SQLCipher is required when memory_encryption_enabled=True. Install with: pip install trw-memory[encryption]"
 )
+SQLCIPHER_CIPHER = "aes-256-cbc"
+SQLCIPHER_CIPHER_PAGE_SIZE = 4096
+SQLCIPHER_KDF_ITER = 256000
 
 
 def _import_sqlcipher_driver() -> Any:
@@ -58,6 +61,13 @@ def _import_sqlcipher_driver() -> Any:
         with contextlib.suppress(ImportError):
             return importlib.import_module(module_name)
     raise EncryptionUnavailableError(SQLCIPHER_REQUIRED_MESSAGE)
+
+
+def _apply_sqlcipher_pragmas(conn: Any) -> None:
+    """Apply the explicit SQLCipher settings required by the PRD."""
+    conn.execute(f"PRAGMA cipher = '{SQLCIPHER_CIPHER}'")
+    conn.execute(f"PRAGMA cipher_page_size = {SQLCIPHER_CIPHER_PAGE_SIZE}")
+    conn.execute(f"PRAGMA kdf_iter = {SQLCIPHER_KDF_ITER}")
 
 # ---------------------------------------------------------------------------
 # Column helpers
@@ -95,7 +105,6 @@ class SQLiteBackend(StorageBackend):
         self._dim = dim
         self._vec_available = False
         self._lock = threading.Lock()
-        self._sqlcipher_key_hex = sqlcipher_key_hex
         self._dbapi: Any = _import_sqlcipher_driver() if sqlcipher_key_hex is not None else sqlite3
 
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -103,19 +112,19 @@ class SQLiteBackend(StorageBackend):
         self.recovered = False
         self.integrity_warning = False
         try:
-            if self._sqlcipher_key_hex is None:
+            if sqlcipher_key_hex is None:
                 self._conn = self._open_and_configure(db_path)
             else:
                 self._conn = self._open_and_configure(
                     db_path,
                     dbapi=self._dbapi,
-                    sqlcipher_key_hex=self._sqlcipher_key_hex,
+                    sqlcipher_key_hex=sqlcipher_key_hex,
                 )
         except sqlite3.DatabaseError:
             # quick_check failed — but this can be transient (WAL contention,
             # concurrent MCP server access). Check if DB actually has data
             # before destroying it with auto-recovery.
-            if self._db_has_data(db_path, dbapi=self._dbapi, sqlcipher_key_hex=self._sqlcipher_key_hex):
+            if self._db_has_data(db_path, dbapi=self._dbapi, sqlcipher_key_hex=sqlcipher_key_hex):
                 logger.warning(
                     "db_integrity_check_failed_but_has_data",
                     db=str(db_path),
@@ -125,7 +134,7 @@ class SQLiteBackend(StorageBackend):
                 self._conn = self._open_without_integrity_check(
                     db_path,
                     dbapi=self._dbapi,
-                    sqlcipher_key_hex=self._sqlcipher_key_hex,
+                    sqlcipher_key_hex=sqlcipher_key_hex,
                 )
                 self.integrity_warning = True
             else:
@@ -133,7 +142,7 @@ class SQLiteBackend(StorageBackend):
                 self._conn = self.recover_db(
                     db_path,
                     dbapi=self._dbapi,
-                    sqlcipher_key_hex=self._sqlcipher_key_hex,
+                    sqlcipher_key_hex=sqlcipher_key_hex,
                 )
                 self.recovered = True
 
@@ -179,6 +188,7 @@ class SQLiteBackend(StorageBackend):
             if len(sqlcipher_key_hex) != 64 or any(ch not in "0123456789abcdef" for ch in sqlcipher_key_hex):
                 raise ValueError("sqlcipher_key_hex must be a 64-character lowercase hex string")
             conn.execute(f'PRAGMA key = "x\'{sqlcipher_key_hex}\'"')  # noqa: S608
+            _apply_sqlcipher_pragmas(conn)
             conn.execute("SELECT count(*) FROM sqlite_master")
         return conn
 

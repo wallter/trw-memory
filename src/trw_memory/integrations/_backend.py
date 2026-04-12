@@ -14,7 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from trw_memory.exceptions import EncryptionUnavailableError
+import structlog
+
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.encryption import derive_namespace_key
@@ -38,6 +39,8 @@ DEFAULT_LIST_LIMIT: int = 10_000
 
 #: Shared tag prefix for message roles (used by LangChain + LlamaIndex).
 ROLE_TAG_PREFIX: str = "role:"
+_NAMESPACE_METADATA_FILE = "namespace.txt"
+logger = structlog.get_logger(__name__)
 
 
 def _make_id() -> str:
@@ -47,6 +50,19 @@ def _make_id() -> str:
     < 0.0001% at 1 million entries (birthday paradox).
     """
     return f"M-{uuid.uuid4().hex[:16]}"
+
+
+def _write_namespace_metadata(namespace_dir: Path, namespace: str) -> None:
+    namespace_dir.mkdir(parents=True, exist_ok=True)
+    (namespace_dir / _NAMESPACE_METADATA_FILE).write_text(namespace, encoding="utf-8")
+
+
+def _read_namespace_metadata(namespace_dir: Path) -> str | None:
+    metadata_path = namespace_dir / _NAMESPACE_METADATA_FILE
+    if not metadata_path.exists():
+        return None
+    namespace = metadata_path.read_text(encoding="utf-8").strip()
+    return namespace or None
 
 
 def resolve_backend(
@@ -105,16 +121,20 @@ def create_backend_from_config(
     if config.storage_backend == "sqlite":
         from trw_memory.storage.sqlite_backend import SQLiteBackend
 
-        db_path = base / ns_dir / config.sqlite_db_name
+        namespace_dir = base / ns_dir
+        _write_namespace_metadata(namespace_dir, namespace)
+        db_path = namespace_dir / config.sqlite_db_name
         sqlcipher_key_hex: str | None = None
         if config.encryption_enabled:
             master_key = get_master_key(config)
-            sqlcipher_key_hex = derive_namespace_key(master_key, namespace).hex()
+            sqlcipher_key_hex = derive_namespace_key(master_key, namespace)
         return SQLiteBackend(db_path=db_path, dim=config.embedding_dim, sqlcipher_key_hex=sqlcipher_key_hex)
 
     from trw_memory.storage.yaml_backend import YAMLBackend
 
-    entries_dir = base / ns_dir / "entries"
+    namespace_dir = base / ns_dir
+    _write_namespace_metadata(namespace_dir, namespace)
+    entries_dir = namespace_dir / "entries"
     return YAMLBackend(entries_dir=entries_dir)
 
 
@@ -140,17 +160,23 @@ def discover_namespace_backends(
         stores: list[tuple[list[str], StorageBackend]] = []
 
         if config.storage_backend == "sqlite":
-            from trw_memory.storage.sqlite_backend import SQLCIPHER_REQUIRED_MESSAGE, SQLiteBackend
+            from trw_memory.storage.sqlite_backend import SQLiteBackend
 
-            if config.encryption_enabled:
-                raise EncryptionUnavailableError(SQLCIPHER_REQUIRED_MESSAGE)
+            master_key: bytes | None = get_master_key(config) if config.encryption_enabled else None
 
             for candidate in sorted(base.iterdir()):
                 db_path = candidate / config.sqlite_db_name
                 if not candidate.is_dir() or not db_path.exists():
                     continue
+                sqlcipher_key_hex: str | None = None
+                if master_key is not None:
+                    namespace = _read_namespace_metadata(candidate)
+                    if namespace is None:
+                        logger.warning("encrypted_namespace_discovery_skipped", path=str(candidate))
+                        continue
+                    sqlcipher_key_hex = derive_namespace_key(master_key, namespace)
                 store_backend: StorageBackend = stack.enter_context(
-                    SQLiteBackend(db_path=db_path, dim=config.embedding_dim)
+                    SQLiteBackend(db_path=db_path, dim=config.embedding_dim, sqlcipher_key_hex=sqlcipher_key_hex)
                 )
                 namespaces = store_backend.list_namespaces()
                 if namespaces:

@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from trw_memory.exceptions import LocalOnlyViolationError
+from trw_memory.embeddings import get_local_embedder
 from trw_memory.embeddings.local import LocalEmbeddingProvider
 
 # ---------------------------------------------------------------------------
@@ -218,9 +219,20 @@ class TestLocalOnlyModelLoading:
             provider = LocalEmbeddingProvider()
             with pytest.raises(
                 LocalOnlyViolationError,
-                match="memory_local_only=True disables all network access",
+                match=(
+                    "Model 'all-MiniLM-L6-v2' not found in local cache. Download is blocked "
+                    r"\(memory_local_only=True\)"
+                ),
             ):
                 provider._load_model()
+
+    def test_get_local_embedder_propagates_local_only_violation(self) -> None:
+        with patch(
+            "trw_memory.embeddings.local.LocalEmbeddingProvider.available",
+            side_effect=LocalOnlyViolationError("blocked"),
+        ):
+            with pytest.raises(LocalOnlyViolationError, match="blocked"):
+                get_local_embedder()
 
 
 # ---------------------------------------------------------------------------
