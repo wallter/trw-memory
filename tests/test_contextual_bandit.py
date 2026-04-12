@@ -109,6 +109,23 @@ def test_select_with_context() -> None:
     assert score > 0.0  # UCB should be positive with identity A_inv
 
 
+def test_select_decision_returns_runner_up_metadata() -> None:
+    """Contextual live integrations can request a Thompson-compatible decision."""
+    selector = ContextualBanditSelector(feature_dim=2, alpha=0.5)
+    arms = ["arm_a", "arm_b"]
+
+    for _ in range(40):
+        selector.update("arm_a", reward=1.0, context_vector=[1.0, 0.0])
+        selector.update("arm_b", reward=0.0, context_vector=[1.0, 0.0])
+
+    decision = selector.select_decision(arms, context_vector=[1.0, 0.0])
+
+    assert decision.selected_id == "arm_a"
+    assert decision.runner_up_id == "arm_b"
+    assert 0.0 < decision.selection_probability <= 1.0
+    assert 0.0 <= (decision.runner_up_probability or 0.0) < 1.0
+
+
 # ---------------------------------------------------------------------------
 # test_dimension_mismatch_raises
 # ---------------------------------------------------------------------------
@@ -251,6 +268,21 @@ def test_to_dict_from_dict_round_trip() -> None:
     rest_sel, rest_score = restored.select(arms, context_vector=context)
     assert orig_sel == rest_sel
     assert orig_score == pytest.approx(rest_score)
+
+
+def test_compact_dict_round_trip_restores_observed_arms() -> None:
+    """Compact envelope persistence restores a behaviorally useful selector."""
+    selector = ContextualBanditSelector(feature_dim=2, alpha=0.5)
+    for _ in range(30):
+        selector.update("arm_a", reward=1.0, context_vector=[1.0, 0.0])
+        selector.update("arm_b", reward=0.0, context_vector=[1.0, 0.0])
+
+    compact = selector.to_compact_dict(max_arms=4)
+    restored = ContextualBanditSelector.from_compact_dict(compact)
+
+    assert restored._arms["arm_a"].n_obs == selector._arms["arm_a"].n_obs
+    selected_id, _ = restored.select(["arm_a", "arm_b"], context_vector=[1.0, 0.0])
+    assert selected_id == "arm_a"
 
 
 # ---------------------------------------------------------------------------
