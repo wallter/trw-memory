@@ -9,7 +9,12 @@ Public API re-exported from submodules:
 - ``poisoning`` — memory poisoning anomaly detection
 """
 
-from trw_memory.exceptions import LocalOnlyViolationError
+from trw_memory.exceptions import (
+    EncryptionUnavailableError,
+    KeyRotationError,
+    LocalOnlyViolationError,
+    MasterKeyNotFoundError,
+)
 from trw_memory.security.audit import (
     AuditLog,
     AuditRecord,
@@ -57,7 +62,10 @@ __all__ = [
     "AnomalyType",
     "AuditLog",
     "AuditRecord",
+    "EncryptionUnavailableError",
+    "KeyRotationError",
     "LocalOnlyViolationError",
+    "MasterKeyNotFoundError",
     "PIIAction",
     "PIIMatch",
     "PIIType",

@@ -46,3 +46,15 @@ class DimensionMismatchError(MemoryError):
 
 class LocalOnlyViolationError(MemoryError):
     """Raised when a network-capable operation is attempted in local-only mode."""
+
+
+class MasterKeyNotFoundError(MemoryError):
+    """Raised when no usable master key exists in any configured source."""
+
+
+class EncryptionUnavailableError(MemoryError):
+    """Raised when an encryption-required runtime dependency is unavailable."""
+
+
+class KeyRotationError(MemoryError):
+    """Raised when key rotation fails or cannot be safely completed."""

@@ -16,10 +16,14 @@ from __future__ import annotations
 
 import structlog
 
+from trw_memory.exceptions import LocalOnlyViolationError
+from trw_memory.models.config import MemoryConfig
+
 logger = structlog.get_logger(__name__)
 
 _DEFAULT_MODEL = "all-MiniLM-L6-v2"
 _DEFAULT_DIM = 384
+_LOCAL_ONLY_ERROR_MESSAGE = "Operation blocked: memory_local_only=True disables all network access."
 
 
 class LocalEmbeddingProvider:
@@ -55,10 +59,11 @@ class LocalEmbeddingProvider:
             return self._model
 
         self._load_attempted = True
+        config = MemoryConfig()
         try:
             from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(self._model_name)
+            self._model = SentenceTransformer(self._model_name, local_files_only=config.local_only)
             logger.debug(
                 "embedding_model_loaded",
                 model=self._model_name,
@@ -69,7 +74,15 @@ class LocalEmbeddingProvider:
                 "embedding_library_unavailable",
                 hint="pip install trw-memory[embeddings]",
             )
-        except (OSError, RuntimeError, ValueError):
+        except OSError as exc:
+            if config.local_only:
+                raise LocalOnlyViolationError(_LOCAL_ONLY_ERROR_MESSAGE) from exc
+            logger.warning(
+                "embedding_model_load_failed",
+                model=self._model_name,
+                exc_info=True,
+            )
+        except (RuntimeError, TypeError, ValueError):
             logger.warning(
                 "embedding_model_load_failed",
                 model=self._model_name,

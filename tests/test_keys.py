@@ -24,7 +24,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from trw_memory.exceptions import ConfigError
+from trw_memory.exceptions import ConfigError, MasterKeyNotFoundError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.security import (
@@ -47,11 +47,13 @@ _KEY_LENGTH = 32
 def _make_config(
     key_source: str = "env",
     key_file_path: str = "~/.trw-memory/master.key",
+    auto_generate_key: bool = True,
 ) -> MemoryConfig:
     return MemoryConfig(
         encryption_enabled=True,
         key_source=key_source,  # type: ignore[arg-type]
         key_file_path=key_file_path,
+        auto_generate_key=auto_generate_key,
     )
 
 
@@ -111,12 +113,35 @@ class TestGetMasterKeyEnv:
         with pytest.raises(ConfigError, match="Invalid hex"):
             get_master_key(config)
 
-    def test_no_sources_available_raises_config_error(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_no_sources_available_raises_master_key_not_found(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         monkeypatch.delenv("MEMORY_MASTER_KEY", raising=False)
         nonexistent_file = tmp_path / "nonexistent.key"
-        config = _make_config(key_source="env", key_file_path=str(nonexistent_file))
-        with pytest.raises(ConfigError, match="No master key found"):
+        config = _make_config(
+            key_source="env",
+            key_file_path=str(nonexistent_file),
+            auto_generate_key=False,
+        )
+        with pytest.raises(MasterKeyNotFoundError, match="No master key found"):
             get_master_key(config)
+
+    def test_auto_generates_file_key_when_no_source_available(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.delenv("MEMORY_MASTER_KEY", raising=False)
+        generated_path = tmp_path / "generated.key"
+
+        with patch("trw_memory.security.keys._KEYRING_AVAILABLE", False):
+            config = _make_config(
+                key_source="env",
+                key_file_path=str(generated_path),
+                auto_generate_key=True,
+            )
+            result = get_master_key(config)
+
+        assert len(result) == _KEY_LENGTH
+        assert generated_path.read_bytes() == result
 
 
 # ---------------------------------------------------------------------------
@@ -133,11 +158,17 @@ class TestGetMasterKeyFile:
         result = get_master_key(config)
         assert result == key
 
-    def test_file_not_found_raises_config_error(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_file_not_found_raises_master_key_not_found(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         monkeypatch.delenv("MEMORY_MASTER_KEY", raising=False)
         nonexistent = tmp_path / "no.key"
-        config = _make_config(key_source="file", key_file_path=str(nonexistent))
-        with pytest.raises(ConfigError, match="No master key found"):
+        config = _make_config(
+            key_source="file",
+            key_file_path=str(nonexistent),
+            auto_generate_key=False,
+        )
+        with pytest.raises(MasterKeyNotFoundError, match="No master key found"):
             get_master_key(config)
 
     def test_file_wrong_size_raises_config_error(self, tmp_path: Path) -> None:
@@ -246,6 +277,21 @@ class TestGetMasterKeyKeyring:
             result = get_master_key(config)
 
         assert result == key
+
+    def test_generates_new_key_in_keyring_when_enabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MEMORY_MASTER_KEY", raising=False)
+        mock_keyring = MagicMock()
+        mock_keyring.get_password.return_value = None
+
+        with (
+            patch("trw_memory.security.keys._keyring", mock_keyring),
+            patch("trw_memory.security.keys._KEYRING_AVAILABLE", True),
+        ):
+            config = _make_config(key_source="keyring", auto_generate_key=True)
+            result = get_master_key(config)
+
+        assert len(result) == _KEY_LENGTH
+        mock_keyring.set_password.assert_called_once_with("trw-memory", "master-key", result.hex())
 
 
 # ---------------------------------------------------------------------------

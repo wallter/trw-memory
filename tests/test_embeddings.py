@@ -15,6 +15,9 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from trw_memory.exceptions import LocalOnlyViolationError
 from trw_memory.embeddings.local import LocalEmbeddingProvider
 
 # ---------------------------------------------------------------------------
@@ -170,6 +173,54 @@ class TestGracefulDegradationViaImport:
             provider._load_attempted = True
             result = provider.embed_batch(["a", "b"])
         assert result == [None, None]
+
+
+class TestLocalOnlyModelLoading:
+    def test_load_model_uses_local_files_only_when_local_only_enabled(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "true")
+        captured: dict[str, object] = {}
+
+        class FakeSentenceTransformer:
+            def __init__(self, model_name: str, *, local_files_only: bool) -> None:
+                captured["model_name"] = model_name
+                captured["local_files_only"] = local_files_only
+
+        fake_module = MagicMock(SentenceTransformer=FakeSentenceTransformer)
+
+        with patch.dict("sys.modules", {"sentence_transformers": fake_module}):
+            provider = LocalEmbeddingProvider()
+            model = provider._load_model()
+
+        assert model is not None
+        assert captured == {
+            "model_name": "all-MiniLM-L6-v2",
+            "local_files_only": True,
+        }
+
+    def test_load_model_raises_local_only_violation_when_uncached_model_requires_download(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "true")
+
+        class FakeSentenceTransformer:
+            def __init__(self, model_name: str, *, local_files_only: bool) -> None:
+                assert model_name == "all-MiniLM-L6-v2"
+                assert local_files_only is True
+                raise OSError("model not cached")
+
+        fake_module = MagicMock(SentenceTransformer=FakeSentenceTransformer)
+
+        with patch.dict("sys.modules", {"sentence_transformers": fake_module}):
+            provider = LocalEmbeddingProvider()
+            with pytest.raises(
+                LocalOnlyViolationError,
+                match="memory_local_only=True disables all network access",
+            ):
+                provider._load_model()
 
 
 # ---------------------------------------------------------------------------

@@ -26,12 +26,15 @@ def test_core_exports_exist() -> None:
     """All core exports from __all__ are importable."""
     from trw_memory import (
         ConfigError,
+        EncryptionUnavailableError,
+        KeyRotationError,
         MemoryConfig,
         MemoryEntry,
         MemoryError,
         MemoryEvent,
         MemoryEventType,
         MemoryIndex,
+        MasterKeyNotFoundError,
         MemoryStatus,
         StorageError,
         namespace_to_path,
@@ -39,12 +42,15 @@ def test_core_exports_exist() -> None:
     )
 
     assert issubclass(ConfigError, Exception)
+    assert issubclass(EncryptionUnavailableError, Exception)
+    assert issubclass(KeyRotationError, Exception)
     assert issubclass(MemoryConfig, object)
     assert issubclass(MemoryEntry, object)
     assert issubclass(MemoryError, Exception)
     assert issubclass(MemoryEvent, object)
     assert issubclass(MemoryEventType, object)
     assert issubclass(MemoryIndex, object)
+    assert issubclass(MasterKeyNotFoundError, Exception)
     assert issubclass(MemoryStatus, object)
     assert issubclass(StorageError, Exception)
     assert callable(namespace_to_path)
@@ -68,6 +74,9 @@ def test_all_exports_complete() -> None:
         "ConfigError",
         "DimensionMismatchError",
         "LocalOnlyViolationError",
+        "EncryptionUnavailableError",
+        "KeyRotationError",
+        "MasterKeyNotFoundError",
         "MemoryClient",
         "MemoryConfig",
         "MemoryConnectionError",
@@ -93,7 +102,10 @@ def test_exceptions_inherit_properly() -> None:
         AuthorizationError,
         ConfigError,
         DimensionMismatchError,
+        EncryptionUnavailableError,
+        KeyRotationError,
         LocalOnlyViolationError,
+        MasterKeyNotFoundError,
         MemoryConnectionError,
         MemoryError,
         MemoryNotFoundError,
@@ -110,6 +122,9 @@ def test_exceptions_inherit_properly() -> None:
     assert issubclass(AuthorizationError, MemoryError)
     assert issubclass(DimensionMismatchError, MemoryError)
     assert issubclass(LocalOnlyViolationError, MemoryError)
+    assert issubclass(EncryptionUnavailableError, MemoryError)
+    assert issubclass(KeyRotationError, MemoryError)
+    assert issubclass(MasterKeyNotFoundError, MemoryError)
 
 
 def test_memory_status_is_enum() -> None:
