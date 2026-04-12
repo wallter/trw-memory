@@ -65,7 +65,7 @@ def test_migration_idempotent() -> None:
 
 def test_entry_columns_count_49() -> None:
     """ENTRY_COLUMNS must contain exactly 49 entries after adding session_count."""
-    assert len(ENTRY_COLUMNS) == 49, f"Expected 49, got {len(ENTRY_COLUMNS)}: {ENTRY_COLUMNS}"
+    assert len(ENTRY_COLUMNS) == 52, f"Expected 52, got {len(ENTRY_COLUMNS)}: {ENTRY_COLUMNS}"  # +3 for PRD-CORE-132
 
 
 def test_entry_columns_contains_new_fields() -> None:

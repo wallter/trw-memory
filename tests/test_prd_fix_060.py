@@ -150,9 +150,13 @@ class TestFR02EntryToDict:
             "sessions_surfaced",
             "avg_rework_delta",
             "outcome_correlation",
+            "recall_count",
+            "helpful_count",
+            "unhelpful_count",
+            "session_count",
         }
         assert set(result.keys()) == expected_keys
-        assert len(result) == 48
+        assert len(result) == 52
 
         # Verify types of serialized values
         assert result["id"] == "M-TEST-001"
@@ -299,7 +303,7 @@ class TestFR05BooleanConversion:
         from trw_memory.storage._row_mapper import row_to_entry
 
         now_iso = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc).isoformat()
-        # Build a row tuple matching ENTRY_COLUMNS order (48 columns)
+        # Build a row tuple matching ENTRY_COLUMNS order (52 columns)
         row = (
             "M-BOOL-001",  # id
             "content",  # content
@@ -314,6 +318,7 @@ class TestFR05BooleanConversion:
             now_iso,  # updated_at
             None,  # last_accessed_at
             0,  # access_count
+            0,  # session_count
             0.5,  # q_value
             0,  # q_observations
             "agent",  # source
@@ -349,6 +354,9 @@ class TestFR05BooleanConversion:
             "",  # sync_hash (PRD-INFRA-051)
             0,  # sync_seq (PRD-INFRA-051)
             None,  # last_synced_at (PRD-INFRA-051)
+            0,  # recall_count (PRD-CORE-132)
+            0,  # helpful_count (PRD-CORE-132)
+            0,  # unhelpful_count (PRD-CORE-132)
         )
 
         entry = row_to_entry(row)
@@ -374,7 +382,8 @@ class TestFR05BooleanConversion:
             now_iso,
             now_iso,
             None,
-            0,
+            0,  # access_count
+            0,  # session_count
             0.5,
             0,
             "agent",
@@ -410,6 +419,9 @@ class TestFR05BooleanConversion:
             "",  # sync_hash (PRD-INFRA-051)
             0,  # sync_seq (PRD-INFRA-051)
             None,  # last_synced_at (PRD-INFRA-051)
+            0,  # recall_count (PRD-CORE-132)
+            0,  # helpful_count (PRD-CORE-132)
+            0,  # unhelpful_count (PRD-CORE-132)
         )
 
         entry = row_to_entry(row)
