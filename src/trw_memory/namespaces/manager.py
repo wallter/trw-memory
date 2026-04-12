@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 
 from trw_memory.namespaces.validation import validate_namespace
-from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+if TYPE_CHECKING:
+    from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 
 class NamespaceManager:
