@@ -7,10 +7,13 @@ Uses an in-memory SQLite database with the DDL from sqlite_backend.py.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
 from trw_memory.graph import (
     IMPORTANCE_BOOST,
+    _merge_cross_validated_entry,
     _safe_cosine_similarity,
     apply_importance_boost,
     apply_importance_decay,
@@ -21,7 +24,10 @@ from trw_memory.graph import (
     graph_query,
     memory_decay_pass,
 )
+from trw_memory.integrations._backend import create_backend_from_config
+from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 # ---------------------------------------------------------------------------
 # DDL (copied from sqlite_backend.py for in-memory test setup)
@@ -469,6 +475,32 @@ class TestApplyImportanceBoost:
         assert len(result.outcome_history) == 2
         assert result.outcome_history[0] == "previous_event"
         assert "importance_boost" in result.outcome_history[1]
+
+    def test_concurrent_cross_validation_merges_both_project_boosts(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
+
+        with create_backend_from_config(cfg, "project:default") as storage:
+            backend = storage
+            backend.store(_make_entry("e1", importance=0.5))
+
+            threads = [
+                threading.Thread(
+                    target=_merge_cross_validated_entry,
+                    args=(backend, "e1", project_id, 0.97),
+                )
+                for project_id in ("project-a", "project-b")
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            updated = backend.get("e1")
+            assert updated is not None
+            assert updated.importance == 0.6
+            assert updated.cross_validated is True
+            assert sum("importance_boost" in item for item in updated.outcome_history) == 2
+            assert sum("cross_validated:project_id=" in item for item in updated.outcome_history) == 2
 
 
 class TestApplyImportanceDecay:

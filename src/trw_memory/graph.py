@@ -79,6 +79,8 @@ _PROPAGATION_RATES: dict[str, float] = {
     "depends_on": 0.1,
 }
 _NEGATIVE_MULTIPLIER = 0.5
+_ENTRY_UPDATE_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_ENTRY_UPDATE_LOCKS_GUARD = threading.Lock()
 
 
 def _optional_lock(lock: threading.Lock | None) -> contextlib.AbstractContextManager[bool]:
@@ -199,6 +201,35 @@ def _persist_cross_validated_entry(
     )
 
 
+def _entry_update_lock(backend: StorageBackend, entry_id: str) -> threading.Lock:
+    """Return a stable per-entry lock for in-process cross-validation updates."""
+    backend_key = str(getattr(backend, "_db_path", f"backend:{id(backend)}"))
+    key = (backend_key, entry_id)
+    with _ENTRY_UPDATE_LOCKS_GUARD:
+        return _ENTRY_UPDATE_LOCKS.setdefault(key, threading.Lock())
+
+
+def _merge_cross_validated_entry(
+    backend: StorageBackend,
+    entry_id: str,
+    project_id: str,
+    similarity: float,
+) -> tuple[MemoryEntry | None, bool]:
+    """Atomically append a single project's validation and boost once."""
+    with _entry_update_lock(backend, entry_id):
+        current = backend.get(entry_id)
+        if current is None:
+            return None, False
+        if _entry_has_cross_validation(current, project_id):
+            return current, False
+
+        updated = _append_cross_validation(current, project_id, similarity)
+        updated = apply_importance_boost(updated)
+        _persist_cross_validated_entry(backend, current, updated)
+        reloaded = backend.get(entry_id)
+        return (reloaded or updated), True
+
+
 def _apply_cross_project_validation(
     entry: MemoryEntry,
     backend: StorageBackend,
@@ -224,7 +255,7 @@ def _apply_cross_project_validation(
 
     cfg = config or MemoryConfig()
     matched_projects = 0
-    updated_entry = entry
+    current_entry = entry
 
     with discover_namespace_backends(cfg) as stores:
         for namespaces, remote_backend in stores:
@@ -257,7 +288,7 @@ def _apply_cross_project_validation(
                     for candidate, remote_embedding in remote_candidates
                 ]
                 if not detect_cross_validation(
-                    updated_entry,
+                    current_entry,
                     conn,
                     embedding=embedding,
                     remote_entries=remote_payload,
@@ -269,19 +300,24 @@ def _apply_cross_project_validation(
                     if similarity <= CROSS_VALIDATION_THRESHOLD:
                         continue
 
-                    if not _entry_has_cross_validation(updated_entry, project_id):
-                        updated_entry = _append_cross_validation(updated_entry, project_id, similarity)
-                        updated_entry = apply_importance_boost(updated_entry)
+                    merged_entry, applied = _merge_cross_validated_entry(
+                        backend,
+                        entry.id,
+                        project_id,
+                        similarity,
+                    )
+                    if merged_entry is not None:
+                        current_entry = merged_entry
+                    if applied:
                         matched_projects += 1
 
-                    if _entry_has_cross_validation(remote_entry, current_project):
-                        continue
+                    _merge_cross_validated_entry(
+                        remote_backend,
+                        remote_entry.id,
+                        current_project,
+                        similarity,
+                    )
 
-                    updated_remote = _append_cross_validation(remote_entry, current_project, similarity)
-                    updated_remote = apply_importance_boost(updated_remote)
-                    _persist_cross_validated_entry(remote_backend, remote_entry, updated_remote)
-
-    _persist_cross_validated_entry(backend, entry, updated_entry)
     return matched_projects
 
 
