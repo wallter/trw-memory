@@ -5,9 +5,16 @@ Tests the *_impl functions directly without requiring a running FastMCP server.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock
 
+from trw_memory.integrations._backend import create_backend_from_config
+from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.namespaces.manager import NamespaceManager
+from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools.forget import memory_forget_impl
 from trw_memory.tools.recall import memory_recall_impl
 from trw_memory.tools.search import memory_search_impl
@@ -101,6 +108,27 @@ class TestMemoryRecallImpl:
         result = memory_recall_impl("test", "project:default", backend=backend, min_score=1.0)
         assert "memories" in result
         assert isinstance(result["memories"], list)
+
+    def test_expired_team_namespace_returns_empty_with_flag(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
+
+        with create_backend_from_config(cfg, "team:sprint-24") as storage:
+            backend = cast(SQLiteBackend, storage)
+            backend.store(_make_entry("M-001", namespace="team:sprint-24"))
+            manager = NamespaceManager(backend)
+            manager.ensure_team_namespace(
+                "team:sprint-24",
+                created_at=datetime.now(timezone.utc) - timedelta(days=2),
+            )
+            manager.mark_team_namespace_completed(
+                "team:sprint-24",
+                completed_at=datetime.now(timezone.utc) - timedelta(days=2),
+            )
+
+            result = memory_recall_impl("", "team:sprint-24", backend=backend)
+
+            assert result["memories"] == []
+            assert result["namespace_expired"] is True
 
 
 # ---------------------------------------------------------------------------

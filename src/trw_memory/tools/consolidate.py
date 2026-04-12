@@ -21,8 +21,10 @@ from trw_memory.exceptions import ConfigError, StorageError
 from trw_memory.lifecycle.consolidation import consolidate_cycle
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
+from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools._types import McpServer
 
 logger = structlog.get_logger(__name__)
@@ -88,6 +90,9 @@ def _promote_team_memories(
         discarded=discarded_count,
     )
 
+    if isinstance(source_backend, SQLiteBackend):
+        NamespaceManager(source_backend).mark_team_namespace_completed(namespace, completed_at=now)
+
     return {
         "promoted_count": promoted_count,
         "discarded_count": discarded_count,
@@ -103,6 +108,7 @@ def _promote_all_team_namespaces(
 ) -> dict[str, object]:
     """Promote all discovered team namespaces and aggregate their summaries."""
     namespace_results: list[dict[str, object]] = []
+    errors: list[dict[str, str]] = []
     seen_namespaces: set[str] = set()
 
     with discover_namespace_backends(cfg) as stores:
@@ -111,6 +117,11 @@ def _promote_all_team_namespaces(
                 if not namespace.startswith("team:") or namespace in seen_namespaces:
                     continue
                 seen_namespaces.add(namespace)
+
+                if isinstance(store_backend, SQLiteBackend):
+                    if NamespaceManager(store_backend).team_namespace_expired(namespace):
+                        logger.debug("team_namespace_wildcard_skip_expired", namespace=namespace)
+                        continue
 
                 project_backend = namespace_backend_factory("project:default") if namespace_backend_factory else store_backend
                 try:
@@ -121,11 +132,18 @@ def _promote_all_team_namespaces(
                             target_backend=project_backend,
                         )
                     )
+                except (StorageError, ValueError) as exc:
+                    logger.exception(
+                        "team_namespace_wildcard_namespace_failed",
+                        namespace=namespace,
+                        error=str(exc),
+                    )
+                    errors.append({"namespace": namespace, "error": str(exc)})
                 finally:
                     if project_backend is not store_backend:
                         project_backend.close()
 
-    if not namespace_results:
+    if not namespace_results and not errors:
         logger.debug("team_namespace_wildcard_skipped", reason="no_team_namespaces")
         return {
             "promoted_count": 0,
@@ -143,6 +161,8 @@ def _promote_all_team_namespaces(
         "namespace_id": TEAM_NAMESPACE_WILDCARD,
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "namespaces": namespace_results,
+        **({"errors": errors} if errors else {}),
+        **({"status": "error" if not namespace_results else "partial"} if errors else {}),
     }
 
 

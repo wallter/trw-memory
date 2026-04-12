@@ -171,6 +171,26 @@ class TestMemoryStoreImpl:
                 expected.insert(0, ("similarity", 2))
             assert [tuple(row) for row in edge_rows] == expected
 
+    def test_team_namespace_store_registers_lifecycle_row(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path), embedding_dim=4)
+
+        with create_backend_from_config(cfg, "team:sprint-37") as storage:
+            backend = cast(SQLiteBackend, storage)
+            result = memory_store_impl(
+                "team discovery",
+                "team:sprint-37",
+                backend=backend,
+                tags=["team"],
+                config=cfg,
+            )
+
+            assert result["status"] == "stored"
+            row = backend._conn.execute(
+                "SELECT team_id, expires_at, status FROM memory_namespaces WHERE namespace_id = ?",
+                ("team:sprint-37",),
+            ).fetchone()
+            assert tuple(row) == ("sprint-37", None, "active")
+
 
 # ---------------------------------------------------------------------------
 # memory_consolidate_impl

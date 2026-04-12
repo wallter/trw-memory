@@ -21,9 +21,11 @@ from trw_memory.lifecycle._recall import record_recall_access
 from trw_memory.lifecycle.scoring import entry_utility, rank_by_utility
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
+from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.retrieval import hybrid_search
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools._types import McpServer
 
 logger = structlog.get_logger(__name__)
@@ -82,6 +84,19 @@ def memory_recall_impl(
     except ConfigError as exc:
         return {"error": str(exc), "status": "invalid"}
 
+    if namespace.startswith("team:") and isinstance(backend, SQLiteBackend):
+        if NamespaceManager(backend).team_namespace_expired(namespace):
+            logger.debug("memory_recall_team_namespace_expired", namespace=namespace)
+            return {
+                "memories": [],
+                "total_matches": 0,
+                "query": query,
+                "tokens_used": 0,
+                "tokens_budget": token_budget,
+                "tokens_truncated": False,
+                "namespace_expired": True,
+            }
+
     # Validate any additional namespaces
     extra_ns: list[str] = []
     for ns in include_namespaces or []:
@@ -107,6 +122,11 @@ def memory_recall_impl(
             ns_backend = backend
             if ns != namespace and namespace_backend_factory is not None:
                 ns_backend = stack.enter_context(namespace_backend_factory(ns))
+
+            if ns.startswith("team:") and isinstance(ns_backend, SQLiteBackend):
+                if NamespaceManager(ns_backend).team_namespace_expired(ns):
+                    logger.debug("recall_expired_namespace_skipped", namespace=ns)
+                    continue
 
             ns_entries = ns_backend.list_entries(
                 status=MemoryStatus.ACTIVE,
