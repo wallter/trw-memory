@@ -5,10 +5,14 @@ Tests the *_impl functions directly without requiring a running FastMCP server.
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock, patch
 
+from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools.consolidate import memory_consolidate_impl
 from trw_memory.tools.status import memory_status_impl
 from trw_memory.tools.store import memory_store_impl
@@ -130,6 +134,42 @@ class TestMemoryStoreImpl:
         memory_store_impl("  padded content  ", "project:default", backend=backend)
         stored_entry: MemoryEntry = backend.store.call_args[0][0]
         assert stored_entry.content == "padded content"
+
+    def test_sqlite_store_populates_similarity_and_tag_edges(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path), embedding_dim=4)
+
+        with create_backend_from_config(cfg, "project:default") as storage:
+            backend = cast(SQLiteBackend, storage)
+            backend.store(
+                MemoryEntry(
+                    id="M-existing",
+                    content="existing memory",
+                    namespace="project:default",
+                    tags=["python", "async", "sqlite"],
+                )
+            )
+            backend.upsert_vector("M-existing", [1.0, 0.0, 0.0, 0.0])
+
+            fake_embedder = MagicMock()
+            fake_embedder.embed.return_value = [1.0, 0.0, 0.0, 0.0]
+
+            with patch("trw_memory.tools.store.get_local_embedder", return_value=fake_embedder):
+                result = memory_store_impl(
+                    "new memory",
+                    "project:default",
+                    backend=backend,
+                    tags=["python", "async", "graph"],
+                    config=cfg,
+                )
+
+            assert result["status"] == "stored"
+            edge_rows = backend._conn.execute(
+                "SELECT edge_type, COUNT(*) FROM memory_graph_edges GROUP BY edge_type ORDER BY edge_type"
+            ).fetchall()
+            expected = [("tag_cooccurrence", 2)]
+            if backend._vec_available:
+                expected.insert(0, ("similarity", 2))
+            assert [tuple(row) for row in edge_rows] == expected
 
 
 # ---------------------------------------------------------------------------

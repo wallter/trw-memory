@@ -6,6 +6,7 @@ stores it via the backend, and returns the memory_id and status.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -13,6 +14,7 @@ import structlog
 
 from trw_memory.embeddings import get_local_embedder
 from trw_memory.exceptions import ConfigError, StorageError
+from trw_memory.graph import update_entry_graph
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.namespaces.validation import validate_namespace
@@ -83,6 +85,7 @@ def memory_store_impl(
 
     try:
         backend.store(entry)
+        embedding: list[float] | None = None
         # Mirror MemoryClient.store(): tool writes should populate vectors too,
         # otherwise tool-created memories rank differently from SDK-created ones.
         cfg = config or MemoryConfig()
@@ -103,6 +106,12 @@ def memory_store_impl(
                 raise StorageError(
                     f"failed to persist vector for {entry_id!r}; entry write was rolled back"
                 ) from exc
+        try:
+            # Graph enrichment is a secondary index over the stored entry. Log
+            # failures explicitly, but do not roll back the canonical row/vector.
+            update_entry_graph(entry, backend, embedding=embedding)
+        except (StorageError, sqlite3.Error, ValueError):
+            logger.warning("memory_store_graph_update_failed", entry_id=entry_id, exc_info=True)
     except Exception as exc:  # broad catch: tool error boundary
         logger.exception("memory_store_failed", entry_id=entry_id, error=str(exc))
         return {"error": f"storage error: {exc}", "status": "error"}

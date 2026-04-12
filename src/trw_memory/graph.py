@@ -29,11 +29,13 @@ __all__ = [
     "graph_query",
     "memory_decay_pass",
     "propagate_impact",
+    "update_entry_graph",
 ]
 
 from trw_memory.exceptions import DimensionMismatchError
-from trw_memory.models.memory import MemoryEntry
+from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.retrieval.dense import cosine_similarity
+from trw_memory.storage.interface import StorageBackend
 
 logger = structlog.get_logger(__name__)
 
@@ -82,6 +84,59 @@ def _optional_lock(lock: threading.Lock | None) -> contextlib.AbstractContextMan
     if lock is not None:
         return lock
     return contextlib.nullcontext(True)
+
+
+def update_entry_graph(
+    entry: MemoryEntry,
+    backend: StorageBackend,
+    *,
+    embedding: list[float] | None = None,
+) -> dict[str, int]:
+    """Best-effort graph enrichment for a freshly written entry.
+
+    The graph is a secondary index over the canonical memory row. If the active
+    backend does not expose a SQLite connection, graph updates are skipped
+    without affecting the primary write path.
+    """
+    conn = getattr(backend, "_conn", None)
+    if not isinstance(conn, sqlite3.Connection):
+        logger.debug("graph_update_skipped", entry_id=entry.id, reason="no_sqlite_connection")
+        return {"similarity_edges": 0, "tag_edges": 0, "consolidation_edges": 0}
+
+    candidate_entries = backend.list_entries(
+        status=MemoryStatus.ACTIVE,
+        namespace=entry.namespace,
+        limit=CANDIDATE_LIMIT,
+    )
+    candidate_ids = [candidate.id for candidate in candidate_entries if candidate.id != entry.id]
+    candidate_embeddings = (
+        list(backend.get_stored_embeddings(candidate_ids).items()) if embedding is not None and candidate_ids else None
+    )
+    lock = getattr(backend, "_lock", None)
+
+    similarity_edges = create_similarity_edges(
+        entry,
+        conn,
+        embedding=embedding,
+        candidate_embeddings=candidate_embeddings,
+        lock=lock,
+    )
+    tag_edges = create_tag_cooccurrence_edges(
+        entry,
+        conn,
+        candidate_entries=candidate_entries,
+        lock=lock,
+    )
+    consolidation_edges = create_consolidation_edges(
+        entry,
+        conn,
+        lock=lock,
+    )
+    return {
+        "similarity_edges": similarity_edges,
+        "tag_edges": tag_edges,
+        "consolidation_edges": consolidation_edges,
+    }
 
 
 def create_similarity_edges(

@@ -18,7 +18,7 @@ import asyncio
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,6 +28,8 @@ from trw_memory.exceptions import (
     MemoryNotFoundError,
     ToolAlreadyRegisteredError,
 )
+from trw_memory.models.memory import MemoryEntry
+from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -154,6 +156,34 @@ class TestStore:
     async def test_store_with_detail(self, client: MemoryClient) -> None:
         result = await client.store("summary", detail="extended explanation", tags=["a"])
         assert result["status"] == "stored"
+
+    async def test_store_populates_similarity_and_tag_edges(self, client: MemoryClient) -> None:
+        backend = cast(SQLiteBackend, client._get_backend())
+        backend.store(
+            MemoryEntry(
+                id="M-existing",
+                content="existing memory",
+                namespace="default",
+                tags=["python", "async", "sqlite"],
+            )
+        )
+        backend.upsert_vector("M-existing", [1.0, 0.0, 0.0, 0.0])
+
+        fake_embedder = MagicMock()
+        fake_embedder.embed.return_value = [1.0, 0.0, 0.0, 0.0]
+
+        with patch.object(client, "_get_embedder", return_value=fake_embedder):
+            stored = await client.store("new memory", tags=["python", "async", "graph"])
+
+        edge_rows = backend._conn.execute(
+            "SELECT edge_type, COUNT(*) FROM memory_graph_edges WHERE source_id IN (?, ?) OR target_id IN (?, ?) "
+            "GROUP BY edge_type ORDER BY edge_type",
+            (stored["memory_id"], "M-existing", stored["memory_id"], "M-existing"),
+        ).fetchall()
+        expected = [("tag_cooccurrence", 2)]
+        if backend._vec_available:
+            expected.insert(0, ("similarity", 2))
+        assert [tuple(row) for row in edge_rows] == expected
 
     async def test_store_sync_publish_marks_entry_as_published(
         self,
