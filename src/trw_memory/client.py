@@ -30,6 +30,7 @@ from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.exceptions import (
     MemoryConnectionError,
     MemoryNotFoundError,
+    SchemaValidationError,
     StorageError,
     ToolAlreadyRegisteredError,
 )
@@ -52,6 +53,7 @@ from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.retrieval.dense import cosine_similarity
 from trw_memory.security.pii import anonymize_installation_id
+from trw_memory.security.poisoning import validate_store_inputs
 from trw_memory.security.rbac import Permission, require_namespace_permission
 from trw_memory.security.runtime import (
     append_audit_event,
@@ -127,6 +129,9 @@ class MemoryResultDict(TypedDict):
     q_observations: NotRequired[int]
     recurrence: NotRequired[int]
     access_count: NotRequired[int]
+    metadata: NotRequired[dict[str, str]]
+    anomaly_dimension: NotRequired[str]
+    z_score: NotRequired[float]
     _relevance_hint: NotRequired[float]
 
 
@@ -149,6 +154,7 @@ class ForgetResultDict(TypedDict):
     memory_id: str
     status: str
     namespace: str
+    entries_deleted: NotRequired[int]
 
 
 @runtime_checkable
@@ -167,7 +173,7 @@ class AgentWithToolDecorator(Protocol):
 
 def _entry_to_result(entry: MemoryEntry, score: float = 0.0) -> MemoryResultDict:
     """Convert a MemoryEntry to a result dict."""
-    return MemoryResultDict(
+    result = MemoryResultDict(
         memory_id=entry.id,
         content=entry.content,
         detail=entry.detail,
@@ -185,6 +191,16 @@ def _entry_to_result(entry: MemoryEntry, score: float = 0.0) -> MemoryResultDict
         access_count=entry.access_count,
         _relevance_hint=score,
     )
+    if entry.metadata:
+        result["metadata"] = dict(entry.metadata)
+        if "anomaly_dimension" in entry.metadata:
+            result["anomaly_dimension"] = entry.metadata["anomaly_dimension"]
+        if "z_score" in entry.metadata:
+            try:
+                result["z_score"] = float(entry.metadata["z_score"])
+            except ValueError:
+                pass
+    return result
 
 
 def _create_local_backend(config: MemoryConfig, namespace: str) -> StorageBackend:
@@ -347,10 +363,18 @@ class MemoryClient:
         Raises:
             ValueError: If *content* is empty or *importance* out of range.
         """
-        if not content or not content.strip():
-            raise ValueError("content must not be empty")
-        if not 0.0 <= importance <= 1.0:
-            raise ValueError(f"importance must be in [0.0, 1.0], got {importance}")
+        try:
+            validate_store_inputs(content=content, detail=detail, tags=tags, metadata=metadata, importance=importance)
+        except SchemaValidationError as exc:
+            append_audit_event(
+                self._config,
+                "store_rejected",
+                entry_id=entry_id or "",
+                actor=source_identity or source,
+                namespace=self._namespace,
+                data={"reason": "schema_invalid", "failed_fields": exc.failed_fields, "session_id": session_id},
+            )
+            raise
         self._require_permission(Permission.WRITE, "store")
         self._maybe_start_retry_drain()
 
@@ -589,6 +613,13 @@ class MemoryClient:
                 final = await self._merge_shared_results(query, final, limit)
             final = self._apply_budget(final, token_budget)
             await self._record_recall_access(final)
+            append_audit_event(
+                self._config,
+                "recall",
+                actor="",
+                namespace=self._namespace,
+                data={"query": query[:80], "entries_returned": len(final)},
+            )
             self._remember_results_in_tiers(final)
             logger.debug(
                 "memory_recalled",
@@ -619,6 +650,13 @@ class MemoryClient:
             results = await self._merge_shared_results(query, results, limit)
         final = self._apply_budget(results, token_budget)
         await self._record_recall_access(final)
+        append_audit_event(
+            self._config,
+            "recall",
+            actor="",
+            namespace=self._namespace,
+            data={"query": query[:80], "entries_returned": len(final)},
+        )
         self._remember_results_in_tiers(final)
         return final
 
@@ -843,9 +881,16 @@ class MemoryClient:
             for namespace, entry_ids in grouped.items():
                 if namespace == self._namespace:
                     record_recall_access(self._get_backend(), entry_ids)
-                    continue
-                with _create_local_backend(self._config, namespace) as backend:
-                    record_recall_access(backend, entry_ids)
+                else:
+                    with _create_local_backend(self._config, namespace) as backend:
+                        record_recall_access(backend, entry_ids)
+                append_audit_event(
+                    self._config,
+                    "access",
+                    actor="",
+                    namespace=namespace,
+                    data={"entry_ids": entry_ids, "entries_accessed": len(entry_ids)},
+                )
 
     def _tier_results(
         self,
@@ -1218,11 +1263,12 @@ class MemoryClient:
             self._pending_remote_retirements.update(remote_id for remote_id in remote_ids if remote_id)
         await self._apply_pending_remote_retirements()
 
-    async def forget(self, memory_id: str) -> ForgetResultDict:
+    async def forget(self, memory_id: str | None = None, *, actor: str | None = None) -> ForgetResultDict:
         """Delete a memory entry.
 
         Args:
             memory_id: ID of the memory to delete.
+            actor: Optional actor identity for GDPR-style bulk erasure.
 
         Returns:
             Dict with ``memory_id``, ``status``, ``namespace``.
@@ -1233,8 +1279,37 @@ class MemoryClient:
         """
         self._require_permission(Permission.DELETE, "forget")
         self._maybe_start_retry_drain()
+        if not memory_id and not actor:
+            raise ValueError("memory_id or actor must be provided")
         async with self._lock:
             backend = self._get_backend()
+            if actor:
+                deleted_count = 0
+                for candidate in backend.list_entries(
+                    namespace=self._namespace,
+                    limit=max(10_000, backend.count(namespace=self._namespace)),
+                ):
+                    if candidate.source_identity != actor:
+                        continue
+                    if backend.delete(candidate.id):
+                        deleted_count += 1
+                        remove_entry_from_tiers(self._config, self._namespace, candidate.id)
+                deleted_count += delete_quarantined_entries(self._config, namespace=self._namespace, actor=actor)
+                append_audit_event(
+                    self._config,
+                    "forget",
+                    actor=actor,
+                    namespace=self._namespace,
+                    data={"entries_deleted": deleted_count, "selector": "actor"},
+                )
+                return ForgetResultDict(
+                    memory_id="",
+                    status="deleted",
+                    namespace=self._namespace,
+                    entries_deleted=deleted_count,
+                )
+
+            assert memory_id is not None
             existing = backend.get(memory_id)
             if existing is None:
                 quarantined_deleted = delete_quarantined_entries(
@@ -1252,7 +1327,12 @@ class MemoryClient:
                     namespace=self._namespace,
                     data={"entries_deleted": quarantined_deleted, "quarantined": True},
                 )
-                return ForgetResultDict(memory_id=memory_id, status="deleted", namespace=self._namespace)
+                return ForgetResultDict(
+                    memory_id=memory_id,
+                    status="deleted",
+                    namespace=self._namespace,
+                    entries_deleted=quarantined_deleted,
+                )
             if existing.namespace != self._namespace:
                 raise MemoryNotFoundError(f"Memory entry {memory_id!r} not found in namespace {self._namespace!r}")
             remote_id = existing.remote_id
@@ -1280,6 +1360,7 @@ class MemoryClient:
             memory_id=memory_id,
             status="deleted",
             namespace=self._namespace,
+            entries_deleted=1,
         )
 
     async def search(
@@ -1321,13 +1402,16 @@ class MemoryClient:
                 self._config,
                 namespace=self._namespace,
                 actor=actor,
-                limit=limit * 5,
+                limit=max(limit * 5, 10_000) if actor is not None else limit * 5,
             )
         else:
             async with self._lock:
+                fetch_limit = limit * 5
+                if actor is not None:
+                    fetch_limit = max(fetch_limit, self._get_backend().count(namespace=self._namespace))
                 entries = self._get_backend().list_entries(
                     namespace=self._namespace,
-                    limit=limit * 5,  # over-fetch to allow for post-filtering
+                    limit=fetch_limit,  # over-fetch to allow for post-filtering
                 )
 
         # Post-filter
@@ -1356,6 +1440,17 @@ class MemoryClient:
             tag_filter=tags,
             min_importance=min_importance,
             result_count=len(final),
+        )
+        append_audit_event(
+            self._config,
+            "access",
+            actor=actor or "",
+            namespace=self._namespace,
+            data={
+                "entries_returned": len(final),
+                "status": status or "",
+                "tag_filter": tags or [],
+            },
         )
         return final
 
@@ -1387,14 +1482,23 @@ class MemoryClient:
                 include_shared=include_shared,
             )
 
-        async def memory_forget(memory_id: str) -> ForgetResultDict:
-            return await client.forget(memory_id)
+        async def memory_forget(memory_id: str | None = None, actor: str | None = None) -> ForgetResultDict:
+            return await client.forget(memory_id, actor=actor)
 
         async def memory_search(
             tags: list[str] | None = None,
             min_importance: float = 0.0,
+            limit: int = 50,
+            actor: str | None = None,
+            status: str | None = None,
         ) -> list[MemoryResultDict]:
-            return await client.search(tags=tags, min_importance=min_importance)
+            return await client.search(
+                tags=tags,
+                min_importance=min_importance,
+                limit=limit,
+                actor=actor,
+                status=status,
+            )
 
         return {
             "memory_store": memory_store,

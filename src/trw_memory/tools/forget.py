@@ -64,7 +64,7 @@ def memory_forget_impl(
     require_namespace_permission(cfg, namespace, Permission.DELETE, "forget")
 
     if actor:
-        entries = backend.list_entries(namespace=namespace, limit=10_000)
+        entries = backend.list_entries(namespace=namespace, limit=max(10_000, backend.count(namespace=namespace)))
         deleted_count = 0
         for candidate in entries:
             if candidate.source_identity != actor:
