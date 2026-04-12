@@ -190,6 +190,27 @@ class TestStore:
             expected.insert(0, ("similarity", 2))
         assert [tuple(row) for row in edge_rows] == expected
 
+    async def test_store_without_embedder_still_populates_tag_edges(self, client: MemoryClient) -> None:
+        backend = cast(SQLiteBackend, client._get_backend())
+        backend.store(
+            MemoryEntry(
+                id="M-existing-tags",
+                content="existing memory",
+                namespace="default",
+                tags=["python", "async", "sqlite"],
+            )
+        )
+
+        with patch.object(client, "_get_embedder", return_value=None):
+            stored = await client.store("new memory", tags=["python", "async", "graph"])
+
+        edge_rows = backend._conn.execute(
+            "SELECT edge_type, COUNT(*) FROM memory_graph_edges WHERE source_id IN (?, ?) OR target_id IN (?, ?) "
+            "GROUP BY edge_type ORDER BY edge_type",
+            (stored["memory_id"], "M-existing-tags", stored["memory_id"], "M-existing-tags"),
+        ).fetchall()
+        assert [tuple(row) for row in edge_rows] == [("tag_cooccurrence", 2)]
+
     async def test_store_registers_team_namespace_lifecycle_row(
         self,
         tmp_path: Path,
