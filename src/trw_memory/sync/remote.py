@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Literal, TypedDict, cast
+from typing import TypedDict, cast
 from urllib.parse import urlparse
 
 import httpx
 import structlog
 
-from trw_memory.exceptions import LocalOnlyViolationError
 from trw_memory.embeddings.interface import EmbeddingProvider
+from trw_memory.exceptions import LocalOnlyViolationError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.dense import cosine_similarity
@@ -125,7 +125,7 @@ def publish_memory_result(
     if embedding:
         payload["embedding"] = embedding
 
-    return _publish_payload_result(cast(dict[str, object], payload), cfg, entry_id=entry.id)
+    return _publish_payload_result(cast("dict[str, object]", payload), cfg, entry_id=entry.id)
 
 
 def publish_memory(

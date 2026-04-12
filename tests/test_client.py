@@ -15,12 +15,13 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
-import time
 import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator, cast
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -200,7 +201,7 @@ class TestRbacEnforcement:
         assert result["status"] == "stored"
 
     async def test_store_populates_similarity_and_tag_edges(self, client: MemoryClient) -> None:
-        backend = cast(SQLiteBackend, client._get_backend())
+        backend = cast("SQLiteBackend", client._get_backend())
         vector = [1.0, *([0.0] * (backend._dim - 1))]
         backend.store(
             MemoryEntry(
@@ -230,7 +231,7 @@ class TestRbacEnforcement:
         assert [tuple(row) for row in edge_rows] == expected
 
     async def test_store_without_embedder_still_populates_tag_edges(self, client: MemoryClient) -> None:
-        backend = cast(SQLiteBackend, client._get_backend())
+        backend = cast("SQLiteBackend", client._get_backend())
         backend.store(
             MemoryEntry(
                 id="M-existing-tags",
@@ -261,7 +262,7 @@ class TestRbacEnforcement:
         client = MemoryClient(namespace="team:sprint-24", mode="local")
 
         stored = await client.store("team finding", tags=["team"])
-        backend = cast(SQLiteBackend, client._get_backend())
+        backend = cast("SQLiteBackend", client._get_backend())
         row = backend._conn.execute(
             "SELECT team_id, expires_at, status FROM memory_namespaces WHERE namespace_id = ?",
             ("team:sprint-24",),
@@ -305,7 +306,7 @@ class TestRbacEnforcement:
         cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path / "storage"))
 
         with create_backend_from_config(cfg, "project:other") as storage:
-            remote_backend = cast(SQLiteBackend, storage)
+            remote_backend = cast("SQLiteBackend", storage)
             remote_backend.store(
                 MemoryEntry(
                     id="M-remote",
@@ -335,7 +336,7 @@ class TestRbacEnforcement:
                 stored = await client.store("shared operational lesson", importance=0.6)
                 await asyncio.to_thread(wait_for_graph_updates)
 
-            backend = cast(SQLiteBackend, client._get_backend())
+            backend = cast("SQLiteBackend", client._get_backend())
             current_entry = backend.get(stored["memory_id"])
             remote_entry = remote_backend.get("M-remote")
             assert current_entry is not None
@@ -518,7 +519,7 @@ class TestRecall:
         await client.store("deployment lesson", importance=0.7)
 
         with create_backend_from_config(cfg, "project:other") as storage:
-            remote_backend = cast(SQLiteBackend, storage)
+            remote_backend = cast("SQLiteBackend", storage)
             org_entry = MemoryEntry(
                 id="M-org",
                 content="deployment lesson from another project",
@@ -534,10 +535,10 @@ class TestRecall:
         assert any(result["source"] == "org" for result in results)
         assert results[0]["source"] == "local"
         assert any(result["namespace"] == "project:other" for result in results)
-        backend = cast(SQLiteBackend, client._get_backend())
+        backend = cast("SQLiteBackend", client._get_backend())
         current_entry = backend.get(results[0]["memory_id"])
         with create_backend_from_config(cfg, "project:other") as reopened_storage:
-            remote_entry = cast(SQLiteBackend, reopened_storage).get("M-org")
+            remote_entry = cast("SQLiteBackend", reopened_storage).get("M-org")
         assert current_entry is not None
         assert remote_entry is not None
         assert current_entry.access_count == 1
@@ -630,7 +631,7 @@ class TestRecall:
         client = MemoryClient(namespace="team:sprint-24", mode="local")
         await client.store("team finding", tags=["team"])
 
-        backend = cast(SQLiteBackend, client._get_backend())
+        backend = cast("SQLiteBackend", client._get_backend())
         NamespaceManager(backend).mark_team_namespace_completed(
             "team:sprint-24",
             completed_at=datetime.now(timezone.utc) - timedelta(days=2),

@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
-import sqlite3
 import socket
 import threading
 import uuid
@@ -37,7 +36,6 @@ from trw_memory.exceptions import (
 from trw_memory.graph import list_org_shared_entries, schedule_graph_update
 from trw_memory.lifecycle._recall import record_recall_access
 from trw_memory.lifecycle.scoring import entry_utility
-from trw_memory.lifecycle.tiers._scoring import compute_importance_score
 from trw_memory.lifecycle.tiers._runtime import (
     get_tier_manager,
     remember_entry_data_in_tiers,
@@ -46,13 +44,14 @@ from trw_memory.lifecycle.tiers._runtime import (
     tier_candidates,
     warmup_tier_manager,
 )
+from trw_memory.lifecycle.tiers._scoring import compute_importance_score
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
+from trw_memory.retrieval.dense import cosine_similarity
 from trw_memory.security.pii import anonymize_installation_id
 from trw_memory.security.rbac import Permission, require_namespace_permission
-from trw_memory.retrieval.dense import cosine_similarity
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.sync.conflict import init_clock
@@ -471,14 +470,17 @@ class MemoryClient:
 
         async with self._lock:
             backend = self._get_backend()
-            if self._namespace.startswith("team:") and isinstance(backend, SQLiteBackend):
-                if NamespaceManager(backend).team_namespace_expired(self._namespace):
-                    logger.debug(
-                        "memory_recall_team_namespace_expired",
-                        op="recall",
-                        namespace=self._namespace,
-                    )
-                    return []
+            if (
+                self._namespace.startswith("team:")
+                and isinstance(backend, SQLiteBackend)
+                and NamespaceManager(backend).team_namespace_expired(self._namespace)
+            ):
+                logger.debug(
+                    "memory_recall_team_namespace_expired",
+                    op="recall",
+                    namespace=self._namespace,
+                )
+                return []
             tier_local_results = self._tier_results(backend, query, tags, limit, query_embedding)
             self._tier_manager = get_tier_manager(self._config, self._namespace)
 
@@ -825,7 +827,7 @@ class MemoryClient:
             relevance_hint = result.get("_relevance_hint")
             result["score"] = round(
                 compute_importance_score(
-                    cast(dict[str, object], result),
+                    cast("dict[str, object]", result),
                     query_tokens,
                     query_embedding=query_embedding,
                     config=config,
@@ -920,7 +922,7 @@ class MemoryClient:
         payload = await asyncio.to_thread(_anonymize_entry, entry, self._project_root)
         if embedding is not None:
             payload["embedding"] = embedding
-        queue_payload = cast(dict[str, object], payload)
+        queue_payload = cast("dict[str, object]", payload)
         enqueued = await asyncio.to_thread(self._retry_queue.enqueue, entry.id, queue_payload)
         if not enqueued:
             logger.warning(
@@ -1117,7 +1119,7 @@ class MemoryClient:
     @staticmethod
     def _strip_shared_prefix(content: str) -> str:
         """Normalize cached shared content for dedup comparisons."""
-        return content[9:] if content.startswith("[shared] ") else content
+        return content.removeprefix("[shared] ")
 
     async def _mark_fetch_retirements(self, shared_results: list[dict[str, object]]) -> None:
         """Record retirement markers returned from remote fetches."""
