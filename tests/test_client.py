@@ -508,6 +508,48 @@ class TestRecall:
         assert remote_entry.access_count == 1
         await client.close()
 
+    async def test_recall_include_org_memories_skips_below_threshold_entries(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        client = MemoryClient(namespace="project:default", mode="local")
+        await client.store("deployment lesson", importance=0.7)
+
+        low_entry = MemoryEntry(
+            id="M-org-low",
+            content="deployment lesson from another project",
+            namespace="project:other",
+            importance=0.79,
+            cross_validated=True,
+        )
+        with patch("trw_memory.client.list_org_shared_entries", return_value=[low_entry]):
+            results = await client.recall("", include_org_memories=True)
+
+        assert all(result["namespace"] != "project:other" for result in results)
+        await client.close()
+
+    async def test_recall_include_org_memories_false_skips_org_lookup(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        client = MemoryClient(namespace="project:default", mode="local")
+        await client.store("deployment lesson", importance=0.7)
+
+        with patch(
+            "trw_memory.client.list_org_shared_entries",
+            side_effect=AssertionError("org lookup should be skipped"),
+        ):
+            results = await client.recall("", include_org_memories=False)
+
+        assert all(result["source"] == "local" for result in results)
+        await client.close()
+
     async def test_recall_include_shared_appends_remote_results(
         self,
         tmp_path: Path,
