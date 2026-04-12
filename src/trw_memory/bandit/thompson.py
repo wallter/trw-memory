@@ -145,20 +145,34 @@ class BanditSelector:
             )
 
         # --- Normal Thompson Sampling --------------------------------------
-        samples: dict[str, float] = {}
-        for arm_id in eligible_ids:
+        top_arm: str | None = None
+        top_index = 0
+        top_sample = -1.0
+        runner_up_id: str | None = None
+        runner_up_sample: float | None = None
+        for index, arm_id in enumerate(eligible_ids):
             arm = self._arms[arm_id]
-            samples[arm_id] = random.betavariate(arm.alpha, arm.beta)
+            sample = random.betavariate(arm.alpha, arm.beta)
+            if sample > top_sample:
+                runner_up_id = top_arm
+                runner_up_sample = top_sample if top_arm is not None else None
+                top_arm = arm_id
+                top_index = index
+                top_sample = sample
+            elif runner_up_sample is None or sample > runner_up_sample:
+                runner_up_id = arm_id
+                runner_up_sample = sample
 
-        sorted_arms = sorted(samples, key=lambda a: samples[a], reverse=True)
-        top_arm = sorted_arms[0]
+        assert top_arm is not None  # guaranteed by eligible_ids non-empty check
 
         # --- Floor exploration: override top arm with probability ----------
         exploration = False
         selected = top_arm
         if len(eligible_ids) > 1 and random.random() < self._floor_exploration:  # noqa: S311
-            non_top = [a for a in eligible_ids if a != top_arm]
-            selected = random.choice(non_top)  # noqa: S311
+            selected_index = random.randrange(len(eligible_ids) - 1)  # noqa: S311
+            if selected_index >= top_index:
+                selected_index += 1
+            selected = eligible_ids[selected_index]
             exploration = True
             logger.debug(
                 "floor_exploration_triggered",
@@ -166,9 +180,8 @@ class BanditSelector:
                 selected=selected,
             )
 
-        runner_up_id, _ = self._compute_runner_up(
-            eligible_ids, selected, samples=samples,
-        )
+        if selected != top_arm:
+            runner_up_id = top_arm
         propensities = self._estimate_propensities(eligible_ids)
 
         return BanditDecision(
@@ -325,21 +338,51 @@ class BanditSelector:
         if len(eligible_ids) == 1:
             return {eligible_ids[0]: 1.0}
 
-        counts = {arm_id: 0 for arm_id in eligible_ids}
-        for _ in range(self._PROPENSITY_MONTE_CARLO_SAMPLES):
-            samples = {
-                arm_id: random.betavariate(
-                    self._arms[arm_id].alpha,
-                    self._arms[arm_id].beta,
-                )
-                for arm_id in eligible_ids
-            }
-            top_arm = max(samples, key=samples.__getitem__)
-            selected = top_arm
-            if random.random() < self._floor_exploration:  # noqa: S311
-                non_top = [arm_id for arm_id in eligible_ids if arm_id != top_arm]
-                selected = random.choice(non_top)  # noqa: S311
-            counts[selected] += 1
+        betavariate = random.betavariate
+        random_float = random.random
+        randrange = random.randrange
+        floor_exploration = self._floor_exploration
+        sample_count = self._PROPENSITY_MONTE_CARLO_SAMPLES
+        arm_count = len(eligible_ids)
 
-        sample_count = float(self._PROPENSITY_MONTE_CARLO_SAMPLES)
-        return {arm_id: counts[arm_id] / sample_count for arm_id in eligible_ids}
+        alphas = [0.0] * arm_count
+        betas = [0.0] * arm_count
+        for index, arm_id in enumerate(eligible_ids):
+            arm = self._arms[arm_id]
+            alphas[index] = arm.alpha
+            betas[index] = arm.beta
+
+        counts = [0] * arm_count
+
+        if floor_exploration <= 0.0:
+            for _ in range(sample_count):
+                top_index = 0
+                top_sample = betavariate(alphas[0], betas[0])
+                for index in range(1, arm_count):
+                    sample = betavariate(alphas[index], betas[index])
+                    if sample > top_sample:
+                        top_index = index
+                        top_sample = sample
+                counts[top_index] += 1
+        else:
+            for _ in range(sample_count):
+                top_index = 0
+                top_sample = betavariate(alphas[0], betas[0])
+                for index in range(1, arm_count):
+                    sample = betavariate(alphas[index], betas[index])
+                    if sample > top_sample:
+                        top_index = index
+                        top_sample = sample
+
+                selected_index = top_index
+                if random_float() < floor_exploration:  # noqa: S311
+                    selected_index = randrange(arm_count - 1)  # noqa: S311
+                    if selected_index >= top_index:
+                        selected_index += 1
+                counts[selected_index] += 1
+
+        sample_total = float(sample_count)
+        return {
+            arm_id: counts[index] / sample_total
+            for index, arm_id in enumerate(eligible_ids)
+        }
