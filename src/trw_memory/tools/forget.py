@@ -9,6 +9,8 @@ from __future__ import annotations
 import structlog
 
 from trw_memory.exceptions import ConfigError, StorageError
+from trw_memory.lifecycle.tiers._runtime import remove_entry_from_tiers, supports_tier_runtime
+from trw_memory.models.config import MemoryConfig
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools._types import McpServer
@@ -22,6 +24,7 @@ def memory_forget_impl(
     namespace: str,
     *,
     backend: StorageBackend,
+    config: MemoryConfig | None = None,
 ) -> dict[str, object]:
     """Core implementation of memory_forget (callable without MCP).
 
@@ -57,11 +60,14 @@ def memory_forget_impl(
     # --- Delete by ID (with namespace isolation) ---
     if memory_id:
         deleted_count = 0
+        cfg = config or MemoryConfig()
         try:
             entry = backend.get(memory_id)
             if entry is not None and entry.namespace == namespace:
                 was_deleted = backend.delete(memory_id)
                 deleted_count = 1 if was_deleted else 0
+                if was_deleted and supports_tier_runtime(backend):
+                    remove_entry_from_tiers(cfg, namespace, memory_id)
         except StorageError as exc:
             logger.warning("memory_forget_delete_error", memory_id=memory_id, error=str(exc))
 
@@ -86,10 +92,13 @@ def memory_forget_impl(
         return {"deleted": 0, "status": "ok"}
 
     deleted_count = 0
+    cfg = config or MemoryConfig()
     for entry in matches:
         try:
             if backend.delete(entry.id):
                 deleted_count += 1
+                if supports_tier_runtime(backend):
+                    remove_entry_from_tiers(cfg, namespace, entry.id)
         except StorageError as exc:  # per-item error handling: log delete failure for this entry, continue bulk delete  # noqa: PERF203
             logger.warning("memory_forget_delete_error", memory_id=entry.id, error=str(exc))
 
@@ -110,8 +119,6 @@ def register_forget_tool(mcp: McpServer) -> None:
         mcp: FastMCP server instance (imported lazily to keep fastmcp optional).
     """
     from trw_memory.integrations._backend import create_backend_from_config
-    from trw_memory.models.config import MemoryConfig
-
     async def memory_forget(
         memory_id: str | None = None,
         query: str | None = None,
@@ -138,6 +145,7 @@ def register_forget_tool(mcp: McpServer) -> None:
                 query,
                 namespace,
                 backend=backend,
+                config=cfg,
             )
 
     mcp.tool()(memory_forget)

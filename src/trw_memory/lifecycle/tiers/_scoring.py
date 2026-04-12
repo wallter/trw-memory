@@ -13,6 +13,7 @@ from typing import NamedTuple
 import structlog
 
 from trw_memory.exceptions import DimensionMismatchError
+from trw_memory.lifecycle.scoring import bayesian_calibrate
 from trw_memory.lifecycle._utils import days_since_access as _days_since_access
 from trw_memory.models.config import MemoryConfig
 from trw_memory.retrieval.dense import cosine_similarity
@@ -57,6 +58,7 @@ def compute_importance_score(
     entry_embedding: list[float] | None = None,
     *,
     config: MemoryConfig | None = None,
+    relevance_hint: float | None = None,
 ) -> float:
     """Compute a composite importance score for a memory entry.
 
@@ -88,7 +90,9 @@ def compute_importance_score(
         w3 /= total_w
 
     # Relevance: cosine similarity when both embeddings present, else token overlap
-    if query_embedding is not None and entry_embedding is not None:
+    if relevance_hint is not None:
+        relevance = max(0.0, min(1.0, relevance_hint))
+    elif query_embedding is not None and entry_embedding is not None:
         try:
             relevance = max(0.0, cosine_similarity(query_embedding, entry_embedding))
         except (DimensionMismatchError, ZeroDivisionError):
@@ -111,11 +115,16 @@ def compute_importance_score(
     decay_rate = math.log(2) / half_life if half_life > 0 else 0.0
     recency = math.exp(-decay_rate * days)
 
-    # Importance: the entry's importance field (was 'impact' in LearningEntry)
-    # Support both 'importance' (MemoryEntry) and 'impact' (legacy LearningEntry)
-    raw_importance = entry.get("importance", entry.get("impact", 0.5))
-    importance = float(str(raw_importance))
-    importance = max(0.0, min(1.0, importance))
+    # Importance: prefer the calibrated q-value surface when present, but keep
+    # legacy impact-only entries rankable during migration and tier hydration.
+    base_importance = float(str(entry.get("importance", entry.get("impact", 0.5))))
+    q_value = float(str(entry.get("q_value", base_importance)))
+    q_observations = int(str(entry.get("q_observations", 0)))
+    blended_importance = bayesian_calibrate(q_value)
+    if q_observations < 3:
+        weight = q_observations / 3.0
+        blended_importance = (1.0 - weight) * base_importance + weight * blended_importance
+    importance = max(0.0, min(1.0, blended_importance))
 
     score = w1 * relevance + w2 * recency + w3 * importance
     return max(0.0, min(1.0, score))

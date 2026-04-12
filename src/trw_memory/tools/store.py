@@ -15,6 +15,7 @@ import structlog
 from trw_memory.embeddings import get_local_embedder
 from trw_memory.exceptions import ConfigError, StorageError
 from trw_memory.graph import schedule_graph_update
+from trw_memory.lifecycle.tiers._runtime import remember_entry_in_tiers, supports_tier_runtime
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
@@ -116,6 +117,8 @@ def memory_store_impl(
             schedule_graph_update(entry, backend, embedding=embedding, config=cfg)
         except RuntimeError:
             logger.warning("memory_store_graph_schedule_failed", entry_id=entry_id, exc_info=True)
+        if supports_tier_runtime(backend):
+            remember_entry_in_tiers(cfg, namespace, entry, embedding)
     except Exception as exc:  # broad catch: tool error boundary
         logger.exception("memory_store_failed", entry_id=entry_id, error=str(exc))
         return {"error": f"storage error: {exc}", "status": "error"}

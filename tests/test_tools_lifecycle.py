@@ -248,6 +248,25 @@ class TestMemoryStoreImpl:
             assert any("cross_validated:project_id=other" in item for item in stored_entry.outcome_history)
             assert any("cross_validated:project_id=default" in item for item in remote_entry.outcome_history)
 
+    def test_store_primes_tier_runtime(self, tmp_path: Path) -> None:
+        from trw_memory.lifecycle.tiers._runtime import get_tier_manager
+
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path), embedding_dim=4)
+        with create_backend_from_config(cfg, "project:default") as storage:
+            backend = cast(SQLiteBackend, storage)
+            with patch("trw_memory.tools.store.get_local_embedder", return_value=None):
+                result = memory_store_impl(
+                    "tier primed entry",
+                    "project:default",
+                    backend=backend,
+                    config=cfg,
+                )
+
+            manager = get_tier_manager(cfg, "project:default")
+            warm_ids = [str(item["id"]) for item in manager.warm_search(["tier"], None)]
+            assert result["status"] == "stored"
+            assert cast(str, result["memory_id"]) in warm_ids
+
 
 # ---------------------------------------------------------------------------
 # memory_consolidate_impl

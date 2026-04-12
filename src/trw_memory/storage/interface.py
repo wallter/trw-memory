@@ -219,6 +219,17 @@ class StorageBackend(ABC):
             StorageError: If the upsert fails (only in overriding backends).
         """
 
+    def delete_vector(self, entry_id: str) -> bool:
+        """Delete the dense vector associated with *entry_id*.
+
+        Backends without vector support return ``False``.
+        """
+        return False
+
+    def vector_exists(self, entry_id: str) -> bool:
+        """Return whether a dense vector currently exists for *entry_id*."""
+        return False
+
     def search_vectors(
         self,
         query_embedding: list[float],
