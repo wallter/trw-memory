@@ -27,6 +27,7 @@ import pytest
 
 from trw_memory.client import SHARED_EVENT_CACHE_MAX, MemoryClient, MemoryResultDict, StoreResultDict
 from trw_memory.exceptions import (
+    AuthorizationError,
     MemoryNotFoundError,
     ToolAlreadyRegisteredError,
 )
@@ -137,6 +138,41 @@ class TestStore:
     async def test_store_whitespace_only_raises(self, client: MemoryClient) -> None:
         with pytest.raises(ValueError, match="content must not be empty"):
             await client.store("   ")
+
+
+class TestRbacEnforcement:
+    async def test_store_denied_for_reader_namespace_role(self, client: MemoryClient) -> None:
+        client._config.rbac_enabled = True
+        client._config.namespace_roles = {"default": "reader"}
+
+        with pytest.raises(
+            AuthorizationError,
+            match=r"Role 'reader' does not have store permission on namespace 'default'\.",
+        ):
+            await client.store("blocked write")
+
+    async def test_recall_denied_for_writer_namespace_role(self, client: MemoryClient) -> None:
+        client._config.rbac_enabled = True
+        client._config.default_role = "admin"
+        client._config.namespace_roles = {"default": "writer"}
+
+        with pytest.raises(
+            AuthorizationError,
+            match=r"Role 'writer' does not have recall permission on namespace 'default'\.",
+        ):
+            await client.recall("blocked read")
+
+    async def test_admin_role_allows_store_recall_and_forget(self, client: MemoryClient) -> None:
+        client._config.rbac_enabled = True
+        client._config.default_role = "admin"
+
+        stored = await client.store("allowed entry", tags=["rbac"])
+        results = await client.recall("allowed", limit=5)
+
+        assert [result["memory_id"] for result in results] == [stored["memory_id"]]
+
+        deleted = await client.forget(stored["memory_id"])
+        assert deleted["status"] == "deleted"
 
     async def test_store_importance_too_low_raises(self, client: MemoryClient) -> None:
         with pytest.raises(ValueError, match="importance"):

@@ -20,6 +20,7 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
+from trw_memory.security.rbac import Permission, require_namespace_permission
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools._types import McpServer
@@ -58,6 +59,8 @@ def memory_store_impl(
         validate_namespace(namespace)
     except ConfigError as exc:
         return {"error": str(exc), "status": "invalid"}
+    cfg = config or MemoryConfig()
+    require_namespace_permission(cfg, namespace, Permission.WRITE, "store")
 
     # Validate content
     if not content or not content.strip():
@@ -93,7 +96,6 @@ def memory_store_impl(
         embedding: list[float] | None = None
         # Mirror MemoryClient.store(): tool writes should populate vectors too,
         # otherwise tool-created memories rank differently from SDK-created ones.
-        cfg = config or MemoryConfig()
         embedder = get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim)
         if embedder is not None:
             try:

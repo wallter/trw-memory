@@ -52,7 +52,7 @@ class TestConfigLiteralTypes:
         """All valid default_role values must be accepted."""
         from trw_memory.models.config import MemoryConfig
 
-        for role in ("admin", "editor", "viewer", "writer"):
+        for role in ("admin", "reader", "writer", "none"):
             cfg = MemoryConfig(default_role=role)  # type: ignore[arg-type]
             assert cfg.default_role == role
 

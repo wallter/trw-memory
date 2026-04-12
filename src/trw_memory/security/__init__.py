@@ -9,6 +9,7 @@ Public API re-exported from submodules:
 - ``poisoning`` — memory poisoning anomaly detection
 """
 
+from trw_memory.exceptions import LocalOnlyViolationError
 from trw_memory.security.audit import (
     AuditLog,
     AuditRecord,
@@ -46,6 +47,7 @@ from trw_memory.security.rbac import (
     Permission,
     Role,
     check_permission,
+    require_namespace_permission,
     require_permission,
 )
 
@@ -71,8 +73,10 @@ __all__ = [
     "encrypt_field",
     "generate_master_key",
     "get_master_key",
+    "LocalOnlyViolationError",
     "quarantine_entry",
     "redact_text",
+    "require_namespace_permission",
     "require_permission",
     "rotate_master_key",
     "shannon_entropy",

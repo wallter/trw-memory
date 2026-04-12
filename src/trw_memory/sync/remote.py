@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 import httpx
 import structlog
 
+from trw_memory.exceptions import LocalOnlyViolationError
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -30,6 +31,7 @@ FETCH_TIMEOUT = 3.0
 MAX_SUMMARY_LENGTH = 1000
 MAX_DETAIL_LENGTH = 10_000
 MAX_TAGS_COUNT = 20
+LOCAL_ONLY_ERROR_MESSAGE = "Operation blocked: memory_local_only=True disables all network access."
 
 
 class AnonymizedEntry(TypedDict):
@@ -50,6 +52,11 @@ class PublishResult(TypedDict):
     success: bool
     remote_id: str | None
     retryable: bool
+
+
+def _raise_local_only_violation() -> None:
+    """Raise the shared local-only guard error for network entrypoints."""
+    raise LocalOnlyViolationError(LOCAL_ONLY_ERROR_MESSAGE)
 
 
 def is_valid_platform_url(platform_url: str) -> bool:
@@ -102,8 +109,8 @@ def publish_memory_result(
 ) -> PublishResult:
     """Publish a memory entry and return the success flag plus remote ID."""
     if cfg.local_only:
-        logger.debug("memory_publish_skipped_local_only", entry_id=entry.id)
-        return {"success": False, "remote_id": None, "retryable": False}
+        logger.warning("memory_publish_blocked_local_only", entry_id=entry.id)
+        _raise_local_only_violation()
 
     if not cfg.sync_enabled or not cfg.platform_url:
         return {"success": False, "remote_id": None, "retryable": False}
@@ -202,7 +209,10 @@ def _publish_payload_result(
 
 def drain_retry_queue(queue: RetryQueue, cfg: MemoryConfig) -> dict[str, int]:
     """Drain queued publish payloads when sync is enabled and reachable."""
-    if cfg.local_only or not cfg.sync_enabled or not cfg.platform_url:
+    if cfg.local_only:
+        logger.warning("memory_retry_drain_blocked_local_only")
+        _raise_local_only_violation()
+    if not cfg.sync_enabled or not cfg.platform_url:
         return {"drained": 0, "failed": 0, "skipped": queue.depth()}
     if not is_valid_platform_url(cfg.platform_url):
         logger.warning("memory_retry_drain_invalid_platform_url")
@@ -223,8 +233,8 @@ def retire_remote_memory(remote_id: str, cfg: MemoryConfig) -> bool:
     shipped backend contract while remaining fail-open for local callers.
     """
     if cfg.local_only:
-        logger.debug("memory_retire_skipped_local_only", remote_id=remote_id)
-        return True
+        logger.warning("memory_retire_blocked_local_only", remote_id=remote_id)
+        _raise_local_only_violation()
     if not cfg.sync_enabled or not cfg.platform_url or not remote_id:
         return True
     if not is_valid_platform_url(cfg.platform_url):
@@ -270,8 +280,8 @@ def fetch_shared_memories(
     Fail-open: returns empty list on any error.
     """
     if cfg.local_only:
-        logger.debug("memory_fetch_skipped_local_only")
-        return []
+        logger.warning("memory_fetch_blocked_local_only")
+        _raise_local_only_violation()
 
     if not cfg.sync_enabled or not cfg.platform_url:
         return []

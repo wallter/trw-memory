@@ -1,21 +1,18 @@
-"""Role-Based Access Control (RBAC) for memory operations.
-
-Defines a simple role/permission model with three roles:
-- **reader**: can read memories
-- **writer**: can read and write memories
-- **admin**: full access including delete and admin operations
-"""
+"""Role-Based Access Control (RBAC) for memory operations."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from enum import Enum
 from functools import wraps
-from typing import ParamSpec, TypeVar
+from typing import TYPE_CHECKING, ParamSpec, TypeVar
 
 import structlog
 
 from trw_memory.exceptions import AuthorizationError, ConfigError
+
+if TYPE_CHECKING:
+    from trw_memory.models.config import MemoryConfig
 
 logger = structlog.get_logger(__name__)
 
@@ -29,6 +26,12 @@ class Role(str, Enum):
     READER = "reader"
     WRITER = "writer"
     ADMIN = "admin"
+    NONE = "none"
+
+    @classmethod
+    def from_string(cls, value: str) -> Role:
+        """Parse a role name using the public string values."""
+        return cls(value.strip().lower())
 
 
 class Permission(str, Enum):
@@ -42,13 +45,14 @@ class Permission(str, Enum):
 
 ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
     Role.READER: {Permission.READ},
-    Role.WRITER: {Permission.READ, Permission.WRITE},
+    Role.WRITER: {Permission.WRITE},
     Role.ADMIN: {
         Permission.READ,
         Permission.WRITE,
         Permission.DELETE,
         Permission.ADMIN,
     },
+    Role.NONE: set(),
 }
 
 
@@ -64,6 +68,22 @@ def check_permission(role: Role, permission: Permission) -> bool:
     """
     allowed = ROLE_PERMISSIONS.get(role, set())
     return permission in allowed
+
+
+def require_namespace_permission(
+    config: "MemoryConfig",
+    namespace: str,
+    permission: Permission,
+    operation: str,
+) -> None:
+    """Enforce a namespace-scoped permission using the current MemoryConfig."""
+    if not config.rbac_enabled:
+        return
+    role_name = config.namespace_roles.get(namespace, config.default_role)
+    role = Role.from_string(role_name)
+    if check_permission(role, permission):
+        return
+    raise AuthorizationError(f"Role '{role.value}' does not have {operation} permission on namespace '{namespace}'.")
 
 
 def require_permission(
@@ -95,10 +115,10 @@ def require_permission(
             if role is None:
                 raise ConfigError(f"Missing 'role' kwarg required by @require_permission({permission.value!r})")
             if not isinstance(role, Role):
-                role = Role(role)
+                role = Role.from_string(str(role))
             if not check_permission(role, permission):
                 logger.warning("authorization_denied", op="rbac", role=role.value, permission=permission.value)
-                raise AuthorizationError(f"Permission denied: role {role.value!r} lacks {permission.value!r} permission")
+                raise AuthorizationError(f"Role '{role.value}' does not have {permission.value} permission.")
             return func(*args, **kwargs)
 
         return wrapper

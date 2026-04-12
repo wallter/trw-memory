@@ -36,9 +36,13 @@ class ToolAlreadyRegisteredError(MemoryError):
     """Raised when register_tools() is called twice."""
 
 
-class AuthorizationError(MemoryError):
+class AuthorizationError(MemoryError, PermissionError):
     """Raised when a permission check fails."""
 
 
 class DimensionMismatchError(MemoryError):
     """Raised when vectors have incompatible dimensions."""
+
+
+class LocalOnlyViolationError(MemoryError):
+    """Raised when a network-capable operation is attempted in local-only mode."""

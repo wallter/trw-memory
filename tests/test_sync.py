@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
+from trw_memory.exceptions import LocalOnlyViolationError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.sync.conflict import (
@@ -489,11 +490,12 @@ class TestPublishMemory:
         entry = _make_entry(importance=0.9)
         assert publish_memory(entry, cfg) is True
 
-    def test_returns_true_when_local_only_enabled(self) -> None:
-        """Local-only mode is treated as a non-retryable skip."""
+    def test_raises_when_local_only_enabled(self) -> None:
+        """Local-only mode blocks remote publish entrypoints explicitly."""
         cfg = _make_config(local_only=True)
         entry = _make_entry(importance=0.9)
-        assert publish_memory(entry, cfg) is True
+        with pytest.raises(LocalOnlyViolationError, match="memory_local_only=True"):
+            publish_memory(entry, cfg)
 
     def test_returns_false_when_platform_url_empty(self) -> None:
         """Empty remote config is treated as a non-retryable skip."""
@@ -614,10 +616,11 @@ class TestFetchSharedMemories:
         cfg = _make_config(sync_enabled=False)
         assert fetch_shared_memories("query", cfg) == []
 
-    def test_returns_empty_when_local_only_enabled(self) -> None:
-        """Returns [] when local_only=True."""
+    def test_raises_when_local_only_enabled(self) -> None:
+        """Local-only mode blocks remote fetch entrypoints explicitly."""
         cfg = _make_config(local_only=True)
-        assert fetch_shared_memories("query", cfg) == []
+        with pytest.raises(LocalOnlyViolationError, match="memory_local_only=True"):
+            fetch_shared_memories("query", cfg)
 
     def test_returns_empty_when_platform_url_empty(self) -> None:
         """Returns [] when platform_url is empty."""
@@ -799,6 +802,10 @@ class TestRetireRemoteMemory:
 
     def test_retire_skips_invalid_platform_url(self) -> None:
         assert retire_remote_memory("42", _make_config(platform_url="file:///etc/passwd")) is True
+
+    def test_retire_raises_when_local_only_enabled(self) -> None:
+        with pytest.raises(LocalOnlyViolationError, match="memory_local_only=True"):
+            retire_remote_memory("42", _make_config(local_only=True))
 
 
 # ===========================================================================
@@ -1031,11 +1038,12 @@ class TestSSESubscriber:
         sub.start()
         assert sub._thread is None
 
-    def test_start_does_nothing_when_local_only_enabled(self) -> None:
-        """No thread started when local_only=True."""
+    def test_start_raises_when_local_only_enabled(self) -> None:
+        """Local-only mode blocks the live SSE network subscriber."""
         cfg = _make_config(local_only=True)
         sub = SSESubscriber(cfg, on_event=lambda data: None)
-        sub.start()
+        with pytest.raises(LocalOnlyViolationError, match="memory_local_only=True"):
+            sub.start()
         assert sub._thread is None
 
     def test_start_does_nothing_when_platform_url_empty(self) -> None:

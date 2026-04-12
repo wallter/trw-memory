@@ -111,7 +111,11 @@ class MemoryConfig(BaseSettings):
 
     # RBAC
     rbac_enabled: bool = Field(default=False, description="Enable role-based access control")
-    default_role: Literal["admin", "editor", "viewer", "writer"] = "writer"
+    default_role: Literal["admin", "reader", "writer", "none"] = "admin"
+    namespace_roles: dict[str, str] = Field(
+        default_factory=dict,
+        description="Per-namespace role overrides used when RBAC is enabled",
+    )
 
     # Retrieval
     bm25_candidates: int = Field(default=50, gt=0, description="Number of BM25 candidates to consider")
