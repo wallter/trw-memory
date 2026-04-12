@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -259,6 +260,73 @@ def test_memory_config_env_var_numeric_override(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("MEMORY_BM25_CANDIDATES", "100")
     cfg = MemoryConfig()
     assert cfg.bm25_candidates == 100
+
+
+def test_memory_config_reads_trw_config_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Framework config YAML should seed sync fields when MEMORY_* vars are unset."""
+    trw_dir = tmp_path / ".trw"
+    trw_dir.mkdir()
+    (trw_dir / "config.yaml").write_text(
+        "\n".join(
+            [
+                "platform_telemetry_enabled: true",
+                "platform_urls:",
+                "  - https://platform.example.com",
+                'platform_api_key: "yaml-key"',
+                "sync_namespace: org:test",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    cfg = MemoryConfig()
+
+    assert cfg.sync_enabled is True
+    assert cfg.platform_url == "https://platform.example.com"
+    assert cfg.platform_api_key == "yaml-key"
+    assert cfg.sync_namespace == "org:test"
+
+
+def test_memory_config_env_overrides_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit MEMORY_* env vars keep precedence over .trw/config.yaml."""
+    trw_dir = tmp_path / ".trw"
+    trw_dir.mkdir()
+    (trw_dir / "config.yaml").write_text(
+        "platform_telemetry_enabled: false\nplatform_api_key: yaml-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
+    monkeypatch.setenv("MEMORY_PLATFORM_API_KEY", "env-key")
+
+    cfg = MemoryConfig()
+
+    assert cfg.sync_enabled is True
+    assert cfg.platform_api_key == "env-key"
+
+
+def test_memory_config_sync_enabled_disables_default_local_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit sync opt-in should clear the default local-only guardrail."""
+    monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
+
+    cfg = MemoryConfig()
+
+    assert cfg.sync_enabled is True
+    assert cfg.local_only is False
+
+
+def test_memory_config_explicit_local_only_is_preserved_with_sync_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Users can still force a local-only dry run even when sync is configured."""
+    monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
+    monkeypatch.setenv("MEMORY_LOCAL_ONLY", "true")
+
+    cfg = MemoryConfig()
+
+    assert cfg.sync_enabled is True
+    assert cfg.local_only is True
 
 
 def test_memory_config_consolidation_enabled_env_override(monkeypatch: pytest.MonkeyPatch) -> None:

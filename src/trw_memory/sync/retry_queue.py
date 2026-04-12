@@ -7,7 +7,10 @@ to a persistent JSONL file and re-attempted on the next drain cycle.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import threading
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +21,7 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 MAX_QUEUE_DEPTH = 500
+MAX_QUEUE_BYTES = 5 * 1024 * 1024
 MAX_RETRIES = 5
 
 
@@ -63,7 +67,18 @@ class RetryQueue:
                 "retry_count": 0,
                 "last_error": None,
             }
-            self._append(record)
+            queued_bytes = sum(self._serialized_size(entry) for entry in entries)
+            record_bytes = self._serialized_size(record)
+            if queued_bytes + record_bytes > MAX_QUEUE_BYTES:
+                logger.warning(
+                    "retry_queue_size_limit_exceeded",
+                    entry_id=entry_id,
+                    queued_bytes=queued_bytes,
+                    record_bytes=record_bytes,
+                    max_bytes=MAX_QUEUE_BYTES,
+                )
+                return False
+            self._write_all([*entries, record])
             return True
 
     def drain(self, publish_fn: Callable[[dict[str, object]], bool]) -> dict[str, int]:
@@ -91,6 +106,11 @@ class RetryQueue:
                     remaining.append(record)
                     skipped += 1
                     continue
+
+                retry_count = int(record["retry_count"])
+                if retry_count > 0:
+                    backoff_seconds = min(1.0 * (2 ** (retry_count - 1)), 30.0)
+                    time.sleep(backoff_seconds)
 
                 try:
                     success = publish_fn(record["payload"])
@@ -122,6 +142,11 @@ class RetryQueue:
         with self._lock:
             return len(self._read_all())
 
+    def snapshot(self) -> list[QueueRecord]:
+        """Return a copy of the current queue records for reconciliation logic."""
+        with self._lock:
+            return list(self._read_all())
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -138,12 +163,23 @@ class RetryQueue:
                     logger.warning("retry_queue_corrupt_record_dropped", line_preview=line[:100])
         return entries
 
-    def _append(self, record: QueueRecord) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._path, "a") as f:
-            f.write(json.dumps(record) + "\n")
-
     def _write_all(self, entries: list[QueueRecord]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._path, "w") as f:
-            f.writelines(json.dumps(entry) + "\n" for entry in entries)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(self._path.parent),
+            prefix=f"{self._path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp_path = Path(handle.name)
+            handle.writelines(json.dumps(entry) + "\n" for entry in entries)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp_path.replace(self._path)
+
+    @staticmethod
+    def _serialized_size(entry: QueueRecord) -> int:
+        """Return the encoded JSONL byte size for one record."""
+        return len((json.dumps(entry) + "\n").encode("utf-8"))
