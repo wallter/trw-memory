@@ -74,7 +74,8 @@ class MemoryConfig(BaseSettings):
     # Consolidation
     consolidation_enabled: bool = Field(default=True, description="Enable periodic consolidation of similar entries")
     consolidation_similarity_threshold: float = Field(default=0.75, ge=0.0, le=1.0, description="Cosine similarity threshold for consolidation clustering")
-    consolidation_min_cluster: int = Field(default=3, gt=0, description="Minimum cluster size for consolidation")
+    consolidation_min_cluster: int = Field(default=3, ge=2, description="Minimum cluster size for consolidation")
+    consolidation_max_per_cycle: int = Field(default=50, gt=0, description="Maximum entries to evaluate in one consolidation cycle")
     consolidation_interval_days: int = Field(default=7, gt=0, description="Days between consolidation sweeps")
 
     # Audit

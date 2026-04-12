@@ -28,10 +28,10 @@ from trw_memory.models.memory import MemoryEntry, MemoryIndex, MemoryStatus
 
 
 def test_memory_status_values() -> None:
-    assert MemoryStatus.ACTIVE == "active"
-    assert MemoryStatus.RESOLVED == "resolved"
-    assert MemoryStatus.OBSOLETE == "obsolete"
-    assert MemoryStatus.ARCHIVED == "archived"
+    assert MemoryStatus.ACTIVE.value == "active"
+    assert MemoryStatus.RESOLVED.value == "resolved"
+    assert MemoryStatus.OBSOLETE.value == "obsolete"
+    assert MemoryStatus.ARCHIVED.value == "archived"
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +150,7 @@ def test_memory_entry_negative_recurrence_raises() -> None:
 
 def test_memory_entry_coerces_string_importance() -> None:
     """String value for importance is coerced to float."""
-    entry = MemoryEntry(id="M-coerce", content="test", importance="0.5")  # pyright: ignore[reportArgumentType]
+    entry = MemoryEntry.model_validate({"id": "M-coerce", "content": "test", "importance": "0.5"})
     assert entry.importance == 0.5
 
 
@@ -230,6 +230,14 @@ def test_memory_config_defaults() -> None:
     assert cfg.decay_half_life_days == 14.0
     assert cfg.q_learning_rate == 0.15
     assert cfg.consolidation_enabled is True
+    assert cfg.consolidation_max_per_cycle == 50
+    assert cfg.consolidation_interval_days == 7
+
+
+def test_memory_config_consolidation_min_cluster_requires_two() -> None:
+    """consolidation_min_cluster must be at least 2."""
+    with pytest.raises(ValidationError):
+        MemoryConfig(consolidation_min_cluster=1)
 
 
 def test_memory_config_env_var_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -253,21 +261,37 @@ def test_memory_config_env_var_numeric_override(monkeypatch: pytest.MonkeyPatch)
     assert cfg.bm25_candidates == 100
 
 
+def test_memory_config_consolidation_enabled_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MEMORY_CONSOLIDATION_ENABLED should override the default."""
+    monkeypatch.setenv("MEMORY_CONSOLIDATION_ENABLED", "false")
+    cfg = MemoryConfig()
+    assert cfg.consolidation_enabled is False
+
+
+def test_memory_config_consolidation_similarity_threshold_invalid_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """consolidation_similarity_threshold must stay within [0.0, 1.0]."""
+    monkeypatch.setenv("MEMORY_CONSOLIDATION_SIMILARITY_THRESHOLD", "1.5")
+    with pytest.raises(ValidationError):
+        MemoryConfig()
+
+
 # ---------------------------------------------------------------------------
 # MemoryEventType
 # ---------------------------------------------------------------------------
 
 
 def test_memory_event_type_values() -> None:
-    assert MemoryEventType.STORE == "store"
-    assert MemoryEventType.RECALL == "recall"
-    assert MemoryEventType.UPDATE == "update"
-    assert MemoryEventType.DELETE == "delete"
-    assert MemoryEventType.CONSOLIDATE == "consolidate"
-    assert MemoryEventType.MIGRATE == "migrate"
-    assert MemoryEventType.TIER_PROMOTE == "tier_promote"
-    assert MemoryEventType.TIER_DEMOTE == "tier_demote"
-    assert MemoryEventType.TIER_PURGE == "tier_purge"
+    assert MemoryEventType.STORE.value == "store"
+    assert MemoryEventType.RECALL.value == "recall"
+    assert MemoryEventType.UPDATE.value == "update"
+    assert MemoryEventType.DELETE.value == "delete"
+    assert MemoryEventType.CONSOLIDATE.value == "consolidate"
+    assert MemoryEventType.MIGRATE.value == "migrate"
+    assert MemoryEventType.TIER_PROMOTE.value == "tier_promote"
+    assert MemoryEventType.TIER_DEMOTE.value == "tier_demote"
+    assert MemoryEventType.TIER_PURGE.value == "tier_purge"
 
 
 # ---------------------------------------------------------------------------
