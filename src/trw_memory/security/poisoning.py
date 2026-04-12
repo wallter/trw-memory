@@ -254,6 +254,41 @@ def validate_entry_payload(entry: MemoryEntry, *, max_chars: int) -> None:
             raise PoisoningError(f"memory entry matched blocked injection pattern {pattern.pattern!r}")
 
 
+def validate_store_inputs(
+    *,
+    content: object,
+    detail: object,
+    tags: object,
+    metadata: object,
+    importance: object,
+) -> None:
+    """Strictly validate public store inputs before coercion or persistence."""
+    failed_fields: list[str] = []
+    if not isinstance(content, str):
+        failed_fields.append("content")
+    elif not content.strip():
+        failed_fields.append("content")
+    if not isinstance(detail, str):
+        failed_fields.append("detail")
+    if tags is not None and (not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags)):
+        failed_fields.append("tags")
+    if metadata is not None and (
+        not isinstance(metadata, dict)
+        or any(not isinstance(key, str) or not isinstance(value, str) for key, value in metadata.items())
+    ):
+        failed_fields.append("metadata")
+    if not isinstance(importance, (int, float)):
+        failed_fields.append("importance")
+    elif not 0.0 <= float(importance) <= 1.0:
+        failed_fields.append("importance")
+
+    if failed_fields:
+        raise SchemaValidationError(
+            f"memory store schema invalid for fields: {', '.join(failed_fields)}",
+            failed_fields=failed_fields,
+        )
+
+
 def score_entry_anomaly(
     entry: MemoryEntry,
     reference_entries: list[MemoryEntry],
