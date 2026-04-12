@@ -15,6 +15,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from trw_memory.client import MemoryClient, MemoryResultDict, StoreResultDict
+from trw_memory.client import SHARED_EVENT_CACHE_MAX, MemoryClient, MemoryResultDict, StoreResultDict
 from trw_memory.exceptions import (
     MemoryNotFoundError,
     ToolAlreadyRegisteredError,
@@ -89,6 +90,23 @@ class TestConstructor:
         )
         assert c._timeout == 10.0
 
+    def test_sync_enabled_starts_sse_subscription(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "s"))
+        monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
+        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
+        monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
+        monkeypatch.setenv("MEMORY_PLATFORM_API_KEY", "test-key")
+
+        with patch("trw_memory.client.SSESubscriber") as subscriber_cls:
+            subscriber = MagicMock()
+            subscriber_cls.return_value = subscriber
+
+            client = MemoryClient(namespace="default", mode="local")
+
+        subscriber_cls.assert_called_once()
+        subscriber.start.assert_called_once()
+        asyncio.run(client.close())
+
 
 # ---------------------------------------------------------------------------
 # store() tests (FR02)
@@ -147,9 +165,13 @@ class TestStore:
         monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
         monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
         monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
+        monkeypatch.setenv("MEMORY_PLATFORM_API_KEY", "test-key")
         client = MemoryClient(namespace="default", mode="local")
 
-        with patch("trw_memory.client.publish_memory", return_value=True):
+        with patch(
+            "trw_memory.client.publish_memory_result",
+            return_value={"success": True, "remote_id": "42", "retryable": False},
+        ):
             stored = await client.store("publish this entry", importance=0.9)
             await client.close()
 
@@ -157,6 +179,8 @@ class TestStore:
         entry = reopened._get_backend().get(stored["memory_id"])
         assert entry is not None
         assert entry.published_to_platform is True
+        assert entry.remote_id == "42"
+        assert entry.vector_clock
         await reopened.close()
 
     async def test_store_sync_failure_enqueues_retry_payload(
@@ -169,10 +193,14 @@ class TestStore:
         monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
         monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
         monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
+        monkeypatch.setenv("MEMORY_PLATFORM_API_KEY", "test-key")
         client = MemoryClient(namespace="default", mode="local")
 
         with (
-            patch("trw_memory.client.publish_memory", return_value=False),
+            patch(
+                "trw_memory.client.publish_memory_result",
+                return_value={"success": False, "remote_id": None, "retryable": True},
+            ),
             patch("trw_memory.client._anonymize_entry", return_value={"summary": "queued"}),
         ):
             stored = await client.store("queue this entry", importance=0.9)
@@ -182,6 +210,55 @@ class TestStore:
         assert queue.depth() == 1
         lines = (Path(tmp_path) / "storage" / "sync_queue.jsonl").read_text(encoding="utf-8").splitlines()
         assert stored["memory_id"] in lines[0]
+
+    async def test_store_does_not_wait_for_remote_publish_completion(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
+        monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
+        client = MemoryClient(namespace="default", mode="local")
+
+        def slow_publish_result(*_args: object, **_kwargs: object) -> dict[str, object]:
+            time.sleep(0.2)
+            return {"success": True, "remote_id": "42", "retryable": False}
+
+        started = asyncio.get_running_loop().time()
+        with (
+            patch.object(client, "_get_embedder", return_value=None),
+            patch("trw_memory.client.publish_memory_result", side_effect=slow_publish_result),
+        ):
+            stored = await client.store("async publish", importance=0.9)
+        elapsed = asyncio.get_running_loop().time() - started
+
+        assert stored["status"] == "stored"
+        assert elapsed < 0.1
+        await client.close()
+
+    async def test_store_invalid_platform_url_skips_publish_without_marking_synced(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
+        monkeypatch.setenv("MEMORY_PLATFORM_URL", "file:///etc/passwd")
+        client = MemoryClient(namespace="default", mode="local")
+
+        stored = await client.store("skip invalid remote", importance=0.9)
+        await client.close()
+
+        reopened = MemoryClient(namespace="default", mode="local")
+        entry = reopened._get_backend().get(stored["memory_id"])
+        assert entry is not None
+        assert entry.published_to_platform is False
+        assert entry.remote_id is None
+        assert reopened._retry_queue.depth() == 0
+        await reopened.close()
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +322,7 @@ class TestRecall:
         monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
         monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
         monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
+        monkeypatch.setenv("MEMORY_PLATFORM_API_KEY", "test-key")
         client = MemoryClient(namespace="default", mode="local")
         await client.store("local entry", importance=0.8)
         shared_result = {
@@ -266,6 +344,112 @@ class TestRecall:
         assert fetch_mock.called
         assert any(result["source"] == "shared" for result in results)
         assert results[0]["source"] == "local"
+        await client.close()
+
+    async def test_recall_surfaces_cached_sse_publish(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
+        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
+        monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
+
+        with patch("trw_memory.client.SSESubscriber"):
+            client = MemoryClient(namespace="default", mode="local")
+
+        client._handle_sse_event({"type": "learning_published", "id": 42, "summary": "deployment rollback guide"})
+
+        with patch("trw_memory.client.fetch_shared_memories", return_value=[]):
+            results = await client.recall("deployment", include_shared=True)
+
+        assert any(result["memory_id"] == "42" and result["source"] == "shared" for result in results)
+        await client.close()
+
+    async def test_recall_dedupes_cached_sse_publish_by_similarity(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
+        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
+        monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
+        monkeypatch.setenv("MEMORY_PLATFORM_API_KEY", "test-key")
+
+        with patch("trw_memory.client.SSESubscriber"):
+            client = MemoryClient(namespace="default", mode="local")
+
+        await client.store("Local deployment advice", importance=0.5)
+        client._handle_sse_event({"type": "learning_published", "id": 42, "summary": "Remote deployment guidance"})
+
+        embedder = MagicMock()
+        embedder.available.return_value = True
+        embedder.embed_batch.return_value = [[1.0, 0.0], [0.99, 0.01]]
+
+        with (
+            patch("trw_memory.client.fetch_shared_memories", return_value=[]),
+            patch.object(client, "_get_embedder", return_value=embedder),
+        ):
+            results = await client.recall("deployment", include_shared=True)
+
+        assert all(result["memory_id"] != "42" for result in results)
+        await client.close()
+
+    async def test_cached_sse_events_are_bounded(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
+        monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
+
+        with patch("trw_memory.client.SSESubscriber"):
+            client = MemoryClient(namespace="default", mode="local")
+
+        for idx in range(SHARED_EVENT_CACHE_MAX + 20):
+            client._handle_sse_event({"type": "learning_published", "id": idx, "summary": f"entry {idx}"})
+
+        assert len(client._shared_event_cache) == SHARED_EVENT_CACHE_MAX
+        assert client._shared_event_cache[0]["memory_id"] == "20"
+        assert client._shared_event_cache[-1]["memory_id"] == str(SHARED_EVENT_CACHE_MAX + 19)
+        await client.close()
+
+    async def test_recall_marks_remote_retirements_pending_delete(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
+        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
+        monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
+
+        with patch("trw_memory.client.SSESubscriber"):
+            client = MemoryClient(namespace="default", mode="local")
+
+        with patch(
+            "trw_memory.client.publish_memory_result",
+            return_value={"success": True, "remote_id": "42", "retryable": False},
+        ):
+            stored = await client.store("published memory", importance=0.9)
+            if client._background_tasks:
+                await asyncio.gather(*list(client._background_tasks))
+
+        client._handle_sse_event({"type": "learning_retired", "id": 42})
+
+        with patch("trw_memory.client.fetch_shared_memories", return_value=[]):
+            await client.recall("published", include_shared=True)
+
+        entry = client._get_backend().get(stored["memory_id"])
+        assert entry is not None
+        assert entry.pending_delete is True
         await client.close()
 
 
@@ -303,6 +487,36 @@ class TestForget:
         client_b = MemoryClient(namespace="project:bbb", mode="local")
         with pytest.raises(MemoryNotFoundError):
             await client_b.forget(stored["memory_id"])
+
+    async def test_forget_retired_remote_entry_when_remote_id_present(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
+        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
+        monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
+
+        with patch("trw_memory.client.SSESubscriber"):
+            client = MemoryClient(namespace="default", mode="local")
+
+        with patch(
+            "trw_memory.client.publish_memory_result",
+            return_value={"success": True, "remote_id": "42", "retryable": False},
+        ):
+            stored = await client.store("retire this memory", importance=0.9)
+            if client._background_tasks:
+                await asyncio.gather(*list(client._background_tasks))
+
+        with patch("trw_memory.client.retire_remote_memory", return_value=True) as retire_mock:
+            await client.forget(stored["memory_id"])
+            if client._background_tasks:
+                await asyncio.gather(*list(client._background_tasks))
+
+        retire_mock.assert_called_once_with("42", client._config)
+        await client.close()
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +633,10 @@ class TestContextManager:
 
         seed_client = MemoryClient(namespace="default", mode="local")
         with (
-            patch("trw_memory.client.publish_memory", return_value=False),
+            patch(
+                "trw_memory.client.publish_memory_result",
+                return_value={"success": False, "remote_id": None, "retryable": True},
+            ),
             patch("trw_memory.client._anonymize_entry", return_value={"summary": "queued"}),
         ):
             await seed_client.store("queue this entry", importance=0.9)
@@ -438,6 +655,8 @@ class TestContextManager:
 
         reopened = MemoryClient(namespace="default", mode="local")
         assert reopened._retry_queue.depth() == 0
+        drained_entry = reopened._get_backend().list_entries(limit=10)[0]
+        assert drained_entry.published_to_platform is True
         await reopened.close()
 
 

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from trw_memory.models.config import MemoryConfig
@@ -38,8 +39,10 @@ from trw_memory.sync.remote import (
     drain_retry_queue,
     fetch_shared_memories,
     publish_memory,
+    publish_memory_result,
+    retire_remote_memory,
 )
-from trw_memory.sync.retry_queue import MAX_QUEUE_DEPTH, MAX_RETRIES, RetryQueue
+from trw_memory.sync.retry_queue import MAX_QUEUE_BYTES, MAX_QUEUE_DEPTH, MAX_RETRIES, RetryQueue
 from trw_memory.sync.subscriber import RECONNECT_DELAY, SSESubscriber
 
 # ---------------------------------------------------------------------------
@@ -106,12 +109,14 @@ def _mock_httpx_client(
 
     if side_effect is not None:
         mock_client.post.side_effect = side_effect
+        mock_client.patch.side_effect = side_effect
     else:
         mock_resp = MagicMock()
         mock_resp.status_code = status_code
         if json_data is not None:
             mock_resp.json.return_value = json_data
         mock_client.post.return_value = mock_resp
+        mock_client.patch.return_value = mock_resp
 
     mock_client_cls.return_value = mock_client
     return mock_client
@@ -370,7 +375,7 @@ class TestResolveConflict:
         assert result.content == "local preferred"
 
     def test_concurrent_unions_merged_from(self) -> None:
-        """Concurrent merge unions merged_from lists."""
+        """Concurrent merge records the participating vector-clock nodes."""
         local = _make_entry(
             merged_from=["src-1"],
             vector_clock={"A": 2, "B": 1},
@@ -380,7 +385,7 @@ class TestResolveConflict:
             vector_clock={"A": 1, "B": 2},
         )
         result = resolve_conflict(local, remote)
-        assert set(result.merged_from) == {"src-1", "src-2"}
+        assert result.merged_from == ["A", "B"]
 
     def test_concurrent_same_detail_no_double(self) -> None:
         """When local and remote detail are equal, don't duplicate."""
@@ -496,6 +501,12 @@ class TestPublishMemory:
         entry = _make_entry(importance=0.9)
         assert publish_memory(entry, cfg) is True
 
+    def test_returns_true_when_platform_url_scheme_invalid(self) -> None:
+        """Invalid URL schemes are rejected before any network call."""
+        cfg = _make_config(platform_url="file:///etc/passwd")
+        entry = _make_entry(importance=0.9)
+        assert publish_memory(entry, cfg) is True
+
     def test_returns_true_when_importance_below_threshold(self) -> None:
         """Below-threshold entries are skipped instead of retried."""
         cfg = _make_config(sync_min_importance=0.7)
@@ -510,6 +521,24 @@ class TestPublishMemory:
         cfg = _make_config()
         entry = _make_entry(importance=0.9)
         assert publish_memory(entry, cfg) is True
+
+    @patch("trw_memory.sync.remote.httpx.Client")
+    def test_publish_result_returns_remote_id(self, mock_client_cls: MagicMock) -> None:
+        """Successful publishes surface the backend-assigned remote ID."""
+        _mock_httpx_client(mock_client_cls, status_code=200, json_data={"id": 123, "status": "published"})
+
+        cfg = _make_config()
+        entry = _make_entry(importance=0.9)
+        result = publish_memory_result(entry, cfg)
+
+        assert result == {"success": True, "remote_id": "123", "retryable": False}
+
+    def test_publish_result_invalid_platform_url_is_non_retryable_skip(self) -> None:
+        """Unsafe platform URLs should not be marked published or retried."""
+        cfg = _make_config(platform_url="file:///etc/passwd")
+        entry = _make_entry(importance=0.9)
+
+        assert publish_memory_result(entry, cfg) == {"success": False, "remote_id": None, "retryable": False}
 
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_calls_correct_url_with_auth(self, mock_client_cls: MagicMock) -> None:
@@ -595,10 +624,23 @@ class TestFetchSharedMemories:
         cfg = _make_config(platform_url="")
         assert fetch_shared_memories("query", cfg) == []
 
+    def test_returns_empty_when_platform_url_scheme_invalid(self) -> None:
+        """Invalid URL schemes are rejected before any fetch."""
+        cfg = _make_config(platform_url="file:///etc/passwd")
+        assert fetch_shared_memories("query", cfg) == []
+
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_returns_empty_on_connection_error(self, mock_client_cls: MagicMock) -> None:
         """Returns [] on connection error (fail-open)."""
         _mock_httpx_client(mock_client_cls, side_effect=ConnectionError("refused"))
+
+        cfg = _make_config()
+        assert fetch_shared_memories("query", cfg) == []
+
+    @patch("trw_memory.sync.remote.httpx.Client")
+    def test_returns_empty_on_timeout(self, mock_client_cls: MagicMock) -> None:
+        """Timeouts fall back to local-only results."""
+        _mock_httpx_client(mock_client_cls, side_effect=httpx.ReadTimeout("timed out"))
 
         cfg = _make_config()
         assert fetch_shared_memories("query", cfg) == []
@@ -619,6 +661,7 @@ class TestFetchSharedMemories:
         results = fetch_shared_memories("query", cfg)
         assert len(results) == 2
         assert str(results[0]["content"]).startswith("[shared] ")
+        assert str(results[0]["summary"]).startswith("[shared] ")
         assert str(results[1]["content"]).startswith("[shared] ")
         assert results[0]["source"] == "shared"
 
@@ -686,6 +729,38 @@ class TestFetchSharedMemories:
         assert results[0]["content"] == "[shared] A finding"
 
     @patch("trw_memory.sync.remote.httpx.Client")
+    def test_handles_items_wrapper_dict(self, mock_client_cls: MagicMock) -> None:
+        """Handles backend SearchResponse payloads wrapped in {items: [...]}."""
+        _mock_httpx_client(
+            mock_client_cls,
+            status_code=200,
+            json_data={"items": [{"summary": "A finding from items"}]},
+        )
+
+        cfg = _make_config()
+        results = fetch_shared_memories("query", cfg)
+        assert len(results) == 1
+        assert results[0]["content"] == "[shared] A finding from items"
+
+    @patch("trw_memory.sync.remote.httpx.Client")
+    def test_deduplicates_by_embedding_similarity(self, mock_client_cls: MagicMock) -> None:
+        """Semantically duplicate remote entries are suppressed when embeddings match."""
+        _mock_httpx_client(
+            mock_client_cls,
+            status_code=200,
+            json_data=[{"summary": "Remote deployment guidance", "detail": "extra"}],
+        )
+
+        cfg = _make_config()
+        local = [_make_entry(content="Local deployment advice", detail="detail")]
+        embedder = MagicMock()
+        embedder.available.return_value = True
+        embedder.embed_batch.return_value = [[1.0, 0.0], [0.99, 0.01]]
+
+        results = fetch_shared_memories("query", cfg, local_entries=local, embedder=embedder)
+        assert results == []
+
+    @patch("trw_memory.sync.remote.httpx.Client")
     def test_returns_empty_on_invalid_json(self, mock_client_cls: MagicMock) -> None:
         """Malformed JSON responses fail open to local-only behavior."""
         mock_client = MagicMock()
@@ -706,6 +781,24 @@ class TestFetchSharedMemories:
 
         cfg = _make_config()
         assert fetch_shared_memories("query", cfg) == []
+
+
+class TestRetireRemoteMemory:
+    """FR05: local delete propagation uses the backend status endpoint."""
+
+    @patch("trw_memory.sync.remote.httpx.Client")
+    def test_retire_marks_remote_entry_obsolete(self, mock_client_cls: MagicMock) -> None:
+        mock_client = _mock_httpx_client(mock_client_cls, status_code=200)
+
+        assert retire_remote_memory("42", _make_config()) is True
+
+        call_args = mock_client.patch.call_args
+        assert call_args[0][0] == "https://api.example.com/v1/learnings/42/status"
+        assert call_args[1]["json"] == {"status": "obsolete"}
+        assert call_args[1]["headers"]["Authorization"] == "Bearer test-key-123"
+
+    def test_retire_skips_invalid_platform_url(self) -> None:
+        assert retire_remote_memory("42", _make_config(platform_url="file:///etc/passwd")) is True
 
 
 # ===========================================================================
@@ -733,6 +826,14 @@ class TestRetryQueue:
         assert not queue.enqueue("M-overflow", {"summary": "overflow"})
         assert queue.depth() == MAX_QUEUE_DEPTH
 
+    def test_enqueue_returns_false_when_size_limit_exceeded(self, tmp_path: Path) -> None:
+        """Queue enforces the 5MB aggregate size cap before writing a new record."""
+        queue = RetryQueue(tmp_path / "queue.jsonl")
+        oversized_detail = "x" * ((MAX_QUEUE_BYTES // 2) + 1024)
+
+        assert queue.enqueue("M-001", {"summary": "test", "detail": oversized_detail})
+        assert not queue.enqueue("M-002", {"summary": "test", "detail": oversized_detail})
+
     def test_drain_publishes_and_removes_successful(self, tmp_path: Path) -> None:
         """Drain removes entries that publish successfully."""
         queue = RetryQueue(tmp_path / "queue.jsonl")
@@ -757,6 +858,30 @@ class TestRetryQueue:
         record = json.loads(lines[0])
         assert record["retry_count"] == 1
         assert record["last_error"] == "publish returned False"
+
+    def test_drain_applies_exponential_backoff_after_failures(self, tmp_path: Path) -> None:
+        """Retries after prior failures sleep using the documented backoff curve."""
+        queue_path = tmp_path / "queue.jsonl"
+        queue_path.write_text(
+            json.dumps(
+                {
+                    "entry_id": "M-001",
+                    "payload": {"summary": "test"},
+                    "queued_at": "2026-01-01T00:00:00Z",
+                    "retry_count": 3,
+                    "last_error": "previous failure",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        queue = RetryQueue(queue_path)
+
+        with patch("trw_memory.sync.retry_queue.time.sleep") as sleep_mock:
+            result = queue.drain(lambda _: False)
+
+        assert result["failed"] == 1
+        sleep_mock.assert_called_once_with(4.0)
 
     def test_drain_skips_entries_at_max_retries(self, tmp_path: Path) -> None:
         """Entries with retry_count >= MAX_RETRIES are skipped."""
@@ -871,6 +996,16 @@ class TestRetryQueue:
         assert result == {"drained": 0, "failed": 0, "skipped": 1}
         assert queue.depth() == 1
 
+    def test_drain_retry_queue_skips_invalid_platform_url(self, tmp_path: Path) -> None:
+        """Drain helper leaves queued payloads untouched for unsafe URL schemes."""
+        queue = RetryQueue(tmp_path / "queue.jsonl")
+        queue.enqueue("M-001", {"summary": "test"})
+
+        result = drain_retry_queue(queue, _make_config(platform_url="file:///etc/passwd"))
+
+        assert result == {"drained": 0, "failed": 0, "skipped": 1}
+        assert queue.depth() == 1
+
     def test_clear_retry_queue_helper_empties_file(self, tmp_path: Path) -> None:
         """The remote helper delegates to the queue clear operation."""
         queue = RetryQueue(tmp_path / "queue.jsonl")
@@ -910,6 +1045,13 @@ class TestSSESubscriber:
         sub.start()
         assert sub._thread is None
 
+    def test_start_does_nothing_when_platform_url_invalid(self) -> None:
+        """Invalid platform URLs are rejected before the SSE thread starts."""
+        cfg = _make_config(platform_url="file:///etc/passwd")
+        sub = SSESubscriber(cfg, on_event=lambda data: None)
+        sub.start()
+        assert sub._thread is None
+
     def test_process_line_extracts_event_id(self) -> None:
         """id: lines update _last_event_id."""
         cfg = _make_config()
@@ -926,6 +1068,26 @@ class TestSSESubscriber:
         sub._process_line(f"data: {data}")
         assert len(received) == 1
         assert received[0]["type"] == "learning_published"
+
+    def test_process_line_calls_on_event_for_learning_retired(self) -> None:
+        """Retirement events flow through the real SSE parser."""
+        cfg = _make_config()
+        received: list[dict[str, Any]] = []
+        sub = SSESubscriber(cfg, on_event=lambda data: received.append(data))
+        data = json.dumps({"type": "learning_retired", "id": 42})
+        sub._process_line(f"data: {data}")
+        assert len(received) == 1
+        assert received[0]["type"] == "learning_retired"
+
+    def test_process_line_calls_on_event_for_learning_updated(self) -> None:
+        """Update events flow through the real SSE parser."""
+        cfg = _make_config()
+        received: list[dict[str, Any]] = []
+        sub = SSESubscriber(cfg, on_event=lambda data: received.append(data))
+        data = json.dumps({"type": "learning_updated", "id": 42})
+        sub._process_line(f"data: {data}")
+        assert len(received) == 1
+        assert received[0]["type"] == "learning_updated"
 
     def test_process_line_ignores_non_learning_events(self) -> None:
         """data: lines with other event types are ignored."""
@@ -969,28 +1131,47 @@ class TestSSESubscriber:
 class TestConfigFields:
     """FR08: MemoryConfig has sync-related fields."""
 
-    def test_sync_enabled_defaults_false(self) -> None:
+    @staticmethod
+    def _isolate_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Run default-value assertions outside any project-level `.trw/config.yaml`."""
+        monkeypatch.chdir(tmp_path)
+        for key in (
+            "MEMORY_SYNC_ENABLED",
+            "MEMORY_SYNC_MIN_IMPORTANCE",
+            "MEMORY_SYNC_NAMESPACE",
+            "MEMORY_PLATFORM_URL",
+            "MEMORY_PLATFORM_API_KEY",
+            "MEMORY_LOCAL_ONLY",
+        ):
+            monkeypatch.delenv(key, raising=False)
+
+    def test_sync_enabled_defaults_false(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """sync_enabled defaults to False."""
+        self._isolate_defaults(tmp_path, monkeypatch)
         cfg = MemoryConfig()
         assert cfg.sync_enabled is False
 
-    def test_sync_min_importance_defaults_0_7(self) -> None:
+    def test_sync_min_importance_defaults_0_7(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """sync_min_importance defaults to 0.7."""
+        self._isolate_defaults(tmp_path, monkeypatch)
         cfg = MemoryConfig()
         assert cfg.sync_min_importance == 0.7
 
-    def test_sync_namespace_defaults_empty(self) -> None:
+    def test_sync_namespace_defaults_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """sync_namespace defaults to empty string."""
+        self._isolate_defaults(tmp_path, monkeypatch)
         cfg = MemoryConfig()
         assert cfg.sync_namespace == ""
 
-    def test_platform_url_defaults_empty(self) -> None:
+    def test_platform_url_defaults_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """platform_url defaults to empty string."""
+        self._isolate_defaults(tmp_path, monkeypatch)
         cfg = MemoryConfig()
         assert cfg.platform_url == ""
 
-    def test_platform_api_key_defaults_empty(self) -> None:
+    def test_platform_api_key_defaults_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """platform_api_key defaults to empty string."""
+        self._isolate_defaults(tmp_path, monkeypatch)
         cfg = MemoryConfig()
         assert cfg.platform_api_key == ""
 

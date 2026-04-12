@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import socket
+import threading
 import uuid
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timezone
@@ -35,16 +37,22 @@ from trw_memory.lifecycle._recall import record_recall_access
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.validation import validate_namespace
+from trw_memory.security.pii import anonymize_installation_id
+from trw_memory.retrieval.dense import cosine_similarity
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.sync.conflict import init_clock
 from trw_memory.sync.remote import (
     _anonymize_entry,
     drain_retry_queue,
     fetch_shared_memories,
-    publish_memory,
+    publish_memory_result,
+    retire_remote_memory,
 )
 from trw_memory.sync.retry_queue import RetryQueue
+from trw_memory.sync.subscriber import SSESubscriber
 
 logger = structlog.get_logger(__name__)
+SHARED_EVENT_CACHE_MAX = 256
 
 __all__ = [
     "ForgetResultDict",
@@ -207,9 +215,18 @@ class MemoryClient:
         self._backend: StorageBackend | None = None
         self._resolved_mode: str = ""
         self._config = MemoryConfig()
+        self._project_root = str(Path.cwd())
+        self._installation_id = f"{socket.gethostname()}:{Path(self._config.storage_path).resolve()}"
+        self._local_node_id = anonymize_installation_id(self._installation_id)
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._retry_queue = RetryQueue(Path(self._config.storage_path) / "sync_queue.jsonl")
         self._retry_drain_started = False
+        self._shared_event_cache: list[MemoryResultDict] = []
+        self._shared_event_cache_lock = threading.Lock()
+        self._pending_remote_retirements: set[str] = set()
+        self._pending_remote_retirements_lock = threading.Lock()
+        self._sse_subscriber: SSESubscriber | None = None
+        self._sse_subscriber_started = False
 
         if mode == "mcp":
             raise NotImplementedError("MCP mode is not yet implemented")
@@ -231,6 +248,8 @@ class MemoryClient:
 
         if mode == "auto" and self._backend is None:
             raise MemoryConnectionError("No connection mode available. Tried: local.")
+
+        self._maybe_start_sse_subscription()
 
     def __repr__(self) -> str:
         return f"MemoryClient(namespace={self._namespace!r}, mode={self._resolved_mode!r})"
@@ -282,9 +301,12 @@ class MemoryClient:
             raise ValueError("content must not be empty")
         if not 0.0 <= importance <= 1.0:
             raise ValueError(f"importance must be in [0.0, 1.0], got {importance}")
+        self._maybe_start_retry_drain()
 
         memory_id = _make_id()
         now = datetime.now(timezone.utc)
+        entry_metadata = dict(metadata or {})
+        entry_metadata.setdefault("installation_id", self._installation_id)
 
         entry = MemoryEntry(
             id=memory_id,
@@ -293,10 +315,14 @@ class MemoryClient:
             tags=tags or [],
             importance=importance,
             namespace=self._namespace,
-            metadata=metadata or {},
+            metadata=entry_metadata,
             created_at=now,
             updated_at=now,
             source="agent",
+            # We need a stable local node marker even before the backend grows
+            # first-class sync metadata, otherwise concurrent local edits have no
+            # causal anchor at all.
+            vector_clock=init_clock(self._local_node_id),
         )
 
         # Persist the dense vector on the normal write path so later recall can
@@ -391,6 +417,8 @@ class MemoryClient:
             raise ValueError(f"limit must be >= 1, got {limit}")
         if token_budget is not None and token_budget <= 0:
             raise ValueError(f"token_budget must be positive, got {token_budget}")
+        self._maybe_start_retry_drain()
+        await self._apply_pending_remote_retirements()
 
         # --- Tier 1: Hybrid retrieval pipeline (BM25 + dense + RRF) ----------
         hybrid_results = await self._try_hybrid_recall(query, limit, tags)
@@ -618,21 +646,31 @@ class MemoryClient:
 
     async def _publish_entry(self, entry: MemoryEntry, embedding: list[float] | None) -> None:
         """Best-effort remote publish for a freshly stored entry."""
-        published = await asyncio.to_thread(
+        publish_result = await asyncio.to_thread(
             functools.partial(
-                publish_memory,
+                publish_memory_result,
                 entry,
                 self._config,
                 embedding=embedding,
+                project_root=self._project_root,
             )
         )
-        if published:
+        if publish_result["success"]:
             async with self._lock:
                 backend = self._get_backend()
-                backend.update(entry.id, published_to_platform=True)
+                backend.update(
+                    entry.id,
+                    published_to_platform=True,
+                    remote_id=publish_result["remote_id"],
+                    last_synced_at=datetime.now(timezone.utc),
+                )
             return
 
-        payload = await asyncio.to_thread(_anonymize_entry, entry, "")
+        retryable = publish_result.get("retryable", not publish_result["success"])
+        if not retryable:
+            return
+
+        payload = await asyncio.to_thread(_anonymize_entry, entry, self._project_root)
         if embedding is not None:
             payload["embedding"] = embedding
         queue_payload = cast(dict[str, object], payload)
@@ -654,8 +692,14 @@ class MemoryClient:
     ) -> list[MemoryResultDict]:
         """Fetch shared memories and append them after local results."""
         try:
+            await self._apply_pending_remote_retirements()
             local_entries = await self._load_entries_for_results(local_results)
             embedder = self._get_embedder()
+            cached_shared = await self._dedupe_cached_shared_results(
+                self._snapshot_cached_shared_results(query),
+                local_entries=local_entries,
+                embedder=embedder,
+            )
             query_embedding: list[float] | None = None
             if embedder is not None and query.strip():
                 query_embedding = await asyncio.to_thread(embedder.embed, query)
@@ -668,6 +712,7 @@ class MemoryClient:
                     embedding=query_embedding,
                     limit=limit,
                     local_entries=local_entries,
+                    embedder=embedder,
                 )
             )
         except Exception:
@@ -680,8 +725,10 @@ class MemoryClient:
                 namespace=self._namespace,
                 exc_info=True,
             )
-            return local_results
-        return [*local_results, *(self._shared_result_to_result(item) for item in shared)]
+            return self._merge_shared_candidates(local_results, self._snapshot_cached_shared_results(query))
+        await self._mark_fetch_retirements(shared)
+        live_shared = [self._shared_result_to_result(item) for item in shared if not self._is_retired_shared_result(item)]
+        return self._merge_shared_candidates(local_results, [*live_shared, *cached_shared])
 
     async def _load_entries_for_results(self, results: list[MemoryResultDict]) -> list[MemoryEntry]:
         """Materialize local entries for dedup against shared results."""
@@ -736,6 +783,108 @@ class MemoryClient:
                 return 0.0
         return 0.0
 
+    @staticmethod
+    def _is_retired_shared_result(result: dict[str, object]) -> bool:
+        """Return whether a shared result represents a remote retirement."""
+        status = str(result.get("status", "")).lower()
+        return status in {"obsolete", "deleted"}
+
+    def _merge_shared_candidates(
+        self,
+        local_results: list[MemoryResultDict],
+        shared_results: list[MemoryResultDict],
+    ) -> list[MemoryResultDict]:
+        """Append shared results after local ones while suppressing exact duplicates."""
+        seen_ids = {result["memory_id"] for result in local_results}
+        seen_content = {result["content"] for result in local_results}
+        merged = list(local_results)
+        for result in shared_results:
+            if result["memory_id"] in seen_ids or result["content"] in seen_content:
+                continue
+            merged.append(result)
+            seen_ids.add(result["memory_id"])
+            seen_content.add(result["content"])
+        return merged
+
+    def _snapshot_cached_shared_results(self, query: str) -> list[MemoryResultDict]:
+        """Return cached SSE shared results relevant to the current query."""
+        with self._shared_event_cache_lock:
+            cached = list(self._shared_event_cache)
+        if not query.strip():
+            return cached
+        return [result for result in cached if self._matches_query(result, query)]
+
+    @staticmethod
+    def _matches_query(result: MemoryResultDict, query: str) -> bool:
+        """Apply the same simple token matching used by fallback recall."""
+        query_terms = {term for term in query.lower().split() if term}
+        if not query_terms:
+            return True
+        text = f"{result['content']} {result['detail']} {' '.join(result['tags'])}".lower()
+        return any(term in text for term in query_terms)
+
+    async def _dedupe_cached_shared_results(
+        self,
+        cached_results: list[MemoryResultDict],
+        *,
+        local_entries: list[MemoryEntry],
+        embedder: EmbeddingProvider | None,
+        dedup_threshold: float = 0.92,
+    ) -> list[MemoryResultDict]:
+        """Apply the same exact/semantic dedup rules to cached SSE results."""
+        if not cached_results or not local_entries:
+            return cached_results
+
+        local_remote_ids = {str(entry.remote_id) for entry in local_entries if entry.remote_id}
+        local_contents = {entry.content.lower().strip() for entry in local_entries}
+
+        candidates: list[MemoryResultDict] = []
+        candidate_texts: list[str] = []
+        for result in cached_results:
+            normalized_content = self._strip_shared_prefix(result["content"]).strip()
+            if result["memory_id"] in local_remote_ids or normalized_content.lower() in local_contents:
+                continue
+            candidates.append(result)
+            candidate_texts.append(f"{normalized_content} {result['detail']}".strip())
+
+        if not candidates or embedder is None or not embedder.available():
+            return candidates
+
+        local_texts = [f"{entry.content} {entry.detail}".strip() for entry in local_entries]
+        vectors = await asyncio.to_thread(embedder.embed_batch, [*local_texts, *candidate_texts])
+        local_vectors = [vector for vector in vectors[: len(local_entries)] if vector is not None]
+        remote_vectors = vectors[len(local_entries) :]
+        if not local_vectors:
+            return candidates
+
+        deduped: list[MemoryResultDict] = []
+        for candidate, remote_vector in zip(candidates, remote_vectors, strict=False):
+            if remote_vector is None:
+                deduped.append(candidate)
+                continue
+            if any(cosine_similarity(remote_vector, local_vector) > dedup_threshold for local_vector in local_vectors):
+                continue
+            deduped.append(candidate)
+        return deduped
+
+    @staticmethod
+    def _strip_shared_prefix(content: str) -> str:
+        """Normalize cached shared content for dedup comparisons."""
+        return content[9:] if content.startswith("[shared] ") else content
+
+    async def _mark_fetch_retirements(self, shared_results: list[dict[str, object]]) -> None:
+        """Record retirement markers returned from remote fetches."""
+        remote_ids = {
+            str(result.get("id", result.get("remote_id", "")))
+            for result in shared_results
+            if self._is_retired_shared_result(result)
+        }
+        if not remote_ids:
+            return
+        with self._pending_remote_retirements_lock:
+            self._pending_remote_retirements.update(remote_id for remote_id in remote_ids if remote_id)
+        await self._apply_pending_remote_retirements()
+
     async def forget(self, memory_id: str) -> ForgetResultDict:
         """Delete a memory entry.
 
@@ -749,6 +898,7 @@ class MemoryClient:
             MemoryNotFoundError: If *memory_id* does not exist or belongs
                 to a different namespace.
         """
+        self._maybe_start_retry_drain()
         async with self._lock:
             backend = self._get_backend()
             existing = backend.get(memory_id)
@@ -756,7 +906,10 @@ class MemoryClient:
                 raise MemoryNotFoundError(f"Memory entry {memory_id!r} not found")
             if existing.namespace != self._namespace:
                 raise MemoryNotFoundError(f"Memory entry {memory_id!r} not found in namespace {self._namespace!r}")
+            remote_id = existing.remote_id
             backend.delete(memory_id)
+        if remote_id:
+            self._schedule_background_task(self._retire_remote_entry(memory_id, remote_id))
 
         logger.debug(
             "memory_forgotten",
@@ -796,6 +949,8 @@ class MemoryClient:
             raise ValueError(f"limit must be >= 1, got {limit}")
         if not 0.0 <= min_importance <= 1.0:
             raise ValueError(f"min_importance must be in [0.0, 1.0], got {min_importance}")
+        self._maybe_start_retry_drain()
+        await self._apply_pending_remote_retirements()
 
         async with self._lock:
             entries = self._get_backend().list_entries(
@@ -978,9 +1133,7 @@ class MemoryClient:
 
     async def __aenter__(self) -> MemoryClient:
         """Enter the async context manager."""
-        if self._should_start_retry_drain():
-            self._retry_drain_started = True
-            self._schedule_background_task(self._drain_retry_queue())
+        self._maybe_start_retry_drain()
         return self
 
     async def __aexit__(
@@ -994,6 +1147,10 @@ class MemoryClient:
 
     async def close(self) -> None:
         """Close the underlying backend and release resources."""
+        if self._sse_subscriber is not None:
+            self._sse_subscriber.stop()
+            self._sse_subscriber = None
+            self._sse_subscriber_started = False
         if self._background_tasks:
             await asyncio.gather(*list(self._background_tasks), return_exceptions=True)
         if self._backend is not None:
@@ -1011,9 +1168,92 @@ class MemoryClient:
             and self._retry_queue.depth() > 0
         )
 
+    def _should_start_sse_subscription(self) -> bool:
+        """Return whether this client should own a live shared-learning subscription."""
+        return (
+            not self._sse_subscriber_started
+            and not self._config.local_only
+            and self._config.sync_enabled
+            and bool(self._config.platform_url)
+            and bool(self._config.platform_api_key)
+        )
+
+    def _maybe_start_sse_subscription(self) -> None:
+        """Start the SSE subscriber once per client when remote sync is enabled."""
+        if not self._should_start_sse_subscription():
+            return
+        subscriber = SSESubscriber(self._config, on_event=self._handle_sse_event)
+        subscriber.start()
+        self._sse_subscriber = subscriber
+        self._sse_subscriber_started = True
+
+    def _maybe_start_retry_drain(self) -> None:
+        """Start queue recovery once the client is actively used in a live loop."""
+        if self._should_start_retry_drain():
+            self._retry_drain_started = True
+            self._schedule_background_task(self._drain_retry_queue())
+
+    def _handle_sse_event(self, event: dict[str, object]) -> None:
+        """Merge SSE learning events into the next shared recall path."""
+        event_type = str(event.get("type", ""))
+        if event_type in {"learning_published", "learning_updated"}:
+            self._cache_shared_event(event)
+            return
+        if event_type == "learning_retired":
+            remote_id = str(event.get("id", ""))
+            if not remote_id:
+                return
+            with self._pending_remote_retirements_lock:
+                self._pending_remote_retirements.add(remote_id)
+            with self._shared_event_cache_lock:
+                self._shared_event_cache = [
+                    cached for cached in self._shared_event_cache if cached["memory_id"] != remote_id
+                ]
+
+    def _cache_shared_event(self, event: dict[str, object]) -> None:
+        """Store a lightweight shared result so the next recall can surface it."""
+        remote_id = str(event.get("id", "")).strip()
+        summary = str(event.get("summary", "")).strip()
+        if not remote_id or not summary:
+            return
+        shared_content = summary if summary.startswith("[shared] ") else f"[shared] {summary}"
+        cached = MemoryResultDict(
+            memory_id=remote_id,
+            content=shared_content,
+            detail="",
+            tags=[],
+            importance=0.0,
+            score=0.0,
+            created_at="",
+            updated_at="",
+            namespace="shared",
+            source="shared",
+        )
+        with self._shared_event_cache_lock:
+            self._shared_event_cache = [
+                existing for existing in self._shared_event_cache if existing["memory_id"] != remote_id
+            ]
+            self._shared_event_cache.append(cached)
+            if len(self._shared_event_cache) > SHARED_EVENT_CACHE_MAX:
+                # Keep the most recent shared events so a burst cannot grow memory usage without bound.
+                self._shared_event_cache = self._shared_event_cache[-SHARED_EVENT_CACHE_MAX:]
+
     async def _drain_retry_queue(self) -> None:
         """Best-effort background drain for queued publish payloads."""
+        queued_before = {record["entry_id"] for record in self._retry_queue.snapshot()}
         result = await asyncio.to_thread(drain_retry_queue, self._retry_queue, self._config)
+        queued_after = {record["entry_id"] for record in self._retry_queue.snapshot()}
+        drained_ids = queued_before - queued_after
+        if drained_ids:
+            async with self._lock:
+                backend = self._get_backend()
+                synced_at = datetime.now(timezone.utc)
+                for entry_id in drained_ids:
+                    backend.update(
+                        entry_id,
+                        published_to_platform=True,
+                        last_synced_at=synced_at,
+                    )
         logger.debug(
             "memory_sync_queue_drained",
             op="session_start",
@@ -1023,3 +1263,56 @@ class MemoryClient:
             failed=result["failed"],
             skipped=result["skipped"],
         )
+
+    async def _retire_remote_entry(self, memory_id: str, remote_id: str) -> None:
+        """Best-effort remote retirement for a locally deleted published entry."""
+        retired = await asyncio.to_thread(retire_remote_memory, remote_id, self._config)
+        if retired:
+            logger.debug(
+                "memory_remote_retired",
+                op="forget",
+                outcome="success",
+                memory_id=memory_id,
+                remote_id=remote_id,
+                namespace=self._namespace,
+            )
+            return
+        logger.warning(
+            "memory_remote_retire_failed",
+            op="forget",
+            outcome="failure",
+            memory_id=memory_id,
+            remote_id=remote_id,
+            namespace=self._namespace,
+        )
+
+    async def _apply_pending_remote_retirements(self) -> None:
+        """Mark matching local entries as pending_delete when remote retirement wins."""
+        with self._pending_remote_retirements_lock:
+            remote_ids = set(self._pending_remote_retirements)
+            self._pending_remote_retirements.clear()
+        if not remote_ids:
+            return
+
+        async with self._lock:
+            backend = self._get_backend()
+            limit = max(backend.count(namespace=self._namespace), 1)
+            entries = backend.list_entries(namespace=self._namespace, limit=limit)
+            unresolved = set(remote_ids)
+            for entry in entries:
+                if entry.remote_id not in unresolved:
+                    continue
+                # Package-local sync does not yet increment vector clocks on every
+                # mutation, so last_synced_at is the only trustworthy shipped
+                # signal that the local row has previously converged with remote.
+                if entry.last_synced_at is None:
+                    continue
+                updated = backend.update(
+                    entry.id,
+                    pending_delete=True,
+                )
+                if updated is not None:
+                    unresolved.discard(str(entry.remote_id))
+        if unresolved:
+            with self._pending_remote_retirements_lock:
+                self._pending_remote_retirements.update(unresolved)

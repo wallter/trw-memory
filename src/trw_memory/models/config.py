@@ -6,12 +6,60 @@ Defaults match the TRWConfig memory-related values for backward compatibility.
 
 from __future__ import annotations
 
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings.sources import InitSettingsSource, PydanticBaseSettingsSource
+from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError
 
 __all__ = ["MemoryConfig"]
+
+
+def _read_trw_config_yaml() -> dict[str, object]:
+    """Best-effort read of the current project's `.trw/config.yaml`."""
+    config_path = Path.cwd() / ".trw" / "config.yaml"
+    if not config_path.exists():
+        return {}
+
+    yaml = YAML(typ="safe")
+    try:
+        with config_path.open(encoding="utf-8") as handle:
+            loaded = yaml.load(handle)
+    except (OSError, YAMLError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+class _TRWConfigYamlSource(InitSettingsSource):
+    """Map framework config keys onto the subset owned by trw-memory."""
+
+    def __init__(self, settings_cls: type[BaseSettings]) -> None:
+        raw = _read_trw_config_yaml()
+        mapped: dict[str, Any] = {}
+
+        sync_enabled = raw.get("sync_enabled", raw.get("platform_telemetry_enabled"))
+        if sync_enabled is not None:
+            mapped["sync_enabled"] = sync_enabled
+        if raw.get("sync_min_importance") is not None:
+            mapped["sync_min_importance"] = raw["sync_min_importance"]
+        if raw.get("sync_namespace") is not None:
+            mapped["sync_namespace"] = raw["sync_namespace"]
+        if raw.get("platform_api_key") is not None:
+            mapped["platform_api_key"] = raw["platform_api_key"]
+
+        direct_url = raw.get("platform_url")
+        platform_urls = raw.get("platform_urls")
+        if direct_url is not None:
+            mapped["platform_url"] = direct_url
+        elif isinstance(platform_urls, list):
+            first_url = next((candidate for candidate in platform_urls if candidate), None)
+            if first_url is not None:
+                mapped["platform_url"] = first_url
+
+        super().__init__(settings_cls, mapped)
 
 
 class MemoryConfig(BaseSettings):
@@ -115,3 +163,28 @@ class MemoryConfig(BaseSettings):
         if abs(total - 1.0) > 0.01:
             raise ValueError(f"Score weights must sum to 1.0, got {total:.3f}")
         return self
+
+    @model_validator(mode="after")
+    def _enable_sync_turns_off_default_local_only(self) -> MemoryConfig:
+        """Treat explicit sync opt-in as the master gate unless local_only was also set."""
+        if self.sync_enabled and self.local_only and "local_only" not in self.model_fields_set:
+            self.local_only = False
+        return self
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Load `.trw/config.yaml` after env vars, preserving env precedence."""
+        return (
+            init_settings,
+            env_settings,
+            _TRWConfigYamlSource(settings_cls),
+            dotenv_settings,
+            file_secret_settings,
+        )
