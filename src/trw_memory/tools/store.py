@@ -6,7 +6,6 @@ stores it via the backend, and returns the memory_id and status.
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime, timezone
 from uuid import uuid4
 

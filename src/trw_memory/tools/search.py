@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import structlog
 
-from trw_memory.models.config import MemoryConfig
 from trw_memory.exceptions import ConfigError
+from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.security.rbac import Permission, require_namespace_permission

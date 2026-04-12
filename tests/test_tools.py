@@ -5,10 +5,11 @@ Tests the *_impl functions directly without requiring a running FastMCP server.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterator, cast
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,8 +22,8 @@ from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools.forget import memory_forget_impl
 from trw_memory.tools.recall import _merge_tier_entries, memory_recall_impl
-from trw_memory.tools.store import memory_store_impl
 from trw_memory.tools.search import memory_search_impl
+from trw_memory.tools.store import memory_store_impl
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -145,7 +146,7 @@ class TestMemoryRecallImpl:
         cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
 
         with create_backend_from_config(cfg, "team:sprint-24") as storage:
-            backend = cast(SQLiteBackend, storage)
+            backend = cast("SQLiteBackend", storage)
             backend.store(_make_entry("M-001", namespace="team:sprint-24"))
             manager = NamespaceManager(backend)
             manager.ensure_team_namespace(
@@ -189,7 +190,7 @@ class TestMemoryRecallImpl:
 
         result = memory_recall_impl("", "project:default", backend=backend, graph_depth=1, conn=conn)
 
-        related_items = cast(list[dict[str, object]], result["related"])
+        related_items = cast("list[dict[str, object]]", result["related"])
         assert related_items[0]["id"] == "M-related"
         assert related_items[0]["content"] == "related entry"
         assert related_items[0]["edge_type"] == "similarity"
@@ -203,8 +204,8 @@ class TestMemoryRecallImpl:
             create_backend_from_config(cfg, "project:default") as current_storage,
             create_backend_from_config(cfg, "project:other") as remote_storage,
         ):
-            current_backend = cast(SQLiteBackend, current_storage)
-            remote_backend = cast(SQLiteBackend, remote_storage)
+            current_backend = cast("SQLiteBackend", current_storage)
+            remote_backend = cast("SQLiteBackend", remote_storage)
 
             current_backend.store(
                 MemoryEntry(
@@ -237,7 +238,7 @@ class TestMemoryRecallImpl:
                     config=cfg,
                 )
 
-            memories = cast(list[dict[str, object]], result["memories"])
+            memories = cast("list[dict[str, object]]", result["memories"])
             assert len(memories) == 2
             assert memories[0]["namespace"] == "project:default"
             assert memories[1]["namespace"] == "project:other"
@@ -256,8 +257,8 @@ class TestMemoryRecallImpl:
             create_backend_from_config(cfg, "project:default") as current_storage,
             create_backend_from_config(cfg, "project:other") as remote_storage,
         ):
-            current_backend = cast(SQLiteBackend, current_storage)
-            remote_backend = cast(SQLiteBackend, remote_storage)
+            current_backend = cast("SQLiteBackend", current_storage)
+            remote_backend = cast("SQLiteBackend", remote_storage)
 
             current_backend.store(MemoryEntry(id="M-local", content="deployment lesson", namespace="project:default"))
             remote_backend.store(
@@ -284,14 +285,14 @@ class TestMemoryRecallImpl:
                     config=cfg,
                 )
 
-            memories = cast(list[dict[str, object]], result["memories"])
+            memories = cast("list[dict[str, object]]", result["memories"])
             assert [memory["namespace"] for memory in memories] == ["project:default"]
 
     def test_include_org_memories_false_suppresses_org_entries(self, tmp_path: Path) -> None:
         cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
 
         with create_backend_from_config(cfg, "project:default") as current_storage:
-            current_backend = cast(SQLiteBackend, current_storage)
+            current_backend = cast("SQLiteBackend", current_storage)
             current_backend.store(MemoryEntry(id="M-local", content="deployment lesson", namespace="project:default"))
 
             with patch(
@@ -307,7 +308,7 @@ class TestMemoryRecallImpl:
                     config=cfg,
                 )
 
-            memories = cast(list[dict[str, object]], result["memories"])
+            memories = cast("list[dict[str, object]]", result["memories"])
             assert [memory["namespace"] for memory in memories] == ["project:default"]
 
     def test_recall_promotes_cold_tier_hit_through_tool_surface(self, tmp_path: Path) -> None:
@@ -337,7 +338,7 @@ class TestMemoryRecallImpl:
                 config=cfg,
             )
 
-            memories = cast(list[dict[str, object]], result["memories"])
+            memories = cast("list[dict[str, object]]", result["memories"])
             assert any(memory["id"] == "M-tool-cold" for memory in memories)
             assert not cold_file.exists()
             assert backend.get("M-tool-cold") is not None
@@ -379,7 +380,7 @@ class TestMemoryRecallImpl:
                 config=cfg,
             )
 
-            memories = cast(list[dict[str, object]], result["memories"])
+            memories = cast("list[dict[str, object]]", result["memories"])
             assert any(memory["id"] == "M-tool-cold-vector" for memory in memories)
             assert fake_backend.vectors["M-tool-cold-vector"] == [1.0, 0.0]
 
@@ -419,7 +420,7 @@ class TestMemoryRecallImpl:
             finally:
                 manager._cold_store._warm_store.warm_add = original_warm_add  # type: ignore[method-assign]
 
-            memories = cast(list[dict[str, object]], result["memories"])
+            memories = cast("list[dict[str, object]]", result["memories"])
             assert not any(memory["id"] == "M-tool-cold-fail" for memory in memories)
             assert cold_file.exists()
             assert backend.get("M-tool-cold-fail") is None
@@ -460,7 +461,7 @@ class TestMemoryRecallImpl:
             finally:
                 manager._cold_store._warm_store.warm_add = original_warm_add  # type: ignore[method-assign]
 
-            memories = cast(list[dict[str, object]], result["memories"])
+            memories = cast("list[dict[str, object]]", result["memories"])
             assert not any(memory["id"] == "M-tool-cold-sqlite-fail" for memory in memories)
             assert cold_file.exists()
             assert backend.get("M-tool-cold-sqlite-fail") is None
@@ -507,7 +508,7 @@ class TestMemoryRecallImpl:
             finally:
                 monkeypatch.setattr(Path, "unlink", original_unlink)
 
-            memories = cast(list[dict[str, object]], result["memories"])
+            memories = cast("list[dict[str, object]]", result["memories"])
             assert not any(memory["id"] == "M-tool-cold-sqlite-unlink-fail" for memory in memories)
             assert cold_file.exists()
             assert backend.get("M-tool-cold-sqlite-unlink-fail") is None
@@ -558,7 +559,7 @@ class TestMemoryRecallImpl:
             finally:
                 monkeypatch.setattr(Path, "unlink", original_unlink)
 
-            memories = cast(list[dict[str, object]], result["memories"])
+            memories = cast("list[dict[str, object]]", result["memories"])
             assert not any(memory["id"] == "M-tool-cold-yaml-double-fail" for memory in memories)
             assert cold_file.exists()
             assert backend.get("M-tool-cold-yaml-double-fail") is None
@@ -609,7 +610,7 @@ class TestMemoryRecallImpl:
             finally:
                 monkeypatch.setattr(Path, "unlink", original_unlink)
 
-            memories = cast(list[dict[str, object]], result["memories"])
+            memories = cast("list[dict[str, object]]", result["memories"])
             assert not any(memory["id"] == "M-tool-cold-sqlite-double-fail" for memory in memories)
             assert cold_file.exists()
             assert backend.get("M-tool-cold-sqlite-double-fail") is None
@@ -645,7 +646,7 @@ class TestMemoryRecallImpl:
                     config=cfg,
                 )
 
-            memories = cast(list[dict[str, object]], result["memories"])
+            memories = cast("list[dict[str, object]]", result["memories"])
             assert [memory["id"] for memory in memories] == ["M-semantic"]
 
     def test_recall_refreshes_hot_recency_for_ttl(self, tmp_path: Path) -> None:
@@ -671,7 +672,7 @@ class TestMemoryRecallImpl:
                 config=cfg,
             )
 
-            memories = cast(list[dict[str, object]], result["memories"])
+            memories = cast("list[dict[str, object]]", result["memories"])
             assert any(memory["id"] == "M-tool-hot-ttl" for memory in memories)
             hot_entry = manager.hot_get("M-tool-hot-ttl")
             assert hot_entry is not None
@@ -859,7 +860,7 @@ class TestMemoryForgetImpl:
         cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
         with create_backend_from_config(cfg, "project:default") as backend:
             stored = memory_store_impl("tool tracked entry", "project:default", backend=backend, config=cfg)
-            memory_id = cast(str, stored["memory_id"])
+            memory_id = cast("str", stored["memory_id"])
             manager = get_tier_manager(cfg, "project:default")
 
             warm_ids = [str(item["id"]) for item in manager.warm_search(["tracked"], None)]

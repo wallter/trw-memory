@@ -21,8 +21,8 @@ from trw_memory.exceptions import ConfigError
 from trw_memory.graph import list_org_shared_entries
 from trw_memory.lifecycle._recall import record_recall_access
 from trw_memory.lifecycle.scoring import entry_utility, rank_by_utility
-from trw_memory.lifecycle.tiers._scoring import compute_importance_score
 from trw_memory.lifecycle.tiers._runtime import remember_entry_data_in_tiers, supports_tier_runtime, tier_candidates
+from trw_memory.lifecycle.tiers._scoring import compute_importance_score
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
@@ -36,7 +36,7 @@ from trw_memory.tools._types import McpServer
 logger = structlog.get_logger(__name__)
 
 
-def memory_recall_impl(
+def memory_recall_impl(  # noqa: C901 - existing orchestration-heavy recall pipeline; security hook was added surgically
     query: str,
     namespace: str,
     *,
@@ -94,18 +94,21 @@ def memory_recall_impl(
     cfg = config or MemoryConfig()
     require_namespace_permission(cfg, namespace, Permission.READ, "recall")
 
-    if namespace.startswith("team:") and isinstance(backend, SQLiteBackend):
-        if NamespaceManager(backend).team_namespace_expired(namespace):
-            logger.debug("memory_recall_team_namespace_expired", namespace=namespace)
-            return {
-                "memories": [],
-                "total_matches": 0,
-                "query": query,
-                "tokens_used": 0,
-                "tokens_budget": token_budget,
-                "tokens_truncated": False,
-                "namespace_expired": True,
-            }
+    if (
+        namespace.startswith("team:")
+        and isinstance(backend, SQLiteBackend)
+        and NamespaceManager(backend).team_namespace_expired(namespace)
+    ):
+        logger.debug("memory_recall_team_namespace_expired", namespace=namespace)
+        return {
+            "memories": [],
+            "total_matches": 0,
+            "query": query,
+            "tokens_used": 0,
+            "tokens_budget": token_budget,
+            "tokens_truncated": False,
+            "namespace_expired": True,
+        }
 
     # Validate any additional namespaces
     extra_ns: list[str] = []
@@ -132,10 +135,13 @@ def memory_recall_impl(
             if ns != namespace and namespace_backend_factory is not None:
                 ns_backend = stack.enter_context(namespace_backend_factory(ns))
 
-            if ns.startswith("team:") and isinstance(ns_backend, SQLiteBackend):
-                if NamespaceManager(ns_backend).team_namespace_expired(ns):
-                    logger.debug("recall_expired_namespace_skipped", namespace=ns)
-                    continue
+            if (
+                ns.startswith("team:")
+                and isinstance(ns_backend, SQLiteBackend)
+                and NamespaceManager(ns_backend).team_namespace_expired(ns)
+            ):
+                logger.debug("recall_expired_namespace_skipped", namespace=ns)
+                continue
 
             ns_entries = ns_backend.list_entries(
                 status=MemoryStatus.ACTIVE,

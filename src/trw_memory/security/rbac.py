@@ -71,7 +71,7 @@ def check_permission(role: Role, permission: Permission) -> bool:
 
 
 def require_namespace_permission(
-    config: "MemoryConfig",
+    config: MemoryConfig,
     namespace: str,
     permission: Permission,
     operation: str,
