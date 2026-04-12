@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterator, cast
 from unittest.mock import MagicMock, patch
 
+from trw_memory.graph import wait_for_graph_updates
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
@@ -162,6 +163,7 @@ class TestMemoryStoreImpl:
                     tags=["python", "async", "graph"],
                     config=cfg,
                 )
+                wait_for_graph_updates()
 
             assert result["status"] == "stored"
             edge_rows = backend._conn.execute(
@@ -232,6 +234,7 @@ class TestMemoryStoreImpl:
                     config=cfg,
                     importance=0.6,
                 )
+                wait_for_graph_updates()
 
             assert result["status"] == "stored"
             stored_entry = current_backend.get(cast(str, result["memory_id"]))

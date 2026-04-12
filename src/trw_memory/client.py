@@ -34,7 +34,7 @@ from trw_memory.exceptions import (
     StorageError,
     ToolAlreadyRegisteredError,
 )
-from trw_memory.graph import list_org_shared_entries, update_entry_graph
+from trw_memory.graph import list_org_shared_entries, schedule_graph_update
 from trw_memory.lifecycle._recall import record_recall_access
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -356,12 +356,11 @@ class MemoryClient:
                         f"failed to persist vector for {entry.id!r}; entry write was rolled back"
                     ) from exc
             try:
-                # Graph enrichment must run even without embeddings so
-                # tag/co-occurrence and consolidation lineage stay consistent with
-                # the tool write path in BM25-only environments.
-                update_entry_graph(entry, backend, embedding=embedding, config=self._config)
-            except (StorageError, sqlite3.Error, ValueError):
-                logger.warning("memory_store_graph_update_failed", memory_id=entry.id, exc_info=True)
+                # Graph enrichment must still run without embeddings so tag and
+                # lineage edges stay consistent, but it should not hold up store().
+                schedule_graph_update(entry, backend, embedding=embedding, config=self._config)
+            except RuntimeError:
+                logger.warning("memory_store_graph_schedule_failed", memory_id=entry.id, exc_info=True)
 
         logger.debug(
             "memory_stored",

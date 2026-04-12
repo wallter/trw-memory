@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 import time
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, cast
@@ -29,6 +30,7 @@ from trw_memory.exceptions import (
     MemoryNotFoundError,
     ToolAlreadyRegisteredError,
 )
+from trw_memory.graph import wait_for_graph_updates
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -179,6 +181,7 @@ class TestStore:
 
         with patch.object(client, "_get_embedder", return_value=fake_embedder):
             stored = await client.store("new memory", tags=["python", "async", "graph"])
+            await asyncio.to_thread(wait_for_graph_updates)
 
         edge_rows = backend._conn.execute(
             "SELECT edge_type, COUNT(*) FROM memory_graph_edges WHERE source_id IN (?, ?) OR target_id IN (?, ?) "
@@ -203,6 +206,7 @@ class TestStore:
 
         with patch.object(client, "_get_embedder", return_value=None):
             stored = await client.store("new memory", tags=["python", "async", "graph"])
+            await asyncio.to_thread(wait_for_graph_updates)
 
         edge_rows = backend._conn.execute(
             "SELECT edge_type, COUNT(*) FROM memory_graph_edges WHERE source_id IN (?, ?) OR target_id IN (?, ?) "
@@ -230,6 +234,27 @@ class TestStore:
         assert stored["status"] == "stored"
         assert tuple(row) == ("sprint-24", None, "active")
         await client.close()
+
+    async def test_store_returns_before_graph_update_finishes(
+        self,
+        client: MemoryClient,
+    ) -> None:
+        release_update = threading.Event()
+
+        def slow_graph_update(*_args: object, **_kwargs: object) -> dict[str, int]:
+            release_update.wait(timeout=1.0)
+            return {"similarity_edges": 0, "tag_edges": 0, "consolidation_edges": 0, "cross_validated_projects": 0}
+
+        with patch("trw_memory.graph.update_entry_graph", side_effect=slow_graph_update):
+            started = time.perf_counter()
+            stored = await client.store("background graph update")
+            elapsed = time.perf_counter() - started
+
+        assert stored["status"] == "stored"
+        assert elapsed < 0.1
+
+        release_update.set()
+        await asyncio.to_thread(wait_for_graph_updates)
 
     async def test_store_cross_validates_matching_project_entries(
         self,
@@ -270,6 +295,7 @@ class TestStore:
                 patch("trw_memory.integrations._backend.discover_namespace_backends", fake_discover),
             ):
                 stored = await client.store("shared operational lesson", importance=0.6)
+                await asyncio.to_thread(wait_for_graph_updates)
 
             backend = cast(SQLiteBackend, client._get_backend())
             current_entry = backend.get(stored["memory_id"])
