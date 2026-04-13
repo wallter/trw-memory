@@ -90,3 +90,18 @@ class RateLimitError(MemoryError):
     def __init__(self, message: str, *, path: str = "", retry_after: float = 0.0) -> None:
         super().__init__(message, path=path)
         self.retry_after = retry_after
+
+
+class CorruptDatabaseUnsalvageableError(StorageError):
+    """Raised when a corrupt DB cannot be salvaged and strict policy refuses the empty fallback.
+
+    Carries ``backup_path`` as a user-actionable breadcrumb so the forensic evidence
+    is visible at the call site. Raised by :meth:`SQLiteBackend.recover_db` only when
+    the primary SELECT salvage AND the ``sqlite3 .recover`` CLI fallback both yield
+    zero rows from a non-empty ``.corrupt.bak`` file under the ``strict`` recovery
+    policy (PRD-CORE-138).
+    """
+
+    def __init__(self, message: str, *, backup_path: str = "") -> None:
+        super().__init__(f"{message} (backup preserved at: {backup_path})", path=backup_path)
+        self.backup_path = backup_path
