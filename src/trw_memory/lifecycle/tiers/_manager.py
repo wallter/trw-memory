@@ -509,6 +509,8 @@ class TierManager:
                 dim=config.embedding_dim,
                 sqlcipher_key_hex=sqlcipher_key_hex,
                 recovery_policy=config.memory_recovery_policy,
+                corrupt_backup_keep=config.memory_corrupt_backup_keep,
+                rebuild_from_cold=config.memory_recovery_rebuild_from_cold,
             )
 
         from trw_memory.storage.yaml_backend import YAMLBackend
