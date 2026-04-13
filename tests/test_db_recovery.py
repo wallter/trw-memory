@@ -110,8 +110,9 @@ class TestRecoverDb:
         # Corrupt it
         _corrupt_db(db_path)
 
-        # Recovery should produce a new valid database
-        new_conn = SQLiteBackend.recover_db(db_path)
+        # Recovery under empty_ok policy (PRD-CORE-138 escape hatch): legacy
+        # silent-empty fallback when CLI salvage is unavailable/unsuccessful.
+        new_conn = SQLiteBackend.recover_db(db_path, recovery_policy="empty_ok")
         new_conn.close()
 
         # Verify backup was created
@@ -135,7 +136,7 @@ class TestRecoverDb:
         shm.write_bytes(b"shm data")
 
         _corrupt_db(db_path)
-        new_conn = SQLiteBackend.recover_db(db_path)
+        new_conn = SQLiteBackend.recover_db(db_path, recovery_policy="empty_ok")
         new_conn.close()
 
         assert not wal.exists()
@@ -149,7 +150,7 @@ class TestRecoverDb:
         conn.execute("CREATE TABLE memories (id TEXT PRIMARY KEY)")
         conn.close()
         _corrupt_db(db_path)
-        c1 = SQLiteBackend.recover_db(db_path)
+        c1 = SQLiteBackend.recover_db(db_path, recovery_policy="empty_ok")
         c1.close()
 
         backup1 = db_path.with_suffix(".db.corrupt.bak")
@@ -157,7 +158,7 @@ class TestRecoverDb:
 
         # Second corruption + recovery — old backup should be rotated
         _corrupt_db(db_path)
-        c2 = SQLiteBackend.recover_db(db_path)
+        c2 = SQLiteBackend.recover_db(db_path, recovery_policy="empty_ok")
         c2.close()
 
         rotated = db_path.with_suffix(".db.corrupt.bak.1")
@@ -169,6 +170,7 @@ class TestRecoverDb:
         # Write total garbage — not even a valid SQLite file
         db_path.write_bytes(b"\x00" * 4096)
 
+        # Tiny backup (<=page_size) falls through even under strict (PRD-CORE-138).
         new_conn = SQLiteBackend.recover_db(db_path)
         new_conn.close()
 
@@ -189,8 +191,9 @@ class TestInitAutoRecovery:
         # Corrupt it (header overwrite — _db_has_data returns False)
         _corrupt_db(db_path)
 
-        # Constructor should detect corruption and auto-recover
-        backend2 = SQLiteBackend(db_path)
+        # Constructor with empty_ok policy triggers legacy auto-recovery path
+        # (PRD-CORE-138: default strict raises on non-empty backup with 0 rows).
+        backend2 = SQLiteBackend(db_path, recovery_policy="empty_ok")
         # Database should be healthy after recovery
         assert backend2._run_integrity_check() is True
         assert backend2.recovered is True
