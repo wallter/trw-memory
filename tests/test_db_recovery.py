@@ -12,12 +12,23 @@ Covers:
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+# PRD-CORE-139: timestamped backup filename pattern.
+_TIMESTAMPED_BACKUP_RE = re.compile(
+    r"^memory\.db\.corrupt\.(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)(?:-\d+)?\.bak$"
+)
+
+
+def _timestamped_backups(parent: Path) -> list[Path]:
+    """Return sorted list of PRD-CORE-139 timestamped corruption backups in ``parent``."""
+    return sorted(p for p in parent.iterdir() if _TIMESTAMPED_BACKUP_RE.fullmatch(p.name))
 
 
 def _make_entry(entry_id: str = "test-1", content: str = "hello") -> MemoryEntry:
@@ -115,9 +126,9 @@ class TestRecoverDb:
         new_conn = SQLiteBackend.recover_db(db_path, recovery_policy="empty_ok")
         new_conn.close()
 
-        # Verify backup was created
-        backup = db_path.with_suffix(".db.corrupt.bak")
-        assert backup.exists()
+        # Verify backup was created (PRD-CORE-139: timestamped filename).
+        backups = _timestamped_backups(tmp_path)
+        assert len(backups) == 1
 
         # The new database should be valid
         result = SQLiteBackend.check_integrity(db_path)
@@ -143,6 +154,7 @@ class TestRecoverDb:
         assert not shm.exists()
 
     def test_backup_rotation(self, tmp_path: Path) -> None:
+        """PRD-CORE-139: each recovery produces a timestamped backup; both coexist."""
         db_path = tmp_path / "memory.db"
 
         # First corruption + recovery
@@ -153,17 +165,20 @@ class TestRecoverDb:
         c1 = SQLiteBackend.recover_db(db_path, recovery_policy="empty_ok")
         c1.close()
 
-        backup1 = db_path.with_suffix(".db.corrupt.bak")
-        assert backup1.exists()
+        backups_after_first = _timestamped_backups(tmp_path)
+        assert len(backups_after_first) == 1
 
-        # Second corruption + recovery — old backup should be rotated
+        # Second corruption + recovery — a second timestamped backup appears.
+        # (PRD-CORE-139 replaces the pre-PRD 2-wide numeric rotation.)
         _corrupt_db(db_path)
         c2 = SQLiteBackend.recover_db(db_path, recovery_policy="empty_ok")
         c2.close()
 
-        rotated = db_path.with_suffix(".db.corrupt.bak.1")
-        assert rotated.exists()
-        assert backup1.exists()
+        backups_after_second = _timestamped_backups(tmp_path)
+        # Both backups coexist; budget default is 5.
+        assert len(backups_after_second) == 2
+        # First backup is still on disk.
+        assert backups_after_first[0] in backups_after_second
 
     def test_empty_db_when_salvage_fails(self, tmp_path: Path) -> None:
         db_path = tmp_path / "memory.db"
@@ -200,8 +215,8 @@ class TestInitAutoRecovery:
         assert backend2.integrity_warning is False
         backend2.close()
 
-        # Backup should exist
-        assert db_path.with_suffix(".db.corrupt.bak").exists()
+        # Backup should exist (PRD-CORE-139: timestamped filename).
+        assert len(_timestamped_backups(tmp_path)) == 1
 
     def test_preserves_db_with_data_on_transient_failure(self, tmp_path: Path, monkeypatch: object) -> None:
         """When quick_check fails but DB has readable data, open anyway
@@ -234,8 +249,9 @@ class TestInitAutoRecovery:
             assert result.content == "must not be lost"
             backend2.close()
 
-            # No backup should be created
+            # No backup should be created (neither legacy nor timestamped).
             assert not db_path.with_suffix(".db.corrupt.bak").exists()
+            assert _timestamped_backups(tmp_path) == []
 
     def test_db_has_data_returns_false_for_empty(self, tmp_path: Path) -> None:
         db_path = tmp_path / "empty.db"
