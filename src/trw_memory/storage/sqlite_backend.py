@@ -17,14 +17,20 @@ import json
 import shutil
 import sqlite3
 import struct
+import subprocess
+import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 import structlog
 
-from trw_memory.exceptions import EncryptionUnavailableError, StorageError
+from trw_memory.exceptions import (
+    CorruptDatabaseUnsalvageableError,
+    EncryptionUnavailableError,
+    StorageError,
+)
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage._row_mapper import entry_to_row, row_to_entry
 from trw_memory.storage._schema import ensure_schema, ensure_vec_table
@@ -100,12 +106,20 @@ class SQLiteBackend(StorageBackend):
 
     _DEFAULT_DIM: ClassVar[int] = 384
 
-    def __init__(self, db_path: Path, dim: int = 384, *, sqlcipher_key_hex: str | None = None) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        dim: int = 384,
+        *,
+        sqlcipher_key_hex: str | None = None,
+        recovery_policy: Literal["strict", "empty_ok"] = "strict",
+    ) -> None:
         self._db_path = db_path
         self._dim = dim
         self._vec_available = False
         self._lock = threading.Lock()
         self._dbapi: Any = _import_sqlcipher_driver() if sqlcipher_key_hex is not None else sqlite3
+        self._recovery_policy = recovery_policy
 
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -143,6 +157,7 @@ class SQLiteBackend(StorageBackend):
                     db_path,
                     dbapi=self._dbapi,
                     sqlcipher_key_hex=sqlcipher_key_hex,
+                    recovery_policy=self._recovery_policy,
                 )
                 self.recovered = True
 
@@ -305,20 +320,79 @@ class SQLiteBackend(StorageBackend):
             return False
 
     @staticmethod
+    def _salvage_via_recover_cli(backup_path: Path, dbapi: Any = sqlite3) -> list[Any]:
+        """Attempt `sqlite3 <backup> .recover` CLI salvage.
+
+        PRD-CORE-138 FR04 — second salvage path for cases where the in-process
+        ``SELECT * FROM memories`` raises :class:`sqlite3.DatabaseError` because
+        ``sqlite_master`` is damaged but B-tree pages still hold rows.
+
+        Returns an empty list on any failure: CLI absent, non-zero exit,
+        ``subprocess.TimeoutExpired``, ``FileNotFoundError``, ``sqlite3.Error``
+        during dump load, or empty output. The caller treats an empty list as
+        "salvage failed" and consults the recovery policy.
+        """
+        try:
+            completed = subprocess.run(  # noqa: S603 — args passed as list, shell=False
+                ["sqlite3", str(backup_path), ".recover"],
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return []
+
+        if completed.returncode != 0 or not completed.stdout:
+            return []
+
+        dump_sql = completed.stdout.decode("utf-8", errors="replace")
+        if not dump_sql.strip():
+            return []
+
+        # Load dump into a temp DB and extract rows.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_db = Path(tmpdir) / "recover.db"
+            try:
+                tmp_conn = dbapi.connect(str(tmp_db))
+                tmp_conn.row_factory = sqlite3.Row
+                try:
+                    tmp_conn.executescript(dump_sql)
+                    rows = tmp_conn.execute("SELECT * FROM memories").fetchall()
+                    return list(rows)
+                except sqlite3.Error:
+                    return []
+                finally:
+                    tmp_conn.close()
+            except sqlite3.Error:
+                return []
+
+    @staticmethod
     def recover_db(
         db_path: Path,
         *,
         dbapi: Any = sqlite3,
         sqlcipher_key_hex: str | None = None,
+        recovery_policy: Literal["strict", "empty_ok"] = "strict",
     ) -> Any:
         """Recover from a corrupt database by salvaging rows into a fresh DB.
 
         1. Rename corrupt file to ``<name>.corrupt.bak``
-        2. Try to dump salvageable rows via ``.recover`` (SQLite 3.29+)
-        3. If dump fails, start with an empty database
+        2. Try salvage via in-process ``SELECT * FROM memories``.
+        3. On ``DatabaseError`` (e.g., destroyed ``sqlite_master``), fall back
+           to the ``sqlite3 .recover`` CLI (PRD-CORE-138 FR04).
+        4. If both salvage paths yield zero rows AND the backup is non-empty
+           AND ``recovery_policy == "strict"`` (default), raise
+           :class:`CorruptDatabaseUnsalvageableError` preserving the backup
+           (FR03).
+        5. Under ``recovery_policy == "empty_ok"`` preserve legacy behavior:
+           create a fresh empty DB and log ``rows_salvaged=0`` (FR05).
 
         Returns:
             A new :class:`sqlite3.Connection` to the recovered database.
+
+        Raises:
+            CorruptDatabaseUnsalvageableError: Under ``strict`` policy when
+                salvage yields zero rows from a non-empty ``.corrupt.bak``.
         """
         backup_path = db_path.with_suffix(".db.corrupt.bak")
         # Rotate old backups — keep at most 2
@@ -334,7 +408,8 @@ class SQLiteBackend(StorageBackend):
             with contextlib.suppress(OSError):
                 wal.unlink()
 
-        recovered_rows = 0
+        salvage_primary_failed = False
+        rows: list[Any] = []
         try:
             # Attempt to salvage rows from the corrupt database.
             old_conn = SQLiteBackend._connect(
@@ -345,15 +420,49 @@ class SQLiteBackend(StorageBackend):
                 sqlcipher_key_hex=sqlcipher_key_hex,
             )
             try:
-                rows = old_conn.execute(
-                    "SELECT * FROM memories"
-                ).fetchall()
-                recovered_rows = len(rows)
+                rows = list(old_conn.execute("SELECT * FROM memories").fetchall())
             except sqlite3.DatabaseError:
+                salvage_primary_failed = True
                 rows = []
             old_conn.close()
         except sqlite3.DatabaseError:
+            salvage_primary_failed = True
             rows = []
+
+        # FR04: second salvage path via sqlite3 CLI .recover when primary yielded no rows.
+        salvage_cli_failed = False
+        cli_used = False
+        if not rows:
+            cli_used = True
+            rows = SQLiteBackend._salvage_via_recover_cli(backup_path, dbapi=dbapi)
+            salvage_cli_failed = not rows
+
+        recovered_rows = len(rows)
+
+        # FR03: strict-mode refusal on non-empty backup with zero salvaged rows.
+        # Page-size heuristic: SQLite default page is 4096 bytes. Backups smaller
+        # than one page cannot contain real row data — treat them as genuinely
+        # empty and fall through to the legacy empty-DB creation path.
+        page_size = 4096
+        try:
+            backup_size = backup_path.stat().st_size
+        except OSError:
+            backup_size = 0
+
+        if not rows and backup_size > page_size and recovery_policy == "strict":
+            logger.error(
+                "db_recovery_refused_strict",
+                action="refuse_empty_fallback",
+                db_path=str(db_path),
+                backup_path=str(backup_path),
+                backup_size_bytes=backup_size,
+                salvage_primary_failed=salvage_primary_failed,
+                salvage_cli_failed=salvage_cli_failed,
+            )
+            raise CorruptDatabaseUnsalvageableError(
+                "database disk image is malformed and salvage yielded 0 rows",
+                backup_path=str(backup_path),
+            )
 
         new_conn = SQLiteBackend._connect(
             db_path,
@@ -376,12 +485,21 @@ class SQLiteBackend(StorageBackend):
                     new_conn.execute(insert_sql, tuple(row))
             new_conn.commit()
 
-        logger.warning(
-            "db_recovered",
-            db=str(db_path),
-            backup=str(backup_path),
-            rows_salvaged=recovered_rows,
-        )
+        if cli_used and rows:
+            logger.warning(
+                "db_recovered_via_cli",
+                db=str(db_path),
+                backup=str(backup_path),
+                rows_salvaged=recovered_rows,
+                source="sqlite3_cli_dump",
+            )
+        else:
+            logger.warning(
+                "db_recovered",
+                db=str(db_path),
+                backup=str(backup_path),
+                rows_salvaged=recovered_rows,
+            )
         return new_conn
 
     @staticmethod
