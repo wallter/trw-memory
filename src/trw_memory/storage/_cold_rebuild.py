@@ -38,6 +38,7 @@ from sqlite3 import Connection
 import structlog
 
 from trw_memory.exceptions import StorageError
+from trw_memory.storage._shared import ENTRY_COLUMNS
 from trw_memory.storage.persistence import read_yaml
 
 __all__ = ["rebuild_from_cold"]
@@ -64,11 +65,11 @@ _LIST_FIELDS: tuple[str, ...] = (
 # YAML dict-typed fields that round-trip as JSON objects in the DB.
 _DICT_FIELDS: tuple[str, ...] = ("metadata", "vector_clock")
 
-# Column order for the INSERT statement. Matches the subset of
-# ``ENTRY_COLUMNS`` that ``_hydrate_yaml`` actually populates. Kept local
-# rather than importing from ``_shared`` because we deliberately hardcode
-# ``type`` and default several columns here rather than relying on SQL
-# ``DEFAULT`` clauses (safer under schema drift).
+# Column order for the INSERT statement. Declared as the subset of
+# :data:`trw_memory.storage._shared.ENTRY_COLUMNS` that ``_hydrate_yaml``
+# actually populates. The guard below asserts subset membership at import
+# time so that a future rename in the canonical column list fails loudly
+# here instead of silently dropping rows via ``INSERT OR IGNORE``.
 _INSERT_COLUMNS: tuple[str, ...] = (
     "id",
     "content",
@@ -94,6 +95,20 @@ _INSERT_COLUMNS: tuple[str, ...] = (
     "domain",
     "phase_affinity",
 )
+
+# PRD-CORE-140 audit finding 140-FR01-P2: enforce SSOT. If a future
+# canonical column rename breaks this invariant, fail at module import
+# with a clear diagnostic rather than silently dropping rows at insert.
+_INSERT_COLUMN_SET: set[str] = {str(c) for c in _INSERT_COLUMNS}
+_UNKNOWN_COLUMNS = _INSERT_COLUMN_SET - set(ENTRY_COLUMNS)
+if _UNKNOWN_COLUMNS:  # pragma: no cover — defensive invariant check
+    raise RuntimeError(
+        f"_INSERT_COLUMNS drift from ENTRY_COLUMNS: {sorted(_UNKNOWN_COLUMNS)} "
+        "not present in canonical column list. Update _cold_rebuild.py or "
+        "_shared.ENTRY_COLUMNS to re-align."
+    )
+del _INSERT_COLUMN_SET
+del _UNKNOWN_COLUMNS
 
 
 def _assert_within_cold_dir(cold_base: Path, candidate: Path) -> None:
