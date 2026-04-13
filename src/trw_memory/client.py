@@ -64,7 +64,6 @@ from trw_memory.security.runtime import (
     store_quarantined_entry,
 )
 from trw_memory.storage.interface import StorageBackend
-from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.sync.conflict import init_clock
 from trw_memory.sync.remote import (
     _anonymize_entry,
@@ -459,7 +458,7 @@ class MemoryClient:
             # actually use hybrid ranking instead of silently degrading to BM25-only.
             embedder = self._get_embedder()
             embedding = embedder.embed(f"{entry.content} {entry.detail}") if embedder is not None else None
-            if self._namespace.startswith("team:") and isinstance(backend, SQLiteBackend):
+            if self._namespace.startswith("team:"):
                 NamespaceManager(backend).ensure_team_namespace(self._namespace, created_at=now)
             backend.store(entry)
             if embedding is not None:
@@ -578,11 +577,7 @@ class MemoryClient:
 
         async with self._lock:
             backend = self._get_backend()
-            if (
-                self._namespace.startswith("team:")
-                and isinstance(backend, SQLiteBackend)
-                and NamespaceManager(backend).team_namespace_expired(self._namespace)
-            ):
+            if self._namespace.startswith("team:") and NamespaceManager(backend).team_namespace_expired(self._namespace):
                 logger.debug(
                     "memory_recall_team_namespace_expired",
                     op="recall",

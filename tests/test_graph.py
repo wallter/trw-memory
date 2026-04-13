@@ -626,6 +626,27 @@ class TestMemoryDecayPass:
 
         assert result["processed"] == 0
 
+    def test_skips_never_accessed_fresh_entries(self) -> None:
+        conn = _make_conn()
+        recent = datetime.now(timezone.utc).isoformat()
+        _insert_memory_row(conn, "e1", cross_validated=1, created_at=recent, last_accessed_at=None, importance=0.8)
+
+        result = memory_decay_pass(conn, cutoff_days=90)
+
+        assert result["processed"] == 0
+
+    def test_decays_never_accessed_old_entries_by_created_at(self) -> None:
+        conn = _make_conn()
+        old_date = "2020-01-01T00:00:00+00:00"
+        _insert_memory_row(conn, "e1", cross_validated=1, created_at=old_date, last_accessed_at=None, importance=0.8)
+
+        result = memory_decay_pass(conn, cutoff_days=90)
+
+        assert result["processed"] == 1
+        row = conn.execute("SELECT importance FROM memories WHERE id = 'e1'").fetchone()
+        assert row is not None
+        assert abs(row[0] - 0.7) < 0.001
+
     def test_decay_floors_at_zero(self) -> None:
         conn = _make_conn()
         old_date = "2020-01-01T00:00:00+00:00"

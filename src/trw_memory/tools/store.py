@@ -31,7 +31,6 @@ from trw_memory.security.poisoning import validate_store_inputs
 from trw_memory.security.rbac import Permission, require_namespace_permission
 from trw_memory.security.runtime import append_audit_event, prepare_entry_for_store, store_quarantined_entry
 from trw_memory.storage.interface import StorageBackend
-from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools._types import McpServer
 
 logger = structlog.get_logger(__name__)
@@ -153,7 +152,7 @@ def memory_store_impl(
             }
 
         entry = decision.entry
-        if namespace.startswith("team:") and isinstance(backend, SQLiteBackend):
+        if namespace.startswith("team:"):
             NamespaceManager(backend).ensure_team_namespace(namespace, created_at=now)
         backend.store(entry)
         embedding: list[float] | None = None

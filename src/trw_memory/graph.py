@@ -762,14 +762,14 @@ def memory_decay_pass(
 
     rows = conn.execute(
         "SELECT id, importance FROM memories WHERE cross_validated = 1 "
-        "AND (last_accessed_at IS NULL OR last_accessed_at < ?) "
+        "AND COALESCE(last_accessed_at, created_at) < ? "
         "LIMIT ?",
         (cutoff, batch_size),
     ).fetchall()
 
     total = conn.execute(
         "SELECT COUNT(*) FROM memories WHERE cross_validated = 1 "
-        "AND (last_accessed_at IS NULL OR last_accessed_at < ?)",
+        "AND COALESCE(last_accessed_at, created_at) < ?",
         (cutoff,),
     ).fetchone()
     total_qualifying = total[0] if total else 0

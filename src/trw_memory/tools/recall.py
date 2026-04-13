@@ -31,7 +31,6 @@ from trw_memory.retrieval import hybrid_search
 from trw_memory.security.rbac import Permission, require_namespace_permission
 from trw_memory.security.runtime import append_audit_event
 from trw_memory.storage.interface import StorageBackend
-from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools._types import McpServer
 
 logger = structlog.get_logger(__name__)
@@ -95,11 +94,7 @@ def memory_recall_impl(  # noqa: C901 - existing orchestration-heavy recall pipe
     cfg = config or MemoryConfig()
     require_namespace_permission(cfg, namespace, Permission.READ, "recall")
 
-    if (
-        namespace.startswith("team:")
-        and isinstance(backend, SQLiteBackend)
-        and NamespaceManager(backend).team_namespace_expired(namespace)
-    ):
+    if namespace.startswith("team:") and NamespaceManager(backend).team_namespace_expired(namespace):
         logger.debug("memory_recall_team_namespace_expired", namespace=namespace)
         return {
             "memories": [],
@@ -136,11 +131,7 @@ def memory_recall_impl(  # noqa: C901 - existing orchestration-heavy recall pipe
             if ns != namespace and namespace_backend_factory is not None:
                 ns_backend = stack.enter_context(namespace_backend_factory(ns))
 
-            if (
-                ns.startswith("team:")
-                and isinstance(ns_backend, SQLiteBackend)
-                and NamespaceManager(ns_backend).team_namespace_expired(ns)
-            ):
+            if ns.startswith("team:") and NamespaceManager(ns_backend).team_namespace_expired(ns):
                 logger.debug("recall_expired_namespace_skipped", namespace=ns)
                 continue
 

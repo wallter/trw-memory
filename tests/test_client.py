@@ -811,6 +811,25 @@ class TestRecall:
         assert await client.recall("team") == []
         await client.close()
 
+    async def test_recall_returns_empty_for_expired_team_namespace_with_yaml(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "yaml")
+        client = MemoryClient(namespace="team:sprint-24", mode="local")
+        await client.store("team finding", tags=["team"])
+
+        backend = client._get_backend()
+        NamespaceManager(backend).mark_team_namespace_completed(
+            "team:sprint-24",
+            completed_at=datetime.now(timezone.utc) - timedelta(days=2),
+        )
+
+        assert await client.recall("team") == []
+        await client.close()
+
     async def test_recall_warms_hot_tier_from_persisted_warm_entries(
         self,
         tmp_path: Path,
