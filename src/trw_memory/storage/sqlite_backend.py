@@ -130,6 +130,8 @@ class SQLiteBackend(StorageBackend):
         recovery_policy: Literal["strict", "empty_ok"] = "strict",
         corrupt_backup_keep: int = 5,
         rebuild_from_cold: bool = True,
+        integrity_check_interval_minutes: int = 0,
+        concurrent_writer_warn_threshold: int = 4,
     ) -> None:
         self._db_path = db_path
         self._dim = dim
@@ -139,6 +141,11 @@ class SQLiteBackend(StorageBackend):
         self._recovery_policy = recovery_policy
         self._corrupt_backup_keep = corrupt_backup_keep
         self._rebuild_from_cold = rebuild_from_cold
+        self._integrity_check_interval_minutes = integrity_check_interval_minutes
+        self._concurrent_writer_warn_threshold = concurrent_writer_warn_threshold
+        # PRD-INFRA-063 (B2) + PRD-INFRA-064 (B3) hooks — populated after open.
+        self._integrity_scheduler: Any = None
+        self._writer_registry: Any = None
 
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -198,6 +205,43 @@ class SQLiteBackend(StorageBackend):
                 logger.debug("sqlite_vec_load_failed", db=str(db_path), exc_info=True)
         else:
             logger.debug("sqlite_vec_unavailable", reason="not_installed")
+
+        # PRD-INFRA-064 (B3): multi-writer advisory registry — advisory ONLY,
+        # registry failures MUST NOT raise (advisory-only invariant).
+        try:
+            from trw_memory.storage._writer_registry import WriterRegistry
+
+            self._writer_registry = WriterRegistry(
+                db_path,
+                warn_threshold=self._concurrent_writer_warn_threshold,
+            )
+            self._writer_registry.register()
+        except Exception:  # justified: advisory-only invariant — never block open
+            logger.debug("writer_registry_unavailable", db=str(db_path), exc_info=True)
+            self._writer_registry = None
+
+        # PRD-INFRA-063 (B2): periodic integrity scheduler — opt-in via
+        # interval > 0. Dedicated read-only connection; observability only.
+        try:
+            from trw_memory.storage._integrity_scheduler import IntegrityScheduler
+
+            self._integrity_scheduler = IntegrityScheduler(
+                db_path,
+                interval_minutes=self._integrity_check_interval_minutes,
+                on_regression=self._handle_integrity_regression,
+            )
+            self._integrity_scheduler.start()
+        except Exception:  # justified: observability scheduler must not block open
+            logger.debug("integrity_scheduler_unavailable", db=str(db_path), exc_info=True)
+            self._integrity_scheduler = None
+
+    def _handle_integrity_regression(self, _db_path: Path, _detail: str) -> None:
+        """Callback invoked by :class:`IntegrityScheduler` on a failed probe.
+
+        Sets :attr:`integrity_warning` so external code can observe the
+        regression (same flag used by the transient-WAL-contention path).
+        """
+        self.integrity_warning = True
 
     # ------------------------------------------------------------------
     # Integrity & recovery
@@ -1208,6 +1252,17 @@ class SQLiteBackend(StorageBackend):
 
     def close(self) -> None:
         """Close the database connection."""
+        # PRD-INFRA-063: stop the integrity scheduler BEFORE closing the
+        # connection so the background thread unwinds cleanly.
+        if self._integrity_scheduler is not None:
+            with contextlib.suppress(Exception):
+                self._integrity_scheduler.stop(timeout=2.0)
+            self._integrity_scheduler = None
+        # PRD-INFRA-064: remove our writer-registry lockfile.
+        if self._writer_registry is not None:
+            with contextlib.suppress(Exception):
+                self._writer_registry.close()
+            self._writer_registry = None
         with contextlib.suppress(sqlite3.Error):
             self._conn.close()
         logger.debug("sqlite_backend_closed", db=str(self._db_path))
