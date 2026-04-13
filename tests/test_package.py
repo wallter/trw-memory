@@ -1,6 +1,46 @@
-"""Tests for trw-memory package metadata and exports."""
+"""Tests for trw-memory package metadata, packaging, and workflow surfaces."""
 
 from __future__ import annotations
+
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+from ruamel.yaml import YAML
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility path
+    import tomli as tomllib
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+PYPROJECT_PATH = PACKAGE_ROOT / "pyproject.toml"
+MEMORY_CI_PATH = REPO_ROOT / ".github" / "workflows" / "memory-ci.yml"
+MEMORY_CD_PATH = REPO_ROOT / ".github" / "workflows" / "memory-cd.yml"
+
+
+def _load_pyproject() -> dict[str, object]:
+    with PYPROJECT_PATH.open("rb") as handle:
+        return tomllib.load(handle)
+
+
+def _load_workflow(path: Path) -> dict[str, object]:
+    yaml = YAML(typ="safe")
+    loaded = yaml.load(path.read_text(encoding="utf-8"))
+    assert isinstance(loaded, dict)
+    return loaded
+
+
+def _find_step(job: dict[str, object], name: str) -> dict[str, object]:
+    steps = job.get("steps")
+    assert isinstance(steps, list)
+    for step in steps:
+        assert isinstance(step, dict)
+        if step.get("name") == name:
+            return step
+    raise AssertionError(f"Step {name!r} not found")
 
 
 def test_package_importable() -> None:
@@ -134,3 +174,193 @@ def test_memory_status_is_enum() -> None:
     assert hasattr(MemoryStatus, "ACTIVE")
     assert hasattr(MemoryStatus, "RESOLVED")
     assert hasattr(MemoryStatus, "OBSOLETE")
+
+
+def test_cli_help_returns_zero() -> None:
+    """The installed CLI module prints help successfully."""
+    result = subprocess.run(
+        [sys.executable, "-m", "trw_memory.cli", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "usage:" in result.stdout.lower()
+
+
+def test_pyproject_declares_current_package_contract() -> None:
+    """Package metadata matches the shipped trw-memory contract."""
+    pyproject = _load_pyproject()
+    project = pyproject["project"]
+    assert isinstance(project, dict)
+    classifiers = project["classifiers"]
+    assert isinstance(classifiers, list)
+
+    assert pyproject["build-system"] == {"requires": ["hatchling"], "build-backend": "hatchling.build"}
+    assert project["name"] == "trw-memory"
+    assert project["license"] == "BUSL-1.1"
+    assert project["requires-python"] == ">=3.10"
+    assert "Programming Language :: Python :: 3.10" in classifiers
+    assert "Programming Language :: Python :: 3.11" in classifiers
+    assert "Programming Language :: Python :: 3.12" in classifiers
+    assert "Programming Language :: Python :: 3.13" in classifiers
+
+
+def test_pyproject_declares_current_optional_extras_and_scripts() -> None:
+    """Optional extras and scripts expose the current packaging surfaces."""
+    pyproject = _load_pyproject()
+    project = pyproject["project"]
+    assert isinstance(project, dict)
+    optional = project["optional-dependencies"]
+    assert isinstance(optional, dict)
+    scripts = project["scripts"]
+    assert isinstance(scripts, dict)
+
+    assert set(optional) == {
+        "mcp",
+        "encryption",
+        "embeddings",
+        "vectors",
+        "bm25",
+        "llm",
+        "langchain",
+        "llamaindex",
+        "crewai",
+        "all-integrations",
+        "all",
+        "dev",
+    }
+    assert optional["all"] == ["trw-memory[mcp,embeddings,vectors,bm25,llm]"]
+    assert optional["all-integrations"] == ["trw-memory[langchain,llamaindex,crewai]"]
+    assert scripts["trw-memory"] == "trw_memory.cli:main"
+    assert scripts["trw-memory-server"] == "trw_memory.server:main"
+
+
+def test_pyproject_mypy_config_is_strict_python_310() -> None:
+    """The package keeps strict mypy settings aligned to the minimum Python version."""
+    pyproject = _load_pyproject()
+    mypy = pyproject["tool"]["mypy"]
+    assert isinstance(mypy, dict)
+
+    assert mypy["strict"] is True
+    assert mypy["python_version"] == "3.10"
+    assert mypy["plugins"] == ["pydantic.mypy"]
+
+
+def test_memory_ci_workflow_covers_package_and_workflow_changes() -> None:
+    """CI runs for trw-memory changes and for workflow edits that change the contract."""
+    workflow = _load_workflow(MEMORY_CI_PATH)
+    on_config = workflow["on"]
+    assert isinstance(on_config, dict)
+    push = on_config["push"]
+    pull_request = on_config["pull_request"]
+    assert isinstance(push, dict)
+    assert isinstance(pull_request, dict)
+
+    assert workflow["name"] == "memory-ci"
+    assert push["branches"] == ["main"]
+    assert push["paths"] == ["trw-memory/**", ".github/workflows/memory-ci.yml", ".github/workflows/memory-cd.yml"]
+    assert pull_request["paths"] == ["trw-memory/**", ".github/workflows/memory-ci.yml", ".github/workflows/memory-cd.yml"]
+
+
+def test_memory_ci_test_job_uploads_coverage_artifacts() -> None:
+    """The matrix test job emits both terminal and XML coverage for each Python version."""
+    workflow = _load_workflow(MEMORY_CI_PATH)
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    test_job = jobs["test"]
+    assert isinstance(test_job, dict)
+    matrix = test_job["strategy"]["matrix"]
+    assert isinstance(matrix, dict)
+    coverage_step = _find_step(test_job, "Run tests with coverage")
+    upload_step = _find_step(test_job, "Upload coverage XML")
+    security_step = _find_step(test_job, "Run INFRA-020 security coverage gate")
+
+    assert matrix["python-version"] == ["3.10", "3.11", "3.12", "3.13"]
+    assert coverage_step["run"].count("--cov-report") == 2
+    assert "--cov-report=xml:coverage.xml" in coverage_step["run"]
+    assert upload_step["uses"] == "actions/upload-artifact@v4"
+    assert upload_step["with"]["name"] == "coverage-${{ matrix.python-version }}"
+    assert upload_step["with"]["path"] == "trw-memory/coverage.xml"
+    assert "--cov-branch" in security_step["run"]
+
+
+def test_memory_ci_compat_job_checks_core_and_sqlite_vec_paths() -> None:
+    """Compat covers core-only imports, optional extras, and sqlite-vec loading."""
+    workflow = _load_workflow(MEMORY_CI_PATH)
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    compat_job = jobs["compat"]
+    assert isinstance(compat_job, dict)
+
+    install_core_step = _find_step(compat_job, "Install core package only")
+    verify_core_step = _find_step(compat_job, "Verify core import without optional deps")
+    verify_missing_step = _find_step(compat_job, "Verify optional imports fail gracefully")
+    install_all_step = _find_step(compat_job, "Install optional compatibility extras")
+    sqlite_vec_step = _find_step(compat_job, "Verify sqlite-vec runtime compatibility")
+    imports_step = _find_step(compat_job, "Verify representative optional imports")
+
+    assert install_core_step["run"] == "pip install -e ."
+    assert "Core exports OK" in verify_core_step["run"]
+    assert "ImportError" in verify_missing_step["run"]
+    assert install_all_step["run"] == 'pip install -e ".[all]"'
+    assert "sqlite_vec.load(conn)" in sqlite_vec_step["run"]
+    assert "SKIPPED: sqlite-vec requires SQLite >= 3.35.0" in sqlite_vec_step["run"]
+    for module_name in ("anthropic", "sentence_transformers", "sqlite_vec"):
+        assert module_name in imports_step["run"]
+
+
+def test_memory_ci_typecheck_job_uses_python_310_and_mypy_strict() -> None:
+    """Typecheck is pinned to the minimum supported runtime with strict mypy."""
+    workflow = _load_workflow(MEMORY_CI_PATH)
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    typecheck_job = jobs["typecheck"]
+    assert isinstance(typecheck_job, dict)
+
+    setup_step = _find_step(typecheck_job, "Set up Python 3.10")
+    typecheck_step = _find_step(typecheck_job, "Run mypy --strict")
+
+    assert setup_step["with"]["python-version"] == "3.10"
+    assert typecheck_step["run"] == "mypy --strict src/trw_memory/"
+
+
+def test_memory_cd_workflow_matches_current_release_contract() -> None:
+    """The release workflow builds, signs, publishes, and updates the changelog."""
+    workflow = _load_workflow(MEMORY_CD_PATH)
+    on_config = workflow["on"]
+    assert isinstance(on_config, dict)
+    push = on_config["push"]
+    assert isinstance(push, dict)
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+
+    build_job = jobs["build"]
+    sign_job = jobs["sign"]
+    publish_job = jobs["publish-codeartifact"]
+    changelog_job = jobs["changelog"]
+    assert isinstance(build_job, dict)
+    assert isinstance(sign_job, dict)
+    assert isinstance(publish_job, dict)
+    assert isinstance(changelog_job, dict)
+
+    assert workflow["name"] == "memory-cd"
+    assert push["tags"] == ["trw-memory-v*"]
+    assert workflow["permissions"] == {"contents": "write", "id-token": "write"}
+
+    assert _find_step(build_job, "Build wheel and sdist")["run"] == "python -m build"
+    assert "find dist" in _find_step(build_job, "Verify build artifacts exist")["run"]
+    assert "sha256sum dist/*" in _find_step(build_job, "Compute checksums")["run"]
+    assert _find_step(sign_job, "Sign artifacts")["uses"] == "sigstore/gh-action-sigstore-python@v3"
+    assert "Missing required secret(s):" in _find_step(publish_job, "Validate required publishing secrets")["run"]
+    assert _find_step(publish_job, "Configure AWS credentials")["uses"] == "aws-actions/configure-aws-credentials@v4"
+    assert "twine upload dist/*.whl dist/*.tar.gz" in _find_step(publish_job, "Publish to CodeArtifact")["run"]
+    assert "CHANGELOG.md" in _find_step(changelog_job, "Generate changelog")["run"]
+
+
+def test_package_version_is_semver_like() -> None:
+    """Version string follows a semantic-version style contract."""
+    from trw_memory import __version__
+
+    assert re.match(r"^\d+\.\d+\.\d+$", __version__)
