@@ -11,7 +11,7 @@
 trw-memory is the standalone memory engine for [TRW (The Real Work)](https://trwframework.com) — a methodology layer for AI-assisted development that turns stateless agents into self-improving systems through [knowledge compounding](https://trwframework.com/docs). It works alongside [trw-mcp](https://github.com/wallter/trw-mcp), the MCP server that provides 24 tools built on this engine.
 
 - **trw-memory** (this repo): Standalone AI agent memory engine with hybrid retrieval, scoring, and lifecycle
-- **trw-mcp**: MCP server with 24 tools, 24 skills, 18 agents — uses trw-memory as its backend
+- **trw-mcp**: MCP server with 25 tools, 24 skills, 12 agents — uses trw-memory as its backend
 
 ## What It Does
 
@@ -210,7 +210,7 @@ src/trw_memory/
     from_trw.py          # YAML-to-SQLite migration from trw-mcp format
 ```
 
-**81 source files, ~12,150 lines of code**
+**92 source files, ~19,900 lines of code**
 
 ## API Reference
 
@@ -332,7 +332,7 @@ trw-memory-server  # Starts MCP server (stdio transport)
 # Install dev dependencies
 pip install -e ".[dev]"
 
-# Run full test suite (1,423 tests, >=85% coverage required)
+# Run full test suite (2,050+ tests, >=85% coverage required)
 .venv/bin/python -m pytest tests/ -v --cov=trw_memory --cov-report=term-missing
 
 # Type checking (strict mode, 81 files)
@@ -344,7 +344,7 @@ pip install -e ".[dev]"
 .venv/bin/python -m pytest tests/test_storage_sqlite.py -v
 ```
 
-**Current metrics**: 1,423 tests, ~90% coverage, mypy strict clean.
+**Current metrics**: 2,050+ tests, ~90% coverage, mypy strict clean.
 
 ### Optional Dependencies
 
