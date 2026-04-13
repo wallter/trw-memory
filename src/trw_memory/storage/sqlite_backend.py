@@ -47,10 +47,8 @@ from trw_memory.sync.delta import DeltaTracker
 
 try:
     import sqlite_vec
-
-    _SQLITE_VEC_AVAILABLE = True
-except ImportError:
-    _SQLITE_VEC_AVAILABLE = False
+except ImportError:  # pragma: no cover — optional dep
+    sqlite_vec = None  # type: ignore[assignment]
 
 logger = structlog.get_logger(__name__)
 SQLCIPHER_REQUIRED_MESSAGE = (
@@ -163,10 +161,11 @@ class SQLiteBackend(StorageBackend):
 
         ensure_schema(self._conn)
 
-        if _SQLITE_VEC_AVAILABLE:
+        vec_module = sqlite_vec
+        if vec_module is not None:
             try:
                 self._conn.enable_load_extension(True)
-                sqlite_vec.load(self._conn)
+                vec_module.load(self._conn)
                 self._conn.enable_load_extension(False)
                 ensure_vec_table(self._conn, self._dim)
                 self._vec_available = True
