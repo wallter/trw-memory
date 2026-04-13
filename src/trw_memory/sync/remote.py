@@ -7,8 +7,11 @@ they never raise exceptions to the caller.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import TypedDict, cast
 from urllib.parse import urlparse
 
@@ -223,6 +226,133 @@ def drain_retry_queue(queue: RetryQueue, cfg: MemoryConfig) -> dict[str, int]:
 def clear_retry_queue(queue: RetryQueue) -> None:
     """Clear all queued publish payloads."""
     queue.clear()
+
+
+class SnapshotHashPayload(TypedDict):
+    """Metadata-only envelope published for snapshot drift notification (PRD-INFRA-066 / C1).
+
+    Critical invariant: this payload MUST NEVER carry snapshot contents — only
+    a SHA-256 digest, size, timestamp, and anonymized installation_id. The
+    existence of this type is the structural guard that prevents an accidental
+    contents leak at the call site.
+    """
+
+    digest: str
+    size_bytes: int
+    created_at: str
+    installation_id: str
+
+
+def publish_snapshot_hash(
+    snapshot_path: Path,
+    cfg: MemoryConfig,
+    *,
+    installation_id: str = "",
+) -> PublishResult:
+    """Publish SHA-256 of a snapshot (NOT contents) to the platform (PRD-INFRA-066 / C1).
+
+    Computes a SHA-256 of ``snapshot_path``'s bytes and posts a metadata-only
+    envelope (:class:`SnapshotHashPayload`) to the platform. Contents are
+    never transmitted. Gated on:
+
+    - ``cfg.local_only is False`` (raises ``LocalOnlyViolationError`` if True)
+    - ``cfg.sync_enabled is True``
+    - ``cfg.memory_snapshot_publish_hash is True``
+    - ``cfg.platform_url`` is set and valid
+
+    When any condition is unmet, returns a non-retryable skip result without
+    making a network call.
+
+    Args:
+        snapshot_path: Path to the snapshot file (e.g. from B4 rotation).
+        cfg: Memory configuration.
+        installation_id: Optional raw installation id; anonymized before publish.
+
+    Returns:
+        :class:`PublishResult` — ``success=True`` on 2xx, ``retryable=True`` on
+        transport/5xx errors, ``retryable=False`` for skip paths.
+    """
+    if cfg.local_only:
+        logger.warning(
+            "snapshot_hash_publish_blocked_local_only",
+            snapshot=str(snapshot_path),
+        )
+        _raise_local_only_violation()
+
+    if not cfg.sync_enabled or not cfg.memory_snapshot_publish_hash:
+        return {"success": False, "remote_id": None, "retryable": False}
+    if not cfg.platform_url:
+        return {"success": False, "remote_id": None, "retryable": False}
+    if not is_valid_platform_url(cfg.platform_url):
+        logger.warning(
+            "snapshot_hash_publish_invalid_platform_url",
+            snapshot=str(snapshot_path),
+        )
+        return {"success": False, "remote_id": None, "retryable": False}
+
+    if not snapshot_path.exists() or not snapshot_path.is_file():
+        logger.debug(
+            "snapshot_hash_publish_missing_file",
+            snapshot=str(snapshot_path),
+        )
+        return {"success": False, "remote_id": None, "retryable": False}
+
+    try:
+        digest, size_bytes = _hash_snapshot_file(snapshot_path)
+    except OSError as exc:
+        logger.debug(
+            "snapshot_hash_publish_read_failed",
+            snapshot=str(snapshot_path),
+            error=str(exc),
+        )
+        return {"success": False, "remote_id": None, "retryable": True}
+
+    payload: SnapshotHashPayload = {
+        "digest": digest,
+        "size_bytes": size_bytes,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "installation_id": anonymize_installation_id(installation_id or ""),
+    }
+
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if cfg.platform_api_key:
+        headers["Authorization"] = f"Bearer {cfg.platform_api_key}"
+
+    endpoint = f"{cfg.platform_url.rstrip('/')}/v1/memory/snapshot-hash"
+
+    try:
+        with httpx.Client(timeout=PUBLISH_TIMEOUT) as client:
+            resp = client.post(endpoint, json=cast("dict[str, object]", payload), headers=headers)
+            if 200 <= resp.status_code < 300:
+                logger.debug(
+                    "snapshot_hash_published",
+                    digest=digest,
+                    size_bytes=size_bytes,
+                )
+                return {"success": True, "remote_id": None, "retryable": False}
+            logger.warning(
+                "snapshot_hash_publish_failed",
+                status=resp.status_code,
+                digest=digest,
+            )
+            return {"success": False, "remote_id": None, "retryable": True}
+    except (httpx.HTTPError, OSError, ConnectionError):
+        logger.debug("snapshot_hash_publish_error", exc_info=True)
+        return {"success": False, "remote_id": None, "retryable": True}
+
+
+def _hash_snapshot_file(path: Path, chunk_size: int = 65536) -> tuple[str, int]:
+    """Return ``(sha256_hex, size_bytes)`` for ``path`` without loading it fully."""
+    hasher = hashlib.sha256()
+    size = 0
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(chunk_size)
+            if not chunk:
+                break
+            hasher.update(chunk)
+            size += len(chunk)
+    return hasher.hexdigest(), size
 
 
 def retire_remote_memory(remote_id: str, cfg: MemoryConfig) -> bool:
