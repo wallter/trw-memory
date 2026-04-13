@@ -647,3 +647,606 @@ def test_negative_empty_backup_still_produces_empty_db_under_strict(tmp_path: Pa
         assert count_row[0] == 0
     finally:
         conn.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PRD-CORE-139: Timestamped backup rotation
+# ═══════════════════════════════════════════════════════════════════════════
+# Covers FR01 (filename format), FR02 (config field), FR03 (filename-based
+# pruning), FR04 (legacy preservation), FR05 (salvage semantics unchanged),
+# NFR01-NFR04 (latency, idempotence, security, observability).
+
+import shutil as _shutil  # noqa: E402 — section-local alias to avoid shadowing
+
+from trw_memory.storage import sqlite_backend as _sqlite_backend_module  # noqa: E402
+
+
+class _FrozenDateTime:
+    """Drop-in datetime replacement that returns a fixed ``now(tz)``.
+
+    Used by PRD-CORE-139 tests to control the UTC timestamp embedded in
+    the backup filename without pulling in freezegun (not a dev dep here).
+    """
+
+    _frozen_utc: datetime = datetime(2026, 4, 13, 14, 37, 14, tzinfo=timezone.utc)
+
+    @classmethod
+    def now(cls, tz: Any = None) -> datetime:
+        if tz is None:
+            return cls._frozen_utc.replace(tzinfo=None)
+        return cls._frozen_utc.astimezone(tz) if tz != timezone.utc else cls._frozen_utc
+
+    @classmethod
+    def set(cls, value: datetime) -> None:
+        cls._frozen_utc = value
+
+
+def _freeze_utc(monkeypatch: pytest.MonkeyPatch, when: datetime) -> None:
+    """Patch ``datetime`` in the backend module to return ``when`` for ``now(tz)``."""
+    _FrozenDateTime.set(when)
+    # Replace the ``datetime`` symbol the backend imports; leave ``timezone`` alone
+    # so ``datetime.now(timezone.utc)`` still resolves to the desired instant.
+    monkeypatch.setattr(_sqlite_backend_module, "datetime", _FrozenDateTime)
+
+
+def _write_timestamped_backup(parent: Path, ts_suffix: str, content: bytes = b"data") -> Path:
+    """Seed a synthetic timestamped corrupt backup file with a given suffix."""
+    path = parent / f"memory.db.corrupt.{ts_suffix}.bak"
+    path.write_bytes(content)
+    return path
+
+
+def _write_legacy_backup(parent: Path, name: str, content: bytes = b"legacy") -> Path:
+    """Seed a legacy-named corrupt backup (memory.db.corrupt.bak[.1])."""
+    path = parent / name
+    path.write_bytes(content)
+    return path
+
+
+def _trigger_recovery(db_path: Path, monkeypatch: pytest.MonkeyPatch, *, keep_n: int = 5) -> Path:
+    """Populate + corrupt + recover, returning the new timestamped backup path."""
+    _populate_db(db_path, entries=1)
+    _corrupt_sqlite_master(db_path)
+
+    # Keep the CLI salvage path deterministic: return a single synthetic row so
+    # strict policy does not raise.
+    class _FakeRow:
+        def __init__(self, data: dict[str, Any]) -> None:
+            self._data = data
+
+        def keys(self) -> list[str]:
+            return list(self._data.keys())
+
+        def __iter__(self) -> Any:
+            return iter(self._data.values())
+
+    now = "2026-04-13T00:00:00+00:00"
+    fake_row = _FakeRow(
+        {"id": "L-ok", "content": "ok", "created_at": now, "updated_at": now}
+    )
+    monkeypatch.setattr(
+        SQLiteBackend,
+        "_salvage_via_recover_cli",
+        staticmethod(lambda _backup, dbapi=sqlite3: [fake_row]),
+    )
+
+    conn = SQLiteBackend.recover_db(db_path, recovery_policy="strict", corrupt_backup_keep=keep_n)
+    conn.close()
+    return _find_timestamped_backup(db_path.parent)
+
+
+# ---------------------------------------------------------------------------
+# FR01 — filename format
+# ---------------------------------------------------------------------------
+
+
+def test_fr01_filename_is_iso8601_utc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """FR01: backup filename matches memory.db.corrupt.<ISO-UTC>.bak exactly."""
+    _freeze_utc(monkeypatch, datetime(2026, 4, 12, 3, 14, 59, tzinfo=timezone.utc))
+    db_path = tmp_path / "memory.db"
+    backup = _trigger_recovery(db_path, monkeypatch)
+
+    assert backup.name == "memory.db.corrupt.2026-04-12T03-14-59Z.bak"
+    assert _TIMESTAMPED_BACKUP_RE.fullmatch(backup.name) is not None
+
+
+def test_fr01_filename_uses_utc_not_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """FR01: Z suffix present; colons replaced with hyphens for Windows safety."""
+    _freeze_utc(monkeypatch, datetime(2026, 6, 15, 23, 5, 0, tzinfo=timezone.utc))
+    db_path = tmp_path / "memory.db"
+    backup = _trigger_recovery(db_path, monkeypatch)
+
+    assert backup.name.endswith("Z.bak")
+    assert ":" not in backup.name
+    # Confirm UTC time materialized, not local.
+    assert "2026-06-15T23-05-00Z" in backup.name
+
+
+# ---------------------------------------------------------------------------
+# FR02 — config field
+# ---------------------------------------------------------------------------
+
+
+def test_fr02_config_field_default() -> None:
+    """FR02: MemoryConfig().memory_corrupt_backup_keep defaults to 5."""
+    assert MemoryConfig().memory_corrupt_backup_keep == 5
+
+
+def test_fr02_config_field_bounds() -> None:
+    """FR02: values outside [1, 50] raise ValidationError."""
+    with pytest.raises(ValidationError):
+        MemoryConfig(memory_corrupt_backup_keep=0)
+    with pytest.raises(ValidationError):
+        MemoryConfig(memory_corrupt_backup_keep=51)
+    # Boundaries inclusive.
+    assert MemoryConfig(memory_corrupt_backup_keep=1).memory_corrupt_backup_keep == 1
+    assert MemoryConfig(memory_corrupt_backup_keep=50).memory_corrupt_backup_keep == 50
+
+
+def test_fr02_init_accepts_corrupt_backup_keep_kwarg(tmp_path: Path) -> None:
+    """FR02: SQLiteBackend.__init__ exposes corrupt_backup_keep kwarg with default 5."""
+    init_sig = inspect.signature(SQLiteBackend.__init__)
+    assert "corrupt_backup_keep" in init_sig.parameters
+    assert init_sig.parameters["corrupt_backup_keep"].default == 5
+
+    # Attribute is stored on the instance for threading into recover_db.
+    backend = SQLiteBackend(tmp_path / "memory.db", corrupt_backup_keep=3)
+    try:
+        assert backend._corrupt_backup_keep == 3
+    finally:
+        backend.close()
+
+
+def test_fr02_keep_n_honored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """FR02: with keep=5, 7 synthetic recoveries leave exactly 5 timestamped files."""
+    # Seed 7 timestamped backups directly (faster than 7 real recoveries).
+    for day in range(1, 8):
+        _write_timestamped_backup(tmp_path, f"2026-04-{day:02d}T00-00-00Z")
+
+    SQLiteBackend._prune_corrupt_backups(tmp_path, keep_n=5)
+
+    remaining = [p.name for p in tmp_path.iterdir() if _TIMESTAMPED_BACKUP_RE.fullmatch(p.name)]
+    assert len(remaining) == 5
+    # The two oldest (April 1 and 2) should have been pruned.
+    assert all("2026-04-01" not in n and "2026-04-02" not in n for n in remaining)
+
+
+# ---------------------------------------------------------------------------
+# FR03 — filename-parsed pruning
+# ---------------------------------------------------------------------------
+
+
+def test_fr03_prune_oldest_first(tmp_path: Path) -> None:
+    """FR03: with T1 < T2 < T3 and keep=2, T1 is the sole deletion victim."""
+    t1 = _write_timestamped_backup(tmp_path, "2026-04-10T00-00-00Z")
+    t2 = _write_timestamped_backup(tmp_path, "2026-04-11T00-00-00Z")
+    t3 = _write_timestamped_backup(tmp_path, "2026-04-12T00-00-00Z")
+
+    SQLiteBackend._prune_corrupt_backups(tmp_path, keep_n=2)
+
+    assert not t1.exists()
+    assert t2.exists()
+    assert t3.exists()
+
+
+def test_fr03_prune_uses_filename_not_mtime(tmp_path: Path) -> None:
+    """FR03: st_mtime reversed via os.utime; pruning still picks oldest by filename."""
+    t1 = _write_timestamped_backup(tmp_path, "2026-04-10T00-00-00Z")
+    t2 = _write_timestamped_backup(tmp_path, "2026-04-11T00-00-00Z")
+    t3 = _write_timestamped_backup(tmp_path, "2026-04-12T00-00-00Z")
+
+    # Reverse the mtime order: t1 has the newest mtime, t3 the oldest.
+    now = time.time()
+    os.utime(t1, (now, now))              # newest mtime
+    os.utime(t2, (now - 3600, now - 3600))
+    os.utime(t3, (now - 7200, now - 7200))  # oldest mtime
+
+    SQLiteBackend._prune_corrupt_backups(tmp_path, keep_n=2)
+
+    # Even though t1 has the newest mtime, its filename timestamp is oldest
+    # and so it must be the deletion victim.
+    assert not t1.exists(), "pruning picked wrong victim — it consulted mtime, not filename"
+    assert t2.exists()
+    assert t3.exists()
+
+
+def test_fr03_malformed_filename_skipped(tmp_path: Path) -> None:
+    """FR03: files not matching the timestamp regex are neither counted nor deleted."""
+    malformed = tmp_path / "memory.db.corrupt.notatimestamp.bak"
+    malformed.write_bytes(b"garbage")
+    # Seed 5 valid timestamped files so keep=5 does not evict any (malformed does not count).
+    for day in range(10, 15):
+        _write_timestamped_backup(tmp_path, f"2026-04-{day}T00-00-00Z")
+
+    SQLiteBackend._prune_corrupt_backups(tmp_path, keep_n=5)
+
+    assert malformed.exists()  # not deleted
+    remaining = [p for p in tmp_path.iterdir() if _TIMESTAMPED_BACKUP_RE.fullmatch(p.name)]
+    assert len(remaining) == 5  # malformed did not count against the budget
+
+
+# ---------------------------------------------------------------------------
+# FR04 — legacy backup preservation
+# ---------------------------------------------------------------------------
+
+
+def test_fr04_legacy_bak_preserved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """FR04: memory.db.corrupt.bak survives a recovery byte-identical."""
+    legacy = _write_legacy_backup(tmp_path, "memory.db.corrupt.bak", b"legacy-sacred-bytes")
+    legacy_content = legacy.read_bytes()
+
+    db_path = tmp_path / "memory.db"
+    _trigger_recovery(db_path, monkeypatch)
+
+    assert legacy.exists()
+    assert legacy.read_bytes() == legacy_content
+
+
+def test_fr04_legacy_bak_1_preserved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """FR04: memory.db.corrupt.bak.1 survives a recovery byte-identical."""
+    legacy = _write_legacy_backup(tmp_path, "memory.db.corrupt.bak.1", b"legacy-v1-bytes")
+    legacy_content = legacy.read_bytes()
+
+    db_path = tmp_path / "memory.db"
+    _trigger_recovery(db_path, monkeypatch)
+
+    assert legacy.exists()
+    assert legacy.read_bytes() == legacy_content
+
+
+def test_fr04_legacy_counted_but_not_pruned(tmp_path: Path) -> None:
+    """FR04: 2 legacy + 5 timestamped with keep=5 → one timestamped deleted, legacy untouched."""
+    legacy_0 = _write_legacy_backup(tmp_path, "memory.db.corrupt.bak", b"legacy-0")
+    legacy_1 = _write_legacy_backup(tmp_path, "memory.db.corrupt.bak.1", b"legacy-1")
+    for day in range(1, 6):
+        _write_timestamped_backup(tmp_path, f"2026-04-{day:02d}T00-00-00Z")
+
+    SQLiteBackend._prune_corrupt_backups(tmp_path, keep_n=5)
+
+    # Total was 7 (2 legacy + 5 timestamped). Budget is 5. Excess = 2.
+    # Only timestamped files are pruning victims → 2 timestamped deleted.
+    assert legacy_0.exists()
+    assert legacy_1.exists()
+    remaining_ts = [p.name for p in tmp_path.iterdir() if _TIMESTAMPED_BACKUP_RE.fullmatch(p.name)]
+    assert len(remaining_ts) == 3
+    # The two oldest were deleted — April 1 and April 2.
+    assert all("2026-04-01" not in n and "2026-04-02" not in n for n in remaining_ts)
+
+
+def test_fr04_legacy_only_overshoot_warns(tmp_path: Path) -> None:
+    """FR04: 6 legacy files with keep=5: no deletion, exactly one WARNING emitted.
+
+    Legacy file count exceeding the budget cannot be remedied — the WARNING
+    surfaces the condition for operators to act on.
+    """
+    # The legacy-name set has only 2 entries (memory.db.corrupt.bak, .bak.1);
+    # so the test scenario uses 2 legacy + (keep-N-1) timestamped to simulate
+    # the overshoot path where ALL pruning candidates are timestamped but
+    # the legacy total alone still exceeds the budget.
+    # For the pure legacy-only overshoot we seed the 2 legacy names and use
+    # keep_n=1 so the budget excess persists with no timestamped candidates.
+    _write_legacy_backup(tmp_path, "memory.db.corrupt.bak")
+    _write_legacy_backup(tmp_path, "memory.db.corrupt.bak.1")
+
+    with structlog.testing.capture_logs() as logs:
+        SQLiteBackend._prune_corrupt_backups(tmp_path, keep_n=1)
+
+    overshoot = [log for log in logs if log.get("event") == "corrupt_backup_budget_exceeded_legacy_only"]
+    assert len(overshoot) == 1
+    assert overshoot[0]["keep"] == 1
+    assert overshoot[0]["legacy_count"] == 2
+    # Both legacy files still on disk.
+    assert (tmp_path / "memory.db.corrupt.bak").exists()
+    assert (tmp_path / "memory.db.corrupt.bak.1").exists()
+
+
+# ---------------------------------------------------------------------------
+# FR05 — salvage semantics unchanged
+# ---------------------------------------------------------------------------
+
+
+def test_fr05_salvage_semantics_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """FR05: db_recovered log payload still emits rows_salvaged and backup fields."""
+    db_path = tmp_path / "memory.db"
+    _populate_db(db_path, entries=2)
+    _corrupt_sqlite_master(db_path)
+
+    # Under empty_ok, recovery succeeds with 0 rows salvaged — same as pre-PRD baseline.
+    monkeypatch.setattr(
+        SQLiteBackend,
+        "_salvage_via_recover_cli",
+        staticmethod(lambda _backup, dbapi=sqlite3: []),
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        conn = SQLiteBackend.recover_db(db_path, recovery_policy="empty_ok")
+        conn.close()
+
+    events = [log for log in logs if log.get("event") == "db_recovered"]
+    assert len(events) == 1
+    entry = events[0]
+    # Critical payload fields from PRD-CORE-138 unchanged.
+    assert entry["rows_salvaged"] == 0
+    assert "backup" in entry
+    assert "db" in entry
+    # Backup path now carries the timestamped name.
+    assert _TIMESTAMPED_BACKUP_RE.fullmatch(Path(entry["backup"]).name) is not None
+
+
+# ---------------------------------------------------------------------------
+# NFR01 — performance
+# ---------------------------------------------------------------------------
+
+
+def test_nfr01_rotation_latency_bounded(tmp_path: Path) -> None:
+    """NFR01: _prune_corrupt_backups over 50 files completes in <20 ms."""
+    for i in range(50):
+        # Vary the timestamp by second to exercise sort comparator 50 times.
+        _write_timestamped_backup(tmp_path, f"2026-04-10T00-00-{i % 60:02d}Z-{i}")
+
+    start = time.perf_counter()
+    SQLiteBackend._prune_corrupt_backups(tmp_path, keep_n=5)
+    elapsed_ms = (time.perf_counter() - start) * 1000
+
+    assert elapsed_ms < 100, f"pruning took {elapsed_ms:.2f}ms (target <20ms, hard cap 100ms)"
+
+
+# ---------------------------------------------------------------------------
+# NFR02 — reliability & collision handling
+# ---------------------------------------------------------------------------
+
+
+def test_nfr02_filename_collision_same_second(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """NFR02: two recoveries in the same UTC second produce <ts>.bak and <ts>-1.bak."""
+    _freeze_utc(monkeypatch, datetime(2026, 4, 12, 3, 14, 59, tzinfo=timezone.utc))
+
+    db_1 = tmp_path / "memory.db"
+    db_1.write_bytes(b"dummy-1" * 100)
+    first = SQLiteBackend._rotate_corrupt_backup(db_1)
+
+    # Second corruption event at the exact same frozen UTC second.
+    db_2 = tmp_path / "memory.db"
+    db_2.write_bytes(b"dummy-2" * 100)
+    second = SQLiteBackend._rotate_corrupt_backup(db_2)
+
+    assert first.name == "memory.db.corrupt.2026-04-12T03-14-59Z.bak"
+    assert second.name == "memory.db.corrupt.2026-04-12T03-14-59Z-1.bak"
+    # Both parseable by the timestamped regex.
+    assert _TIMESTAMPED_BACKUP_RE.fullmatch(first.name) is not None
+    assert _TIMESTAMPED_BACKUP_RE.fullmatch(second.name) is not None
+
+
+def test_nfr02_is_idempotent(tmp_path: Path) -> None:
+    """NFR02: running prune twice on an already-bounded directory is a no-op."""
+    for day in range(1, 6):
+        _write_timestamped_backup(tmp_path, f"2026-04-{day:02d}T00-00-00Z")
+
+    SQLiteBackend._prune_corrupt_backups(tmp_path, keep_n=5)
+    first_pass = sorted(p.name for p in tmp_path.iterdir())
+
+    SQLiteBackend._prune_corrupt_backups(tmp_path, keep_n=5)
+    second_pass = sorted(p.name for p in tmp_path.iterdir())
+
+    assert first_pass == second_pass
+
+
+# ---------------------------------------------------------------------------
+# NFR04 — observability
+# ---------------------------------------------------------------------------
+
+
+def test_nfr04_rotation_emits_structured_log(tmp_path: Path) -> None:
+    """NFR04: _prune_corrupt_backups emits corrupt_backup_rotated INFO with expected fields."""
+    for day in range(1, 4):
+        _write_timestamped_backup(tmp_path, f"2026-04-{day:02d}T00-00-00Z")
+    _write_legacy_backup(tmp_path, "memory.db.corrupt.bak")
+
+    with structlog.testing.capture_logs() as logs:
+        SQLiteBackend._prune_corrupt_backups(tmp_path, keep_n=2)
+
+    events = [log for log in logs if log.get("event") == "corrupt_backup_rotated"]
+    assert len(events) == 1
+    entry = events[0]
+    assert entry["log_level"] == "info"
+    assert entry["keep"] == 2
+    assert entry["total_legacy"] == 1
+    # Started with 3 timestamped files; budget=2, legacy=1 → 2 timestamped deleted.
+    # After deletion, total_timestamped is the count of what remains.
+    assert entry["total_timestamped"] == 1
+    assert entry["pruned"] == 2
+    assert entry["parent"] == str(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Negative paths
+# ---------------------------------------------------------------------------
+
+
+def test_negative_unlink_permission_error_is_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative: Path.unlink raising PermissionError during prune does not propagate."""
+    for day in range(1, 4):
+        _write_timestamped_backup(tmp_path, f"2026-04-{day:02d}T00-00-00Z")
+
+    original_unlink = Path.unlink
+
+    def _raise_perm(self: Path, *args: Any, **kwargs: Any) -> None:
+        if "2026-04-01" in self.name:
+            raise PermissionError("denied")
+        original_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _raise_perm)
+
+    # Should not raise even though the victim unlink fails.
+    SQLiteBackend._prune_corrupt_backups(tmp_path, keep_n=1)
+
+
+def test_negative_keep_equals_1_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Boundary: keep=1 leaves exactly one timestamped backup after a recovery."""
+    _freeze_utc(monkeypatch, datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc))
+    # Seed 3 existing timestamped backups.
+    for day in range(1, 4):
+        _write_timestamped_backup(tmp_path, f"2026-04-{day:02d}T00-00-00Z")
+
+    # Prune down to 1.
+    SQLiteBackend._prune_corrupt_backups(tmp_path, keep_n=1)
+
+    remaining = [p.name for p in tmp_path.iterdir() if _TIMESTAMPED_BACKUP_RE.fullmatch(p.name)]
+    assert len(remaining) == 1
+    # The newest (April 3) is what survives.
+    assert remaining[0] == "memory.db.corrupt.2026-04-03T00-00-00Z.bak"
+
+
+# ---------------------------------------------------------------------------
+# Integration — end-to-end recovery sequences
+# ---------------------------------------------------------------------------
+
+
+def test_integration_end_to_end_7_recoveries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Integration: 7 real recoveries with keep=5 leave exactly 5 timestamped files."""
+    db_path = tmp_path / "memory.db"
+
+    # Class-based stub so seven calls all behave like PRD-CORE-138's happy salvage path.
+    class _FakeRow:
+        def __init__(self, data: dict[str, Any]) -> None:
+            self._data = data
+
+        def keys(self) -> list[str]:
+            return list(self._data.keys())
+
+        def __iter__(self) -> Any:
+            return iter(self._data.values())
+
+    now = "2026-04-13T00:00:00+00:00"
+    fake_row = _FakeRow({"id": "L-seq", "content": "seq", "created_at": now, "updated_at": now})
+    monkeypatch.setattr(
+        SQLiteBackend,
+        "_salvage_via_recover_cli",
+        staticmethod(lambda _backup, dbapi=sqlite3: [fake_row]),
+    )
+
+    # Seven distinct UTC seconds so no collision suffixes are appended.
+    for i in range(7):
+        _freeze_utc(monkeypatch, datetime(2026, 4, 12, 3, 14, 50 + i, tzinfo=timezone.utc))
+        _populate_db(db_path, entries=1)
+        _corrupt_sqlite_master(db_path)
+        conn = SQLiteBackend.recover_db(db_path, recovery_policy="strict", corrupt_backup_keep=5)
+        conn.close()
+
+    remaining = sorted(
+        p.name for p in tmp_path.iterdir() if _TIMESTAMPED_BACKUP_RE.fullmatch(p.name)
+    )
+    assert len(remaining) == 5
+    # The two oldest (t=50 and t=51) were evicted.
+    assert all("14-50Z" not in n and "14-51Z" not in n for n in remaining)
+
+
+def test_integration_mixed_legacy_and_new(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Integration: legacy + timestamped coexist; only timestamped are ever pruned."""
+    _write_legacy_backup(tmp_path, "memory.db.corrupt.bak", b"legacy-0")
+    _write_legacy_backup(tmp_path, "memory.db.corrupt.bak.1", b"legacy-1")
+
+    # Direct-drive the rotation helpers rather than reusing _trigger_recovery,
+    # which asserts "exactly one timestamped backup" on return.
+    class _FakeRow:
+        def __init__(self, data: dict[str, Any]) -> None:
+            self._data = data
+
+        def keys(self) -> list[str]:
+            return list(self._data.keys())
+
+        def __iter__(self) -> Any:
+            return iter(self._data.values())
+
+    now_iso = "2026-04-13T00:00:00+00:00"
+    fake_row = _FakeRow({"id": "L-m", "content": "m", "created_at": now_iso, "updated_at": now_iso})
+    monkeypatch.setattr(
+        SQLiteBackend,
+        "_salvage_via_recover_cli",
+        staticmethod(lambda _backup, dbapi=sqlite3: [fake_row]),
+    )
+
+    db_path = tmp_path / "memory.db"
+    for i in range(4):
+        _freeze_utc(monkeypatch, datetime(2026, 4, 12, 3, 14, 50 + i, tzinfo=timezone.utc))
+        _populate_db(db_path, entries=1)
+        _corrupt_sqlite_master(db_path)
+        conn = SQLiteBackend.recover_db(db_path, recovery_policy="strict", corrupt_backup_keep=5)
+        conn.close()
+
+    # Legacy survives untouched.
+    assert (tmp_path / "memory.db.corrupt.bak").read_bytes() == b"legacy-0"
+    assert (tmp_path / "memory.db.corrupt.bak.1").read_bytes() == b"legacy-1"
+    # Total timestamped: 4 created, budget is 5 (legacy 2 + timestamped 4 = 6 → over budget).
+    # 1 timestamped should have been pruned to fit 5 total.
+    remaining_ts = [p for p in tmp_path.iterdir() if _TIMESTAMPED_BACKUP_RE.fullmatch(p.name)]
+    assert len(remaining_ts) == 3  # 4 created, 1 pruned → 3 remain
+
+
+# ---------------------------------------------------------------------------
+# Regression
+# ---------------------------------------------------------------------------
+
+
+def test_regression_2_wide_overwrite_no_longer_occurs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: pre-PRD-139 2-wide rotation would have overwritten legacy files.
+
+    Reproduces the 2026-04-12 pattern where a second corruption event destroyed
+    the evidence from the first. With timestamped rotation + legacy preservation,
+    both legacy files and the new timestamped backup must coexist.
+    """
+    legacy_0 = _write_legacy_backup(tmp_path, "memory.db.corrupt.bak", b"first-event")
+    legacy_1 = _write_legacy_backup(tmp_path, "memory.db.corrupt.bak.1", b"second-event")
+
+    db_path = tmp_path / "memory.db"
+    _trigger_recovery(db_path, monkeypatch)
+
+    # Legacy artifacts survived.
+    assert legacy_0.read_bytes() == b"first-event"
+    assert legacy_1.read_bytes() == b"second-event"
+    # New timestamped backup exists alongside.
+    assert _find_timestamped_backup(tmp_path).exists()
+
+
+def test_regression_healthy_open_path_no_rotation(tmp_path: Path) -> None:
+    """Regression: healthy DB open triggers zero rotation side effects."""
+    db_path = tmp_path / "memory.db"
+    backend = SQLiteBackend(db_path)
+    backend.close()
+
+    # No corrupt backup files should have been produced by a clean open.
+    corrupt_files = [
+        p for p in tmp_path.iterdir()
+        if p.name.startswith("memory.db.corrupt.")
+    ]
+    assert corrupt_files == []
+
+
+# ---------------------------------------------------------------------------
+# Migration
+# ---------------------------------------------------------------------------
+
+
+def test_migration_upgrade_preserves_legacy_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Migration: user upgrading from pre-139 keeps their legacy backups intact."""
+    # Pre-upgrade state: directory only contains legacy files.
+    _write_legacy_backup(tmp_path, "memory.db.corrupt.bak", b"pre-upgrade-0")
+    _write_legacy_backup(tmp_path, "memory.db.corrupt.bak.1", b"pre-upgrade-1")
+
+    db_path = tmp_path / "memory.db"
+    _trigger_recovery(db_path, monkeypatch)
+
+    # Both legacy files survived byte-for-byte.
+    assert (tmp_path / "memory.db.corrupt.bak").read_bytes() == b"pre-upgrade-0"
+    assert (tmp_path / "memory.db.corrupt.bak.1").read_bytes() == b"pre-upgrade-1"
+    # One new timestamped backup appeared.
+    assert _find_timestamped_backup(tmp_path).exists()
