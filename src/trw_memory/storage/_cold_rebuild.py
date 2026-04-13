@@ -31,10 +31,9 @@ import json
 import re
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 from sqlite3 import Connection
-from typing import Any
 
 import structlog
 
@@ -140,9 +139,7 @@ def _coerce_ts(value: object) -> str | None:
     if isinstance(value, datetime):
         return value.isoformat()
     # date (and its subclass datetime handled above) — stringify and normalise
-    from datetime import date as _date
-
-    if isinstance(value, _date):
+    if isinstance(value, date):
         return f"{value.isoformat()}T00:00:00+00:00"
     if isinstance(value, str):
         return _normalize_ts(value)
@@ -446,9 +443,3 @@ def rebuild_from_cold(base_dir: Path, new_conn: Connection) -> int:
         duration_ms=duration_ms,
     )
     return rebuilt
-
-
-# Silences an unused-import warning on strict analyzers: datetime/timezone are
-# used transitively via _coerce_ts's nested import. Re-exported for tests that
-# want a canonical handle on the normalisation helpers.
-_ = (Any, datetime, timezone)
