@@ -232,5 +232,5 @@ def make_entry(
         metadata=metadata or {},
         created_at=now,
         updated_at=now,
-        source=source,  # type: ignore[arg-type]  # validator coerces unknown values to "agent"
+        source=source,
     )

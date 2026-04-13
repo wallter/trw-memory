@@ -228,7 +228,7 @@ def from_learning_entry(data: dict[str, object]) -> MemoryEntry:
         session_count=session_count,
         q_value=q_value,
         q_observations=q_observations,
-        source=source,  # type: ignore[arg-type]  # validator coerces unknown values to "agent"
+        source=source,
         source_identity=source_identity,
         client_profile=client_profile,
         model_id=model_id,

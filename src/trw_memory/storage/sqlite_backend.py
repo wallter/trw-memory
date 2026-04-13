@@ -49,7 +49,7 @@ from trw_memory.sync.delta import DeltaTracker
 try:
     import sqlite_vec
 except ImportError:  # pragma: no cover — optional dep
-    sqlite_vec = None  # type: ignore[assignment]
+    sqlite_vec = None
 
 logger = structlog.get_logger(__name__)
 SQLCIPHER_REQUIRED_MESSAGE = (

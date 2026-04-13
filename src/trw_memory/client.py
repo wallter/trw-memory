@@ -22,9 +22,10 @@ import uuid
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, NotRequired, Protocol, TypedDict, cast, runtime_checkable
+from typing import Literal, Protocol, TypedDict, cast, runtime_checkable
 
 import structlog
+from typing_extensions import NotRequired
 
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.exceptions import (
@@ -173,24 +174,24 @@ class AgentWithToolDecorator(Protocol):
 
 def _entry_to_result(entry: MemoryEntry, score: float = 0.0) -> MemoryResultDict:
     """Convert a MemoryEntry to a result dict."""
-    result = MemoryResultDict(
-        memory_id=entry.id,
-        content=entry.content,
-        detail=entry.detail,
-        tags=list(entry.tags),
-        importance=entry.importance,
-        score=score,
-        created_at=entry.created_at.isoformat(),
-        updated_at=entry.updated_at.isoformat(),
-        namespace=entry.namespace,
-        source="local",
-        last_accessed_at=entry.last_accessed_at.isoformat() if entry.last_accessed_at is not None else "",
-        q_value=entry.q_value,
-        q_observations=entry.q_observations,
-        recurrence=entry.recurrence,
-        access_count=entry.access_count,
-        _relevance_hint=score,
-    )
+    result: MemoryResultDict = {
+        "memory_id": entry.id,
+        "content": entry.content,
+        "detail": entry.detail,
+        "tags": list(entry.tags),
+        "importance": entry.importance,
+        "score": score,
+        "created_at": entry.created_at.isoformat(),
+        "updated_at": entry.updated_at.isoformat(),
+        "namespace": entry.namespace,
+        "source": "local",
+        "last_accessed_at": entry.last_accessed_at.isoformat() if entry.last_accessed_at is not None else "",
+        "q_value": entry.q_value,
+        "q_observations": entry.q_observations,
+        "recurrence": entry.recurrence,
+        "access_count": entry.access_count,
+        "_relevance_hint": score,
+    }
     if entry.metadata:
         result["metadata"] = dict(entry.metadata)
         if "anomaly_dimension" in entry.metadata:
@@ -441,16 +442,17 @@ class MemoryClient:
                         "z_score": decision.anomaly_z_score,
                     },
                 )
-                return StoreResultDict(
-                    memory_id=decision.entry.id,
-                    namespace=self._namespace,
-                    status="quarantined",
-                    timestamp=now.isoformat(),
-                    quarantined=True,
-                    stored=False,
-                    anomaly_dimension=decision.anomaly_dimension,
-                    z_score=decision.anomaly_z_score,
-                )
+                quarantined_result: StoreResultDict = {
+                    "memory_id": decision.entry.id,
+                    "namespace": self._namespace,
+                    "status": "quarantined",
+                    "timestamp": now.isoformat(),
+                    "quarantined": True,
+                    "stored": False,
+                    "anomaly_dimension": decision.anomaly_dimension,
+                    "z_score": decision.anomaly_z_score,
+                }
+                return quarantined_result
 
             entry = decision.entry
             # Persist the dense vector on the normal write path so later recall can
@@ -509,12 +511,13 @@ class MemoryClient:
         )
         if self._should_attempt_remote_publish(entry):
             self._schedule_background_task(self._publish_entry(entry, embedding))
-        return StoreResultDict(
-            memory_id=memory_id,
-            namespace=self._namespace,
-            status="updated" if decision.op == "update" else "stored",
-            timestamp=now.isoformat(),
-        )
+        store_result: StoreResultDict = {
+            "memory_id": memory_id,
+            "namespace": self._namespace,
+            "status": "updated" if decision.op == "update" else "stored",
+            "timestamp": now.isoformat(),
+        }
+        return store_result
 
     async def recall(
         self,
@@ -977,24 +980,25 @@ class MemoryClient:
         raw_score = entry.get("score")
         score = float(str(raw_score)) if raw_score is not None else entry_utility(entry)
         raw_tags = entry.get("tags", [])
-        return MemoryResultDict(
-            memory_id=str(entry.get("id", entry.get("memory_id", ""))),
-            content=str(entry.get("content", "")),
-            detail=str(entry.get("detail", "")),
-            tags=[str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else [],
-            importance=MemoryClient._coerce_float(entry.get("importance", 0.0)),
-            score=round(score, 4),
-            created_at=str(entry.get("created_at", "")),
-            updated_at=str(entry.get("updated_at", entry.get("created_at", ""))),
-            namespace=str(entry.get("namespace", "default")),
-            source="local",
-            last_accessed_at=str(entry.get("last_accessed_at", "")),
-            q_value=MemoryClient._coerce_float(entry.get("q_value", 0.0)),
-            q_observations=int(str(entry.get("q_observations", 0))),
-            recurrence=int(str(entry.get("recurrence", 1))),
-            access_count=int(str(entry.get("access_count", 0))),
-            _relevance_hint=MemoryClient._coerce_float(entry.get("_tier_relevance", score)),
-        )
+        tier_result: MemoryResultDict = {
+            "memory_id": str(entry.get("id", entry.get("memory_id", ""))),
+            "content": str(entry.get("content", "")),
+            "detail": str(entry.get("detail", "")),
+            "tags": [str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else [],
+            "importance": MemoryClient._coerce_float(entry.get("importance", 0.0)),
+            "score": round(score, 4),
+            "created_at": str(entry.get("created_at", "")),
+            "updated_at": str(entry.get("updated_at", entry.get("created_at", ""))),
+            "namespace": str(entry.get("namespace", "default")),
+            "source": "local",
+            "last_accessed_at": str(entry.get("last_accessed_at", "")),
+            "q_value": MemoryClient._coerce_float(entry.get("q_value", 0.0)),
+            "q_observations": int(str(entry.get("q_observations", 0))),
+            "recurrence": int(str(entry.get("recurrence", 1))),
+            "access_count": int(str(entry.get("access_count", 0))),
+            "_relevance_hint": MemoryClient._coerce_float(entry.get("_tier_relevance", score)),
+        }
+        return tier_result
 
     def _get_embedder(self) -> EmbeddingProvider | None:
         """Try to obtain a local embedding provider; return None on failure.
@@ -1140,18 +1144,19 @@ class MemoryClient:
         created_at = str(result.get("created_at", ""))
         updated_at = str(result.get("updated_at", created_at))
         source = str(result.get("source", "shared"))
-        return MemoryResultDict(
-            memory_id=memory_id,
-            content=str(result.get("content", "")),
-            detail=detail,
-            tags=tags,
-            importance=MemoryClient._coerce_float(importance_raw),
-            score=MemoryClient._coerce_float(score_raw),
-            created_at=created_at,
-            updated_at=updated_at,
-            namespace=namespace,
-            source=source,
-        )
+        shared_result: MemoryResultDict = {
+            "memory_id": memory_id,
+            "content": str(result.get("content", "")),
+            "detail": detail,
+            "tags": tags,
+            "importance": MemoryClient._coerce_float(importance_raw),
+            "score": MemoryClient._coerce_float(score_raw),
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "namespace": namespace,
+            "source": source,
+        }
+        return shared_result
 
     @staticmethod
     def _coerce_float(value: object) -> float:
@@ -1306,12 +1311,13 @@ class MemoryClient:
                     namespace=self._namespace,
                     data={"entries_deleted": deleted_count, "selector": "actor"},
                 )
-                return ForgetResultDict(
-                    memory_id="",
-                    status="deleted",
-                    namespace=self._namespace,
-                    entries_deleted=deleted_count,
-                )
+                actor_forget_result: ForgetResultDict = {
+                    "memory_id": "",
+                    "status": "deleted",
+                    "namespace": self._namespace,
+                    "entries_deleted": deleted_count,
+                }
+                return actor_forget_result
 
             assert memory_id is not None
             existing = backend.get(memory_id)
@@ -1331,12 +1337,13 @@ class MemoryClient:
                     namespace=self._namespace,
                     data={"entries_deleted": quarantined_deleted, "quarantined": True},
                 )
-                return ForgetResultDict(
-                    memory_id=memory_id,
-                    status="deleted",
-                    namespace=self._namespace,
-                    entries_deleted=quarantined_deleted,
-                )
+                quarantined_forget_result: ForgetResultDict = {
+                    "memory_id": memory_id,
+                    "status": "deleted",
+                    "namespace": self._namespace,
+                    "entries_deleted": quarantined_deleted,
+                }
+                return quarantined_forget_result
             if existing.namespace != self._namespace:
                 raise MemoryNotFoundError(f"Memory entry {memory_id!r} not found in namespace {self._namespace!r}")
             remote_id = existing.remote_id
@@ -1360,12 +1367,13 @@ class MemoryClient:
             memory_id=memory_id,
             namespace=self._namespace,
         )
-        return ForgetResultDict(
-            memory_id=memory_id,
-            status="deleted",
-            namespace=self._namespace,
-            entries_deleted=1,
-        )
+        forget_result: ForgetResultDict = {
+            "memory_id": memory_id,
+            "status": "deleted",
+            "namespace": self._namespace,
+            "entries_deleted": 1,
+        }
+        return forget_result
 
     async def search(
         self,
@@ -1707,18 +1715,18 @@ class MemoryClient:
         if not remote_id or not summary:
             return
         shared_content = summary if summary.startswith("[shared] ") else f"[shared] {summary}"
-        cached = MemoryResultDict(
-            memory_id=remote_id,
-            content=shared_content,
-            detail="",
-            tags=[],
-            importance=0.0,
-            score=0.0,
-            created_at="",
-            updated_at="",
-            namespace="shared",
-            source="shared",
-        )
+        cached: MemoryResultDict = {
+            "memory_id": remote_id,
+            "content": shared_content,
+            "detail": "",
+            "tags": [],
+            "importance": 0.0,
+            "score": 0.0,
+            "created_at": "",
+            "updated_at": "",
+            "namespace": "shared",
+            "source": "shared",
+        }
         with self._shared_event_cache_lock:
             self._shared_event_cache = [
                 existing for existing in self._shared_event_cache if existing["memory_id"] != remote_id
