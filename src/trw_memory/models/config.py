@@ -94,6 +94,40 @@ class _TRWConfigYamlSource(InitSettingsSource):
             "memory_recovery_rebuild_from_cold",
             "recovery_rebuild_from_cold",
         )
+        # PRD-INFRA-063 (B2)
+        _map_first(
+            "memory_integrity_check_interval_minutes",
+            "memory_integrity_check_interval_minutes",
+            "integrity_check_interval_minutes",
+        )
+        # PRD-INFRA-064 (B3)
+        _map_first(
+            "memory_concurrent_writer_warn_threshold",
+            "memory_concurrent_writer_warn_threshold",
+            "concurrent_writer_warn_threshold",
+        )
+        # PRD-INFRA-065 (B4)
+        _map_first(
+            "memory_snapshot_enabled",
+            "memory_snapshot_enabled",
+            "snapshot_enabled",
+        )
+        _map_first(
+            "memory_snapshot_daily_keep",
+            "memory_snapshot_daily_keep",
+            "snapshot_daily_keep",
+        )
+        _map_first(
+            "memory_snapshot_weekly_keep",
+            "memory_snapshot_weekly_keep",
+            "snapshot_weekly_keep",
+        )
+        # PRD-INFRA-066 (C1)
+        _map_first(
+            "memory_snapshot_publish_hash",
+            "memory_snapshot_publish_hash",
+            "snapshot_publish_hash",
+        )
 
         super().__init__(settings_cls, mapped)
 
@@ -260,6 +294,88 @@ class MemoryConfig(BaseSettings):
             "When True AND memory_recovery_policy='strict' AND salvage yields 0 rows from "
             "a non-empty backup, rebuild the DB from the cold YAML tier before raising "
             "CorruptDatabaseUnsalvageableError. Set to False to disable automatic rebuild."
+        ),
+    )
+
+    # Periodic integrity scheduler (PRD-INFRA-063 / B2)
+    memory_integrity_check_interval_minutes: int = Field(
+        default=0,
+        ge=0,
+        le=1440,
+        validation_alias=AliasChoices(
+            "memory_integrity_check_interval_minutes",
+            "integrity_check_interval_minutes",
+        ),
+        description=(
+            "Interval in minutes between background PRAGMA quick_check runs on a read-only "
+            "connection. 0 disables (default — opt-in). Max 1440 (1 day). Observability-only: "
+            "a failed check sets integrity_warning=True and logs db_integrity_regression_detected; "
+            "it NEVER triggers auto-recovery."
+        ),
+    )
+
+    # Multi-writer advisory registry (PRD-INFRA-064 / B3)
+    memory_concurrent_writer_warn_threshold: int = Field(
+        default=4,
+        ge=1,
+        le=100,
+        validation_alias=AliasChoices(
+            "memory_concurrent_writer_warn_threshold",
+            "concurrent_writer_warn_threshold",
+        ),
+        description=(
+            "When the count of live writer pids registered in <db_path>.writers/ exceeds this "
+            "value, log at WARNING level. Advisory ONLY — the registry NEVER refuses open(). "
+            "The 2026-04-12 incident involved 9 concurrent writers; default 4 surfaces the "
+            "pattern without being noisy for 1-3 writer workloads."
+        ),
+    )
+
+    # Snapshot rotation (PRD-INFRA-065 / B4)
+    memory_snapshot_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "memory_snapshot_enabled",
+            "snapshot_enabled",
+        ),
+        description=(
+            "When True, trw_deliver and the CLI `trw-memory snapshot` subcommand take "
+            "VACUUM INTO snapshots under <base_dir>/memory/snapshots/{daily,weekly}/. "
+            "Default False (opt-in) to avoid surprising disk usage."
+        ),
+    )
+    memory_snapshot_daily_keep: int = Field(
+        default=7,
+        ge=1,
+        le=365,
+        validation_alias=AliasChoices(
+            "memory_snapshot_daily_keep",
+            "snapshot_daily_keep",
+        ),
+        description="Number of daily snapshots retained under snapshots/daily/ before oldest-by-filename eviction.",
+    )
+    memory_snapshot_weekly_keep: int = Field(
+        default=4,
+        ge=1,
+        le=52,
+        validation_alias=AliasChoices(
+            "memory_snapshot_weekly_keep",
+            "snapshot_weekly_keep",
+        ),
+        description="Number of weekly snapshots retained under snapshots/weekly/ before oldest-by-filename eviction.",
+    )
+
+    # Off-box snapshot hash publish (PRD-INFRA-066 / C1)
+    memory_snapshot_publish_hash: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "memory_snapshot_publish_hash",
+            "snapshot_publish_hash",
+        ),
+        description=(
+            "When True AND sync_enabled=True AND NOT local_only, publish SHA-256 hash of the "
+            "latest snapshot (plus size and timestamp metadata — NEVER contents) to the platform "
+            "for drift notification on restore. Opt-in. Ignored silently under local_only=True."
         ),
     )
 
