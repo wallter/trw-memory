@@ -89,6 +89,11 @@ class _TRWConfigYamlSource(InitSettingsSource):
             "memory_corrupt_backup_keep",
             "corrupt_backup_keep",
         )
+        _map_first(
+            "memory_recovery_rebuild_from_cold",
+            "memory_recovery_rebuild_from_cold",
+            "recovery_rebuild_from_cold",
+        )
 
         super().__init__(settings_cls, mapped)
 
@@ -241,6 +246,20 @@ class MemoryConfig(BaseSettings):
             "Number of corruption backup files to retain before oldest-by-filename-timestamp "
             "eviction. Legacy memory.db.corrupt.bak and memory.db.corrupt.bak.1 files count "
             "against this budget but are never selected for deletion."
+        ),
+    )
+
+    # Cold-tier rebuild on recovery (PRD-CORE-140)
+    memory_recovery_rebuild_from_cold: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "memory_recovery_rebuild_from_cold",
+            "recovery_rebuild_from_cold",
+        ),
+        description=(
+            "When True AND memory_recovery_policy='strict' AND salvage yields 0 rows from "
+            "a non-empty backup, rebuild the DB from the cold YAML tier before raising "
+            "CorruptDatabaseUnsalvageableError. Set to False to disable automatic rebuild."
         ),
     )
 
