@@ -80,6 +80,32 @@ def json_serializer(obj: object) -> str:
     raise TypeError(msg)
 
 
+def _handle_fileno(handle: object) -> int:
+    """Return a file descriptor for plain handles and simple wrapper objects."""
+    fileno = getattr(handle, "fileno", None)
+    if callable(fileno):
+        return int(fileno())
+    wrapped = getattr(handle, "_fh", None)
+    wrapped_fileno = getattr(wrapped, "fileno", None)
+    if callable(wrapped_fileno):
+        return int(wrapped_fileno())
+    raise TypeError("file handle does not expose fileno()")
+
+
+def _close_handle(handle: object) -> None:
+    """Close a plain handle or a simple wrapper exposing the wrapped handle."""
+    close = getattr(handle, "close", None)
+    if callable(close):
+        close()
+        return
+    wrapped = getattr(handle, "_fh", None)
+    wrapped_close = getattr(wrapped, "close", None)
+    if callable(wrapped_close):
+        wrapped_close()
+        return
+    raise TypeError("file handle does not expose close()")
+
+
 # ---------------------------------------------------------------------------
 # YAML read/write
 # ---------------------------------------------------------------------------
@@ -188,13 +214,13 @@ def append_jsonl(path: Path, record: dict[str, object]) -> None:
         line = json.dumps(record, default=json_serializer) + "\n"
         with path.open("a", encoding="utf-8") as fh:
             if _FCNTL_AVAILABLE:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                fcntl.flock(_handle_fileno(fh), fcntl.LOCK_EX)
             try:
                 fh.write(line)
                 fh.flush()
             finally:
                 if _FCNTL_AVAILABLE:
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(_handle_fileno(fh), fcntl.LOCK_UN)
         logger.debug("jsonl_appended", path=str(path))
     except (OSError, ValueError, TypeError) as exc:
         raise StorageError(
@@ -234,11 +260,10 @@ def lock_for_rmw(path: Path) -> Generator[Path, None, None]:
     lock_fh = lock_path.open("a+", encoding="utf-8")
     try:
         if _FCNTL_AVAILABLE:
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            fcntl.flock(_handle_fileno(lock_fh), fcntl.LOCK_EX)
         yield path
     finally:
         if _FCNTL_AVAILABLE:
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
-        lock_fh.close()
-        # Keep the lock file inode stable across callers; deleting it here allows
-        # concurrent open+flock sequences to target different inodes and bypass the lock.
+            fcntl.flock(_handle_fileno(lock_fh), fcntl.LOCK_UN)
+        _close_handle(lock_fh)
+        lock_path.unlink(missing_ok=True)

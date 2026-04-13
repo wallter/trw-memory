@@ -943,6 +943,8 @@ class MemoryClient:
         query_embedding: list[float] | None = None,
     ) -> list[MemoryResultDict]:
         """Merge tier-only candidates into the normal local recall results."""
+        if not tier_results:
+            return local_results[:limit]
         merged = list(local_results)
         seen_ids = {result["memory_id"] for result in local_results}
         seen_content = {result["content"] for result in local_results}
@@ -952,6 +954,8 @@ class MemoryClient:
             merged.append(result)
             seen_ids.add(result["memory_id"])
             seen_content.add(result["content"])
+        if len(merged) == len(local_results):
+            return local_results[:limit]
         for result in merged:
             relevance_hint = result.get("_relevance_hint")
             result["score"] = round(

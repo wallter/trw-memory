@@ -97,6 +97,20 @@ class Assertion(BaseModel):
         default=None, description="When this assertion first started failing consecutively"
     )
 
+    @field_validator("type", mode="before")
+    @classmethod
+    def _coerce_type(cls, v: object) -> AssertionType:
+        """Accept persisted string enum values before strict validation runs."""
+        if isinstance(v, AssertionType):
+            return v
+        if isinstance(v, str):
+            try:
+                return AssertionType(v)
+            except ValueError as err:
+                valid = ", ".join(assertion_type.value for assertion_type in AssertionType)
+                raise ValueError(f"type must be one of {valid}") from err
+        raise ValueError(f"type must be a string or AssertionType enum, got {type(v).__name__}")
+
     @field_validator("pattern")
     @classmethod
     def _validate_pattern(cls, v: str, info: ValidationInfo) -> str:

@@ -154,6 +154,19 @@ def test_memory_store_impl_uses_configured_embedder_settings() -> None:
     embedder_mock.assert_called_once_with(model_name="custom-model", dim=768)
 
 
+def test_memory_store_impl_ignores_non_entry_backend_get_result() -> None:
+    """Tool store should treat mock placeholders as no existing entry."""
+    backend = MagicMock()
+    backend.get.return_value = MagicMock()
+
+    with patch("trw_memory.tools.store.get_local_embedder", return_value=None):
+        result = memory_store_impl("stored through tool", "project:default", backend=backend)
+
+    assert result["status"] == "stored"
+    stored_entry = backend.store.call_args.args[0]
+    assert isinstance(stored_entry, MemoryEntry)
+
+
 def test_memory_recall_impl_passes_stored_embeddings_to_hybrid_search() -> None:
     """memory_recall_impl forwards backend vectors into hybrid_search."""
     entry = MemoryEntry(id="M-001", content="pydantic", namespace="project:default")
