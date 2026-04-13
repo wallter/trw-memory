@@ -128,7 +128,12 @@ def create_backend_from_config(
         if config.encryption_enabled:
             master_key = get_master_key(config)
             sqlcipher_key_hex = derive_namespace_key(master_key, namespace)
-        return SQLiteBackend(db_path=db_path, dim=config.embedding_dim, sqlcipher_key_hex=sqlcipher_key_hex)
+        return SQLiteBackend(
+            db_path=db_path,
+            dim=config.embedding_dim,
+            sqlcipher_key_hex=sqlcipher_key_hex,
+            recovery_policy=config.memory_recovery_policy,
+        )
 
     from trw_memory.storage.yaml_backend import YAMLBackend
 
@@ -176,7 +181,12 @@ def discover_namespace_backends(
                         continue
                     sqlcipher_key_hex = derive_namespace_key(master_key, namespace)
                 store_backend: StorageBackend = stack.enter_context(
-                    SQLiteBackend(db_path=db_path, dim=config.embedding_dim, sqlcipher_key_hex=sqlcipher_key_hex)
+                    SQLiteBackend(
+                        db_path=db_path,
+                        dim=config.embedding_dim,
+                        sqlcipher_key_hex=sqlcipher_key_hex,
+                        recovery_policy=config.memory_recovery_policy,
+                    )
                 )
                 namespaces = store_backend.list_namespaces()
                 if namespaces:
