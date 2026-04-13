@@ -16,10 +16,12 @@ Covers:
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
+from benchmarks._retrieval import rank_entries
 # Benchmark classes
 from benchmarks.bench_latency import LatencyBenchmark
 from benchmarks.bench_memory import MemoryBenchmark
@@ -34,6 +36,7 @@ from benchmarks.bench_quality import (
     reciprocal_rank,
 )
 from benchmarks.bench_throughput import ThroughputBenchmark
+from trw_memory.models.memory import MemoryEntry
 
 # Corpus / fixture generation
 from benchmarks.corpus import (
@@ -211,6 +214,41 @@ class TestFixtures:
         assert true_count > 0, "Should have true duplicate pairs"
         assert false_count > 0, "Should have false duplicate pairs"
         assert true_count + false_count == 30
+
+
+# ====================================================================
+# Benchmark retrieval helper tests
+# ====================================================================
+
+
+class TestBenchmarkRetrieval:
+    """Tests for benchmark ranking helpers."""
+
+    def test_rank_entries_matches_expected_golden_entry(self, tmp_path: Path) -> None:
+        """Fallback benchmark ranking surfaces the intended golden entry."""
+        out = tmp_path / "golden.json"
+        create_golden_set(out)
+        data = json.loads(out.read_text())
+        now = datetime.now(timezone.utc)
+
+        entries = [
+            MemoryEntry(
+                id=str(entry["id"]),
+                content=str(entry["content"]),
+                detail="",
+                tags=[str(tag) for tag in entry["tags"]],
+                importance=float(entry["importance"]),
+                namespace="golden",
+                created_at=now,
+                updated_at=now,
+                source="agent",
+            )
+            for entry in data["entries"]
+        ]
+
+        results = rank_entries("pydantic strict mode", entries, top_k=3)
+        assert results
+        assert "golden-001" in {entry.id for entry in results}
 
 
 # ====================================================================
@@ -615,3 +653,17 @@ class TestQualityBenchmarkIntegration:
         # Metrics should be between 0 and 1
         for key in ("precision_at_5", "recall_at_10", "mrr", "ndcg_at_10"):
             assert 0.0 <= results[key] <= 1.0, f"{key} = {results[key]}"
+
+    def test_run_benchmarks_meets_thresholds_with_bundled_fixtures(
+        self, tmp_path: Path
+    ) -> None:
+        """Bundled benchmark fixtures clear the default threshold gate."""
+        golden_path = tmp_path / "golden.json"
+        create_golden_set(golden_path)
+
+        report = run_benchmarks(
+            sizes=[100],
+            golden_set_path=golden_path,
+        )
+
+        assert check_thresholds(report) == []

@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from benchmarks._retrieval import search_backend_entries
 from benchmarks.corpus import generate_corpus, generate_query_set
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
@@ -107,7 +108,13 @@ class ThroughputBenchmark:
             start = time.perf_counter()
             for q in queries:
                 query_str = str(q["query"])
-                backend.search(query_str, top_k=10, namespace="benchmark")
+                search_backend_entries(
+                    backend,
+                    query_str,
+                    namespace="benchmark",
+                    candidate_limit=size,
+                    top_k=10,
+                )
             total_sec = time.perf_counter() - start
 
             query_count = len(queries)
