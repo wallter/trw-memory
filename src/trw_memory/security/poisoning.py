@@ -8,6 +8,7 @@ Uses 3-sigma (z-score) thresholds to detect three classes of anomaly:
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections import Counter
@@ -24,6 +25,8 @@ logger = structlog.get_logger(__name__)
 _INJECTION_PATTERNS = (
     re.compile(r"ignore (?:all )?previous instructions", re.IGNORECASE),
     re.compile(r"<script\b", re.IGNORECASE),
+    re.compile(r"javascript\s*:", re.IGNORECASE),
+    re.compile(r"\beval\s*\(", re.IGNORECASE),
     re.compile(r"rm\s+-rf\s+/", re.IGNORECASE),
     re.compile(r"system prompt", re.IGNORECASE),
 )
@@ -241,17 +244,32 @@ def quarantine_entry(entry: MemoryEntry) -> MemoryEntry:
 
 def validate_entry_payload(entry: MemoryEntry, *, max_chars: int) -> None:
     """Apply write-time poisoning and schema validation checks to one entry."""
-    combined = f"{entry.content}{entry.detail}"
-    if len(combined) > max_chars:
-        raise SchemaValidationError(f"memory entry exceeds {max_chars} characters")
     try:
         entry.content.encode("utf-8")
         entry.detail.encode("utf-8")
     except UnicodeEncodeError as exc:
-        raise SchemaValidationError("memory entry contains non-UTF-8 content") from exc
+        raise PoisoningError("memory entry contains non-UTF-8 content", reason="encoding_invalid") from exc
+    serialized = json.dumps(
+        entry.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    serialized_size = len(serialized.encode("utf-8"))
+    if serialized_size > max_chars:
+        raise PoisoningError(
+            f"memory entry exceeds {max_chars} bytes",
+            reason="size_exceeded",
+        )
+    if "code_snippet_flagged" in entry.tags:
+        return
+    combined = f"{entry.content}{entry.detail}"
     for pattern in _INJECTION_PATTERNS:
         if pattern.search(combined):
-            raise PoisoningError(f"memory entry matched blocked injection pattern {pattern.pattern!r}")
+            raise PoisoningError(
+                f"memory entry matched blocked injection pattern {pattern.pattern!r}",
+                reason="injection_pattern",
+            )
 
 
 def validate_store_inputs(

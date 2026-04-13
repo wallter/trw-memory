@@ -23,6 +23,8 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
+from trw_memory.security.rbac import Permission, require_namespace_permission
+from trw_memory.security.runtime import append_audit_event
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools._types import McpServer
@@ -200,6 +202,9 @@ def memory_consolidate_impl(
     except ConfigError as exc:
         return {"error": str(exc), "status": "invalid"}
 
+    cfg = config or MemoryConfig()
+    require_namespace_permission(cfg, namespace, Permission.WRITE, "consolidate")
+
     # Team namespace promotion: copy high-impact entries to project namespace
     if namespace.startswith("team:"):
         project_backend = namespace_backend_factory("project:default") if namespace_backend_factory else backend
@@ -213,7 +218,6 @@ def memory_consolidate_impl(
             if project_backend is not backend:
                 project_backend.close()
 
-    cfg = config or MemoryConfig()
     embedder = get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim)
 
     try:
@@ -240,6 +244,17 @@ def memory_consolidate_impl(
         dry_run=dry_run,
         clusters_found=clusters_found,
         entries_consolidated=consolidated_count,
+    )
+    append_audit_event(
+        cfg,
+        "consolidate",
+        namespace=namespace,
+        data={
+            "dry_run": bool(result.get("dry_run", dry_run)),
+            "clusters_found": clusters_found,
+            "entries_consolidated": consolidated_count,
+            "status": str(result.get("status", "")),
+        },
     )
 
     return {
