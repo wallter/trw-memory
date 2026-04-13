@@ -129,6 +129,7 @@ class SQLiteBackend(StorageBackend):
         sqlcipher_key_hex: str | None = None,
         recovery_policy: Literal["strict", "empty_ok"] = "strict",
         corrupt_backup_keep: int = 5,
+        rebuild_from_cold: bool = True,
     ) -> None:
         self._db_path = db_path
         self._dim = dim
@@ -137,6 +138,7 @@ class SQLiteBackend(StorageBackend):
         self._dbapi: Any = _import_sqlcipher_driver() if sqlcipher_key_hex is not None else sqlite3
         self._recovery_policy = recovery_policy
         self._corrupt_backup_keep = corrupt_backup_keep
+        self._rebuild_from_cold = rebuild_from_cold
 
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -176,6 +178,7 @@ class SQLiteBackend(StorageBackend):
                     sqlcipher_key_hex=sqlcipher_key_hex,
                     recovery_policy=self._recovery_policy,
                     corrupt_backup_keep=self._corrupt_backup_keep,
+                    rebuild_from_cold=self._rebuild_from_cold,
                 )
                 self.recovered = True
 
@@ -474,6 +477,7 @@ class SQLiteBackend(StorageBackend):
         sqlcipher_key_hex: str | None = None,
         recovery_policy: Literal["strict", "empty_ok"] = "strict",
         corrupt_backup_keep: int = 5,
+        rebuild_from_cold: bool = True,
     ) -> Any:
         """Recover from a corrupt database by salvaging rows into a fresh DB.
 
@@ -484,19 +488,24 @@ class SQLiteBackend(StorageBackend):
         2. Try salvage via in-process ``SELECT * FROM memories``.
         3. On ``DatabaseError`` (e.g., destroyed ``sqlite_master``), fall back
            to the ``sqlite3 .recover`` CLI (PRD-CORE-138 FR04).
-        4. If both salvage paths yield zero rows AND the backup is non-empty
-           AND ``recovery_policy == "strict"`` (default), raise
-           :class:`CorruptDatabaseUnsalvageableError` preserving the backup
-           (FR03).
-        5. Under ``recovery_policy == "empty_ok"`` preserve legacy behavior:
-           create a fresh empty DB and log ``rows_salvaged=0`` (FR05).
+        4. PRD-CORE-140 FR03: when both salvage paths yield zero rows, the
+           backup is non-empty, ``recovery_policy == "strict"``, AND
+           ``rebuild_from_cold`` is True, run the cold-tier rebuild into the
+           freshly opened DB. If rebuild yields >0 rows, the strict-refusal
+           raise is suppressed.
+        5. If the salvage-and-rebuild combined still yielded zero rows AND
+           the backup is non-empty AND ``recovery_policy == "strict"`` (default),
+           raise :class:`CorruptDatabaseUnsalvageableError` preserving the backup.
+        6. Under ``recovery_policy == "empty_ok"`` preserve legacy behavior:
+           create a fresh empty DB and log ``rows_salvaged=0``.
 
         Returns:
             A new :class:`sqlite3.Connection` to the recovered database.
 
         Raises:
             CorruptDatabaseUnsalvageableError: Under ``strict`` policy when
-                salvage yields zero rows from a non-empty ``.corrupt.bak``.
+                salvage + cold-rebuild both yield zero rows from a non-empty
+                ``.corrupt.bak``.
         """
         # PRD-CORE-139 FR01/FR03/FR04: timestamped rotation + filename-based pruning.
         backup_path = SQLiteBackend._rotate_corrupt_backup(db_path)
@@ -548,7 +557,85 @@ class SQLiteBackend(StorageBackend):
         except OSError:
             backup_size = 0
 
-        if not rows and backup_size > page_size and recovery_policy == "strict":
+        # PRD-CORE-140 FR03: gated cold-tier rebuild before strict-refusal raise.
+        # Gate: strict policy AND knob enabled AND salvage yielded zero rows AND
+        # backup is non-empty. When all four hold, open the new DB early, run the
+        # rebuild, and only re-raise the strict error if rebuild also yielded zero.
+        strict_refuse = not rows and backup_size > page_size and recovery_policy == "strict"
+        cold_rebuild_attempted = False
+        cold_rebuild_rows = 0
+        new_conn: Any = None
+
+        if strict_refuse and rebuild_from_cold:
+            logger.debug(
+                "cold_rebuild_gate_evaluated",
+                policy=recovery_policy,
+                knob=True,
+                recovered_rows=recovered_rows,
+                decision="run",
+            )
+            # Lazy import: avoids circular-import at module-load time.
+            from trw_memory.storage._cold_rebuild import rebuild_from_cold as _rebuild_fn
+
+            new_conn = SQLiteBackend._connect(
+                db_path,
+                dbapi=dbapi,
+                timeout=30.0,
+                check_same_thread=False,
+                sqlcipher_key_hex=sqlcipher_key_hex,
+            )
+            new_conn.execute("PRAGMA journal_mode=WAL")
+            new_conn.execute("PRAGMA synchronous=NORMAL")
+            ensure_schema(new_conn)
+            # Standard trw-memory layout: db_path = <base>/memory.db, cold YAMLs
+            # live at <base>/memory/cold/**/*.yaml — see
+            # trw_memory.lifecycle.tiers._runtime.namespace_storage_dir.
+            rebuild_base = db_path.parent
+            try:
+                cold_rebuild_rows = _rebuild_fn(rebuild_base, new_conn)
+            except Exception:
+                logger.exception(
+                    "cold_rebuild_failed",
+                    db=str(db_path),
+                    base_dir=str(rebuild_base),
+                )
+                cold_rebuild_rows = 0
+            cold_rebuild_attempted = True
+            if cold_rebuild_rows > 0:
+                # Strict gate satisfied by rebuild — suppress the raise.
+                strict_refuse = False
+        elif strict_refuse:
+            logger.debug(
+                "cold_rebuild_gate_evaluated",
+                policy=recovery_policy,
+                knob=False,
+                recovered_rows=recovered_rows,
+                decision="skip_knob_off",
+            )
+        else:
+            logger.debug(
+                "cold_rebuild_gate_evaluated",
+                policy=recovery_policy,
+                knob=rebuild_from_cold,
+                recovered_rows=recovered_rows,
+                decision="skip_gate_not_met",
+            )
+
+        if strict_refuse:
+            # Close the fresh conn opened for an unsuccessful rebuild (if any)
+            # so we don't leak a handle on the raise path. Also delete the
+            # just-created DB file and its WAL sidecars so the caller observes
+            # the same post-state as pre-PRD-CORE-140 (backup preserved; no
+            # stub DB at db_path).
+            if new_conn is not None:
+                with contextlib.suppress(sqlite3.Error):
+                    new_conn.close()
+                with contextlib.suppress(OSError):
+                    db_path.unlink(missing_ok=True)
+                for suffix in (".db-wal", ".db-shm"):
+                    sidecar = db_path.with_name(db_path.name.replace(".db", suffix))
+                    with contextlib.suppress(OSError):
+                        sidecar.unlink(missing_ok=True)
             logger.error(
                 "db_recovery_refused_strict",
                 action="refuse_empty_fallback",
@@ -557,22 +644,25 @@ class SQLiteBackend(StorageBackend):
                 backup_size_bytes=backup_size,
                 salvage_primary_failed=salvage_primary_failed,
                 salvage_cli_failed=salvage_cli_failed,
+                cold_rebuild_attempted=cold_rebuild_attempted,
+                cold_rebuild_rows=cold_rebuild_rows,
             )
             raise CorruptDatabaseUnsalvageableError(
                 "database disk image is malformed and salvage yielded 0 rows",
                 backup_path=str(backup_path),
             )
 
-        new_conn = SQLiteBackend._connect(
-            db_path,
-            dbapi=dbapi,
-            timeout=30.0,
-            check_same_thread=False,
-            sqlcipher_key_hex=sqlcipher_key_hex,
-        )
-        new_conn.execute("PRAGMA journal_mode=WAL")
-        new_conn.execute("PRAGMA synchronous=NORMAL")
-        ensure_schema(new_conn)
+        if new_conn is None:
+            new_conn = SQLiteBackend._connect(
+                db_path,
+                dbapi=dbapi,
+                timeout=30.0,
+                check_same_thread=False,
+                sqlcipher_key_hex=sqlcipher_key_hex,
+            )
+            new_conn.execute("PRAGMA journal_mode=WAL")
+            new_conn.execute("PRAGMA synchronous=NORMAL")
+            ensure_schema(new_conn)
 
         if rows:
             cols = rows[0].keys()
@@ -584,7 +674,16 @@ class SQLiteBackend(StorageBackend):
                     new_conn.execute(insert_sql, tuple(row))
             new_conn.commit()
 
-        if cli_used and rows:
+        if cold_rebuild_attempted and cold_rebuild_rows > 0:
+            logger.warning(
+                "db_recovered",
+                db=str(db_path),
+                backup=str(backup_path),
+                rows_salvaged=recovered_rows,
+                rebuilt_from_cold=cold_rebuild_rows,
+                source="cold_rebuild",
+            )
+        elif cli_used and rows:
             logger.warning(
                 "db_recovered_via_cli",
                 db=str(db_path),
