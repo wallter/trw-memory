@@ -42,8 +42,8 @@ from trw_memory.lifecycle.tiers._runtime import (
     remember_entry_data_in_tiers,
     remember_entry_in_tiers,
     remove_entry_from_tiers,
-    tier_runtime_enabled,
     tier_candidates,
+    tier_runtime_enabled,
     warmup_tier_manager,
 )
 from trw_memory.lifecycle.tiers._scoring import compute_importance_score

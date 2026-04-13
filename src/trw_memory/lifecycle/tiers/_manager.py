@@ -29,6 +29,7 @@ logger = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
     from trw_memory.storage.interface import StorageBackend
 
 
