@@ -63,14 +63,30 @@ class KeyRotationError(MemoryError):
 class SchemaValidationError(MemoryError):
     """Raised when a memory entry fails the write-time schema/policy contract."""
 
+    def __init__(self, message: str, *, path: str = "", failed_fields: list[str] | None = None) -> None:
+        super().__init__(message, path=path)
+        self.failed_fields = failed_fields or []
+
 
 class PIIBlockError(MemoryError):
     """Raised when a memory entry is blocked by the configured PII policy."""
+
+    def __init__(self, message: str, *, path: str = "", detected_type: str = "") -> None:
+        super().__init__(message, path=path)
+        self.detected_type = detected_type
 
 
 class PoisoningError(MemoryError):
     """Raised when content matches write-time poisoning or injection defenses."""
 
+    def __init__(self, message: str, *, path: str = "", reason: str = "") -> None:
+        super().__init__(message, path=path)
+        self.reason = reason
+
 
 class RateLimitError(MemoryError):
     """Raised when a caller exceeds the configured memory write rate limit."""
+
+    def __init__(self, message: str, *, path: str = "", retry_after: float = 0.0) -> None:
+        super().__init__(message, path=path)
+        self.retry_after = retry_after

@@ -29,6 +29,7 @@ from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.retrieval import hybrid_search
 from trw_memory.security.rbac import Permission, require_namespace_permission
+from trw_memory.security.runtime import append_audit_event
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools._types import McpServer
@@ -238,6 +239,28 @@ def memory_recall_impl(  # noqa: C901 - existing orchestration-heavy recall pipe
     # Apply limit cap AFTER token budget
     result_dicts = result_dicts[:limit]
     _record_access_by_namespace(result_dicts, backend, namespace, namespace_backend_factory)
+    append_audit_event(
+        cfg,
+        "access",
+        namespace=namespace,
+        data={
+            "entries_returned": len(result_dicts),
+            "tag_filter": tags or [],
+            "query": query,
+        },
+    )
+    append_audit_event(
+        cfg,
+        "recall",
+        namespace=namespace,
+        data={
+            "query": query,
+            "total_matches": len(result_dicts),
+            "graph_depth": graph_depth,
+            "tokens_used": tokens_used,
+            "tokens_truncated": tokens_truncated,
+        },
+    )
     if supports_tier_runtime(backend):
         recalled_at = datetime.now(timezone.utc).isoformat()
         for item in result_dicts:
