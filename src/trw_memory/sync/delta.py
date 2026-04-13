@@ -7,10 +7,14 @@ import json
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+import structlog
+
 from trw_memory.models.memory import MemoryEntry
 
 if TYPE_CHECKING:
     from trw_memory.storage.interface import StorageBackend
+
+logger = structlog.get_logger(__name__)
 
 # Fields included in sync hash (content-bearing fields)
 _HASH_FIELDS = (
@@ -95,6 +99,6 @@ class DeltaTracker:
                 result = backend.update(eid, last_synced_at=now)
                 if result is not None:
                     count += 1
-            except Exception:  # noqa: S110, PERF203
-                pass
+            except Exception:  # noqa: PERF203
+                logger.warning("delta_mark_synced_failed", entry_id=eid, exc_info=True)
         return count
