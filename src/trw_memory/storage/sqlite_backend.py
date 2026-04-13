@@ -553,14 +553,17 @@ class SQLiteBackend(StorageBackend):
                 ) from None
 
             # Mark dirty for sync pipeline (PRD-INFRA-051)
-            # Skip when the caller is explicitly setting sync fields (e.g. mark_synced)
-            if "sync_seq" not in field_dict and "last_synced_at" not in field_dict:
-                current = self._conn.execute(
-                    "SELECT sync_seq FROM memories WHERE id = ?", (entry_id,)
-                ).fetchone()
-                if current:
-                    field_dict["sync_seq"] = (current[0] or 0) + 1
-                    field_dict["last_synced_at"] = None
+            # Skip when the caller is explicitly setting sync bookkeeping fields
+            # (for example ``mark_synced()`` only updates ``last_synced_at``).
+            if not {"sync_seq", "sync_hash", "last_synced_at"} & field_dict.keys():
+                updated_entry = existing.model_copy(deep=True)
+                for key, val in field_dict.items():
+                    setattr(updated_entry, key, val)
+                next_sync_seq = (existing.sync_seq or 0) + 1
+                field_dict["sync_seq"] = next_sync_seq
+                updated_entry.sync_seq = next_sync_seq
+                field_dict["sync_hash"] = DeltaTracker.compute_sync_hash(updated_entry)
+                field_dict["last_synced_at"] = None
 
             for key, val in field_dict.items():
                 sql_key = "expires_at" if key == "expires" else key

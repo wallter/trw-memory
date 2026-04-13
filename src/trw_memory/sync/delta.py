@@ -28,6 +28,19 @@ _HASH_FIELDS = (
 )
 
 
+def _normalize_hash_value(value: object) -> object:
+    """Normalize values into the PRD's canonical JSON-hash representation."""
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).isoformat()
+    if isinstance(value, float):
+        return float(f"{value:.6f}")
+    if isinstance(value, dict):
+        return {str(key): _normalize_hash_value(val) for key, val in sorted(value.items(), key=lambda item: str(item[0]))}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_hash_value(item) for item in value]
+    return value
+
+
 class DeltaTracker:
     """Tracks which entries are dirty and need syncing."""
 
@@ -35,9 +48,8 @@ class DeltaTracker:
     def compute_sync_hash(entry: MemoryEntry) -> str:
         """SHA-256 of canonical serialization of content fields."""
         d = entry.to_dict()
-        canonical = {k: d.get(k) for k in _HASH_FIELDS}
-        # Stable serialization
-        raw = json.dumps(canonical, sort_keys=True, default=str)
+        canonical = {k: _normalize_hash_value(d.get(k)) for k in _HASH_FIELDS}
+        raw = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         return hashlib.sha256(raw.encode()).hexdigest()
 
     @staticmethod
