@@ -1,13 +1,18 @@
-"""Tests for SQLiteBackend strict-salvage-refusal recovery policy (PRD-CORE-138).
+"""Tests for SQLiteBackend strict-salvage-refusal recovery policy (PRD-CORE-138)
+plus timestamped 5-wide corruption-backup rotation (PRD-CORE-139).
 
-Covers FR01-FR06 and NFR01-NFR04 from docs/requirements-aare-f/prds/PRD-CORE-138.md.
+Covers FR01-FR06 and NFR01-NFR04 from docs/requirements-aare-f/prds/PRD-CORE-138.md
+and FR01-FR05/NFR01-NFR04 from docs/requirements-aare-f/prds/PRD-CORE-139.md.
 """
 
 from __future__ import annotations
 
 import inspect
+import os
+import re
 import sqlite3
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +25,22 @@ from trw_memory.exceptions import CorruptDatabaseUnsalvageableError, StorageErro
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+# PRD-CORE-139: filename pattern for new timestamped backups.
+_TIMESTAMPED_BACKUP_RE = re.compile(
+    r"^memory\.db\.corrupt\.(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)(?:-\d+)?\.bak$"
+)
+
+
+def _find_timestamped_backup(parent: Path) -> Path:
+    """Return the single timestamped corruption backup in ``parent`` (PRD-CORE-139).
+
+    Used by tests that need to reference the post-rotation backup path without
+    hardcoding the wall-clock timestamp.
+    """
+    matches = sorted(p for p in parent.iterdir() if _TIMESTAMPED_BACKUP_RE.fullmatch(p.name))
+    assert len(matches) == 1, f"expected exactly one timestamped backup in {parent}, got {[p.name for p in matches]}"
+    return matches[0]
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +156,8 @@ def test_fr03_strict_refuses_silent_empty_on_destroyed_sqlite_master(
         SQLiteBackend.recover_db(db_path, recovery_policy="strict")
 
     # Backup preserved intact on disk; no new DB written at db_path.
-    backup_path = db_path.with_suffix(".db.corrupt.bak")
+    # PRD-CORE-139: backup name is timestamped (memory.db.corrupt.<ISO-UTC>.bak).
+    backup_path = _find_timestamped_backup(tmp_path)
     assert backup_path.exists()
     assert backup_path.stat().st_size > 4096  # backup is non-empty
     assert not db_path.exists()  # no new DB was created on strict refusal
@@ -158,7 +180,8 @@ def test_fr03_strict_refusal_exception_contains_backup_path(
     with pytest.raises(CorruptDatabaseUnsalvageableError) as exc_info:
         SQLiteBackend.recover_db(db_path, recovery_policy="strict")
 
-    backup_path = db_path.with_suffix(".db.corrupt.bak")
+    # PRD-CORE-139: backup name is timestamped.
+    backup_path = _find_timestamped_backup(tmp_path)
     assert str(backup_path) in str(exc_info.value)
     assert exc_info.value.backup_path == str(backup_path)
 
@@ -385,7 +408,8 @@ def test_fr05_empty_ok_preserves_legacy_behavior(
         conn.close()
 
     # Backup file is still on disk (legacy behavior preserves backups too).
-    assert db_path.with_suffix(".db.corrupt.bak").exists()
+    # PRD-CORE-139: backup is named with a timestamped suffix.
+    assert _find_timestamped_backup(tmp_path).exists()
     # New DB was created at the original path.
     assert db_path.exists()
 
@@ -452,15 +476,15 @@ def test_fr06_policy_threaded_through_init(
 
     # Rebuild the corrupted state (the strict path left the backup but no DB).
     # Move backup back so we can test empty_ok reopening.
-    backup_path = db_path.with_suffix(".db.corrupt.bak")
+    # PRD-CORE-139: backup name is timestamped.
+    backup_path = _find_timestamped_backup(tmp_path)
     assert backup_path.exists()
     import shutil
 
     shutil.copy(str(backup_path), str(db_path))
 
-    # Remove the old .corrupt.bak so rotation doesn't preserve stale state
-    # and the strict path signal matches empty_ok expectations.
-    # (With empty_ok: constructor completes, recovered=True.)
+    # With empty_ok: constructor completes, recovered=True. A second
+    # timestamped backup will be created alongside the first.
     backend = SQLiteBackend(db_path, recovery_policy="empty_ok")
     assert backend.recovered is True
     backend.close()
@@ -548,7 +572,8 @@ def test_nfr04_strict_refusal_emits_structured_log(
     assert entry["log_level"] == "error"
     assert entry["action"] == "refuse_empty_fallback"
     assert entry["db_path"] == str(db_path)
-    assert entry["backup_path"] == str(db_path.with_suffix(".db.corrupt.bak"))
+    # PRD-CORE-139: backup path is timestamped, not the legacy .corrupt.bak name.
+    assert entry["backup_path"] == str(_find_timestamped_backup(tmp_path))
     assert entry["backup_size_bytes"] > 4096
     assert entry["salvage_primary_failed"] is True
     assert entry["salvage_cli_failed"] is True

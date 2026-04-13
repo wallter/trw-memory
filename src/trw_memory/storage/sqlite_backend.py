@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import json
+import re
 import shutil
 import sqlite3
 import struct
@@ -88,6 +89,22 @@ _VALID_UPDATE_COLUMNS: frozenset[str] = (frozenset(_COLUMNS) - IMMUTABLE_FIELDS)
 
 
 # ---------------------------------------------------------------------------
+# PRD-CORE-139: timestamped corrupt-backup rotation
+# ---------------------------------------------------------------------------
+# Matches memory.db.corrupt.<ISO-UTC>.bak with optional -N collision suffix.
+# Group 1 is the timestamp used for lexicographic (== chronological) sort.
+_TIMESTAMPED_BACKUP_RE: re.Pattern[str] = re.compile(
+    r"^memory\.db\.corrupt\.(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)(?:-\d+)?\.bak$"
+)
+# Pre-PRD-CORE-139 filenames. These are sacred: count against the keep budget
+# but are never pruning victims, so forensic evidence captured before the
+# rotation change is never silently destroyed on upgrade.
+_LEGACY_CORRUPT_NAMES: frozenset[str] = frozenset(
+    {"memory.db.corrupt.bak", "memory.db.corrupt.bak.1"}
+)
+
+
+# ---------------------------------------------------------------------------
 # Backend
 # ---------------------------------------------------------------------------
 
@@ -111,6 +128,7 @@ class SQLiteBackend(StorageBackend):
         *,
         sqlcipher_key_hex: str | None = None,
         recovery_policy: Literal["strict", "empty_ok"] = "strict",
+        corrupt_backup_keep: int = 5,
     ) -> None:
         self._db_path = db_path
         self._dim = dim
@@ -118,6 +136,7 @@ class SQLiteBackend(StorageBackend):
         self._lock = threading.Lock()
         self._dbapi: Any = _import_sqlcipher_driver() if sqlcipher_key_hex is not None else sqlite3
         self._recovery_policy = recovery_policy
+        self._corrupt_backup_keep = corrupt_backup_keep
 
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -156,6 +175,7 @@ class SQLiteBackend(StorageBackend):
                     dbapi=self._dbapi,
                     sqlcipher_key_hex=sqlcipher_key_hex,
                     recovery_policy=self._recovery_policy,
+                    corrupt_backup_keep=self._corrupt_backup_keep,
                 )
                 self.recovered = True
 
@@ -366,16 +386,101 @@ class SQLiteBackend(StorageBackend):
                 return []
 
     @staticmethod
+    def _rotate_corrupt_backup(db_path: Path) -> Path:
+        """Move ``db_path`` to ``memory.db.corrupt.<UTC-ISO>.bak`` (PRD-CORE-139 FR01).
+
+        Uses ``datetime.now(timezone.utc)`` at call time. Colons in the time
+        portion are replaced with hyphens for Windows/shell safety. On a
+        same-second collision with an existing backup (NFR02), appends a
+        ``-1``, ``-2``, ... suffix — names remain parseable by
+        :data:`_TIMESTAMPED_BACKUP_RE`.
+
+        Returns:
+            The new path the corrupt DB was moved to.
+        """
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+        candidate = db_path.with_name(f"memory.db.corrupt.{ts}.bak")
+        i = 1
+        while candidate.exists():
+            candidate = db_path.with_name(f"memory.db.corrupt.{ts}-{i}.bak")
+            i += 1
+        shutil.move(str(db_path), str(candidate))
+        return candidate
+
+    @staticmethod
+    def _prune_corrupt_backups(parent: Path, keep_n: int) -> None:
+        """Keep at most ``keep_n`` corruption backup files in ``parent`` (FR03/FR04).
+
+        Pruning candidates are restricted to files matching
+        :data:`_TIMESTAMPED_BACKUP_RE`. Order is determined by parsing the
+        timestamp out of the filename — never the filesystem mtime, which is
+        trampled by ``shutil.move`` and so is not authoritative for move-time.
+
+        Legacy ``memory.db.corrupt.bak`` and ``memory.db.corrupt.bak.1`` files
+        count against ``keep_n`` (so total disk usage stays bounded across an
+        upgrade) but are NEVER selected for deletion. If the legacy count alone
+        exceeds the budget, no deletion occurs and a single WARNING
+        (``corrupt_backup_budget_exceeded_legacy_only``) is emitted.
+
+        Deletion failures are swallowed via :func:`contextlib.suppress`
+        following the existing style at the WAL/SHM cleanup block.
+        """
+        timestamped: list[tuple[str, Path]] = []
+        legacy_count = 0
+        try:
+            children = list(parent.iterdir())
+        except OSError:
+            return
+        for child in children:
+            name = child.name
+            if name in _LEGACY_CORRUPT_NAMES:
+                legacy_count += 1
+                continue
+            match = _TIMESTAMPED_BACKUP_RE.fullmatch(name)
+            if match is not None:
+                timestamped.append((match.group(1), child))
+        # Lexicographic sort over the ISO-8601 prefix == chronological sort.
+        timestamped.sort(key=lambda pair: pair[0])
+        excess = len(timestamped) + legacy_count - keep_n
+        pruned = 0
+        while excess > 0 and timestamped:
+            _, victim = timestamped.pop(0)
+            with contextlib.suppress(OSError):
+                victim.unlink()
+                pruned += 1
+            excess -= 1
+        if excess > 0:
+            # Only legacy files remain; cannot meet the budget without
+            # touching legacy artifacts (FR04 forbids).
+            logger.warning(
+                "corrupt_backup_budget_exceeded_legacy_only",
+                keep=keep_n,
+                legacy_count=legacy_count,
+            )
+        logger.info(
+            "corrupt_backup_rotated",
+            parent=str(parent),
+            keep=keep_n,
+            total_timestamped=len(timestamped),
+            total_legacy=legacy_count,
+            pruned=pruned,
+        )
+
+    @staticmethod
     def recover_db(
         db_path: Path,
         *,
         dbapi: Any = sqlite3,
         sqlcipher_key_hex: str | None = None,
         recovery_policy: Literal["strict", "empty_ok"] = "strict",
+        corrupt_backup_keep: int = 5,
     ) -> Any:
         """Recover from a corrupt database by salvaging rows into a fresh DB.
 
-        1. Rename corrupt file to ``<name>.corrupt.bak``
+        1. Move corrupt file to ``memory.db.corrupt.<UTC-ISO>.bak``
+           (PRD-CORE-139 FR01) and prune old timestamped backups beyond
+           ``corrupt_backup_keep`` (FR03/FR04). Legacy ``.corrupt.bak`` and
+           ``.corrupt.bak.1`` files are preserved.
         2. Try salvage via in-process ``SELECT * FROM memories``.
         3. On ``DatabaseError`` (e.g., destroyed ``sqlite_master``), fall back
            to the ``sqlite3 .recover`` CLI (PRD-CORE-138 FR04).
@@ -393,14 +498,9 @@ class SQLiteBackend(StorageBackend):
             CorruptDatabaseUnsalvageableError: Under ``strict`` policy when
                 salvage yields zero rows from a non-empty ``.corrupt.bak``.
         """
-        backup_path = db_path.with_suffix(".db.corrupt.bak")
-        # Rotate old backups — keep at most 2
-        if backup_path.exists():
-            older = db_path.with_suffix(".db.corrupt.bak.1")
-            with contextlib.suppress(OSError):
-                shutil.move(str(backup_path), str(older))
-
-        shutil.move(str(db_path), str(backup_path))
+        # PRD-CORE-139 FR01/FR03/FR04: timestamped rotation + filename-based pruning.
+        backup_path = SQLiteBackend._rotate_corrupt_backup(db_path)
+        SQLiteBackend._prune_corrupt_backups(db_path.parent, keep_n=corrupt_backup_keep)
         # Also remove stale WAL/SHM files for the corrupt DB
         for suffix in (".db-wal", ".db-shm"):
             wal = db_path.with_name(db_path.name.replace(".db", suffix))
