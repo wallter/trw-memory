@@ -29,7 +29,7 @@ __all__ = [
 _logger = logging.getLogger(__name__)
 
 # Valid source values for MemoryEntry provenance tracking.
-_VALID_SOURCES = frozenset({"human", "agent", "tool", "consolidated"})
+_VALID_SOURCES = frozenset({"human", "agent", "tool", "consolidated", "team_sync"})
 
 
 class MemoryStatus(str, Enum):
@@ -242,8 +242,8 @@ class MemoryEntry(BaseModel):
     q_observations: int = Field(ge=0, default=0)
 
     # Provenance
-    source: Literal["human", "agent", "tool", "consolidated"] = Field(
-        default="agent", description="Origin: 'human', 'agent', 'tool', 'consolidated'"
+    source: Literal["human", "agent", "tool", "consolidated", "team_sync"] = Field(
+        default="agent", description="Origin: 'human', 'agent', 'tool', 'consolidated', 'team_sync'"
     )
     source_identity: str = Field(default="", description="Name of source agent/user")
     client_profile: str = Field(
