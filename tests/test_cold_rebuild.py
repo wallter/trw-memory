@@ -169,6 +169,102 @@ def test_hydrator_hardcodes_type_pattern(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_hydrator_source_type_consolidated(tmp_path: Path) -> None:
+    """Audit finding 140-FR05-P2a — regression for the EXACT 2026-04-12 bug.
+
+    During manual recovery, ``source_type='consolidated'`` entries were dropped
+    because the broken hydrator tried to write ``consolidated`` into the DB
+    ``type`` column (which is a ``MemoryType`` enum with no ``CONSOLIDATED``
+    member). The corrected mapping routes ``source_type`` to the ``source``
+    column and hardcodes ``type='pattern'``. This test uses the exact value
+    that triggered the incident.
+    """
+    _make_yaml(tmp_path, "L-CONS", source_type="consolidated")
+
+    conn = _open_fresh_db(tmp_path / "memory.db")
+    try:
+        rebuilt = rebuild_from_cold(tmp_path, conn)
+        assert rebuilt == 1, "consolidated entry must NOT be silently dropped"
+        row = conn.execute(
+            "SELECT type, source FROM memories WHERE id='L-CONS'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "pattern", "type must be hardcoded, not copied from source_type"
+        assert row[1] == "consolidated", "source_type value must land on the source column"
+    finally:
+        conn.close()
+
+
+def test_hydrator_covers_all_entry_columns() -> None:
+    """Audit finding 140-FR05-P2b — explicit PRD §8 test strategy entry.
+
+    Every column the hydrator emits must be present in the canonical
+    ``ENTRY_COLUMNS`` tuple. Guards against future column renames that
+    would otherwise silently misalign the INSERT statement with the live
+    schema. The ``_INSERT_COLUMN_SET`` runtime guard in ``_cold_rebuild.py``
+    already fails at import time if this invariant breaks; this test
+    upgrades that guarantee from "module-load smoke" to "CI regression".
+    """
+    from trw_memory.storage._cold_rebuild import _INSERT_COLUMNS
+    from trw_memory.storage._shared import ENTRY_COLUMNS
+
+    emitted = set(_INSERT_COLUMNS)
+    canonical = set(ENTRY_COLUMNS)
+    missing = emitted - canonical
+    assert not missing, (
+        f"_INSERT_COLUMNS drift — {sorted(missing)} not in ENTRY_COLUMNS. "
+        "A column was removed or renamed; update _cold_rebuild.py or _shared.ENTRY_COLUMNS."
+    )
+
+
+@pytest.mark.slow
+def test_rebuild_throughput_10k_files(tmp_path: Path) -> None:
+    """Audit finding 140-NFR01-P2 — automated SLO regression guard.
+
+    PRD-CORE-140 NFR01 states rebuild must process 10,000 cold YAML files in
+    under 30 seconds. The implementation uses a single transaction and
+    per-file streaming iteration which meets this target empirically; this
+    test is the CI contract. Generated YAMLs are minimal-valid (only the
+    required fields populated) to focus on per-file overhead rather than
+    serialization cost.
+    """
+    import time
+
+    cold_dir = tmp_path / "memory" / "cold" / "2026" / "04"
+    cold_dir.mkdir(parents=True)
+
+    # 10_000 minimal YAMLs — raw write avoids ruamel overhead
+    for i in range(10_000):
+        entry_id = f"L-{i:05x}"
+        yaml_text = (
+            f"id: {entry_id}\n"
+            f"summary: entry {i}\n"
+            f"detail: ''\n"
+            f"impact: 0.5\n"
+            f"status: active\n"
+            f"recurrence: 1\n"
+            f"namespace: default\n"
+            f"created: '2026-04-12T00:00:00+00:00'\n"
+            f"updated: '2026-04-12T00:00:00+00:00'\n"
+            f"source_type: agent\n"
+        )
+        (cold_dir / f"{entry_id}.yaml").write_text(yaml_text)
+
+    conn = _open_fresh_db(tmp_path / "memory.db")
+    try:
+        start = time.monotonic()
+        rebuilt = rebuild_from_cold(tmp_path, conn)
+        elapsed = time.monotonic() - start
+    finally:
+        conn.close()
+
+    assert rebuilt == 10_000, f"expected 10,000 rebuilt, got {rebuilt}"
+    assert elapsed < 30.0, (
+        f"NFR01 throughput SLO violated: 10k YAMLs took {elapsed:.2f}s, budget 30s. "
+        "Check for quadratic work or missing transaction batching."
+    )
+
+
 def test_hydrator_normalizes_date_only(tmp_path: Path) -> None:
     """FR05: YAML date-only created/updated is normalised to full ISO-8601."""
     _make_yaml(tmp_path, "L-DATE", created="2026-04-12", updated="2026-04-12")
