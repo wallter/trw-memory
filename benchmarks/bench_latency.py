@@ -14,6 +14,7 @@ import statistics
 import time
 from pathlib import Path
 
+from benchmarks._retrieval import search_backend_entries
 from benchmarks.corpus import generate_corpus, generate_query_set
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
@@ -87,7 +88,13 @@ class LatencyBenchmark:
             for q in queries:
                 query_str = str(q["query"])
                 start = time.perf_counter()
-                backend.search(query_str, top_k=10, namespace="benchmark")
+                search_backend_entries(
+                    backend,
+                    query_str,
+                    namespace="benchmark",
+                    candidate_limit=size,
+                    top_k=10,
+                )
                 elapsed = (time.perf_counter() - start) * 1000  # ms
                 latencies.append(elapsed)
 
