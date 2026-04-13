@@ -758,13 +758,18 @@ def memory_decay_pass(
     Returns:
         {"processed": int, "remaining": int, "total_decayed": int}
     """
+    if batch_size <= 0:
+        msg = "batch_size must be positive"
+        raise ValueError(msg)
+
+    effective_batch_size = min(batch_size, 1000)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=cutoff_days)).isoformat()
 
     rows = conn.execute(
         "SELECT id, importance FROM memories WHERE cross_validated = 1 "
         "AND COALESCE(last_accessed_at, created_at) < ? "
         "LIMIT ?",
-        (cutoff, batch_size),
+        (cutoff, effective_batch_size),
     ).fetchall()
 
     total = conn.execute(
