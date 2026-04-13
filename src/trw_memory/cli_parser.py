@@ -89,4 +89,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_forget.add_argument("memory_id", help="ID of the entry to delete")
     p_forget.add_argument("--namespace", default="default", help="Namespace")
 
+    # --- restore (PRD-CORE-140) ---
+    p_restore = subparsers.add_parser(
+        "restore",
+        help="Rebuild the SQLite DB from the cold YAML tier",
+    )
+    p_restore.add_argument(
+        "--from-cold",
+        dest="from_cold",
+        action="store_true",
+        required=True,
+        help="Rebuild from cold tier (currently the only supported source)",
+    )
+    p_restore.add_argument("--namespace", default="default", help="Namespace")
+    p_restore.add_argument(
+        "--db",
+        default=None,
+        help="Optional override for the SQLite DB path (default: configured path)",
+    )
+
     return parser

@@ -306,6 +306,47 @@ async def _handle_forget(args: argparse.Namespace) -> int:
         await client.close()
 
 
+@_cli_error_boundary
+async def _handle_restore(args: argparse.Namespace) -> int:
+    """Handle the 'restore --from-cold' subcommand (PRD-CORE-140 FR02).
+
+    Opens (or creates) the SQLite DB at the resolved path, runs
+    ``ensure_schema``, then invokes :func:`rebuild_from_cold`. Prints a
+    user-facing summary and returns 0 on success.
+    """
+    import sqlite3
+
+    from trw_memory.storage._cold_rebuild import rebuild_from_cold
+    from trw_memory.storage._schema import ensure_schema
+
+    config = MemoryConfig()
+    namespace = validate_namespace(args.namespace)
+
+    if args.db:
+        db_path = Path(args.db).resolve()
+        base_dir = db_path.parent
+    else:
+        base_dir = (Path(config.storage_path) / namespace.replace(":", "_")).resolve()
+        db_path = base_dir / config.sqlite_db_name
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Count cold YAMLs before rebuild so we can report skipped = total - rebuilt.
+    cold_base = base_dir / "memory" / "cold"
+    total_yaml = sum(1 for _ in cold_base.rglob("*.yaml")) if cold_base.exists() else 0
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        ensure_schema(conn)
+        rebuilt = rebuild_from_cold(base_dir, conn)
+    finally:
+        conn.close()
+
+    skipped = max(total_yaml - rebuilt, 0)
+    print(f"Rebuilt {rebuilt} entries from cold tier ({skipped} skipped)")
+    return 0
+
+
 async def _dispatch(args: argparse.Namespace) -> int:
     """Route to the appropriate handler based on subcommand."""
     handlers: dict[str, Callable[..., object]] = {
@@ -317,6 +358,7 @@ async def _dispatch(args: argparse.Namespace) -> int:
         "import": _handle_import,
         "status": _handle_status,
         "forget": _handle_forget,
+        "restore": _handle_restore,
     }
     handler = handlers.get(args.command)
     if handler is None:
