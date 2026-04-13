@@ -2,6 +2,20 @@
 
 All notable changes to the TRW Memory package.
 
+## [0.6.7] — 2026-04-13
+
+### Added
+- **Feedback lifecycle** — `recall_count`, `helpful_count`, `unhelpful_count` fields on `MemoryEntry` (PRD-CORE-132)
+- **Recall tracking** — `record_recall_access` increments `recall_count` on every recall
+- **Dynamic decay scoring** — `feedback_decay_score()` implements `impact × 0.95^(recall_count / max(1, helpful_count))`; wired into `entry_utility()` for recall ranking
+- **Schema migration** — `ensure_schema` adds feedback columns via ALTER TABLE with defaults
+
+### Changed
+- Removed 150 lines of duplicated `rank_by_utility`/`utility_based_prune_candidates` from `_recall.py` (DRY cleanup)
+
+### Fixed
+- `_row_mapper.py` feedback fields properly wired into `MemoryEntry` construction
+
 ## [0.6.6] — 2026-04-07
 
 ### Added
