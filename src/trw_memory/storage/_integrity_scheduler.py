@@ -151,8 +151,29 @@ class IntegrityScheduler:
         ok, detail = self._probe()
         self.last_check_at = time.time()
         self.last_check_ok = ok
+        self._write_sentinel()
         self._report(ok, detail)
         return ok
+
+    # ------------------------------------------------------------------
+    # Sentinel file (PRD-INFRA-063 + PRD-INFRA-068 cross-PRD contract)
+    # ------------------------------------------------------------------
+
+    def _write_sentinel(self) -> None:
+        """Write ``<db_parent>/.integrity_last_check`` for C3 to read.
+
+        The C3 session-start dashboard reads this file to report
+        ``last_integrity_check_age_minutes``. Failures are silent — the
+        dashboard gracefully degrades to ``None`` when the file is missing.
+        """
+        if self.last_check_at is None:
+            return
+        sentinel = self._db_path.parent / ".integrity_last_check"
+        try:
+            sentinel.write_text(f"{self.last_check_at:.6f}\n")
+        except OSError:
+            # Non-fatal: sentinel is an observability artifact only.
+            return
 
     # ------------------------------------------------------------------
     # Background loop
@@ -165,6 +186,7 @@ class IntegrityScheduler:
             ok, detail = self._probe()
             self.last_check_at = time.time()
             self.last_check_ok = ok
+            self._write_sentinel()
             self._report(ok, detail)
 
     def _probe(self) -> tuple[bool, str]:
@@ -179,6 +201,10 @@ class IntegrityScheduler:
         try:
             uri = f"file:{self._db_path}?mode=ro"
             conn = sqlite3.connect(uri, uri=True, timeout=5.0, check_same_thread=False)
+            # Belt-and-suspenders: enforce read-only at the PRAGMA layer too.
+            # Reconfirms the URI mode=ro intent and blocks any accidental write.
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute("PRAGMA query_only = 1")
             rows = conn.execute("PRAGMA quick_check").fetchall()
             detail = rows[0][0] if rows else "empty"
             ok = len(rows) == 1 and rows[0][0] == "ok"
