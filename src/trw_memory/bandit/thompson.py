@@ -94,6 +94,8 @@ class BanditSelector:
         self._cold_start_min = cold_start_min
         self._floor_exploration = floor_exploration
         self._arms: dict[str, ArmState] = {}
+        self._state_version = 0
+        self._propensity_cache: dict[tuple[str, ...], tuple[int, dict[str, float]]] = {}
 
     # -- public API ---------------------------------------------------------
 
@@ -120,6 +122,7 @@ class BanditSelector:
         for arm_id in eligible_ids:
             if arm_id not in self._arms:
                 self._arms[arm_id] = ArmState()
+                self._state_version += 1
 
         # --- Cold-start: round-robin for under-exposed arms ----------------
         cold_arms = [
@@ -219,6 +222,7 @@ class BanditSelector:
         arm.beta = self._PRIOR_BETA + sum(1.0 - r for r in arm.window)
 
         arm.exposure_count += 1
+        self._invalidate_propensity_cache()
 
     def soft_reset_arm(self, arm_id: str) -> None:
         """Soft-reset an arm posterior to the optimistic prior.
@@ -233,6 +237,7 @@ class BanditSelector:
         arm.alpha = self._PRIOR_ALPHA
         arm.beta = self._PRIOR_BETA
         arm.window = []
+        self._invalidate_propensity_cache()
 
     def to_json(self) -> str:
         """Serialize the selector state (hyperparameters + arms) to JSON."""
@@ -338,6 +343,11 @@ class BanditSelector:
         if len(eligible_ids) == 1:
             return {eligible_ids[0]: 1.0}
 
+        cache_key = tuple(eligible_ids)
+        cached = self._propensity_cache.get(cache_key)
+        if cached is not None and cached[0] == self._state_version:
+            return cached[1]
+
         betavariate = random.betavariate
         random_float = random.random
         randrange = random.randrange
@@ -375,14 +385,20 @@ class BanditSelector:
                         top_sample = sample
 
                 selected_index = top_index
-                if random_float() < floor_exploration:  # noqa: S311
-                    selected_index = randrange(arm_count - 1)  # noqa: S311
+                if random_float() < floor_exploration:
+                    selected_index = randrange(arm_count - 1)
                     if selected_index >= top_index:
                         selected_index += 1
                 counts[selected_index] += 1
 
         sample_total = float(sample_count)
-        return {
+        result = {
             arm_id: counts[index] / sample_total
             for index, arm_id in enumerate(eligible_ids)
         }
+        self._propensity_cache[cache_key] = (self._state_version, result)
+        return result
+
+    def _invalidate_propensity_cache(self) -> None:
+        self._state_version += 1
+        self._propensity_cache.clear()
