@@ -272,6 +272,72 @@ def test_fr04_recover_cli_nonzero_exit_falls_through(
         SQLiteBackend.recover_db(db_path, recovery_policy="strict")
 
 
+def test_fr04_recover_cli_full_executescript_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FR04: exercise the real _salvage_via_recover_cli tempdb/executescript path.
+
+    Mocks subprocess.run to return a valid CREATE + INSERT dump so the helper
+    loads it via executescript and returns rows. This covers the tempfile +
+    dbapi.connect + executescript branch of _salvage_via_recover_cli.
+    """
+    db_path = tmp_path / "memory.db"
+    _populate_db(db_path, entries=2)
+    _corrupt_sqlite_master(db_path)
+
+    # Provide a minimal, valid SQL dump the way `sqlite3 .recover` would.
+    dump_sql = b"""
+CREATE TABLE memories (
+    id TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+INSERT INTO memories (id, content, created_at, updated_at)
+VALUES ('L-from-dump', 'rescued from cli dump', '2026-04-13T00:00:00+00:00', '2026-04-13T00:00:00+00:00');
+"""
+
+    def _valid_dump(*_args: Any, **_kwargs: Any) -> Any:
+        return subprocess.CompletedProcess(
+            args=["sqlite3"],
+            returncode=0,
+            stdout=dump_sql,
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(subprocess, "run", _valid_dump)
+
+    conn = SQLiteBackend.recover_db(db_path, recovery_policy="strict")
+    try:
+        row = conn.execute("SELECT id, content FROM memories").fetchone()
+        assert row[0] == "L-from-dump"
+        assert row[1] == "rescued from cli dump"
+    finally:
+        conn.close()
+
+
+def test_fr04_recover_cli_malformed_dump_falls_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FR04: malformed dump (executescript raises sqlite3.Error) → empty list → strict refusal."""
+    db_path = tmp_path / "memory.db"
+    _populate_db(db_path, entries=2)
+    _corrupt_sqlite_master(db_path)
+
+    def _bad_dump(*_args: Any, **_kwargs: Any) -> Any:
+        return subprocess.CompletedProcess(
+            args=["sqlite3"],
+            returncode=0,
+            stdout=b"THIS IS NOT VALID SQL AT ALL;;",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(subprocess, "run", _bad_dump)
+
+    with pytest.raises(CorruptDatabaseUnsalvageableError):
+        SQLiteBackend.recover_db(db_path, recovery_policy="strict")
+
+
 def test_fr04_recover_cli_empty_dump_falls_through(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
