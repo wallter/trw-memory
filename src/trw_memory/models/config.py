@@ -83,6 +83,7 @@ class _TRWConfigYamlSource(InitSettingsSource):
         _map_first("rbac_mode", "rbac_mode", "memory_rbac_mode")
         _map_first("namespace_roles", "namespace_roles", "memory_namespace_roles")
         _map_first("key_rotation_backup", "key_rotation_backup", "memory_key_rotation_backup")
+        _map_first("memory_recovery_policy", "memory_recovery_policy", "recovery_policy")
 
         super().__init__(settings_cls, mapped)
 
@@ -214,6 +215,17 @@ class MemoryConfig(BaseSettings):
     max_entry_chars: int = Field(default=10_240, gt=0, description="Maximum combined content/detail character count")
     max_memory_writes_per_minute: int = Field(default=10, ge=0, description="Per-session write limit enforced over a rolling minute")
     rate_limit_state_path: str = Field(default="", description="Path to the persisted write-rate limiter state file")
+
+    # Recovery policy (PRD-CORE-138)
+    memory_recovery_policy: Literal["strict", "empty_ok"] = Field(
+        default="strict",
+        validation_alias=AliasChoices("memory_recovery_policy", "recovery_policy"),
+        description=(
+            "Behavior when DB corruption salvage yields 0 rows on a non-empty backup: "
+            "'strict' raises CorruptDatabaseUnsalvageableError (default); "
+            "'empty_ok' preserves legacy silent-empty fallback."
+        ),
+    )
 
     # Sync configuration (PRD-CORE-047)
     sync_enabled: bool = Field(default=False, description="Enable remote platform sync")
