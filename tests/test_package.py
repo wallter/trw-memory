@@ -248,6 +248,17 @@ def test_pyproject_mypy_config_is_strict_python_310() -> None:
     assert mypy["plugins"] == ["pydantic.mypy"]
 
 
+def test_pyproject_coverage_omits_server_module() -> None:
+    """Package coverage excludes the server entry-point module from the denominator."""
+    pyproject = _load_pyproject()
+    coverage_run = pyproject["tool"]["coverage"]["run"]
+    assert isinstance(coverage_run, dict)
+    omit = coverage_run["omit"]
+    assert isinstance(omit, list)
+
+    assert "*/server.py" in omit
+
+
 def test_memory_ci_workflow_covers_package_and_workflow_changes() -> None:
     """CI runs for trw-memory changes and for workflow edits that change the contract."""
     workflow = _load_workflow(MEMORY_CI_PATH)
@@ -280,10 +291,13 @@ def test_memory_ci_test_job_uploads_coverage_artifacts() -> None:
     assert matrix["python-version"] == ["3.10", "3.11", "3.12", "3.13"]
     assert coverage_step["run"].count("--cov-report") == 2
     assert "--cov-report=xml:coverage.xml" in coverage_step["run"]
+    assert "--cov-fail-under=85" in coverage_step["run"]
     assert upload_step["uses"] == "actions/upload-artifact@v4"
+    assert upload_step["if"] == "always()"
     assert upload_step["with"]["name"] == "coverage-${{ matrix.python-version }}"
     assert upload_step["with"]["path"] == "trw-memory/coverage.xml"
     assert "--cov-branch" in security_step["run"]
+    assert "--cov-fail-under=90" in security_step["run"]
 
 
 def test_memory_ci_compat_job_checks_core_and_sqlite_vec_paths() -> None:
@@ -352,11 +366,24 @@ def test_memory_cd_workflow_matches_current_release_contract() -> None:
     assert _find_step(build_job, "Build wheel and sdist")["run"] == "python -m build"
     assert "find dist" in _find_step(build_job, "Verify build artifacts exist")["run"]
     assert "sha256sum dist/*" in _find_step(build_job, "Compute checksums")["run"]
+    assert _find_step(sign_job, "Download build artifacts")["with"]["path"] == "dist/"
+    assert "Install sigstore" not in {step.get("name") for step in sign_job["steps"]}
     assert _find_step(sign_job, "Sign artifacts")["uses"] == "sigstore/gh-action-sigstore-python@v3"
+    assert _find_step(publish_job, "Download build artifacts")["with"]["path"] == "trw-memory/dist/"
     assert "Missing required secret(s):" in _find_step(publish_job, "Validate required publishing secrets")["run"]
     assert _find_step(publish_job, "Configure AWS credentials")["uses"] == "aws-actions/configure-aws-credentials@v4"
     assert "twine upload dist/*.whl dist/*.tar.gz" in _find_step(publish_job, "Publish to CodeArtifact")["run"]
-    assert "CHANGELOG.md" in _find_step(changelog_job, "Generate changelog")["run"]
+    changelog_run = _find_step(changelog_job, "Generate changelog")["run"]
+    commit_run = _find_step(changelog_job, "Commit changelog")["run"]
+    assert "CHANGELOG.md" in changelog_run
+    assert '"Features"' in changelog_run
+    assert '"Bug Fixes"' in changelog_run
+    assert '"Other"' in changelog_run
+    assert '"Uncategorized"' in changelog_run
+    assert "TODO" not in changelog_run
+    assert 'git add CHANGELOG.md' in commit_run
+    assert 'git push origin HEAD:main' in commit_run
+    assert 'github-actions[bot]' in commit_run
 
 
 def test_package_version_is_semver_like() -> None:
