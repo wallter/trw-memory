@@ -190,9 +190,8 @@ class WarmTierStore:
         except (OSError, ValueError):
             logger.debug("warm_tier_db_remove_failed", entry_id=entry_id, exc_info=True)
             vector_removed = False
-            memory_removed = False
 
-        sidecar_removed = self.purge_sidecar_entry(entry_id)
+        self.purge_sidecar_entry(entry_id)
         vector_still_present = False
         if backend_present:
             try:

@@ -127,7 +127,7 @@ def tier_candidates(
         return []
     manager = warmup_tier_manager(config, namespace, backend)
     query_tokens = [token for token in query.lower().split() if token]
-    
+
     def _restore_entry(entry_data: dict[str, object]) -> None:
         backend.store(MemoryEntry.model_validate(entry_data))
 
