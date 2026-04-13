@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -40,19 +41,25 @@ class AuditLog:
 
     def append(
         self,
-        op: str,
+        op: str | None = None,
         *,
+        action: str | None = None,
         entry_id: str = "",
+        target_id: str = "",
         actor: str = "",
         namespace: str = "default",
         data: dict[str, object] | None = None,
     ) -> AuditRecord:
         """Append one record to the audit log."""
+        effective_op = op or action
+        effective_entry_id = entry_id or target_id
+        if not effective_op:
+            raise ValueError("append requires op or action")
         with lock_for_rmw(self._path):
             prev_hash = self._read_last_hash_unlocked()
             record = AuditRecord(
-                op=op,
-                id=entry_id,
+                op=effective_op,
+                id=effective_entry_id,
                 actor=actor,
                 namespace=namespace,
                 data=data or {},
@@ -67,56 +74,63 @@ class AuditLog:
         """Verify the full audit log and return a structured result."""
         records = self.read_all()
         if not records:
-            return {"valid": True, "record_count": 0, "error": "", "first_bad_line": None}
+            return {"valid": True, "entries_checked": 0, "first_broken_at": None, "broken_hash": None}
 
         expected_prev = _GENESIS_HASH
         for line_no, record in enumerate(records, start=1):
             if record.prev_hash != expected_prev:
                 return {
                     "valid": False,
-                    "record_count": len(records),
-                    "error": f"line {line_no}: prev_hash mismatch",
-                    "first_bad_line": line_no,
+                    "entries_checked": len(records),
+                    "first_broken_at": line_no,
+                    "broken_hash": record.prev_hash,
                 }
             payload = record.model_dump(mode="json")
             expected_hash = self._compute_hash(record.prev_hash, payload)
             if record.hash != expected_hash:
                 return {
                     "valid": False,
-                    "record_count": len(records),
-                    "error": f"line {line_no}: hash mismatch",
-                    "first_bad_line": line_no,
+                    "entries_checked": len(records),
+                    "first_broken_at": line_no,
+                    "broken_hash": record.hash,
                 }
             expected_prev = record.hash
-        return {"valid": True, "record_count": len(records), "error": "", "first_bad_line": None}
+        return {"valid": True, "entries_checked": len(records), "first_broken_at": None, "broken_hash": None}
 
     def compact(self, retention_days: int) -> int:
         """Drop records older than *retention_days* and re-chain the retained suffix."""
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-        records = [record for record in self.read_all() if record.ts >= cutoff]
-        if not records:
-            self._path.unlink(missing_ok=True)
-            return 0
-
-        chained: list[dict[str, object]] = []
-        prev_hash = _GENESIS_HASH
-        for record in records:
-            payload = record.model_dump(mode="json")
-            payload["prev_hash"] = prev_hash
-            payload["hash"] = self._compute_hash(prev_hash, payload)
-            chained.append(payload)
-            prev_hash = str(payload["hash"])
-
         with lock_for_rmw(self._path):
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            with self._path.open("w", encoding="utf-8") as fh:
-                for payload in chained:
-                    fh.write(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=self._json_default) + "\n")
-                fh.flush()
-                if self._fsync:
-                    import os
+            records = [record for record in self.read_all() if record.ts >= cutoff]
+            if not records:
+                self._path.unlink(missing_ok=True)
+                return 0
 
-                    os.fsync(fh.fileno())
+            chained: list[dict[str, object]] = []
+            prev_hash = _GENESIS_HASH
+            for record in records:
+                payload = record.model_dump(mode="json")
+                payload["prev_hash"] = prev_hash
+                payload["hash"] = self._compute_hash(prev_hash, payload)
+                chained.append(payload)
+                prev_hash = str(payload["hash"])
+
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(dir=str(self._path.parent), suffix=".audit.tmp")
+            tmp_path = Path(tmp_name)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    for payload in chained:
+                        fh.write(
+                            json.dumps(payload, sort_keys=True, separators=(",", ":"), default=self._json_default) + "\n"
+                        )
+                    fh.flush()
+                    if self._fsync:
+                        os.fsync(fh.fileno())
+                tmp_path.replace(self._path)
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                raise
         return len(chained)
 
     def read_all(self) -> list[AuditRecord]:
@@ -174,6 +188,9 @@ class AuditLog:
             fh.write(line)
             fh.flush()
             if self._fsync:
-                import os
-
                 os.fsync(fh.fileno())
+
+
+def audit_verify(log_path: Path) -> dict[str, object]:
+    """Verify an audit log and return the PRD-aligned result shape."""
+    return AuditLog(log_path).verify_chain()

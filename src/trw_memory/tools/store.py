@@ -88,11 +88,12 @@ def memory_store_impl(
         )
         if raise_security_errors:
             raise
-        return {"error": str(exc), "status": "blocked", "namespace": namespace}
+        return {"error": str(exc), "status": "invalid", "namespace": namespace}
 
     entry_id = entry_id or ("M-" + uuid4().hex[:16])
     now = datetime.now(timezone.utc)
-    existing = backend.get(entry_id) if entry_id is not None else None
+    existing_raw = backend.get(entry_id) if entry_id is not None else None
+    existing = existing_raw if isinstance(existing_raw, MemoryEntry) else None
     entry_metadata = dict(existing.metadata) if existing is not None else {}
     entry_metadata.update(metadata or {})
     if existing is None:
@@ -196,7 +197,11 @@ def memory_store_impl(
                 "quarantined": False,
             },
         )
-    except (PIIBlockError, PoisoningError, RateLimitError, SchemaValidationError) as exc:
+    except SchemaValidationError as exc:
+        if raise_security_errors:
+            raise
+        return {"error": str(exc), "status": "invalid", "namespace": namespace}
+    except (PIIBlockError, PoisoningError, RateLimitError) as exc:
         if raise_security_errors:
             raise
         return {"error": str(exc), "status": "blocked", "namespace": namespace}

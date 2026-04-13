@@ -145,6 +145,12 @@ class TestAuditFlush:
                 flush_called = True
                 self._fh.flush()
 
+            def close(self) -> None:
+                self._fh.close()
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._fh, name)
+
             def __enter__(self) -> TrackingWriter:
                 return self
 
