@@ -89,17 +89,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_forget.add_argument("memory_id", help="ID of the entry to delete")
     p_forget.add_argument("--namespace", default="default", help="Namespace")
 
-    # --- restore (PRD-CORE-140) ---
+    # --- restore (PRD-CORE-140 + PRD-INFRA-065) ---
     p_restore = subparsers.add_parser(
         "restore",
-        help="Rebuild the SQLite DB from the cold YAML tier",
+        help="Rebuild the SQLite DB from the cold YAML tier or a snapshot",
     )
-    p_restore.add_argument(
+    restore_source = p_restore.add_mutually_exclusive_group(required=True)
+    restore_source.add_argument(
         "--from-cold",
         dest="from_cold",
         action="store_true",
-        required=True,
-        help="Rebuild from cold tier (currently the only supported source)",
+        help="Rebuild from the cold YAML tier (PRD-CORE-140)",
+    )
+    restore_source.add_argument(
+        "--from-snapshot",
+        dest="from_snapshot",
+        default=None,
+        metavar="NAME_OR_LATEST",
+        help=(
+            "Restore from a snapshot — pass 'latest' for the newest daily, "
+            "or a filename like 2026-04-13.db / 2026-W15.db (PRD-INFRA-065)"
+        ),
     )
     p_restore.add_argument("--namespace", default="default", help="Namespace")
     p_restore.add_argument(
@@ -107,5 +117,39 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional override for the SQLite DB path (default: configured path)",
     )
+
+    # --- snapshot (PRD-INFRA-065) ---
+    p_snapshot = subparsers.add_parser(
+        "snapshot",
+        help="Manage memory DB snapshots (VACUUM INTO rotation)",
+    )
+    snap_subs = p_snapshot.add_subparsers(dest="snapshot_action", required=True)
+
+    p_snap_create = snap_subs.add_parser("create", help="Create a new snapshot")
+    p_snap_create.add_argument(
+        "--tier",
+        choices=["daily", "weekly"],
+        default="daily",
+        help="Snapshot tier to write (default: daily)",
+    )
+    p_snap_create.add_argument("--namespace", default="default", help="Namespace")
+    p_snap_create.add_argument("--db", default=None, help="Optional DB path override")
+    p_snap_create.add_argument(
+        "--force",
+        action="store_true",
+        help="For weekly: take snapshot even on non-Sunday",
+    )
+
+    p_snap_list = snap_subs.add_parser("list", help="List available snapshots")
+    p_snap_list.add_argument("--namespace", default="default", help="Namespace")
+    p_snap_list.add_argument("--db", default=None, help="Optional DB path override")
+    p_snap_list.add_argument(
+        "--format", dest="fmt", choices=["table", "json"], default="table",
+        help="Output format",
+    )
+
+    p_snap_rotate = snap_subs.add_parser("rotate", help="Prune snapshots to budget")
+    p_snap_rotate.add_argument("--namespace", default="default", help="Namespace")
+    p_snap_rotate.add_argument("--db", default=None, help="Optional DB path override")
 
     return parser
