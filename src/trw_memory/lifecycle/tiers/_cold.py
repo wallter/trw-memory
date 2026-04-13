@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -24,6 +25,13 @@ logger = structlog.get_logger(__name__)
 _WARM_EMBEDDING_KEY = "_warm_embedding"
 
 
+@dataclass(frozen=True)
+class _ColdSearchCacheEntry:
+    mtime_ns: int
+    data: dict[str, object]
+    search_text: str
+
+
 class ColdTierStore:
     """Cold tier: YAML archive partitioned by {YYYY}/{MM}/.
 
@@ -35,6 +43,7 @@ class ColdTierStore:
     def __init__(self, base_dir: Path, warm_store: WarmTierStore) -> None:
         self._base_dir = base_dir
         self._warm_store = warm_store
+        self._search_cache: dict[str, _ColdSearchCacheEntry] = {}
 
     def _cold_dir(self) -> Path:
         """Base cold archive directory (base_dir/memory/cold/)."""
@@ -169,6 +178,7 @@ class ColdTierStore:
                     self._rollback_cold_archive_failure(entry_id, dest, entry_data, embedding)
                     raise StorageError(f"source cleanup failed for {entry_id}", path=str(dest))
             logger.debug("cold_archive", entry_id=entry_id, dest=str(dest))
+            self._search_cache.pop(str(dest), None)
         except (OSError, StorageError):
             logger.warning(
                 "cold_archive_failed",
@@ -228,6 +238,7 @@ class ColdTierStore:
                 self._warm_store.warm_add(entry_id, promoted_data, embedding)
                 warm_added = True
                 yaml_file.unlink(missing_ok=True)
+                self._search_cache.pop(str(yaml_file), None)
                 logger.debug("cold_promote", entry_id=entry_id, src=str(yaml_file))
                 return promoted_data
             except (OSError, StorageError):
@@ -285,17 +296,15 @@ class ColdTierStore:
 
         lower_tokens = {t.lower() for t in query_tokens}
         results: list[dict[str, object]] = []
+        live_paths: set[str] = set()
 
         for yaml_file in sorted(cold_base.rglob("*.yaml")):
-            try:
-                data = read_yaml(yaml_file)
-            except (OSError, StorageError):
+            live_paths.add(str(yaml_file))
+            cached = self._cached_search_entry(yaml_file)
+            if cached is None:
                 continue
-
-            text = str(data.get("content", data.get("summary", ""))).lower()
-            text += " " + str(data.get("detail", "")).lower()
-            tags = [str(t).lower() for t in cast("list[object]", data.get("tags") or [])]
-            text += " " + " ".join(tags)
+            data = cached.data
+            text = cached.search_text
 
             if any(tok in text for tok in lower_tokens):
                 if promote:
@@ -315,7 +324,37 @@ class ColdTierStore:
                 if top_k is not None and len(results) >= top_k:
                     break
 
+        stale_paths = set(self._search_cache) - live_paths
+        for stale_path in stale_paths:
+            self._search_cache.pop(stale_path, None)
+
         return results
+
+    def _cached_search_entry(self, yaml_file: Path) -> _ColdSearchCacheEntry | None:
+        cache_key = str(yaml_file)
+        try:
+            mtime_ns = yaml_file.stat().st_mtime_ns
+        except OSError:
+            self._search_cache.pop(cache_key, None)
+            return None
+
+        cached = self._search_cache.get(cache_key)
+        if cached is not None and cached.mtime_ns == mtime_ns:
+            return cached
+
+        try:
+            data = read_yaml(yaml_file)
+        except (OSError, StorageError):
+            self._search_cache.pop(cache_key, None)
+            return None
+
+        text = str(data.get("content", data.get("summary", ""))).lower()
+        text += " " + str(data.get("detail", "")).lower()
+        tags = [str(t).lower() for t in cast("list[object]", data.get("tags") or [])]
+        text += " " + " ".join(tags)
+        entry = _ColdSearchCacheEntry(mtime_ns=mtime_ns, data=data, search_text=text)
+        self._search_cache[cache_key] = entry
+        return entry
 
     def _archive_payload(
         self,
