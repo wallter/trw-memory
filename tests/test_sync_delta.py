@@ -81,6 +81,13 @@ def test_compute_sync_hash_ignores_non_content_fields() -> None:
     assert h1 == h2
 
 
+def test_compute_sync_hash_normalizes_float_precision() -> None:
+    """FR05: Float fields are canonicalized to six decimal places."""
+    entry1 = MemoryEntry(id="M-f1", content="same", importance=0.1234564)
+    entry2 = MemoryEntry(id="M-f2", content="same", importance=0.12345649)
+    assert DeltaTracker.compute_sync_hash(entry1) == DeltaTracker.compute_sync_hash(entry2)
+
+
 # ---------------------------------------------------------------------------
 # FR06: Auto dirty-marking on store
 # ---------------------------------------------------------------------------
@@ -162,6 +169,46 @@ def test_get_dirty_entries_respects_since_seq(tmp_path: Path) -> None:
     ids = {e.id for e in dirty_one}
     assert "M-seq2" in ids
     assert "M-seq1" not in ids
+    backend.close()
+
+
+def test_sqlite_update_recomputes_sync_hash(tmp_path: Path) -> None:
+    """FR06: SQLite updates recompute sync_hash and clear last_synced_at."""
+    backend = SQLiteBackend(tmp_path / "test.db")
+    entry = MemoryEntry(id="M-update", content="before")
+    backend.store(entry)
+    DeltaTracker.mark_synced(["M-update"], backend)
+    before = backend.get("M-update")
+    assert before is not None
+
+    backend.update("M-update", content="after")
+
+    after = backend.get("M-update")
+    assert after is not None
+    assert after.sync_seq == before.sync_seq + 1
+    assert after.sync_hash != before.sync_hash
+    assert after.last_synced_at is None
+    backend.close()
+
+
+def test_yaml_update_recomputes_sync_hash(tmp_path: Path) -> None:
+    """FR06: YAML updates also recompute sync_hash and clear last_synced_at."""
+    from trw_memory.storage.yaml_backend import YAMLBackend
+
+    backend = YAMLBackend(tmp_path / "yaml_entries")
+    entry = MemoryEntry(id="M-yaml-update", content="before")
+    backend.store(entry)
+    DeltaTracker.mark_synced(["M-yaml-update"], backend)
+    before = backend.get("M-yaml-update")
+    assert before is not None
+
+    backend.update("M-yaml-update", content="after")
+
+    after = backend.get("M-yaml-update")
+    assert after is not None
+    assert after.sync_seq == before.sync_seq + 1
+    assert after.sync_hash != before.sync_hash
+    assert after.last_synced_at is None
     backend.close()
 
 

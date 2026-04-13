@@ -158,16 +158,16 @@ def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
         assertions=_parse_assertions(data.get("assertions", [])),
         anchors=anchors,
         anchor_validity=anchor_validity,
-        type=_str("type", "pattern"),  # type: ignore[arg-type]
+        type=_str("type", "pattern"),
         nudge_line=_str("nudge_line", ""),
         expires=_str("expires", ""),
-        confidence=_str("confidence", "unverified"),  # type: ignore[arg-type]
+        confidence=_str("confidence", "unverified"),
         task_type=_str("task_type", ""),
         domain=_str_list("domain"),
         phase_origin=_str("phase_origin", ""),
         phase_affinity=_str_list("phase_affinity"),
         team_origin=_str("team_origin", ""),
-        protection_tier=_str("protection_tier", "normal"),  # type: ignore[arg-type]
+        protection_tier=_str("protection_tier", "normal"),
         sync_hash=_str("sync_hash", ""),
         sync_seq=_int("sync_seq", 0),
         last_synced_at=parse_dt(data.get("last_synced_at")) if data.get("last_synced_at") else None,
@@ -310,7 +310,16 @@ class YAMLBackend(StorageBackend):
                 ) from None
             if "updated_at" not in field_dict:
                 field_dict["updated_at"] = datetime.now(timezone.utc)
+            entry = _dict_to_entry(data)
             for key, val in field_dict.items():
+                setattr(entry, key, val)
+
+            if not {"sync_seq", "sync_hash", "last_synced_at"} & field_dict.keys():
+                entry.sync_seq = (entry.sync_seq or 0) + 1
+                entry.sync_hash = DeltaTracker.compute_sync_hash(entry)
+                entry.last_synced_at = None
+
+            for key, val in _entry_to_dict(entry).items():
                 data[key] = serialize_update_value(key, val)
 
             write_yaml(path, data)
