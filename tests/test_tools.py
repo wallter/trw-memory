@@ -346,6 +346,22 @@ class TestMemoryRecallImpl:
             assert result["memories"] == []
             assert result["namespace_expired"] is True
 
+    def test_expired_team_namespace_returns_empty_with_flag_for_yaml(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path))
+
+        with create_backend_from_config(cfg, "team:sprint-24") as backend:
+            memory_store_impl("team discovery", "team:sprint-24", backend=backend, config=cfg)
+            manager = NamespaceManager(backend)
+            manager.mark_team_namespace_completed(
+                "team:sprint-24",
+                completed_at=datetime.now(timezone.utc) - timedelta(days=2),
+            )
+
+            result = memory_recall_impl("", "team:sprint-24", backend=backend, config=cfg)
+
+            assert result["memories"] == []
+            assert result["namespace_expired"] is True
+
     def test_graph_depth_zero_omits_related_field(self) -> None:
         backend = _mock_backend([_make_entry()])
 

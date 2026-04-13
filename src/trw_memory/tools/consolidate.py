@@ -26,7 +26,6 @@ from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.security.rbac import Permission, require_namespace_permission
 from trw_memory.security.runtime import append_audit_event
 from trw_memory.storage.interface import StorageBackend
-from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools._types import McpServer
 
 logger = structlog.get_logger(__name__)
@@ -92,8 +91,7 @@ def _promote_team_memories(
         discarded=discarded_count,
     )
 
-    if isinstance(source_backend, SQLiteBackend):
-        NamespaceManager(source_backend).mark_team_namespace_completed(namespace, completed_at=now)
+    NamespaceManager(source_backend).mark_team_namespace_completed(namespace, completed_at=now)
 
     return {
         "promoted_count": promoted_count,
@@ -120,10 +118,10 @@ def _promote_all_team_namespaces(
                     continue
                 seen_namespaces.add(namespace)
 
-                if isinstance(store_backend, SQLiteBackend):
-                    if NamespaceManager(store_backend).team_namespace_expired(namespace):
-                        logger.debug("team_namespace_wildcard_skip_expired", namespace=namespace)
-                        continue
+                manager = NamespaceManager(store_backend)
+                if manager.team_namespace_completed(namespace):
+                    logger.debug("team_namespace_wildcard_skip_completed", namespace=namespace)
+                    continue
 
                 project_backend = namespace_backend_factory("project:default") if namespace_backend_factory else store_backend
                 try:
@@ -207,6 +205,16 @@ def memory_consolidate_impl(
 
     # Team namespace promotion: copy high-impact entries to project namespace
     if namespace.startswith("team:"):
+        manager = NamespaceManager(backend)
+        if manager.team_namespace_completed(namespace):
+            return {
+                "promoted_count": 0,
+                "discarded_count": 0,
+                "namespace_id": namespace,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "status": "skipped",
+                "skipped_reason": "already_completed",
+            }
         project_backend = namespace_backend_factory("project:default") if namespace_backend_factory else backend
         try:
             return _promote_team_memories(

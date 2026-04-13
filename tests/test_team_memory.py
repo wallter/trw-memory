@@ -7,7 +7,7 @@ from team namespaces to the project namespace.
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import cast
 
@@ -17,7 +17,9 @@ from trw_memory.exceptions import StorageError
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.storage.persistence import read_yaml
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools.consolidate import _promote_team_memories, memory_consolidate_impl
 from trw_memory.tools.recall import memory_recall_impl
@@ -287,7 +289,36 @@ class TestConsolidateImplTeamDispatch:
             ).fetchone()
             assert row is not None
             assert row[0] is not None
-            assert row[1] == "active"
+            assert row[1] == "completed"
+
+    def test_team_promotion_marks_namespace_completion_in_yaml_metadata(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path))
+
+        team_backend = create_backend_from_config(cfg, "team:sprint-37")
+        try:
+            memory_store_impl(
+                "team discovery",
+                "team:sprint-37",
+                backend=team_backend,
+                importance=0.8,
+                config=cfg,
+            )
+
+            result = memory_consolidate_impl(
+                "team:sprint-37",
+                backend=team_backend,
+                config=cfg,
+                namespace_backend_factory=lambda ns: create_backend_from_config(cfg, ns),
+            )
+
+            assert result["promoted_count"] == 1
+        finally:
+            team_backend.close()
+
+        metadata = cast(dict[str, object], read_yaml(tmp_path / "team_sprint-37" / "namespace_lifecycle.yaml"))
+        assert metadata["team_id"] == "sprint-37"
+        assert metadata["expires_at"] is not None
+        assert metadata["status"] == "completed"
 
     def test_team_wildcard_promotes_all_discovered_team_namespaces(self, tmp_path: Path) -> None:
         cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path))
@@ -330,6 +361,85 @@ class TestConsolidateImplTeamDispatch:
             assert project_backend.get("promoted-e3") is None
         finally:
             project_backend.close()
+
+    def test_team_wildcard_skips_completed_namespaces(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path))
+
+        completed_backend = create_backend_from_config(cfg, "team:sprint-37-done")
+        try:
+            memory_store_impl(
+                "completed discovery",
+                "team:sprint-37-done",
+                backend=completed_backend,
+                importance=0.8,
+                config=cfg,
+            )
+            NamespaceManager(completed_backend).mark_team_namespace_completed(
+                "team:sprint-37-done",
+                completed_at=datetime.now(timezone.utc) - timedelta(hours=1),
+            )
+        finally:
+            completed_backend.close()
+
+        active_backend = create_backend_from_config(cfg, "team:sprint-37-active")
+        try:
+            memory_store_impl(
+                "active discovery",
+                "team:sprint-37-active",
+                backend=active_backend,
+                importance=0.8,
+                config=cfg,
+            )
+        finally:
+            active_backend.close()
+
+        default_backend = create_backend_from_config(cfg, "default")
+        try:
+            result = memory_consolidate_impl(
+                "team:*",
+                backend=default_backend,
+                config=cfg,
+                namespace_backend_factory=lambda ns: create_backend_from_config(cfg, ns),
+            )
+        finally:
+            default_backend.close()
+
+        assert result["promoted_count"] == 1
+        namespaces = cast(list[dict[str, object]], result["namespaces"])
+        assert [str(item["namespace_id"]) for item in namespaces] == ["team:sprint-37-active"]
+
+    def test_team_namespace_repeat_consolidation_skips_after_completion(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path))
+
+        team_backend = create_backend_from_config(cfg, "team:sprint-37")
+        try:
+            memory_store_impl(
+                "team discovery",
+                "team:sprint-37",
+                backend=team_backend,
+                importance=0.8,
+                config=cfg,
+            )
+
+            first = memory_consolidate_impl(
+                "team:sprint-37",
+                backend=team_backend,
+                config=cfg,
+                namespace_backend_factory=lambda ns: create_backend_from_config(cfg, ns),
+            )
+            second = memory_consolidate_impl(
+                "team:sprint-37",
+                backend=team_backend,
+                config=cfg,
+                namespace_backend_factory=lambda ns: create_backend_from_config(cfg, ns),
+            )
+        finally:
+            team_backend.close()
+
+        assert first["promoted_count"] == 1
+        assert second["status"] == "skipped"
+        assert second["skipped_reason"] == "already_completed"
+        assert second["promoted_count"] == 0
 
     def test_team_wildcard_skips_when_no_team_namespaces_exist(self, tmp_path: Path) -> None:
         cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path))
