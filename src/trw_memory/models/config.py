@@ -84,6 +84,11 @@ class _TRWConfigYamlSource(InitSettingsSource):
         _map_first("namespace_roles", "namespace_roles", "memory_namespace_roles")
         _map_first("key_rotation_backup", "key_rotation_backup", "memory_key_rotation_backup")
         _map_first("memory_recovery_policy", "memory_recovery_policy", "recovery_policy")
+        _map_first(
+            "memory_corrupt_backup_keep",
+            "memory_corrupt_backup_keep",
+            "corrupt_backup_keep",
+        )
 
         super().__init__(settings_cls, mapped)
 
@@ -224,6 +229,18 @@ class MemoryConfig(BaseSettings):
             "Behavior when DB corruption salvage yields 0 rows on a non-empty backup: "
             "'strict' raises CorruptDatabaseUnsalvageableError (default); "
             "'empty_ok' preserves legacy silent-empty fallback."
+        ),
+    )
+
+    # Corruption backup rotation (PRD-CORE-139)
+    memory_corrupt_backup_keep: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        description=(
+            "Number of corruption backup files to retain before oldest-by-filename-timestamp "
+            "eviction. Legacy memory.db.corrupt.bak and memory.db.corrupt.bak.1 files count "
+            "against this budget but are never selected for deletion."
         ),
     )
 
