@@ -1559,14 +1559,18 @@ class TestContextManager:
                 "trw_memory.client.publish_memory_result",
                 return_value={"success": False, "remote_id": None, "retryable": True},
             ),
-            patch("trw_memory.client._anonymize_entry", return_value={"summary": "queued"}),
+            patch(
+                "trw_memory.client._anonymize_entry",
+                return_value={"summary": "queued", "source_learning_id": "queued-entry"},
+            ),
         ):
-            await seed_client.store("queue this entry", importance=0.9)
+            await seed_client.store("queue this entry", importance=0.9, entry_id="queued-entry")
             await seed_client.close()
 
         with patch("trw_memory.sync.remote.httpx.Client") as mock_client_cls:
             mock_client = MagicMock()
             mock_response = MagicMock(status_code=200)
+            mock_response.json.return_value = {"id": "42"}
             mock_client.post.return_value = mock_response
             mock_client.__enter__.return_value = mock_client
             mock_client.__exit__.return_value = False
@@ -1579,7 +1583,52 @@ class TestContextManager:
         assert reopened._retry_queue.depth() == 0
         drained_entry = reopened._get_backend().list_entries(limit=10)[0]
         assert drained_entry.published_to_platform is True
+        assert drained_entry.remote_id == "42"
         await reopened.close()
+
+    async def test_retry_queue_recovery_preserves_remote_id_for_later_retire(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "ctx"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
+        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
+        monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
+
+        seed_client = MemoryClient(namespace="default", mode="local")
+        with (
+            patch(
+                "trw_memory.client.publish_memory_result",
+                return_value={"success": False, "remote_id": None, "retryable": True},
+            ),
+            patch(
+                "trw_memory.client._anonymize_entry",
+                return_value={"summary": "queued", "source_learning_id": "queued-entry"},
+            ),
+        ):
+            await seed_client.store("queue this entry", importance=0.9, entry_id="queued-entry")
+            await seed_client.close()
+
+        with patch("trw_memory.sync.remote.httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_response = MagicMock(status_code=200)
+            mock_response.json.return_value = {"id": "42"}
+            mock_client.post.return_value = mock_response
+            mock_client.__enter__.return_value = mock_client
+            mock_client.__exit__.return_value = False
+            mock_client_cls.return_value = mock_client
+
+            async with MemoryClient(namespace="default", mode="local"):
+                pass
+
+        reopened = MemoryClient(namespace="default", mode="local")
+        with patch("trw_memory.client.retire_remote_memory", return_value=True) as retire_mock:
+            await reopened.forget("queued-entry")
+            await reopened.close()
+
+        retire_mock.assert_called_once_with("42", reopened._config)
 
 
 # ---------------------------------------------------------------------------

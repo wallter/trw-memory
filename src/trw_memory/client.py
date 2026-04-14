@@ -1742,11 +1742,20 @@ class MemoryClient:
                 backend = self._get_backend()
                 synced_at = datetime.now(timezone.utc)
                 for entry_id in drained_ids:
-                    backend.update(
-                        entry_id,
-                        published_to_platform=True,
-                        last_synced_at=synced_at,
-                    )
+                    remote_id = result["remote_ids"].get(entry_id)
+                    if remote_id is not None:
+                        backend.update(
+                            entry_id,
+                            published_to_platform=True,
+                            remote_id=remote_id,
+                            last_synced_at=synced_at,
+                        )
+                    else:
+                        backend.update(
+                            entry_id,
+                            published_to_platform=True,
+                            last_synced_at=synced_at,
+                        )
         logger.debug(
             "memory_sync_queue_drained",
             op="session_start",

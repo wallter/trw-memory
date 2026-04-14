@@ -1000,13 +1000,13 @@ class TestRetryQueue:
     def test_drain_retry_queue_republishes_payloads(self, tmp_path: Path) -> None:
         """The remote helper drains queued payloads through the publish transport."""
         queue = RetryQueue(tmp_path / "queue.jsonl")
-        queue.enqueue("M-001", {"summary": "test"})
+        queue.enqueue("M-001", {"summary": "test", "source_learning_id": "M-001"})
 
         with patch("trw_memory.sync.remote.httpx.Client") as mock_client_cls:
-            _mock_httpx_client(mock_client_cls, status_code=200)
+            _mock_httpx_client(mock_client_cls, status_code=200, json_data={"id": "42"})
             result = drain_retry_queue(queue, _make_config())
 
-        assert result == {"drained": 1, "failed": 0, "skipped": 0}
+        assert result == {"drained": 1, "failed": 0, "skipped": 0, "remote_ids": {"M-001": "42"}}
         assert queue.depth() == 0
 
     def test_drain_retry_queue_skips_when_sync_disabled(self, tmp_path: Path) -> None:
@@ -1016,7 +1016,7 @@ class TestRetryQueue:
 
         result = drain_retry_queue(queue, _make_config(sync_enabled=False))
 
-        assert result == {"drained": 0, "failed": 0, "skipped": 1}
+        assert result == {"drained": 0, "failed": 0, "skipped": 1, "remote_ids": {}}
         assert queue.depth() == 1
 
     def test_drain_retry_queue_skips_invalid_platform_url(self, tmp_path: Path) -> None:
@@ -1026,7 +1026,7 @@ class TestRetryQueue:
 
         result = drain_retry_queue(queue, _make_config(platform_url="file:///etc/passwd"))
 
-        assert result == {"drained": 0, "failed": 0, "skipped": 1}
+        assert result == {"drained": 0, "failed": 0, "skipped": 1, "remote_ids": {}}
         assert queue.depth() == 1
 
     def test_clear_retry_queue_helper_empties_file(self, tmp_path: Path) -> None:
@@ -1076,11 +1076,14 @@ class TestSSESubscriber:
         sub.start()
         assert sub._thread is None
 
-    def test_process_line_extracts_event_id(self) -> None:
-        """id: lines update _last_event_id."""
+    def test_process_line_tracks_pending_event_id_until_learning_data(self) -> None:
+        """id: lines become the reconnect cursor only after a learning event payload."""
         cfg = _make_config()
         sub = SSESubscriber(cfg, on_event=lambda data: None)
         sub._process_line("id: evt-42")
+        assert sub._last_event_id is None
+        sub._process_line("event: learning_published")
+        sub._process_line(f"data: {json.dumps({'type': 'learning_published', 'summary': 'new'})}")
         assert sub._last_event_id == "evt-42"
 
     def test_process_line_calls_on_event_for_learning_published(self) -> None:
@@ -1121,6 +1124,19 @@ class TestSSESubscriber:
         data = json.dumps({"type": "heartbeat"})
         sub._process_line(f"data: {data}")
         assert len(received) == 0
+
+    def test_process_line_does_not_advance_last_event_id_for_heartbeat(self) -> None:
+        """Heartbeat IDs must not become the replay cursor for reconnect."""
+        cfg = _make_config()
+        sub = SSESubscriber(cfg, on_event=lambda data: None)
+        sub._process_line("id: evt-learning")
+        sub._process_line("event: learning_published")
+        sub._process_line(f"data: {json.dumps({'type': 'learning_published', 'summary': 'new'})}")
+        sub._process_line("id: evt-heartbeat")
+        sub._process_line("event: heartbeat")
+        sub._process_line(f"data: {json.dumps({'type': 'heartbeat'})}")
+
+        assert sub._last_event_id == "evt-learning"
 
     def test_process_line_ignores_empty_data(self) -> None:
         """Empty data: lines are ignored."""
@@ -1261,6 +1277,24 @@ class TestSSESubscriberDaemonThread:
         sub._thread = mock_thread
         sub.stop()
         assert sub._stop_event.is_set()
+        mock_thread.join.assert_called_once_with(timeout=2.0)
+
+    def test_subscriber_stop_closes_active_stream(self) -> None:
+        """stop() closes the live SSE response/client before joining."""
+        cfg = _make_config(sync_enabled=True)
+        sub = SSESubscriber(cfg, on_event=lambda _data: None)
+        mock_thread = MagicMock()
+        mock_thread.is_alive.return_value = True
+        sub._thread = mock_thread
+        mock_response = MagicMock()
+        mock_client = MagicMock()
+        sub._active_response = mock_response
+        sub._active_client = mock_client
+
+        sub.stop()
+
+        mock_response.close.assert_called_once()
+        mock_client.close.assert_called_once()
         mock_thread.join.assert_called_once_with(timeout=2.0)
 
     @patch("trw_memory.sync.subscriber.httpx.Client")
