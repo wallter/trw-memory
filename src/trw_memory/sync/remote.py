@@ -57,6 +57,15 @@ class PublishResult(TypedDict):
     retryable: bool
 
 
+class RetryDrainResult(TypedDict):
+    """Typed retry-drain result including recovered remote identifiers."""
+
+    drained: int
+    failed: int
+    skipped: int
+    remote_ids: dict[str, str]
+
+
 def _raise_local_only_violation() -> None:
     """Raise the shared local-only guard error for network entrypoints."""
     raise LocalOnlyViolationError(LOCAL_ONLY_ERROR_MESSAGE)
@@ -210,17 +219,34 @@ def _publish_payload_result(
         return {"success": False, "remote_id": None, "retryable": True}
 
 
-def drain_retry_queue(queue: RetryQueue, cfg: MemoryConfig) -> dict[str, int]:
+def drain_retry_queue(queue: RetryQueue, cfg: MemoryConfig) -> RetryDrainResult:
     """Drain queued publish payloads when sync is enabled and reachable."""
     if cfg.local_only:
         logger.warning("memory_retry_drain_blocked_local_only")
         _raise_local_only_violation()
     if not cfg.sync_enabled or not cfg.platform_url:
-        return {"drained": 0, "failed": 0, "skipped": queue.depth()}
+        return {"drained": 0, "failed": 0, "skipped": queue.depth(), "remote_ids": {}}
     if not is_valid_platform_url(cfg.platform_url):
         logger.warning("memory_retry_drain_invalid_platform_url")
-        return {"drained": 0, "failed": 0, "skipped": queue.depth()}
-    return queue.drain(lambda payload: _publish_payload(payload, cfg))
+        return {"drained": 0, "failed": 0, "skipped": queue.depth(), "remote_ids": {}}
+
+    remote_ids: dict[str, str] = {}
+
+    def publish_payload(payload: dict[str, object]) -> bool:
+        source_learning_id = payload.get("source_learning_id")
+        entry_id = str(source_learning_id) if isinstance(source_learning_id, str) else ""
+        result = _publish_payload_result(payload, cfg, entry_id=entry_id)
+        if result["success"] and entry_id and result["remote_id"] is not None:
+            remote_ids[entry_id] = result["remote_id"]
+        return result["success"]
+
+    drain_result = queue.drain(publish_payload)
+    return {
+        "drained": drain_result["drained"],
+        "failed": drain_result["failed"],
+        "skipped": drain_result["skipped"],
+        "remote_ids": remote_ids,
+    }
 
 
 def clear_retry_queue(queue: RetryQueue) -> None:

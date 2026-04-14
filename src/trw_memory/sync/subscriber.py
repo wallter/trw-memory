@@ -38,8 +38,13 @@ class SSESubscriber:
         self._cfg = cfg
         self._on_event = on_event
         self._thread: threading.Thread | None = None
+        self._connection_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._last_event_id: str | None = None
+        self._pending_event_id: str | None = None
+        self._pending_event_type: str | None = None
+        self._active_client: httpx.Client | None = None
+        self._active_response: httpx.Response | None = None
 
     def start(self) -> None:
         """Start the SSE subscription in a daemon thread."""
@@ -64,6 +69,15 @@ class SSESubscriber:
     def stop(self) -> None:
         """Signal the subscriber to stop."""
         self._stop_event.set()
+        with self._connection_lock:
+            active_response = self._active_response
+            active_client = self._active_client
+            self._active_response = None
+            self._active_client = None
+        if active_response is not None:
+            active_response.close()
+        if active_client is not None:
+            active_client.close()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
         logger.debug("sse_subscriber_stopped")
@@ -81,10 +95,20 @@ class SSESubscriber:
                     headers["Last-Event-ID"] = self._last_event_id
 
                 with httpx.Client(timeout=None) as client, client.stream("GET", url, headers=headers) as response:  # noqa: S113 — timeout=None is intentional: SSE long-poll connection must stay open indefinitely until a message arrives
-                    for line in response.iter_lines():
-                        if self._stop_event.is_set():
-                            return
-                        self._process_line(line)
+                    with self._connection_lock:
+                        self._active_client = client
+                        self._active_response = response
+                    try:
+                        for line in response.iter_lines():
+                            if self._stop_event.is_set():
+                                return
+                            self._process_line(line)
+                    finally:
+                        with self._connection_lock:
+                            if self._active_response is response:
+                                self._active_response = None
+                            if self._active_client is client:
+                                self._active_client = None
             except (httpx.HTTPError, OSError):
                 logger.debug("sse_connection_error", exc_info=True)
 
@@ -94,7 +118,9 @@ class SSESubscriber:
     def _process_line(self, line: str) -> None:
         """Process a single SSE line."""
         if line.startswith("id:"):
-            self._last_event_id = line[3:].strip()
+            self._pending_event_id = line[3:].strip()
+        elif line.startswith("event:"):
+            self._pending_event_type = line[6:].strip() or None
         elif line.startswith("data:"):
             data_str = line[5:].strip()
             if not data_str:
@@ -104,8 +130,10 @@ class SSESubscriber:
                 if not isinstance(raw, dict):
                     return
                 data: dict[str, object] = raw
-                event_type = str(data.get("type", ""))
+                event_type = self._pending_event_type or str(data.get("type", ""))
                 if event_type in {"learning_published", "learning_updated", "learning_retired"}:
+                    if self._pending_event_id:
+                        self._last_event_id = self._pending_event_id
                     self._on_event(data)
                     logger.debug(
                         "sse_event_received",
@@ -113,3 +141,6 @@ class SSESubscriber:
                     )
             except json.JSONDecodeError:
                 logger.debug("sse_malformed_json", data=data_str[:200])
+            finally:
+                self._pending_event_id = None
+                self._pending_event_type = None
