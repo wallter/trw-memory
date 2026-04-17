@@ -690,3 +690,68 @@ class TestCountWithNamespaceFilter:
         assert backend.count(namespace="specific") == 4
         assert backend.count(namespace="other") == 2
         assert backend.count() == 6
+
+
+class TestSqliteVecExtensionLoadFailure:
+    """Regression: macOS system Python / python.org builds compiled without
+    SQLITE_ENABLE_LOAD_EXTENSION raise AttributeError on enable_load_extension().
+
+    Previously the except clause caught (sqlite3.Error, OSError) only, so
+    the AttributeError propagated and killed trw_learn/deliver on fresh Mac installs.
+    """
+
+    @staticmethod
+    def _install_bad_connect(
+        monkeypatch: pytest.MonkeyPatch, exc: Exception
+    ) -> None:
+        """Patch sqlite3.connect to return a proxy whose enable_load_extension raises."""
+        import sqlite3
+
+        original_connect = sqlite3.connect
+
+        class _ConnProxy:
+            def __init__(self, conn: sqlite3.Connection, exc: Exception) -> None:
+                self._conn = conn
+                self._exc = exc
+
+            def enable_load_extension(self, _enabled: bool) -> None:
+                raise self._exc
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._conn, name)
+
+        def connect_proxy(*args: object, **kwargs: object) -> sqlite3.Connection:
+            return _ConnProxy(original_connect(*args, **kwargs), exc)  # type: ignore[arg-type,return-value]
+
+        monkeypatch.setattr(sqlite3, "connect", connect_proxy)
+
+    def test_backend_init_survives_attribute_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Python without load_extension must not crash backend init."""
+        self._install_bad_connect(
+            monkeypatch, AttributeError("enable_load_extension not available")
+        )
+
+        backend = SQLiteBackend(tmp_path / "noext.db")
+
+        assert backend._vec_available is False
+        entry = make_entry("no-ext-1", content="should persist without vec")
+        backend.store(entry)
+        got = backend.get("no-ext-1")
+        assert got is not None
+        assert got.content == "should persist without vec"
+
+    def test_backend_init_survives_operational_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Some macOS builds raise OperationalError instead of AttributeError."""
+        import sqlite3 as _sqlite3
+
+        self._install_bad_connect(monkeypatch, _sqlite3.OperationalError("not authorized"))
+
+        backend = SQLiteBackend(tmp_path / "opfail.db")
+
+        assert backend._vec_available is False
+        backend.store(make_entry("op-1", content="fallback works"))
+        assert backend.get("op-1") is not None

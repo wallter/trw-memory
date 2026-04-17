@@ -4,6 +4,14 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+## [0.6.9] — 2026-04-17
+
+### Fixed
+
+- **Fresh macOS installs no longer lose learnings when Python was built without SQLite extension support** — on macOS system Python and some python.org builds, `sqlite3` is compiled without `SQLITE_ENABLE_LOAD_EXTENSION`, so `conn.enable_load_extension(True)` raises `AttributeError` (method absent) or `OperationalError` (not authorized). The previous `except (sqlite3.Error, OSError)` clause in `SQLiteBackend.__init__` did not catch `AttributeError`, so the error propagated up through the MCP server and surfaced as "sqlite extension error in the MCP server" at every `trw_learn` call, blocking all learning persistence. `AttributeError` is now caught alongside `sqlite3.Error` and `OSError`; the backend degrades gracefully to BM25-only retrieval and emits a `sqlite_vec_load_failed` warning with the exception type + detail + remediation hint. Added two regression tests (`TestSqliteVecExtensionLoadFailure`) that install a sqlite3 connection proxy raising `AttributeError` and `OperationalError` respectively, and assert backend init succeeds with `_vec_available=False` while metadata operations still round-trip.
+
+## [Unreleased — prior to 0.6.9]
+
 ### Added
 
 - **2026-04-13 — Recovery is safer after serious corruption incidents** — strict-salvage refusal, cold-tier rebuilds, and restore-from-cold flows make it less likely that a bad SQLite state silently turns into partial data loss (PRD-CORE-138, PRD-CORE-140).
