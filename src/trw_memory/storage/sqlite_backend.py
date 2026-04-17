@@ -191,15 +191,23 @@ class SQLiteBackend(StorageBackend):
         vec_module = sqlite_vec
         if vec_module is not None:
             try:
+                # AttributeError: Python built without SQLITE_ENABLE_LOAD_EXTENSION
+                # (common on macOS system Python and some python.org builds).
                 self._conn.enable_load_extension(True)
                 vec_module.load(self._conn)
                 self._conn.enable_load_extension(False)
                 ensure_vec_table(self._conn, self._dim)
                 self._vec_available = True
                 logger.debug("sqlite_vec_loaded", db=str(db_path))
-            except (sqlite3.Error, OSError):
+            except (sqlite3.Error, OSError, AttributeError) as exc:
                 self._vec_available = False
-                logger.debug("sqlite_vec_load_failed", db=str(db_path), exc_info=True)
+                logger.warning(
+                    "sqlite_vec_load_failed",
+                    db=str(db_path),
+                    reason=type(exc).__name__,
+                    detail=str(exc),
+                    hint="Python lacks SQLite load_extension support; vector search disabled, BM25 still works",
+                )
         else:
             logger.debug("sqlite_vec_unavailable", reason="not_installed")
 
