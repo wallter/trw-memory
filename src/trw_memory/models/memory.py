@@ -322,7 +322,9 @@ class MemoryEntry(BaseModel):
             try:
                 return ProtectionTier(v)
             except ValueError as err:
-                raise ValueError(f"protection_tier must be one of {', '.join([p.value for p in ProtectionTier])}") from err
+                raise ValueError(
+                    f"protection_tier must be one of {', '.join([p.value for p in ProtectionTier])}"
+                ) from err
         if isinstance(v, ProtectionTier):
             return v
         raise ValueError(f"protection_tier must be a string or ProtectionTier enum, got {type(v).__name__}")

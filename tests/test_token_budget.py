@@ -18,7 +18,6 @@ from trw_memory.retrieval.token_budget import (
     estimate_tokens,
 )
 
-
 # ---------------------------------------------------------------------------
 # estimate_tokens tests (FR01)
 # ---------------------------------------------------------------------------
@@ -127,8 +126,8 @@ def _make_result(content: str, detail: str = "", tags: list[str] | None = None) 
 class TestApplyTokenBudget:
     def test_apply_token_budget_fits_all(self) -> None:
         results = [
-            _make_result("hello"),        # 1 + 20 = 21
-            _make_result("world"),        # 1 + 20 = 21
+            _make_result("hello"),  # 1 + 20 = 21
+            _make_result("world"),  # 1 + 20 = 21
         ]
         filtered, used, truncated = apply_token_budget(results, token_budget=1000)
         assert len(filtered) == 2
@@ -137,8 +136,8 @@ class TestApplyTokenBudget:
 
     def test_apply_token_budget_truncates(self) -> None:
         results = [
-            _make_result("hello"),        # 21
-            _make_result("world"),        # 21
+            _make_result("hello"),  # 21
+            _make_result("world"),  # 21
             _make_result("third entry"),  # 23 (2 words -> 3 tokens + 20)
         ]
         # Budget of 45 fits first two (42) but not third (42 + 23 = 65)
@@ -160,7 +159,7 @@ class TestApplyTokenBudget:
     def test_apply_token_budget_minimum_one_with_more(self) -> None:
         results = [
             _make_result("the quick brown fox jumps"),  # 27 tokens
-            _make_result("second entry"),               # 23 tokens
+            _make_result("second entry"),  # 23 tokens
         ]
         # Budget smaller than first entry: return first only, mark truncated
         filtered, used, truncated = apply_token_budget(results, token_budget=5)
@@ -285,10 +284,7 @@ class TestTokenEstimationAccuracy:
                 errors.append(error)
 
         mape = sum(errors) / len(errors)
-        assert mape < 0.15, (
-            f"MAPE {mape:.2%} exceeds 15% threshold. "
-            f"Sample errors: {[f'{e:.2%}' for e in errors]}"
-        )
+        assert mape < 0.15, f"MAPE {mape:.2%} exceeds 15% threshold. Sample errors: {[f'{e:.2%}' for e in errors]}"
 
     def test_estimate_tokens_never_zero_for_nonempty(self) -> None:
         """Every non-empty sample must produce estimate >= 1."""
@@ -316,9 +312,11 @@ class TestTokenBudgetPerformance:
         import time
 
         entries: list[dict[str, object]] = [
-            {"content": f"Learning entry number {i} with some detail text about patterns",
-             "detail": f"Additional context for entry {i}",
-             "tags": ["tag1", "tag2"]}
+            {
+                "content": f"Learning entry number {i} with some detail text about patterns",
+                "detail": f"Additional context for entry {i}",
+                "tags": ["tag1", "tag2"],
+            }
             for i in range(1000)
         ]
 

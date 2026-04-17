@@ -97,7 +97,9 @@ def prepare_entry_for_store(
     flagged_entry = _flag_code_snippet(entry)
 
     try:
-        enforce_write_rate_limit(config, session_id=session_id, actor=actor, namespace=entry.namespace, entry_id=entry.id)
+        enforce_write_rate_limit(
+            config, session_id=session_id, actor=actor, namespace=entry.namespace, entry_id=entry.id
+        )
         validate_entry_payload(flagged_entry, max_chars=config.max_entry_chars)
         secured_entry, pii_matches = _apply_runtime_pii_policy(flagged_entry, config)
         anomaly, anomaly_stats = _score_entry_anomaly(
@@ -282,7 +284,9 @@ def _apply_runtime_pii_policy(entry: MemoryEntry, config: MemoryConfig) -> tuple
     blocking = [match for match in all_matches if match.pii_type in _BLOCKING_PII_TYPES]
     if blocking:
         detected_type = str(blocking[0].pii_type)
-        logger.warning("memory_store_pii_blocked", detected_type=detected_type, namespace=entry.namespace, entry_id=entry.id)
+        logger.warning(
+            "memory_store_pii_blocked", detected_type=detected_type, namespace=entry.namespace, entry_id=entry.id
+        )
         raise PIIBlockError(f"memory entry blocked by PII policy: {detected_type}", detected_type=detected_type)
 
     new_content = _replace_pii(entry.content, content_matches)

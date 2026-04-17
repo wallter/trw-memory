@@ -46,7 +46,7 @@ def test_memory_recall_include_namespaces_reads_extra_namespace_store(
             config=cfg,
         )
 
-    memories = cast(list[dict[str, object]], result["memories"])
+    memories = cast("list[dict[str, object]]", result["memories"])
     namespaces = {str(memory["namespace"]) for memory in memories}
     assert namespaces == {"project:aaa", "project:bbb"}
     assert result["total_matches"] == 2
@@ -95,10 +95,6 @@ def test_discover_namespace_backends_reopens_encrypted_sqlite_stores(
         global_backend.store(make_entry("global active", namespace="global"))
 
     with discover_namespace_backends(cfg) as stores:
-        discovered = {
-            namespace
-            for namespaces, _backend in stores
-            for namespace in namespaces
-        }
+        discovered = {namespace for namespaces, _backend in stores for namespace in namespaces}
 
     assert discovered == {"project:aaa", "global"}

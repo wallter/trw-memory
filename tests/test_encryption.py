@@ -28,7 +28,6 @@ from trw_memory.exceptions import AuthorizationError, KeyRotationError
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
-from trw_memory.tools.recall import memory_recall_impl
 from trw_memory.security import (
     decrypt_entry_fields,
     decrypt_field,
@@ -40,6 +39,7 @@ from trw_memory.security import (
     rotate_key,
 )
 from trw_memory.security.keys import clear_key_cache
+from trw_memory.tools.recall import memory_recall_impl
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -589,7 +589,7 @@ class TestRotateKey:
         assert "PRAGMA cipher = 'aes-256-cbc'" in statements
         assert "PRAGMA cipher_page_size = 4096" in statements
         assert "PRAGMA kdf_iter = 256000" in statements
-        assert any(statement.startswith('PRAGMA rekey = "x\'') for statement in statements)
+        assert any(statement.startswith("PRAGMA rekey = \"x'") for statement in statements)
 
     def test_rotate_key_restores_backup_on_integrity_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -632,11 +632,9 @@ class TestRotateKey:
 
         assert Path(f"{db_path}.bak").exists()
         assert db_path.read_bytes() == original_bytes
-        assert any(statement.startswith('PRAGMA rekey = "x\'') for statement in failure_statements)
+        assert any(statement.startswith("PRAGMA rekey = \"x'") for statement in failure_statements)
 
-    def test_rotate_key_writes_keyring_when_configured(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_rotate_key_writes_keyring_when_configured(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         old_key = generate_master_key()
         new_key = generate_master_key()
         monkeypatch.setenv("MEMORY_MASTER_KEY", old_key.hex())
@@ -713,7 +711,7 @@ class TestRotateKey:
         key_hex = derive_namespace_key(master_key, "default")
         conn = driver.connect(str(db_path))
         try:
-            conn.execute(f'PRAGMA key = "x\'{key_hex}\'"')
+            conn.execute(f"PRAGMA key = \"x'{key_hex}'\"")
             _apply_sqlcipher_pragmas(conn)
             version = conn.execute("PRAGMA cipher_version").fetchone()[0]
             cipher = conn.execute("PRAGMA cipher").fetchone()[0]
@@ -757,7 +755,7 @@ class TestRotateKey:
         db_path = Path(config.storage_path) / "default" / config.sqlite_db_name
         old_conn = driver.connect(str(db_path))
         try:
-            old_conn.execute(f'PRAGMA key = "x\'{derive_namespace_key(old_key, "default")}\'"')
+            old_conn.execute(f"PRAGMA key = \"x'{derive_namespace_key(old_key, 'default')}'\"")
             _apply_sqlcipher_pragmas(old_conn)
             with pytest.raises(sqlite3.DatabaseError):
                 old_conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
@@ -766,15 +764,13 @@ class TestRotateKey:
 
         new_conn = driver.connect(str(db_path))
         try:
-            new_conn.execute(f'PRAGMA key = "x\'{derive_namespace_key(new_key, "default")}\'"')
+            new_conn.execute(f"PRAGMA key = \"x'{derive_namespace_key(new_key, 'default')}'\"")
             _apply_sqlcipher_pragmas(new_conn)
             assert new_conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] > 0
         finally:
             new_conn.close()
 
-    def test_recall_encrypted_vs_unencrypted(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_recall_encrypted_vs_unencrypted(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _load_real_sqlcipher_driver_or_skip()
         monkeypatch.setattr("trw_memory.tools.recall.get_local_embedder", lambda **_: None)
 

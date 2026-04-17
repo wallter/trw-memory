@@ -70,7 +70,11 @@ def _make_entries_spread(
 
 
 def _serialized_size(entry: MemoryEntry) -> int:
-    return len(json.dumps(entry.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    return len(
+        json.dumps(entry.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +349,9 @@ class TestWriteTimeValidation:
         assert result["status"] == "blocked"
 
     def test_score_entry_anomaly_flags_large_outlier(self) -> None:
-        reference = [_make_entry(entry_id=f"M-{i}", content="normal content", detail="ok", metadata={}) for i in range(20)]
+        reference = [
+            _make_entry(entry_id=f"M-{i}", content="normal content", detail="ok", metadata={}) for i in range(20)
+        ]
         outlier = _make_entry(entry_id="M-outlier", content="A" * 5000, detail="")
         anomaly = score_entry_anomaly(outlier, reference, z_threshold=3.0)
         assert anomaly is not None
@@ -389,7 +395,9 @@ class TestRuntimePoisoningPolicy:
                 prepare_entry_for_store(second, backend=backend, config=cfg, session_id="s1")
 
         assert excinfo.value.retry_after > 0.0
-        audit_records = [read_yaml_line for read_yaml_line in Path(cfg.audit_log_path).read_text(encoding="utf-8").splitlines()]
+        audit_records = [
+            read_yaml_line for read_yaml_line in Path(cfg.audit_log_path).read_text(encoding="utf-8").splitlines()
+        ]
         assert any('"op":"store_rejected"' in line for line in audit_records)
         assert any('"reason":"rate_limited"' in line for line in audit_records)
         assert any('"session_id":"s1"' in line for line in audit_records)
@@ -426,7 +434,7 @@ class TestRuntimePoisoningPolicy:
         cfg = MemoryConfig(storage_path=str(tmp_path / "mem"), max_memory_writes_per_minute=5)
         state_path = Path(cfg.rate_limit_state_path)
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text('sessions:\n  old: [1.0]\n', encoding="utf-8")
+        state_path.write_text("sessions:\n  old: [1.0]\n", encoding="utf-8")
 
         with create_backend_from_config(cfg, "project:default") as backend:
             prepare_entry_for_store(

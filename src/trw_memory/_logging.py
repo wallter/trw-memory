@@ -20,11 +20,22 @@ from typing import Any
 
 import structlog
 
-_SENSITIVE_PATTERNS: frozenset[str] = frozenset({
-    "password", "passwd", "secret", "token", "api_key", "apikey",
-    "authorization", "cookie", "credential", "private_key", "access_key",
-    "session_id",
-})
+_SENSITIVE_PATTERNS: frozenset[str] = frozenset(
+    {
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "api_key",
+        "apikey",
+        "authorization",
+        "cookie",
+        "credential",
+        "private_key",
+        "access_key",
+        "session_id",
+    }
+)
 
 _SENSITIVE_VALUE_RE = re.compile(
     r"((?:Bearer|Basic|Token)\s+)\S+",
@@ -33,7 +44,9 @@ _SENSITIVE_VALUE_RE = re.compile(
 
 
 def _redact_secrets(
-    logger: Any, method_name: str, event_dict: MutableMapping[str, Any],
+    logger: Any,
+    method_name: str,
+    event_dict: MutableMapping[str, Any],
 ) -> MutableMapping[str, Any]:
     for key in list(event_dict):
         key_lower = key.lower()
@@ -41,13 +54,16 @@ def _redact_secrets(
             event_dict[key] = "***REDACTED***"
         elif isinstance(event_dict[key], str):
             event_dict[key] = _SENSITIVE_VALUE_RE.sub(
-                r"\1***REDACTED***", event_dict[key],
+                r"\1***REDACTED***",
+                event_dict[key],
             )
     return event_dict
 
 
 def _add_component(
-    logger: Any, method_name: str, event_dict: MutableMapping[str, Any],
+    logger: Any,
+    method_name: str,
+    event_dict: MutableMapping[str, Any],
 ) -> MutableMapping[str, Any]:
     logger_name = event_dict.get("_logger_name") or event_dict.get("logger")
     if logger_name and "component" not in event_dict:
@@ -82,11 +98,7 @@ def configure_logging(
         level = getattr(logging, log_level.upper(), logging.INFO)
     else:
         env_level = os.environ.get("TRW_LOG_LEVEL") or os.environ.get("LOG_LEVEL")
-        level = (
-            getattr(logging, env_level.upper(), logging.INFO)
-            if env_level
-            else _verbosity_to_level(verbosity)
-        )
+        level = getattr(logging, env_level.upper(), logging.INFO) if env_level else _verbosity_to_level(verbosity)
 
     if json_output is None:
         use_json = not sys.stderr.isatty()
@@ -114,7 +126,8 @@ def configure_logging(
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     logging.basicConfig(
-        format="%(message)s", level=level,
+        format="%(message)s",
+        level=level,
         handlers=[logging.StreamHandler(sys.stderr)],
         force=True,
     )

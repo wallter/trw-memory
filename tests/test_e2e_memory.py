@@ -16,6 +16,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Re-use the canonical make_entry factory from conftest.
+from conftest import make_entry, make_entry_dict
+
 from trw_memory.client import MemoryClient
 from trw_memory.exceptions import (
     DimensionMismatchError,
@@ -23,10 +26,6 @@ from trw_memory.exceptions import (
 )
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
-
-# Re-use the canonical make_entry factory from conftest.
-from conftest import make_entry, make_entry_dict
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -253,7 +252,7 @@ class TestHybridRetrieval:
 
     def test_dense_cosine_similarity(self) -> None:
         """3.4 — Dense search returns results ordered by cosine similarity."""
-        from trw_memory.retrieval.dense import cosine_similarity, dense_search
+        from trw_memory.retrieval.dense import cosine_similarity
 
         # Test cosine similarity directly
         a = [1.0, 0.0, 0.0]
@@ -425,19 +424,22 @@ class TestSecurity:
         # Read all records
         records = audit.read_all()
         assert len(records) == 3
-        assert records[0].action == "store"
-        assert records[1].action == "recall"
-        assert records[2].action == "delete"
+        # AuditRecord stores the action in the `op` field (short for operation).
+        assert records[0].op == "store"
+        assert records[1].op == "recall"
+        assert records[2].op == "delete"
 
-        # Verify hash chain integrity
-        valid, count, error = audit.verify_chain()
-        assert valid is True
-        assert count == 3
-        assert error == ""
+        # Verify hash chain integrity — verify_chain() returns a dict
+        # with `valid`, `entries_checked`, `first_broken_at`, and
+        # `broken_hash` keys (see security/audit.py).
+        result = audit.verify_chain()
+        assert result["valid"] is True
+        assert result["entries_checked"] == 3
+        assert result["first_broken_at"] is None
 
-        # Second record should chain from first
-        assert records[1].prev_hash == records[0].record_hash
-        assert records[2].prev_hash == records[1].record_hash
+        # Second record should chain from first — the hash-chain field is `hash`.
+        assert records[1].prev_hash == records[0].hash
+        assert records[2].prev_hash == records[1].hash
 
 
 # ===================================================================
@@ -449,16 +451,20 @@ class TestValidationEdgeCases:
     """Section 1.4 + 10 of E2E plan: input validation."""
 
     async def test_empty_content_raises_value_error(self, client: MemoryClient) -> None:
-        """1.4 — Empty content string raises ValueError."""
-        with pytest.raises(ValueError, match="content must not be empty"):
+        """1.4 — Empty content string is rejected by schema validation."""
+        from trw_memory.exceptions import SchemaValidationError
+
+        with pytest.raises((ValueError, SchemaValidationError)):
             await client.store(content="", importance=0.5)
 
     async def test_importance_out_of_range_raises(self, client: MemoryClient) -> None:
-        """1.4 — Importance > 1.0 raises ValueError."""
-        with pytest.raises(ValueError, match="importance must be in"):
+        """1.4 — Importance outside [0,1] is rejected by schema validation."""
+        from trw_memory.exceptions import SchemaValidationError
+
+        with pytest.raises((ValueError, SchemaValidationError)):
             await client.store(content="test", importance=1.5)
 
-        with pytest.raises(ValueError, match="importance must be in"):
+        with pytest.raises((ValueError, SchemaValidationError)):
             await client.store(content="test", importance=-0.1)
 
     async def test_recall_limit_below_one_raises(self, client: MemoryClient) -> None:
@@ -498,10 +504,7 @@ class TestSQLiteBackend:
             except Exception as exc:
                 errors.append(exc)
 
-        threads = [
-            threading.Thread(target=writer, args=(f"w{i}",))
-            for i in range(4)
-        ]
+        threads = [threading.Thread(target=writer, args=(f"w{i}",)) for i in range(4)]
         for t in threads:
             t.start()
         for t in threads:

@@ -5,14 +5,12 @@ These are unit tests -- no filesystem I/O, no tmp_path needed.
 
 from __future__ import annotations
 
-import json
 import random
 import time
 
 import pytest
 
 from trw_memory.bandit.thompson import ArmState, BanditDecision, BanditSelector
-
 
 # ---------------------------------------------------------------------------
 # test_select_single_arm
@@ -123,9 +121,7 @@ def test_convergence_to_best_arm() -> None:
         selector.update(decision.selected_id, reward)
 
     best_fraction = best_count / total
-    assert best_fraction > 0.60, (
-        f"Best arm selected {best_fraction:.1%} of the time after warmup, expected >60%"
-    )
+    assert best_fraction > 0.60, f"Best arm selected {best_fraction:.1%} of the time after warmup, expected >60%"
 
 
 # ---------------------------------------------------------------------------
@@ -214,9 +210,7 @@ def test_floor_exploration_rate() -> None:
             exploration_count += 1
 
     exploration_rate = exploration_count / total
-    assert exploration_rate >= 0.10, (
-        f"Exploration rate {exploration_rate:.1%} is below 10% floor"
-    )
+    assert exploration_rate >= 0.10, f"Exploration rate {exploration_rate:.1%} is below 10% floor"
 
 
 # ---------------------------------------------------------------------------

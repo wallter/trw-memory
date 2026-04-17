@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from benchmarks._retrieval import rank_entries
+
 # Benchmark classes
 from benchmarks.bench_latency import LatencyBenchmark
 from benchmarks.bench_memory import MemoryBenchmark
@@ -36,7 +37,6 @@ from benchmarks.bench_quality import (
     reciprocal_rank,
 )
 from benchmarks.bench_throughput import ThroughputBenchmark
-from trw_memory.models.memory import MemoryEntry
 
 # Corpus / fixture generation
 from benchmarks.corpus import (
@@ -53,6 +53,7 @@ from benchmarks.runner import (
     format_report,
     run_benchmarks,
 )
+from trw_memory.models.memory import MemoryEntry
 
 # ====================================================================
 # Corpus generation tests
@@ -654,9 +655,7 @@ class TestQualityBenchmarkIntegration:
         for key in ("precision_at_5", "recall_at_10", "mrr", "ndcg_at_10"):
             assert 0.0 <= results[key] <= 1.0, f"{key} = {results[key]}"
 
-    def test_run_benchmarks_meets_thresholds_with_bundled_fixtures(
-        self, tmp_path: Path
-    ) -> None:
+    def test_run_benchmarks_meets_thresholds_with_bundled_fixtures(self, tmp_path: Path) -> None:
         """Bundled benchmark fixtures clear the default threshold gate."""
         golden_path = tmp_path / "golden.json"
         create_golden_set(golden_path)

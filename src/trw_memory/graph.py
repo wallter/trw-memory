@@ -277,10 +277,7 @@ def _entry_has_cross_validation(entry: MemoryEntry, project_id: str) -> bool:
 
 def _append_cross_validation(entry: MemoryEntry, project_id: str, similarity: float) -> MemoryEntry:
     now = datetime.now(timezone.utc)
-    outcome = (
-        f"cross_validated:project_id={project_id}:similarity={similarity:.4f}:"
-        f"timestamp={now.isoformat()}"
-    )
+    outcome = f"cross_validated:project_id={project_id}:similarity={similarity:.4f}:timestamp={now.isoformat()}"
     return entry.model_copy(
         update={
             "cross_validated": True,
@@ -406,8 +403,7 @@ def _apply_cross_project_validation(
                     if (remote_embedding := remote_embeddings.get(candidate.id)) is not None
                 ]
                 remote_payload = [
-                    (candidate.id, project_id, remote_embedding)
-                    for candidate, remote_embedding in remote_candidates
+                    (candidate.id, project_id, remote_embedding) for candidate, remote_embedding in remote_candidates
                 ]
                 if not detect_cross_validation(
                     current_entry,
@@ -773,8 +769,7 @@ def memory_decay_pass(
     ).fetchall()
 
     total = conn.execute(
-        "SELECT COUNT(*) FROM memories WHERE cross_validated = 1 "
-        "AND COALESCE(last_accessed_at, created_at) < ?",
+        "SELECT COUNT(*) FROM memories WHERE cross_validated = 1 AND COALESCE(last_accessed_at, created_at) < ?",
         (cutoff,),
     ).fetchone()
     total_qualifying = total[0] if total else 0
@@ -903,11 +898,7 @@ def filter_conflicts(
         conflicts = get_conflicts(conn, eid)
         for conflict in conflicts:
             # Determine the other side of the conflict
-            other_id = (
-                conflict["target_id"]
-                if conflict["source_id"] == eid
-                else conflict["source_id"]
-            )
+            other_id = conflict["target_id"] if conflict["source_id"] == eid else conflict["source_id"]
             if other_id not in entry_ids or other_id in suppressed:
                 continue
 
@@ -944,9 +935,7 @@ def detect_clusters(
 ) -> list[dict[str, object]]:
     """Detect dense subgraphs via greedy clique-expansion bounded by graph size."""
     # Build adjacency from all edges (deduplicated, undirected)
-    rows = conn.execute(
-        "SELECT DISTINCT source_id, target_id FROM memory_graph_edges"
-    ).fetchall()
+    rows = conn.execute("SELECT DISTINCT source_id, target_id FROM memory_graph_edges").fetchall()
 
     adj: dict[str, set[str]] = {}
     for src, tgt in rows:
@@ -1145,15 +1134,10 @@ def _upsert_edge(
         ValueError: If *edge_type* is not in :data:`VALID_EDGE_TYPES`.
     """
     if edge_type not in VALID_EDGE_TYPES:
-        raise ValueError(
-            f"Invalid edge type {edge_type!r}. "
-            f"Must be one of: {', '.join(sorted(VALID_EDGE_TYPES))}"
-        )
+        raise ValueError(f"Invalid edge type {edge_type!r}. Must be one of: {', '.join(sorted(VALID_EDGE_TYPES))}")
     meta_json = json.dumps(metadata) if metadata else "{}"
     if len(meta_json) > 4096:
-        raise ValueError(
-            f"edge metadata exceeds 4096 byte limit ({len(meta_json)} bytes)"
-        )
+        raise ValueError(f"edge metadata exceeds 4096 byte limit ({len(meta_json)} bytes)")
     conn.execute(
         "INSERT INTO memory_graph_edges "
         "(source_id, target_id, edge_type, weight, created_at, edge_metadata) "

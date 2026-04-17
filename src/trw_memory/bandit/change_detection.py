@@ -67,9 +67,7 @@ class PageHinkleyDetector:
             (self._forgetting_factor * self._h_down) + deviation_down,
         )
         self._m = 0.0 if self._m == float("inf") else min(self._m, self._h)
-        self._m_down = (
-            0.0 if self._m_down == float("inf") else min(self._m_down, self._h_down)
-        )
+        self._m_down = 0.0 if self._m_down == float("inf") else min(self._m_down, self._h_down)
 
         up_dev = self._h - self._m
         down_dev = self._h_down - self._m_down

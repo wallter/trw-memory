@@ -157,9 +157,7 @@ class TestAutoRecallNarrowed:
 
         assert result == []
 
-    async def test_auto_recall_fails_open_on_value_error(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_auto_recall_fails_open_on_value_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """auto_recall must return empty list when recall raises ValueError."""
         from trw_memory.client import MemoryClient
 

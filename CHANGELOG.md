@@ -2,6 +2,21 @@
 
 All notable changes to the TRW Memory package.
 
+## [Unreleased]
+
+### Added
+
+- **2026-04-13 — Recovery is safer after serious corruption incidents** — strict-salvage refusal, cold-tier rebuilds, and restore-from-cold flows make it less likely that a bad SQLite state silently turns into partial data loss (PRD-CORE-138, PRD-CORE-140).
+- **2026-04-13 — Operational safety rails for long-lived stores** — timestamped corrupt-backup rotation, scheduled integrity checks, multi-writer advisory tracking, and snapshot rotation make recovery paths more explicit and easier to reason about (PRD-CORE-139, PRD-INFRA-063, PRD-INFRA-064, PRD-INFRA-065).
+
+### Changed
+
+- **2026-04-13 — Durability observability improved** — integrity and snapshot signals are easier to publish and track without reviving the deprecated session-start memory-health surface (PRD-INFRA-066, PRD-INFRA-067, PRD-INFRA-068).
+
+### Fixed
+
+- **2026-04-12 to 2026-04-13 — Recovery and sync edge cases were hardened** — follow-up audit work closed gaps in sync tracking, decay proofing, and team-lifecycle semantics so cross-session behavior is more dependable under stress.
+
 ## [0.6.7] — 2026-04-13
 
 ### Added

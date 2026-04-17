@@ -21,9 +21,7 @@ from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 # PRD-CORE-139: timestamped backup filename pattern.
-_TIMESTAMPED_BACKUP_RE = re.compile(
-    r"^memory\.db\.corrupt\.(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)(?:-\d+)?\.bak$"
-)
+_TIMESTAMPED_BACKUP_RE = re.compile(r"^memory\.db\.corrupt\.(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)(?:-\d+)?\.bak$")
 
 
 def _timestamped_backups(parent: Path) -> list[Path]:

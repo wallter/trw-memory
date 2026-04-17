@@ -30,7 +30,6 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.security import (
     decrypt_entry_fields,
-    derive_namespace_key,
     derive_namespace_key_bytes,
     encrypt_entry_fields,
     generate_master_key,
@@ -102,9 +101,7 @@ class TestGetMasterKeyEnv:
         result = get_master_key(config)
         assert len(result) == _KEY_LENGTH
 
-    def test_env_key_not_set_raises_master_key_not_found_without_keyring(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_env_key_not_set_raises_master_key_not_found_without_keyring(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("MEMORY_MASTER_KEY", raising=False)
         with (
             patch("trw_memory.security.keys._KEYRING_AVAILABLE", False),
@@ -183,9 +180,7 @@ class TestGetMasterKeyFile:
         result = get_master_key(config)
         assert result == key
 
-    def test_file_not_found_raises_master_key_not_found(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_file_not_found_raises_master_key_not_found(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.delenv("MEMORY_MASTER_KEY", raising=False)
         nonexistent = tmp_path / "no.key"
         config = _make_config(
@@ -327,7 +322,9 @@ class TestGetMasterKeyKeyring:
         assert result == key
         mock_keyring.get_password.assert_not_called()
 
-    def test_keyring_without_env_or_keyring_entry_raises_when_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_keyring_without_env_or_keyring_entry_raises_when_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.delenv("MEMORY_MASTER_KEY", raising=False)
         with (
             patch("trw_memory.security.keys._KEYRING_AVAILABLE", False),

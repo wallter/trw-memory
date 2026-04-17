@@ -322,7 +322,7 @@ class TestCreateConsolidatedEntry:
         cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path), embedding_dim=4)
 
         with create_backend_from_config(cfg, "default") as sqlite_storage:
-            storage = cast(SQLiteBackend, sqlite_storage)
+            storage = cast("SQLiteBackend", sqlite_storage)
             cluster = [_make_entry("e1"), _make_entry("e2")]
             for entry in cluster:
                 storage.store(entry)
@@ -337,8 +337,7 @@ class TestCreateConsolidatedEntry:
             wait_for_graph_updates()
 
             edge_rows = storage._conn.execute(
-                "SELECT source_id, target_id, edge_type FROM memory_graph_edges "
-                "WHERE source_id = ? ORDER BY target_id",
+                "SELECT source_id, target_id, edge_type FROM memory_graph_edges WHERE source_id = ? ORDER BY target_id",
                 (result.id,),
             ).fetchall()
             assert [tuple(row) for row in edge_rows] == [

@@ -11,7 +11,6 @@ import pytest
 
 from trw_memory.bandit.contextual import ContextualBanditSelector
 
-
 # ---------------------------------------------------------------------------
 # test_select_no_context_random
 # ---------------------------------------------------------------------------
@@ -38,9 +37,7 @@ def test_select_no_context_uses_thompson_not_random() -> None:
         counts[selected_id] = counts.get(selected_id, 0) + 1
 
     good_rate = counts["arm_good"] / n_trials
-    assert good_rate > 0.60, (
-        f"Expected arm_good selected > 60% after training, got {good_rate:.2f}"
-    )
+    assert good_rate > 0.60, f"Expected arm_good selected > 60% after training, got {good_rate:.2f}"
 
 
 def test_thompson_state_serialized_in_to_dict() -> None:
@@ -163,10 +160,7 @@ def test_linucb_different_context_different_selection() -> None:
     # After training, context [0, 1] should select arm_b
     selected_b, _ = selector.select(arms, context_vector=[0.0, 1.0])
 
-    assert selected_a != selected_b, (
-        f"Expected different selections for different contexts, "
-        f"got {selected_a} for both"
-    )
+    assert selected_a != selected_b, f"Expected different selections for different contexts, got {selected_a} for both"
 
 
 # ---------------------------------------------------------------------------
@@ -181,8 +175,9 @@ def test_degenerate_scores_fallback(caplog: pytest.LogCaptureFixture) -> None:
 
     # With no training data and identity matrices, all arms are identical.
     # All scores should be degenerate (within 1% of each other).
-    import structlog
     import logging
+
+    import structlog
 
     # Configure structlog to emit to stdlib for caplog capture
     structlog.configure(
@@ -298,17 +293,13 @@ def test_from_dict_corrupt_returns_fresh() -> None:
     assert len(result._arms) == 0
 
     # Wrong types
-    result2 = ContextualBanditSelector.from_dict(
-        {"feature_dim": "not_a_number", "alpha": [], "arms": "wrong"}
-    )
+    result2 = ContextualBanditSelector.from_dict({"feature_dim": "not_a_number", "alpha": [], "arms": "wrong"})
     assert isinstance(result2, ContextualBanditSelector)
 
 
 def test_from_dict_bad_arms_type_returns_fresh() -> None:
     """arms field that is not a dict returns a fresh instance with correct params."""
-    result = ContextualBanditSelector.from_dict(
-        {"feature_dim": 3, "alpha": 2.0, "arms": "not_a_dict"}
-    )
+    result = ContextualBanditSelector.from_dict({"feature_dim": 3, "alpha": 2.0, "arms": "not_a_dict"})
     assert isinstance(result, ContextualBanditSelector)
     assert result._feature_dim == 3
     assert result._alpha == 2.0
@@ -436,6 +427,4 @@ def test_sherman_morrison_preserves_symmetry() -> None:
     d = len(arm.A_inv)
     for i in range(d):
         for j in range(d):
-            assert arm.A_inv[i][j] == pytest.approx(
-                arm.A_inv[j][i], abs=1e-10
-            ), f"A_inv not symmetric at ({i},{j})"
+            assert arm.A_inv[i][j] == pytest.approx(arm.A_inv[j][i], abs=1e-10), f"A_inv not symmetric at ({i},{j})"

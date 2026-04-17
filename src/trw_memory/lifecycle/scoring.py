@@ -214,7 +214,7 @@ def feedback_decay_score(
         Decayed score in [0.0, 1.0].
     """
     exponent = recall_count / max(1, helpful_count)
-    return _clamp01(importance * (0.95 ** exponent))
+    return _clamp01(importance * (0.95**exponent))
 
 
 def entry_utility(

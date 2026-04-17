@@ -577,7 +577,9 @@ class MemoryClient:
 
         async with self._lock:
             backend = self._get_backend()
-            if self._namespace.startswith("team:") and NamespaceManager(backend).team_namespace_expired(self._namespace):
+            if self._namespace.startswith("team:") and NamespaceManager(backend).team_namespace_expired(
+                self._namespace
+            ):
                 logger.debug(
                     "memory_recall_team_namespace_expired",
                     op="recall",
@@ -837,15 +839,10 @@ class MemoryClient:
             if not query_terms:
                 tf_score = entry.importance
             else:
-                text_tokens = (
-                    f"{entry.content} {entry.detail} {' '.join(entry.tags)}"
-                    .lower()
-                    .split()
-                )
+                text_tokens = f"{entry.content} {entry.detail} {' '.join(entry.tags)}".lower().split()
                 matches = sum(1 for t in text_tokens if t in query_terms)
                 tf_score = (
-                    min(1.0, matches / max(len(text_tokens), 1) * _FALLBACK_TF_SCALE)
-                    * _FALLBACK_TF_WEIGHT
+                    min(1.0, matches / max(len(text_tokens), 1) * _FALLBACK_TF_SCALE) * _FALLBACK_TF_WEIGHT
                     + entry.importance * _FALLBACK_IMPORTANCE_WEIGHT
                 )
             if tf_score >= min_score:
@@ -1108,7 +1105,9 @@ class MemoryClient:
             )
             return self._merge_shared_candidates(local_results, self._snapshot_cached_shared_results(query))
         await self._mark_fetch_retirements(shared)
-        live_shared = [self._shared_result_to_result(item) for item in shared if not self._is_retired_shared_result(item)]
+        live_shared = [
+            self._shared_result_to_result(item) for item in shared if not self._is_retired_shared_result(item)
+        ]
         return self._merge_shared_candidates(local_results, [*live_shared, *cached_shared])
 
     async def _load_entries_for_results(self, results: list[MemoryResultDict]) -> list[MemoryEntry]:

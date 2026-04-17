@@ -219,7 +219,7 @@ def test_memory_recall_impl_updates_access_metadata_only_for_returned_entries(tm
         touched = backend.get(target_entry.id)
         untouched = backend.get(other_entry.id)
 
-    memories = cast(list[dict[str, object]], result["memories"])
+    memories = cast("list[dict[str, object]]", result["memories"])
     assert result["total_matches"] == 1
     assert memories[0]["id"] == target_entry.id
     assert touched is not None

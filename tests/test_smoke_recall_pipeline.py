@@ -17,7 +17,6 @@ import pytest
 from trw_memory.client import MemoryClient
 from trw_memory.retrieval.token_budget import estimate_entry_tokens, estimate_tokens
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -99,29 +98,21 @@ async def client_with_varied_entries(client: MemoryClient) -> MemoryClient:
 class TestRecallPipelineBasics:
     """Verify the recall pipeline returns correctly ranked results."""
 
-    async def test_recall_returns_results_sorted_by_score(
-        self, client_with_varied_entries: MemoryClient
-    ) -> None:
+    async def test_recall_returns_results_sorted_by_score(self, client_with_varied_entries: MemoryClient) -> None:
         """Results come back sorted by relevance score descending."""
         results = await client_with_varied_entries.recall(query="database pooling")
         assert len(results) >= 1
         scores = [float(r.get("score", 0)) for r in results]
         assert scores == sorted(scores, reverse=True)
 
-    async def test_recall_broad_query_returns_multiple(
-        self, client_with_varied_entries: MemoryClient
-    ) -> None:
+    async def test_recall_broad_query_returns_multiple(self, client_with_varied_entries: MemoryClient) -> None:
         """A broad query matching multiple entries returns several results."""
         results = await client_with_varied_entries.recall(query="learning about", limit=100)
         assert len(results) >= 2
 
-    async def test_recall_tag_filter_narrows_results(
-        self, client_with_varied_entries: MemoryClient
-    ) -> None:
+    async def test_recall_tag_filter_narrows_results(self, client_with_varied_entries: MemoryClient) -> None:
         """Tag filter restricts results to matching entries."""
-        results = await client_with_varied_entries.recall(
-            query="learning", tags=["pydantic"]
-        )
+        results = await client_with_varied_entries.recall(query="learning", tags=["pydantic"])
         for r in results:
             assert "pydantic" in r["tags"]
 
@@ -134,42 +125,26 @@ class TestRecallPipelineBasics:
 class TestTokenBudgetIntegration:
     """Verify token budgeting works end-to-end through the recall pipeline."""
 
-    async def test_token_budget_reduces_result_count(
-        self, client_with_varied_entries: MemoryClient
-    ) -> None:
+    async def test_token_budget_reduces_result_count(self, client_with_varied_entries: MemoryClient) -> None:
         """A tight token budget returns fewer results than no budget."""
         all_results = await client_with_varied_entries.recall(query="learning about", limit=100)
-        budgeted_results = await client_with_varied_entries.recall(
-            query="learning about", limit=100, token_budget=100
-        )
+        budgeted_results = await client_with_varied_entries.recall(query="learning about", limit=100, token_budget=100)
         assert len(budgeted_results) < len(all_results)
 
-    async def test_token_budget_large_returns_all_matches(
-        self, client_with_varied_entries: MemoryClient
-    ) -> None:
+    async def test_token_budget_large_returns_all_matches(self, client_with_varied_entries: MemoryClient) -> None:
         """A large budget returns all matching results (no truncation)."""
         # First get baseline without budget
-        baseline = await client_with_varied_entries.recall(
-            query="learning about", limit=100
-        )
+        baseline = await client_with_varied_entries.recall(query="learning about", limit=100)
         # Same query with very large budget should return same count
-        budgeted = await client_with_varied_entries.recall(
-            query="learning about", limit=100, token_budget=100_000
-        )
+        budgeted = await client_with_varied_entries.recall(query="learning about", limit=100, token_budget=100_000)
         assert len(budgeted) == len(baseline)
 
-    async def test_token_budget_minimum_one_guarantee(
-        self, client_with_varied_entries: MemoryClient
-    ) -> None:
+    async def test_token_budget_minimum_one_guarantee(self, client_with_varied_entries: MemoryClient) -> None:
         """Even a tiny budget returns at least 1 result (minimum-one guarantee)."""
-        results = await client_with_varied_entries.recall(
-            query="learning about", limit=100, token_budget=1
-        )
+        results = await client_with_varied_entries.recall(query="learning about", limit=100, token_budget=1)
         assert len(results) >= 1
 
-    async def test_token_budget_invalid_raises_value_error(
-        self, client_with_varied_entries: MemoryClient
-    ) -> None:
+    async def test_token_budget_invalid_raises_value_error(self, client_with_varied_entries: MemoryClient) -> None:
         """Zero or negative token_budget raises ValueError."""
         with pytest.raises(ValueError, match="token_budget must be positive"):
             await client_with_varied_entries.recall(query="test", token_budget=0)
@@ -177,14 +152,10 @@ class TestTokenBudgetIntegration:
         with pytest.raises(ValueError, match="token_budget must be positive"):
             await client_with_varied_entries.recall(query="test", token_budget=-10)
 
-    async def test_token_budget_none_unchanged_behavior(
-        self, client_with_varied_entries: MemoryClient
-    ) -> None:
+    async def test_token_budget_none_unchanged_behavior(self, client_with_varied_entries: MemoryClient) -> None:
         """token_budget=None produces same results as no budget parameter."""
         results_default = await client_with_varied_entries.recall(query="learning about", limit=100)
-        results_none = await client_with_varied_entries.recall(
-            query="learning about", limit=100, token_budget=None
-        )
+        results_none = await client_with_varied_entries.recall(query="learning about", limit=100, token_budget=None)
         # Same count and same IDs
         ids_default = {r["memory_id"] for r in results_default}
         ids_none = {r["memory_id"] for r in results_none}
@@ -243,9 +214,7 @@ class TestTokenEstimationConsistency:
 class TestStoreRecallBudgetRoundTrip:
     """Verify the complete store → recall → budget pipeline works atomically."""
 
-    async def test_store_then_recall_with_budget_returns_stored_entry(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_store_then_recall_with_budget_returns_stored_entry(self, client: MemoryClient) -> None:
         """A single stored entry is retrievable with any token budget."""
         await client.store(
             content="Test entry for round-trip verification",
@@ -256,9 +225,7 @@ class TestStoreRecallBudgetRoundTrip:
         assert len(results) >= 1
         assert "round-trip" in results[0]["content"]
 
-    async def test_store_many_recall_budget_preserves_ranking(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_store_many_recall_budget_preserves_ranking(self, client: MemoryClient) -> None:
         """Budget filtering preserves the score-based ranking order."""
         for i in range(10):
             await client.store(

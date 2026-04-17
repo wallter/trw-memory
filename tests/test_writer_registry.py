@@ -98,9 +98,7 @@ def test_stale_peer_pruning(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_registry_never_refuses_open_when_dir_unwritable(
-    tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
+def test_registry_never_refuses_open_when_dir_unwritable(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     """CRITICAL: registry failures must NEVER raise (sprint exit criterion)."""
     db = tmp_path / "memory.db"
 
@@ -118,9 +116,7 @@ def test_registry_never_refuses_open_when_dir_unwritable(
     reg.close()
 
 
-def test_registry_never_refuses_open_when_lock_create_fails(
-    tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
+def test_registry_never_refuses_open_when_lock_create_fails(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     """PermissionError on lock creation must be swallowed."""
     db = tmp_path / "memory.db"
     original_open = os.open
@@ -163,9 +159,7 @@ def test_registry_never_refuses_open(tmp_path: Path, monkeypatch: MonkeyPatch) -
 # ---------------------------------------------------------------------------
 
 
-def test_warn_threshold_not_triggered_for_single_writer(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_warn_threshold_not_triggered_for_single_writer(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     db = tmp_path / "memory.db"
     reg = WriterRegistry(db, warn_threshold=4)
     reg.register()
@@ -247,9 +241,7 @@ def test_pid_is_live_rejects_impossible_pid(tmp_path: Path) -> None:
     assert _pid_is_live(9999998, lock) is False
 
 
-def test_stale_lock_heuristic_for_old_file(
-    tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
+def test_stale_lock_heuristic_for_old_file(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     """On non-POSIX hosts old lockfiles register as dead via mtime heuristic."""
     from trw_memory.storage._writer_registry import _pid_is_live
 
@@ -279,9 +271,7 @@ def test_del_cleans_up_lock_file(tmp_path: Path) -> None:
     assert not lock_path.exists()
 
 
-def test_close_after_failed_register_is_noop(
-    tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
+def test_close_after_failed_register_is_noop(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     db = tmp_path / "memory.db"
 
     def _fail(*_args: object, **_kwargs: object) -> None:

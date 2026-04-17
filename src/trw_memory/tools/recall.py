@@ -112,7 +112,9 @@ def memory_recall_impl(  # noqa: C901 - existing orchestration-heavy recall pipe
         try:
             validate_namespace(ns)
             extra_ns.append(ns)
-        except ConfigError:  # per-item error handling: skip invalid namespaces, continue with valid ones  # noqa: PERF203
+        except (
+            ConfigError
+        ):  # per-item error handling: skip invalid namespaces, continue with valid ones
             logger.debug("recall_invalid_namespace_skipped", namespace=ns)
 
     all_namespaces = [namespace, *extra_ns]
@@ -143,9 +145,7 @@ def memory_recall_impl(  # noqa: C901 - existing orchestration-heavy recall pipe
             all_entries.extend(ns_entries)
 
             if query and ns_entries:
-                stored_embeddings.update(
-                    ns_backend.get_stored_embeddings([entry.id for entry in ns_entries])
-                )
+                stored_embeddings.update(ns_backend.get_stored_embeddings([entry.id for entry in ns_entries]))
 
     # Apply tag filter
     if tags:
@@ -221,9 +221,7 @@ def memory_recall_impl(  # noqa: C901 - existing orchestration-heavy recall pipe
     tokens_truncated = False
 
     if token_budget is not None and result_dicts:
-        result_dicts, tokens_used, tokens_truncated = apply_token_budget(
-            result_dicts, token_budget
-        )
+        result_dicts, tokens_used, tokens_truncated = apply_token_budget(result_dicts, token_budget)
     else:
         tokens_used = sum(estimate_entry_tokens(d) for d in result_dicts)
 
@@ -296,10 +294,7 @@ def _merge_tier_entries(
 ) -> list[dict[str, object]]:
     """Merge tier-only matches into the main recall candidate set."""
     merged: list[dict[str, object]] = list(ranked_dicts)
-    seen_keys = {
-        (str(item.get("namespace", "project:default")), str(item.get("id", "")))
-        for item in ranked_dicts
-    }
+    seen_keys = {(str(item.get("namespace", "project:default")), str(item.get("id", ""))) for item in ranked_dicts}
     for item in tier_dicts:
         key = (str(item.get("namespace", "project:default")), str(item.get("id", "")))
         if key in seen_keys:

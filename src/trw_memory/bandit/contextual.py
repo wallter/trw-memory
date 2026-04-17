@@ -58,10 +58,7 @@ def _normalize_scores(scores: dict[str, float]) -> dict[str, float]:
 
     min_score = min(scores.values())
     shift = (-min_score) + 1e-9 if min_score <= 0.0 else 0.0
-    adjusted = {
-        arm_id: max(0.0, score + shift)
-        for arm_id, score in scores.items()
-    }
+    adjusted = {arm_id: max(0.0, score + shift) for arm_id, score in scores.items()}
     total = sum(adjusted.values())
     if total <= 0.0:
         uniform = 1.0 / len(scores)
@@ -256,6 +253,7 @@ class ContextualBanditSelector:
     def to_dict(self) -> dict[str, Any]:
         """Serialize selector state for JSON persistence."""
         import json
+
         return {
             "feature_dim": self._feature_dim,
             "alpha": self._alpha,
@@ -280,11 +278,7 @@ class ContextualBanditSelector:
         learnings.
         """
         active_arms = sorted(
-            (
-                (arm_id, arm)
-                for arm_id, arm in self._arms.items()
-                if arm.n_obs > 0
-            ),
+            ((arm_id, arm) for arm_id, arm in self._arms.items() if arm.n_obs > 0),
             key=lambda item: (-item[1].n_obs, item[0]),
         )[:max_arms]
         return {
@@ -345,6 +339,7 @@ class ContextualBanditSelector:
         input.
         """
         import json
+
         try:
             feature_dim = int(data["feature_dim"])
             alpha = float(data["alpha"])
@@ -357,10 +352,7 @@ class ContextualBanditSelector:
             selector = cls(feature_dim=feature_dim, alpha=alpha)
 
             for arm_id, arm_dict in arms_data.items():
-                a_inv = [
-                    [float(v) for v in row]
-                    for row in arm_dict["A_inv"]
-                ]
+                a_inv = [[float(v) for v in row] for row in arm_dict["A_inv"]]
                 b = [float(v) for v in arm_dict["b"]]
                 n_obs = int(arm_dict["n_obs"])
 
@@ -374,9 +366,7 @@ class ContextualBanditSelector:
             thompson_state = data.get("thompson_state")
             if thompson_state is not None:
                 try:
-                    selector._thompson = BanditSelector.from_json(
-                        json.dumps(thompson_state)
-                    )
+                    selector._thompson = BanditSelector.from_json(json.dumps(thompson_state))
                 except Exception:  # justified: Thompson restore is best-effort
                     _logger.debug("contextual_thompson_restore_failed", exc_info=True)
                     selector._thompson = BanditSelector()
@@ -408,10 +398,7 @@ class ContextualBanditSelector:
             return decision, decision.selection_probability
 
         if len(context_vector) != self._feature_dim:
-            raise ValueError(
-                f"context_vector dimension {len(context_vector)} != "
-                f"expected {self._feature_dim}"
-            )
+            raise ValueError(f"context_vector dimension {len(context_vector)} != expected {self._feature_dim}")
 
         x = context_vector
         scores: dict[str, float] = {}
@@ -452,9 +439,7 @@ class ContextualBanditSelector:
                 selected_id=selected,
                 selection_probability=probabilities[selected],
                 runner_up_id=runner_up_id,
-                runner_up_probability=(
-                    probabilities.get(runner_up_id) if runner_up_id is not None else None
-                ),
+                runner_up_probability=(probabilities.get(runner_up_id) if runner_up_id is not None else None),
                 exploration=False,
             ),
             scores[selected],

@@ -124,9 +124,7 @@ def _assert_within_cold_dir(cold_base: Path, candidate: Path) -> None:
     resolved_base = cold_base.resolve()
     resolved_candidate = candidate.resolve()
     if not resolved_candidate.is_relative_to(resolved_base):
-        raise ValueError(
-            f"Path traversal guard: {candidate} is not under cold dir {resolved_base}"
-        )
+        raise ValueError(f"Path traversal guard: {candidate} is not under cold dir {resolved_base}")
 
 
 def _normalize_ts(ts_str: str | None) -> str | None:
@@ -243,9 +241,7 @@ def _hydrate_yaml(y: dict[str, object]) -> tuple[object, ...] | None:
     source = str(y.get("source_type") or y.get("source") or "agent")
 
     consolidated_into_raw = y.get("consolidated_into")
-    consolidated_into = (
-        str(consolidated_into_raw) if consolidated_into_raw not in (None, "") else None
-    )
+    consolidated_into = str(consolidated_into_raw) if consolidated_into_raw not in (None, "") else None
 
     # List-typed fields — each may raise TypeError on unexpected shape.
     serialised_lists: dict[str, str] = {}

@@ -32,7 +32,6 @@ from trw_memory.graph import (
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
-from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 # ---------------------------------------------------------------------------
 # DDL (copied from sqlite_backend.py for in-memory test setup)
@@ -874,8 +873,7 @@ class TestMemoryDecayPassBatch:
         )
         for start in range(0, 50_000, 5_000):
             rows = [
-                (f"decay-{i}", "content", old_date, old_date, old_date, 1, 0.8)
-                for i in range(start, start + 5_000)
+                (f"decay-{i}", "content", old_date, old_date, old_date, 1, 0.8) for i in range(start, start + 5_000)
             ]
             conn.executemany(insert_sql, rows)
         conn.commit()

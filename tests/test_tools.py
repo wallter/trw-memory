@@ -135,7 +135,9 @@ class TestMemoryStoreImpl:
             backend.store(
                 MemoryEntry(id="M-alice", content="alice entry", namespace="project:default", source_identity="alice")
             )
-            backend.store(MemoryEntry(id="M-bob", content="bob entry", namespace="project:default", source_identity="bob"))
+            backend.store(
+                MemoryEntry(id="M-bob", content="bob entry", namespace="project:default", source_identity="bob")
+            )
 
             result = memory_forget_impl(None, None, "project:default", backend=backend, config=cfg, actor="alice")
 
@@ -188,9 +190,9 @@ class TestMemoryStoreImpl:
         backend = _mock_backend(entries)
         deleted_ids: set[str] = set()
 
-        backend.list_entries.side_effect = lambda **kwargs: [
-            entry for entry in entries if entry.id not in deleted_ids
-        ][: int(kwargs["limit"])]
+        backend.list_entries.side_effect = lambda **kwargs: [entry for entry in entries if entry.id not in deleted_ids][
+            : int(kwargs["limit"])
+        ]
         backend.delete.side_effect = lambda entry_id: deleted_ids.add(entry_id) is None
 
         result = memory_forget_impl(None, None, "project:default", backend=backend, config=cfg, actor="alice")
@@ -222,7 +224,9 @@ class TestMemoryStoreImpl:
         assert audit_records[-1].op == "consolidate"
 
     def test_consolidate_denied_for_reader_namespace_role(self, tmp_path: Path) -> None:
-        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"), rbac_enabled=True, namespace_roles={"project:default": "reader"})
+        cfg = MemoryConfig(
+            storage_path=str(tmp_path / "mem"), rbac_enabled=True, namespace_roles={"project:default": "reader"}
+        )
 
         with create_backend_from_config(cfg, "project:default") as backend:
             with pytest.raises(
@@ -378,9 +382,7 @@ class TestMemoryRecallImpl:
         backend.get.side_effect = lambda entry_id: {"M-root": root, "M-related": related}.get(entry_id)
 
         conn = sqlite3.connect(":memory:")
-        conn.execute(
-            "CREATE TABLE memory_graph_edges (source_id TEXT, target_id TEXT, edge_type TEXT, weight REAL)"
-        )
+        conn.execute("CREATE TABLE memory_graph_edges (source_id TEXT, target_id TEXT, edge_type TEXT, weight REAL)")
         conn.execute(
             "INSERT INTO memory_graph_edges (source_id, target_id, edge_type, weight) VALUES (?, ?, ?, ?)",
             ("M-root", "M-related", "similarity", 0.91),
@@ -978,7 +980,9 @@ class TestMemorySearchImpl:
         cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
 
         with create_backend_from_config(cfg, "project:default") as backend:
-            backend.store(MemoryEntry(id="M-alice", content="alpha", namespace="project:default", source_identity="alice"))
+            backend.store(
+                MemoryEntry(id="M-alice", content="alpha", namespace="project:default", source_identity="alice")
+            )
             result = memory_search_impl("project:default", backend=backend, config=cfg, actor="alice")
 
         assert result["total"] == 1

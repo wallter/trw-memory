@@ -13,8 +13,8 @@ from typing import NamedTuple
 import structlog
 
 from trw_memory.exceptions import DimensionMismatchError
-from trw_memory.lifecycle.scoring import bayesian_calibrate
 from trw_memory.lifecycle._utils import days_since_access as _days_since_access
+from trw_memory.lifecycle.scoring import bayesian_calibrate
 from trw_memory.models.config import MemoryConfig
 from trw_memory.retrieval.dense import cosine_similarity
 

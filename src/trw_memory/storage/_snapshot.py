@@ -118,9 +118,7 @@ def _assert_within_snapshots_dir(base_dir: Path, candidate: Path) -> None:
     resolved_base = snapshots_base_dir(base_dir).resolve()
     resolved_candidate = candidate.resolve()
     if not resolved_candidate.is_relative_to(resolved_base):
-        raise SnapshotError(
-            f"Path traversal guard: {candidate} is not under snapshots dir {resolved_base}"
-        )
+        raise SnapshotError(f"Path traversal guard: {candidate} is not under snapshots dir {resolved_base}")
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +158,7 @@ def create_snapshot(db_path: Path, dest: Path) -> Path:
         # Use parameterized-literal quoting — VACUUM INTO does not support
         # bind parameters, so escape single quotes defensively.
         escaped = str(tmp).replace("'", "''")
-        conn.execute(f"VACUUM INTO '{escaped}'")  # noqa: S608 — path literal, not user input
+        conn.execute(f"VACUUM INTO '{escaped}'")
     except sqlite3.Error as exc:
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)

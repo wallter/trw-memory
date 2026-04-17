@@ -36,7 +36,7 @@ class _RecordingClient:
         self.calls: list[dict[str, Any]] = []
         self._status_code = status_code
 
-    def __enter__(self) -> "_RecordingClient":
+    def __enter__(self) -> _RecordingClient:
         return self
 
     def __exit__(self, *_args: object) -> None:
@@ -139,9 +139,7 @@ def test_skips_when_snapshot_missing(tmp_path: Path, monkeypatch: MonkeyPatch) -
 # ---------------------------------------------------------------------------
 
 
-def test_publish_succeeds_and_posts_metadata_only(
-    tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
+def test_publish_succeeds_and_posts_metadata_only(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     snap = tmp_path / "snapshot.db"
     expected_digest = _write_fake_snapshot(snap, b"known-content")
     cfg = _cfg()
@@ -162,9 +160,7 @@ def test_publish_succeeds_and_posts_metadata_only(
     assert payload["installation_id"] != "site-42"
 
 
-def test_publish_hash_never_includes_snapshot_bytes(
-    tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
+def test_publish_hash_never_includes_snapshot_bytes(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     """Structural guard: payload MUST NOT contain any byte-leak field.
 
     This is the sprint exit-criterion regression test — it fails loudly if a
@@ -192,9 +188,7 @@ def test_publish_hash_never_includes_snapshot_bytes(
         if key in allowed:
             continue
         for suffix in forbidden_suffixes:
-            assert not key.endswith(suffix), (
-                f"forbidden suffix {suffix!r} in key {key!r} — potential contents leak"
-            )
+            assert not key.endswith(suffix), f"forbidden suffix {suffix!r} in key {key!r} — potential contents leak"
 
 
 def test_publish_sends_api_key_header(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
@@ -213,9 +207,7 @@ def test_publish_sends_api_key_header(tmp_path: Path, monkeypatch: MonkeyPatch) 
 # ---------------------------------------------------------------------------
 
 
-def test_publish_returns_retryable_on_5xx(
-    tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
+def test_publish_returns_retryable_on_5xx(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     snap = tmp_path / "snapshot.db"
     _write_fake_snapshot(snap)
     cfg = _cfg()
@@ -225,16 +217,14 @@ def test_publish_returns_retryable_on_5xx(
     assert result == {"success": False, "remote_id": None, "retryable": True}
 
 
-def test_publish_fails_open_on_httpx_error(
-    tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
+def test_publish_fails_open_on_httpx_error(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     """Connection errors must NEVER raise to the caller."""
     snap = tmp_path / "snapshot.db"
     _write_fake_snapshot(snap)
     cfg = _cfg()
 
     class _ExplodingClient:
-        def __enter__(self) -> "_ExplodingClient":
+        def __enter__(self) -> _ExplodingClient:
             return self
 
         def __exit__(self, *_args: object) -> None:
@@ -268,9 +258,7 @@ def test_hash_matches_sha256_of_bytes(tmp_path: Path, monkeypatch: MonkeyPatch) 
     assert payload["size_bytes"] == len(body)
 
 
-def test_hash_stable_for_real_snapshot_content(
-    tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
+def test_hash_stable_for_real_snapshot_content(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     """End-to-end: create a real SQLite snapshot, verify hash matches stored bytes."""
     src = tmp_path / "memory.db"
     conn = sqlite3.connect(str(src))

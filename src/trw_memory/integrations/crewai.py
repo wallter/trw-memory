@@ -55,8 +55,8 @@ except importlib.metadata.PackageNotFoundError as exc:
 
 if _parse_version(_crewai_version) < _MIN_CREWAI_VERSION:
     raise ImportError(
-        f'crewai>={_MIN_CREWAI_VERSION[0]}.{_MIN_CREWAI_VERSION[1]}.{_MIN_CREWAI_VERSION[2]} '
-        f'is required for the CrewAI adapter (found {_crewai_version}). '
+        f"crewai>={_MIN_CREWAI_VERSION[0]}.{_MIN_CREWAI_VERSION[1]}.{_MIN_CREWAI_VERSION[2]} "
+        f"is required for the CrewAI adapter (found {_crewai_version}). "
         'Install it with: pip install "trw-memory[crewai]"'
     )
 
@@ -181,10 +181,7 @@ class TRWCrewStorage(BackendOwnerMixin):
             )
             for entry in entries
             if entry.importance >= score_threshold
-            and (
-                str_filter is None
-                or all(entry.metadata.get(key) == value for key, value in str_filter.items())
-            )
+            and (str_filter is None or all(entry.metadata.get(key) == value for key, value in str_filter.items()))
         ]
         return results
 

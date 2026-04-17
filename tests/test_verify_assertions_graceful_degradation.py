@@ -58,6 +58,7 @@ class TestGracefulDegradation:
         f.write_text("hello_world")
         # Make file unreadable (only works if not root)
         import os
+
         if os.getuid() != 0:
             f.chmod(0o000)
             try:

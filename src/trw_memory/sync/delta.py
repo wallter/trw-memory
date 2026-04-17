@@ -39,7 +39,9 @@ def _normalize_hash_value(value: object) -> object:
     if isinstance(value, float):
         return float(f"{value:.6f}")
     if isinstance(value, dict):
-        return {str(key): _normalize_hash_value(val) for key, val in sorted(value.items(), key=lambda item: str(item[0]))}
+        return {
+            str(key): _normalize_hash_value(val) for key, val in sorted(value.items(), key=lambda item: str(item[0]))
+        }
     if isinstance(value, (list, tuple)):
         return [_normalize_hash_value(item) for item in value]
     return value
@@ -75,9 +77,7 @@ class DeltaTracker:
             from trw_memory.storage._row_mapper import row_to_entry
             from trw_memory.storage._shared import ENTRY_COLUMNS
 
-            cols = ", ".join(
-                "expires_at AS expires" if c == "expires_at" else c for c in ENTRY_COLUMNS
-            )
+            cols = ", ".join("expires_at AS expires" if c == "expires_at" else c for c in ENTRY_COLUMNS)
             sql = (
                 f"SELECT {cols} FROM memories "  # noqa: S608
                 f"WHERE sync_seq > ? AND (last_synced_at IS NULL OR last_synced_at = '') "

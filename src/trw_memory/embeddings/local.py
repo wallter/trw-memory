@@ -23,6 +23,8 @@ logger = structlog.get_logger(__name__)
 
 _DEFAULT_MODEL = "all-MiniLM-L6-v2"
 _DEFAULT_DIM = 384
+
+
 class LocalEmbeddingProvider:
     """Sentence-transformers embedding provider with lazy model loading.
 

@@ -172,9 +172,7 @@ def memory_store_impl(
                     raise StorageError(
                         f"failed to persist vector for {entry_id!r}; rollback did not complete cleanly"
                     ) from exc
-                raise StorageError(
-                    f"failed to persist vector for {entry_id!r}; entry write was rolled back"
-                ) from exc
+                raise StorageError(f"failed to persist vector for {entry_id!r}; entry write was rolled back") from exc
         try:
             # Graph enrichment is a secondary index over the stored entry, so we
             # dispatch it after the canonical row/vector write succeeds.
@@ -229,6 +227,7 @@ def register_store_tool(mcp: McpServer) -> None:
         mcp: FastMCP server instance (imported lazily to keep fastmcp optional).
     """
     from trw_memory.integrations._backend import create_backend_from_config
+
     @mcp.tool()
     async def memory_store(
         content: str,

@@ -21,9 +21,7 @@ from trw_memory.graph import (
     detect_clusters,
     propagate_impact,
 )
-from trw_memory.models.memory import Anchor, MemoryEntry
 from trw_memory.storage._schema import ensure_schema
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -78,9 +76,7 @@ def _insert_edge(
 
 def _get_importance(conn: sqlite3.Connection, entry_id: str) -> float:
     """Read the importance field for an entry."""
-    row = conn.execute(
-        "SELECT importance FROM memories WHERE id = ?", (entry_id,)
-    ).fetchone()
+    row = conn.execute("SELECT importance FROM memories WHERE id = ?", (entry_id,)).fetchone()
     assert row is not None, f"Entry {entry_id} not found"
     return float(row[0])
 

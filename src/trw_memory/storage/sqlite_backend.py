@@ -74,14 +74,13 @@ def _apply_sqlcipher_pragmas(conn: Any) -> None:
     conn.execute(f"PRAGMA cipher_page_size = {SQLCIPHER_CIPHER_PAGE_SIZE}")
     conn.execute(f"PRAGMA kdf_iter = {SQLCIPHER_KDF_ITER}")
 
+
 # ---------------------------------------------------------------------------
 # Column helpers
 # ---------------------------------------------------------------------------
 
 _COLUMNS = ENTRY_COLUMNS
-_SELECT_COLUMNS_SQL = ", ".join(
-    "expires_at AS expires" if column == "expires_at" else column for column in _COLUMNS
-)
+_SELECT_COLUMNS_SQL = ", ".join("expires_at AS expires" if column == "expires_at" else column for column in _COLUMNS)
 _INSERT_COLUMNS_SQL = ", ".join(_COLUMNS)
 
 # Allowlist for UPDATE: all columns except immutable ones.
@@ -99,9 +98,7 @@ _TIMESTAMPED_BACKUP_RE: re.Pattern[str] = re.compile(
 # Pre-PRD-CORE-139 filenames. These are sacred: count against the keep budget
 # but are never pruning victims, so forensic evidence captured before the
 # rotation change is never silently destroyed on upgrade.
-_LEGACY_CORRUPT_NAMES: frozenset[str] = frozenset(
-    {"memory.db.corrupt.bak", "memory.db.corrupt.bak.1"}
-)
+_LEGACY_CORRUPT_NAMES: frozenset[str] = frozenset({"memory.db.corrupt.bak", "memory.db.corrupt.bak.1"})
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +265,7 @@ class SQLiteBackend(StorageBackend):
         if sqlcipher_key_hex is not None:
             if len(sqlcipher_key_hex) != 64 or any(ch not in "0123456789abcdef" for ch in sqlcipher_key_hex):
                 raise ValueError("sqlcipher_key_hex must be a 64-character lowercase hex string")
-            conn.execute(f'PRAGMA key = "x\'{sqlcipher_key_hex}\'"')  # noqa: S608
+            conn.execute(f"PRAGMA key = \"x'{sqlcipher_key_hex}'\"")
             _apply_sqlcipher_pragmas(conn)
             conn.execute("SELECT count(*) FROM sqlite_master")
         return conn

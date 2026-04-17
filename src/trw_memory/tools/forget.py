@@ -134,7 +134,9 @@ def memory_forget_impl(
                 deleted_count += 1
                 if supports_tier_runtime(backend):
                     remove_entry_from_tiers(cfg, namespace, entry.id)
-        except StorageError as exc:  # per-item error handling: log delete failure for this entry, continue bulk delete  # noqa: PERF203
+        except (
+            StorageError
+        ) as exc:  # per-item error handling: log delete failure for this entry, continue bulk delete
             logger.warning("memory_forget_delete_error", memory_id=entry.id, error=str(exc))
 
     logger.info(
@@ -161,6 +163,7 @@ def register_forget_tool(mcp: McpServer) -> None:
         mcp: FastMCP server instance (imported lazily to keep fastmcp optional).
     """
     from trw_memory.integrations._backend import create_backend_from_config
+
     async def memory_forget(
         memory_id: str | None = None,
         query: str | None = None,

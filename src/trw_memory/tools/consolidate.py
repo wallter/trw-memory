@@ -15,9 +15,9 @@ from datetime import datetime, timezone
 
 import structlog
 
-from trw_memory.integrations._backend import discover_namespace_backends
 from trw_memory.embeddings import get_local_embedder
 from trw_memory.exceptions import ConfigError, StorageError
+from trw_memory.integrations._backend import discover_namespace_backends
 from trw_memory.lifecycle.consolidation import consolidate_cycle
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
@@ -123,7 +123,9 @@ def _promote_all_team_namespaces(
                     logger.debug("team_namespace_wildcard_skip_completed", namespace=namespace)
                     continue
 
-                project_backend = namespace_backend_factory("project:default") if namespace_backend_factory else store_backend
+                project_backend = (
+                    namespace_backend_factory("project:default") if namespace_backend_factory else store_backend
+                )
                 try:
                     namespace_results.append(
                         _promote_team_memories(

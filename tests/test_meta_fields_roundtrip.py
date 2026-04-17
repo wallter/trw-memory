@@ -14,15 +14,10 @@ import pytest
 
 from trw_memory.models.memory import (
     Anchor,
-    Confidence,
     MemoryEntry,
-    MemoryType,
-    ProtectionTier,
 )
 from trw_memory.storage._schema import ensure_schema
-from trw_memory.storage._shared import ENTRY_COLUMNS
 from trw_memory.storage.sqlite_backend import SQLiteBackend
-
 
 # ---------------------------------------------------------------------------
 # Helpers
