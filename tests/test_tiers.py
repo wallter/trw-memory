@@ -543,8 +543,7 @@ class TestColdTier:
         assert yaml_file.exists()
 
     def test_cold_promote_rolls_back_restore_when_warm_add_fails(self, mgr: TierManager, mem_dir: Path) -> None:
-        from trw_memory.storage.persistence import write_yaml
-        from trw_memory.storage.persistence import read_yaml
+        from trw_memory.storage.persistence import read_yaml, write_yaml
 
         cold_partition = mgr._cold_dir() / "2025" / "06"
         cold_partition.mkdir(parents=True, exist_ok=True)
@@ -602,8 +601,7 @@ class TestColdTier:
         mgr: TierManager,
         mem_dir: Path,
     ) -> None:
-        from trw_memory.storage.persistence import read_yaml
-        from trw_memory.storage.persistence import write_yaml
+        from trw_memory.storage.persistence import read_yaml, write_yaml
 
         cold_partition = mgr._cold_dir() / "2025" / "06"
         cold_partition.mkdir(parents=True, exist_ok=True)
@@ -1433,7 +1431,9 @@ class TestTierPerformanceContracts:
 
         assert peak < 50 * 1024 * 1024
 
-    def test_sweep_processes_100_entries_under_5_seconds(self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig) -> None:
+    def test_sweep_processes_100_entries_under_5_seconds(
+        self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig
+    ) -> None:
         from trw_memory.storage.persistence import write_yaml
 
         entries_dir = mem_dir / "entries"

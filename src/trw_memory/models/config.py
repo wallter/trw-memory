@@ -158,9 +158,13 @@ class MemoryConfig(BaseSettings):
         validation_alias=AliasChoices("encryption_enabled", "memory_encryption_enabled"),
         description="Enable field-level encryption",
     )
-    encryption_algorithm: str = Field(default="AES-256-GCM", description="Encryption algorithm for field-level encryption")
+    encryption_algorithm: str = Field(
+        default="AES-256-GCM", description="Encryption algorithm for field-level encryption"
+    )
     key_source: Literal["keyring", "env", "file"] = Field(default="env", description="Source for encryption master key")
-    key_file_path: str = Field(default="~/.trw-memory/master.key", description="Path to master key file when key_source='file'")
+    key_file_path: str = Field(
+        default="~/.trw-memory/master.key", description="Path to master key file when key_source='file'"
+    )
     auto_generate_key: bool = Field(
         default=True,
         validation_alias=AliasChoices("auto_generate_key", "memory_auto_generate_key"),
@@ -204,8 +208,12 @@ class MemoryConfig(BaseSettings):
 
     # Dedup
     dedup_enabled: bool = Field(default=True, description="Enable semantic deduplication")
-    dedup_skip_threshold: float = Field(default=0.95, ge=0.0, le=1.0, description="Similarity threshold for skipping duplicate entries")
-    dedup_merge_threshold: float = Field(default=0.85, ge=0.0, le=1.0, description="Similarity threshold for merging similar entries")
+    dedup_skip_threshold: float = Field(
+        default=0.95, ge=0.0, le=1.0, description="Similarity threshold for skipping duplicate entries"
+    )
+    dedup_merge_threshold: float = Field(
+        default=0.85, ge=0.0, le=1.0, description="Similarity threshold for merging similar entries"
+    )
 
     # Tiers
     hot_max_entries: int = Field(default=50, gt=0, description="Maximum entries in the hot tier")
@@ -229,35 +237,53 @@ class MemoryConfig(BaseSettings):
     decay_half_life_days: float = Field(default=14.0, gt=0.0, description="Half-life in days for recency decay")
     decay_use_exponent: float = Field(default=0.6, ge=0.0, le=1.0, description="Exponent for utility-based decay")
     q_learning_rate: float = Field(default=0.15, ge=0.0, le=1.0, description="Q-learning update rate")
-    score_relevance_weight: float = Field(default=0.4, ge=0.0, le=1.0, description="Weight for relevance in composite score")
-    score_recency_weight: float = Field(default=0.3, ge=0.0, le=1.0, description="Weight for recency in composite score")
-    score_importance_weight: float = Field(default=0.3, ge=0.0, le=1.0, description="Weight for importance in composite score")
+    score_relevance_weight: float = Field(
+        default=0.4, ge=0.0, le=1.0, description="Weight for relevance in composite score"
+    )
+    score_recency_weight: float = Field(
+        default=0.3, ge=0.0, le=1.0, description="Weight for recency in composite score"
+    )
+    score_importance_weight: float = Field(
+        default=0.3, ge=0.0, le=1.0, description="Weight for importance in composite score"
+    )
 
     # Consolidation
     consolidation_enabled: bool = Field(default=True, description="Enable periodic consolidation of similar entries")
-    consolidation_similarity_threshold: float = Field(default=0.75, ge=0.0, le=1.0, description="Cosine similarity threshold for consolidation clustering")
+    consolidation_similarity_threshold: float = Field(
+        default=0.75, ge=0.0, le=1.0, description="Cosine similarity threshold for consolidation clustering"
+    )
     consolidation_min_cluster: int = Field(default=3, ge=2, description="Minimum cluster size for consolidation")
-    consolidation_max_per_cycle: int = Field(default=50, gt=0, description="Maximum entries to evaluate in one consolidation cycle")
+    consolidation_max_per_cycle: int = Field(
+        default=50, gt=0, description="Maximum entries to evaluate in one consolidation cycle"
+    )
     consolidation_interval_days: int = Field(default=7, gt=0, description="Days between consolidation sweeps")
 
     # Audit
     audit_enabled: bool = Field(default=True, description="Enable audit logging of all memory operations")
     audit_log_path: str = Field(default="", description="Path to JSONL audit log file")
-    audit_retention_days: int = Field(default=365, gt=0, description="Days of audit history to retain before compaction")
-    fsync_on_append: bool = Field(default=False, description="Call os.fsync() after each audit log write for crash safety")
+    audit_retention_days: int = Field(
+        default=365, gt=0, description="Days of audit history to retain before compaction"
+    )
+    fsync_on_append: bool = Field(
+        default=False, description="Call os.fsync() after each audit log write for crash safety"
+    )
 
     # PII
     pii_enabled: bool = Field(default=True, description="Enable PII detection in memory content")
     pii_action: Literal["block", "redact", "warn"] = "warn"
     pii_entropy_threshold: float = Field(default=4.5, gt=0.0, description="Shannon entropy threshold for PII detection")
-    pii_custom_patterns: list[str] = Field(default_factory=list, description="Additional regex patterns treated as custom PII")
+    pii_custom_patterns: list[str] = Field(
+        default_factory=list, description="Additional regex patterns treated as custom PII"
+    )
 
     # Poisoning defense
     poisoning_detection_enabled: bool = Field(default=True, description="Enable statistical poisoning detection")
     poisoning_z_threshold: float = Field(default=3.0, gt=0.0, description="Z-score threshold for anomaly detection")
     quarantine_path: str = Field(default="", description="Directory where quarantined entries are written")
     max_entry_chars: int = Field(default=10_240, gt=0, description="Maximum combined content/detail character count")
-    max_memory_writes_per_minute: int = Field(default=10, ge=0, description="Per-session write limit enforced over a rolling minute")
+    max_memory_writes_per_minute: int = Field(
+        default=10, ge=0, description="Per-session write limit enforced over a rolling minute"
+    )
     rate_limit_state_path: str = Field(default="", description="Path to the persisted write-rate limiter state file")
 
     # Recovery policy (PRD-CORE-138)

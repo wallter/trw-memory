@@ -10,7 +10,6 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -19,7 +18,6 @@ from trw_memory.lifecycle._recall import record_recall_access
 from trw_memory.lifecycle.scoring import entry_utility, feedback_decay_score
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
-
 
 # ---------------------------------------------------------------------------
 # FR01: Enhanced Memory Schema
@@ -194,13 +192,13 @@ class TestFeedbackDecayScore:
     def test_recalls_with_no_helpful_decays(self) -> None:
         """10 recalls, 0 helpful: moderate decay."""
         score = feedback_decay_score(importance=0.8, recall_count=10, helpful_count=0)
-        expected = 0.8 * (0.95 ** 10)  # 0.8 * ~0.5987 = ~0.479
+        expected = 0.8 * (0.95**10)  # 0.8 * ~0.5987 = ~0.479
         assert score == pytest.approx(expected, rel=1e-4)
 
     def test_100_recalls_no_helpful_heavy_decay(self) -> None:
         """100 recalls, 0 helpful: heavy decay."""
         score = feedback_decay_score(importance=0.8, recall_count=100, helpful_count=0)
-        expected = 0.8 * (0.95 ** 100)  # Very small
+        expected = 0.8 * (0.95**100)  # Very small
         assert score == pytest.approx(expected, rel=1e-4)
         assert score < 0.01
 
@@ -212,7 +210,7 @@ class TestFeedbackDecayScore:
     def test_helpful_counteracts_decay(self) -> None:
         """10 recalls, 10 helpful: exponent = 1, minimal decay."""
         score = feedback_decay_score(importance=0.8, recall_count=10, helpful_count=10)
-        expected = 0.8 * (0.95 ** 1)  # 0.8 * 0.95 = 0.76
+        expected = 0.8 * (0.95**1)  # 0.8 * 0.95 = 0.76
         assert score == pytest.approx(expected, rel=1e-4)
 
     def test_high_helpful_ratio_preserves_score(self) -> None:
@@ -224,7 +222,7 @@ class TestFeedbackDecayScore:
     def test_partial_helpful(self) -> None:
         """100 recalls, 10 helpful: exponent = 10, same as 10/0 case."""
         score = feedback_decay_score(importance=0.8, recall_count=100, helpful_count=10)
-        expected = 0.8 * (0.95 ** 10)
+        expected = 0.8 * (0.95**10)
         assert score == pytest.approx(expected, rel=1e-4)
 
     def test_clamped_to_01(self) -> None:

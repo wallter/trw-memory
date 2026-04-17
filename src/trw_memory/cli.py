@@ -61,7 +61,7 @@ def _cli_error_boundary(fn: Callable[P, object]) -> Callable[P, object]:
     Works with both sync and async callables.
     """
 
-    async_fn = cast(Callable[P, Awaitable[object]], fn)
+    async_fn = cast("Callable[P, Awaitable[object]]", fn)
     sync_fn = fn
 
     @functools.wraps(fn)
@@ -89,8 +89,8 @@ def _cli_error_boundary(fn: Callable[P, object]) -> Callable[P, object]:
     import asyncio as _asyncio
 
     if _asyncio.iscoroutinefunction(fn):
-        return cast(Callable[P, object], async_wrapper)
-    return cast(Callable[P, object], sync_wrapper)
+        return cast("Callable[P, object]", async_wrapper)
+    return cast("Callable[P, object]", sync_wrapper)
 
 
 def _open_validated_backend(config: MemoryConfig, namespace: str) -> tuple[str, StorageBackend]:

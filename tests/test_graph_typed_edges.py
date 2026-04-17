@@ -105,13 +105,10 @@ def _count_edges(conn: sqlite3.Connection, edge_type: str | None = None) -> int:
     return int(row[0]) if row else 0
 
 
-def _get_edge_metadata(
-    conn: sqlite3.Connection, source_id: str, target_id: str, edge_type: str
-) -> dict[str, str]:
+def _get_edge_metadata(conn: sqlite3.Connection, source_id: str, target_id: str, edge_type: str) -> dict[str, str]:
     """Get edge metadata for a specific edge."""
     row = conn.execute(
-        "SELECT edge_metadata FROM memory_graph_edges "
-        "WHERE source_id = ? AND target_id = ? AND edge_type = ?",
+        "SELECT edge_metadata FROM memory_graph_edges WHERE source_id = ? AND target_id = ? AND edge_type = ?",
         (source_id, target_id, edge_type),
     ).fetchone()
     if row and row[0]:
@@ -152,14 +149,11 @@ class TestValidEdgeTypes:
         now = datetime.now(timezone.utc).isoformat()
         metadata = {"anchor_file": "src/graph.py", "reason": "shared_anchor"}
 
-        _upsert_edge(
-            conn, "e1", "e2", "co_anchored", 0.8, now, metadata=metadata
-        )
+        _upsert_edge(conn, "e1", "e2", "co_anchored", 0.8, now, metadata=metadata)
         conn.commit()
 
         row = conn.execute(
-            "SELECT edge_metadata FROM memory_graph_edges "
-            "WHERE source_id = ? AND target_id = ? AND edge_type = ?",
+            "SELECT edge_metadata FROM memory_graph_edges WHERE source_id = ? AND target_id = ? AND edge_type = ?",
             ("e1", "e2", "co_anchored"),
         ).fetchone()
         assert row is not None
@@ -176,8 +170,7 @@ class TestValidEdgeTypes:
         conn.commit()
 
         row = conn.execute(
-            "SELECT edge_metadata FROM memory_graph_edges "
-            "WHERE source_id = ? AND target_id = ? AND edge_type = ?",
+            "SELECT edge_metadata FROM memory_graph_edges WHERE source_id = ? AND target_id = ? AND edge_type = ?",
             ("e1", "e2", "similarity"),
         ).fetchone()
         assert row is not None
@@ -218,9 +211,7 @@ class TestValidEdgeTypes:
         large_metadata = {"key": "x" * 5000}
 
         with pytest.raises(ValueError, match="exceeds 4096 byte limit"):
-            _upsert_edge(
-                conn, "e1", "e2", "related_to", 0.5, now, metadata=large_metadata
-            )
+            _upsert_edge(conn, "e1", "e2", "related_to", 0.5, now, metadata=large_metadata)
 
     def test_upsert_edge_metadata_within_limit(self) -> None:
         """Edge metadata within 4096 bytes is accepted."""
@@ -229,9 +220,7 @@ class TestValidEdgeTypes:
         # Create metadata just under the limit
         ok_metadata = {"key": "x" * 100}
 
-        _upsert_edge(
-            conn, "e1", "e2", "related_to", 0.5, now, metadata=ok_metadata
-        )
+        _upsert_edge(conn, "e1", "e2", "related_to", 0.5, now, metadata=ok_metadata)
         conn.commit()
         assert _count_edges(conn) == 1
 
@@ -249,9 +238,7 @@ class TestCoAnchoredEdges:
         _insert_memory_row(conn, "e1", anchors_json=json.dumps(anchor_data))
         _insert_memory_row(conn, "e2", anchors_json=json.dumps(anchor_data))
 
-        count = create_co_anchored_edges(
-            conn, "e1", ["src/graph.py"]
-        )
+        count = create_co_anchored_edges(conn, "e1", ["src/graph.py"])
         assert count >= 1
         assert _count_edges(conn, "co_anchored") >= 1
 
@@ -278,9 +265,7 @@ class TestCoAnchoredEdges:
             _insert_memory_row(conn, f"e{i}", anchors_json=json.dumps(anchor_data))
 
         # Cap at 3 per file
-        count = create_co_anchored_edges(
-            conn, "e0", ["src/big.py"], max_per_file=3
-        )
+        count = create_co_anchored_edges(conn, "e0", ["src/big.py"], max_per_file=3)
         assert count <= 3
 
     def test_co_anchored_multiple_files(self) -> None:
@@ -323,7 +308,11 @@ class TestConflictResolution:
         _insert_memory_row(conn, "e1")
         _insert_memory_row(conn, "e2")
         _insert_edge(
-            conn, "e1", "e2", "conflicts_with", 1.0,
+            conn,
+            "e1",
+            "e2",
+            "conflicts_with",
+            1.0,
             metadata={"reason": "contradicting"},
         )
 

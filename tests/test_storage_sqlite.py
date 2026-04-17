@@ -12,9 +12,9 @@ Covers:
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-import time
 
 import pytest
 
@@ -245,11 +245,7 @@ class TestListEntries:
 class TestEntriesWithAssertions:
     def test_count_with_assertions_returns_only_assertion_entries(self, backend: SQLiteBackend) -> None:
         with_assertions = make_entry("a1").model_copy(
-            update={
-                "assertions": [
-                    Assertion(type=AssertionType.GLOB_EXISTS, pattern="", target="src/main.py")
-                ]
-            }
+            update={"assertions": [Assertion(type=AssertionType.GLOB_EXISTS, pattern="", target="src/main.py")]}
         )
         without_assertions = make_entry("a2")
 

@@ -266,7 +266,7 @@ class TestConsolidateImplTeamDispatch:
         cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
 
         with create_backend_from_config(cfg, "team:sprint-37") as storage:
-            team_backend = cast(SQLiteBackend, storage)
+            team_backend = cast("SQLiteBackend", storage)
             memory_store_impl(
                 "team discovery",
                 "team:sprint-37",
@@ -315,7 +315,7 @@ class TestConsolidateImplTeamDispatch:
         finally:
             team_backend.close()
 
-        metadata = cast(dict[str, object], read_yaml(tmp_path / "team_sprint-37" / "namespace_lifecycle.yaml"))
+        metadata = cast("dict[str, object]", read_yaml(tmp_path / "team_sprint-37" / "namespace_lifecycle.yaml"))
         assert metadata["team_id"] == "sprint-37"
         assert metadata["expires_at"] is not None
         assert metadata["status"] == "completed"
@@ -348,7 +348,7 @@ class TestConsolidateImplTeamDispatch:
         assert result["promoted_count"] == 2
         assert result["discarded_count"] == 1
         assert result["namespace_id"] == "team:*"
-        namespaces = cast(list[dict[str, object]], result["namespaces"])
+        namespaces = cast("list[dict[str, object]]", result["namespaces"])
         per_namespace = {str(item["namespace_id"]): item for item in namespaces}
         assert per_namespace["team:sprint-37-impl"]["promoted_count"] == 1
         assert per_namespace["team:sprint-37-test"]["promoted_count"] == 1
@@ -405,7 +405,7 @@ class TestConsolidateImplTeamDispatch:
             default_backend.close()
 
         assert result["promoted_count"] == 1
-        namespaces = cast(list[dict[str, object]], result["namespaces"])
+        namespaces = cast("list[dict[str, object]]", result["namespaces"])
         assert [str(item["namespace_id"]) for item in namespaces] == ["team:sprint-37-active"]
 
     def test_team_namespace_repeat_consolidation_skips_after_completion(self, tmp_path: Path) -> None:
@@ -510,7 +510,7 @@ class TestConsolidateImplTeamDispatch:
 
         assert result["status"] == "partial"
         assert result["promoted_count"] == 1
-        assert len(cast(list[dict[str, str]], result["errors"])) == 1
+        assert len(cast("list[dict[str, str]]", result["errors"])) == 1
 
     def test_team_namespace_consolidation_completes_under_five_seconds_for_200_entries(self, tmp_path: Path) -> None:
         cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path))
@@ -544,13 +544,13 @@ class TestConsolidateImplTeamDispatch:
             project_backend.store(_make_entry("project-entry", importance=0.8, namespace="project:default"))
 
             project_results = memory_recall_impl("", "project:default", backend=project_backend, config=cfg)
-            project_ids = {str(item["id"]) for item in cast(list[dict[str, object]], project_results["memories"])}
+            project_ids = {str(item["id"]) for item in cast("list[dict[str, object]]", project_results["memories"])}
             assert "project-entry" in project_ids
             assert "team-entry" not in project_ids
 
             assert team_backend.delete("team-entry") is True
             post_delete = memory_recall_impl("", "project:default", backend=project_backend, config=cfg)
-            post_delete_ids = {str(item["id"]) for item in cast(list[dict[str, object]], post_delete["memories"])}
+            post_delete_ids = {str(item["id"]) for item in cast("list[dict[str, object]]", post_delete["memories"])}
             assert "project-entry" in post_delete_ids
             assert "team-entry" not in post_delete_ids
 
@@ -564,7 +564,7 @@ class TestConsolidateImplTeamDispatch:
 
             assert result["promoted_count"] == 1
             final_results = memory_recall_impl("", "project:default", backend=project_backend, config=cfg)
-            final_ids = {str(item["id"]) for item in cast(list[dict[str, object]], final_results["memories"])}
+            final_ids = {str(item["id"]) for item in cast("list[dict[str, object]]", final_results["memories"])}
             assert "project-entry" in final_ids
             assert "promoted-team-entry-2" in final_ids
             assert "team-entry-2" not in final_ids

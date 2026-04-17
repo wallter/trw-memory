@@ -122,7 +122,8 @@ class AuditLog:
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     for payload in chained:
                         fh.write(
-                            json.dumps(payload, sort_keys=True, separators=(",", ":"), default=self._json_default) + "\n"
+                            json.dumps(payload, sort_keys=True, separators=(",", ":"), default=self._json_default)
+                            + "\n"
                         )
                     fh.flush()
                     if self._fsync:

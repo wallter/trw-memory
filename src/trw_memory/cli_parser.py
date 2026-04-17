@@ -17,11 +17,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Global logging flags
     parser.add_argument(
-        "-v", "--verbose", action="count", default=0,
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
         help="Increase verbosity (-v=DEBUG, -vv=DEBUG+more). Stacks.",
     )
     parser.add_argument(
-        "-q", "--quiet", action="store_true",
+        "-q",
+        "--quiet",
+        action="store_true",
         help="Suppress output except warnings and errors",
     )
     parser.add_argument(
@@ -144,7 +149,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_snap_list.add_argument("--namespace", default="default", help="Namespace")
     p_snap_list.add_argument("--db", default=None, help="Optional DB path override")
     p_snap_list.add_argument(
-        "--format", dest="fmt", choices=["table", "json"], default="table",
+        "--format",
+        dest="fmt",
+        choices=["table", "json"],
+        default="table",
         help="Output format",
     )
 

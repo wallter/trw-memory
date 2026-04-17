@@ -36,8 +36,11 @@ class TestMemoryEntryEmptyStringCoercion:
     def test_all_three_empty_together(self) -> None:
         """All three empty strings at once should not raise."""
         entry = MemoryEntry(
-            id="test", content="test",
-            type="", confidence="", protection_tier="",
+            id="test",
+            content="test",
+            type="",
+            confidence="",
+            protection_tier="",
         )
         assert entry.type == MemoryType.PATTERN.value
         assert entry.confidence == Confidence.UNVERIFIED.value
@@ -46,8 +49,11 @@ class TestMemoryEntryEmptyStringCoercion:
     def test_valid_values_still_work(self) -> None:
         """Non-empty valid values are accepted as before."""
         entry = MemoryEntry(
-            id="test", content="test",
-            type="incident", confidence="high", protection_tier="critical",
+            id="test",
+            content="test",
+            type="incident",
+            confidence="high",
+            protection_tier="critical",
         )
         assert entry.type == MemoryType.INCIDENT.value
         assert entry.confidence == Confidence.HIGH.value

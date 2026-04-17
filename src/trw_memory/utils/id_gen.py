@@ -42,6 +42,5 @@ def generate_compact_id(
             prefix,
         )
     raise RuntimeError(
-        f"generate_compact_id: exceeded {max_retries} retries for prefix={prefix!r}; "
-        "collision space may be exhausted"
+        f"generate_compact_id: exceeded {max_retries} retries for prefix={prefix!r}; collision space may be exhausted"
     )

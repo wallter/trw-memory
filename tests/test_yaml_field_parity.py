@@ -547,9 +547,7 @@ class TestSQLiteAssertionsUpdate:
         )
         db.store(entry)
 
-        new_assertions = [
-            Assertion(type=AssertionType.GLOB_EXISTS, pattern="", target="src/**/*.py")
-        ]
+        new_assertions = [Assertion(type=AssertionType.GLOB_EXISTS, pattern="", target="src/**/*.py")]
         result = db.update("M-sql-assert", assertions=new_assertions)
         assert result is not None
         assert len(result.assertions) == 1

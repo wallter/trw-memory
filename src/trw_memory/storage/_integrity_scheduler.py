@@ -74,7 +74,7 @@ class IntegrityScheduler:
         self,
         db_path: Path,
         interval_minutes: int,
-        on_regression: "callable[[Path, str], None] | None" = None,  # type: ignore[valid-type]
+        on_regression: callable[[Path, str], None] | None = None,  # type: ignore[valid-type]
     ) -> None:
         self._db_path = db_path
         self._interval_seconds: float = max(0.0, float(interval_minutes) * 60.0)

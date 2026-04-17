@@ -9,8 +9,8 @@ Test count target: >= 40 test functions.
 from __future__ import annotations
 
 import importlib
-import importlib.metadata
 import importlib.machinery
+import importlib.metadata
 import sys
 import types
 from collections.abc import Generator
@@ -650,7 +650,9 @@ class TestCrewAIAdapter:
     def test_reset_uses_bulk_namespace_delete(self, tmp_backend: Any) -> None:
         """reset() should clear the namespace through the backend bulk path."""
         storage = self.mod.TRWCrewStorage(namespace="default", backend=tmp_backend)
-        with patch.object(tmp_backend, "delete_by_namespace", wraps=tmp_backend.delete_by_namespace) as delete_namespace:
+        with patch.object(
+            tmp_backend, "delete_by_namespace", wraps=tmp_backend.delete_by_namespace
+        ) as delete_namespace:
             storage.save("entry 1")
             storage.save("entry 2")
             storage.reset()

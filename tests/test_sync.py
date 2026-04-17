@@ -989,9 +989,7 @@ class TestRetryQueue:
         """Empty lines in the JSONL file should not cause errors."""
         queue_path = tmp_path / "queue.jsonl"
         queue_path.write_text(
-            '{"entry_id": "M-001", "data": {"summary": "test"}, "retries": 0}\n'
-            "\n"
-            "\n",
+            '{"entry_id": "M-001", "data": {"summary": "test"}, "retries": 0}\n\n\n',
             encoding="utf-8",
         )
         queue = RetryQueue(queue_path)

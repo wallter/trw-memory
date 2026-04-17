@@ -295,9 +295,7 @@ def _create_consolidated_entry(
                 raise StorageError(
                     f"failed to persist vector for {entry.id!r}; rollback did not complete cleanly"
                 ) from exc
-            raise StorageError(
-                f"failed to persist vector for {entry.id!r}; entry write was rolled back"
-            ) from exc
+            raise StorageError(f"failed to persist vector for {entry.id!r}; entry write was rolled back") from exc
     try:
         # Consolidation lineage edges are secondary structure and should not keep
         # the consolidated entry itself on the write path.
@@ -356,7 +354,11 @@ def _archive_originals(
             if updated is None:
                 raise StorageError(f"failed to archive original entry {entry.id!r}")
             processed.append(entry.id)
-        except (StorageError, ValueError, RuntimeError) as exc:  # per-item error handling: re-raise but log each failure individually  # noqa: PERF203
+        except (
+            StorageError,
+            ValueError,
+            RuntimeError,
+        ) as exc:  # per-item error handling: re-raise but log each failure individually
             logger.exception(
                 "consolidation_archive_failed",
                 entry_id=entry.id,

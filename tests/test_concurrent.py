@@ -154,9 +154,7 @@ class TestConcurrentAccess:
                 with errors_lock:
                     errors.append(exc)
 
-        threads: list[threading.Thread] = [
-            threading.Thread(target=writer, args=(i,)) for i in range(num_writers)
-        ]
+        threads: list[threading.Thread] = [threading.Thread(target=writer, args=(i,)) for i in range(num_writers)]
         threads.extend(threading.Thread(target=reader, args=(i,)) for i in range(num_readers))
 
         for t in threads:

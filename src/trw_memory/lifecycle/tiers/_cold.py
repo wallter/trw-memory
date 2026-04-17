@@ -7,8 +7,8 @@ of infrequently accessed memory entries.
 from __future__ import annotations
 
 import contextlib
-from datetime import datetime, timezone
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -309,13 +309,17 @@ class ColdTierStore:
             if any(tok in text for tok in lower_tokens):
                 if promote:
                     entry_id = str(data.get("id", ""))
-                    promoted_entry = self.cold_promote(
-                        entry_id,
-                        restore_entry_fn=restore_entry_fn,
-                        delete_restored_entry_fn=delete_restored_entry_fn,
-                        force_delete_restored_entry_fn=force_delete_restored_entry_fn,
-                        verify_restored_entry_removed_fn=verify_restored_entry_removed_fn,
-                    ) if entry_id else None
+                    promoted_entry = (
+                        self.cold_promote(
+                            entry_id,
+                            restore_entry_fn=restore_entry_fn,
+                            delete_restored_entry_fn=delete_restored_entry_fn,
+                            force_delete_restored_entry_fn=force_delete_restored_entry_fn,
+                            verify_restored_entry_removed_fn=verify_restored_entry_removed_fn,
+                        )
+                        if entry_id
+                        else None
+                    )
                     if promoted_entry is None:
                         continue
                     results.append(promoted_entry)

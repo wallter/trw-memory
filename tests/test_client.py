@@ -40,9 +40,9 @@ from trw_memory.graph import wait_for_graph_updates
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.security.audit import AuditLog
 from trw_memory.security.keys import clear_key_cache
-from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 # ---------------------------------------------------------------------------
@@ -149,7 +149,7 @@ class TestConstructor:
 
         assert results
         assert results[0]["content"] == "encrypted runtime path"
-        assert statements[0].startswith('PRAGMA key = "x\'')
+        assert statements[0].startswith("PRAGMA key = \"x'")
         assert "PRAGMA cipher = 'aes-256-cbc'" in statements
         assert "PRAGMA cipher_page_size = 4096" in statements
         assert "PRAGMA kdf_iter = 256000" in statements
@@ -346,7 +346,9 @@ class TestRbacEnforcement:
         client: MemoryClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        entries = [MemoryEntry(id=f"M-seed-{index}", content="seed", namespace="default") for index in range(10_050)] + [
+        entries = [
+            MemoryEntry(id=f"M-seed-{index}", content="seed", namespace="default") for index in range(10_050)
+        ] + [
             MemoryEntry(
                 id=f"M-alice-{index}",
                 content="alice memory",
@@ -358,9 +360,9 @@ class TestRbacEnforcement:
         deleted_ids: set[str] = set()
         backend = MagicMock()
         backend.count.return_value = len(entries)
-        backend.list_entries.side_effect = lambda **kwargs: [
-            entry for entry in entries if entry.id not in deleted_ids
-        ][: int(kwargs["limit"])]
+        backend.list_entries.side_effect = lambda **kwargs: [entry for entry in entries if entry.id not in deleted_ids][
+            : int(kwargs["limit"])
+        ]
         backend.delete.side_effect = lambda entry_id: deleted_ids.add(entry_id) is None
         monkeypatch.setattr(client, "_get_backend", lambda: backend)
         monkeypatch.setattr("trw_memory.client.remove_entry_from_tiers", lambda *args, **kwargs: None)

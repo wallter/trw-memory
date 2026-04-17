@@ -37,7 +37,6 @@ from trw_memory.storage._schema import ensure_schema
 from trw_memory.storage.persistence import write_yaml
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -185,9 +184,7 @@ def test_hydrator_source_type_consolidated(tmp_path: Path) -> None:
     try:
         rebuilt = rebuild_from_cold(tmp_path, conn)
         assert rebuilt == 1, "consolidated entry must NOT be silently dropped"
-        row = conn.execute(
-            "SELECT type, source FROM memories WHERE id='L-CONS'"
-        ).fetchone()
+        row = conn.execute("SELECT type, source FROM memories WHERE id='L-CONS'").fetchone()
         assert row is not None
         assert row[0] == "pattern", "type must be hardcoded, not copied from source_type"
         assert row[1] == "consolidated", "source_type value must land on the source column"
@@ -272,9 +269,7 @@ def test_hydrator_normalizes_date_only(tmp_path: Path) -> None:
     conn = _open_fresh_db(tmp_path / "memory.db")
     try:
         rebuild_from_cold(tmp_path, conn)
-        row = conn.execute(
-            "SELECT created_at, updated_at FROM memories WHERE id='L-DATE'"
-        ).fetchone()
+        row = conn.execute("SELECT created_at, updated_at FROM memories WHERE id='L-DATE'").fetchone()
         assert row is not None
         assert row[0] == "2026-04-12T00:00:00+00:00"
         assert row[1] == "2026-04-12T00:00:00+00:00"
@@ -344,9 +339,7 @@ def test_malformed_yaml_skipped_with_warning(tmp_path: Path) -> None:
         with capture_logs() as logs:
             rebuilt = rebuild_from_cold(tmp_path, conn)
         assert rebuilt == 3
-        warns = [
-            r for r in logs if r.get("event") == "cold_rebuild_skipped" and r.get("log_level") == "warning"
-        ]
+        warns = [r for r in logs if r.get("event") == "cold_rebuild_skipped" and r.get("log_level") == "warning"]
         assert len(warns) == 1
         assert warns[0]["field"] == "id"
         assert "bad.yaml" in warns[0]["file"]
@@ -422,15 +415,8 @@ def test_symlink_traversal_skipped(tmp_path: Path) -> None:
             rebuilt = rebuild_from_cold(tmp_path, conn)
         assert rebuilt == 1  # only L-OK inserted
         # Ensure the escaped entry did NOT get hydrated
-        assert (
-            conn.execute("SELECT count(*) FROM memories WHERE id='L-EVIL'").fetchone()[0]
-            == 0
-        )
-        reasons = {
-            r.get("reason")
-            for r in logs
-            if r.get("event") == "cold_rebuild_skipped"
-        }
+        assert conn.execute("SELECT count(*) FROM memories WHERE id='L-EVIL'").fetchone()[0] == 0
+        reasons = {r.get("reason") for r in logs if r.get("event") == "cold_rebuild_skipped"}
         assert "path_traversal_guard" in reasons
     finally:
         conn.close()
@@ -513,9 +499,7 @@ def test_hydrate_yaml_datetime_object_created() -> None:
     from datetime import datetime, timezone
 
     dt = datetime(2026, 4, 12, 15, 30, 0, tzinfo=timezone.utc)
-    row = _hydrate_yaml(
-        {"id": "L-DT", "summary": "x", "created": dt, "updated": dt}
-    )
+    row = _hydrate_yaml({"id": "L-DT", "summary": "x", "created": dt, "updated": dt})
     assert row is not None
     from trw_memory.storage._cold_rebuild import _INSERT_COLUMNS
 
@@ -536,9 +520,7 @@ def test_hydrate_yaml_date_object_created() -> None:
 
 def test_hydrate_yaml_missing_updated_falls_back_to_created() -> None:
     """Permissive fallback: missing updated reuses created_at."""
-    row = _hydrate_yaml(
-        {"id": "L-NU", "summary": "x", "created": "2026-04-12"}
-    )
+    row = _hydrate_yaml({"id": "L-NU", "summary": "x", "created": "2026-04-12"})
     assert row is not None
     from trw_memory.storage._cold_rebuild import _INSERT_COLUMNS
 
@@ -612,11 +594,7 @@ def test_malformed_list_field_skipped_in_rebuild(tmp_path: Path) -> None:
     _make_yaml(tmp_path, "L-GOOD")
     bad = tmp_path / "memory" / "cold" / "2026" / "04" / "badlist.yaml"
     bad.write_text(
-        "id: L-BADLIST\n"
-        "summary: bad list\n"
-        "created: 2026-04-12\n"
-        "updated: 2026-04-12\n"
-        "tags: not-a-list\n",
+        "id: L-BADLIST\nsummary: bad list\ncreated: 2026-04-12\nupdated: 2026-04-12\ntags: not-a-list\n",
         encoding="utf-8",
     )
 
@@ -625,11 +603,7 @@ def test_malformed_list_field_skipped_in_rebuild(tmp_path: Path) -> None:
         with capture_logs() as logs:
             rebuilt = rebuild_from_cold(tmp_path, conn)
         assert rebuilt == 1
-        tags_warn = [
-            r
-            for r in logs
-            if r.get("event") == "cold_rebuild_skipped" and r.get("field") == "tags"
-        ]
+        tags_warn = [r for r in logs if r.get("event") == "cold_rebuild_skipped" and r.get("field") == "tags"]
         assert len(tags_warn) == 1
     finally:
         conn.close()
@@ -644,10 +618,7 @@ def test_duplicate_id_does_not_double_insert(tmp_path: Path) -> None:
     second_dir.mkdir(parents=True)
     second = second_dir / "L-DUP.yaml"
     second.write_text(
-        "id: L-DUP\n"
-        "summary: duplicate\n"
-        "created: 2026-04-12\n"
-        "updated: 2026-04-12\n",
+        "id: L-DUP\nsummary: duplicate\ncreated: 2026-04-12\nupdated: 2026-04-12\n",
         encoding="utf-8",
     )
 
@@ -681,11 +652,7 @@ def test_rebuild_skips_insert_sqlite_error(tmp_path: Path) -> None:
         with capture_logs() as logs:
             rebuilt = rebuild_from_cold(tmp_path, conn)
         assert rebuilt == 0
-        reasons = [
-            r.get("reason")
-            for r in logs
-            if r.get("event") == "cold_rebuild_skipped"
-        ]
+        reasons = [r.get("reason") for r in logs if r.get("event") == "cold_rebuild_skipped"]
         assert "insert_failed" in reasons
     finally:
         conn.close()

@@ -27,9 +27,7 @@ from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 # PRD-CORE-139: filename pattern for new timestamped backups.
-_TIMESTAMPED_BACKUP_RE = re.compile(
-    r"^memory\.db\.corrupt\.(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)(?:-\d+)?\.bak$"
-)
+_TIMESTAMPED_BACKUP_RE = re.compile(r"^memory\.db\.corrupt\.(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)(?:-\d+)?\.bak$")
 
 
 def _find_timestamped_backup(parent: Path) -> Path:
@@ -163,9 +161,7 @@ def test_fr03_strict_refuses_silent_empty_on_destroyed_sqlite_master(
     assert not db_path.exists()  # no new DB was created on strict refusal
 
 
-def test_fr03_strict_refusal_exception_contains_backup_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_fr03_strict_refusal_exception_contains_backup_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """FR03: exception message includes the absolute backup path."""
     db_path = tmp_path / "memory.db"
     _populate_db(db_path, entries=2)
@@ -191,9 +187,7 @@ def test_fr03_strict_refusal_exception_contains_backup_path(
 # ---------------------------------------------------------------------------
 
 
-def test_fr04_recover_cli_salvage_succeeds_when_select_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_fr04_recover_cli_salvage_succeeds_when_select_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """FR04: sqlite3 .recover CLI path restores rows when in-process SELECT fails."""
     db_path = tmp_path / "memory.db"
     _populate_db(db_path, entries=2)
@@ -205,6 +199,7 @@ def test_fr04_recover_cli_salvage_succeeds_when_select_fails(
     # Full DDL is brittle — return a populated row from _salvage_via_recover_cli directly
     # (the test proves the recovery path uses CLI rows, not that subprocess formatting is right).
     sentinel_row = sqlite3.Row
+
     # We can't easily construct sqlite3.Row instances without a cursor; mock with a
     # lightweight object exposing .keys() and iteration support like sqlite3.Row.
     class _FakeRow:
@@ -244,9 +239,7 @@ def test_fr04_recover_cli_salvage_succeeds_when_select_fails(
         conn.close()
 
 
-def test_fr04_recover_cli_unavailable_falls_through_to_strict(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_fr04_recover_cli_unavailable_falls_through_to_strict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """FR04: CLI unavailable (FileNotFoundError) falls through to strict refusal."""
     db_path = tmp_path / "memory.db"
     _populate_db(db_path, entries=2)
@@ -261,9 +254,7 @@ def test_fr04_recover_cli_unavailable_falls_through_to_strict(
         SQLiteBackend.recover_db(db_path, recovery_policy="strict")
 
 
-def test_fr04_recover_cli_timeout_falls_through_to_strict(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_fr04_recover_cli_timeout_falls_through_to_strict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """FR04: CLI timeout falls through to strict-mode refusal."""
     db_path = tmp_path / "memory.db"
     _populate_db(db_path, entries=2)
@@ -278,9 +269,7 @@ def test_fr04_recover_cli_timeout_falls_through_to_strict(
         SQLiteBackend.recover_db(db_path, recovery_policy="strict")
 
 
-def test_fr04_recover_cli_nonzero_exit_falls_through(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_fr04_recover_cli_nonzero_exit_falls_through(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """FR04: CLI non-zero exit code is treated as salvage failure."""
     db_path = tmp_path / "memory.db"
     _populate_db(db_path, entries=2)
@@ -295,9 +284,7 @@ def test_fr04_recover_cli_nonzero_exit_falls_through(
         SQLiteBackend.recover_db(db_path, recovery_policy="strict")
 
 
-def test_fr04_recover_cli_full_executescript_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_fr04_recover_cli_full_executescript_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """FR04: exercise the real _salvage_via_recover_cli tempdb/executescript path.
 
     Mocks subprocess.run to return a valid CREATE + INSERT dump so the helper
@@ -339,9 +326,7 @@ VALUES ('L-from-dump', 'rescued from cli dump', '2026-04-13T00:00:00+00:00', '20
         conn.close()
 
 
-def test_fr04_recover_cli_malformed_dump_falls_through(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_fr04_recover_cli_malformed_dump_falls_through(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """FR04: malformed dump (executescript raises sqlite3.Error) → empty list → strict refusal."""
     db_path = tmp_path / "memory.db"
     _populate_db(db_path, entries=2)
@@ -361,9 +346,7 @@ def test_fr04_recover_cli_malformed_dump_falls_through(
         SQLiteBackend.recover_db(db_path, recovery_policy="strict")
 
 
-def test_fr04_recover_cli_empty_dump_falls_through(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_fr04_recover_cli_empty_dump_falls_through(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """FR04: CLI returns 0 exit but empty stdout → strict refusal."""
     db_path = tmp_path / "memory.db"
     _populate_db(db_path, entries=2)
@@ -383,9 +366,7 @@ def test_fr04_recover_cli_empty_dump_falls_through(
 # ---------------------------------------------------------------------------
 
 
-def test_fr05_empty_ok_preserves_legacy_behavior(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_fr05_empty_ok_preserves_legacy_behavior(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """FR05: empty_ok policy preserves pre-PRD silent-empty behavior."""
     db_path = tmp_path / "memory.db"
     _populate_db(db_path, entries=2)
@@ -414,9 +395,7 @@ def test_fr05_empty_ok_preserves_legacy_behavior(
     assert db_path.exists()
 
 
-def test_fr05_empty_ok_logs_rows_salvaged_zero(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_fr05_empty_ok_logs_rows_salvaged_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """FR05: empty_ok fallback logs db_recovered with rows_salvaged=0 (legacy WARNING)."""
     db_path = tmp_path / "memory.db"
     _populate_db(db_path, entries=2)
@@ -456,9 +435,7 @@ def test_fr06_recover_db_accepts_recovery_policy_kwarg() -> None:
     assert sig.parameters["recovery_policy"].default == "strict"
 
 
-def test_fr06_policy_threaded_through_init(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_fr06_policy_threaded_through_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """FR06: recovery_policy kwarg flows from __init__ to recover_db."""
     db_path = tmp_path / "memory.db"
     _populate_db(db_path, entries=2)
@@ -513,9 +490,7 @@ def test_nfr01_healthy_open_path_unchanged_latency(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_nfr03_subprocess_called_without_shell(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_nfr03_subprocess_called_without_shell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """NFR03: subprocess.run invocation passes args as a list, never shell=True."""
     db_path = tmp_path / "memory.db"
     _populate_db(db_path, entries=2)
@@ -547,9 +522,7 @@ def test_nfr03_subprocess_called_without_shell(
 # ---------------------------------------------------------------------------
 
 
-def test_nfr04_strict_refusal_emits_structured_log(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_nfr04_strict_refusal_emits_structured_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """NFR04: strict-refusal path emits db_recovery_refused_strict at ERROR level."""
     db_path = tmp_path / "memory.db"
     _populate_db(db_path, entries=2)
@@ -656,7 +629,6 @@ def test_negative_empty_backup_still_produces_empty_db_under_strict(tmp_path: Pa
 # pruning), FR04 (legacy preservation), FR05 (salvage semantics unchanged),
 # NFR01-NFR04 (latency, idempotence, security, observability).
 
-import shutil as _shutil  # noqa: E402 — section-local alias to avoid shadowing
 
 from trw_memory.storage import sqlite_backend as _sqlite_backend_module  # noqa: E402
 
@@ -721,9 +693,7 @@ def _trigger_recovery(db_path: Path, monkeypatch: pytest.MonkeyPatch, *, keep_n:
             return iter(self._data.values())
 
     now = "2026-04-13T00:00:00+00:00"
-    fake_row = _FakeRow(
-        {"id": "L-ok", "content": "ok", "created_at": now, "updated_at": now}
-    )
+    fake_row = _FakeRow({"id": "L-ok", "content": "ok", "created_at": now, "updated_at": now})
     monkeypatch.setattr(
         SQLiteBackend,
         "_salvage_via_recover_cli",
@@ -837,7 +807,7 @@ def test_fr03_prune_uses_filename_not_mtime(tmp_path: Path) -> None:
 
     # Reverse the mtime order: t1 has the newest mtime, t3 the oldest.
     now = time.time()
-    os.utime(t1, (now, now))              # newest mtime
+    os.utime(t1, (now, now))  # newest mtime
     os.utime(t2, (now - 3600, now - 3600))
     os.utime(t3, (now - 7200, now - 7200))  # oldest mtime
 
@@ -1062,9 +1032,7 @@ def test_nfr04_rotation_emits_structured_log(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_negative_unlink_permission_error_is_swallowed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_negative_unlink_permission_error_is_swallowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Negative: Path.unlink raising PermissionError during prune does not propagate."""
     for day in range(1, 4):
         _write_timestamped_backup(tmp_path, f"2026-04-{day:02d}T00-00-00Z")
@@ -1103,9 +1071,7 @@ def test_negative_keep_equals_1_boundary(tmp_path: Path, monkeypatch: pytest.Mon
 # ---------------------------------------------------------------------------
 
 
-def test_integration_end_to_end_7_recoveries(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_integration_end_to_end_7_recoveries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Integration: 7 real recoveries with keep=5 leave exactly 5 timestamped files."""
     db_path = tmp_path / "memory.db"
 
@@ -1136,17 +1102,13 @@ def test_integration_end_to_end_7_recoveries(
         conn = SQLiteBackend.recover_db(db_path, recovery_policy="strict", corrupt_backup_keep=5)
         conn.close()
 
-    remaining = sorted(
-        p.name for p in tmp_path.iterdir() if _TIMESTAMPED_BACKUP_RE.fullmatch(p.name)
-    )
+    remaining = sorted(p.name for p in tmp_path.iterdir() if _TIMESTAMPED_BACKUP_RE.fullmatch(p.name))
     assert len(remaining) == 5
     # The two oldest (t=50 and t=51) were evicted.
     assert all("14-50Z" not in n and "14-51Z" not in n for n in remaining)
 
 
-def test_integration_mixed_legacy_and_new(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_integration_mixed_legacy_and_new(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Integration: legacy + timestamped coexist; only timestamped are ever pruned."""
     _write_legacy_backup(tmp_path, "memory.db.corrupt.bak", b"legacy-0")
     _write_legacy_backup(tmp_path, "memory.db.corrupt.bak.1", b"legacy-1")
@@ -1193,9 +1155,7 @@ def test_integration_mixed_legacy_and_new(
 # ---------------------------------------------------------------------------
 
 
-def test_regression_2_wide_overwrite_no_longer_occurs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_regression_2_wide_overwrite_no_longer_occurs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Regression: pre-PRD-139 2-wide rotation would have overwritten legacy files.
 
     Reproduces the 2026-04-12 pattern where a second corruption event destroyed
@@ -1222,10 +1182,7 @@ def test_regression_healthy_open_path_no_rotation(tmp_path: Path) -> None:
     backend.close()
 
     # No corrupt backup files should have been produced by a clean open.
-    corrupt_files = [
-        p for p in tmp_path.iterdir()
-        if p.name.startswith("memory.db.corrupt.")
-    ]
+    corrupt_files = [p for p in tmp_path.iterdir() if p.name.startswith("memory.db.corrupt.")]
     assert corrupt_files == []
 
 
@@ -1234,9 +1191,7 @@ def test_regression_healthy_open_path_no_rotation(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_migration_upgrade_preserves_legacy_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_migration_upgrade_preserves_legacy_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Migration: user upgrading from pre-139 keeps their legacy backups intact."""
     # Pre-upgrade state: directory only contains legacy files.
     _write_legacy_backup(tmp_path, "memory.db.corrupt.bak", b"pre-upgrade-0")

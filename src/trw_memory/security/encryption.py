@@ -187,7 +187,7 @@ def rotate_key(namespace: str, new_passphrase: str, config: MemoryConfig | None 
     try:
         rotation_conn.execute("PRAGMA busy_timeout = 30000")
         _apply_sqlcipher_pragmas(rotation_conn)
-        rotation_conn.execute(f'PRAGMA rekey = "x\'{new_sqlcipher_key_hex}\'"')  # noqa: S608
+        rotation_conn.execute(f"PRAGMA rekey = \"x'{new_sqlcipher_key_hex}'\"")
 
         rows = rotation_conn.execute("PRAGMA integrity_check").fetchall()
         if len(rows) != 1 or rows[0][0] != "ok":

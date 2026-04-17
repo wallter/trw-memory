@@ -27,9 +27,7 @@ from trw_memory.client import (
 # ---------------------------------------------------------------------------
 
 
-def _make_client(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> MemoryClient:
+def _make_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient:
     """Create a test-isolated MemoryClient with SQLite backend."""
     monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "mem_storage"))
     monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
@@ -61,9 +59,7 @@ class TestRecallFallbackPath:
     """Verify recall works via fallback TF scoring when hybrid is unavailable."""
 
     @pytest.fixture()
-    def client(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> MemoryClient:
+    def client(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient:
         return _make_client(tmp_path, monkeypatch)
 
     async def test_recall_fallback_path_when_hybrid_returns_none(
@@ -79,9 +75,7 @@ class TestRecallFallbackPath:
         assert len(results) >= 1
         assert results[0]["content"] == "pydantic v2 uses model_dump"
 
-    async def test_recall_fallback_path_on_empty_entries(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_recall_fallback_path_on_empty_entries(self, client: MemoryClient) -> None:
         """recall() returns empty when no entries stored (hybrid gets no candidates)."""
         results = await client.recall("anything")
         assert results == []
@@ -119,14 +113,10 @@ class TestRecallHybridPath:
     """Verify recall uses hybrid_search when available."""
 
     @pytest.fixture()
-    def client(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> MemoryClient:
+    def client(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient:
         return _make_client(tmp_path, monkeypatch)
 
-    async def test_recall_uses_hybrid_search_when_available(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_recall_uses_hybrid_search_when_available(self, client: MemoryClient) -> None:
         """recall() uses hybrid_search pipeline when it is importable."""
         await client.store("structlog uses get_logger", tags=["logging"])
         await client.store("print is bad for logging", tags=["logging"])
@@ -138,9 +128,7 @@ class TestRecallHybridPath:
         contents = [r["content"] for r in results]
         assert any("structlog" in c for c in contents)
 
-    async def test_recall_hybrid_applies_tag_filter(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_recall_hybrid_applies_tag_filter(self, client: MemoryClient) -> None:
         """Hybrid path respects tag filtering."""
         await client.store("pydantic validation", tags=["pydantic", "python"])
         await client.store("pydantic serialization", tags=["pydantic"])
@@ -151,9 +139,7 @@ class TestRecallHybridPath:
         for r in results:
             assert "python" in r["tags"]
 
-    async def test_recall_hybrid_positional_scoring(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_recall_hybrid_positional_scoring(self, client: MemoryClient) -> None:
         """Hybrid path uses RRF-style positional scoring: 1/(1+rank).
 
         We mock hybrid_search to return controlled entries so we can verify
@@ -200,14 +186,10 @@ class TestRecallEmptyQuery:
     """Verify recall behavior with empty or whitespace queries."""
 
     @pytest.fixture()
-    def client(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> MemoryClient:
+    def client(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient:
         return _make_client(tmp_path, monkeypatch)
 
-    async def test_recall_empty_query_returns_results(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_recall_empty_query_returns_results(self, client: MemoryClient) -> None:
         """Empty query should still return results (all entries match)."""
         await client.store("entry one", importance=0.8)
         await client.store("entry two", importance=0.6)
@@ -216,9 +198,7 @@ class TestRecallEmptyQuery:
         # Should return stored entries even with empty query
         assert len(results) >= 1
 
-    async def test_recall_whitespace_query_does_not_crash(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_recall_whitespace_query_does_not_crash(self, client: MemoryClient) -> None:
         """Whitespace-only query does not raise; returns empty or all entries."""
         await client.store("some content", importance=0.7)
 
@@ -239,14 +219,10 @@ class TestRecallMinScoreFiltering:
     """Verify min_score filters results in both paths."""
 
     @pytest.fixture()
-    def client(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> MemoryClient:
+    def client(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient:
         return _make_client(tmp_path, monkeypatch)
 
-    async def test_recall_min_score_filters_low_scoring(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_recall_min_score_filters_low_scoring(self, client: MemoryClient) -> None:
         """Entries below min_score threshold are excluded."""
         await client.store("exact match query term", importance=0.9)
         await client.store("unrelated content xyz", importance=0.1)
@@ -257,9 +233,7 @@ class TestRecallMinScoreFiltering:
         for r in results:
             assert r["score"] >= 0.5
 
-    async def test_recall_min_score_zero_returns_all(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_recall_min_score_zero_returns_all(self, client: MemoryClient) -> None:
         """min_score=0.0 (default) returns all matched entries."""
         await client.store("alpha content", importance=0.1)
         await client.store("beta content", importance=0.9)
@@ -277,14 +251,10 @@ class TestRecallTagFiltering:
     """Verify tag filtering in both hybrid and fallback paths."""
 
     @pytest.fixture()
-    def client(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> MemoryClient:
+    def client(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient:
         return _make_client(tmp_path, monkeypatch)
 
-    async def test_recall_tag_filter_includes_matching(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_recall_tag_filter_includes_matching(self, client: MemoryClient) -> None:
         """Only entries with all specified tags are returned."""
         await client.store("python tip", tags=["python", "tips"])
         await client.store("java tip", tags=["java", "tips"])
@@ -292,9 +262,7 @@ class TestRecallTagFiltering:
         results = await client.recall("tip", tags=["python"])
         assert all("python" in r["tags"] for r in results)
 
-    async def test_recall_tag_filter_subset_matching(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_recall_tag_filter_subset_matching(self, client: MemoryClient) -> None:
         """Tags filter uses subset: entry must contain ALL filter tags."""
         await client.store("multi-tag entry", tags=["a", "b", "c"])
         await client.store("partial-tag entry", tags=["a"])
@@ -305,9 +273,7 @@ class TestRecallTagFiltering:
             assert "a" in r["tags"]
             assert "b" in r["tags"]
 
-    async def test_recall_no_tags_returns_all(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_recall_no_tags_returns_all(self, client: MemoryClient) -> None:
         """When tags=None, all matching entries are returned regardless of tags."""
         await client.store("tagged entry", tags=["test"])
         await client.store("untagged entry")
@@ -325,14 +291,10 @@ class TestRecallLimitRespected:
     """Verify the limit parameter caps results."""
 
     @pytest.fixture()
-    def client(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> MemoryClient:
+    def client(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient:
         return _make_client(tmp_path, monkeypatch)
 
-    async def test_recall_limit_caps_results(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_recall_limit_caps_results(self, client: MemoryClient) -> None:
         """Results are capped at the limit value."""
         for i in range(10):
             await client.store(f"entry number {i} about testing")
@@ -340,9 +302,7 @@ class TestRecallLimitRespected:
         results = await client.recall("testing", limit=3)
         assert len(results) <= 3
 
-    async def test_recall_limit_one_returns_single(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_recall_limit_one_returns_single(self, client: MemoryClient) -> None:
         """limit=1 returns at most one result."""
         await client.store("first entry about code")
         await client.store("second entry about code")
@@ -360,13 +320,13 @@ class TestRecallSearchPathLogged:
     """Verify structured logging includes search_path field."""
 
     @pytest.fixture()
-    def client(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> MemoryClient:
+    def client(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient:
         return _make_client(tmp_path, monkeypatch)
 
     async def test_recall_logs_hybrid_search_path(
-        self, client: MemoryClient, monkeypatch: pytest.MonkeyPatch,
+        self,
+        client: MemoryClient,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """When hybrid search succeeds, log includes search_path='hybrid'."""
         await client.store("test content for logging")
@@ -378,14 +338,14 @@ class TestRecallSearchPathLogged:
             if event == "memory_recalled":
                 logged_kwargs.update(kw)
 
-        monkeypatch.setattr(
-            "trw_memory.client.logger", type("L", (), {"debug": staticmethod(_capture_debug)})()
-        )
+        monkeypatch.setattr("trw_memory.client.logger", type("L", (), {"debug": staticmethod(_capture_debug)})())
         await client.recall("test content")
         assert logged_kwargs.get("search_path") in ("hybrid", "fallback")
 
     async def test_recall_logs_fallback_search_path(
-        self, client: MemoryClient, monkeypatch: pytest.MonkeyPatch,
+        self,
+        client: MemoryClient,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """When fallback is used, log includes search_path='fallback'."""
         await client.store("test content for logging")
@@ -396,9 +356,7 @@ class TestRecallSearchPathLogged:
             if event == "memory_recalled":
                 logged_kwargs.update(kw)
 
-        monkeypatch.setattr(
-            "trw_memory.client.logger", type("L", (), {"debug": staticmethod(_capture_debug)})()
-        )
+        monkeypatch.setattr("trw_memory.client.logger", type("L", (), {"debug": staticmethod(_capture_debug)})())
         _force_fallback(monkeypatch)
         await client.recall("test")
         assert logged_kwargs.get("search_path") == "fallback"
@@ -475,9 +433,7 @@ class TestRecallMethodWiring:
     """Verify the new private methods exist and are callable."""
 
     @pytest.fixture()
-    def client(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> MemoryClient:
+    def client(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient:
         return _make_client(tmp_path, monkeypatch)
 
     def test_try_hybrid_recall_method_exists(self, client: MemoryClient) -> None:

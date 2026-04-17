@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from trw_memory.namespaces.validation import validate_namespace

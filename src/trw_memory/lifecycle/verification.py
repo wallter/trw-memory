@@ -19,16 +19,18 @@ from trw_memory.models.memory import Assertion, AssertionResult, AssertionType
 logger = structlog.get_logger(__name__)
 
 # Default directories to exclude from file scanning
-DEFAULT_EXCLUDES: frozenset[str] = frozenset({
-    ".git",
-    "__pycache__",
-    "node_modules",
-    ".egg-info",
-    "dist",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-})
+DEFAULT_EXCLUDES: frozenset[str] = frozenset(
+    {
+        ".git",
+        "__pycache__",
+        "node_modules",
+        ".egg-info",
+        "dist",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+    }
+)
 
 # Security limits
 MAX_FILE_SIZE_BYTES: int = 1_048_576  # 1MB
@@ -58,8 +60,11 @@ def verify_assertions(
         logger.debug("project_root unavailable, skipping assertion verification")
         return [
             AssertionResult(
-                type=a.type, pattern=a.pattern, target=a.target,
-                passed=None, evidence="project_root unavailable",
+                type=a.type,
+                pattern=a.pattern,
+                target=a.target,
+                passed=None,
+                evidence="project_root unavailable",
             )
             for a in assertions
         ]
@@ -74,8 +79,10 @@ def verify_assertions(
         except Exception as exc:
             logger.debug("assertion_verification_error", exc_info=True)
             result = AssertionResult(
-                type=assertion.type, pattern=assertion.pattern,
-                target=assertion.target, passed=None,
+                type=assertion.type,
+                pattern=assertion.pattern,
+                target=assertion.target,
+                passed=None,
                 evidence=f"verification error: {exc}",
             )
         results.append(result)
@@ -108,8 +115,10 @@ def _verify_single(
     if assertion.type in (AssertionType.GLOB_ABSENT, "glob_absent"):
         return _verify_glob(assertion, project_root, excludes, expect_exists=False)
     return AssertionResult(
-        type=assertion.type, pattern=assertion.pattern,
-        target=assertion.target, passed=None,
+        type=assertion.type,
+        pattern=assertion.pattern,
+        target=assertion.target,
+        passed=None,
         evidence=f"unknown assertion type: {assertion.type}",
     )
 
@@ -126,8 +135,10 @@ def _verify_grep(
         compiled = re.compile(assertion.pattern)
     except re.error as e:
         return AssertionResult(
-            type=assertion.type, pattern=assertion.pattern,
-            target=assertion.target, passed=None,
+            type=assertion.type,
+            pattern=assertion.pattern,
+            target=assertion.target,
+            passed=None,
             evidence=f"invalid regex: {e}",
         )
 
@@ -181,8 +192,11 @@ def _verify_grep(
             evidence = f"pattern unexpectedly found in {len(matching_files)} file(s): {', '.join(matching_files[:5])}"
 
     return AssertionResult(
-        type=assertion.type, pattern=assertion.pattern,
-        target=assertion.target, passed=passed, evidence=evidence,
+        type=assertion.type,
+        pattern=assertion.pattern,
+        target=assertion.target,
+        passed=passed,
+        evidence=evidence,
     )
 
 
@@ -210,8 +224,11 @@ def _verify_glob(
             evidence = f"{len(matches)} file(s) unexpectedly found matching '{assertion.target}'"
 
     return AssertionResult(
-        type=assertion.type, pattern=assertion.pattern,
-        target=assertion.target, passed=passed, evidence=evidence,
+        type=assertion.type,
+        pattern=assertion.pattern,
+        target=assertion.target,
+        passed=passed,
+        evidence=evidence,
     )
 
 
@@ -228,7 +245,8 @@ def _iter_files(
         return []
 
     return [
-        p for p in candidates
+        p
+        for p in candidates
         if not any(part in excludes or part.endswith(".egg-info") for part in p.relative_to(project_root).parts)
     ]
 

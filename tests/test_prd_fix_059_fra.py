@@ -51,9 +51,7 @@ class TestMakeIdFormat:
         from trw_memory.client import _make_id
 
         mid = _make_id()
-        assert re.fullmatch(r"M-[0-9a-f]{16}", mid), (
-            f"Expected M-<16 hex chars>, got {mid!r}"
-        )
+        assert re.fullmatch(r"M-[0-9a-f]{16}", mid), f"Expected M-<16 hex chars>, got {mid!r}"
 
     def test_make_id_uniqueness(self) -> None:
         """FR-01: 100 generated IDs must all be unique (collision resistance)."""
@@ -92,9 +90,7 @@ class TestToolsStoreIdFormat:
         )
         assert result["status"] == "stored"
         memory_id = str(result["memory_id"])
-        assert re.fullmatch(r"M-[0-9a-f]{16}", memory_id), (
-            f"Expected M-<16 hex chars>, got {memory_id!r}"
-        )
+        assert re.fullmatch(r"M-[0-9a-f]{16}", memory_id), f"Expected M-<16 hex chars>, got {memory_id!r}"
 
 
 # ---------------------------------------------------------------------------

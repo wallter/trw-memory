@@ -125,7 +125,12 @@ class TestAuditLogVerify:
         retained = audit_log.compact(retention_days=1)
 
         assert retained == 0
-        assert audit_log.verify_chain() == {"valid": True, "entries_checked": 0, "first_broken_at": None, "broken_hash": None}
+        assert audit_log.verify_chain() == {
+            "valid": True,
+            "entries_checked": 0,
+            "first_broken_at": None,
+            "broken_hash": None,
+        }
 
     def test_concurrent_writes_preserve_valid_chain(self, audit_path: Path) -> None:
         audit_log = AuditLog(audit_path)

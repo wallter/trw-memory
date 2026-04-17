@@ -5,9 +5,10 @@ Tests the *_impl functions directly without requiring a running FastMCP server.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, cast
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 from trw_memory.graph import wait_for_graph_updates
@@ -141,7 +142,7 @@ class TestMemoryStoreImpl:
         cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path), embedding_dim=4)
 
         with create_backend_from_config(cfg, "project:default") as storage:
-            backend = cast(SQLiteBackend, storage)
+            backend = cast("SQLiteBackend", storage)
             backend.store(
                 MemoryEntry(
                     id="M-existing",
@@ -178,7 +179,7 @@ class TestMemoryStoreImpl:
         cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path), embedding_dim=4)
 
         with create_backend_from_config(cfg, "team:sprint-37") as storage:
-            backend = cast(SQLiteBackend, storage)
+            backend = cast("SQLiteBackend", storage)
             with patch("trw_memory.tools.store.get_local_embedder", return_value=None):
                 result = memory_store_impl(
                     "team discovery",
@@ -202,8 +203,8 @@ class TestMemoryStoreImpl:
             create_backend_from_config(cfg, "project:default") as current_storage,
             create_backend_from_config(cfg, "project:other") as remote_storage,
         ):
-            current_backend = cast(SQLiteBackend, current_storage)
-            remote_backend = cast(SQLiteBackend, remote_storage)
+            current_backend = cast("SQLiteBackend", current_storage)
+            remote_backend = cast("SQLiteBackend", remote_storage)
 
             remote_backend.store(
                 MemoryEntry(
@@ -237,7 +238,7 @@ class TestMemoryStoreImpl:
                 wait_for_graph_updates()
 
             assert result["status"] == "stored"
-            stored_entry = current_backend.get(cast(str, result["memory_id"]))
+            stored_entry = current_backend.get(cast("str", result["memory_id"]))
             remote_entry = remote_backend.get("M-remote")
             assert stored_entry is not None
             assert remote_entry is not None
@@ -253,7 +254,7 @@ class TestMemoryStoreImpl:
 
         cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path), embedding_dim=4)
         with create_backend_from_config(cfg, "project:default") as storage:
-            backend = cast(SQLiteBackend, storage)
+            backend = cast("SQLiteBackend", storage)
             with patch("trw_memory.tools.store.get_local_embedder", return_value=None):
                 result = memory_store_impl(
                     "tier primed entry",
@@ -265,7 +266,7 @@ class TestMemoryStoreImpl:
             manager = get_tier_manager(cfg, "project:default")
             warm_ids = [str(item["id"]) for item in manager.warm_search(["tier"], None)]
             assert result["status"] == "stored"
-            assert cast(str, result["memory_id"]) in warm_ids
+            assert cast("str", result["memory_id"]) in warm_ids
 
 
 # ---------------------------------------------------------------------------

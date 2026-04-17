@@ -13,8 +13,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
-
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.sync.delta import DeltaTracker

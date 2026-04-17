@@ -124,9 +124,7 @@ def test_on_regression_does_not_fire_when_healthy(tmp_path: Path) -> None:
     _make_healthy_db(db)
 
     captured: list[tuple[Path, str]] = []
-    sched = IntegrityScheduler(
-        db, interval_minutes=0, on_regression=lambda p, d: captured.append((p, d))
-    )
+    sched = IntegrityScheduler(db, interval_minutes=0, on_regression=lambda p, d: captured.append((p, d)))
     sched.run_once()
     assert captured == []
 
@@ -206,9 +204,7 @@ def test_loop_runs_probe_at_interval(tmp_path: Path) -> None:
     assert sched.last_check_at is not None
 
 
-def test_loop_uses_dedicated_readonly_connection(
-    tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
+def test_loop_uses_dedicated_readonly_connection(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     """Regression: the probe MUST open a fresh read-only uri connection.
 
     Asserts the scheduler opens its own connection rather than reusing the
@@ -232,7 +228,7 @@ def test_loop_uses_dedicated_readonly_connection(
 
     assert len(calls) == 1, "expected exactly one connect() in run_once()"
     first_args, first_kwargs = calls[0]
-    first_arg = cast(str, first_args[0])
+    first_arg = cast("str", first_args[0])
     assert first_arg.startswith("file:"), "probe MUST use a file: URI"
     assert "mode=ro" in first_arg, "probe MUST use read-only mode"
     assert first_kwargs.get("uri") is True

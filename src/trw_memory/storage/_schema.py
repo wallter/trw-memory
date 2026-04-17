@@ -210,9 +210,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
         # Migration: add edge_metadata column for PRD-CORE-107 typed edges
         with contextlib.suppress(sqlite3.OperationalError):
-            cursor.execute(
-                "ALTER TABLE memory_graph_edges ADD COLUMN edge_metadata TEXT DEFAULT '{}'"
-            )
+            cursor.execute("ALTER TABLE memory_graph_edges ADD COLUMN edge_metadata TEXT DEFAULT '{}'")
 
         conn.commit()
     finally:

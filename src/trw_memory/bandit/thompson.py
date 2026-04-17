@@ -87,9 +87,7 @@ class BanditSelector:
         if cold_start_min < 0:
             raise ValueError(f"cold_start_min must be >= 0, got {cold_start_min}")
         if not 0.0 <= floor_exploration <= 1.0:
-            raise ValueError(
-                f"floor_exploration must be in [0.0, 1.0], got {floor_exploration}"
-            )
+            raise ValueError(f"floor_exploration must be in [0.0, 1.0], got {floor_exploration}")
         self._tau = tau
         self._cold_start_min = cold_start_min
         self._floor_exploration = floor_exploration
@@ -125,11 +123,7 @@ class BanditSelector:
                 self._state_version += 1
 
         # --- Cold-start: round-robin for under-exposed arms ----------------
-        cold_arms = [
-            arm_id
-            for arm_id in eligible_ids
-            if self._arms[arm_id].exposure_count < self._cold_start_min
-        ]
+        cold_arms = [arm_id for arm_id in eligible_ids if self._arms[arm_id].exposure_count < self._cold_start_min]
         if cold_arms:
             # Pick the least-exposed cold-start arm (round-robin)
             selected = min(cold_arms, key=lambda a: self._arms[a].exposure_count)
@@ -191,9 +185,7 @@ class BanditSelector:
             selected_id=selected,
             selection_probability=propensities[selected],
             runner_up_id=runner_up_id,
-            runner_up_probability=(
-                propensities.get(runner_up_id) if runner_up_id is not None else None
-            ),
+            runner_up_probability=(propensities.get(runner_up_id) if runner_up_id is not None else None),
             exploration=exploration,
         )
 
@@ -392,10 +384,7 @@ class BanditSelector:
                 counts[selected_index] += 1
 
         sample_total = float(sample_count)
-        result = {
-            arm_id: counts[index] / sample_total
-            for index, arm_id in enumerate(eligible_ids)
-        }
+        result = {arm_id: counts[index] / sample_total for index, arm_id in enumerate(eligible_ids)}
         self._propensity_cache[cache_key] = (self._state_version, result)
         return result
 
