@@ -4,7 +4,13 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
-## [0.6.9] — 2026-04-17
+## [0.6.10] — 2026-04-17
+
+### Fixed
+
+- **`import trw_memory` failed on a bare install without httpx** — `trw_memory/__init__.py` transitively imports `trw_memory.sync.remote`, which does `import httpx` at module scope. `httpx` was listed only under `dev` extras, so any user running `pip install trw-memory` (without trw-mcp bringing httpx in as a transitive) hit `ModuleNotFoundError: No module named 'httpx'` at first import. This was masked in CI because no cross-platform smoke test exercised the wheel's import path until v0.6.9's release workflow was added. Moved `httpx>=0.27.0` from `[dev]` to base `dependencies`; the v0.6.9 release workflow run (which caught this) is the regression-prevention signal. Retagging as v0.6.10 because v0.6.9 never published a PyPI artifact.
+
+## [0.6.9] — 2026-04-17 (never published)
 
 ### Fixed
 
