@@ -8,7 +8,7 @@
 
 ## Part of TRW Framework
 
-trw-memory is the standalone memory engine for [TRW (The Real Work)](https://trwframework.com) — a methodology layer for AI-assisted development that turns stateless agents into self-improving systems through [knowledge compounding](https://trwframework.com/docs). It works alongside [trw-mcp](https://github.com/wallter/trw-mcp), the MCP server that provides 24 tools built on this engine.
+trw-memory is the standalone memory engine for [TRW (The Real Work)](https://trwframework.com) — a methodology layer for AI-assisted development that provides stateless agents with a persistent memory layer **designed to enable self-improvement across sessions** via [knowledge compounding](https://trwframework.com/docs). *The outcome effect of cross-session memory on coding tasks is an open empirical question; iter-9/10 produced null on SWE-bench-single-shot at n≥40. See [docs/eval/iter-notes/iter-11-prospector-analysis.md](https://github.com/wallter/trw-framework/blob/main/docs/eval/iter-notes/iter-11-prospector-analysis.md).* It works alongside [trw-mcp](https://github.com/wallter/trw-mcp), the MCP server that provides 24 tools built on this engine.
 
 - **trw-memory** (this repo): Standalone AI agent memory engine with hybrid retrieval, scoring, and lifecycle
 - **trw-mcp**: MCP server with 25 tools, 24 skills, 12 agents — uses trw-memory as its backend
