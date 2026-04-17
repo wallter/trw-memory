@@ -4,7 +4,13 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
-## [0.6.10] — 2026-04-17
+## [0.6.11] — 2026-04-17
+
+### Fixed
+
+- **`import trw_memory` also required `cryptography` on bare install** — same class of latent bug caught by v0.6.10's publish-gating smoke test. `trw_memory.security.encryption` is re-exported unconditionally from `trw_memory.security.__init__`, and that module chain is reached through the package's top-level imports. `cryptography` was listed only under `[encryption]` extras, so fresh `pip install trw-memory` failed with `ModuleNotFoundError: No module named 'cryptography'`. Moved `cryptography>=41.0.0` to base dependencies (it stays in `[encryption]` extras for users who already specify it). Verified locally with a clean venv: `pip install trw-memory && python -c "from trw_memory.storage.sqlite_backend import SQLiteBackend"` now succeeds. v0.6.10 was tagged but never published for the same reason v0.6.9 wasn't — both caught by the smoke gate.
+
+## [0.6.10] — 2026-04-17 (never published)
 
 ### Fixed
 
