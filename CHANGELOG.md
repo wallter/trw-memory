@@ -4,6 +4,107 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-04-18 — UTF-8 prevention + per-row quarantine + stale-handle detection
+
+Driven by a 2026-04-18 production incident: two consumer processes held open
+file descriptors to a DB inode that had already been moved aside to
+`memory.db.corrupt.2026-04-18T18-38-33Z.bak` by the auto-recovery layer. Linux
+kept the old inode alive, so those consumers kept reading the corrupt bytes and
+every `trw_learn` call failed with
+`sqlite3.OperationalError: Could not decode to UTF-8 column 'detail' with text
+'...'` until the stale PIDs were manually killed. This release closes three
+gaps that let that class of incident happen.
+
+### Added
+
+- **Write-time UTF-8 validation (prevention).** New `Utf8ValidationError`
+  (subclass of `SchemaValidationError`) is raised by `SQLiteBackend.store`
+  when any TEXT-column string field fails strict UTF-8 round-trip. Lone
+  surrogates (`\uD800`–`\uDFFF`) and any other non-encodable char now fail
+  fast at write time with `failed_fields=[…]` naming the offending columns,
+  so corrupt bytes can no longer land in the DB undetected. Covered fields:
+  `content`, `detail`, `nudge_line`, `type`, `namespace`, `source`,
+  `source_identity`, `client_profile`, `model_id`, `sync_hash`, and other
+  bare-string columns — JSON-serialised fields (`tags`, `evidence`,
+  `metadata`) are already safe via `json.dumps` surrogate escaping.
+  Implementation: `storage/_utf8_validator.py` (new, 82 LOC, 100% coverage).
+
+- **Per-row quarantine on read (auto-recovery).** `SQLiteBackend.list_entries`,
+  `search`, and `entries_with_assertions` now fall back to a
+  `text_factory=bytes` cursor when the default decode path raises
+  `UnicodeDecodeError` / `sqlite3.OperationalError("Could not decode to UTF-8")`,
+  skip the bad row with a `structlog` WARN event `action="memory_row_utf8_quarantined"`
+  (column, rowid, table, db_path), and increment the per-backend counter
+  `SQLiteBackend.quarantine_count_utf8`. One bad row no longer kills the
+  entire scan; callers get a degraded-but-usable result and operators can
+  observe the quarantine rate via the counter + structured log.
+
+- **Stale-handle detection with transparent reconnect (coordination).**
+  `SQLiteBackend.recover_db` now writes a `memory.db.recovered_at` sentinel
+  next to the fresh DB. The backend captures the DB's inode + sentinel
+  mtime at connection open, then calls `StaleHandleDetector.is_stale()` at
+  the top of every public read method (cached via
+  `TRW_MEMORY_STALE_HANDLE_CHECK_SECS`, default 1.0 s — so the check costs
+  well under 100 µs on the hot path). On sentinel-newer OR inode-change,
+  the backend transparently closes and reopens the connection against the
+  current filesystem entry, then resets the detector's baseline. A new
+  `StaleConnectionError(StorageError)` surfaces only when the reopen
+  attempt itself fails. The existing `IntegrityScheduler`
+  observability-only invariant is preserved — the recovery signal lives
+  entirely inside `SQLiteBackend` + `recover_db`. Implementation:
+  `storage/_stale_handle_detector.py` (new, 181 LOC, 91% coverage) +
+  edits to `sqlite_backend.py`.
+
+### Exceptions
+
+- `Utf8ValidationError(SchemaValidationError)` — write-time UTF-8 failure,
+  with `failed_fields: list[str]`.
+- `StaleConnectionError(StorageError)` — raised only when a detected-stale
+  connection cannot be reopened (a normal reconnect is silent).
+
+### Tests
+
+11 new tests under `tests/unit/storage/`:
+- `test_utf8_validation.py` (4): lone-surrogate rejection, multi-field
+  rejection, valid-unicode acceptance, no double-validation.
+- `test_resilient_list_entries.py` (3): skips bad row + counter + log
+  capture, all-bad returns empty list, clean DB no-quarantine regression.
+- `test_stale_handle_recovery.py` (4): inode-change reconnect, sentinel-mtime
+  reconnect, check-budget caching cheap, reopen-failure raises
+  `StaleConnectionError`.
+
+Coverage on new code: 92.86% (100% validator, 91% detector — target ≥90%
+met). 123 existing `test_sqlite_backend_recovery.py` +
+`test_storage_sqlite.py` + `test_sqlite_assertions_column.py` tests remain
+green (zero regressions). `mypy --strict` clean on all new + edited files.
+
+### Diagnostic recipe
+
+When `trw_learn` or any `list_entries` call raises
+`Could not decode to UTF-8 column '…' with text '…'`:
+
+```bash
+# 1. Confirm the live DB is clean:
+python3 -c "import sqlite3; c = sqlite3.connect('.trw/memory/memory.db'); c.execute('SELECT COUNT(*) FROM memories').fetchone()"
+
+# 2. Find consumer processes with open handles on a .corrupt.*.bak:
+for pid in $(pgrep -f trw-mcp); do
+  echo "=== PID $pid ==="
+  ls -l /proc/$pid/fd 2>/dev/null | grep -E '\.db'
+done
+
+# 3. Kill any PID whose FD points at a .corrupt.*.bak:
+kill -TERM <stale-pid>
+```
+
+With 0.7.0 installed, this class of incident self-heals: consumers detect
+the sentinel on their next read, reconnect, and resume.
+
+### Environment variables
+
+- `TRW_MEMORY_STALE_HANDLE_CHECK_SECS` (default `1.0`) — how long a
+  successful stale-handle check is cached before the next `stat` call.
+
 ## [0.6.11] — 2026-04-17
 
 ### Fixed
