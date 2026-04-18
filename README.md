@@ -45,7 +45,7 @@ pip install trw-memory
 # Or install from source
 git clone https://github.com/wallter/trw-memory.git
 cd trw-memory
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv && source ../.venv/bin/activate
 pip install -e ".[dev]"
 
 # With all optional features (embeddings, vectors, BM25, LLM)
@@ -333,15 +333,15 @@ trw-memory-server  # Starts MCP server (stdio transport)
 pip install -e ".[dev]"
 
 # Run full test suite (2,050+ tests, >=85% coverage required)
-.venv/bin/python -m pytest tests/ -v --cov=trw_memory --cov-report=term-missing
+../.venv/bin/python -m pytest tests/ -v --cov=trw_memory --cov-report=term-missing
 
 # Type checking (strict mode, 81 files)
-.venv/bin/python -m mypy --strict src/trw_memory/
+../.venv/bin/python -m mypy --strict src/trw_memory/
 
 # Targeted testing
-.venv/bin/python -m pytest tests/test_client.py -v
-.venv/bin/python -m pytest tests/test_retrieval.py -v
-.venv/bin/python -m pytest tests/test_storage_sqlite.py -v
+../.venv/bin/python -m pytest tests/test_client.py -v
+../.venv/bin/python -m pytest tests/test_retrieval.py -v
+../.venv/bin/python -m pytest tests/test_storage_sqlite.py -v
 ```
 
 **Current metrics**: 2,050+ tests, ~90% coverage, mypy strict clean.

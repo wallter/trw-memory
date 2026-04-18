@@ -10,9 +10,9 @@ Hybrid retrieval (BM25 + dense vectors), tiered storage (SQLite primary, YAML se
 
 ```bash
 cd trw-memory
-.venv/bin/python -m pytest tests/test_specific_file.py -v   # Single file (preferred)
-.venv/bin/python -m pytest tests/ -v                         # Full suite (delivery only)
-.venv/bin/python -m mypy --strict src/trw_memory/            # Type check
+../.venv/bin/python -m pytest tests/test_specific_file.py -v   # Single file (preferred)
+../.venv/bin/python -m pytest tests/ -v                         # Full suite (delivery only)
+../.venv/bin/python -m mypy --strict src/trw_memory/            # Type check
 pip install -e ".[dev]"                                       # Dev install
 pip install -e ".[dev,vectors,bm25]"                         # With optional deps
 ```
