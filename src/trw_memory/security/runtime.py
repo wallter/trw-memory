@@ -337,10 +337,36 @@ def _redaction_marker(pii_type: PIIType) -> str:
 
 
 def _flag_code_snippet(entry: MemoryEntry) -> MemoryEntry:
+    """Authoritatively set the system code-flag metadata key.
+
+    Strips any caller-provided value of ``SYSTEM_CODE_FLAG_KEY`` and sets
+    it to "true" iff the combined content matches a code-snippet pattern.
+    This guarantees callers cannot pre-seed the bypass flag — see security
+    audit 2026-04-18 H2. The descriptive ``"code_snippet_flagged"`` tag is
+    still appended for backward-compat visibility in UI listings.
+    """
+    from trw_memory.security.poisoning import SYSTEM_CODE_FLAG_KEY
+
     combined = f"{entry.content}\n{entry.detail}"
-    if any(pattern.search(combined) for pattern in _CODE_SNIPPET_PATTERNS):
-        if "code_snippet_flagged" not in entry.tags:
-            return entry.model_copy(update={"tags": [*entry.tags, "code_snippet_flagged"]})
+    is_code = any(pattern.search(combined) for pattern in _CODE_SNIPPET_PATTERNS)
+
+    # Start by stripping any caller-supplied system-flag key.
+    metadata = {k: v for k, v in entry.metadata.items() if k != SYSTEM_CODE_FLAG_KEY}
+    tags = list(entry.tags)
+    updates: dict[str, object] = {}
+
+    if is_code:
+        metadata[SYSTEM_CODE_FLAG_KEY] = "true"
+        if "code_snippet_flagged" not in tags:
+            tags.append("code_snippet_flagged")
+
+    if metadata != entry.metadata:
+        updates["metadata"] = metadata
+    if tags != list(entry.tags):
+        updates["tags"] = tags
+
+    if updates:
+        return entry.model_copy(update=updates)
     return entry
 
 
