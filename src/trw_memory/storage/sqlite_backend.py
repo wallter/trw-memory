@@ -30,8 +30,11 @@ import structlog
 from trw_memory.exceptions import (
     CorruptDatabaseUnsalvageableError,
     EncryptionUnavailableError,
+    StaleConnectionError,
     StorageError,
 )
+from trw_memory.storage._stale_handle_detector import StaleHandleDetector, write_sentinel
+from trw_memory.storage._utf8_validator import validate_utf8_fields
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage._row_mapper import entry_to_row, row_to_entry
 from trw_memory.storage._schema import ensure_schema, ensure_vec_table
@@ -135,6 +138,7 @@ class SQLiteBackend(StorageBackend):
         self._vec_available = False
         self._lock = threading.Lock()
         self._dbapi: Any = _import_sqlcipher_driver() if sqlcipher_key_hex is not None else sqlite3
+        self._sqlcipher_key_hex = sqlcipher_key_hex
         self._recovery_policy = recovery_policy
         self._corrupt_backup_keep = corrupt_backup_keep
         self._rebuild_from_cold = rebuild_from_cold
@@ -148,6 +152,10 @@ class SQLiteBackend(StorageBackend):
 
         self.recovered = False
         self.integrity_warning = False
+        # P2 — per-row UTF-8 quarantine counter (incremented on each skipped row)
+        self.quarantine_count_utf8: int = 0
+        # P3 — reconnect counter (incremented on each stale-handle reopen)
+        self.reconnect_count: int = 0
         try:
             if sqlcipher_key_hex is None:
                 self._conn = self._open_and_configure(db_path)
@@ -187,6 +195,10 @@ class SQLiteBackend(StorageBackend):
                 self.recovered = True
 
         ensure_schema(self._conn)
+
+        # P3 — stale-handle detector (belt + suspenders: inode + sentinel).
+        # Only meaningful for real files; :memory: paths get a no-op detector.
+        self._stale_detector = StaleHandleDetector(db_path)
 
         vec_module = sqlite_vec
         if vec_module is not None:
@@ -247,6 +259,57 @@ class SQLiteBackend(StorageBackend):
         regression (same flag used by the transient-WAL-contention path).
         """
         self.integrity_warning = True
+
+    # ------------------------------------------------------------------
+    # P3 — Stale-handle detection + reconnect
+    # ------------------------------------------------------------------
+
+    def _reconnect(self) -> None:
+        """Close the current connection and reopen against the current DB file.
+
+        Called when :meth:`_ensure_connection_fresh` detects a stale handle.
+
+        Raises:
+            StaleConnectionError: If reopening the connection fails.
+        """
+        try:
+            with contextlib.suppress(sqlite3.Error):
+                self._conn.close()
+            if self._sqlcipher_key_hex is not None:
+                self._conn = self._open_and_configure(
+                    self._db_path,
+                    dbapi=self._dbapi,
+                    sqlcipher_key_hex=self._sqlcipher_key_hex,
+                )
+            else:
+                self._conn = self._open_and_configure(self._db_path)
+            ensure_schema(self._conn)
+            self._stale_detector.reset()
+            self.reconnect_count += 1
+            logger.info(
+                "memory_stale_handle_reconnected",
+                db_path=str(self._db_path),
+                reconnect_count=self.reconnect_count,
+            )
+        except Exception as exc:
+            raise StaleConnectionError(
+                f"Failed to reopen stale connection to {self._db_path}: {exc}",
+                path=str(self._db_path),
+            ) from exc
+
+    def _ensure_connection_fresh(self) -> None:
+        """Check whether the connection has gone stale; reconnect if so.
+
+        This is a best-effort probe — NOT a consistency guarantee.  The check
+        is cached for ``TRW_MEMORY_STALE_HANDLE_CHECK_SECS`` (default 1s) so
+        the steady-state cost on a warm kernel page cache is effectively zero.
+
+        Raises:
+            StaleConnectionError: If a stale handle is detected and reconnect
+                fails.
+        """
+        if self._stale_detector.is_stale():
+            self._reconnect()
 
     # ------------------------------------------------------------------
     # Integrity & recovery
@@ -565,6 +628,12 @@ class SQLiteBackend(StorageBackend):
             with contextlib.suppress(OSError):
                 wal.unlink()
 
+        # P3 — write cross-process sentinel so peer consumers detect stale FDs.
+        # Written early (before the fresh DB exists) so any peer doing a precheck
+        # between now and the fresh-DB creation will see the sentinel and
+        # schedule a reconnect on their next read.
+        write_sentinel(db_path, backup_path)
+
         salvage_primary_failed = False
         rows: list[Any] = []
         try:
@@ -792,6 +861,169 @@ class SQLiteBackend(StorageBackend):
     # Filter helpers
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # P2 — Resilient row materialisation
+    # ------------------------------------------------------------------
+
+    def _fetch_rows_resilient(
+        self,
+        cursor: Any,
+        *,
+        table: str = "memories",
+    ) -> list[MemoryEntry]:
+        """Iterate a cursor row-by-row, quarantining bad-UTF-8 rows.
+
+        The sqlite3.OperationalError("Could not decode to UTF-8 column ...")
+        is raised by the C extension during row fetch.  We use a fallback
+        connection with ``text_factory=bytes`` to read raw rows when the
+        primary cursor fails, then decode each column individually, replacing
+        undecidable bytes with the Unicode replacement character and marking
+        the row as quarantined.
+
+        Strategy:
+          1. Attempt ``fetchall()`` on the primary cursor.
+          2. On UTF-8 decode failure, fall back to a secondary bytes-mode
+             connection that re-executes the same SQL and reads all rows as
+             bytes objects.  For each bytes row we attempt str decode; rows
+             that cannot be decoded at all are quarantined.
+
+        Per-row errors:
+          - Increment ``self.quarantine_count_utf8``.
+          - Emit a structlog WARN event with action="memory_row_utf8_quarantined".
+          - Skip the row from the return list.
+
+        Non-UTF-8 errors (e.g. schema errors) are re-raised so callers can
+        convert them to ``StorageError`` as before.
+
+        Args:
+            cursor: Active sqlite3 cursor after ``execute()``.
+            table: Table name for logging context.
+
+        Returns:
+            List of successfully materialised MemoryEntry objects.
+        """
+        # Fast path: all rows are clean UTF-8.
+        try:
+            raw_rows = cursor.fetchall()
+        except (sqlite3.OperationalError, UnicodeDecodeError) as exc:
+            err_str = str(exc)
+            if "UTF-8" not in err_str and "decode" not in err_str.lower() and not isinstance(exc, UnicodeDecodeError):
+                raise  # non-UTF-8 error — propagate
+
+            # Slow path: re-read rows via a bytes-mode connection.
+            return self._fetch_rows_via_bytes_fallback(cursor, table=table)
+
+        results: list[MemoryEntry] = []
+        for idx, raw_row in enumerate(raw_rows):
+            try:
+                entry = row_to_entry(tuple(raw_row))
+                results.append(entry)
+            except (UnicodeDecodeError, UnicodeEncodeError) as exc:
+                self.quarantine_count_utf8 += 1
+                row_id: str | None = None
+                with contextlib.suppress(Exception):
+                    row_id = str(raw_row[0])
+                logger.warning(
+                    "db_bad_utf8_row_quarantined",
+                    action="memory_row_utf8_quarantined",
+                    row_id=row_id,
+                    column="detail",
+                    db_path=str(self._db_path),
+                    table=table,
+                    row_index=idx,
+                    error=str(exc),
+                )
+        return results
+
+    def _fetch_rows_via_bytes_fallback(
+        self,
+        cursor: Any,
+        *,
+        table: str = "memories",
+    ) -> list[MemoryEntry]:
+        """Fallback: re-execute via bytes-mode connection to isolate bad rows.
+
+        Opens a second connection with ``text_factory=bytes`` so we get raw
+        bytes per column.  We then attempt UTF-8 decode per column; rows where
+        any column cannot decode at all are quarantined (counted + logged) and
+        omitted from the result.
+
+        This is the slow path — invoked only when the primary cursor fails.
+        """
+        # Reconstruct the SQL and parameters from the cursor description.
+        # Since we can't re-read them, use the table scan approach: read all
+        # ids via a bytes connection and then re-fetch individually.
+        # Simpler: re-query the full table via bytes connection and filter.
+        results: list[MemoryEntry] = []
+        try:
+            raw_conn = self._dbapi.connect(str(self._db_path))
+            raw_conn.text_factory = bytes
+            raw_rows = raw_conn.execute(
+                f"SELECT {_SELECT_COLUMNS_SQL} FROM {table} ORDER BY updated_at DESC"  # noqa: S608
+            ).fetchall()
+            raw_conn.close()
+        except Exception:
+            # Can't even open the fallback — return empty so callers don't crash.
+            logger.warning(
+                "db_utf8_fallback_failed",
+                action="memory_row_utf8_quarantined",
+                db_path=str(self._db_path),
+                table=table,
+            )
+            return []
+
+        for idx, raw_row in enumerate(raw_rows):
+            # Decode each bytes value to str; skip row if any column fails entirely.
+            decoded: list[object] = []
+            row_bad = False
+            bad_col: str | None = None
+            for col_idx, val in enumerate(raw_row):
+                if isinstance(val, bytes):
+                    try:
+                        decoded.append(val.decode("utf-8", errors="strict"))
+                    except (UnicodeDecodeError, ValueError):
+                        row_bad = True
+                        with contextlib.suppress(Exception):
+                            bad_col = cursor.description[col_idx][0] if cursor.description else None
+                        break
+                else:
+                    decoded.append(val)
+
+            if row_bad:
+                self.quarantine_count_utf8 += 1
+                row_id_str: str | None = None
+                with contextlib.suppress(Exception):
+                    first = raw_row[0]
+                    row_id_str = first.decode("utf-8", errors="replace") if isinstance(first, bytes) else str(first)
+                logger.warning(
+                    "db_bad_utf8_row_quarantined",
+                    action="memory_row_utf8_quarantined",
+                    row_id=row_id_str,
+                    column=bad_col or "unknown",
+                    db_path=str(self._db_path),
+                    table=table,
+                    row_index=idx,
+                )
+                continue
+
+            try:
+                entry = row_to_entry(tuple(decoded))
+                results.append(entry)
+            except Exception:
+                # Unexpected mapping failure — quarantine silently.
+                self.quarantine_count_utf8 += 1
+                logger.warning(
+                    "db_bad_utf8_row_quarantined",
+                    action="memory_row_utf8_quarantined",
+                    row_id=None,
+                    column="row_to_entry",
+                    db_path=str(self._db_path),
+                    table=table,
+                    row_index=idx,
+                )
+
+        return results
+
     @staticmethod
     def _build_filter_clause(
         *,
@@ -834,8 +1066,34 @@ class SQLiteBackend(StorageBackend):
             entry: Memory entry to persist.
 
         Raises:
+            Utf8ValidationError: If any TEXT-column field contains invalid UTF-8.
             StorageError: If the write fails.
         """
+        # P1 — write-time UTF-8 validation (prevention layer).
+        # Validate before computing sync_hash so a bad entry never mutates state.
+        validate_utf8_fields(
+            {
+                "id": entry.id,
+                "content": entry.content,
+                "detail": entry.detail,
+                "nudge_line": entry.nudge_line,
+                "type": entry.type,
+                "namespace": entry.namespace,
+                "source": entry.source,
+                "source_identity": entry.source_identity,
+                "client_profile": entry.client_profile,
+                "model_id": entry.model_id,
+                "consolidated_into": entry.consolidated_into,
+                "remote_id": entry.remote_id,
+                "expires_at": entry.expires,
+                "task_type": entry.task_type,
+                "phase_origin": entry.phase_origin,
+                "team_origin": entry.team_origin,
+                "outcome_correlation": entry.outcome_correlation,
+                "sync_hash": entry.sync_hash,
+            }
+        )
+
         # Auto dirty-mark for sync pipeline (PRD-INFRA-051)
         entry.sync_seq = (entry.sync_seq or 0) + 1
         entry.sync_hash = DeltaTracker.compute_sync_hash(entry)
@@ -1092,10 +1350,14 @@ class SQLiteBackend(StorageBackend):
         )
         params.append(top_k)
 
+        # P3 — stale-handle precheck
+        self._ensure_connection_fresh()
+
         try:
             with self._lock:
-                rows = self._conn.execute(sql, params).fetchall()
-            results = [row_to_entry(tuple(r)) for r in rows]
+                cursor = self._conn.execute(sql, params)
+                # P2 — resilient cursor iteration
+                results = self._fetch_rows_resilient(cursor)
 
             # Post-filter by tags (all-of semantics)
             if tags:
@@ -1146,12 +1408,16 @@ class SQLiteBackend(StorageBackend):
         Returns:
             List of MemoryEntry objects that have at least one assertion.
         """
+        # P3 — stale-handle precheck
+        self._ensure_connection_fresh()
+
         try:
             with self._lock:
-                rows = self._conn.execute(
+                cursor = self._conn.execute(
                     "SELECT * FROM memories WHERE assertions IS NOT NULL AND assertions != '[]'",
-                ).fetchall()
-            return [row_to_entry(row) for row in rows]
+                )
+                # P2 — resilient cursor iteration
+                return self._fetch_rows_resilient(cursor)
         except sqlite3.Error as exc:
             logger.debug("entries_with_assertions_query_failed", exc_info=True)
             raise StorageError(
@@ -1193,10 +1459,14 @@ class SQLiteBackend(StorageBackend):
         )
         params.append(limit)
 
+        # P3 — stale-handle precheck (cached; cheap on warm path)
+        self._ensure_connection_fresh()
+
         try:
             with self._lock:
-                rows = self._conn.execute(sql, params).fetchall()
-            return [row_to_entry(tuple(r)) for r in rows]
+                cursor = self._conn.execute(sql, params)
+                # P2 — resilient cursor iteration: skip bad-UTF-8 rows
+                return self._fetch_rows_resilient(cursor)
         except (sqlite3.Error, ValueError, KeyError) as exc:
             raise StorageError(
                 f"Failed to list entries: {exc}",
