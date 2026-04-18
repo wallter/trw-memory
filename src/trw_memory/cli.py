@@ -218,7 +218,9 @@ async def _handle_import(args: argparse.Namespace) -> int:
     if file_path.suffix in (".yaml", ".yml"):
         from ruamel.yaml import YAML
 
-        yaml = YAML()
+        # typ="safe" blocks !!python/object tags on untrusted import files.
+        # Precedent: models/config.py loads config the same way.
+        yaml = YAML(typ="safe")
         data = yaml.load(raw_text)
     else:
         data = json.loads(raw_text)

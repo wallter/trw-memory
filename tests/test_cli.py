@@ -674,6 +674,21 @@ class TestImportCommand:
         assert ret == 1
         assert "expected a JSON/YAML array" in capsys.readouterr().err
 
+    def test_import_yaml_rejects_python_object_tag(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Regression: bulk YAML import must not execute !!python/object
+        # constructors. Safe loader raises ConstructorError before any
+        # Python code can run.
+        fpath = tmp_path / "payload.yaml"
+        fpath.write_text("!!python/object/apply:os.system [\"id\"]\n")
+        ret = main(["import", str(fpath)])
+        assert ret == 1
+        err = capsys.readouterr().err
+        assert "Error:" in err
+
     @patch(f"{_CLI}._create_local_backend")
     @patch(f"{_CLI}.MemoryConfig")
     def test_import_merge_mode_skip_existing(
