@@ -92,6 +92,24 @@ class RateLimitError(MemoryError):
         self.retry_after = retry_after
 
 
+class Utf8ValidationError(SchemaValidationError):
+    """Raised when a string field fails write-time UTF-8 validation.
+
+    Carries the list of offending field names via failed_fields. Use this
+    when a write would persist bytes that can't round-trip through
+    str.encode('utf-8', errors='strict') — lone surrogates, invalid
+    continuation bytes, etc.
+    """
+
+
+class StaleConnectionError(StorageError):
+    """Raised when a connection was detected stale and could not be reopened.
+
+    Normally SQLiteBackend._ensure_connection_fresh transparently reopens.
+    This exception surfaces only when the reopen attempt itself fails.
+    """
+
+
 class CorruptDatabaseUnsalvageableError(StorageError):
     """Raised when a corrupt DB cannot be salvaged and strict policy refuses the empty fallback.
 
