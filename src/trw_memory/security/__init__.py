@@ -43,11 +43,36 @@ from trw_memory.security.pii import (
     redact_text,
     shannon_entropy,
 )
+from trw_memory.security.canary import (
+    CanaryLearning,
+    CanaryStore,
+    CanaryVerificationResult,
+    seed_canaries,
+    verify_canaries,
+)
 from trw_memory.security.poisoning import (
     AnomalyResult,
     AnomalyType,
     PoisoningDetector,
     quarantine_entry,
+)
+from trw_memory.security.provenance import (
+    ProvenanceChain,
+    ProvenanceEntry,
+)
+from trw_memory.security.provenance import (
+    append as provenance_append,
+)
+from trw_memory.security.provenance import (
+    verify as provenance_verify,
+)
+from trw_memory.security.recall_filter import (
+    RecallFilterResult,
+    filter_recall_window,
+)
+from trw_memory.security.trust_scorer import (
+    TrustScore,
+    score_intake,
 )
 from trw_memory.security.rbac import (
     ROLE_PERMISSIONS,
@@ -64,7 +89,20 @@ __all__ = [
     "AnomalyType",
     "AuditLog",
     "AuditRecord",
+    "CanaryLearning",
+    "CanaryStore",
+    "CanaryVerificationResult",
     "EncryptionUnavailableError",
+    "ProvenanceChain",
+    "ProvenanceEntry",
+    "RecallFilterResult",
+    "TrustScore",
+    "filter_recall_window",
+    "provenance_append",
+    "provenance_verify",
+    "score_intake",
+    "seed_canaries",
+    "verify_canaries",
     "KeyRotationError",
     "LocalOnlyViolationError",
     "MasterKeyNotFoundError",
