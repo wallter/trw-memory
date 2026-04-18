@@ -7,16 +7,16 @@ This guide is for AI agents writing or modifying tests in the `trw-memory/tests/
 ```bash
 # During implementation — run ONLY the file you changed:
 cd trw-memory
-.venv/bin/python -m pytest tests/test_specific_file.py -v
+../.venv/bin/python -m pytest tests/test_specific_file.py -v
 
 # Run a single test:
-.venv/bin/python -m pytest tests/test_storage.py::test_store_entry -v
+../.venv/bin/python -m pytest tests/test_storage.py::test_store_entry -v
 
 # Full suite with coverage (delivery only):
-.venv/bin/python -m pytest tests/ --cov=trw_memory --cov-report=term-missing
+../.venv/bin/python -m pytest tests/ --cov=trw_memory --cov-report=term-missing
 
 # Type check:
-.venv/bin/python -m mypy --strict src/trw_memory/
+../.venv/bin/python -m mypy --strict src/trw_memory/
 ```
 
 **NEVER run the full suite during implementation. Target specific files only.**
