@@ -239,6 +239,58 @@ def test_fr04_recover_cli_salvage_succeeds_when_select_fails(tmp_path: Path, mon
         conn.close()
 
 
+def test_recovery_drops_unknown_columns_preventing_sql_injection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: column names from the corrupt dump are filtered against
+    the schema allowlist before splicing into the INSERT string. An attacker
+    who crafts a corrupt DB with a malicious column name cannot inject SQL;
+    the unknown column is silently dropped (warning emitted) and the valid
+    columns are preserved.
+    """
+    db_path = tmp_path / "memory.db"
+    _populate_db(db_path, entries=1)
+    _corrupt_sqlite_master(db_path)
+
+    class _FakeRow:
+        def __init__(self, data: dict[str, Any]) -> None:
+            self._data = data
+
+        def keys(self) -> list[str]:
+            return list(self._data.keys())
+
+        def __iter__(self) -> Any:
+            return iter(self._data.values())
+
+    now = "2026-04-18T00:00:00+00:00"
+    # Attacker-controlled column name that would corrupt the INSERT if not filtered.
+    malicious_col = 'id, content); DROP TABLE memories; --'
+    poisoned_row = _FakeRow(
+        {
+            "id": "L-legit",
+            "content": "legit content",
+            "created_at": now,
+            "updated_at": now,
+            malicious_col: "payload",
+        }
+    )
+    monkeypatch.setattr(
+        SQLiteBackend,
+        "_salvage_via_recover_cli",
+        staticmethod(lambda _backup, dbapi=sqlite3: [poisoned_row]),
+    )
+
+    conn = SQLiteBackend.recover_db(db_path, recovery_policy="strict")
+    try:
+        # Table still exists (injection didn't execute) and the legit row landed.
+        count = conn.execute("SELECT count(*) FROM memories").fetchone()[0]
+        assert count == 1
+        row_id = conn.execute("SELECT id FROM memories").fetchone()[0]
+        assert row_id == "L-legit"
+    finally:
+        conn.close()
+
+
 def test_fr04_recover_cli_unavailable_falls_through_to_strict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """FR04: CLI unavailable (FileNotFoundError) falls through to strict refusal."""
     db_path = tmp_path / "memory.db"

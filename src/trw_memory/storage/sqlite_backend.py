@@ -783,14 +783,30 @@ class SQLiteBackend(StorageBackend):
             ensure_schema(new_conn)
 
         if rows:
-            cols = rows[0].keys()
-            placeholders = ", ".join(["?"] * len(cols))
-            cols_sql = ", ".join(cols)
-            insert_sql = f"INSERT OR IGNORE INTO memories ({cols_sql}) VALUES ({placeholders})"  # noqa: S608
-            for row in rows:
-                with contextlib.suppress(sqlite3.Error):
-                    new_conn.execute(insert_sql, tuple(row))
-            new_conn.commit()
+            # Security: recovered row keys come from a corrupt/attacker-
+            # influenced DB dump. Splicing them into SQL without validation
+            # is an injection vector. Keep only columns in the current schema
+            # allowlist; project each row by positional index (works with
+            # both sqlite3.Row and the iterable row objects used in tests).
+            raw_cols = list(rows[0].keys())
+            safe_indices = [i for i, c in enumerate(raw_cols) if c in ENTRY_COLUMNS]
+            safe_cols = [raw_cols[i] for i in safe_indices]
+            dropped = [c for c in raw_cols if c not in ENTRY_COLUMNS]
+            if dropped:
+                logger.warning(
+                    "db_recovery_dropped_unknown_columns",
+                    columns=dropped,
+                    db=str(db_path),
+                )
+            if safe_cols:
+                placeholders = ", ".join(["?"] * len(safe_cols))
+                cols_sql = ", ".join(safe_cols)
+                insert_sql = f"INSERT OR IGNORE INTO memories ({cols_sql}) VALUES ({placeholders})"  # noqa: S608
+                for row in rows:
+                    with contextlib.suppress(sqlite3.Error):
+                        row_values = tuple(row)
+                        new_conn.execute(insert_sql, tuple(row_values[i] for i in safe_indices))
+                new_conn.commit()
 
         if cold_rebuild_attempted and cold_rebuild_rows > 0:
             logger.warning(
