@@ -31,6 +31,11 @@ _INJECTION_PATTERNS = (
     re.compile(r"system prompt", re.IGNORECASE),
 )
 
+# System-only metadata key that signals `_flag_code_snippet` authoritatively
+# detected a code snippet and the injection-pattern bypass may apply.
+# Must NOT be caller-settable — see security audit 2026-04-18 H2.
+SYSTEM_CODE_FLAG_KEY = "_sys_code_flagged"
+
 
 class AnomalyType(str, Enum):
     """Categories of memory poisoning anomalies."""
@@ -261,7 +266,12 @@ def validate_entry_payload(entry: MemoryEntry, *, max_chars: int) -> None:
             f"memory entry exceeds {max_chars} bytes",
             reason="size_exceeded",
         )
-    if "code_snippet_flagged" in entry.tags:
+    # Security audit 2026-04-18 H2: check the system-only metadata key that
+    # `_flag_code_snippet` sets authoritatively, NOT the entry.tags list.
+    # Callers can set any tag they want, so the previous
+    # `"code_snippet_flagged" in entry.tags` bypass let any caller skip
+    # injection detection.
+    if entry.metadata.get(SYSTEM_CODE_FLAG_KEY) == "true":
         return
     combined = f"{entry.content}{entry.detail}"
     for pattern in _INJECTION_PATTERNS:
