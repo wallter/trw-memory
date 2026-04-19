@@ -21,9 +21,10 @@ import socket
 import threading
 import uuid
 from collections.abc import Callable, Coroutine
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Protocol, TypedDict, cast, runtime_checkable
+from typing import Any, Literal, Protocol, TypedDict, cast, runtime_checkable
 
 import structlog
 from typing_extensions import NotRequired
@@ -80,11 +81,80 @@ logger = structlog.get_logger(__name__)
 SHARED_EVENT_CACHE_MAX = 256
 
 __all__ = [
+    "BulkStoreItemResult",
+    "BulkStoreRequest",
+    "BulkStoreSummary",
     "ForgetResultDict",
     "MemoryClient",
     "MemoryResultDict",
     "StoreResultDict",
 ]
+
+
+# ---- Bulk store types (PRD-MEM-future, scaffolded 2026-04-19) -----
+# Amortise per-item lock + audit + embed overhead for ingestion-heavy
+# workloads (audits, distill batch ingestion). See learning L-ujVK for
+# the per-item-overhead measurement that motivated this API.
+
+
+@dataclass(frozen=True)
+class BulkStoreRequest:
+    """One record in a ``MemoryClient.bulk_store(...)`` batch.
+
+    Mirrors the per-item kwargs of ``MemoryClient.store`` so callers can
+    migrate per-item loops to a single batch call without re-shaping
+    their data.
+    """
+
+    content: str
+    detail: str = ""
+    tags: list[str] | None = None
+    importance: float = 0.5
+    metadata: dict[str, str] | None = None
+    source: Literal["human", "agent", "tool", "consolidated"] = "agent"
+    source_identity: str = ""
+    session_id: str | None = None
+    entry_id: str | None = None
+
+
+@dataclass
+class BulkStoreItemResult:
+    """Per-item result inside a ``BulkStoreSummary.items`` list (input-order).
+
+    ``status`` is one of ``"stored"`` / ``"updated"`` / ``"quarantined"``
+    / ``"rejected"``. ``rejected`` rows carry a ``skipped_reason``;
+    ``quarantined`` rows include the anomaly diagnostic fields.
+    """
+
+    memory_id: str
+    status: str
+    quarantined: bool = False
+    skipped_reason: str = ""
+    anomaly_dimension: str = ""
+    z_score: float = 0.0
+
+
+@dataclass
+class BulkStoreSummary:
+    """Aggregate + per-item result of a ``MemoryClient.bulk_store(...)`` call."""
+
+    total: int
+    stored: int
+    updated: int
+    quarantined: int
+    rejected: int
+    duration_ms: float
+    items: list[BulkStoreItemResult] = field(default_factory=list)
+
+    @property
+    def succeeded(self) -> int:
+        """Count of records that landed in the main store (stored + updated)."""
+        return self.stored + self.updated
+
+    @property
+    def per_item_ms(self) -> float:
+        """Mean wall-time per record across the whole batch."""
+        return self.duration_ms / self.total if self.total else 0.0
 
 
 # Fallback recall scoring (used when hybrid retrieval pipeline is unavailable).
@@ -620,6 +690,284 @@ class MemoryClient:
             "timestamp": now.isoformat(),
         }
         return store_result
+
+    async def bulk_store(
+        self,
+        requests: list[BulkStoreRequest],
+        *,
+        skip_audit_per_item: bool = True,
+        skip_remote_publish: bool = True,
+    ) -> BulkStoreSummary:
+        """Store many records in one batched operation.
+
+        Trades per-item audit + remote-publish overhead for throughput.
+        The per-item *security* checks (PII redaction, poisoning detection)
+        STILL run on every record — those guard correctness invariants;
+        only the batched bookkeeping is amortised.
+
+        Args:
+            requests: List of :class:`BulkStoreRequest` describing each record.
+            skip_audit_per_item: When True (default), one batch-summary audit
+                event covers all inserts. When False, each insert emits its
+                own audit event (matches per-call ``store()`` semantics) at
+                the cost of throughput.
+            skip_remote_publish: When True (default), remote-publish tasks
+                are NOT scheduled per-item. Audit / sync workloads that ingest
+                from a single trusted source typically don't need per-record
+                remote publishing; bulk consumers can manage replication
+                separately.
+
+        Returns:
+            :class:`BulkStoreSummary` with aggregate counts and per-item
+            results in input order.
+
+        Raises:
+            ValueError: If ``requests`` is empty.
+
+        Performance notes:
+            On a 100-record batch the lock is acquired once vs 100 times,
+            embeddings are computed via ``embed_batch`` (single model call),
+            and the audit log gets one event vs 100. Backend ``store()``
+            still runs per-entry (sqlite has no native multi-INSERT path
+            here) but the lock+audit savings dominate the wall-clock cost
+            on workloads where embedding + lock acquisition were the
+            bottleneck (the trw-distill audit case, see learning L-ujVK).
+        """
+        if not requests:
+            raise ValueError("bulk_store requires at least one request")
+
+        self._require_permission(Permission.WRITE, "bulk_store")
+        self._maybe_start_retry_drain()
+
+        start_ts = datetime.now(timezone.utc)
+
+        # Pre-validate ALL inputs before acquiring the lock so a single
+        # bad row doesn't leave the batch half-written. Failed rows are
+        # tracked and skipped.
+        prepared: list[tuple[BulkStoreRequest, str | None]] = []
+        for req in requests:
+            try:
+                validate_store_inputs(
+                    content=req.content,
+                    detail=req.detail,
+                    tags=req.tags,
+                    metadata=req.metadata,
+                    importance=req.importance,
+                )
+                prepared.append((req, None))
+            except SchemaValidationError as exc:
+                prepared.append((req, f"schema_invalid:{','.join(exc.failed_fields)}"))
+
+        items: list[BulkStoreItemResult] = []
+        embedder = self._get_embedder()
+        accepted_indices: list[int] = []
+        accepted_entries: list[MemoryEntry] = []
+
+        async with self._lock:
+            backend = self._get_backend()
+            now = datetime.now(timezone.utc)
+
+            # Pass 1 — build entries, run security gate, partition.
+            # decisions parallels prepared; entries that get rejected/quarantined
+            # leave None at their index. Accepted entries store the
+            # PreparedStoreEntry decision so Pass 3 can use op + pii_matches.
+            decisions: list[Any] = [None] * len(prepared)
+            for i, (req, validation_error) in enumerate(prepared):
+                if validation_error is not None:
+                    items.append(BulkStoreItemResult(
+                        memory_id=req.entry_id or "",
+                        status="rejected",
+                        skipped_reason=validation_error,
+                    ))
+                    continue
+
+                memory_id = req.entry_id or _make_id()
+                existing = backend.get(memory_id) if req.entry_id is not None else None
+                entry_metadata = dict(existing.metadata) if existing is not None else {}
+                entry_metadata.update(req.metadata or {})
+                entry_metadata.setdefault("installation_id", self._installation_id)
+
+                if existing is None:
+                    entry = MemoryEntry(
+                        id=memory_id,
+                        content=req.content.strip(),
+                        detail=req.detail,
+                        tags=req.tags or [],
+                        importance=req.importance,
+                        namespace=self._namespace,
+                        metadata=entry_metadata,
+                        created_at=now,
+                        updated_at=now,
+                        source=req.source,
+                        source_identity=req.source_identity,
+                        vector_clock=init_clock(self._local_node_id),
+                    )
+                else:
+                    entry = existing.model_copy(update={
+                        "content": req.content.strip(),
+                        "detail": req.detail,
+                        "tags": req.tags or [],
+                        "importance": req.importance,
+                        "metadata": entry_metadata,
+                        "updated_at": now,
+                        "source": req.source,
+                        "source_identity": req.source_identity or existing.source_identity,
+                        "vector_clock": init_clock(self._local_node_id),
+                    })
+
+                decision = prepare_entry_for_store(
+                    entry,
+                    backend=backend,
+                    config=self._config,
+                    session_id=req.session_id,
+                )
+                if decision.quarantined:
+                    store_quarantined_entry(self._config, decision.entry)
+                    items.append(BulkStoreItemResult(
+                        memory_id=decision.entry.id,
+                        status="quarantined",
+                        quarantined=True,
+                        anomaly_dimension=decision.anomaly_dimension,
+                        z_score=decision.anomaly_z_score,
+                    ))
+                    continue
+
+                accepted_indices.append(i)
+                accepted_entries.append(decision.entry)
+                decisions[i] = decision
+
+            # Pass 2 — single batched embed call for accepted entries only.
+            embeddings: list[list[float] | None] = []
+            if accepted_entries and embedder is not None:
+                try:
+                    texts = [f"{e.content} {e.detail}" for e in accepted_entries]
+                    embeddings = embedder.embed_batch(texts)
+                except Exception as exc:
+                    logger.warning(
+                        "bulk_store_embed_batch_failed",
+                        op="bulk_store",
+                        n=len(accepted_entries),
+                        error=str(exc),
+                    )
+                    embeddings = [None] * len(accepted_entries)
+            else:
+                embeddings = [None] * len(accepted_entries)
+
+            # Pass 3 — backend store + vector + tier registration per accepted.
+            for j, (orig_i, entry) in enumerate(zip(accepted_indices, accepted_entries)):
+                decision = decisions[orig_i]
+                assert decision is not None  # mypy guard; partitioning ensures this
+                embedding = embeddings[j] if j < len(embeddings) else None
+
+                if self._namespace.startswith("team:"):
+                    NamespaceManager(backend).ensure_team_namespace(
+                        self._namespace, created_at=now
+                    )
+
+                backend.store(entry)
+                if embedding is not None:
+                    try:
+                        backend.upsert_vector(entry.id, embedding)
+                    except Exception as exc:
+                        try:
+                            backend.delete(entry.id)
+                        except Exception:
+                            logger.exception(
+                                "bulk_store_vector_rollback_failed",
+                                memory_id=entry.id,
+                            )
+                            raise StorageError(
+                                f"failed to persist vector for {entry.id!r}; rollback did not complete cleanly"
+                            ) from exc
+                        raise StorageError(
+                            f"failed to persist vector for {entry.id!r}; entry write was rolled back"
+                        ) from exc
+
+                try:
+                    schedule_graph_update(
+                        entry, backend, embedding=embedding, config=self._config
+                    )
+                except RuntimeError:
+                    logger.warning(
+                        "bulk_store_graph_schedule_failed",
+                        memory_id=entry.id,
+                        exc_info=True,
+                    )
+
+                remember_entry_in_tiers(
+                    self._config, self._namespace, entry, embedding
+                )
+
+                if not skip_audit_per_item:
+                    append_audit_event(
+                        self._config,
+                        decision.op,
+                        entry_id=entry.id,
+                        actor=entry.source_identity or entry.source,
+                        namespace=self._namespace,
+                        data={
+                            "status": "updated" if decision.op == "update" else "stored",
+                            "session_id": prepared[orig_i][0].session_id,
+                            "pii_types": sorted({m.pii_type for m in decision.pii_matches}),
+                            "quarantined": False,
+                        },
+                    )
+
+                items.append(BulkStoreItemResult(
+                    memory_id=entry.id,
+                    status="updated" if decision.op == "update" else "stored",
+                ))
+
+                if not skip_remote_publish and self._should_attempt_remote_publish(entry):
+                    self._schedule_background_task(self._publish_entry(entry, embedding))
+
+        # Single batch-summary audit event covering the whole call.
+        stored_count = sum(1 for it in items if it.status == "stored")
+        updated_count = sum(1 for it in items if it.status == "updated")
+        quarantined_count = sum(1 for it in items if it.status == "quarantined")
+        rejected_count = sum(1 for it in items if it.status == "rejected")
+        end_ts = datetime.now(timezone.utc)
+        duration_ms = (end_ts - start_ts).total_seconds() * 1000.0
+
+        if skip_audit_per_item:
+            append_audit_event(
+                self._config,
+                "bulk_store",
+                entry_id="",
+                actor=requests[0].source_identity or requests[0].source if requests else "agent",
+                namespace=self._namespace,
+                data={
+                    "total": len(requests),
+                    "stored": stored_count,
+                    "updated": updated_count,
+                    "quarantined": quarantined_count,
+                    "rejected": rejected_count,
+                    "duration_ms": round(duration_ms, 2),
+                },
+            )
+
+        logger.info(
+            "memory_bulk_stored",
+            op="bulk_store",
+            outcome="success",
+            namespace=self._namespace,
+            total=len(requests),
+            stored=stored_count,
+            updated=updated_count,
+            quarantined=quarantined_count,
+            rejected=rejected_count,
+            duration_ms=round(duration_ms, 2),
+        )
+
+        return BulkStoreSummary(
+            total=len(requests),
+            stored=stored_count,
+            updated=updated_count,
+            quarantined=quarantined_count,
+            rejected=rejected_count,
+            duration_ms=duration_ms,
+            items=items,
+        )
 
     async def recall(
         self,
