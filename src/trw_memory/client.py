@@ -815,12 +815,24 @@ class MemoryClient:
                         "vector_clock": init_clock(self._local_node_id),
                     })
 
-                decision = prepare_entry_for_store(
-                    entry,
-                    backend=backend,
-                    config=self._config,
-                    session_id=req.session_id,
-                )
+                # Per-item security gate. Catch poisoning / authorization
+                # so a single bad row doesn't abort the whole batch — the
+                # bulk semantic is "best-effort, report per-item".
+                try:
+                    decision = prepare_entry_for_store(
+                        entry,
+                        backend=backend,
+                        config=self._config,
+                        session_id=req.session_id,
+                    )
+                except Exception as exc:
+                    items.append(BulkStoreItemResult(
+                        memory_id=memory_id,
+                        status="rejected",
+                        skipped_reason=f"{type(exc).__name__}:{str(exc)[:80]}",
+                    ))
+                    continue
+
                 if decision.quarantined:
                     store_quarantined_entry(self._config, decision.entry)
                     items.append(BulkStoreItemResult(
