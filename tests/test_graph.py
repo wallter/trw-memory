@@ -518,8 +518,12 @@ class TestApplyImportanceBoost:
         with create_backend_from_config(cfg, "project:default") as storage:
             storage.store(_make_entry("e1", importance=0.5))
 
+        # Explicit "spawn" avoids Python 3.12's DeprecationWarning about fork()
+        # in multi-threaded parent processes (pytest + asyncio threads make the
+        # parent multi-threaded; fork() + threads can deadlock the child).
+        ctx = multiprocessing.get_context("spawn")
         processes = [
-            multiprocessing.Process(
+            ctx.Process(
                 target=_merge_cross_validation_in_subprocess,
                 args=(str(tmp_path), project_id),
             )
