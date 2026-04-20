@@ -164,6 +164,12 @@ indent-style = "space"
 testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
+markers = [
+  "unit: pure unit tests — no filesystem I/O beyond tmp_path, mocks only, fast",
+  "integration: uses real filesystem / sqlite / network — slower, still isolated",
+  "slow: individual-test runtime > 5 seconds — excluded from default runs",
+  "network: requires external network access (embedding models, API calls)",
+]
 
 [tool.mypy]
 strict = true
