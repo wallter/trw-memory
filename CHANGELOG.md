@@ -4,6 +4,52 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+### Added
+
+- **2026-04-19 — `MemoryClient.bulk_store` API** (commits `9a9787b34`,
+  `6f8da14b7`). New high-throughput batch write path with structured
+  `BulkStoreRequest` / `BulkStoreResult` dataclasses. Per-item
+  `PoisoningError` is caught and surfaced on the result so one tainted
+  entry cannot fail an entire batch — the remaining items land and the
+  caller sees which indices were rejected and why. 7 dedicated tests
+  green; complements the existing single-entry `store()` path for
+  callers that need batch semantics (distill pipelines, migration
+  imports).
+
+### Fixed
+
+Follow-ups to the 2026-04-18 monorepo security audit (learning L-ftMX)
+covering three of the eight HIGH findings attributed to trw-memory.
+
+- **2026-04-19 — `code_snippet_flagged` tag bypass closed** (commit
+  `668b8c887`, H2 part 1/2). The poisoning gate previously trusted the
+  `code_snippet_flagged` tag as a caller-asserted exemption, letting a
+  `trw_learn` caller bypass prompt-injection detection by attaching the
+  tag themselves. The tag is now ignored for gate purposes on writes;
+  it survives as an informational tag on reads. Pairs with trw-mcp's
+  `trw_learn` write-path content-policy gate (H2 part 2/2).
+- **2026-04-19 — SQL-identifier allowlist on DB recovery** (commit
+  `72fc1169a`, H1). `SQLiteBackend.recover_db` previously interpolated
+  recovered column names directly into `INSERT` statements, allowing SQL
+  injection if a maliciously crafted `.corrupt.bak` was substituted for
+  the live DB. Recovered column names are now filtered against a static
+  schema allowlist; anything off-list is dropped with a structured warn
+  event. Recovery-rate telemetry unchanged.
+- **2026-04-19 — Bulk YAML import uses `YAML(typ="safe")`** (commit
+  `7e64f84de`, M3). The import path had degraded to the round-trip
+  loader, which resolves Python object tags on load. Restored to the
+  safe loader, matching the project-wide invariant that all YAML reads
+  are `safe`.
+
+### Test hardening
+
+- **2026-04-20 — `mp.get_context('spawn')` on cross-process graph test**
+  (commit `e4f9961b5`). Default fork context inherited open SQLite
+  handles from the parent test worker and sporadically failed under
+  `pytest-xdist`. Spawn context gives each worker a clean interpreter.
+  Matches the fix already applied to concurrent-write tests in
+  trw-eval.
+
 ## [0.7.0] — 2026-04-18 — UTF-8 prevention + per-row quarantine + stale-handle detection
 
 Driven by a 2026-04-18 production incident: two consumer processes held open
