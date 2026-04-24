@@ -30,9 +30,17 @@ from trw_memory.security.encryption import (
     rotate_key,
 )
 from trw_memory.security.keys import (
+    generate_ed25519_signing_key,
     get_master_key,
+    get_or_create_ed25519_key,
+    load_ed25519_signing_key,
     rotate_master_key,
     store_master_key,
+)
+from trw_memory.security.observe_clock import (
+    ObserveClockState,
+    read_observe_clock,
+    start_observe_clock,
 )
 from trw_memory.security.pii import (
     PIIAction,
@@ -64,7 +72,13 @@ from trw_memory.security.provenance import (
     append as provenance_append,
 )
 from trw_memory.security.provenance import (
+    append_signed as provenance_append_signed,
+)
+from trw_memory.security.provenance import (
     verify as provenance_verify,
+)
+from trw_memory.security.provenance import (
+    verify_signed as provenance_verify_signed,
 )
 from trw_memory.security.recall_filter import (
     RecallFilterResult,
@@ -93,15 +107,23 @@ __all__ = [
     "CanaryStore",
     "CanaryVerificationResult",
     "EncryptionUnavailableError",
+    "ObserveClockState",
     "ProvenanceChain",
     "ProvenanceEntry",
     "RecallFilterResult",
     "TrustScore",
     "filter_recall_window",
+    "generate_ed25519_signing_key",
+    "get_or_create_ed25519_key",
+    "load_ed25519_signing_key",
     "provenance_append",
+    "provenance_append_signed",
     "provenance_verify",
+    "provenance_verify_signed",
+    "read_observe_clock",
     "score_intake",
     "seed_canaries",
+    "start_observe_clock",
     "verify_canaries",
     "KeyRotationError",
     "LocalOnlyViolationError",
