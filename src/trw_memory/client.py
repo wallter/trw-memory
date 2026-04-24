@@ -55,6 +55,7 @@ from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.retrieval.dense import cosine_similarity
+from trw_memory.retrieval.source_policy import apply_source_policy
 from trw_memory.security.pii import anonymize_installation_id
 from trw_memory.security.poisoning import validate_store_inputs
 from trw_memory.security.rbac import Permission, require_namespace_permission
@@ -200,6 +201,7 @@ class MemoryResultDict(TypedDict):
     q_observations: NotRequired[int]
     recurrence: NotRequired[int]
     access_count: NotRequired[int]
+    expires: NotRequired[str]
     metadata: NotRequired[dict[str, str]]
     anomaly_dimension: NotRequired[str]
     z_score: NotRequired[float]
@@ -373,6 +375,8 @@ def _entry_to_result(entry: MemoryEntry, score: float = 0.0) -> MemoryResultDict
                 result["z_score"] = float(entry.metadata["z_score"])
             except ValueError:
                 pass
+    if entry.expires:
+        result["expires"] = entry.expires
     return result
 
 
@@ -515,6 +519,7 @@ class MemoryClient:
         importance: float = 0.5,
         detail: str = "",
         metadata: dict[str, str] | None = None,
+        expires: str = "",
         *,
         source: Literal["human", "agent", "tool", "consolidated"] = "agent",
         source_identity: str = "",
@@ -559,6 +564,7 @@ class MemoryClient:
             entry_metadata = dict(existing.metadata) if existing is not None else {}
             entry_metadata.update(metadata or {})
             entry_metadata.setdefault("installation_id", self._installation_id)
+            entry_expires = expires or (existing.expires if existing is not None else "")
 
             if existing is None:
                 entry = MemoryEntry(
@@ -571,6 +577,7 @@ class MemoryClient:
                     metadata=entry_metadata,
                     created_at=now,
                     updated_at=now,
+                    expires=entry_expires,
                     source=source,
                     source_identity=source_identity,
                     # We need a stable local node marker even before the backend grows
@@ -587,6 +594,7 @@ class MemoryClient:
                         "importance": importance,
                         "metadata": entry_metadata,
                         "updated_at": now,
+                        "expires": entry_expires,
                         "source": source,
                         "source_identity": source_identity or existing.source_identity,
                         "vector_clock": init_clock(self._local_node_id),
@@ -993,6 +1001,10 @@ class MemoryClient:
         token_budget: int | None = None,
         include_distilled: bool = True,
         distilled_weight: float | None = None,
+        include_source_kinds: list[str] | None = None,
+        exclude_source_kinds: list[str] | None = None,
+        source_weights: dict[str, float] | None = None,
+        exclude_expired: bool = True,
     ) -> list[MemoryResultDict]:
         """Search memories by keyword query using hybrid retrieval.
 
@@ -1071,7 +1083,7 @@ class MemoryClient:
         if hybrid_results is not None:
             # Apply min_score filter and limit
             filtered = [r for r in hybrid_results if r["score"] >= min_score]
-            final = self._merge_tier_results(
+            final_pre_policy = self._merge_tier_results(
                 filtered[:limit],
                 tier_local_results,
                 limit,
@@ -1080,12 +1092,28 @@ class MemoryClient:
                 query_embedding,
             )
             if min_score > 0.0:
-                final = [result for result in final if result["score"] >= min_score]
+                final_pre_policy = [result for result in final_pre_policy if result["score"] >= min_score]
             if include_org_memories:
-                final = await self._merge_org_results(query, final, limit, tags, min_score)
+                final_pre_policy = await self._merge_org_results(
+                    query, final_pre_policy, limit, tags, min_score
+                )
             if include_shared:
-                final = await self._merge_shared_results(query, final, limit)
-            final = self._apply_budget(final, token_budget)
+                final_pre_policy = await self._merge_shared_results(query, final_pre_policy, limit)
+            final_scored = cast(
+                list[MemoryResultDict],
+                apply_source_policy(
+                    final_pre_policy,
+                    include_distilled=include_distilled,
+                    distilled_weight=distilled_weight,
+                    include_source_kinds=include_source_kinds,
+                    exclude_source_kinds=exclude_source_kinds,
+                    source_weights=source_weights,
+                    exclude_expired=exclude_expired,
+                ),
+            )
+            if min_score > 0.0:
+                final_scored = [result for result in final_scored if result["score"] >= min_score]
+            final = self._apply_budget(final_scored[:limit], token_budget)
             await self._record_recall_access(final)
             append_audit_event(
                 self._config,
@@ -1095,10 +1123,6 @@ class MemoryClient:
                 data={"query": query[:80], "entries_returned": len(final)},
             )
             self._remember_results_in_tiers(final)
-            # PRD-DIST-005 FR-6: tier distilled records before returning.
-            final = apply_distilled_tiering(
-                final, weight=distilled_weight, include_distilled=include_distilled
-            )[:limit]
             logger.debug(
                 "memory_recalled",
                 op="recall",
@@ -1126,7 +1150,21 @@ class MemoryClient:
             results = await self._merge_org_results(query, results, limit, tags, min_score)
         if include_shared:
             results = await self._merge_shared_results(query, results, limit)
-        final = self._apply_budget(results, token_budget)
+        filtered_results = cast(
+            list[MemoryResultDict],
+            apply_source_policy(
+                results,
+                include_distilled=include_distilled,
+                distilled_weight=distilled_weight,
+                include_source_kinds=include_source_kinds,
+                exclude_source_kinds=exclude_source_kinds,
+                source_weights=source_weights,
+                exclude_expired=exclude_expired,
+            ),
+        )
+        if min_score > 0.0:
+            filtered_results = [result for result in filtered_results if result["score"] >= min_score]
+        final = self._apply_budget(filtered_results[:limit], token_budget)
         await self._record_recall_access(final)
         append_audit_event(
             self._config,
@@ -1136,10 +1174,6 @@ class MemoryClient:
             data={"query": query[:80], "entries_returned": len(final)},
         )
         self._remember_results_in_tiers(final)
-        # PRD-DIST-005 FR-6: tier distilled records before returning.
-        final = apply_distilled_tiering(
-            final, weight=distilled_weight, include_distilled=include_distilled
-        )[:limit]
         return final
 
     @staticmethod
