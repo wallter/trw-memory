@@ -11,7 +11,10 @@ Target: p95 latency <=20ms for a 25-learning window (PRD-SEC-001 NFR-002).
 
 from __future__ import annotations
 
+import json
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
@@ -61,16 +64,61 @@ def _inspect(entry: MemoryEntry) -> list[str]:
     return reasons
 
 
+def _shadow_quarantine(
+    entry: MemoryEntry,
+    reasons: list[str],
+    quarantine_dir: Path,
+) -> None:
+    """Append a shadow quarantine record (FR-004 observe partition).
+
+    Fail-open: any I/O error is logged and swallowed. The record captures
+    what WOULD have been routed to a quarantine store in enforce mode.
+    """
+    try:
+        quarantine_dir.mkdir(parents=True, exist_ok=True)
+        shadow_path = quarantine_dir / "quarantined_entries.jsonl"
+        record = {
+            "id": entry.id,
+            "reasons": reasons,
+            "content_preview": entry.content[:120],
+            "shadowed_at": datetime.now(timezone.utc).isoformat(),
+            "mode": "observe",
+        }
+        with shadow_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+            fh.flush()
+        _LOG.info(
+            "recall_filter.quarantine_shadow",
+            action="quarantine_shadow",
+            entry_id=entry.id,
+            shadow_path=str(shadow_path),
+        )
+    except OSError:  # justified: fail-open on I/O
+        _LOG.warning(
+            "recall_filter.quarantine_shadow_failed",
+            entry_id=entry.id,
+            exc_info=True,
+        )
+
+
 def filter_recall_window(
     learnings: list[MemoryEntry],
     *,
     observe_mode: bool = True,
+    quarantine_dir: Path | None = None,
 ) -> RecallFilterResult:
     """Filter a recall window for injection patterns and hash drift.
 
     In ``observe_mode=True`` the ``accepted`` list is always the full
     original ``learnings`` input; ``would_reject`` is a diagnostic
     view of what the enforcing filter would have removed.
+
+    When *quarantine_dir* is provided, every ``would_reject`` entry is
+    ALSO appended to a JSONL shadow partition at
+    ``<quarantine_dir>/quarantined_entries.jsonl`` (FR-004 observe-mode
+    scaffold). The entry is still dropped from recall results in the
+    same manner as before; the shadow partition simply records what
+    enforce-mode would have done.
     """
     t0 = time.monotonic_ns()
     would_reject: list[MemoryEntry] = []
@@ -82,6 +130,8 @@ def filter_recall_window(
         if entry_reasons:
             would_reject.append(entry)
             reasons[entry.id] = entry_reasons
+            if quarantine_dir is not None:
+                _shadow_quarantine(entry, entry_reasons, quarantine_dir)
         else:
             accepted_enforce.append(entry)
 
@@ -95,6 +145,7 @@ def filter_recall_window(
         would_reject_count=len(would_reject),
         latency_ms=round(elapsed_ms, 3),
         observe_mode=observe_mode,
+        shadow_partition=str(quarantine_dir) if quarantine_dir else None,
     )
 
     if elapsed_ms > _LATENCY_BUDGET_MS and len(learnings) <= 25:
