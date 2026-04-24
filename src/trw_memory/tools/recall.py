@@ -9,6 +9,7 @@ and they are appended under a "related" key in the response.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -28,12 +29,72 @@ from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.retrieval import hybrid_search
+from trw_memory.retrieval.source_policy import apply_source_policy
 from trw_memory.security.rbac import Permission, require_namespace_permission
-from trw_memory.security.runtime import append_audit_event
+from trw_memory.security.recall_filter import filter_recall_window
+from trw_memory.security.runtime import append_audit_event, initialize_canaries, probe_canaries, should_halt_recalls
+from trw_memory.security.telemetry_emit import build_security_traceability, emit_security_event
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools._types import McpServer
 
 logger = structlog.get_logger(__name__)
+
+
+def _apply_sec001_recall_policy(
+    results: list[dict[str, object]],
+    *,
+    config: MemoryConfig,
+    namespace: str = "default",
+) -> list[dict[str, object]]:
+    from trw_memory.models.memory import MemoryEntry
+
+    if not config.enable_recall_filter:
+        return results
+    result_by_id: dict[str, dict[str, object]] = {}
+    entries: list[MemoryEntry] = []
+    for idx, result in enumerate(results):
+        synthetic_id = f"{result['id']}::{idx}"
+        result_by_id[synthetic_id] = result
+        entries.append(MemoryEntry.model_validate({**result, "id": synthetic_id}))
+    filtered = filter_recall_window(entries, mode=config.recall_filter_mode)
+    session_id = os.environ.get("TRW_SESSION_ID", "").strip() or namespace
+    run_id = os.environ.get("TRW_RUN_ID", "").strip() or None
+    emit_security_event(
+        config,
+        emitter="recall_filter",
+        session_id=session_id,
+        run_id=run_id,
+        payload={
+            "event_name": "recall_filter_outcome",
+            "path": "tool_recall",
+            "namespace": namespace,
+            "mode": config.recall_filter_mode,
+            "window_size": len(entries),
+            "accepted_count": len(filtered.accepted),
+            "would_reject_count": len(filtered.would_reject),
+            "actions": dict(filtered.actions),
+            "traceability": build_security_traceability(
+                live_path="tools.recall.memory_recall_impl",
+                requirement_ids=["FR-003", "NFR-010", "NFR-011"],
+            ),
+        },
+    )
+    secured: list[dict[str, object]] = []
+    for entry in filtered.accepted:
+        if entry.metadata.get("system_canary") == "true":
+            continue
+        source_result = result_by_id.get(entry.id)
+        if source_result is None:
+            source = entry.model_dump(mode="json")
+            if "::" in entry.id:
+                source["id"] = entry.id.rsplit("::", 1)[0]
+        else:
+            source = dict(source_result)
+        source["content"] = entry.content
+        source["detail"] = entry.detail
+        source["metadata"] = dict(entry.metadata)
+        secured.append(source)
+    return secured
 
 
 def memory_recall_impl(  # noqa: C901 - existing orchestration-heavy recall pipeline; security hook was added surgically
@@ -51,6 +112,12 @@ def memory_recall_impl(  # noqa: C901 - existing orchestration-heavy recall pipe
     conn: sqlite3.Connection | None = None,
     token_budget: int | None = None,
     config: MemoryConfig | None = None,
+    include_distilled: bool = True,
+    distilled_weight: float | None = None,
+    include_source_kinds: list[str] | None = None,
+    exclude_source_kinds: list[str] | None = None,
+    source_weights: dict[str, float] | None = None,
+    exclude_expired: bool = True,
 ) -> dict[str, object]:
     """Core implementation of memory_recall (callable without MCP).
 
@@ -93,6 +160,12 @@ def memory_recall_impl(  # noqa: C901 - existing orchestration-heavy recall pipe
         return {"error": str(exc), "status": "invalid"}
     cfg = config or MemoryConfig()
     require_namespace_permission(cfg, namespace, Permission.READ, "recall")
+    initialize_canaries(cfg, backend=backend)
+    if should_halt_recalls(cfg):
+        from trw_memory.exceptions import CanaryTamperError
+
+        raise CanaryTamperError("recall halted after canary tamper")
+    probe_canaries(cfg, backend=backend)
 
     if namespace.startswith("team:") and NamespaceManager(backend).team_namespace_expired(namespace):
         logger.debug("memory_recall_team_namespace_expired", namespace=namespace)
@@ -217,6 +290,17 @@ def memory_recall_impl(  # noqa: C901 - existing orchestration-heavy recall pipe
                 limit=limit,
             )
         )
+    result_dicts = apply_source_policy(
+        result_dicts,
+        include_distilled=include_distilled,
+        distilled_weight=distilled_weight,
+        include_source_kinds=include_source_kinds,
+        exclude_source_kinds=exclude_source_kinds,
+        source_weights=source_weights,
+        exclude_expired=exclude_expired,
+    )
+    if min_score > 0.0:
+        result_dicts = [d for d in result_dicts if float(str(d.get("score", entry_utility(d)))) >= min_score]
     tokens_used = 0
     tokens_truncated = False
 
@@ -268,9 +352,10 @@ def memory_recall_impl(  # noqa: C901 - existing orchestration-heavy recall pipe
         tokens_truncated=tokens_truncated,
     )
 
+    secure_result_dicts = _apply_sec001_recall_policy(result_dicts, config=cfg, namespace=namespace)
     response: dict[str, object] = {
-        "memories": result_dicts,
-        "total_matches": len(result_dicts),
+        "memories": secure_result_dicts,
+        "total_matches": len(secure_result_dicts),
         "query": query,
         "tokens_used": tokens_used,
         "tokens_budget": token_budget,
@@ -455,6 +540,12 @@ def register_recall_tool(mcp: McpServer) -> None:
         include_org_memories: bool = True,
         graph_depth: int = 0,
         token_budget: int | None = None,
+        include_distilled: bool = True,
+        distilled_weight: float | None = None,
+        include_source_kinds: list[str] | None = None,
+        exclude_source_kinds: list[str] | None = None,
+        source_weights: dict[str, float] | None = None,
+        exclude_expired: bool = True,
     ) -> dict[str, object]:
         """Search memory entries using hybrid BM25 + vector retrieval.
 
@@ -472,6 +563,12 @@ def register_recall_tool(mcp: McpServer) -> None:
             token_budget: If provided, truncate results to fit within this
                 token budget. Must be a positive integer. Returns metadata
                 about token usage in the response.
+            include_distilled: Include git-distilled records when True.
+            distilled_weight: Optional git-distilled score weight override.
+            include_source_kinds: Optional allowlist of source families.
+            exclude_source_kinds: Optional denylist of source families.
+            source_weights: Optional per-source score weights.
+            exclude_expired: When True, expired transient results are removed.
 
         Returns:
             {"memories": [...], "total_matches": int, "query": str,
@@ -494,6 +591,12 @@ def register_recall_tool(mcp: McpServer) -> None:
                 graph_depth=graph_depth,
                 token_budget=token_budget,
                 config=cfg,
+                include_distilled=include_distilled,
+                distilled_weight=distilled_weight,
+                include_source_kinds=include_source_kinds,
+                exclude_source_kinds=exclude_source_kinds,
+                source_weights=source_weights,
+                exclude_expired=exclude_expired,
             )
 
     mcp.tool()(memory_recall)

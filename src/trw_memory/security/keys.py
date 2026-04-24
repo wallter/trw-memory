@@ -22,7 +22,15 @@ try:
     _NACL_AVAILABLE = True
 except ImportError:  # pragma: no cover
     _NACL_AVAILABLE = False
-    _SigningKey = Any  # type: ignore[misc,assignment]
+    _SigningKey = Any
+
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey as _CryptoEd25519PrivateKey
+
+    _CRYPTO_ED25519_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _CRYPTO_ED25519_AVAILABLE = False
+    _CryptoEd25519PrivateKey = Any  # type: ignore[misc,assignment]
 
 from trw_memory.exceptions import ConfigError, MasterKeyNotFoundError
 from trw_memory.models.config import MemoryConfig
@@ -341,9 +349,6 @@ def load_ed25519_signing_key(path: Path) -> Any:
     gracefully. Raises :class:`ConfigError` on malformed/missing files
     when PyNaCl IS available.
     """
-    if not _NACL_AVAILABLE:
-        logger.warning("ed25519_pynacl_unavailable", path=str(path))
-        return None
     if not path.exists():
         raise ConfigError(f"Ed25519 key file not found: {path}")
     data = path.read_bytes()
@@ -351,7 +356,12 @@ def load_ed25519_signing_key(path: Path) -> Any:
         raise ConfigError(
             f"Ed25519 seed must be {_ED25519_SEED_LENGTH} bytes, got {len(data)}"
         )
-    return _SigningKey(data)
+    if _NACL_AVAILABLE:
+        return _SigningKey(data)
+    if _CRYPTO_ED25519_AVAILABLE:
+        return _CryptoEd25519PrivateKey.from_private_bytes(data)
+    logger.warning("ed25519_runtime_unavailable", path=str(path))
+    return None
 
 
 def get_or_create_ed25519_key(trw_dir: Path) -> Any:
@@ -363,16 +373,21 @@ def get_or_create_ed25519_key(trw_dir: Path) -> Any:
     ``None`` and logs a warning — callers must fall back to SHA-256-only
     provenance chains.
     """
-    key_dir = trw_dir / "memory" / "security"
-    key_path = key_dir / _ED25519_KEY_FILENAME
+    key_path = trw_dir / "memory" / "security" / _ED25519_KEY_FILENAME
+    return get_or_create_ed25519_key_at_path(key_path)
+
+
+def get_or_create_ed25519_key_at_path(key_path: Path) -> Any:
+    """Return an Ed25519 signing key stored exactly at *key_path*."""
+    key_dir = key_path.parent
     if key_path.exists():
-        if _NACL_AVAILABLE:
+        if _NACL_AVAILABLE or _CRYPTO_ED25519_AVAILABLE:
             try:
                 return load_ed25519_signing_key(key_path)
             except ConfigError:
                 logger.warning("ed25519_key_load_failed", path=str(key_path), exc_info=True)
                 return None
-        logger.warning("ed25519_pynacl_unavailable", path=str(key_path))
+        logger.warning("ed25519_runtime_unavailable", path=str(key_path))
         return None
 
     # Create new key
@@ -383,7 +398,7 @@ def get_or_create_ed25519_key(trw_dir: Path) -> Any:
         key_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
     logger.info("ed25519_key_generated", path=str(key_path))
 
-    if not _NACL_AVAILABLE:
-        logger.warning("ed25519_pynacl_unavailable_after_write", path=str(key_path))
+    if not (_NACL_AVAILABLE or _CRYPTO_ED25519_AVAILABLE):
+        logger.warning("ed25519_runtime_unavailable_after_write", path=str(key_path))
         return None
-    return _SigningKey(seed)
+    return load_ed25519_signing_key(key_path)

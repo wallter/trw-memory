@@ -7,6 +7,7 @@ from typing import Any
 from collections.abc import Mapping, Sequence
 
 SourceFamily = str
+_TRANSIENT_SOURCE_FAMILIES = frozenset({"lifecycle", "episodic"})
 
 DEFAULT_SOURCE_WEIGHTS: dict[SourceFamily, float] = {
     "git_distilled": 0.75,
@@ -85,12 +86,13 @@ def apply_source_policy(
     include_set = set(include_source_kinds or [])
     exclude_set = set(exclude_source_kinds or [])
     weights = dict(DEFAULT_SOURCE_WEIGHTS)
+    explicit_weight_overrides = set((source_weights or {}).keys())
     if source_weights:
         weights.update(source_weights)
     if distilled_weight is not None:
         weights["git_distilled"] = distilled_weight
 
-    filtered: list[dict[str, Any]] = []
+    ranked: list[tuple[int, dict[str, Any]]] = []
     for result in results:
         family = classify_source_family(result)
         if family == "git_distilled" and not include_distilled:
@@ -104,14 +106,16 @@ def apply_source_policy(
         weight = weights.get(family, 1.0)
         if weight <= 0.0:
             continue
-        if weight >= 1.0 - 1e-9:
-            filtered.append(dict(result))
-            continue
         adjusted = dict(result)
         adjusted["score"] = float(result.get("score", 0.0)) * weight
-        filtered.append(adjusted)
-    filtered.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
-    return filtered
+        containment_bucket = 0
+        if family in _TRANSIENT_SOURCE_FAMILIES and family not in explicit_weight_overrides:
+            containment_bucket = 2
+        elif str(result.get("source", "")) in {"org", "shared"}:
+            containment_bucket = 1
+        ranked.append((containment_bucket, adjusted))
+    ranked.sort(key=lambda item: (item[0], -float(item[1].get("score", 0.0))))
+    return [item for _, item in ranked]
 
 
 __all__ = [

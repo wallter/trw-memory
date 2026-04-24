@@ -123,3 +123,35 @@ class CorruptDatabaseUnsalvageableError(StorageError):
     def __init__(self, message: str, *, backup_path: str = "") -> None:
         super().__init__(f"{message} (backup preserved at: {backup_path})", path=backup_path)
         self.backup_path = backup_path
+
+
+class SecurityDependencyError(MemoryError):
+    """Base class for fail-loud SEC-001 dependency failures."""
+
+
+class ScorerUnavailableError(SecurityDependencyError):
+    """Raised when trust-scoring cannot be loaded or executed."""
+
+
+class QuarantineUnreachableError(SecurityDependencyError):
+    """Raised when the quarantine database cannot be reached."""
+
+
+class CanaryFixturesMissingError(SecurityDependencyError):
+    """Raised when canary fixtures cannot be resolved at startup/runtime."""
+
+
+class ProvenanceKeyUnavailableError(SecurityDependencyError):
+    """Raised when provenance signing is required but no signing key is available."""
+
+
+class SecurityTelemetryUnavailableError(SecurityDependencyError):
+    """Raised when required SEC-001 telemetry cannot be appended."""
+
+
+class SecurityDefaultUnresolvableError(SecurityDependencyError):
+    """Raised when a SEC-001 default path or fixture cannot resolve at boot."""
+
+
+class CanaryTamperError(SecurityDependencyError):
+    """Raised when a pinned canary hash drifts from the stored row."""

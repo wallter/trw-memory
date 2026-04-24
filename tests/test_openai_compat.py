@@ -103,6 +103,16 @@ class TestRecallSchema:
         assert props["include_org_memories"]["type"] == "boolean"
         assert props["include_org_memories"]["default"] is True
 
+    def test_source_aware_properties_are_exposed(self) -> None:
+        props = get_memory_recall_schema()["parameters"]["properties"]
+        assert props["include_source_kinds"]["type"] == "array"
+        assert props["exclude_source_kinds"]["type"] == "array"
+        assert props["source_weights"]["type"] == "object"
+        assert props["exclude_expired"]["type"] == "boolean"
+        assert props["exclude_expired"]["default"] is True
+        assert props["include_distilled"]["type"] == "boolean"
+        assert props["distilled_weight"]["type"] == "number"
+
 
 class TestSearchSchema:
     def test_structure(self) -> None:

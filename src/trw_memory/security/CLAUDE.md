@@ -22,9 +22,10 @@ sub-CLAUDE.md row of PRD-SEC-001 exit criteria.
 ## v1 Rollout: Observe-Mode Only
 
 `trust_scorer.score_intake(...)` and `recall_filter.filter_recall_window(...)`
-both run in **observe-mode** during Sprint 96. They emit what-they-would-do
-decisions as `HPOTelemetryEvent` subclass events but never actually
-quarantine or reject. The 14-day calibration clock starts when the modules
+both run in **observe-mode** during Sprint 96. Live write/recall paths emit
+their what-they-would-do decisions into the append-only security event stream
+(`events-YYYY-MM-DD.jsonl`) via `security/telemetry_emit.py`, rather than
+structlog-only logs. The 14-day calibration clock starts when the modules
 are deployed; threshold-lock promotion is a Sprint 97 decision gate
 (PRD-SEC-001 §8 Rollout Phase 1 → Phase 2).
 
@@ -52,8 +53,8 @@ maintainer sign-off + operator kill-switch flag. The switch is
 `seed_canaries()` inserts N canary learnings with deterministic content.
 `verify_canaries()` re-reads them via the normal recall path and compares
 content hash. If any canary comes back tampered, that's a trust-layer
-breach signal — emit `MCPSecurityEvent` with `event_type="canary_breach"`
-(not a new subclass — use the `payload` dict).
+breach signal — emit a `MemorySecurityEvent` row to the security event
+stream with `payload.event_name="canary_hash_drift"` or `"canary_missing"`.
 
 Canary seeding is **idempotent** and **in-memory-hash-pinned**. Pinning
 must happen at seed time, not retrieval time, so a compromised storage

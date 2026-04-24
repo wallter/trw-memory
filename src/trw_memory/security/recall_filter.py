@@ -1,4 +1,4 @@
-"""FR-002 — Recall-time pattern filter.
+"""FR-003 — Recall-time pattern filter.
 
 Sprint 96 W1-E scaffolding in ``observe_mode=True``. Accepts a window of
 ``MemoryEntry`` (the trw-memory equivalent of the spec's ``LearnIn``)
@@ -14,7 +14,9 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
+from typing import Literal
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
@@ -22,10 +24,22 @@ from pydantic import BaseModel, ConfigDict, Field
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.poisoning import _INJECTION_PATTERNS
 
-__all__ = ["RecallFilterResult", "filter_recall_window"]
+__all__ = ["RecallDecision", "RecallFilterResult", "filter_recall_window"]
 
 _LOG = structlog.get_logger(__name__)
 _LATENCY_BUDGET_MS = 20.0
+
+
+Action = Literal["allow", "redact", "block"]
+
+
+class RecallDecision(BaseModel):
+    """Decision for a single recalled entry."""
+
+    model_config = ConfigDict(strict=True)
+
+    action: Action
+    reasons: list[str] = Field(default_factory=list)
 
 
 class RecallFilterResult(BaseModel):
@@ -41,10 +55,11 @@ class RecallFilterResult(BaseModel):
     accepted: list[MemoryEntry]
     would_reject: list[MemoryEntry] = Field(default_factory=list)
     reasons: dict[str, list[str]] = Field(default_factory=dict)
+    actions: dict[str, Action] = Field(default_factory=dict)
 
 
 def _inspect(entry: MemoryEntry) -> list[str]:
-    """Return a list of rejection reasons; empty list = pass."""
+    """Return a list of recall-filter reasons; empty list = pass."""
     reasons: list[str] = []
     combined = f"{entry.content}{entry.detail}"
     for pattern in _INJECTION_PATTERNS:
@@ -54,14 +69,32 @@ def _inspect(entry: MemoryEntry) -> list[str]:
 
     # Hash-pin drift: if metadata carries ``content_hash`` (provenance
     # record), recompute and compare.
-    pinned = entry.metadata.get("content_hash")
+    pinned = entry.metadata.get("provenance_content_hash") or entry.metadata.get("content_hash")
     if pinned:
-        import hashlib
-
         current = hashlib.sha256(combined.encode("utf-8")).hexdigest()
         if current != pinned:
             reasons.append("hash_pin_drift")
     return reasons
+
+
+def _redact_entry(entry: MemoryEntry) -> MemoryEntry:
+    redacted_content = entry.content
+    redacted_detail = entry.detail
+    for pattern in _INJECTION_PATTERNS:
+        redacted_content = pattern.sub("[redacted]", redacted_content)
+        redacted_detail = pattern.sub("[redacted]", redacted_detail)
+    return entry.model_copy(update={"content": redacted_content, "detail": redacted_detail})
+
+
+def _decide(entry: MemoryEntry, *, mode: Literal["strict", "redact", "observe"]) -> RecallDecision:
+    reasons = _inspect(entry)
+    if not reasons:
+        return RecallDecision(action="allow", reasons=[])
+    if mode == "observe":
+        return RecallDecision(action="allow", reasons=reasons)
+    if mode == "redact" and all(reason != "hash_pin_drift" for reason in reasons):
+        return RecallDecision(action="redact", reasons=reasons)
+    return RecallDecision(action="block", reasons=reasons)
 
 
 def _shadow_quarantine(
@@ -104,14 +137,16 @@ def _shadow_quarantine(
 def filter_recall_window(
     learnings: list[MemoryEntry],
     *,
-    observe_mode: bool = True,
+    mode: Literal["strict", "redact", "observe"] | None = None,
+    observe_mode: bool | None = None,
     quarantine_dir: Path | None = None,
 ) -> RecallFilterResult:
     """Filter a recall window for injection patterns and hash drift.
 
-    In ``observe_mode=True`` the ``accepted`` list is always the full
-    original ``learnings`` input; ``would_reject`` is a diagnostic
-    view of what the enforcing filter would have removed.
+    ``mode`` controls live behavior:
+    - ``strict``: block matched entries
+    - ``redact``: redact injection content unless the reason is hash drift
+    - ``observe``: return originals while recording would-block entries
 
     When *quarantine_dir* is provided, every ``would_reject`` entry is
     ALSO appended to a JSONL shadow partition at
@@ -119,32 +154,48 @@ def filter_recall_window(
     scaffold). The entry is still dropped from recall results in the
     same manner as before; the shadow partition simply records what
     enforce-mode would have done.
+
+    ``observe_mode`` is retained as a backwards-compatible alias for the
+    pre-SEC call surface: ``True`` maps to ``mode="observe"`` and
+    ``False`` maps to ``mode="strict"``.
     """
+    legacy_mode = "observe" if observe_mode is not None and observe_mode else "strict"
+    if mode is None:
+        resolved_mode: Literal["strict", "redact", "observe"] = legacy_mode if observe_mode is not None else "observe"
+    else:
+        resolved_mode = mode
+        if observe_mode is not None and resolved_mode != legacy_mode:
+            raise ValueError("mode and observe_mode disagree")
+
     t0 = time.monotonic_ns()
     would_reject: list[MemoryEntry] = []
     reasons: dict[str, list[str]] = {}
+    actions: dict[str, Action] = {}
     accepted_enforce: list[MemoryEntry] = []
 
     for entry in learnings:
-        entry_reasons = _inspect(entry)
-        if entry_reasons:
+        decision = _decide(entry, mode=resolved_mode)
+        actions[entry.id] = decision.action
+        if decision.reasons:
             would_reject.append(entry)
-            reasons[entry.id] = entry_reasons
+            reasons[entry.id] = decision.reasons
             if quarantine_dir is not None:
-                _shadow_quarantine(entry, entry_reasons, quarantine_dir)
-        else:
+                _shadow_quarantine(entry, decision.reasons, quarantine_dir)
+        if decision.action == "allow":
             accepted_enforce.append(entry)
+        elif decision.action == "redact":
+            accepted_enforce.append(_redact_entry(entry))
 
-    accepted = list(learnings) if observe_mode else accepted_enforce
+    accepted = list(learnings) if resolved_mode == "observe" else accepted_enforce
 
     elapsed_ms = (time.monotonic_ns() - t0) / 1_000_000.0
 
     _LOG.info(
-        "recall_filter.observe" if observe_mode else "recall_filter.enforce",
+        "recall_filter.observe" if resolved_mode == "observe" else "recall_filter.enforce",
         window_size=len(learnings),
         would_reject_count=len(would_reject),
         latency_ms=round(elapsed_ms, 3),
-        observe_mode=observe_mode,
+        mode=resolved_mode,
         shadow_partition=str(quarantine_dir) if quarantine_dir else None,
     )
 
@@ -156,4 +207,4 @@ def filter_recall_window(
             window_size=len(learnings),
         )
 
-    return RecallFilterResult(accepted=accepted, would_reject=would_reject, reasons=reasons)
+    return RecallFilterResult(accepted=accepted, would_reject=would_reject, reasons=reasons, actions=actions)

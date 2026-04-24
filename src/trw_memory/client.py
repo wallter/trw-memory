@@ -59,13 +59,21 @@ from trw_memory.retrieval.source_policy import apply_source_policy
 from trw_memory.security.pii import anonymize_installation_id
 from trw_memory.security.poisoning import validate_store_inputs
 from trw_memory.security.rbac import Permission, require_namespace_permission
+from trw_memory.security.recall_filter import filter_recall_window
 from trw_memory.security.runtime import (
     append_audit_event,
+    audit_entry,
     delete_quarantined_entries,
+    initialize_canaries,
     list_quarantined_entries,
     prepare_entry_for_store,
+    probe_canaries,
+    review_quarantined_entry,
+    should_halt_recalls,
     store_quarantined_entry,
 )
+from trw_memory.security.startup import verify_defaults
+from trw_memory.security.telemetry_emit import build_security_traceability, emit_security_event
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.sync.conflict import init_clock
 from trw_memory.sync.remote import (
@@ -466,6 +474,8 @@ class MemoryClient:
         if mode in ("local", "auto"):
             try:
                 self._backend = _create_local_backend(self._config, namespace)
+                verify_defaults(self._config)
+                initialize_canaries(self._config, backend=self._backend)
                 self._resolved_mode = "local"
                 logger.debug(
                     "client_initialized",
@@ -1056,6 +1066,10 @@ class MemoryClient:
         self._require_permission(Permission.READ, "recall")
         self._maybe_start_retry_drain()
         await self._apply_pending_remote_retirements()
+        if should_halt_recalls(self._config):
+            from trw_memory.exceptions import CanaryTamperError
+
+            raise CanaryTamperError("recall halted after canary tamper")
         embedder = self._get_embedder() if query.strip() else None
         query_embedding: list[float] | None = None
         if embedder is not None:
@@ -1113,7 +1127,7 @@ class MemoryClient:
             )
             if min_score > 0.0:
                 final_scored = [result for result in final_scored if result["score"] >= min_score]
-            final = self._apply_budget(final_scored[:limit], token_budget)
+            final = self._apply_recall_security(self._apply_budget(final_scored[:limit], token_budget))
             await self._record_recall_access(final)
             append_audit_event(
                 self._config,
@@ -1164,7 +1178,7 @@ class MemoryClient:
         )
         if min_score > 0.0:
             filtered_results = [result for result in filtered_results if result["score"] >= min_score]
-        final = self._apply_budget(filtered_results[:limit], token_budget)
+        final = self._apply_recall_security(self._apply_budget(filtered_results[:limit], token_budget))
         await self._record_recall_access(final)
         append_audit_event(
             self._config,
@@ -1175,6 +1189,61 @@ class MemoryClient:
         )
         self._remember_results_in_tiers(final)
         return final
+
+    def _apply_recall_security(self, results: list[MemoryResultDict]) -> list[MemoryResultDict]:
+        if self._backend is not None:
+            probe_canaries(self._config, backend=self._backend)
+        if not self._config.enable_recall_filter:
+            return results
+        score_by_id: dict[str, float] = {}
+        result_by_id: dict[str, MemoryResultDict] = {}
+        entries: list[MemoryEntry] = []
+        for idx, result in enumerate(results):
+            synthetic_id = f"{result['namespace']}::{result['memory_id']}::{idx}"
+            score_by_id[synthetic_id] = result["score"]
+            result_by_id[synthetic_id] = result
+            raw_result = {"id": synthetic_id, **result}
+            recalled_at = datetime.now(timezone.utc)
+            for timestamp_field in ("created_at", "updated_at"):
+                if raw_result.get(timestamp_field) in {"", "None", None}:
+                    raw_result[timestamp_field] = recalled_at
+            if raw_result.get("last_accessed_at") in {"", "None", None}:
+                raw_result["last_accessed_at"] = None
+            entries.append(MemoryEntry.model_validate(raw_result))
+        filtered = filter_recall_window(entries, mode=self._config.recall_filter_mode)
+        session_id = os.environ.get("TRW_SESSION_ID", "").strip() or self._namespace
+        run_id = os.environ.get("TRW_RUN_ID", "").strip() or None
+        emit_security_event(
+            self._config,
+            emitter="recall_filter",
+            session_id=session_id,
+            run_id=run_id,
+            payload={
+                "event_name": "recall_filter_outcome",
+                "path": "client_recall",
+                "namespace": self._namespace,
+                "mode": self._config.recall_filter_mode,
+                "window_size": len(entries),
+                "accepted_count": len(filtered.accepted),
+                "would_reject_count": len(filtered.would_reject),
+                "actions": dict(filtered.actions),
+                "traceability": build_security_traceability(
+                    live_path="client.MemoryClient._apply_recall_security",
+                    requirement_ids=["FR-003", "NFR-010", "NFR-011"],
+                ),
+            },
+        )
+        secured: list[MemoryResultDict] = []
+        for entry in filtered.accepted:
+            if entry.metadata.get("system_canary") == "true":
+                continue
+            original = dict(result_by_id[entry.id])
+            original["content"] = entry.content
+            original["detail"] = entry.detail
+            original["metadata"] = dict(entry.metadata)
+            original["score"] = score_by_id[entry.id]
+            secured.append(cast("MemoryResultDict", original))
+        return secured
 
     @staticmethod
     def _apply_budget(
@@ -1976,6 +2045,26 @@ class MemoryClient:
         )
         return final
 
+    async def audit_learning(self, learning_id: str) -> dict[str, object]:
+        """Return SEC-001 audit data for an active or quarantined learning."""
+        return audit_entry(self._config, learning_id=learning_id, active_backend=self._get_backend())
+
+    async def review_quarantined(
+        self,
+        learning_id: str,
+        *,
+        decision: Literal["approve", "reject"],
+        reviewer_id: str,
+    ) -> dict[str, str]:
+        """Review a quarantined learning and either promote or reject it."""
+        return review_quarantined_entry(
+            self._config,
+            active_backend=self._get_backend(),
+            learning_id=learning_id,
+            decision=decision,
+            reviewer_id=reviewer_id,
+        )
+
     # ------------------------------------------------------------------
     # Tool registration (FR09)
     # ------------------------------------------------------------------
@@ -1996,12 +2085,24 @@ class MemoryClient:
             limit: int = 10,
             include_org_memories: bool = True,
             include_shared: bool = False,
+            include_distilled: bool = True,
+            distilled_weight: float | None = None,
+            include_source_kinds: list[str] | None = None,
+            exclude_source_kinds: list[str] | None = None,
+            source_weights: dict[str, float] | None = None,
+            exclude_expired: bool = True,
         ) -> list[MemoryResultDict]:
             return await client.recall(
                 query,
                 limit=limit,
                 include_org_memories=include_org_memories,
                 include_shared=include_shared,
+                include_distilled=include_distilled,
+                distilled_weight=distilled_weight,
+                include_source_kinds=include_source_kinds,
+                exclude_source_kinds=exclude_source_kinds,
+                source_weights=source_weights,
+                exclude_expired=exclude_expired,
             )
 
         async def memory_forget(memory_id: str | None = None, actor: str | None = None) -> ForgetResultDict:

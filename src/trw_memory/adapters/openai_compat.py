@@ -105,6 +105,35 @@ def get_memory_recall_schema() -> dict[str, Any]:
                     "default": 0,
                     "description": "When > 0, include graph-related memories up to this traversal depth",
                 },
+                "include_distilled": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Include git-distilled records in recall results",
+                },
+                "distilled_weight": {
+                    "type": "number",
+                    "description": "Optional score weight override for git-distilled records",
+                },
+                "include_source_kinds": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional allowlist of source families to keep",
+                },
+                "exclude_source_kinds": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional denylist of source families to remove",
+                },
+                "source_weights": {
+                    "type": "object",
+                    "additionalProperties": {"type": "number"},
+                    "description": "Optional per-source score weight overrides",
+                },
+                "exclude_expired": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Exclude expired lifecycle and episodic records by default",
+                },
             },
             "required": ["query"],
         },

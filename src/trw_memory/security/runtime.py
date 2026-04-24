@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -12,15 +13,27 @@ from time import time
 
 import structlog
 
-from trw_memory.exceptions import PIIBlockError, RateLimitError
+from trw_memory.exceptions import (
+    CanaryTamperError,
+    PIIBlockError,
+    ProvenanceKeyUnavailableError,
+    QuarantineUnreachableError,
+    RateLimitError,
+    ScorerUnavailableError,
+)
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.audit import AuditLog
+from trw_memory.security.canary import _CANARY_FIXTURES, PINNED_HASHES
 from trw_memory.security.pii import PIIMatch, PIIType, detect_pii
 from trw_memory.security.poisoning import quarantine_entry, score_entry_anomaly, validate_entry_payload
+from trw_memory.security.provenance import build_entry_provenance, derive_verify_key, verify_entry_provenance
+from trw_memory.security.startup import _discover_anchor, resolve_security_path, verify_defaults
+from trw_memory.security.telemetry_emit import build_security_traceability, emit_security_event
+from trw_memory.security.trust_scorer import score_intake
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.persistence import lock_for_rmw, read_yaml, write_yaml
-from trw_memory.storage.yaml_backend import YAMLBackend
+from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 _NAMESPACE_METADATA_FILE = "namespace.txt"
 _BLOCKING_PII_TYPES = frozenset({PIIType.API_KEY})
@@ -39,6 +52,7 @@ _CODE_SNIPPET_PATTERNS = (
 )
 _AUDIT_MAINTENANCE_CACHE: set[str] = set()
 logger = structlog.get_logger(__name__)
+_CANARY_STATE: dict[str, dict[str, object]] = {}
 
 
 @dataclass(frozen=True)
@@ -88,6 +102,7 @@ def prepare_entry_for_store(
     backend: StorageBackend,
     config: MemoryConfig,
     session_id: str | None = None,
+    trw_dir: Path | None = None,
 ) -> PreparedStoreEntry:
     """Apply rate limits, PII handling, and anomaly scoring before a write."""
     ensure_security_maintenance(config)
@@ -95,13 +110,24 @@ def prepare_entry_for_store(
     existing = backend.get(entry.id)
     op = "update" if existing is not None and existing.namespace == entry.namespace else "store"
     flagged_entry = _flag_code_snippet(entry)
+    secured_entry = _apply_sec001_intake(flagged_entry, config=config, session_id=session_id, trw_dir=trw_dir)
+    if secured_entry.metadata.get("quarantined") == "true":
+        trust_score = float(secured_entry.metadata.get("trust_score", "0.0") or "0.0")
+        return PreparedStoreEntry(
+            entry=secured_entry,
+            op=op,
+            pii_matches=(),
+            quarantined=True,
+            anomaly_dimension="trust_score",
+            anomaly_z_score=trust_score,
+        )
 
     try:
         enforce_write_rate_limit(
             config, session_id=session_id, actor=actor, namespace=entry.namespace, entry_id=entry.id
         )
-        validate_entry_payload(flagged_entry, max_chars=config.max_entry_chars)
-        secured_entry, pii_matches = _apply_runtime_pii_policy(flagged_entry, config)
+        validate_entry_payload(secured_entry, max_chars=config.max_entry_chars)
+        secured_entry, pii_matches = _apply_runtime_pii_policy(secured_entry, config)
         anomaly, anomaly_stats = _score_entry_anomaly(
             secured_entry,
             backend,
@@ -151,12 +177,23 @@ def prepare_entry_for_store(
 
 
 def store_quarantined_entry(config: MemoryConfig, entry: MemoryEntry) -> None:
-    """Persist a quarantined entry outside the main memory store."""
-    namespace_dir = _quarantine_namespace_dir(config, entry.namespace)
-    namespace_dir.mkdir(parents=True, exist_ok=True)
-    (namespace_dir / _NAMESPACE_METADATA_FILE).write_text(entry.namespace, encoding="utf-8")
-    with YAMLBackend(namespace_dir / "entries") as backend:
-        backend.store(entry)
+    """Persist a quarantined entry in the SEC-001 quarantine SQLite store."""
+    try:
+        with _open_quarantine_backend(config) as backend:
+            backend.store(
+                entry.model_copy(
+                    update={
+                        "metadata": {
+                            **entry.metadata,
+                            "quarantined": "true",
+                            "quarantined_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    }
+                )
+            )
+            _append_review_log(config, entry.id, "quarantined", reviewer_id="system")
+    except OSError as exc:
+        raise QuarantineUnreachableError(f"quarantine DB unavailable: {exc}") from exc
 
 
 def list_quarantined_entries(
@@ -168,29 +205,14 @@ def list_quarantined_entries(
 ) -> list[MemoryEntry]:
     """Return quarantined entries filtered by namespace and actor."""
     ensure_security_maintenance(config)
-    root = Path(config.quarantine_path)
-    if not root.exists():
-        return []
-
     entries: list[MemoryEntry] = []
-    for namespace_dir in sorted(root.iterdir()):
-        if not namespace_dir.is_dir():
-            continue
-        actual_namespace = _read_namespace_metadata(namespace_dir)
-        if actual_namespace is None:
-            continue
-        if namespace is not None and actual_namespace != namespace:
-            continue
-        entries_dir = namespace_dir / "entries"
-        if not entries_dir.exists():
-            continue
-        with YAMLBackend(entries_dir) as backend:
-            for entry in backend.list_entries(namespace=actual_namespace, limit=limit * 5):
-                if entry.metadata.get("quarantined") != "true":
-                    continue
-                if actor is not None and entry.source_identity != actor:
-                    continue
-                entries.append(entry)
+    with _open_quarantine_backend(config) as backend:
+        for entry in backend.list_entries(namespace=namespace, limit=limit * 5):
+            if entry.metadata.get("quarantined") != "true":
+                continue
+            if actor is not None and entry.source_identity != actor:
+                continue
+            entries.append(entry)
     entries.sort(key=lambda item: item.updated_at, reverse=True)
     return entries[:limit]
 
@@ -204,12 +226,8 @@ def delete_quarantined_entries(
 ) -> int:
     """Delete matching quarantined entries and return the count removed."""
     ensure_security_maintenance(config)
-    namespace_dir = _quarantine_namespace_dir(config, namespace)
-    entries_dir = namespace_dir / "entries"
-    if not entries_dir.exists():
-        return 0
     deleted = 0
-    with YAMLBackend(entries_dir) as backend:
+    with _open_quarantine_backend(config) as backend:
         if memory_id is not None:
             return 1 if backend.delete(memory_id) else 0
         for entry in backend.list_entries(namespace=namespace, limit=10_000):
@@ -453,3 +471,375 @@ def _rejection_reason(exc: Exception) -> str:
     if exc.__class__.__name__ == "SchemaValidationError":
         return "schema_invalid"
     return getattr(exc, "reason", exc.__class__.__name__)
+
+
+def _open_quarantine_backend(config: MemoryConfig) -> SQLiteBackend:
+    path = resolve_security_path(config, "quarantine_db_path", create_parent=True)
+    return SQLiteBackend(
+        db_path=path,
+        dim=config.embedding_dim,
+        recovery_policy=config.memory_recovery_policy,
+        corrupt_backup_keep=config.memory_corrupt_backup_keep,
+        rebuild_from_cold=config.memory_recovery_rebuild_from_cold,
+    )
+
+
+def _append_review_log(config: MemoryConfig, learning_id: str, decision: str, *, reviewer_id: str) -> None:
+    with _open_quarantine_backend(config) as backend:
+        conn = getattr(backend, "_conn", None)
+        if conn is None:
+            raise QuarantineUnreachableError("quarantine DB connection unavailable")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS quarantine_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                learning_id TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                reviewer_id TEXT NOT NULL,
+                reviewed_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO quarantine_reviews (learning_id, decision, reviewer_id, reviewed_at) VALUES (?, ?, ?, ?)",
+            (learning_id, decision, reviewer_id, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+
+
+def get_status_history(config: MemoryConfig, learning_id: str) -> list[dict[str, str]]:
+    with _open_quarantine_backend(config) as backend:
+        conn = getattr(backend, "_conn", None)
+        if conn is None:
+            return []
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS quarantine_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                learning_id TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                reviewer_id TEXT NOT NULL,
+                reviewed_at TEXT NOT NULL
+            )
+            """
+        )
+        rows = conn.execute(
+            "SELECT decision, reviewer_id, reviewed_at FROM quarantine_reviews WHERE learning_id = ? ORDER BY id ASC",
+            (learning_id,),
+        ).fetchall()
+    return [
+        {"status": str(decision), "reviewer_id": str(reviewer_id), "ts": str(reviewed_at)}
+        for decision, reviewer_id, reviewed_at in rows
+    ]
+
+
+def review_quarantined_entry(
+    config: MemoryConfig,
+    *,
+    active_backend: StorageBackend,
+    learning_id: str,
+    decision: str,
+    reviewer_id: str,
+) -> dict[str, str]:
+    if decision not in {"approve", "reject"}:
+        raise ValueError("decision must be approve or reject")
+    existing_history = get_status_history(config, learning_id)
+    resolved_status = next(
+        (item["status"] for item in existing_history if item.get("status") in {"active", "obsolete_poisoned"}),
+        "",
+    )
+    if resolved_status:
+        return {"learning_id": learning_id, "status": "already_resolved", "resolved_status": resolved_status}
+    with _open_quarantine_backend(config) as quarantine_backend:
+        entry = quarantine_backend.get(learning_id)
+        if entry is None:
+            return {"learning_id": learning_id, "status": "not_found"}
+        _append_review_log(config, learning_id, "active" if decision == "approve" else "obsolete_poisoned", reviewer_id=reviewer_id)
+        if decision == "approve":
+            approved = entry.model_copy(
+                update={
+                    "metadata": {
+                        **entry.metadata,
+                        "quarantined": "false",
+                        "reviewed_by": reviewer_id,
+                        "review_decision": "approve",
+                    }
+                }
+            )
+            active_backend.store(approved)
+            quarantine_backend.delete(learning_id)
+            return {"learning_id": learning_id, "status": "approved"}
+        rejected = entry.model_copy(
+            update={
+                "metadata": {
+                    **entry.metadata,
+                    "reviewed_by": reviewer_id,
+                    "review_decision": "reject",
+                    "security_status": "obsolete_poisoned",
+                }
+            }
+        )
+        quarantine_backend.store(rejected)
+        return {"learning_id": learning_id, "status": "rejected"}
+
+
+def audit_entry(
+    config: MemoryConfig,
+    *,
+    learning_id: str,
+    active_backend: StorageBackend,
+) -> dict[str, object]:
+    entry = active_backend.get(learning_id)
+    current_status = "active"
+    if entry is None:
+        quarantined = list_quarantined_entries(config, limit=10_000)
+        entry = next((candidate for candidate in quarantined if candidate.id == learning_id), None)
+        current_status = "quarantined" if entry is not None else "legacy_unsigned"
+    if entry is None:
+        return {"learning_id": learning_id, "status": "not_found", "status_history": []}
+    metadata = dict(entry.metadata)
+    if not metadata.get("provenance_signature"):
+        return {
+            "learning_id": learning_id,
+            "status": "legacy_unsigned",
+            "status_history": get_status_history(config, learning_id),
+        }
+    verify_key = None
+    try:
+        from trw_memory.security.keys import get_or_create_ed25519_key_at_path
+
+        verify_key = derive_verify_key(
+            get_or_create_ed25519_key_at_path(
+                resolve_security_path(config, "provenance_signing_key_path", create_parent=True)
+            )
+        )
+    except Exception:
+        verify_key = None
+    return {
+        "learning_id": learning_id,
+        "status": current_status,
+        "author": metadata.get("provenance_author", entry.source_identity),
+        "session_id": metadata.get("provenance_session_id", ""),
+        "ts": metadata.get("provenance_ts", ""),
+        "content_hash": metadata.get("provenance_content_hash", ""),
+        "signature": metadata.get("provenance_signature", ""),
+        "verified": verify_entry_provenance(entry, verify_key),
+        "status_history": get_status_history(config, learning_id),
+    }
+
+
+def _resolve_provenance_session_id(entry: MemoryEntry, session_id: str | None) -> str:
+    return (
+        session_id
+        or entry.metadata.get("session_id", "")
+        or entry.metadata.get("installation_id", "")
+        or os.environ.get("TRW_SESSION_ID", "").strip()
+        or entry.source_identity
+        or "unknown-session"
+    )
+
+
+def _resolve_security_trace_context(*, session_id: str | None = None) -> tuple[str, str | None]:
+    resolved_session_id = session_id or os.environ.get("TRW_SESSION_ID", "").strip() or "memory-security"
+    run_id = os.environ.get("TRW_RUN_ID", "").strip() or None
+    return resolved_session_id, run_id
+
+
+def _apply_sec001_intake(
+    entry: MemoryEntry,
+    *,
+    config: MemoryConfig,
+    session_id: str | None,
+    trw_dir: Path | None = None,
+) -> MemoryEntry:
+    anchor_dir = trw_dir or _discover_anchor(config)
+    verify_defaults(config, trw_dir=anchor_dir)
+    trust_metadata = {**entry.metadata, "source_identity": entry.source_identity}
+    if config.enable_trust_scoring:
+        try:
+            trust_result = score_intake(
+                f"{entry.content}\n{entry.detail}",
+                trust_metadata,
+                observe_mode=config.trust_scoring_mode == "observe",
+                trw_dir=anchor_dir,
+            )
+        except Exception as exc:
+            raise ScorerUnavailableError(f"trust scorer unavailable: {exc}") from exc
+        updated_metadata = {
+            **entry.metadata,
+            "trust_score": f"{trust_result.score:.4f}",
+            "trust_flags": "|".join(trust_result.reasons),
+        }
+        entry = entry.model_copy(update={"metadata": updated_metadata})
+        would_be_decision = next(
+            (
+                reason.removeprefix("WOULD-BE:")
+                for reason in trust_result.reasons
+                if reason.startswith("WOULD-BE:")
+            ),
+            trust_result.decision,
+        )
+        telemetry_session_id, telemetry_run_id = _resolve_security_trace_context(
+            session_id=session_id or _resolve_provenance_session_id(entry, session_id)
+        )
+        emit_security_event(
+            config,
+            emitter="trust_scorer",
+            session_id=telemetry_session_id,
+            run_id=telemetry_run_id,
+            payload={
+                "event_name": "trust_score_decision",
+                "entry_id": entry.id,
+                "namespace": entry.namespace,
+                "mode": config.trust_scoring_mode,
+                "score": trust_result.score,
+                "decision": trust_result.decision,
+                "would_be_decision": would_be_decision,
+                "flags": list(trust_result.reasons),
+                "traceability": build_security_traceability(
+                    live_path="security.runtime.prepare_entry_for_store",
+                    requirement_ids=["FR-001", "FR-008", "NFR-010", "NFR-011"],
+                ),
+            },
+        )
+        if config.trust_scoring_mode == "strict" and trust_result.score < config.trust_score_threshold:
+            from trw_memory.exceptions import PoisoningError
+
+            raise PoisoningError("trust score below threshold", reason="trust_score_below_threshold")
+        if config.trust_scoring_mode == "enforce" and trust_result.score < config.trust_score_threshold:
+            entry = quarantine_entry(entry)
+
+    if config.provenance_required:
+        try:
+            from trw_memory.security.keys import get_or_create_ed25519_key_at_path
+
+            signing_key = get_or_create_ed25519_key_at_path(
+                resolve_security_path(
+                config,
+                "provenance_signing_key_path",
+                trw_dir=anchor_dir,
+                create_parent=True,
+            )
+            )
+            if signing_key is None:
+                raise ProvenanceKeyUnavailableError("provenance signing key unavailable")
+        except Exception as exc:
+            if isinstance(exc, ProvenanceKeyUnavailableError):
+                raise
+            raise ProvenanceKeyUnavailableError(f"unable to load provenance key: {exc}") from exc
+        provenance_metadata = build_entry_provenance(
+            learning_id=entry.id,
+            content=entry.content,
+            detail=entry.detail,
+            author=_actor_for_entry(entry),
+            session_id=_resolve_provenance_session_id(entry, session_id),
+            ts=datetime.now(timezone.utc).isoformat(),
+            signing_key=signing_key,
+        )
+        entry = entry.model_copy(update={"metadata": {**entry.metadata, **provenance_metadata}})
+    return entry
+
+
+def initialize_canaries(config: MemoryConfig, *, backend: StorageBackend) -> None:
+    state_key = str(resolve_security_path(config, "quarantine_db_path", create_parent=True))
+    if _CANARY_STATE.get(state_key, {}).get("seeded"):
+        return
+    seeded = 0
+    fixture_map = dict(_CANARY_FIXTURES)
+    for canary_id, expected_hash in list(PINNED_HASHES.items())[: config.canary_injection_rate]:
+        if backend.get(canary_id) is not None:
+            seeded += 1
+            continue
+        content = fixture_map[canary_id]
+        backend.store(
+            MemoryEntry(
+                id=canary_id,
+                content=content,
+                namespace="default",
+                metadata={
+                    "system_canary": "true",
+                    "provenance_content_hash": expected_hash,
+                },
+            )
+        )
+        seeded += 1
+    _CANARY_STATE[state_key] = {"seeded": True, "recall_count": 0, "failed": False}
+    telemetry_session_id, telemetry_run_id = _resolve_security_trace_context(session_id="canary-bootstrap")
+    emit_security_event(
+        config,
+        emitter="canary",
+        session_id=telemetry_session_id,
+        run_id=telemetry_run_id,
+        payload={
+            "event_name": "canary_seeded",
+            "seeded_count": seeded,
+            "canary_injection_rate": config.canary_injection_rate,
+            "traceability": build_security_traceability(
+                live_path="security.runtime.initialize_canaries",
+                requirement_ids=["FR-007", "NFR-010", "NFR-011"],
+            ),
+        },
+    )
+
+
+def probe_canaries(config: MemoryConfig, *, backend: StorageBackend) -> None:
+    state_key = str(resolve_security_path(config, "quarantine_db_path", create_parent=True))
+    state = _CANARY_STATE.setdefault(state_key, {"seeded": False, "recall_count": 0, "failed": False})
+    if not state["seeded"]:
+        initialize_canaries(config, backend=backend)
+    raw_recall_count = state.get("recall_count", 0)
+    recall_count = int(raw_recall_count if isinstance(raw_recall_count, (int, float, str)) else 0)
+    recall_count += 1
+    state["recall_count"] = recall_count
+    if recall_count % config.canary_probe_interval != 0:
+        return
+    for canary_id, expected_hash in list(PINNED_HASHES.items())[: config.canary_injection_rate]:
+        entry = backend.get(canary_id)
+        if entry is None:
+            state["failed"] = True
+            telemetry_session_id, telemetry_run_id = _resolve_security_trace_context(session_id="canary-probe")
+            emit_security_event(
+                config,
+                emitter="canary",
+                session_id=telemetry_session_id,
+                run_id=telemetry_run_id,
+                payload={
+                    "event_name": "canary_missing",
+                    "canary_id": canary_id,
+                    "fail_mode": config.canary_fail_mode,
+                    "traceability": build_security_traceability(
+                        live_path="security.runtime.probe_canaries",
+                        requirement_ids=["FR-007", "NFR-010", "NFR-011"],
+                    ),
+                },
+            )
+            raise CanaryTamperError(f"missing canary {canary_id}")
+        current_hash = hashlib.sha256(entry.content.encode("utf-8")).hexdigest()
+        if current_hash != expected_hash:
+            state["failed"] = True
+            entry.metadata["quarantined"] = "true"
+            backend.store(entry)
+            telemetry_session_id, telemetry_run_id = _resolve_security_trace_context(session_id="canary-probe")
+            emit_security_event(
+                config,
+                emitter="canary",
+                session_id=telemetry_session_id,
+                run_id=telemetry_run_id,
+                payload={
+                    "event_name": "canary_hash_drift",
+                    "canary_id": canary_id,
+                    "expected_hash": expected_hash,
+                    "observed_hash": current_hash,
+                    "fail_mode": config.canary_fail_mode,
+                    "traceability": build_security_traceability(
+                        live_path="security.runtime.probe_canaries",
+                        requirement_ids=["FR-007", "FR-009", "NFR-010", "NFR-011"],
+                    ),
+                },
+            )
+            raise CanaryTamperError(f"canary drift detected for {canary_id}")
+
+
+def should_halt_recalls(config: MemoryConfig) -> bool:
+    state_key = str(resolve_security_path(config, "quarantine_db_path", create_parent=True))
+    return bool(_CANARY_STATE.get(state_key, {}).get("failed")) and config.canary_fail_mode == "halt"

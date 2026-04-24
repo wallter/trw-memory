@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1678,6 +1678,38 @@ class TestRegisterTools:
         agent: Any = object()  # No register_tool or tool
         with pytest.raises(TypeError, match=r"register_tool.*tool"):
             client.register_tools(agent)
+
+    @pytest.mark.asyncio
+    async def test_memory_recall_tool_wrapper_forwards_source_aware_args(self, client: MemoryClient) -> None:
+        tools = client._make_tool_functions()
+        recall_mock = AsyncMock(return_value=[])
+        client.recall = recall_mock  # type: ignore[method-assign]
+
+        await tools["memory_recall"](
+            query="source aware",
+            limit=7,
+            include_org_memories=False,
+            include_shared=True,
+            include_distilled=False,
+            distilled_weight=0.4,
+            include_source_kinds=["instruction_rule"],
+            exclude_source_kinds=["episodic"],
+            source_weights={"instruction_rule": 1.2},
+            exclude_expired=False,
+        )
+
+        recall_mock.assert_awaited_once_with(
+            "source aware",
+            limit=7,
+            include_org_memories=False,
+            include_shared=True,
+            include_distilled=False,
+            distilled_weight=0.4,
+            include_source_kinds=["instruction_rule"],
+            exclude_source_kinds=["episodic"],
+            source_weights={"instruction_rule": 1.2},
+            exclude_expired=False,
+        )
 
 
 # ---------------------------------------------------------------------------

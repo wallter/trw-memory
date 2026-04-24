@@ -95,6 +95,42 @@ def test_apply_source_policy_respects_family_filters_and_weights() -> None:
     assert out[1]["score"] == pytest.approx(0.425)
 
 
+def test_apply_source_policy_prioritizes_durable_context_over_transient_by_default() -> None:
+    results = [
+        _result(memory_id="durable", score=0.6, metadata={"source_kind": "instruction_rule"}),
+        _result(
+            memory_id="transient",
+            score=0.99,
+            metadata={"source_kind": "lifecycle"},
+            expires="2099-01-01T00:00:00+00:00",
+        ),
+    ]
+
+    out = apply_source_policy(cast(list[dict[str, Any]], results))
+
+    assert [result["memory_id"] for result in out] == ["durable", "transient"]
+
+
+def test_apply_source_policy_allows_explicit_transient_weight_override() -> None:
+    results = [
+        _result(memory_id="durable", score=0.6, metadata={"source_kind": "instruction_rule"}),
+        _result(
+            memory_id="transient",
+            score=0.99,
+            metadata={"source_kind": "lifecycle"},
+            expires="2099-01-01T00:00:00+00:00",
+        ),
+    ]
+
+    out = apply_source_policy(
+        cast(list[dict[str, Any]], results),
+        source_weights={"lifecycle": 2.0},
+    )
+
+    assert [result["memory_id"] for result in out] == ["transient", "durable"]
+    assert out[0]["score"] == pytest.approx(1.98)
+
+
 @pytest.mark.asyncio
 async def test_memory_client_store_preserves_expires_on_update(
     tmp_path: Path,

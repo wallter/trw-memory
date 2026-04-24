@@ -280,6 +280,28 @@ class MemoryConfig(BaseSettings):
     poisoning_detection_enabled: bool = Field(default=True, description="Enable statistical poisoning detection")
     poisoning_z_threshold: float = Field(default=3.0, gt=0.0, description="Z-score threshold for anomaly detection")
     quarantine_path: str = Field(default="", description="Directory where quarantined entries are written")
+    enable_trust_scoring: bool = Field(default=True, description="Enable SEC-001 trust scoring on all ingest paths")
+    trust_score_threshold: float = Field(default=0.5, ge=0.0, le=1.0, description="SEC-001 quarantine threshold")
+    trust_scoring_mode: Literal["observe", "enforce", "strict"] = Field(
+        default="observe",
+        description="SEC-001 intake mode: observe logs only, enforce quarantines, strict rejects",
+    )
+    quarantine_ttl_seconds: int = Field(default=1_209_600, ge=0, description="Retention window for quarantine rows")
+    quarantine_db_path: str = Field(default="", description="SQLite DB path for SEC-001 quarantine records")
+    enable_recall_filter: bool = Field(default=True, description="Enable SEC-001 recall filtering")
+    recall_filter_mode: Literal["strict", "redact", "observe"] = Field(
+        default="redact",
+        description="SEC-001 recall filter mode",
+    )
+    canary_injection_rate: int = Field(default=5, ge=3, le=5, description="Number of in-code canaries to seed")
+    canary_probe_interval: int = Field(default=25, ge=1, description="Probe canaries every N recalls")
+    canary_fail_mode: Literal["halt", "degrade", "log-only"] = Field(
+        default="halt",
+        description="Fail mode when canary tamper is detected",
+    )
+    canary_fixtures_path: str = Field(default="", description="Path to shipped SEC-001 canary fixtures")
+    provenance_required: bool = Field(default=True, description="Require signed provenance on persisted rows")
+    provenance_signing_key_path: str = Field(default="", description="Path to the Ed25519 signing key")
     max_entry_chars: int = Field(default=10_240, gt=0, description="Maximum combined content/detail character count")
     max_memory_writes_per_minute: int = Field(
         default=10, ge=0, description="Per-session write limit enforced over a rolling minute"
@@ -444,13 +466,23 @@ class MemoryConfig(BaseSettings):
     @model_validator(mode="after")
     def _derive_security_paths(self) -> MemoryConfig:
         """Keep audit/quarantine/rate-limit files outside the active storage root."""
-        security_root = Path(self.storage_path).parent / ".trw" / "security"
+        storage_root = Path(self.storage_path)
+        if storage_root.name == "memory" and storage_root.parent.name == ".trw":
+            security_root = storage_root.parent / "security"
+        else:
+            security_root = storage_root.parent / ".trw" / "security"
         if not self.audit_log_path:
             self.audit_log_path = str(security_root / "audit.jsonl")
         if not self.quarantine_path:
             self.quarantine_path = str(security_root / "quarantine")
+        if not self.quarantine_db_path:
+            self.quarantine_db_path = str(security_root / "quarantine.db")
         if not self.rate_limit_state_path:
             self.rate_limit_state_path = str(security_root / "rate_limits.yaml")
+        if not self.provenance_signing_key_path:
+            self.provenance_signing_key_path = str(security_root / "ed25519_signing_key.bin")
+        if not self.canary_fixtures_path:
+            self.canary_fixtures_path = "package:canary"
         return self
 
     @classmethod
