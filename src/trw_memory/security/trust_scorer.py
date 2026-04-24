@@ -15,6 +15,7 @@ Target: p95 latency <=50ms per learning (PRD-SEC-001 NFR-001).
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Literal
 
 import structlog
@@ -23,6 +24,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from trw_memory.security.poisoning import _INJECTION_PATTERNS
 
 __all__ = ["TrustScore", "score_intake"]
+
+# PRD-SEC-001 Item 5: 14-day observe clock. Start at first score_intake
+# invocation per process; idempotent on disk.
+_clock_started: bool = False
 
 _LOG = structlog.get_logger(__name__)
 
@@ -91,6 +96,7 @@ def score_intake(
     metadata: dict[str, str],
     *,
     observe_mode: bool = True,
+    trw_dir: Path | None = None,
 ) -> TrustScore:
     """Score an intake payload.
 
@@ -98,7 +104,21 @@ def score_intake(
     always ``"allow"``; the would-be decision is recorded in ``reasons``
     prefixed with ``"WOULD-BE:"`` and a ``trust_scorer.observe`` event
     is emitted.
+
+    When *trw_dir* is provided, the 14-day observe calibration clock is
+    started once per process (PRD-SEC-001 Item 5). Fail-open: any clock
+    error is logged and swallowed.
     """
+    global _clock_started
+    if trw_dir is not None and not _clock_started:
+        _clock_started = True
+        try:
+            from trw_memory.security.observe_clock import start_observe_clock
+
+            start_observe_clock(trw_dir)
+        except Exception:  # justified: fail-open, clock is advisory
+            _LOG.warning("trust_scorer.observe_clock_start_failed", exc_info=True)
+
     t0 = time.monotonic_ns()
     score, would_be, reasons = _classify(content, metadata)
 
