@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from trw_memory.client import MemoryClient
+from trw_memory.tools.recall import register_recall_tool
 from trw_memory.tools.search import register_search_tool
 from trw_memory.tools.store import register_store_tool
 
@@ -82,3 +83,41 @@ async def test_registered_search_tool_reads_entries_stored_by_client(
     entries = result["entries"]
     assert isinstance(entries, list)
     assert [entry["content"] for entry in entries] == ["stored via client"]
+
+
+async def test_registered_recall_tool_accepts_source_aware_args(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Registered recall tool must expose the same source-aware policy args as the client."""
+    monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+    monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+
+    client = MemoryClient(namespace="project:interop", mode="local")
+    try:
+        await client.store(
+            "durable rule",
+            metadata={"source_kind": "instruction_rule"},
+            entry_id="M-durable",
+        )
+        await client.store(
+            "ephemeral bulletin",
+            metadata={"source_kind": "lifecycle"},
+            expires="2020-01-01T00:00:00+00:00",
+            entry_id="M-expired",
+        )
+    finally:
+        await client.close()
+
+    mcp = _FakeMCP()
+    register_recall_tool(mcp)
+    result = await mcp.tools["memory_recall"](
+        query="",
+        namespace="project:interop",
+        include_source_kinds=["instruction_rule", "lifecycle"],
+        exclude_expired=True,
+    )
+
+    memories = result["memories"]
+    assert isinstance(memories, list)
+    assert [entry["id"] for entry in memories] == ["M-durable"]

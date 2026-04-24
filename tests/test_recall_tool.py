@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.token_budget import estimate_entry_tokens
 
 
@@ -155,3 +156,37 @@ class TestMemoryRecallImplTokenBudget:
 
         assert result["tokens_used"] <= first_cost or len(result["memories"]) == 1
         assert result["tokens_budget"] == first_cost
+
+    def test_source_aware_args_apply_to_tool_results(self) -> None:
+        """Source-aware include/exclude rules must execute on the MCP recall surface."""
+        from trw_memory.tools.recall import memory_recall_impl
+
+        backend = MagicMock()
+        backend.list_entries.return_value = [
+            MemoryEntry(
+                id="M-durable",
+                content="durable instruction",
+                namespace="project:default",
+                metadata={"source_kind": "instruction_rule"},
+                importance=0.6,
+            ),
+            MemoryEntry(
+                id="M-transient",
+                content="recent bulletin",
+                namespace="project:default",
+                metadata={"source_kind": "lifecycle"},
+                importance=1.0,
+                expires="2099-01-01T00:00:00+00:00",
+            ),
+        ]
+        backend.get_stored_embeddings.return_value = {}
+
+        result = memory_recall_impl(
+            query="",
+            namespace="project:default",
+            backend=backend,
+            include_source_kinds=["instruction_rule", "lifecycle"],
+            exclude_source_kinds=["lifecycle"],
+        )
+
+        assert [entry["id"] for entry in result["memories"]] == ["M-durable"]

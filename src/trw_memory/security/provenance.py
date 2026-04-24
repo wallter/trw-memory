@@ -33,16 +33,19 @@ try:
     _NACL_AVAILABLE = True
 except ImportError:  # pragma: no cover — PyNaCl is optional
     _NACL_AVAILABLE = False
-    SigningKey = Any  # type: ignore[misc,assignment]
-    VerifyKey = Any  # type: ignore[misc,assignment]
-    BadSignatureError = Exception  # type: ignore[misc,assignment]
+    SigningKey = Any
+    VerifyKey = Any
+    BadSignatureError = Exception
 
 __all__ = [
     "ProvenanceChain",
     "ProvenanceEntry",
     "append",
     "append_signed",
+    "build_entry_provenance",
+    "derive_verify_key",
     "verify",
+    "verify_entry_provenance",
     "verify_signed",
 ]
 
@@ -158,6 +161,85 @@ def verify(chain_path: Path) -> bool:
 def _sign_message(learning_id: str, content_hash: str, prev_hash: str) -> bytes:
     """Canonical signing payload for an entry."""
     return f"{learning_id}|{content_hash}|{prev_hash}".encode("utf-8")
+
+
+def build_entry_provenance(
+    *,
+    learning_id: str,
+    content: str,
+    detail: str,
+    author: str,
+    session_id: str,
+    ts: str,
+    signing_key: Any,
+) -> dict[str, str]:
+    """Build signed per-row provenance metadata for a memory entry."""
+    content_hash = hashlib.sha256(f"{content}{detail}".encode("utf-8")).hexdigest()
+    payload = f"{learning_id}|{author}|{session_id}|{ts}|{content_hash}".encode("utf-8")
+    signature = ""
+    if signing_key is not None:
+        signed = signing_key.sign(payload)
+        signature_bytes = signed.signature if hasattr(signed, "signature") else signed
+        signature = bytes(signature_bytes).hex()
+    return {
+        "provenance_author": author,
+        "provenance_session_id": session_id,
+        "provenance_ts": ts,
+        "provenance_content_hash": content_hash,
+        "provenance_signature": signature,
+    }
+
+
+def derive_verify_key(signing_key: Any | None) -> Any | None:
+    """Derive a public verify key from a loaded signing key object."""
+    if signing_key is None:
+        return None
+    verify_key = getattr(signing_key, "verify_key", None)
+    if verify_key is not None:
+        return verify_key
+    public_key = getattr(signing_key, "public_key", None)
+    if callable(public_key):
+        return public_key()
+    return None
+
+
+def verify_entry_provenance(entry: dict[str, str] | Any, verify_key: Any | None) -> bool:
+    """Return True when per-row provenance metadata matches the current content."""
+    metadata = entry if isinstance(entry, dict) else dict(getattr(entry, "metadata", {}))
+    content = metadata.get("_content_for_verify", "") if isinstance(entry, dict) else f"{entry.content}{entry.detail}"
+    content_hash = metadata.get("provenance_content_hash", "")
+    signature = metadata.get("provenance_signature", "")
+    author = metadata.get("provenance_author", "")
+    session_id = metadata.get("provenance_session_id", "")
+    ts = metadata.get("provenance_ts", "")
+    if not content_hash or not author or not session_id or not ts:
+        return False
+    current_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if current_hash != content_hash:
+        return False
+    if not signature:
+        return False
+    if verify_key is None:
+        return False
+    payload = f"{getattr(entry, 'id', metadata.get('learning_id', ''))}|{author}|{session_id}|{ts}|{content_hash}".encode(
+        "utf-8"
+    )
+    try:
+        signature_bytes = bytes.fromhex(signature)
+    except ValueError:
+        return False
+    verify = getattr(verify_key, "verify", None)
+    if not callable(verify):
+        return False
+    for args in ((payload, signature_bytes), (signature_bytes, payload)):
+        try:
+            verified = verify(*args)
+        except Exception:
+            continue
+        if verified is False:
+            continue
+        return True
+    return False
 
 
 def append_signed(

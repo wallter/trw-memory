@@ -38,6 +38,7 @@ class MemoryStatus(str, Enum):
     ACTIVE = "active"
     RESOLVED = "resolved"
     OBSOLETE = "obsolete"
+    OBSOLETE_POISONED = "obsolete_poisoned"
     ARCHIVED = "archived"
 
 

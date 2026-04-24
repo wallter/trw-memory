@@ -25,9 +25,8 @@ from trw_memory.security.poisoning import _INJECTION_PATTERNS
 
 __all__ = ["TrustScore", "score_intake"]
 
-# PRD-SEC-001 Item 5: 14-day observe clock. Start at first score_intake
-# invocation per process; idempotent on disk.
-_clock_started: bool = False
+# PRD-SEC-001 Item 5: 14-day observe clock. Start once per anchor dir.
+_clock_started_for: set[str] = set()
 
 _LOG = structlog.get_logger(__name__)
 
@@ -109,9 +108,9 @@ def score_intake(
     started once per process (PRD-SEC-001 Item 5). Fail-open: any clock
     error is logged and swallowed.
     """
-    global _clock_started
-    if trw_dir is not None and not _clock_started:
-        _clock_started = True
+    global _clock_started_for
+    if trw_dir is not None and str(trw_dir) not in _clock_started_for:
+        _clock_started_for.add(str(trw_dir))
         try:
             from trw_memory.security.observe_clock import start_observe_clock
 

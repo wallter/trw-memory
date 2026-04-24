@@ -23,7 +23,7 @@ from trw_memory.security.audit import AuditLog
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools.consolidate import memory_consolidate_impl
 from trw_memory.tools.forget import memory_forget_impl
-from trw_memory.tools.recall import _merge_tier_entries, memory_recall_impl
+from trw_memory.tools.recall import _apply_sec001_recall_policy, _merge_tier_entries, memory_recall_impl
 from trw_memory.tools.search import memory_search_impl
 from trw_memory.tools.store import memory_store_impl
 
@@ -269,6 +269,16 @@ class TestMemoryStoreImpl:
 
 
 class TestMemoryRecallImpl:
+    def test_apply_sec001_recall_policy_maps_filtered_entries_back_to_results(self) -> None:
+        cfg = MemoryConfig(enable_recall_filter=True, recall_filter_mode="observe")
+
+        secured = _apply_sec001_recall_policy(
+            [{"id": "M-001", "content": "alpha memory", "namespace": "project:default"}],
+            config=cfg,
+        )
+
+        assert [entry["id"] for entry in secured] == ["M-001"]
+
     def test_returns_expected_keys(self) -> None:
         backend = _mock_backend([_make_entry()])
         result = memory_recall_impl("python async", "project:default", backend=backend)

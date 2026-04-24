@@ -15,6 +15,9 @@ from trw_memory.security import provenance as prov_mod
 from trw_memory.security.provenance import (
     ProvenanceEntry,
     append_signed,
+    build_entry_provenance,
+    derive_verify_key,
+    verify_entry_provenance,
     verify_signed,
 )
 
@@ -115,3 +118,25 @@ def test_module_reload_preserves_api() -> None:
     reloaded = importlib.reload(prov_mod)
     assert hasattr(reloaded, "append_signed")
     assert hasattr(reloaded, "verify_signed")
+
+
+def test_verify_entry_provenance_requires_real_verify_key() -> None:
+    key = SigningKey.generate()
+    metadata = build_entry_provenance(
+        learning_id="L-row-001",
+        content="safe",
+        detail="detail",
+        author="agent-1",
+        session_id="sess-1",
+        ts="2026-04-24T00:00:00+00:00",
+        signing_key=key,
+    )
+    entry = {
+        "learning_id": "L-row-001",
+        "_content_for_verify": "safedetail",
+        **metadata,
+    }
+
+    assert verify_entry_provenance(entry, derive_verify_key(key)) is True
+    assert verify_entry_provenance(entry, derive_verify_key(SigningKey.generate())) is False
+    assert verify_entry_provenance(entry, None) is False
