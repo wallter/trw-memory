@@ -9,10 +9,20 @@ from __future__ import annotations
 
 import contextlib
 import os
+import secrets
 import stat
 from pathlib import Path
+from typing import Any
 
 import structlog
+
+try:
+    from nacl.signing import SigningKey as _SigningKey
+
+    _NACL_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _NACL_AVAILABLE = False
+    _SigningKey = Any  # type: ignore[misc,assignment]
 
 from trw_memory.exceptions import ConfigError, MasterKeyNotFoundError
 from trw_memory.models.config import MemoryConfig
@@ -305,3 +315,75 @@ def rotate_master_key(
 
     logger.info("key_rotation_complete", entries_rotated=count)
     return count
+
+
+# ---------------------------------------------------------------------------
+# Ed25519 provenance-signing keys (PRD-SEC-001 FR-002, Sprint-96 carry-forward-b)
+# ---------------------------------------------------------------------------
+
+_ED25519_SEED_LENGTH = 32
+_ED25519_KEY_FILENAME = "ed25519_signing_key.bin"
+
+
+def generate_ed25519_signing_key() -> bytes:
+    """Return a fresh 32-byte seed suitable for :class:`nacl.signing.SigningKey`.
+
+    Uses :func:`secrets.token_bytes`, which is acceptable whether or not
+    PyNaCl is installed.
+    """
+    return secrets.token_bytes(_ED25519_SEED_LENGTH)
+
+
+def load_ed25519_signing_key(path: Path) -> Any:
+    """Load a SigningKey from a 32-byte seed file.
+
+    Returns ``None`` when PyNaCl is unavailable so callers can degrade
+    gracefully. Raises :class:`ConfigError` on malformed/missing files
+    when PyNaCl IS available.
+    """
+    if not _NACL_AVAILABLE:
+        logger.warning("ed25519_pynacl_unavailable", path=str(path))
+        return None
+    if not path.exists():
+        raise ConfigError(f"Ed25519 key file not found: {path}")
+    data = path.read_bytes()
+    if len(data) != _ED25519_SEED_LENGTH:
+        raise ConfigError(
+            f"Ed25519 seed must be {_ED25519_SEED_LENGTH} bytes, got {len(data)}"
+        )
+    return _SigningKey(data)
+
+
+def get_or_create_ed25519_key(trw_dir: Path) -> Any:
+    """Return an Ed25519 :class:`SigningKey` for *trw_dir*, creating one if needed.
+
+    Idempotent. Writes the seed to
+    ``<trw_dir>/memory/security/ed25519_signing_key.bin`` with chmod 0600.
+    When PyNaCl is unavailable, writes the seed for later use but returns
+    ``None`` and logs a warning — callers must fall back to SHA-256-only
+    provenance chains.
+    """
+    key_dir = trw_dir / "memory" / "security"
+    key_path = key_dir / _ED25519_KEY_FILENAME
+    if key_path.exists():
+        if _NACL_AVAILABLE:
+            try:
+                return load_ed25519_signing_key(key_path)
+            except ConfigError:
+                logger.warning("ed25519_key_load_failed", path=str(key_path), exc_info=True)
+                return None
+        logger.warning("ed25519_pynacl_unavailable", path=str(key_path))
+        return None
+
+    # Create new key
+    key_dir.mkdir(parents=True, exist_ok=True)
+    seed = generate_ed25519_signing_key()
+    key_path.write_bytes(seed)
+    with contextlib.suppress(OSError):
+        key_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    logger.info("ed25519_key_generated", path=str(key_path))
+
+    if not _NACL_AVAILABLE:
+        logger.warning("ed25519_pynacl_unavailable_after_write", path=str(key_path))
+        return None
+    return _SigningKey(seed)
