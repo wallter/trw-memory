@@ -2,6 +2,37 @@
 
 All notable changes to the TRW Memory package.
 
+## [0.8.0] — 2026-04-26
+
+### Added
+
+- **SEC001 security startup + telemetry + audit/review tools**
+  (commit `6d20d2445`). New `security/startup.py` binds the security
+  context at server boot (mirrors the trw-mcp wiring), and
+  `security/telemetry_emit.py` is the shared fan-out for
+  security-relevant events. Two new MCP tools land:
+  `tools/audit.py` and `tools/review.py`. Live-paths and server-tool
+  smoke tests (`tests/test_sec001_live_paths.py`,
+  `tests/test_sec001_server_tools.py`) plus a unit harness for the
+  telemetry fan-out (`tests/unit/security/test_security_telemetry.py`).
+
+### Fixed
+
+- **FIX053: torchcodec import guard for text-only embeddings**
+  (commit `cbe4a5bcd`,
+  `src/trw_memory/embeddings/local.py`). SentenceTransformers 5
+  imports optional audio/video helpers at package import time. A
+  broken torchcodec wheel can raise non-`ImportError` exceptions
+  (e.g. `RuntimeError`/`OSError`) during that optional import and
+  prevent `SentenceTransformer` itself from importing — so text
+  embeddings broke even though they don't need torchcodec. Added a
+  scoped `_hide_broken_torchcodec_for_sentence_transformers` context
+  manager that masks a broken torchcodec in `sys.modules` only for
+  the duration of the ST import; other application features that
+  legitimately use torchcodec are unaffected. New
+  `tests/test_embeddings.py` cases pin both the masking and the
+  no-mask happy path.
+
 ## [Unreleased]
 
 ### Added
