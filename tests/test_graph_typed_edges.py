@@ -402,10 +402,7 @@ class TestClusterDetection:
         # Create edges for ~80% connectivity
         # 6 nodes: max edges = 6*5/2 = 15; 80% = 12 edges
         now = datetime.now(timezone.utc).isoformat()
-        pairs = []
-        for i in range(6):
-            for j in range(i + 1, 6):
-                pairs.append((node_ids[i], node_ids[j]))
+        pairs = [(node_ids[i], node_ids[j]) for i in range(6) for j in range(i + 1, 6)]
 
         # Use 12 of 15 pairs for ~80% connectivity
         for src, tgt in pairs[:12]:

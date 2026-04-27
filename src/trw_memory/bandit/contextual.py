@@ -62,7 +62,7 @@ def _normalize_scores(scores: dict[str, float]) -> dict[str, float]:
     total = sum(adjusted.values())
     if total <= 0.0:
         uniform = 1.0 / len(scores)
-        return {arm_id: uniform for arm_id in scores}
+        return dict.fromkeys(scores, uniform)
     return {arm_id: adjusted[arm_id] / total for arm_id in scores}
 
 

@@ -792,11 +792,13 @@ class MemoryClient:
             decisions: list[Any] = [None] * len(prepared)
             for i, (req, validation_error) in enumerate(prepared):
                 if validation_error is not None:
-                    items.append(BulkStoreItemResult(
-                        memory_id=req.entry_id or "",
-                        status="rejected",
-                        skipped_reason=validation_error,
-                    ))
+                    items.append(
+                        BulkStoreItemResult(
+                            memory_id=req.entry_id or "",
+                            status="rejected",
+                            skipped_reason=validation_error,
+                        )
+                    )
                     continue
 
                 memory_id = req.entry_id or _make_id()
@@ -821,17 +823,19 @@ class MemoryClient:
                         vector_clock=init_clock(self._local_node_id),
                     )
                 else:
-                    entry = existing.model_copy(update={
-                        "content": req.content.strip(),
-                        "detail": req.detail,
-                        "tags": req.tags or [],
-                        "importance": req.importance,
-                        "metadata": entry_metadata,
-                        "updated_at": now,
-                        "source": req.source,
-                        "source_identity": req.source_identity or existing.source_identity,
-                        "vector_clock": init_clock(self._local_node_id),
-                    })
+                    entry = existing.model_copy(
+                        update={
+                            "content": req.content.strip(),
+                            "detail": req.detail,
+                            "tags": req.tags or [],
+                            "importance": req.importance,
+                            "metadata": entry_metadata,
+                            "updated_at": now,
+                            "source": req.source,
+                            "source_identity": req.source_identity or existing.source_identity,
+                            "vector_clock": init_clock(self._local_node_id),
+                        }
+                    )
 
                 # Per-item security gate. Catch poisoning / authorization
                 # so a single bad row doesn't abort the whole batch — the
@@ -844,22 +848,26 @@ class MemoryClient:
                         session_id=req.session_id,
                     )
                 except Exception as exc:
-                    items.append(BulkStoreItemResult(
-                        memory_id=memory_id,
-                        status="rejected",
-                        skipped_reason=f"{type(exc).__name__}:{str(exc)[:80]}",
-                    ))
+                    items.append(
+                        BulkStoreItemResult(
+                            memory_id=memory_id,
+                            status="rejected",
+                            skipped_reason=f"{type(exc).__name__}:{str(exc)[:80]}",
+                        )
+                    )
                     continue
 
                 if decision.quarantined:
                     store_quarantined_entry(self._config, decision.entry)
-                    items.append(BulkStoreItemResult(
-                        memory_id=decision.entry.id,
-                        status="quarantined",
-                        quarantined=True,
-                        anomaly_dimension=decision.anomaly_dimension,
-                        z_score=decision.anomaly_z_score,
-                    ))
+                    items.append(
+                        BulkStoreItemResult(
+                            memory_id=decision.entry.id,
+                            status="quarantined",
+                            quarantined=True,
+                            anomaly_dimension=decision.anomaly_dimension,
+                            z_score=decision.anomaly_z_score,
+                        )
+                    )
                     continue
 
                 accepted_indices.append(i)
@@ -884,15 +892,13 @@ class MemoryClient:
                 embeddings = [None] * len(accepted_entries)
 
             # Pass 3 — backend store + vector + tier registration per accepted.
-            for j, (orig_i, entry) in enumerate(zip(accepted_indices, accepted_entries)):
+            for j, (orig_i, entry) in enumerate(zip(accepted_indices, accepted_entries, strict=False)):
                 decision = decisions[orig_i]
-                assert decision is not None  # mypy guard; partitioning ensures this
+                assert decision is not None  # noqa: S101 — mypy guard; partitioning ensures this
                 embedding = embeddings[j] if j < len(embeddings) else None
 
                 if self._namespace.startswith("team:"):
-                    NamespaceManager(backend).ensure_team_namespace(
-                        self._namespace, created_at=now
-                    )
+                    NamespaceManager(backend).ensure_team_namespace(self._namespace, created_at=now)
 
                 backend.store(entry)
                 if embedding is not None:
@@ -914,9 +920,7 @@ class MemoryClient:
                         ) from exc
 
                 try:
-                    schedule_graph_update(
-                        entry, backend, embedding=embedding, config=self._config
-                    )
+                    schedule_graph_update(entry, backend, embedding=embedding, config=self._config)
                 except RuntimeError:
                     logger.warning(
                         "bulk_store_graph_schedule_failed",
@@ -924,9 +928,7 @@ class MemoryClient:
                         exc_info=True,
                     )
 
-                remember_entry_in_tiers(
-                    self._config, self._namespace, entry, embedding
-                )
+                remember_entry_in_tiers(self._config, self._namespace, entry, embedding)
 
                 if not skip_audit_per_item:
                     append_audit_event(
@@ -943,10 +945,12 @@ class MemoryClient:
                         },
                     )
 
-                items.append(BulkStoreItemResult(
-                    memory_id=entry.id,
-                    status="updated" if decision.op == "update" else "stored",
-                ))
+                items.append(
+                    BulkStoreItemResult(
+                        memory_id=entry.id,
+                        status="updated" if decision.op == "update" else "stored",
+                    )
+                )
 
                 if not skip_remote_publish and self._should_attempt_remote_publish(entry):
                     self._schedule_background_task(self._publish_entry(entry, embedding))
@@ -1108,13 +1112,11 @@ class MemoryClient:
             if min_score > 0.0:
                 final_pre_policy = [result for result in final_pre_policy if result["score"] >= min_score]
             if include_org_memories:
-                final_pre_policy = await self._merge_org_results(
-                    query, final_pre_policy, limit, tags, min_score
-                )
+                final_pre_policy = await self._merge_org_results(query, final_pre_policy, limit, tags, min_score)
             if include_shared:
                 final_pre_policy = await self._merge_shared_results(query, final_pre_policy, limit)
             final_scored = cast(
-                list[MemoryResultDict],
+                "list[MemoryResultDict]",
                 apply_source_policy(
                     final_pre_policy,
                     include_distilled=include_distilled,
@@ -1165,7 +1167,7 @@ class MemoryClient:
         if include_shared:
             results = await self._merge_shared_results(query, results, limit)
         filtered_results = cast(
-            list[MemoryResultDict],
+            "list[MemoryResultDict]",
             apply_source_policy(
                 results,
                 include_distilled=include_distilled,
@@ -1898,7 +1900,7 @@ class MemoryClient:
                 }
                 return actor_forget_result
 
-            assert memory_id is not None
+            assert memory_id is not None  # noqa: S101 — narrowed by branch above
             existing = backend.get(memory_id)
             if existing is None:
                 quarantined_deleted = delete_quarantined_entries(

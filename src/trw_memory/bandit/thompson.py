@@ -160,7 +160,7 @@ class BanditSelector:
                 runner_up_id = arm_id
                 runner_up_sample = sample
 
-        assert top_arm is not None  # guaranteed by eligible_ids non-empty check
+        assert top_arm is not None  # noqa: S101 — guaranteed by eligible_ids non-empty check
 
         # --- Floor exploration: override top arm with probability ----------
         exploration = False

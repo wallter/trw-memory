@@ -134,9 +134,7 @@ def memory_forget_impl(
                 deleted_count += 1
                 if supports_tier_runtime(backend):
                     remove_entry_from_tiers(cfg, namespace, entry.id)
-        except (
-            StorageError
-        ) as exc:  # per-item error handling: log delete failure for this entry, continue bulk delete
+        except StorageError as exc:  # per-item error handling: log delete failure for this entry, continue bulk delete
             logger.warning("memory_forget_delete_error", memory_id=entry.id, error=str(exc))
 
     logger.info(

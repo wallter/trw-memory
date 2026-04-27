@@ -105,10 +105,7 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
         if self._message_limit > 0:
             matched = matched[-self._message_limit :]
 
-        result: list[ChatMessage] = []
-        for entry in matched:
-            result.append(ChatMessage(role=self._message_role(entry), content=entry.content))
-        return result
+        return [ChatMessage(role=self._message_role(entry), content=entry.content) for entry in matched]
 
     def add_message(
         self,

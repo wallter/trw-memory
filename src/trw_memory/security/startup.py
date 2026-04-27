@@ -31,9 +31,7 @@ def _discover_anchor(config: MemoryConfig, *, trw_dir: Path | None = None) -> Pa
         found = candidate / ".trw"
         if found.exists():
             return found.resolve()
-    raise SecurityDefaultUnresolvableError(
-        "unable to resolve SEC-001 anchor; set TRW_DIR or use absolute config paths"
-    )
+    raise SecurityDefaultUnresolvableError("unable to resolve SEC-001 anchor; set TRW_DIR or use absolute config paths")
 
 
 def resolve_security_path(
@@ -52,7 +50,11 @@ def resolve_security_path(
         resolved = Path(str(package_root / _CANARY_FIXTURE_DIRNAME)).resolve()
     else:
         candidate = Path(raw_value).expanduser()
-        resolved = candidate.resolve() if candidate.is_absolute() else (_discover_anchor(config, trw_dir=trw_dir) / candidate).resolve()
+        resolved = (
+            candidate.resolve()
+            if candidate.is_absolute()
+            else (_discover_anchor(config, trw_dir=trw_dir) / candidate).resolve()
+        )
     if create_parent:
         resolved.parent.mkdir(parents=True, exist_ok=True)
     return resolved

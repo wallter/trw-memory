@@ -99,9 +99,7 @@ def test_verify_signed_with_unsigned_entry_fails(tmp_path: Path) -> None:
     assert broken == "L-001"
 
 
-def test_append_signed_degrades_when_pynacl_missing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_append_signed_degrades_when_pynacl_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """If PyNaCl flag is false, the entry is still written, just unsigned."""
     monkeypatch.setattr(prov_mod, "_NACL_AVAILABLE", False)
     chain = tmp_path / "chain.jsonl"

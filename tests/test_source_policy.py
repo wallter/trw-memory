@@ -35,7 +35,7 @@ def _result(
         raw["metadata"] = metadata
     if expires:
         raw["expires"] = expires
-    return cast(MemoryResultDict, raw)
+    return cast("MemoryResultDict", raw)
 
 
 def test_classify_source_family_recognizes_multi_source_metadata() -> None:
@@ -73,7 +73,7 @@ def test_apply_source_policy_filters_expired_transient_records() -> None:
         ),
     ]
 
-    out = apply_source_policy(cast(list[dict[str, Any]], results))
+    out = apply_source_policy(cast("list[dict[str, Any]]", results))
 
     assert [result["memory_id"] for result in out] == ["curated", "fresh-episode"]
 
@@ -86,7 +86,7 @@ def test_apply_source_policy_respects_family_filters_and_weights() -> None:
     ]
 
     out = apply_source_policy(
-        cast(list[dict[str, Any]], results),
+        cast("list[dict[str, Any]]", results),
         include_source_kinds=["instruction_rule", "semantic_memory"],
         source_weights={"semantic_memory": 0.5},
     )
@@ -106,7 +106,7 @@ def test_apply_source_policy_prioritizes_durable_context_over_transient_by_defau
         ),
     ]
 
-    out = apply_source_policy(cast(list[dict[str, Any]], results))
+    out = apply_source_policy(cast("list[dict[str, Any]]", results))
 
     assert [result["memory_id"] for result in out] == ["durable", "transient"]
 
@@ -123,7 +123,7 @@ def test_apply_source_policy_allows_explicit_transient_weight_override() -> None
     ]
 
     out = apply_source_policy(
-        cast(list[dict[str, Any]], results),
+        cast("list[dict[str, Any]]", results),
         source_weights={"lifecycle": 2.0},
     )
 

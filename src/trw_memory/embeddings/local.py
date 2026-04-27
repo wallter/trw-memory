@@ -55,7 +55,7 @@ def _torchcodec_decoders_broken() -> bool:
     if not _torchcodec_installed():
         return False
     try:
-        from torchcodec import decoders as _decoders
+        from torchcodec import decoders as _decoders  # type: ignore[import-not-found, import-untyped, unused-ignore]
 
         del _decoders
         return False

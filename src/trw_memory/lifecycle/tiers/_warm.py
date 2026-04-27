@@ -178,13 +178,12 @@ class WarmTierStore:
             entry_id: Memory entry identifier to remove.
         """
         backend_present = False
-        memory_removed = False
         vector_removed = False
         try:
             backend = self._get_warm_backend()
             if backend is not None:
                 backend_present = True
-                memory_removed = backend.delete(entry_id)
+                backend.delete(entry_id)
                 vector_deleted = backend.delete_vector(entry_id)
                 vector_removed = vector_deleted or vector_removed
         except (OSError, ValueError):

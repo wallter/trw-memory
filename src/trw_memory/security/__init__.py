@@ -19,6 +19,13 @@ from trw_memory.security.audit import (
     AuditLog,
     AuditRecord,
 )
+from trw_memory.security.canary import (
+    CanaryLearning,
+    CanaryStore,
+    CanaryVerificationResult,
+    seed_canaries,
+    verify_canaries,
+)
 from trw_memory.security.encryption import (
     decrypt_entry_fields,
     decrypt_field,
@@ -51,13 +58,6 @@ from trw_memory.security.pii import (
     redact_text,
     shannon_entropy,
 )
-from trw_memory.security.canary import (
-    CanaryLearning,
-    CanaryStore,
-    CanaryVerificationResult,
-    seed_canaries,
-    verify_canaries,
-)
 from trw_memory.security.poisoning import (
     AnomalyResult,
     AnomalyType,
@@ -80,14 +80,6 @@ from trw_memory.security.provenance import (
 from trw_memory.security.provenance import (
     verify_signed as provenance_verify_signed,
 )
-from trw_memory.security.recall_filter import (
-    RecallFilterResult,
-    filter_recall_window,
-)
-from trw_memory.security.trust_scorer import (
-    TrustScore,
-    score_intake,
-)
 from trw_memory.security.rbac import (
     ROLE_PERMISSIONS,
     Permission,
@@ -95,6 +87,14 @@ from trw_memory.security.rbac import (
     check_permission,
     require_namespace_permission,
     require_permission,
+)
+from trw_memory.security.recall_filter import (
+    RecallFilterResult,
+    filter_recall_window,
+)
+from trw_memory.security.trust_scorer import (
+    TrustScore,
+    score_intake,
 )
 
 __all__ = [
@@ -107,33 +107,20 @@ __all__ = [
     "CanaryStore",
     "CanaryVerificationResult",
     "EncryptionUnavailableError",
-    "ObserveClockState",
-    "ProvenanceChain",
-    "ProvenanceEntry",
-    "RecallFilterResult",
-    "TrustScore",
-    "filter_recall_window",
-    "generate_ed25519_signing_key",
-    "get_or_create_ed25519_key",
-    "load_ed25519_signing_key",
-    "provenance_append",
-    "provenance_append_signed",
-    "provenance_verify",
-    "provenance_verify_signed",
-    "read_observe_clock",
-    "score_intake",
-    "seed_canaries",
-    "start_observe_clock",
-    "verify_canaries",
     "KeyRotationError",
     "LocalOnlyViolationError",
     "MasterKeyNotFoundError",
+    "ObserveClockState",
     "PIIAction",
     "PIIMatch",
     "PIIType",
     "Permission",
     "PoisoningDetector",
+    "ProvenanceChain",
+    "ProvenanceEntry",
+    "RecallFilterResult",
     "Role",
+    "TrustScore",
     "check_entry_pii",
     "check_permission",
     "decrypt_entry_fields",
@@ -143,14 +130,27 @@ __all__ = [
     "detect_pii",
     "encrypt_entry_fields",
     "encrypt_field",
+    "filter_recall_window",
+    "generate_ed25519_signing_key",
     "generate_master_key",
     "get_master_key",
+    "get_or_create_ed25519_key",
+    "load_ed25519_signing_key",
+    "provenance_append",
+    "provenance_append_signed",
+    "provenance_verify",
+    "provenance_verify_signed",
     "quarantine_entry",
+    "read_observe_clock",
     "redact_text",
     "require_namespace_permission",
     "require_permission",
     "rotate_key",
     "rotate_master_key",
+    "score_intake",
+    "seed_canaries",
     "shannon_entropy",
+    "start_observe_clock",
     "store_master_key",
+    "verify_canaries",
 ]

@@ -26,10 +26,10 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_LIST_LIMIT",
-    "discover_namespace_backends",
     "ROLE_TAG_PREFIX",
     "create_backend",
     "create_backend_from_config",
+    "discover_namespace_backends",
     "make_entry",
     "resolve_backend",
 ]
