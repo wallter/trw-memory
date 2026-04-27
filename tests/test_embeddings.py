@@ -235,6 +235,28 @@ class TestLocalOnlyModelLoading:
                 get_local_embedder()
 
 
+class TestBrokenOptionalTorchcodecMasking:
+    def test_context_hides_broken_torchcodec_only_inside_import(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from trw_memory.embeddings import local
+
+        sentinel = object()
+        monkeypatch.setitem(local.sys.modules, "torchcodec", sentinel)
+        monkeypatch.setattr(local, "_torchcodec_decoders_broken", lambda: True)
+
+        with local._hide_broken_torchcodec_for_sentence_transformers():
+            assert local.sys.modules["torchcodec"] is None
+            assert local.sys.modules["torchcodec.decoders"] is None
+
+        assert local.sys.modules["torchcodec"] is sentinel
+        assert "torchcodec.decoders" not in local.sys.modules
+
+    def test_unavailable_reason_distinguishes_runtime_failure(self) -> None:
+        provider = LocalEmbeddingProvider()
+        provider._last_load_error = "sentence-transformers installed but runtime dependency failed: boom"
+
+        assert provider.unavailable_reason() == "sentence-transformers installed but runtime dependency failed: boom"
+
+
 # ---------------------------------------------------------------------------
 # Successful model path (mocked model)
 # ---------------------------------------------------------------------------
