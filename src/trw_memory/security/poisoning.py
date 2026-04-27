@@ -292,9 +292,7 @@ def validate_store_inputs(
 ) -> None:
     """Strictly validate public store inputs before coercion or persistence."""
     failed_fields: list[str] = []
-    if not isinstance(content, str):
-        failed_fields.append("content")
-    elif not content.strip():
+    if not isinstance(content, str) or not content.strip():
         failed_fields.append("content")
     if not isinstance(detail, str):
         failed_fields.append("detail")
@@ -305,9 +303,7 @@ def validate_store_inputs(
         or any(not isinstance(key, str) or not isinstance(value, str) for key, value in metadata.items())
     ):
         failed_fields.append("metadata")
-    if not isinstance(importance, (int, float)):
-        failed_fields.append("importance")
-    elif not 0.0 <= float(importance) <= 1.0:
+    if not isinstance(importance, (int, float)) or not 0.0 <= float(importance) <= 1.0:
         failed_fields.append("importance")
 
     if failed_fields:

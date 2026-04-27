@@ -30,7 +30,7 @@ def test_injection_pattern_would_be_rejected_but_allowed_in_observe() -> None:
     # Observe mode: always allow
     assert result.decision == "allow"
     # Reasons capture the would-be decision
-    assert any(r.startswith("WOULD-BE:reject") or r.startswith("WOULD-BE:quarantine") for r in result.reasons)
+    assert any(r.startswith(("WOULD-BE:reject", "WOULD-BE:quarantine")) for r in result.reasons)
     assert any("injection_pattern" in r for r in result.reasons)
 
 
@@ -59,7 +59,15 @@ def test_observe_mode_emits_structlog_event(caplog: pytest.LogCaptureFixture) ->
     caplog.set_level(logging.INFO)
     score_intake("hello", {"source_identity": "agent-1"})
     # structlog routes through stdlib logging; look for the event name.
-    assert any("trust_scorer.observe" in rec.getMessage() or "trust_scorer.observe" in str(rec.args) or "observe" in rec.getMessage() for rec in caplog.records) or True
+    assert (
+        any(
+            "trust_scorer.observe" in rec.getMessage()
+            or "trust_scorer.observe" in str(rec.args)
+            or "observe" in rec.getMessage()
+            for rec in caplog.records
+        )
+        or True
+    )
 
 
 def test_fixture_corpus_at_least_9_of_10_would_be_rejected() -> None:
@@ -82,6 +90,6 @@ def test_fixture_corpus_at_least_9_of_10_would_be_rejected() -> None:
         result = score_intake(content, {"source_identity": "agent-1"}, observe_mode=True)
         reasons = result.reasons
         # Would-be is reject or quarantine
-        if any(r.startswith("WOULD-BE:reject") or r.startswith("WOULD-BE:quarantine") for r in reasons):
+        if any(r.startswith(("WOULD-BE:reject", "WOULD-BE:quarantine")) for r in reasons):
             would_block += 1
     assert would_block >= 9, f"only {would_block}/{len(fixtures)} fixtures flagged"

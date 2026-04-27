@@ -22,7 +22,7 @@ try:
     _NACL_AVAILABLE = True
 except ImportError:  # pragma: no cover
     _NACL_AVAILABLE = False
-    _SigningKey = Any
+    _SigningKey = Any  # type: ignore[misc,assignment]
 
 try:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey as _CryptoEd25519PrivateKey
@@ -187,7 +187,7 @@ def get_master_key(config: MemoryConfig) -> bytes:
     _ensure_secure_key_source(config)
     raw_env = os.environ.get(_ENV_VAR)
     if raw_env:
-        if _CACHED_SOURCE == "env" and _CACHED_MASTER_KEY is not None and _CACHED_ENV_HEX == raw_env:
+        if _CACHED_SOURCE == "env" and _CACHED_MASTER_KEY is not None and raw_env == _CACHED_ENV_HEX:
             logger.debug("master_key_loaded", source="env", cached=True)
             return _CACHED_MASTER_KEY
         env_key = _read_key_from_env()
@@ -199,15 +199,17 @@ def get_master_key(config: MemoryConfig) -> bytes:
     if config.key_source == "keyring" and _CACHED_SOURCE == "keyring" and _CACHED_MASTER_KEY is not None:
         logger.debug("master_key_loaded", source="keyring", cached=True)
         return _CACHED_MASTER_KEY
-    if config.key_source in {"env", "file"} and _CACHED_SOURCE == "file" and _CACHED_FILE_PATH == key_path:
-        if _CACHED_MASTER_KEY is not None:
-            logger.debug("master_key_loaded", source="file", cached=True)
-            return _CACHED_MASTER_KEY
+    if (
+        config.key_source in {"env", "file"}
+        and _CACHED_SOURCE == "file"
+        and key_path == _CACHED_FILE_PATH
+        and _CACHED_MASTER_KEY is not None
+    ):
+        logger.debug("master_key_loaded", source="file", cached=True)
+        return _CACHED_MASTER_KEY
 
     sources: list[str]
-    if config.encryption_enabled and config.key_source != "file":
-        sources = ["keyring"]
-    elif config.key_source == "keyring":
+    if (config.encryption_enabled and config.key_source != "file") or config.key_source == "keyring":
         sources = ["keyring"]
     elif config.key_source == "env":
         sources = []
@@ -353,9 +355,7 @@ def load_ed25519_signing_key(path: Path) -> Any:
         raise ConfigError(f"Ed25519 key file not found: {path}")
     data = path.read_bytes()
     if len(data) != _ED25519_SEED_LENGTH:
-        raise ConfigError(
-            f"Ed25519 seed must be {_ED25519_SEED_LENGTH} bytes, got {len(data)}"
-        )
+        raise ConfigError(f"Ed25519 seed must be {_ED25519_SEED_LENGTH} bytes, got {len(data)}")
     if _NACL_AVAILABLE:
         return _SigningKey(data)
     if _CRYPTO_ED25519_AVAILABLE:

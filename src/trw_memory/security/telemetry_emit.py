@@ -66,11 +66,7 @@ def _discover_trw_dirs(config: MemoryConfig) -> tuple[Path, ...]:
 
     current = Path.cwd().resolve()
     cwd_trw_dir = next(
-        (
-            (candidate / ".trw").resolve()
-            for candidate in (current, *current.parents)
-            if (candidate / ".trw").exists()
-        ),
+        ((candidate / ".trw").resolve() for candidate in (current, *current.parents) if (candidate / ".trw").exists()),
         None,
     )
     if cwd_trw_dir is not None:

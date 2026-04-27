@@ -46,7 +46,7 @@ def _make_result(
     }
     if metadata is not None:
         r["metadata"] = metadata
-    return cast(MemoryResultDict, r)
+    return cast("MemoryResultDict", r)
 
 
 # --- _is_distilled_result ---
@@ -112,10 +112,7 @@ def test_weight_env_out_of_range_falls_back(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_tiering_excludes_distilled_when_flag_off() -> None:
     curated = [_make_result(memory_id=f"c{i}", score=0.8) for i in range(3)]
-    distilled = [
-        _make_result(memory_id=f"d{i}", score=0.8, tags=["distill:decision"])
-        for i in range(3)
-    ]
+    distilled = [_make_result(memory_id=f"d{i}", score=0.8, tags=["distill:decision"]) for i in range(3)]
     results = curated + distilled
     out = apply_distilled_tiering(results, include_distilled=False)
     assert len(out) == 3
@@ -134,10 +131,7 @@ def test_tiering_include_false_keeps_all_curated() -> None:
 def test_tiering_dampens_distilled_scores() -> None:
     """FR-6 core: 5 curated + 5 distilled at equal score → distilled rank lower."""
     curated = [_make_result(memory_id=f"c{i}", score=0.80) for i in range(5)]
-    distilled = [
-        _make_result(memory_id=f"d{i}", score=0.80, tags=["distill:decision"])
-        for i in range(5)
-    ]
+    distilled = [_make_result(memory_id=f"d{i}", score=0.80, tags=["distill:decision"]) for i in range(5)]
     results = curated + distilled
     out = apply_distilled_tiering(results, weight=0.75)
     # First 5 should be curated (untouched score 0.80)
@@ -184,10 +178,7 @@ def test_tiering_resorts_after_dampening() -> None:
     # Setup: distilled at 0.95, curated at 0.80.
     # After dampening weight=0.5 → distilled=0.475, curated stays 0.80.
     # → curated should rank first.
-    distilled = [
-        _make_result(memory_id=f"d{i}", score=0.95, tags=["distill:decision"])
-        for i in range(3)
-    ]
+    distilled = [_make_result(memory_id=f"d{i}", score=0.95, tags=["distill:decision"]) for i in range(3)]
     curated = [_make_result(memory_id=f"c{i}", score=0.80) for i in range(3)]
     out = apply_distilled_tiering(distilled + curated, weight=0.5)
     assert [r["memory_id"] for r in out[:3]] == [f"c{i}" for i in range(3)]

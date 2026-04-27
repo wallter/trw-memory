@@ -353,7 +353,7 @@ class TestCreateConsolidatedEntry:
         def _fail_vector(_entry_id: str, _embedding: list[float]) -> None:
             raise RuntimeError("vector write failed")
 
-        setattr(storage, "upsert_vector", _fail_vector)
+        storage.upsert_vector = _fail_vector  # type: ignore[method-assign]
 
         with pytest.raises(StorageError, match="entry write was rolled back"):
             _create_consolidated_entry(cluster, "summary", "detail", storage, embedder=embedder)

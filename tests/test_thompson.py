@@ -37,7 +37,7 @@ def test_select_cold_start_round_robin() -> None:
     arms = ["a", "b", "c"]
 
     # Track selections during cold start phase (3 arms * 3 min = 9 rounds)
-    counts: dict[str, int] = {a: 0 for a in arms}
+    counts: dict[str, int] = dict.fromkeys(arms, 0)
     for _ in range(9):
         decision = selector.select(arms)
         assert decision.exploration is True, "Cold-start selections should be exploration"

@@ -34,7 +34,7 @@ def _result(
         raw["metadata"] = metadata
     if expires:
         raw["expires"] = expires
-    return cast(MemoryResultDict, raw)
+    return cast("MemoryResultDict", raw)
 
 
 @pytest.fixture()

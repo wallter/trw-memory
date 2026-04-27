@@ -97,7 +97,7 @@ def _apply_sec001_recall_policy(
     return secured
 
 
-def memory_recall_impl(  # noqa: C901 - existing orchestration-heavy recall pipeline; security hook was added surgically
+def memory_recall_impl(
     query: str,
     namespace: str,
     *,
@@ -185,9 +185,7 @@ def memory_recall_impl(  # noqa: C901 - existing orchestration-heavy recall pipe
         try:
             validate_namespace(ns)
             extra_ns.append(ns)
-        except (
-            ConfigError
-        ):  # per-item error handling: skip invalid namespaces, continue with valid ones
+        except ConfigError:  # per-item error handling: skip invalid namespaces, continue with valid ones
             logger.debug("recall_invalid_namespace_skipped", namespace=ns)
 
     all_namespaces = [namespace, *extra_ns]

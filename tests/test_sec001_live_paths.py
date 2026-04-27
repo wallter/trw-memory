@@ -108,7 +108,9 @@ async def test_observe_mode_store_starts_clock(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setenv("MEMORY_PROVENANCE_REQUIRED", "true")
 
     client = MemoryClient(namespace="default", mode="local")
-    await client.store("observe content", detail="observe detail", source_identity="observer", session_id="observe-sess")
+    await client.store(
+        "observe content", detail="observe detail", source_identity="observer", session_id="observe-sess"
+    )
 
     assert (trw_dir / "memory" / "security" / "observe_start.yaml").exists()
 

@@ -40,7 +40,7 @@ class NamespaceManager:
             raw = read_yaml(locked_path)
 
         if not isinstance(raw, dict):
-            raise ValueError(f"Lifecycle metadata must be a mapping for {ns!r}")
+            raise TypeError(f"Lifecycle metadata must be a mapping for {ns!r}")
         if str(raw.get("namespace_id", ns)) != ns:
             raise ValueError(f"Lifecycle metadata namespace mismatch for {ns!r}")
         return raw

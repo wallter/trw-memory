@@ -9,7 +9,6 @@ All tests use in-memory SQLite.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
 
@@ -17,7 +16,6 @@ import structlog.testing
 
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -73,7 +71,9 @@ def _inject_bad_utf8_row(db_path: Path | str, entry_id: str) -> None:
             vector_clock, metadata,
             published_to_platform, pending_delete, cross_validated
         ) VALUES (
-            ?, ?, CAST(X'""" + bad_hex_str + """' AS TEXT),
+            ?, ?, CAST(X'"""
+        + bad_hex_str
+        + """' AS TEXT),
             '[]', '[]', 0.5, 'active',
             1, 'default', '2024-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00', 0,
             0, 0.5, 0, 'agent',
@@ -124,9 +124,7 @@ def test_list_entries_skips_bad_utf8_row(tmp_path: Path) -> None:
     assert "M-bad-001" not in ids, "Bad row must be quarantined"
     assert backend2.quarantine_count_utf8 >= 1
 
-    quarantine_events = [
-        log for log in logs if log.get("action") == "memory_row_utf8_quarantined"
-    ]
+    quarantine_events = [log for log in logs if log.get("action") == "memory_row_utf8_quarantined"]
     assert len(quarantine_events) >= 1, "Expected at least one quarantine log event"
     backend2.close()
 

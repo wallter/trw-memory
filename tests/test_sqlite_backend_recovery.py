@@ -264,7 +264,7 @@ def test_recovery_drops_unknown_columns_preventing_sql_injection(
 
     now = "2026-04-18T00:00:00+00:00"
     # Attacker-controlled column name that would corrupt the INSERT if not filtered.
-    malicious_col = 'id, content); DROP TABLE memories; --'
+    malicious_col = "id, content); DROP TABLE memories; --"
     poisoned_row = _FakeRow(
         {
             "id": "L-legit",

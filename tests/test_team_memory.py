@@ -492,7 +492,7 @@ class TestConsolidateImplTeamDispatch:
                 "promoted_count": 1,
                 "discarded_count": 0,
                 "namespace_id": namespace,
-                "completed_at": datetime.now().isoformat(),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
             }
 
         monkeypatch.setattr("trw_memory.tools.consolidate._promote_team_memories", _mock_promote)

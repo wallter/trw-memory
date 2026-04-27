@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
-from collections.abc import Mapping, Sequence
 
 SourceFamily = str
 _TRANSIENT_SOURCE_FAMILIES = frozenset({"lifecycle", "episodic"})

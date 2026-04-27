@@ -51,9 +51,7 @@ def _sha(s: str) -> str:
 
 
 # Frozen at import time (boot) — this is the in-memory pin set.
-PINNED_HASHES: MappingProxyType[str, str] = MappingProxyType(
-    {cid: _sha(content) for cid, content in _CANARY_FIXTURES}
-)
+PINNED_HASHES: MappingProxyType[str, str] = MappingProxyType({cid: _sha(content) for cid, content in _CANARY_FIXTURES})
 
 
 class CanaryLearning(BaseModel):

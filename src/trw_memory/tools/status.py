@@ -70,7 +70,7 @@ def memory_status_impl(
             try:
                 ns_count = backend.count(namespace=ns)
                 namespaces[ns] = ns_count
-            except Exception:  # broad catch: best-effort namespace count, per-item skip intentional  # noqa: PERF203
+            except Exception:  # broad catch: best-effort namespace count, per-item skip intentional
                 logger.debug("memory_status_ns_count_failed", namespace=ns, exc_info=True)
 
         # Also include active entry count

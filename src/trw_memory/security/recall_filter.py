@@ -11,10 +11,10 @@ Target: p95 latency <=20ms for a 25-learning window (PRD-SEC-001 NFR-002).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from datetime import datetime, timezone
-import hashlib
 from pathlib import Path
 from typing import Literal
 
@@ -159,7 +159,7 @@ def filter_recall_window(
     pre-SEC call surface: ``True`` maps to ``mode="observe"`` and
     ``False`` maps to ``mode="strict"``.
     """
-    legacy_mode = "observe" if observe_mode is not None and observe_mode else "strict"
+    legacy_mode: Literal["observe", "strict"] = "observe" if observe_mode is not None and observe_mode else "strict"
     if mode is None:
         resolved_mode: Literal["strict", "redact", "observe"] = legacy_mode if observe_mode is not None else "observe"
     else:

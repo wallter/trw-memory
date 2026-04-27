@@ -88,18 +88,20 @@ async def test_bulk_store_empty_raises(isolated_client: MemoryClient) -> None:
 
 async def test_bulk_store_records_are_recallable(isolated_client: MemoryClient) -> None:
     """Stored records show up via recall() — proves the batch path is real."""
-    await isolated_client.bulk_store([
-        BulkStoreRequest(
-            content="page hinkley test threshold tuning insight",
-            detail="alarm_threshold=20.0 needs ~98 obs for 0.6-magnitude shift",
-            tags=["bandit"],
-        ),
-        BulkStoreRequest(
-            content="structlog event keyword reservation",
-            detail="use action= not event= for kwargs",
-            tags=["logging"],
-        ),
-    ])
+    await isolated_client.bulk_store(
+        [
+            BulkStoreRequest(
+                content="page hinkley test threshold tuning insight",
+                detail="alarm_threshold=20.0 needs ~98 obs for 0.6-magnitude shift",
+                tags=["bandit"],
+            ),
+            BulkStoreRequest(
+                content="structlog event keyword reservation",
+                detail="use action= not event= for kwargs",
+                tags=["logging"],
+            ),
+        ]
+    )
     hits = await isolated_client.recall(query="page hinkley", limit=10)
     assert any("page hinkley" in (h.get("content") or "").lower() for h in hits)
 
@@ -142,9 +144,7 @@ async def test_bulk_store_completes_50_records_in_reasonable_time(
     regress" — at sustained ~100ms per record we'd be at 5s for n=50.
     """
     n = 50
-    requests = [
-        BulkStoreRequest(content=f"record {i}", detail=f"d{i}") for i in range(n)
-    ]
+    requests = [BulkStoreRequest(content=f"record {i}", detail=f"d{i}") for i in range(n)]
     t0 = time.perf_counter()
     summary = await isolated_client.bulk_store(requests)
     elapsed_s = time.perf_counter() - t0
@@ -163,8 +163,6 @@ def test_summary_per_item_ms_safe_at_zero() -> None:
 
 
 def test_summary_succeeded_is_stored_plus_updated() -> None:
-    s = BulkStoreSummary(
-        total=10, stored=7, updated=2, quarantined=1, rejected=0, duration_ms=100.0
-    )
+    s = BulkStoreSummary(total=10, stored=7, updated=2, quarantined=1, rejected=0, duration_ms=100.0)
     assert s.succeeded == 9
     assert s.per_item_ms == 10.0

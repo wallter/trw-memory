@@ -99,6 +99,6 @@ class DeltaTracker:
                 result = backend.update(eid, last_synced_at=now)
                 if result is not None:
                     count += 1
-            except Exception:  # noqa: PERF203
+            except Exception:
                 logger.warning("delta_mark_synced_failed", entry_id=eid, exc_info=True)
         return count

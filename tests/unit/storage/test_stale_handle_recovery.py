@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
-import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,7 +17,6 @@ from trw_memory.exceptions import StaleConnectionError
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage._stale_handle_detector import sentinel_path, write_sentinel
 from trw_memory.storage.sqlite_backend import SQLiteBackend
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -157,9 +155,7 @@ def test_precheck_is_cheap_cached_within_budget(tmp_path: Path) -> None:
         detector.is_stale()
         calls_after_second = len(stat_calls)
 
-    assert calls_after_second == calls_after_first, (
-        "Second call within budget should not issue any stat syscalls"
-    )
+    assert calls_after_second == calls_after_first, "Second call within budget should not issue any stat syscalls"
     backend.close()
 
 
@@ -182,6 +178,7 @@ def test_reconnect_failure_raises_stale_connection_error(tmp_path: Path) -> None
 
     # Patch _open_and_configure to always raise so _reconnect fails
     import sqlite3 as _sqlite3
+
     with patch.object(
         SQLiteBackend,
         "_open_and_configure",

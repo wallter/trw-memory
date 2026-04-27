@@ -325,7 +325,7 @@ class TestImpactPropagationWithEvidenceFor:
         _insert_edge(conn, "B", "C", "evidence_for", 0.9)
 
         affected = propagate_impact(conn, "A", importance_delta=0.1, max_depth=2)
-        affected_map = {entry_id: delta for entry_id, delta in affected}
+        affected_map = dict(affected)
 
         # B receives: 0.1 * 0.3 (evidence_for rate) = 0.03
         assert "B" in affected_map

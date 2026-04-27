@@ -60,7 +60,7 @@ if _parse_version(_crewai_version) < _MIN_CREWAI_VERSION:
         'Install it with: pip install "trw-memory[crewai]"'
     )
 
-from trw_memory.integrations._mixin import BackendOwnerMixin
+from trw_memory.integrations._mixin import BackendOwnerMixin  # noqa: E402 — import after crewai version check
 
 if TYPE_CHECKING:
     from trw_memory.storage.interface import StorageBackend

@@ -53,7 +53,7 @@ def _sweep_hot_to_warm(
             hot.pop(entry_id, None)
             demoted += 1
             logger.debug("sweep_hot_to_warm", entry_id=entry_id)
-        except (OSError, StorageError, ValueError):  # noqa: PERF203 — per-entry error handling
+        except (OSError, StorageError, ValueError):
             logger.warning("sweep_hot_to_warm_failed", entry_id=entry_id, exc_info=True)
             errors += 1
 
@@ -144,7 +144,7 @@ def _sweep_cold_to_purge(
                     days=days,
                     importance_score=utility_score,
                 )
-        except (OSError, StorageError, ValueError):  # noqa: PERF203 — per-entry error handling
+        except (OSError, StorageError, ValueError):
             logger.warning(
                 "sweep_cold_purge_failed",
                 path=str(yaml_file),

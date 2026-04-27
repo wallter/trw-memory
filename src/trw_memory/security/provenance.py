@@ -33,9 +33,9 @@ try:
     _NACL_AVAILABLE = True
 except ImportError:  # pragma: no cover — PyNaCl is optional
     _NACL_AVAILABLE = False
-    SigningKey = Any
-    VerifyKey = Any
-    BadSignatureError = Exception
+    SigningKey = Any  # type: ignore[misc,assignment]
+    VerifyKey = Any  # type: ignore[misc,assignment]
+    BadSignatureError = Exception  # type: ignore[misc,assignment]
 
 __all__ = [
     "ProvenanceChain",
@@ -160,7 +160,7 @@ def verify(chain_path: Path) -> bool:
 
 def _sign_message(learning_id: str, content_hash: str, prev_hash: str) -> bytes:
     """Canonical signing payload for an entry."""
-    return f"{learning_id}|{content_hash}|{prev_hash}".encode("utf-8")
+    return f"{learning_id}|{content_hash}|{prev_hash}".encode()
 
 
 def build_entry_provenance(
@@ -174,8 +174,8 @@ def build_entry_provenance(
     signing_key: Any,
 ) -> dict[str, str]:
     """Build signed per-row provenance metadata for a memory entry."""
-    content_hash = hashlib.sha256(f"{content}{detail}".encode("utf-8")).hexdigest()
-    payload = f"{learning_id}|{author}|{session_id}|{ts}|{content_hash}".encode("utf-8")
+    content_hash = hashlib.sha256(f"{content}{detail}".encode()).hexdigest()
+    payload = f"{learning_id}|{author}|{session_id}|{ts}|{content_hash}".encode()
     signature = ""
     if signing_key is not None:
         signed = signing_key.sign(payload)
@@ -221,8 +221,8 @@ def verify_entry_provenance(entry: dict[str, str] | Any, verify_key: Any | None)
         return False
     if verify_key is None:
         return False
-    payload = f"{getattr(entry, 'id', metadata.get('learning_id', ''))}|{author}|{session_id}|{ts}|{content_hash}".encode(
-        "utf-8"
+    payload = (
+        f"{getattr(entry, 'id', metadata.get('learning_id', ''))}|{author}|{session_id}|{ts}|{content_hash}".encode()
     )
     try:
         signature_bytes = bytes.fromhex(signature)
@@ -234,7 +234,7 @@ def verify_entry_provenance(entry: dict[str, str] | Any, verify_key: Any | None)
     for args in ((payload, signature_bytes), (signature_bytes, payload)):
         try:
             verified = verify(*args)
-        except Exception:
+        except Exception:  # noqa: S112 — try alternate arg ordering on next iteration
             continue
         if verified is False:
             continue
@@ -271,9 +271,7 @@ def append_signed(
         msg = _sign_message(entry.learning_id, entry.content_hash, prev_hash)
         # nacl SigningKey.sign returns SignedMessage whose .signature is bytes
         sig_bytes: bytes = signing_key.sign(msg).signature
-        linked = entry.model_copy(
-            update={"prev_hash": prev_hash, "signature": sig_bytes.hex()}
-        )
+        linked = entry.model_copy(update={"prev_hash": prev_hash, "signature": sig_bytes.hex()})
 
     line = json.dumps(linked.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
     with chain_path.open("a", encoding="utf-8") as fh:

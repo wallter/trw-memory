@@ -683,7 +683,7 @@ class TestImportCommand:
         # constructors. Safe loader raises ConstructorError before any
         # Python code can run.
         fpath = tmp_path / "payload.yaml"
-        fpath.write_text("!!python/object/apply:os.system [\"id\"]\n")
+        fpath.write_text('!!python/object/apply:os.system ["id"]\n')
         ret = main(["import", str(fpath)])
         assert ret == 1
         err = capsys.readouterr().err

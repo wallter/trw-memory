@@ -715,7 +715,7 @@ class TestCrewAIAdapter:
         mocks = _make_crewai_mocks()
         with patch.dict(sys.modules, mocks):
             with patch("importlib.metadata.version", return_value="0.73.9"):
-                with pytest.raises(ImportError, match="crewai>=0.74.0"):
+                with pytest.raises(ImportError, match=r"crewai>=0\.74\.0"):
                     importlib.import_module("trw_memory.integrations.crewai")
 
     def test_context_manager(self, tmp_backend: Any) -> None:

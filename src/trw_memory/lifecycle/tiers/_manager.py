@@ -213,9 +213,7 @@ class TierManager:
         scored: list[dict[str, object]] = []
         for item in entries:
             item_tags = item.get("tags", [])
-            if tag_set and (
-                not isinstance(item_tags, list) or not tag_set.issubset(set(str(tag) for tag in item_tags))
-            ):
+            if tag_set and (not isinstance(item_tags, list) or not tag_set.issubset({str(tag) for tag in item_tags})):
                 continue
             if not _entry_matches_tokens(item, query_tokens):
                 continue
@@ -431,7 +429,7 @@ class TierManager:
                     continue
                 item_tags = item.get("tags", [])
                 if tag_set and (
-                    not isinstance(item_tags, list) or not tag_set.issubset(set(str(tag) for tag in item_tags))
+                    not isinstance(item_tags, list) or not tag_set.issubset({str(tag) for tag in item_tags})
                 ):
                     continue
                 merged.setdefault(entry_id, item)

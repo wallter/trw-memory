@@ -701,9 +701,7 @@ class TestSqliteVecExtensionLoadFailure:
     """
 
     @staticmethod
-    def _install_bad_connect(
-        monkeypatch: pytest.MonkeyPatch, exc: Exception
-    ) -> None:
+    def _install_bad_connect(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
         """Patch sqlite3.connect to return a proxy whose enable_load_extension raises."""
         import sqlite3
 
@@ -725,13 +723,9 @@ class TestSqliteVecExtensionLoadFailure:
 
         monkeypatch.setattr(sqlite3, "connect", connect_proxy)
 
-    def test_backend_init_survives_attribute_error(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_backend_init_survives_attribute_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Python without load_extension must not crash backend init."""
-        self._install_bad_connect(
-            monkeypatch, AttributeError("enable_load_extension not available")
-        )
+        self._install_bad_connect(monkeypatch, AttributeError("enable_load_extension not available"))
 
         backend = SQLiteBackend(tmp_path / "noext.db")
 
@@ -742,9 +736,7 @@ class TestSqliteVecExtensionLoadFailure:
         assert got is not None
         assert got.content == "should persist without vec"
 
-    def test_backend_init_survives_operational_error(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_backend_init_survives_operational_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Some macOS builds raise OperationalError instead of AttributeError."""
         import sqlite3 as _sqlite3
 

@@ -62,10 +62,10 @@ class IntegrityScheduler:
     __slots__ = (
         "_db_path",
         "_interval_seconds",
+        "_lock",
         "_on_regression",
         "_stop_event",
         "_thread",
-        "_lock",
         "last_check_at",
         "last_check_ok",
     )

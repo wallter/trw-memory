@@ -37,8 +37,7 @@ _FIXTURES = _load_fixtures()
 
 # Import-time floor check — fail collection loudly if corpus shrinks.
 assert len(_FIXTURES) >= 10, (
-    f"red-team corpus must have >=10 fixtures (PRD-SEC-001 FR-001 AC); "
-    f"found {len(_FIXTURES)} in {_FIXTURE_DIR}"
+    f"red-team corpus must have >=10 fixtures (PRD-SEC-001 FR-001 AC); found {len(_FIXTURES)} in {_FIXTURE_DIR}"
 )
 
 
@@ -75,17 +74,12 @@ def test_red_team_corpus_block_rate() -> None:
         if result.decision == "quarantine":
             blocked += 1
         else:
-            allowed_ids.append(
-                f"{fixture['attack_id']} -> {result.decision} (score={result.score:.2f})"
-            )
+            allowed_ids.append(f"{fixture['attack_id']} -> {result.decision} (score={result.score:.2f})")
 
     # Floor: >=9 of the first 10 fixtures (corpus may grow beyond 10).
     total = len(_FIXTURES)
     required = max(9, int(total * 0.9))
-    assert blocked >= required, (
-        f"block rate {blocked}/{total} below floor {required}/{total}. "
-        f"Allowed: {allowed_ids}"
-    )
+    assert blocked >= required, f"block rate {blocked}/{total} below floor {required}/{total}. Allowed: {allowed_ids}"
 
 
 def test_no_fixture_scores_as_allow() -> None:
@@ -105,6 +99,4 @@ def test_no_fixture_scores_as_allow() -> None:
         if result.decision == "allow":
             allowed.append(f"{fixture['attack_id']} (score={result.score:.2f})")
     # Allow at most 10% slack to match the >=9/10 floor.
-    assert len(allowed) <= max(1, len(_FIXTURES) // 10), (
-        f"red-team fixtures scoring as 'allow': {allowed}"
-    )
+    assert len(allowed) <= max(1, len(_FIXTURES) // 10), f"red-team fixtures scoring as 'allow': {allowed}"

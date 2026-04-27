@@ -68,13 +68,13 @@ class WriterRegistry:
     """
 
     __slots__ = (
-        "_db_path",
-        "_registry_dir",
-        "_lock_file",
-        "_warn_threshold",
-        "_registered",
         "_atexit_handle",
+        "_db_path",
         "_lock",
+        "_lock_file",
+        "_registered",
+        "_registry_dir",
+        "_warn_threshold",
         "concurrent_writers",
         "peer_pids",
     )

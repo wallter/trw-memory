@@ -33,8 +33,6 @@ from trw_memory.exceptions import (
     StaleConnectionError,
     StorageError,
 )
-from trw_memory.storage._stale_handle_detector import StaleHandleDetector, write_sentinel
-from trw_memory.storage._utf8_validator import validate_utf8_fields
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage._row_mapper import entry_to_row, row_to_entry
 from trw_memory.storage._schema import ensure_schema, ensure_vec_table
@@ -46,6 +44,8 @@ from trw_memory.storage._shared import (
     serialize_update_value,
     validate_update_fields,
 )
+from trw_memory.storage._stale_handle_detector import StaleHandleDetector, write_sentinel
+from trw_memory.storage._utf8_validator import validate_utf8_fields
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.sync.delta import DeltaTracker
 
@@ -468,7 +468,7 @@ class SQLiteBackend(StorageBackend):
         """
         try:
             completed = subprocess.run(  # noqa: S603 — args passed as list, shell=False
-                ["sqlite3", str(backup_path), ".recover"],
+                ["sqlite3", str(backup_path), ".recover"],  # noqa: S607 — sqlite3 is on PATH
                 capture_output=True,
                 timeout=30,
                 check=False,
@@ -1645,12 +1645,12 @@ class SQLiteBackend(StorageBackend):
             return {}
 
         placeholders = ", ".join(["?"] * len(entry_ids))
-        sql = f"""  -- noqa: S608 - placeholder count is derived from entry_ids length only
+        sql = f"""
             SELECT vi.entry_id, vm.embedding
             FROM vec_memories vm
             JOIN vec_index vi ON vm.rowid = vi.rowid
             WHERE vi.entry_id IN ({placeholders})
-        """
+        """  # noqa: S608 — placeholder count is derived from entry_ids length only; values bound separately
         try:
             with self._lock:
                 rows = self._conn.execute(sql, entry_ids).fetchall()

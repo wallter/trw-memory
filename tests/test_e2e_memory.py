@@ -675,7 +675,7 @@ class TestConfigValidation:
 
         from trw_memory.models.config import MemoryConfig
 
-        with pytest.raises(ValidationError, match="sum to 1.0"):
+        with pytest.raises(ValidationError, match=r"sum to 1\.0"):
             MemoryConfig(
                 score_relevance_weight=0.5,
                 score_recency_weight=0.5,

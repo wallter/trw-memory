@@ -312,7 +312,7 @@ def _apply_runtime_pii_policy(entry: MemoryEntry, config: MemoryConfig) -> tuple
     metadata = dict(entry.metadata)
     metadata["pii_types"] = ",".join(sorted({match.pii_type for match in all_matches}))
     if any(match.pii_type == PIIType.HIGH_ENTROPY for match in all_matches):
-        metadata["contains_high_entropy_token"] = "true"
+        metadata["contains_high_entropy_token"] = "true"  # noqa: S105 — flag value, not a credential
     return entry.model_copy(update={"content": new_content, "detail": new_detail, "metadata": metadata}), all_matches
 
 
@@ -554,7 +554,9 @@ def review_quarantined_entry(
         entry = quarantine_backend.get(learning_id)
         if entry is None:
             return {"learning_id": learning_id, "status": "not_found"}
-        _append_review_log(config, learning_id, "active" if decision == "approve" else "obsolete_poisoned", reviewer_id=reviewer_id)
+        _append_review_log(
+            config, learning_id, "active" if decision == "approve" else "obsolete_poisoned", reviewer_id=reviewer_id
+        )
         if decision == "approve":
             approved = entry.model_copy(
                 update={
@@ -672,11 +674,7 @@ def _apply_sec001_intake(
         }
         entry = entry.model_copy(update={"metadata": updated_metadata})
         would_be_decision = next(
-            (
-                reason.removeprefix("WOULD-BE:")
-                for reason in trust_result.reasons
-                if reason.startswith("WOULD-BE:")
-            ),
+            (reason.removeprefix("WOULD-BE:") for reason in trust_result.reasons if reason.startswith("WOULD-BE:")),
             trust_result.decision,
         )
         telemetry_session_id, telemetry_run_id = _resolve_security_trace_context(
@@ -715,11 +713,11 @@ def _apply_sec001_intake(
 
             signing_key = get_or_create_ed25519_key_at_path(
                 resolve_security_path(
-                config,
-                "provenance_signing_key_path",
-                trw_dir=anchor_dir,
-                create_parent=True,
-            )
+                    config,
+                    "provenance_signing_key_path",
+                    trw_dir=anchor_dir,
+                    create_parent=True,
+                )
             )
             if signing_key is None:
                 raise ProvenanceKeyUnavailableError("provenance signing key unavailable")

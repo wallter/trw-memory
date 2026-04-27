@@ -4,6 +4,30 @@ All notable changes to the TRW Memory package.
 
 ## [0.8.0] — 2026-04-26
 
+### Quality
+
+- **Lint, type-check, and format clean across `src/` and `tests/`**
+  (release-prep pass). 10 mypy-strict errors fixed across 4 modules:
+  optional-dep `Any` fallbacks for PyNaCl `SigningKey`/`VerifyKey`/
+  `BadSignatureError` (`security/provenance.py`, `security/keys.py`)
+  and torchcodec (`embeddings/local.py`); `Literal["observe","strict"]`
+  annotation in `security/recall_filter.py:164`. 82 → 0 ruff errors
+  via auto-fixes plus targeted manual edits (`TRY004` on
+  `isinstance` failures in `namespaces/manager.py`, SIM102 nested-if
+  collapse + RUF021 parenthesize-precedence in `security/keys.py`,
+  PERF401 in `integrations/llamaindex.py`, F841 unused-var in
+  `lifecycle/tiers/_warm.py`, E402 noqa with rationale in
+  `integrations/crewai.py`, S* noqa annotations for the SQLite
+  recovery subprocess and placeholder-bound IN-clause in
+  `storage/sqlite_backend.py`, S101/S105/S112 noqa for type-
+  narrowed asserts, non-credential flag values, and per-iteration
+  fallbacks). Project-wide `pyproject.toml [tool.ruff.lint] ignore`
+  extended for codebase-intentional patterns (ANN401, PERF203,
+  SIM105, C901, RUF002, TRY301) with rationale. Expanded `fixable`
+  list so future ruff `--fix` runs cover more rules. No behavioral
+  changes; `mypy --strict` clean, `ruff check` clean,
+  `ruff format --check` clean.
+
 ### Added
 
 - **SEC001 security startup + telemetry + audit/review tools**

@@ -437,9 +437,7 @@ class TestRuntimePoisoningPolicy:
                 prepare_entry_for_store(second, backend=backend, config=cfg, session_id="s1")
 
         assert excinfo.value.retry_after > 0.0
-        audit_records = [
-            read_yaml_line for read_yaml_line in Path(cfg.audit_log_path).read_text(encoding="utf-8").splitlines()
-        ]
+        audit_records = list(Path(cfg.audit_log_path).read_text(encoding="utf-8").splitlines())
         assert any('"op":"store_rejected"' in line for line in audit_records)
         assert any('"reason":"rate_limited"' in line for line in audit_records)
         assert any('"session_id":"s1"' in line for line in audit_records)
