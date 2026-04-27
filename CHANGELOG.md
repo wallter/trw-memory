@@ -2,6 +2,19 @@
 
 All notable changes to the TRW Memory package.
 
+## [0.8.1] — 2026-04-27
+
+### Fixed
+
+- **`trw_memory.security.observe_clock` raised `ModuleNotFoundError: No module named 'yaml'`**
+  on a clean `pip install trw-memory` install. The module imported
+  `yaml` (PyYAML) at top-level, but trw-memory's `dependencies` only
+  declares `ruamel.yaml`. Converted to use the project's standard
+  `ruamel.yaml.YAML(typ="safe")` API. Caught by the public-repo
+  Release-to-PyPI smoke-test in CI run `25025008017` against the
+  v0.8.0 tag — PyPI publish was correctly gated and 0.8.0 never
+  shipped. 0.8.1 supersedes that aborted tag.
+
 ## [0.8.0] — 2026-04-26
 
 ### Quality

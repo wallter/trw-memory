@@ -13,12 +13,14 @@ once per process.
 
 from __future__ import annotations
 
+import io
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import structlog
-import yaml
 from pydantic import BaseModel, ConfigDict
+from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError
 
 __all__ = ["ObserveClockState", "read_observe_clock", "start_observe_clock"]
 
@@ -47,8 +49,9 @@ def read_observe_clock(trw_dir: Path) -> ObserveClockState | None:
     if not path.exists():
         return None
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
+        yaml = YAML(typ="safe")
+        data = yaml.load(path.read_text(encoding="utf-8"))
+    except (OSError, YAMLError):
         _LOG.warning("observe_clock.read_failed", path=str(path), exc_info=True)
         return None
     if not isinstance(data, dict):
@@ -87,10 +90,11 @@ def start_observe_clock(
     )
     path = _clock_path(trw_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        yaml.safe_dump(state.model_dump(mode="json"), sort_keys=True),
-        encoding="utf-8",
-    )
+    yaml = YAML(typ="safe")
+    yaml.default_flow_style = False
+    buf = io.StringIO()
+    yaml.dump(dict(sorted(state.model_dump(mode="json").items())), buf)
+    path.write_text(buf.getvalue(), encoding="utf-8")
     _LOG.info(
         "observe_clock.started",
         prd=prd,
