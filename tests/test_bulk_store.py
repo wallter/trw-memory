@@ -11,7 +11,6 @@ Verifies:
 
 from __future__ import annotations
 
-import os
 import time
 
 import pytest
@@ -25,7 +24,7 @@ from trw_memory.client import (
 
 
 @pytest.fixture
-def isolated_client(tmp_path):
+async def isolated_client(tmp_path, monkeypatch: pytest.MonkeyPatch):
     """Disposable MemoryClient using tmp_path-backed sqlite + unique namespace.
 
     The warm-tier manager writes to a namespace-derived `.memory/<ns>/`
@@ -34,22 +33,25 @@ def isolated_client(tmp_path):
     Embeddings forced OFF to avoid sentence-transformers load cost in
     these tests.
     """
-    import os as _os
     import uuid as _uuid
 
+    trw_dir = tmp_path / ".trw"
+    trw_dir.mkdir(parents=True, exist_ok=True)
     db_path = tmp_path / "mem.db"
-    os.environ["MEMORY_STORAGE_BACKEND"] = "sqlite"
-    os.environ["MEMORY_STORAGE_SQLITE_PATH"] = str(db_path)
+    monkeypatch.setenv("TRW_DIR", str(trw_dir))
+    monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("MEMORY_STORAGE_SQLITE_PATH", str(db_path))
     # Force OFF — `setdefault` was leaking from prior tests that set "1".
-    os.environ["MEMORY_EMBEDDINGS_ENABLED"] = "0"
-    cwd = _os.getcwd()
-    _os.chdir(tmp_path)
+    monkeypatch.setenv("MEMORY_EMBEDDINGS_ENABLED", "0")
+    monkeypatch.chdir(tmp_path)
+    client: MemoryClient | None = None
     try:
         ns_suffix = _uuid.uuid4().hex[:8]
         client = MemoryClient(namespace=f"project:bulk-test-{ns_suffix}", mode="local")
         yield client
     finally:
-        _os.chdir(cwd)
+        if client is not None:
+            await client.close()
 
 
 # ---------------------------------------------------------------- happy path

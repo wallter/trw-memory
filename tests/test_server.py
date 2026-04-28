@@ -133,18 +133,20 @@ class TestServerModule:
         mcp_instance.run.assert_not_called()
         sys.modules.pop("trw_memory.server", None)
 
-    def test_six_tools_registered(self) -> None:
-        """Exactly 6 tools must be registered via mcp.tool()."""
+    def test_eight_tools_registered(self) -> None:
+        """Exactly 8 tools must be registered via mcp.tool()."""
         server_mod, mcp_instance, registered_tools = _reload_server_with_mock()
-        assert len(registered_tools) == 6, f"Expected 6 tools, got {len(registered_tools)}: {registered_tools}"
+        assert len(registered_tools) == 8, f"Expected 8 tools, got {len(registered_tools)}: {registered_tools}"
         sys.modules.pop("trw_memory.server", None)
 
     def test_all_tool_modules_importable(self) -> None:
-        """All 6 tool modules must be importable with their impl functions."""
-        from trw_memory.tools import consolidate, forget, recall, search, status, store
+        """All tool modules must be importable with their impl functions."""
+        from trw_memory.tools import audit, consolidate, forget, recall, review, search, status, store
 
         assert callable(store.memory_store_impl)
         assert callable(recall.memory_recall_impl)
+        assert callable(audit.memory_audit_impl)
+        assert callable(review.memory_review_impl)
         assert callable(forget.memory_forget_impl)
         assert callable(consolidate.memory_consolidate_impl)
         assert callable(search.memory_search_impl)
@@ -152,9 +154,11 @@ class TestServerModule:
 
     def test_register_functions_exist(self) -> None:
         """Each tool module must export a register_*_tool function."""
+        from trw_memory.tools.audit import register_audit_tool
         from trw_memory.tools.consolidate import register_consolidate_tool
         from trw_memory.tools.forget import register_forget_tool
         from trw_memory.tools.recall import register_recall_tool
+        from trw_memory.tools.review import register_review_tool
         from trw_memory.tools.search import register_search_tool
         from trw_memory.tools.status import register_status_tool
         from trw_memory.tools.store import register_store_tool
@@ -162,6 +166,8 @@ class TestServerModule:
         for fn in [
             register_store_tool,
             register_recall_tool,
+            register_audit_tool,
+            register_review_tool,
             register_forget_tool,
             register_consolidate_tool,
             register_search_tool,

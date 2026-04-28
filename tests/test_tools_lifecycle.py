@@ -123,7 +123,10 @@ class TestMemoryStoreImpl:
         backend = _mock_backend()
         memory_store_impl("meta tip", "project:default", backend=backend, metadata={"source": "test"})
         stored_entry: MemoryEntry = backend.store.call_args[0][0]
-        assert stored_entry.metadata == {"source": "test"}
+        assert stored_entry.metadata["source"] == "test"
+        assert stored_entry.metadata["provenance_author"] == "tool"
+        assert stored_entry.metadata["provenance_content_hash"]
+        assert stored_entry.metadata["provenance_signature"]
 
     def test_storage_error_returns_error_dict(self) -> None:
         backend = _mock_backend()
