@@ -27,9 +27,23 @@ from typing import Any
 import pytest
 
 from trw_memory.client import MemoryClient
+from trw_memory.graph import wait_for_graph_updates
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+
+@pytest.fixture(autouse=True)
+def drain_background_graph_updates() -> Iterator[None]:
+    """Finish graph worker threads before pytest closes per-test capture streams."""
+    yield
+    try:
+        wait_for_graph_updates(timeout=1.0)
+    except TimeoutError:
+        # Graph enrichment is best-effort; tests should not hang if a worker is
+        # already blocked on an intentionally fault-injected backend.
+        pass
+
 
 # ---------------------------------------------------------------------------
 # SQLiteBackend fixture
