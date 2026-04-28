@@ -335,11 +335,6 @@ def score_entry_anomaly(
             float(len(entry.tags)),
             [float(len(candidate.tags)) for candidate in clean_reference],
         ),
-        (
-            "importance",
-            float(entry.importance),
-            [float(candidate.importance) for candidate in clean_reference],
-        ),
     ]
 
     strongest: tuple[str, float] | None = None

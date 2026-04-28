@@ -411,11 +411,16 @@ def _score_entry_anomaly(
     config: MemoryConfig,
 ) -> tuple[tuple[str, float] | None, AnomalyStats]:
     reference_entries = backend.list_entries(namespace=entry.namespace, limit=1_000)
-    clean_reference = [candidate for candidate in reference_entries if candidate.metadata.get("quarantined") != "true"]
+    clean_reference = [
+        candidate
+        for candidate in reference_entries
+        if candidate.metadata.get("quarantined") != "true" and candidate.metadata.get("system_canary") != "true"
+    ]
     clean_reference.sort(key=lambda candidate: candidate.updated_at, reverse=True)
     rolling = clean_reference[:100]
     stats = _build_anomaly_stats(rolling)
-    anomaly = score_entry_anomaly(entry, rolling, z_threshold=config.poisoning_z_threshold)
+    anomaly_reference = [candidate for candidate in rolling if (candidate.content + candidate.detail).strip()]
+    anomaly = score_entry_anomaly(entry, anomaly_reference, z_threshold=config.poisoning_z_threshold)
     return anomaly, stats
 
 
