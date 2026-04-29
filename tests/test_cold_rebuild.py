@@ -35,7 +35,7 @@ from trw_memory.storage._cold_rebuild import (
 )
 from trw_memory.storage._schema import ensure_schema
 from trw_memory.storage.persistence import write_yaml
-from trw_memory.storage.sqlite_backend import SQLiteBackend
+from trw_memory.storage.sqlite_backend import SQLiteBackend, _resolve_cold_rebuild_base
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -734,6 +734,55 @@ def test_recover_db_invokes_rebuild_when_gated(tmp_path: Path) -> None:
         assert ids == {"L-COLD0", "L-COLD1", "L-COLD2"}
     finally:
         conn.close()
+
+
+def test_recover_db_invokes_rebuild_for_trw_mcp_layout(tmp_path: Path) -> None:
+    """Regression: ``.trw/memory/memory.db`` must rebuild from ``.trw/memory/cold``."""
+    trw_dir = tmp_path / ".trw"
+    db_path = trw_dir / "memory" / "memory.db"
+    _populate_real_db(db_path, entries=1)
+    _corrupt_sqlite_master(db_path)
+
+    for i in range(3):
+        _make_yaml(trw_dir, f"L-MCP-COLD{i}")
+
+    conn = SQLiteBackend.recover_db(
+        db_path,
+        recovery_policy="strict",
+        rebuild_from_cold=True,
+    )
+    try:
+        row_count = conn.execute("SELECT count(*) FROM memories").fetchone()[0]
+        assert row_count == 3
+        ids = {r[0] for r in conn.execute("SELECT id FROM memories").fetchall()}
+        assert ids == {"L-MCP-COLD0", "L-MCP-COLD1", "L-MCP-COLD2"}
+    finally:
+        conn.close()
+
+
+def test_resolve_cold_rebuild_base_standalone_layout(tmp_path: Path) -> None:
+    """FR01: standalone ``<base>/memory.db`` resolves to ``<base>``."""
+    _make_yaml(tmp_path, "L-BASE-STANDALONE")
+
+    assert _resolve_cold_rebuild_base(tmp_path / "memory.db") == tmp_path
+
+
+def test_resolve_cold_rebuild_base_trw_mcp_layout(tmp_path: Path) -> None:
+    """FR01: ``<trw_dir>/memory/memory.db`` resolves to ``<trw_dir>``."""
+    trw_dir = tmp_path / ".trw"
+    _make_yaml(trw_dir, "L-BASE-MCP")
+
+    assert _resolve_cold_rebuild_base(trw_dir / "memory" / "memory.db") == trw_dir
+
+
+def test_resolve_cold_rebuild_base_selects_largest_non_empty_candidate(tmp_path: Path) -> None:
+    """FR01: when both candidates exist, choose the one with more cold YAMLs."""
+    db_path = tmp_path / "memory" / "memory.db"
+    _make_yaml(tmp_path, "L-BASE-TRW-ONE")
+    _make_yaml(tmp_path / "memory", "L-BASE-STANDALONE-ONE")
+    _make_yaml(tmp_path / "memory", "L-BASE-STANDALONE-TWO")
+
+    assert _resolve_cold_rebuild_base(db_path) == tmp_path / "memory"
 
 
 def test_recover_db_raises_when_rebuild_yields_zero(tmp_path: Path) -> None:
