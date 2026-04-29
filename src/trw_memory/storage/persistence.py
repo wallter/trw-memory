@@ -6,6 +6,7 @@ All file-level persistence goes through this module.  Writes are atomic
 
 from __future__ import annotations
 
+import _thread
 import contextlib
 import json
 import os
@@ -30,6 +31,9 @@ except ImportError:
     _FCNTL_AVAILABLE = False
 
 logger = structlog.get_logger(__name__)
+
+_IN_PROCESS_LOCKS_GUARD: _thread.LockType = _thread.allocate_lock()
+_IN_PROCESS_LOCKS: dict[str, _thread.RLock] = {}
 
 __all__ = [
     "append_jsonl",
@@ -234,6 +238,23 @@ def append_jsonl(path: Path, record: dict[str, object]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _in_process_lock_for(lock_path: Path) -> _thread.RLock:
+    """Return the process-local lock paired with an advisory lock file.
+
+    ``fcntl.flock`` locks are process-scoped on POSIX, so separate threads in
+    this process can otherwise enter the same read-modify-write critical
+    section concurrently.  Pair the file lock with a small in-process lock so
+    threaded appenders observe the same serialization as separate processes.
+    """
+    key = str(lock_path.resolve(strict=False))
+    with _IN_PROCESS_LOCKS_GUARD:
+        lock = _IN_PROCESS_LOCKS.get(key)
+        if lock is None:
+            lock = _thread.RLock()
+            _IN_PROCESS_LOCKS[key] = lock
+        return lock
+
+
 @contextlib.contextmanager
 def lock_for_rmw(path: Path) -> Generator[Path, None, None]:
     """Advisory exclusive lock for read-modify-write cycles.
@@ -257,13 +278,15 @@ def lock_for_rmw(path: Path) -> Generator[Path, None, None]:
     """
     lock_path = path.parent / f"{path.name}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_fh = lock_path.open("a+", encoding="utf-8")
-    try:
-        if _FCNTL_AVAILABLE:
-            fcntl.flock(_handle_fileno(lock_fh), fcntl.LOCK_EX)
-        yield path
-    finally:
-        if _FCNTL_AVAILABLE:
-            fcntl.flock(_handle_fileno(lock_fh), fcntl.LOCK_UN)
-        _close_handle(lock_fh)
-        lock_path.unlink(missing_ok=True)
+    process_lock = _in_process_lock_for(lock_path)
+    with process_lock:
+        lock_fh = lock_path.open("a+", encoding="utf-8")
+        try:
+            if _FCNTL_AVAILABLE:
+                fcntl.flock(_handle_fileno(lock_fh), fcntl.LOCK_EX)
+            yield path
+        finally:
+            if _FCNTL_AVAILABLE:
+                fcntl.flock(_handle_fileno(lock_fh), fcntl.LOCK_UN)
+            _close_handle(lock_fh)
+            lock_path.unlink(missing_ok=True)
