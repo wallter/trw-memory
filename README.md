@@ -340,7 +340,7 @@ pip install -e ".[dev]"
 
 # Targeted testing
 ../.venv/bin/python -m pytest tests/test_client.py -v
-../.venv/bin/python -m pytest tests/test_retrieval.py -v
+../.venv/bin/python -m pytest tests/test_retrieval_*.py -v
 ../.venv/bin/python -m pytest tests/test_storage_sqlite.py -v
 ```
 
