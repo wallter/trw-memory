@@ -7,129 +7,15 @@ Defaults match the TRWConfig memory-related values for backward compatibility.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic_settings.sources import InitSettingsSource, PydanticBaseSettingsSource
-from ruamel.yaml import YAML
-from ruamel.yaml.error import YAMLError
+from pydantic_settings.sources import PydanticBaseSettingsSource
+
+from trw_memory.models._config_sources import _TRWConfigYamlSource
 
 __all__ = ["MemoryConfig"]
-
-
-def _read_trw_config_yaml() -> dict[str, object]:
-    """Best-effort read of the current project's `.trw/config.yaml`."""
-    config_path = Path.cwd() / ".trw" / "config.yaml"
-    if not config_path.exists():
-        return {}
-
-    yaml = YAML(typ="safe")
-    try:
-        with config_path.open(encoding="utf-8") as handle:
-            loaded = yaml.load(handle)
-    except (OSError, YAMLError):
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
-
-
-class _TRWConfigYamlSource(InitSettingsSource):
-    """Map framework config keys onto the subset owned by trw-memory."""
-
-    def __init__(self, settings_cls: type[BaseSettings]) -> None:
-        raw = _read_trw_config_yaml()
-        mapped: dict[str, Any] = {}
-
-        def _map_first(target: str, *aliases: str) -> None:
-            for alias in aliases:
-                if raw.get(alias) is not None:
-                    mapped[target] = raw[alias]
-                    return
-
-        sync_enabled = raw.get("sync_enabled", raw.get("platform_telemetry_enabled"))
-        if sync_enabled is not None:
-            mapped["sync_enabled"] = sync_enabled
-        if raw.get("sync_min_importance") is not None:
-            mapped["sync_min_importance"] = raw["sync_min_importance"]
-        if raw.get("sync_namespace") is not None:
-            mapped["sync_namespace"] = raw["sync_namespace"]
-        if raw.get("platform_api_key") is not None:
-            mapped["platform_api_key"] = raw["platform_api_key"]
-        _map_first("local_only", "local_only", "memory_local_only")
-
-        direct_url = raw.get("platform_url")
-        platform_urls = raw.get("platform_urls")
-        if direct_url is not None:
-            mapped["platform_url"] = direct_url
-        elif isinstance(platform_urls, list):
-            first_url = next((candidate for candidate in platform_urls if candidate), None)
-            if first_url is not None:
-                mapped["platform_url"] = first_url
-
-        # Keep the standalone package configurable from the framework config
-        # file so tier policies can be changed without a package-local env file.
-        _map_first("hot_max_entries", "hot_max_entries", "memory_hot_max_entries")
-        _map_first("hot_ttl_days", "hot_ttl_days", "memory_hot_ttl_days")
-        _map_first("cold_threshold_days", "cold_threshold_days", "memory_cold_threshold_days")
-        _map_first("retention_days", "retention_days", "memory_retention_days")
-        _map_first("score_relevance_weight", "score_relevance_weight", "memory_score_w1")
-        _map_first("score_recency_weight", "score_recency_weight", "memory_score_w2")
-        _map_first("score_importance_weight", "score_importance_weight", "memory_score_w3")
-        _map_first("warm_archive_max_score", "warm_archive_max_score")
-        _map_first("cold_purge_max_score", "cold_purge_max_score")
-        _map_first("encryption_enabled", "encryption_enabled", "memory_encryption_enabled")
-        _map_first("auto_generate_key", "auto_generate_key", "memory_auto_generate_key")
-        _map_first("rbac_enabled", "rbac_enabled", "memory_rbac_enabled")
-        _map_first("rbac_mode", "rbac_mode", "memory_rbac_mode")
-        _map_first("namespace_roles", "namespace_roles", "memory_namespace_roles")
-        _map_first("key_rotation_backup", "key_rotation_backup", "memory_key_rotation_backup")
-        _map_first("memory_recovery_policy", "memory_recovery_policy", "recovery_policy")
-        _map_first(
-            "memory_corrupt_backup_keep",
-            "memory_corrupt_backup_keep",
-            "corrupt_backup_keep",
-        )
-        _map_first(
-            "memory_recovery_rebuild_from_cold",
-            "memory_recovery_rebuild_from_cold",
-            "recovery_rebuild_from_cold",
-        )
-        # PRD-INFRA-063 (B2)
-        _map_first(
-            "memory_integrity_check_interval_minutes",
-            "memory_integrity_check_interval_minutes",
-            "integrity_check_interval_minutes",
-        )
-        # PRD-INFRA-064 (B3)
-        _map_first(
-            "memory_concurrent_writer_warn_threshold",
-            "memory_concurrent_writer_warn_threshold",
-            "concurrent_writer_warn_threshold",
-        )
-        # PRD-INFRA-065 (B4)
-        _map_first(
-            "memory_snapshot_enabled",
-            "memory_snapshot_enabled",
-            "snapshot_enabled",
-        )
-        _map_first(
-            "memory_snapshot_daily_keep",
-            "memory_snapshot_daily_keep",
-            "snapshot_daily_keep",
-        )
-        _map_first(
-            "memory_snapshot_weekly_keep",
-            "memory_snapshot_weekly_keep",
-            "snapshot_weekly_keep",
-        )
-        # PRD-INFRA-066 (C1)
-        _map_first(
-            "memory_snapshot_publish_hash",
-            "memory_snapshot_publish_hash",
-            "snapshot_publish_hash",
-        )
-
-        super().__init__(settings_cls, mapped)
 
 
 class MemoryConfig(BaseSettings):
