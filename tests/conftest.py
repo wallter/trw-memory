@@ -30,6 +30,7 @@ from trw_memory.client import MemoryClient
 from trw_memory.graph import wait_for_graph_updates
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.security.keys import clear_key_cache
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 
@@ -43,6 +44,13 @@ def drain_background_graph_updates() -> Iterator[None]:
         # Graph enrichment is best-effort; tests should not hang if a worker is
         # already blocked on an intentionally fault-injected backend.
         pass
+
+
+@pytest.fixture(autouse=True)
+def clear_master_key_cache_fixture() -> Iterator[None]:
+    clear_key_cache()
+    yield
+    clear_key_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -91,8 +99,22 @@ def memory_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClie
 
 
 @pytest.fixture()
+def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient:
+    monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+    monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+    return MemoryClient(namespace="default", mode="local")
+
+
+@pytest.fixture()
 def yaml_memory_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient:
     """Return a MemoryClient backed by a YAML store in ``tmp_path``."""
+    monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "yaml_storage"))
+    monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "yaml")
+    return MemoryClient(namespace="default", mode="local")
+
+
+@pytest.fixture()
+def yaml_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient:
     monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "yaml_storage"))
     monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "yaml")
     return MemoryClient(namespace="default", mode="local")
