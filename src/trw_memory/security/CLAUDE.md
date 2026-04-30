@@ -86,7 +86,7 @@ provenance chain file (`.trw/memory/provenance.jsonl`) keyed by
 
 ```bash
 cd trw-memory
-../.venv/bin/python -m pytest tests/test_poisoning.py -v
+../.venv/bin/python -m pytest tests/test_poisoning_*.py -v
 ../.venv/bin/python -m pytest tests/test_trust_scorer.py -v
 ../.venv/bin/python -m pytest tests/test_canary.py -v
 ../.venv/bin/python -m pytest tests/test_provenance.py -v
