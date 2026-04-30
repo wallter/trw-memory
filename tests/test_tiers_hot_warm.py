@@ -3,13 +3,37 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from trw_memory.lifecycle.tiers import TierManager
 from trw_memory.models.config import MemoryConfig
+from trw_memory.models.memory import MemoryEntry, MemoryStatus
 
-from ._test_tiers_support import _make_entry, cfg, mgr  # noqa: F401
+pytest_plugins = ("tests._test_tiers_support",)
+
+
+def _make_entry(
+    entry_id: str = "test-id",
+    content: str | None = None,
+    importance: float = 0.5,
+    status: str = "active",
+    days_old: int = 0,
+) -> MemoryEntry:
+    now = datetime.now(timezone.utc)
+    last_accessed_at = now - timedelta(days=days_old)
+    return MemoryEntry(
+        id=entry_id,
+        content=content or f"content for {entry_id}",
+        detail="some detail",
+        tags=["tag1"],
+        importance=importance,
+        status=MemoryStatus(status),
+        last_accessed_at=last_accessed_at,
+        created_at=now,
+        updated_at=now,
+    )
 
 
 class TestHotTier:
@@ -125,6 +149,20 @@ class TestHotTier:
         loaded = mgr.warmup_hot_from_warm(max_entries=1)
         assert loaded == 1
         assert mgr.hot_get("best") is not None
+
+    def test_search_merges_hot_warm_and_cold_results(self, mgr: TierManager) -> None:
+        from trw_memory.storage.persistence import write_yaml
+
+        mgr.hot_put("hot-entry", _make_entry("hot-entry", content="shared-token hot"))
+        mgr.warm_add("warm-entry", {"id": "warm-entry", "content": "shared-token warm", "tags": []}, None)
+
+        cold_partition = mgr._cold_dir() / "2026" / "03"
+        cold_partition.mkdir(parents=True, exist_ok=True)
+        write_yaml(cold_partition / "cold-entry.yaml", {"id": "cold-entry", "content": "shared-token cold", "tags": []})
+
+        results = mgr.search(["shared-token"], top_k=10)
+        ids = {str(result["id"]) for result in results}
+        assert {"hot-entry", "warm-entry", "cold-entry"}.issubset(ids)
 
 
 class TestWarmTier:

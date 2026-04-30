@@ -1,8 +1,4 @@
-"""TierManager: Hot/Warm/Cold tier orchestrator for memory entry lifecycle.
-
-Composes WarmTierStore and ColdTierStore, manages the hot LRU cache directly,
-and orchestrates lifecycle sweep transitions via execute_sweep().
-"""
+"""TierManager: Hot/Warm/Cold tier orchestrator for memory entry lifecycle."""
 
 from __future__ import annotations
 
@@ -14,16 +10,20 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from trw_memory.exceptions import StorageError
 from trw_memory.lifecycle.tiers._cold import ColdTierStore
-from trw_memory.lifecycle.tiers._scoring import TierSweepResult, compute_importance_score
+from trw_memory.lifecycle.tiers._manager_io import load_warm_entries, open_canonical_backend
+from trw_memory.lifecycle.tiers._manager_search import (
+    merge_search_results,
+    rank_search_hits,
+    search_hot_entries,
+    warmup_hot_from_entries,
+    warmup_hot_from_warm_entries,
+)
+from trw_memory.lifecycle.tiers._scoring import TierSweepResult
 from trw_memory.lifecycle.tiers._sweep import execute_sweep
 from trw_memory.lifecycle.tiers._warm import WarmTierStore
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
-from trw_memory.security.encryption import derive_namespace_key
-from trw_memory.security.keys import get_master_key
-from trw_memory.storage.persistence import read_yaml
 
 logger = structlog.get_logger(__name__)
 
@@ -33,33 +33,8 @@ if TYPE_CHECKING:
     from trw_memory.storage.interface import StorageBackend
 
 
-def _entry_matches_tokens(entry: dict[str, object], query_tokens: list[str]) -> bool:
-    """Return whether any token matches the entry text surface."""
-    if not query_tokens:
-        return True
-    content = str(entry.get("content", "")).lower()
-    detail = str(entry.get("detail", "")).lower()
-    raw_tags = entry.get("tags", [])
-    tag_text = " ".join(str(tag).lower() for tag in raw_tags) if isinstance(raw_tags, list) else ""
-    entry_id = str(entry.get("id", "")).lower()
-    haystack = f"{entry_id} {content} {detail} {tag_text}"
-    return any(token in haystack for token in query_tokens)
-
-
 class TierManager:
-    """Hot/Warm/Cold tier manager for memory entry lifecycle.
-
-    Hot tier: in-memory LRU cache (OrderedDict, O(1) ops).
-    Warm tier: sqlite-vec backed persistent index with JSONL sidecar fallback.
-    Cold tier: YAML archive partitioned by {YYYY}/{MM}/.
-
-    Usage::
-
-        mgr = TierManager(base_dir=Path(".memory"))
-        entry = mgr.hot_get("some-id")
-        mgr.hot_put("some-id", memory_entry)
-        result = mgr.sweep()
-    """
+    """Hot/Warm/Cold tier manager for memory entry lifecycle."""
 
     def __init__(
         self,
@@ -68,35 +43,20 @@ class TierManager:
         entries_dir: Path | None = None,
         namespace: str = "default",
     ) -> None:
-        """Initialise TierManager.
-
-        Args:
-            base_dir: Base directory for memory storage.
-            config: MemoryConfig for capacity/TTL settings.
-            entries_dir: Optional explicit entries directory for sweep.
-                         Defaults to base_dir / "entries".
-        """
         self._base_dir = base_dir
         self._config = config or MemoryConfig()
         self._entries_dir: Path = entries_dir or (base_dir / "entries")
         self._namespace = namespace
 
-        # Hot tier: OrderedDict used as LRU cache
-        # LRU invariant: MRU at the end (rightmost), LRU at the front (leftmost)
         self._hot: OrderedDict[str, MemoryEntry] = OrderedDict()
         self._hot_lock = threading.Lock()
 
-        # Composed tier stores
         self._warm_store = WarmTierStore(base_dir)
         self._cold_store = ColdTierStore(base_dir, self._warm_store)
 
     def update_config(self, config: MemoryConfig) -> None:
         """Refresh the active config for call-time policy overrides."""
         self._config = config
-
-    # -----------------------------------------------------------------------
-    # Lifecycle
-    # -----------------------------------------------------------------------
 
     def close(self) -> None:
         """Release all resources held by this TierManager."""
@@ -114,19 +74,8 @@ class TierManager:
     ) -> None:
         self.close()
 
-    # -----------------------------------------------------------------------
-    # Hot Tier
-    # -----------------------------------------------------------------------
-
     def hot_get(self, entry_id: str) -> MemoryEntry | None:
-        """Return a cached entry, moving it to MRU position on hit.
-
-        Args:
-            entry_id: Memory entry identifier.
-
-        Returns:
-            MemoryEntry if in cache, None otherwise.
-        """
+        """Return a cached entry, moving it to MRU position on hit."""
         with self._hot_lock:
             if entry_id not in self._hot:
                 return None
@@ -136,14 +85,7 @@ class TierManager:
             return entry
 
     def hot_put(self, entry_id: str, entry: MemoryEntry) -> None:
-        """Add or refresh an entry in the hot cache.
-
-        Evicts the LRU entry when capacity is exceeded.
-
-        Args:
-            entry_id: Memory entry identifier.
-            entry: MemoryEntry to cache.
-        """
+        """Add or refresh an entry in the hot cache."""
         cfg = self._config
 
         with self._hot_lock:
@@ -155,13 +97,9 @@ class TierManager:
             self._hot[entry_id] = entry
             self._hot.move_to_end(entry_id)
 
-            # Evict LRU if over capacity
             if len(self._hot) > cfg.hot_max_entries:
                 evicted_id = next(iter(self._hot))
                 evicted_entry = self._hot[evicted_id]
-                # The hot tier is only an acceleration layer. When capacity forces
-                # an eviction, the entry must be demoted into warm storage so the
-                # tier transition preserves data instead of silently dropping it.
                 try:
                     self.warm_add(evicted_id, evicted_entry.model_dump(mode="json"), None)
                 except (OSError, ValueError):
@@ -183,7 +121,7 @@ class TierManager:
                 )
 
     def hot_clear(self) -> None:
-        """Evict all entries from the hot cache (for testing / shutdown)."""
+        """Evict all entries from the hot cache."""
         with self._hot_lock:
             self._hot.clear()
 
@@ -206,23 +144,9 @@ class TierManager:
         top_k: int = 25,
     ) -> list[dict[str, object]]:
         """Search the in-memory hot tier without touching disk."""
-        tag_set = set(tags or [])
         with self._hot_lock:
             entries = [entry.model_dump(mode="json") for entry in self._hot.values()]
-
-        scored: list[dict[str, object]] = []
-        for item in entries:
-            item_tags = item.get("tags", [])
-            if tag_set and (not isinstance(item_tags, list) or not tag_set.issubset({str(tag) for tag in item_tags})):
-                continue
-            if not _entry_matches_tokens(item, query_tokens):
-                continue
-            enriched = dict(item)
-            enriched["score"] = compute_importance_score(enriched, query_tokens, config=self._config)
-            scored.append(enriched)
-
-        scored.sort(key=lambda entry: float(str(entry.get("score", 0.0))), reverse=True)
-        return scored[:top_k]
+        return search_hot_entries(entries, query_tokens=query_tokens, tags=tags, top_k=top_k, config=self._config)
 
     def warmup_hot_from_warm(self, *, max_entries: int | None = None) -> int:
         """Populate the hot tier from the highest-utility warm-tier entries."""
@@ -230,26 +154,12 @@ class TierManager:
             return 0
 
         target = max_entries or self._config.hot_max_entries
-        warm_entries = self._warm_store.warm_entries()
-        if not warm_entries:
-            return 0
-
-        ranked = sorted(
-            warm_entries,
-            key=lambda entry: compute_importance_score(entry, [], config=self._config),
-            reverse=True,
+        return warmup_hot_from_warm_entries(
+            self._warm_store.warm_entries(),
+            target=target,
+            hot_put_fn=self.hot_put,
+            config=self._config,
         )
-
-        loaded = 0
-        for item in ranked[:target]:
-            try:
-                entry = MemoryEntry.model_validate(item)
-            except Exception:
-                logger.warning("tier_warmup_invalid_sidecar_entry", exc_info=True)
-                continue
-            self.hot_put(entry.id, entry)
-            loaded += 1
-        return loaded
 
     def warmup_hot_from_entries(
         self,
@@ -263,26 +173,16 @@ class TierManager:
             return 0
 
         target = max_entries or self._config.hot_max_entries
-        ranked = sorted(
+        return warmup_hot_from_entries(
             entries,
-            key=lambda entry: compute_importance_score(entry.model_dump(mode="json"), [], config=self._config),
-            reverse=True,
+            target=target,
+            hot_put_fn=self.hot_put,
+            config=self._config,
+            mirror_to_warm_fn=self.warm_add if mirror_to_warm else None,
         )
 
-        loaded = 0
-        for entry in ranked[:target]:
-            self.hot_put(entry.id, entry)
-            if mirror_to_warm:
-                self.warm_add(entry.id, entry.model_dump(mode="json"), None)
-            loaded += 1
-        return loaded
-
-    # -----------------------------------------------------------------------
-    # Warm Tier (delegated)
-    # -----------------------------------------------------------------------
-
     def _warm_db_path(self) -> Path:
-        """Resolve path to warm.db (delegates to WarmTierStore)."""
+        """Resolve path to warm.db."""
         return self._warm_store._warm_db_path()
 
     def _warm_sidecar_path(self) -> Path:
@@ -310,32 +210,14 @@ class TierManager:
     ) -> list[dict[str, object]]:
         """Search the warm tier for relevant entries."""
         raw_hits = self._warm_store.warm_search(query_tokens, query_embedding, max(top_k * 2, top_k))
-        ranked = sorted(
-            (
-                dict(
-                    entry,
-                    score=compute_importance_score(
-                        entry,
-                        query_tokens,
-                        query_embedding=query_embedding,
-                        config=self._config,
-                        relevance_hint=(
-                            float(str(entry.get("_tier_relevance", entry.get("score"))))
-                            if entry.get("_tier_relevance") is not None or entry.get("score") is not None
-                            else None
-                        ),
-                    ),
-                )
-                for entry in raw_hits
-            ),
-            key=lambda entry: float(str(entry["score"])),
-            reverse=True,
+        ranked = rank_search_hits(
+            raw_hits,
+            query_tokens=query_tokens,
+            query_embedding=query_embedding,
+            config=self._config,
+            relevance_hint_keys=("_tier_relevance", "score"),
         )
         return ranked[:top_k]
-
-    # -----------------------------------------------------------------------
-    # Cold Tier (delegated)
-    # -----------------------------------------------------------------------
 
     def _cold_dir(self) -> Path:
         """Base cold archive directory."""
@@ -419,62 +301,19 @@ class TierManager:
             verify_restored_entry_removed_fn=verify_restored_entry_removed_fn,
         )
         hot_hits = self.hot_search(query_tokens, tags=tags, top_k=max(top_k * 2, top_k))
-
-        tag_set = set(tags or [])
-        merged: dict[str, dict[str, object]] = {}
-        for source_hits in (hot_hits, warm_hits, cold_hits):
-            for item in source_hits:
-                entry_id = str(item.get("id", ""))
-                if not entry_id:
-                    continue
-                item_tags = item.get("tags", [])
-                if tag_set and (
-                    not isinstance(item_tags, list) or not tag_set.issubset({str(tag) for tag in item_tags})
-                ):
-                    continue
-                merged.setdefault(entry_id, item)
-
-        ranked = sorted(
-            (
-                dict(
-                    entry,
-                    score=compute_importance_score(
-                        entry,
-                        query_tokens,
-                        query_embedding=query_embedding,
-                        config=self._config,
-                        relevance_hint=(
-                            float(str(entry.get("_tier_relevance")))
-                            if entry.get("_tier_relevance") is not None
-                            else None
-                        ),
-                    ),
-                )
-                for entry in merged.values()
-            ),
-            key=lambda entry: float(str(entry["score"])),
-            reverse=True,
+        ranked = merge_search_results(
+            hot_hits,
+            warm_hits,
+            cold_hits,
+            query_tokens=query_tokens,
+            query_embedding=query_embedding,
+            tags=tags,
+            config=self._config,
         )
         return ranked[:top_k]
 
-    # -----------------------------------------------------------------------
-    # Sweep (delegated)
-    # -----------------------------------------------------------------------
-
     def sweep(self, config: MemoryConfig | None = None) -> TierSweepResult:
-        """Execute lifecycle sweep across all tiers.
-
-        Performs three transition checks in order:
-        1. Hot -> Warm: entries whose last_accessed_at exceeds hot_ttl_days.
-        2. Warm -> Cold: entries idle > cold_threshold_days with importance < 0.22.
-        3. Cold -> Purge: entries idle > retention_days with importance < 0.1.
-
-        All thresholds are read from config at call time.
-        Per-entry failures are logged and counted in ``errors``.
-
-        Returns:
-            TierSweepResult with counts of promoted, demoted, purged, and errors.
-        """
+        """Execute lifecycle sweep across all tiers."""
         active_config = config or MemoryConfig()
         self._config = active_config
         warm_entries, preload_errors = self._load_warm_entries(active_config)
@@ -497,50 +336,7 @@ class TierManager:
         )
 
     def _open_canonical_backend(self, config: MemoryConfig) -> StorageBackend:
-        db_path = self._base_dir / config.sqlite_db_name
-        if config.storage_backend == "sqlite" and db_path.exists():
-            from trw_memory.storage.sqlite_backend import SQLiteBackend
-
-            sqlcipher_key_hex: str | None = None
-            if config.encryption_enabled:
-                master_key = get_master_key(config)
-                sqlcipher_key_hex = derive_namespace_key(master_key, self._namespace)
-
-            return SQLiteBackend(
-                db_path,
-                dim=config.embedding_dim,
-                sqlcipher_key_hex=sqlcipher_key_hex,
-                recovery_policy=config.memory_recovery_policy,
-                corrupt_backup_keep=config.memory_corrupt_backup_keep,
-                rebuild_from_cold=config.memory_recovery_rebuild_from_cold,
-            )
-
-        from trw_memory.storage.yaml_backend import YAMLBackend
-
-        return YAMLBackend(self._entries_dir)
+        return open_canonical_backend(self._base_dir, self._entries_dir, self._namespace, config)
 
     def _load_warm_entries(self, config: MemoryConfig) -> tuple[list[dict[str, object]], int]:
-        db_path = self._base_dir / config.sqlite_db_name
-        if config.storage_backend == "sqlite" and db_path.exists():
-            try:
-                with self._open_canonical_backend(config) as backend:
-                    backend_entries = backend.list_entries(limit=max(backend.count(), config.hot_max_entries * 8, 200))
-                return [entry.model_dump(mode="json") for entry in backend_entries], 0
-            except (OSError, StorageError, ValueError):
-                logger.warning("tier_sweep_backend_scan_failed", namespace=self._namespace, exc_info=True)
-                return [], 1
-
-        if not self._entries_dir.exists():
-            return [], 0
-
-        entries: list[dict[str, object]] = []
-        errors = 0
-        for yaml_file in sorted(self._entries_dir.glob("*.yaml")):
-            if yaml_file.name == "index.yaml":
-                continue
-            try:
-                entries.append(read_yaml(yaml_file))
-            except (OSError, StorageError, ValueError):
-                logger.warning("tier_sweep_entry_scan_failed", path=str(yaml_file), exc_info=True)
-                errors += 1
-        return entries, errors
+        return load_warm_entries(self._base_dir, self._entries_dir, self._namespace, config)

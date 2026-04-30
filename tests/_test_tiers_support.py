@@ -44,6 +44,7 @@ def mgr(tmp_path: Path) -> TierManager:
 
 def _make_entry(
     entry_id: str = "test-id",
+    content: str | None = None,
     importance: float = 0.5,
     status: str = "active",
     days_old: int = 0,
@@ -52,7 +53,7 @@ def _make_entry(
     last_accessed_at = now - timedelta(days=days_old)
     return MemoryEntry(
         id=entry_id,
-        content=f"content for {entry_id}",
+        content=content or f"content for {entry_id}",
         detail="some detail",
         tags=["tag1"],
         importance=importance,
