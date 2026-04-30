@@ -21,6 +21,13 @@ from ._test_tools_support import _make_entry, _mock_backend
 
 
 class TestMemoryRecallImpl:
+    def test_recall_surface_exports_impl_and_register(self) -> None:
+        from trw_memory.tools import recall as recall_module
+
+        assert callable(recall_module.memory_recall_impl)
+        assert callable(recall_module.register_recall_tool)
+        assert callable(recall_module._apply_sec001_recall_policy)
+
     def test_apply_sec001_recall_policy_maps_filtered_entries_back_to_results(self) -> None:
         cfg = MemoryConfig(enable_recall_filter=True, recall_filter_mode="observe")
 
@@ -65,7 +72,8 @@ class TestMemoryRecallImpl:
         entries = [_make_entry(f"M-{i:03d}", f"content {i}") for i in range(10)]
         backend = _mock_backend(entries)
         result = memory_recall_impl("content", "project:default", backend=backend, limit=3)
-        assert len(result["memories"]) <= 3  # type: ignore[arg-type]
+        memories = cast("list[dict[str, object]]", result["memories"])
+        assert len(memories) <= 3
 
     def test_query_preserved_in_result(self) -> None:
         backend = _mock_backend()
