@@ -1309,6 +1309,35 @@ class SQLiteBackend(StorageBackend):
                 path=str(self._db_path),
             ) from exc
 
+    def increment_access_counts(self, entry_ids: list[str], *, accessed_at: datetime | None = None) -> int:
+        """Increment ``access_count`` and ``last_accessed_at`` for entries in one transaction."""
+        if not entry_ids:
+            return 0
+
+        now = accessed_at or datetime.now(timezone.utc)
+        values = [(now.isoformat(), now.isoformat(), entry_id) for entry_id in entry_ids]
+
+        try:
+            sql = """
+                UPDATE memories
+                SET access_count = COALESCE(access_count, 0) + 1,
+                    last_accessed_at = ?,
+                    updated_at = ?,
+                    sync_seq = COALESCE(sync_seq, 0) + 1,
+                    last_synced_at = NULL
+                WHERE id = ?
+            """
+            with self._lock:
+                before = self._conn.total_changes
+                self._conn.executemany(sql, values)
+                self._conn.commit()
+                return int(self._conn.total_changes - before)
+        except sqlite3.Error as exc:
+            raise StorageError(
+                f"Failed to increment access counts: {exc}",
+                path=str(self._db_path),
+            ) from exc
+
     def delete(self, entry_id: str) -> bool:
         """Remove an entry from the memories table (and vec_index if present).
 
