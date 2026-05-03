@@ -1391,6 +1391,23 @@ class SQLiteBackend(StorageBackend):
         row = self._conn.execute("SELECT 1 FROM vec_index WHERE entry_id = ?", (entry_id,)).fetchone()
         return row is not None
 
+    def existing_vector_ids(self) -> set[str]:
+        """Return the set of entry IDs that currently have a stored vector.
+
+        Empty set when sqlite-vec is unavailable. Single-query bulk lookup so
+        callers (e.g. backfill loops) can skip already-embedded entries
+        without paying per-entry round-trips.
+        """
+        if not self._vec_available:
+            return set()
+        try:
+            with self._lock:
+                rows = self._conn.execute("SELECT entry_id FROM vec_index").fetchall()
+        except sqlite3.Error:
+            logger.debug("existing_vector_ids_query_failed", exc_info=True)
+            return set()
+        return {str(r[0]) for r in rows}
+
     def search(
         self,
         query: str,

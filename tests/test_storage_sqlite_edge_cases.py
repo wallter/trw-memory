@@ -95,6 +95,29 @@ class TestStoredEmbeddings:
         assert embeddings[entry.id] == pytest.approx([0.1] * backend._dim)
 
 
+class TestExistingVectorIds:
+    def test_existing_vector_ids_returns_empty_when_vec_unavailable(
+        self, backend: SQLiteBackend
+    ) -> None:
+        if backend._vec_available:
+            pytest.skip("sqlite-vec available; covered by populated test")
+        assert backend.existing_vector_ids() == set()
+
+    def test_existing_vector_ids_returns_all_stored_ids(self, backend: SQLiteBackend) -> None:
+        pytest.importorskip("sqlite_vec")
+        a = make_entry("vec-a", "alpha")
+        b = make_entry("vec-b", "bravo")
+        c = make_entry("vec-c", "charlie")
+        for entry in (a, b, c):
+            backend.store(entry)
+        backend.upsert_vector(a.id, [0.1] * backend._dim)
+        backend.upsert_vector(b.id, [0.2] * backend._dim)
+        # c intentionally has no vector
+
+        ids = backend.existing_vector_ids()
+        assert ids == {a.id, b.id}
+
+
 class TestListEntriesCombinedFilters:
     """FR03: list_entries with combined status + namespace filters."""
 

@@ -230,6 +230,14 @@ class StorageBackend(ABC):
         """Return whether a dense vector currently exists for *entry_id*."""
         return False
 
+    def existing_vector_ids(self) -> set[str]:
+        """Return the set of entry IDs that currently have a stored vector.
+
+        Default returns an empty set so callers can opt into batch backfill
+        skipping without branching on backend capabilities.
+        """
+        return set()
+
     def search_vectors(
         self,
         query_embedding: list[float],
