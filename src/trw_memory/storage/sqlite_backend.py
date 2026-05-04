@@ -21,6 +21,7 @@ import struct
 import subprocess
 import tempfile
 import threading
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -191,6 +192,12 @@ class SQLiteBackend(StorageBackend):
         self._dim = dim
         self._vec_available = False
         self._lock = threading.Lock()
+        # PRD-FIX-088 FR02: Open-transaction depth counter.
+        # When >0, mutating methods (``update`` etc.) skip per-row ``commit()``
+        # so a caller-controlled outer transaction can batch many writes.
+        # Re-entrant by depth; only the outermost ``transaction()`` issues
+        # ``BEGIN IMMEDIATE`` / ``COMMIT``.
+        self._skip_commit_depth: int = 0
         self._dbapi: Any = _import_sqlcipher_driver() if sqlcipher_key_hex is not None else sqlite3
         self._sqlcipher_key_hex = sqlcipher_key_hex
         self._recovery_policy = recovery_policy
@@ -1271,7 +1278,8 @@ class SQLiteBackend(StorageBackend):
             sql = f"UPDATE memories SET {', '.join(set_parts)} WHERE id = ?"  # noqa: S608 — column names come from the validated UPDATABLE_FIELDS whitelist; values are parameterized
             with self._lock:
                 self._conn.execute(sql, values)
-                self._conn.commit()
+                if self._skip_commit_depth == 0:
+                    self._conn.commit()
             return self.get(entry_id)
         except StorageError:
             raise
@@ -1280,6 +1288,46 @@ class SQLiteBackend(StorageBackend):
                 f"Failed to update entry {entry_id}: {exc}",
                 path=str(self._db_path),
             ) from exc
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[SQLiteBackend]:
+        """Context manager that batches multiple writes into one SQLite transaction.
+
+        PRD-FIX-088 FR02: When a caller wraps a series of ``update()`` (or other
+        mutating) calls in ``with backend.transaction():``, the per-call
+        ``commit()`` is suppressed and a single ``BEGIN IMMEDIATE`` / ``COMMIT``
+        bracket is used instead.  This collapses N implicit transactions to one
+        explicit transaction, which is cheaper and avoids holding the SQLite
+        write-lock across N round-trips.
+
+        Re-entrant by depth: nested ``transaction()`` calls do not re-issue
+        ``BEGIN``; only the outermost issues ``BEGIN IMMEDIATE`` / ``COMMIT``.
+        Inner exceptions still propagate; the outermost handler issues
+        ``ROLLBACK`` and re-raises.
+
+        Yields:
+            ``self`` for fluent chaining (callers normally ignore the value).
+        """
+        is_outer = self._skip_commit_depth == 0
+        if is_outer:
+            with self._lock:
+                self._conn.execute("BEGIN IMMEDIATE")
+        self._skip_commit_depth += 1
+        try:
+            yield self
+            if is_outer:
+                with self._lock:
+                    self._conn.commit()
+        except BaseException:
+            if is_outer:
+                try:
+                    with self._lock:
+                        self._conn.rollback()
+                except sqlite3.Error:
+                    logger.exception("transaction_rollback_failed", db=str(self._db_path))
+            raise
+        finally:
+            self._skip_commit_depth -= 1
 
     def increment_session_counts(self, entry_ids: list[str], *, updated_at: datetime | None = None) -> int:
         """Increment ``session_count`` for multiple entries in one transaction."""

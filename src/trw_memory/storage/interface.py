@@ -9,7 +9,9 @@ replacement.  Two implementations are provided:
 
 from __future__ import annotations
 
+import contextlib
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from datetime import datetime
 
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
@@ -202,6 +204,20 @@ class StorageBackend(ABC):
             Number of rows updated.
         """
         return 0
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[StorageBackend]:
+        """Optional batching context — backends that support transactions
+        should override.
+
+        PRD-FIX-088 FR02: callers wrap a series of writes in
+        ``with backend.transaction(): ...`` to collapse N implicit
+        per-call commits into one explicit commit.  The default
+        implementation is a no-op pass-through so callers don't need
+        ``hasattr`` guards; non-supporting backends still see N implicit
+        commits, which is correct (just slower).
+        """
+        yield self
 
     def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:  # noqa: B027
         """Insert or update a dense vector associated with *entry_id*.
