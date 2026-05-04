@@ -361,176 +361,26 @@ class MemoryClient:
     ) -> StoreResultDict:
         """Store a new memory entry.
 
-        Args:
-            content: Core knowledge statement (must not be empty).
-            tags: Categorisation tags.
-            importance: Importance score in ``[0.0, 1.0]``.
-            detail: Extended explanation.
-            metadata: Arbitrary key-value pairs.
-
-        Returns:
-            Dict with ``memory_id``, ``namespace``, ``status``, ``timestamp``.
-
-        Raises:
-            ValueError: If *content* is empty or *importance* out of range.
+        Implementation lives in ``_client_store.store_impl``
+        (PRD-DIST-246 batch 110). Full per-entry write path: schema
+        validation, security gate, vector upsert with rollback, graph
+        schedule, tier register, audit, optional remote publish.
         """
-        try:
-            validate_store_inputs(content=content, detail=detail, tags=tags, metadata=metadata, importance=importance)
-        except SchemaValidationError as exc:
-            append_audit_event(
-                self._config,
-                "store_rejected",
-                entry_id=entry_id or "",
-                actor=source_identity or source,
-                namespace=self._namespace,
-                data={"reason": "schema_invalid", "failed_fields": exc.failed_fields, "session_id": session_id},
-            )
-            raise
-        self._require_permission(Permission.WRITE, "store")
-        self._maybe_start_retry_drain()
+        from trw_memory._client_store import store_impl as _impl
 
-        memory_id = entry_id or _make_id()
-        async with self._lock:
-            backend = self._get_backend()
-            existing = backend.get(memory_id) if entry_id is not None else None
-            now = datetime.now(timezone.utc)
-            entry_metadata = dict(existing.metadata) if existing is not None else {}
-            entry_metadata.update(metadata or {})
-            entry_metadata.setdefault("installation_id", self._installation_id)
-            entry_expires = expires or (existing.expires if existing is not None else "")
-
-            if existing is None:
-                entry = MemoryEntry(
-                    id=memory_id,
-                    content=content.strip(),
-                    detail=detail,
-                    tags=tags or [],
-                    importance=importance,
-                    namespace=self._namespace,
-                    metadata=entry_metadata,
-                    created_at=now,
-                    updated_at=now,
-                    expires=entry_expires,
-                    source=source,
-                    source_identity=source_identity,
-                    # We need a stable local node marker even before the backend grows
-                    # first-class sync metadata, otherwise concurrent local edits have no
-                    # causal anchor at all.
-                    vector_clock=init_clock(self._local_node_id),
-                )
-            else:
-                entry = existing.model_copy(
-                    update={
-                        "content": content.strip(),
-                        "detail": detail,
-                        "tags": tags or [],
-                        "importance": importance,
-                        "metadata": entry_metadata,
-                        "updated_at": now,
-                        "expires": entry_expires,
-                        "source": source,
-                        "source_identity": source_identity or existing.source_identity,
-                        "vector_clock": init_clock(self._local_node_id),
-                    }
-                )
-
-            decision = prepare_entry_for_store(
-                entry,
-                backend=backend,
-                config=self._config,
-                session_id=session_id,
-            )
-            if decision.quarantined:
-                store_quarantined_entry(self._config, decision.entry)
-                append_audit_event(
-                    self._config,
-                    "quarantine",
-                    entry_id=decision.entry.id,
-                    actor=decision.entry.source_identity or decision.entry.source,
-                    namespace=self._namespace,
-                    data={
-                        "stored": False,
-                        "quarantined": True,
-                        "anomaly_dimension": decision.anomaly_dimension,
-                        "z_score": decision.anomaly_z_score,
-                    },
-                )
-                quarantined_result: StoreResultDict = {
-                    "memory_id": decision.entry.id,
-                    "namespace": self._namespace,
-                    "status": "quarantined",
-                    "timestamp": now.isoformat(),
-                    "quarantined": True,
-                    "stored": False,
-                    "anomaly_dimension": decision.anomaly_dimension,
-                    "z_score": decision.anomaly_z_score,
-                }
-                return quarantined_result
-
-            entry = decision.entry
-            # Persist the dense vector on the normal write path so later recall can
-            # actually use hybrid ranking instead of silently degrading to BM25-only.
-            embedder = self._get_embedder()
-            embedding = embedder.embed(f"{entry.content} {entry.detail}") if embedder is not None else None
-            if self._namespace.startswith("team:"):
-                NamespaceManager(backend).ensure_team_namespace(self._namespace, created_at=now)
-            backend.store(entry)
-            if embedding is not None:
-                try:
-                    backend.upsert_vector(entry.id, embedding)
-                except Exception as exc:
-                    # Keep store() atomic: callers should never see a failed
-                    # write while the primary row is still committed.
-                    try:
-                        backend.delete(entry.id)
-                    except Exception:
-                        logger.exception("memory_store_vector_rollback_failed", memory_id=entry.id)
-                        raise StorageError(
-                            f"failed to persist vector for {entry.id!r}; rollback did not complete cleanly"
-                        ) from exc
-                    raise StorageError(
-                        f"failed to persist vector for {entry.id!r}; entry write was rolled back"
-                    ) from exc
-            try:
-                # Graph enrichment must still run without embeddings so tag and
-                # lineage edges stay consistent, but it should not hold up store().
-                schedule_graph_update(entry, backend, embedding=embedding, config=self._config)
-            except RuntimeError:
-                logger.warning("memory_store_graph_schedule_failed", memory_id=entry.id, exc_info=True)
-            remember_entry_in_tiers(self._config, self._namespace, entry, embedding)
-            append_audit_event(
-                self._config,
-                decision.op,
-                entry_id=entry.id,
-                actor=entry.source_identity or entry.source,
-                namespace=self._namespace,
-                data={
-                    "status": "updated" if decision.op == "update" else "stored",
-                    "session_id": session_id,
-                    "pii_types": sorted({match.pii_type for match in decision.pii_matches}),
-                    "quarantined": False,
-                },
-            )
-
-        logger.debug(
-            "memory_stored",
-            op="store",
-            outcome="success",
-            memory_id=memory_id,
-            namespace=self._namespace,
-            content_len=len(content),
-            tag_count=len(tags or []),
+        return await _impl(
+            self,
+            content,
+            tags=tags,
             importance=importance,
+            detail=detail,
+            metadata=metadata,
+            expires=expires,
+            source=source,
+            source_identity=source_identity,
+            session_id=session_id,
+            entry_id=entry_id,
         )
-        if self._should_attempt_remote_publish(entry):
-            self._schedule_background_task(self._publish_entry(entry, embedding))
-        store_result: StoreResultDict = {
-            "memory_id": memory_id,
-            "namespace": self._namespace,
-            "status": "updated" if decision.op == "update" else "stored",
-            "timestamp": now.isoformat(),
-        }
-        return store_result
 
     async def bulk_store(
         self,
