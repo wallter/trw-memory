@@ -694,562 +694,31 @@ class MemoryClient:
     ) -> list[MemoryResultDict]:
         """Search memories by keyword query using hybrid retrieval.
 
-        Uses a two-tier strategy:
-
-        1. **Hybrid search** (preferred): Fetches all namespace entries and runs
-           them through the retrieval pipeline (``hybrid_search``) which combines
-           BM25 sparse retrieval with dense vector similarity via Reciprocal Rank
-           Fusion (RRF).  This produces substantially better ranking than simple
-           keyword matching.
-
-        2. **Fallback TF scoring**: When the hybrid pipeline is unavailable
-           (missing optional deps, import errors, or empty results), falls back
-           to the original LIKE-based ``backend.search()`` with a blended
-           term-frequency + importance score.
-
-        Both paths apply tag filtering, min_score thresholds, limit capping,
-        and optional token budget fitting.
-
-        Args:
-            query: Free-text search term.
-            limit: Maximum number of results (must be >= 1).
-            tags: If provided, results must contain all listed tags.
-            min_score: Minimum score threshold for results.
-            token_budget: If provided, truncate results to fit within this
-                token budget.  Must be a positive integer.  When the budget
-                is too small for all results, at least one result is always
-                returned (minimum-one guarantee).
-            include_distilled: PRD-DIST-005 FR-6. When False, records from
-                trw-distill (source="distilled:*" or tag "distill:*") are
-                excluded from results. When True (default), distilled records
-                are included but dampened — see ``distilled_weight``.
-            distilled_weight: PRD-DIST-005 FR-6. Dampening factor applied
-                to distilled record scores before final ranking. When None
-                (default), resolves from TRW_MEMORY_DISTILLED_RECALL_WEIGHT
-                env var, falling back to DEFAULT_DISTILLED_RECALL_WEIGHT
-                (0.75). Set to 1.0 to disable dampening.
-
-        Returns:
-            List of result dicts ordered by score descending.
-
-        Raises:
-            ValueError: If *limit* < 1 or *token_budget* <= 0.
+        Two-tier strategy: hybrid pipeline (BM25 + dense + RRF) preferred;
+        falls back to LIKE + TF + importance scoring when the hybrid
+        pipeline is unavailable. Both paths apply tag filtering, min_score
+        thresholds, limit capping, and optional token-budget fitting.
+        Implementation lives in ``_client_recall.recall_impl`` (PRD-DIST-246
+        batch 105).
         """
-        if limit < 1:
-            raise ValueError(f"limit must be >= 1, got {limit}")
-        if token_budget is not None and token_budget <= 0:
-            raise ValueError(f"token_budget must be positive, got {token_budget}")
-        self._require_permission(Permission.READ, "recall")
-        self._maybe_start_retry_drain()
-        await self._apply_pending_remote_retirements()
-        if should_halt_recalls(self._config):
-            from trw_memory.exceptions import CanaryTamperError
+        from trw_memory._client_recall import recall_impl as _recall_impl
 
-            raise CanaryTamperError("recall halted after canary tamper")
-        embedder = self._get_embedder() if query.strip() else None
-        query_embedding: list[float] | None = None
-        if embedder is not None:
-            query_embedding = await asyncio.to_thread(embedder.embed, query)
-
-        async with self._lock:
-            backend = self._get_backend()
-            if self._namespace.startswith("team:") and NamespaceManager(backend).team_namespace_expired(
-                self._namespace
-            ):
-                logger.debug(
-                    "memory_recall_team_namespace_expired",
-                    op="recall",
-                    namespace=self._namespace,
-                )
-                return []
-            if tier_runtime_enabled(self._config):
-                tier_local_results = self._tier_results(backend, query, tags, limit, query_embedding)
-                self._tier_manager = get_tier_manager(self._config, self._namespace)
-            else:
-                tier_local_results = []
-
-        # --- Tier 1: Hybrid retrieval pipeline (BM25 + dense + RRF) ----------
-        hybrid_results = await self._try_hybrid_recall(query, limit, tags)
-        if hybrid_results is not None:
-            # Apply min_score filter and limit
-            filtered = [r for r in hybrid_results if r["score"] >= min_score]
-            final_pre_policy = self._merge_tier_results(
-                filtered[:limit],
-                tier_local_results,
-                limit,
-                query.lower().split(),
-                self._config,
-                query_embedding,
-            )
-            if min_score > 0.0:
-                final_pre_policy = [result for result in final_pre_policy if result["score"] >= min_score]
-            if include_org_memories:
-                final_pre_policy = await self._merge_org_results(query, final_pre_policy, limit, tags, min_score)
-            if include_shared:
-                final_pre_policy = await self._merge_shared_results(query, final_pre_policy, limit)
-            final_scored = cast(
-                "list[MemoryResultDict]",
-                apply_source_policy(
-                    final_pre_policy,
-                    include_distilled=include_distilled,
-                    distilled_weight=distilled_weight,
-                    include_source_kinds=include_source_kinds,
-                    exclude_source_kinds=exclude_source_kinds,
-                    source_weights=source_weights,
-                    exclude_expired=exclude_expired,
-                ),
-            )
-            if min_score > 0.0:
-                final_scored = [result for result in final_scored if result["score"] >= min_score]
-            final = self._apply_recall_security(self._apply_budget(final_scored[:limit], token_budget))
-            await self._record_recall_access(final)
-            append_audit_event(
-                self._config,
-                "recall",
-                actor="",
-                namespace=self._namespace,
-                data={"query": query[:80], "entries_returned": len(final)},
-            )
-            self._remember_results_in_tiers(final)
-            logger.debug(
-                "memory_recalled",
-                op="recall",
-                outcome="success",
-                query=query[:80],
-                namespace=self._namespace,
-                result_count=len(final),
-                search_path="hybrid",
-            )
-            return final
-
-        # --- Tier 2: Fallback LIKE + TF scoring ------------------------------
-        results = await self._fallback_recall(query, limit, tags, min_score)
-        results = self._merge_tier_results(
-            results,
-            tier_local_results,
-            limit,
-            query.lower().split(),
-            self._config,
-            query_embedding,
-        )
-        if min_score > 0.0:
-            results = [result for result in results if result["score"] >= min_score]
-        if include_org_memories:
-            results = await self._merge_org_results(query, results, limit, tags, min_score)
-        if include_shared:
-            results = await self._merge_shared_results(query, results, limit)
-        filtered_results = cast(
-            "list[MemoryResultDict]",
-            apply_source_policy(
-                results,
-                include_distilled=include_distilled,
-                distilled_weight=distilled_weight,
-                include_source_kinds=include_source_kinds,
-                exclude_source_kinds=exclude_source_kinds,
-                source_weights=source_weights,
-                exclude_expired=exclude_expired,
-            ),
-        )
-        if min_score > 0.0:
-            filtered_results = [result for result in filtered_results if result["score"] >= min_score]
-        final = self._apply_recall_security(self._apply_budget(filtered_results[:limit], token_budget))
-        await self._record_recall_access(final)
-        append_audit_event(
-            self._config,
-            "recall",
-            actor="",
-            namespace=self._namespace,
-            data={"query": query[:80], "entries_returned": len(final)},
-        )
-        self._remember_results_in_tiers(final)
-        return final
-
-    def _apply_recall_security(self, results: list[MemoryResultDict]) -> list[MemoryResultDict]:
-        if self._backend is not None:
-            probe_canaries(self._config, backend=self._backend)
-        if not self._config.enable_recall_filter:
-            return results
-        score_by_id: dict[str, float] = {}
-        result_by_id: dict[str, MemoryResultDict] = {}
-        entries: list[MemoryEntry] = []
-        for idx, result in enumerate(results):
-            synthetic_id = f"{result['namespace']}::{result['memory_id']}::{idx}"
-            score_by_id[synthetic_id] = result["score"]
-            result_by_id[synthetic_id] = result
-            raw_result = {"id": synthetic_id, **result}
-            recalled_at = datetime.now(timezone.utc)
-            for timestamp_field in ("created_at", "updated_at"):
-                if raw_result.get(timestamp_field) in {"", "None", None}:
-                    raw_result[timestamp_field] = recalled_at
-            if raw_result.get("last_accessed_at") in {"", "None", None}:
-                raw_result["last_accessed_at"] = None
-            entries.append(MemoryEntry.model_validate(raw_result))
-        filtered = filter_recall_window(entries, mode=self._config.recall_filter_mode)
-        session_id = os.environ.get("TRW_SESSION_ID", "").strip() or self._namespace
-        run_id = os.environ.get("TRW_RUN_ID", "").strip() or None
-        emit_security_event(
-            self._config,
-            emitter="recall_filter",
-            session_id=session_id,
-            run_id=run_id,
-            payload={
-                "event_name": "recall_filter_outcome",
-                "path": "client_recall",
-                "namespace": self._namespace,
-                "mode": self._config.recall_filter_mode,
-                "window_size": len(entries),
-                "accepted_count": len(filtered.accepted),
-                "would_reject_count": len(filtered.would_reject),
-                "actions": dict(filtered.actions),
-                "traceability": build_security_traceability(
-                    live_path="client.MemoryClient._apply_recall_security",
-                    requirement_ids=["FR-003", "NFR-010", "NFR-011"],
-                ),
-            },
-        )
-        secured: list[MemoryResultDict] = []
-        for entry in filtered.accepted:
-            if entry.metadata.get("system_canary") == "true":
-                continue
-            original = dict(result_by_id[entry.id])
-            original["content"] = entry.content
-            original["detail"] = entry.detail
-            original["metadata"] = dict(entry.metadata)
-            original["score"] = score_by_id[entry.id]
-            secured.append(cast("MemoryResultDict", original))
-        return secured
-
-    @staticmethod
-    def _apply_budget(
-        results: list[MemoryResultDict],
-        token_budget: int | None,
-    ) -> list[MemoryResultDict]:
-        """Apply token budget filtering to recall results.
-
-        When *token_budget* is ``None``, returns *results* unchanged.
-
-        Args:
-            results: Ordered list of result dicts.
-            token_budget: Maximum token budget, or ``None`` to skip.
-
-        Returns:
-            Filtered list of results that fit within the budget.
-        """
-        if token_budget is None or not results:
-            return results
-
-        from trw_memory.retrieval.token_budget import apply_token_budget
-
-        # MemoryResultDict is a TypedDict — cast to dict[str, object] for the
-        # budget function, then cast back.  The underlying dicts are the same
-        # objects so no copy overhead.
-        raw: list[dict[str, object]] = list(results)  # type: ignore[arg-type]
-        filtered, _used, _truncated = apply_token_budget(raw, token_budget)
-        return filtered  # type: ignore[return-value]
-
-    async def _merge_org_results(
-        self,
-        query: str,
-        local_results: list[MemoryResultDict],
-        limit: int,
-        tags: list[str] | None,
-        min_score: float,
-    ) -> list[MemoryResultDict]:
-        """Append cross-validated sibling-project memories after local results."""
-        try:
-            org_entries = await asyncio.to_thread(
-                functools.partial(
-                    list_org_shared_entries,
-                    self._config,
-                    self._namespace,
-                    exclude_keys={(result["namespace"], result["memory_id"]) for result in local_results},
-                    limit=max(limit, 25),
-                )
-            )
-        except Exception:
-            logger.debug(
-                "memory_org_recall_failed",
-                op="recall",
-                outcome="failure",
-                namespace=self._namespace,
-                exc_info=True,
-            )
-            return local_results
-
-        tag_set = set(tags or [])
-        org_results: list[MemoryResultDict] = []
-        for entry in org_entries:
-            # Re-apply the FR11 gate here instead of trusting the helper
-            # contract alone so patched/mocked callers cannot accidentally
-            # widen org recall beyond cross-validated high-importance entries.
-            if not entry.cross_validated or entry.importance < 0.8:
-                continue
-            if tag_set and not tag_set.issubset(set(entry.tags)):
-                continue
-
-            candidate = _entry_to_result(entry, score=entry.importance)
-            candidate["source"] = "org"
-            if query.strip() and not self._matches_query(candidate, query):
-                continue
-            if min_score > 0.0 and candidate["score"] < min_score:
-                continue
-            org_results.append(candidate)
-
-        return self._merge_shared_candidates(local_results, org_results)
-
-    async def _try_hybrid_recall(
-        self,
-        query: str,
-        limit: int,
-        tags: list[str] | None,
-    ) -> list[MemoryResultDict] | None:
-        """Attempt hybrid retrieval; return None to signal fallback.
-
-        Fetches all entries for the namespace, runs them through
-        ``hybrid_search`` (BM25 + optional dense vectors + RRF fusion),
-        applies tag filtering, and converts to result dicts with
-        positional scoring.
-
-        Returns:
-            A list of result dicts on success, or ``None`` when the hybrid
-            pipeline is unavailable or produces no candidates.
-        """
-        try:
-            from trw_memory.retrieval.pipeline import hybrid_search
-        except ImportError:
-            return None
-
-        # Fetch candidate entries under lock (consistent with forget/store pattern)
-        async with self._lock:
-            backend = self._get_backend()
-            all_entries = backend.list_entries(
-                namespace=self._namespace,
-                limit=limit * 5,
-            )
-            # The hybrid pipeline only runs dense similarity when callers supply
-            # the stored vectors explicitly; loading them here keeps recall
-            # aligned with the vectors written during store().
-            stored_embeddings = backend.get_stored_embeddings([entry.id for entry in all_entries])
-
-        if not all_entries:
-            return None
-
-        # Optionally obtain an embedding provider for dense retrieval
-        embedder = self._get_embedder()
-
-        try:
-            ranked = hybrid_search(
-                query=query,
-                entries=all_entries,
-                embedder=embedder,
-                stored_embeddings=stored_embeddings or None,
-                top_k=limit * 3,
-            )
-        except Exception:
-            logger.debug(
-                "hybrid_search_failed",
-                op="recall",
-                outcome="failure",
-                exc_info=True,
-            )
-            return None
-
-        if not ranked:
-            return None
-
-        # Apply tag filter
-        if tags:
-            tag_set = set(tags)
-            ranked = [e for e in ranked if tag_set.issubset(set(e.tags))]
-
-        # Convert to result dicts with RRF-style positional scoring
-        results: list[MemoryResultDict] = []
-        for rank, entry in enumerate(ranked):
-            score = round(1.0 / (1 + rank), 4)
-            results.append(_entry_to_result(entry, score=score))
-
-        return results
-
-    async def _fallback_recall(
-        self,
-        query: str,
-        limit: int,
-        tags: list[str] | None,
-        min_score: float,
-    ) -> list[MemoryResultDict]:
-        """Original LIKE-based search with TF + importance scoring.
-
-        Uses ``backend.search()`` for keyword matching and blends a
-        term-frequency relevance score (weight ``_FALLBACK_TF_WEIGHT``)
-        with the entry's stored importance (weight
-        ``_FALLBACK_IMPORTANCE_WEIGHT``).
-        """
-        async with self._lock:
-            entries = self._get_backend().search(
-                query,
-                top_k=limit * 3,
-                tags=tags,
-                namespace=self._namespace,
-            )
-
-        query_terms = set(query.lower().split())
-        results: list[MemoryResultDict] = []
-        for entry in entries:
-            if not query_terms:
-                tf_score = entry.importance
-            else:
-                text_tokens = f"{entry.content} {entry.detail} {' '.join(entry.tags)}".lower().split()
-                matches = sum(1 for t in text_tokens if t in query_terms)
-                tf_score = (
-                    min(1.0, matches / max(len(text_tokens), 1) * _FALLBACK_TF_SCALE) * _FALLBACK_TF_WEIGHT
-                    + entry.importance * _FALLBACK_IMPORTANCE_WEIGHT
-                )
-            if tf_score >= min_score:
-                results.append(_entry_to_result(entry, score=round(tf_score, 4)))
-
-        results.sort(key=lambda r: float(r["score"]), reverse=True)
-        final = results[:limit]
-        logger.debug(
-            "memory_recalled",
-            op="recall",
-            outcome="success",
-            query=query[:80],
-            namespace=self._namespace,
-            result_count=len(final),
-            search_path="fallback",
-        )
-        return final
-
-    async def _record_recall_access(self, results: list[MemoryResultDict]) -> None:
-        """Persist access metadata for the entries that were actually returned."""
-        grouped: dict[str, list[str]] = {}
-        for result in results:
-            if result.get("source") == "shared":
-                continue
-            grouped.setdefault(result["namespace"], []).append(result["memory_id"])
-
-        if not grouped:
-            return
-
-        async with self._lock:
-            for namespace, entry_ids in grouped.items():
-                if namespace == self._namespace:
-                    record_recall_access(self._get_backend(), entry_ids)
-                else:
-                    with _create_local_backend(self._config, namespace) as backend:
-                        record_recall_access(backend, entry_ids)
-                append_audit_event(
-                    self._config,
-                    "access",
-                    actor="",
-                    namespace=namespace,
-                    data={"entry_ids": entry_ids, "entries_accessed": len(entry_ids)},
-                )
-
-    def _tier_results(
-        self,
-        backend: StorageBackend,
-        query: str,
-        tags: list[str] | None,
-        limit: int,
-        query_embedding: list[float] | None = None,
-    ) -> list[MemoryResultDict]:
-        """Collect local tier-managed candidates for this namespace."""
-        candidates = tier_candidates(
-            self._config,
-            self._namespace,
-            backend,
-            query=query,
-            tags=tags,
+        return await _recall_impl(
+            self,
+            query,
             limit=limit,
-            query_embedding=query_embedding,
+            tags=tags,
+            min_score=min_score,
+            include_org_memories=include_org_memories,
+            include_shared=include_shared,
+            token_budget=token_budget,
+            include_distilled=include_distilled,
+            distilled_weight=distilled_weight,
+            include_source_kinds=include_source_kinds,
+            exclude_source_kinds=exclude_source_kinds,
+            source_weights=source_weights,
+            exclude_expired=exclude_expired,
         )
-        return [self._tier_result_from_entry(candidate) for candidate in candidates]
-
-    def _remember_results_in_tiers(self, results: list[MemoryResultDict]) -> None:
-        """Keep the hot/warm tiers aligned with the entries callers actually saw."""
-        recalled_at = datetime.now(timezone.utc).isoformat()
-        for result in results:
-            if result.get("source", "local") != "local":
-                continue
-            payload: dict[str, object] = {
-                "id": result["memory_id"],
-                "content": result["content"],
-                "detail": result["detail"],
-                "tags": result["tags"],
-                "importance": result["importance"],
-                "namespace": result["namespace"],
-                "last_accessed_at": recalled_at,
-            }
-            if result["created_at"]:
-                payload["created_at"] = result["created_at"]
-            if result["updated_at"]:
-                payload["updated_at"] = result["updated_at"]
-            remember_entry_data_in_tiers(self._config, payload)
-
-    @staticmethod
-    def _merge_tier_results(
-        local_results: list[MemoryResultDict],
-        tier_results: list[MemoryResultDict],
-        limit: int,
-        query_tokens: list[str],
-        config: MemoryConfig,
-        query_embedding: list[float] | None = None,
-    ) -> list[MemoryResultDict]:
-        """Merge tier-only candidates into the normal local recall results."""
-        if not tier_results:
-            return local_results[:limit]
-        merged = list(local_results)
-        seen_ids = {result["memory_id"] for result in local_results}
-        seen_content = {result["content"] for result in local_results}
-        for result in tier_results:
-            if result["memory_id"] in seen_ids or result["content"] in seen_content:
-                continue
-            merged.append(result)
-            seen_ids.add(result["memory_id"])
-            seen_content.add(result["content"])
-        if len(merged) == len(local_results):
-            return local_results[:limit]
-        for result in merged:
-            relevance_hint = result.get("_relevance_hint")
-            result["score"] = round(
-                compute_importance_score(
-                    cast("dict[str, object]", result),
-                    query_tokens,
-                    query_embedding=query_embedding,
-                    config=config,
-                    relevance_hint=float(relevance_hint) if relevance_hint is not None else None,
-                ),
-                4,
-            )
-        merged.sort(key=lambda result: float(result["score"]), reverse=True)
-        return merged[:limit]
-
-    @staticmethod
-    def _tier_result_from_entry(entry: dict[str, object]) -> MemoryResultDict:
-        """Convert a tier-managed entry dict into the client recall result shape."""
-        raw_score = entry.get("score")
-        score = float(str(raw_score)) if raw_score is not None else entry_utility(entry)
-        raw_tags = entry.get("tags", [])
-        tier_result: MemoryResultDict = {
-            "memory_id": str(entry.get("id", entry.get("memory_id", ""))),
-            "content": str(entry.get("content", "")),
-            "detail": str(entry.get("detail", "")),
-            "tags": [str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else [],
-            "importance": MemoryClient._coerce_float(entry.get("importance", 0.0)),
-            "score": round(score, 4),
-            "created_at": str(entry.get("created_at", "")),
-            "updated_at": str(entry.get("updated_at", entry.get("created_at", ""))),
-            "namespace": str(entry.get("namespace", "default")),
-            "source": "local",
-            "last_accessed_at": str(entry.get("last_accessed_at", "")),
-            "q_value": MemoryClient._coerce_float(entry.get("q_value", 0.0)),
-            "q_observations": int(str(entry.get("q_observations", 0))),
-            "recurrence": int(str(entry.get("recurrence", 1))),
-            "access_count": int(str(entry.get("access_count", 0))),
-            "_relevance_hint": MemoryClient._coerce_float(entry.get("_tier_relevance", score)),
-        }
-        return tier_result
 
     def _get_embedder(self) -> EmbeddingProvider | None:
         """Try to obtain a local embedding provider; return None on failure.
@@ -1265,6 +734,101 @@ class MemoryClient:
             model_name=self._config.embedding_model,
             dim=self._config.embedding_dim,
         )
+
+    # ---- Recall helper aliases (PRD-DIST-246 batch 105) -------------------
+    # Re-export thin wrappers so existing test patches on
+    # `trw_memory.client.MemoryClient._<helper>` keep working after the
+    # implementation moved to ``_client_recall.py``. Tests monkeypatch via
+    # ``setattr(client, "_merge_tier_results", ...)`` and direct
+    # ``MemoryClient._<helper>(...)`` calls.
+
+    def _apply_recall_security(self, results: list[MemoryResultDict]) -> list[MemoryResultDict]:
+        from trw_memory._client_recall import apply_recall_security as _impl
+
+        return _impl(self, results)
+
+    @staticmethod
+    def _apply_budget(
+        results: list[MemoryResultDict],
+        token_budget: int | None,
+    ) -> list[MemoryResultDict]:
+        from trw_memory._client_recall import apply_budget as _impl
+
+        return _impl(results, token_budget)
+
+    async def _merge_org_results(
+        self,
+        query: str,
+        local_results: list[MemoryResultDict],
+        limit: int,
+        tags: list[str] | None,
+        min_score: float,
+    ) -> list[MemoryResultDict]:
+        from trw_memory._client_recall import merge_org_results as _impl
+
+        return await _impl(self, query, local_results, limit, tags, min_score)
+
+    async def _try_hybrid_recall(
+        self,
+        query: str,
+        limit: int,
+        tags: list[str] | None,
+    ) -> list[MemoryResultDict] | None:
+        from trw_memory._client_recall import try_hybrid_recall as _impl
+
+        return await _impl(self, query, limit, tags)
+
+    async def _fallback_recall(
+        self,
+        query: str,
+        limit: int,
+        tags: list[str] | None,
+        min_score: float,
+    ) -> list[MemoryResultDict]:
+        from trw_memory._client_recall import fallback_recall as _impl
+
+        return await _impl(self, query, limit, tags, min_score)
+
+    async def _record_recall_access(self, results: list[MemoryResultDict]) -> None:
+        from trw_memory._client_recall import record_recall_access_impl as _impl
+
+        await _impl(self, results)
+
+    def _tier_results(
+        self,
+        backend: StorageBackend,
+        query: str,
+        tags: list[str] | None,
+        limit: int,
+        query_embedding: list[float] | None = None,
+    ) -> list[MemoryResultDict]:
+        from trw_memory._client_recall import tier_results as _impl
+
+        return _impl(self, backend, query, tags, limit, query_embedding)
+
+    def _remember_results_in_tiers(self, results: list[MemoryResultDict]) -> None:
+        from trw_memory._client_recall import remember_results_in_tiers as _impl
+
+        _impl(self, results)
+
+    @staticmethod
+    def _merge_tier_results(
+        local_results: list[MemoryResultDict],
+        tier_only_results: list[MemoryResultDict],
+        limit: int,
+        query_tokens: list[str],
+        config: MemoryConfig,
+        query_embedding: list[float] | None = None,
+    ) -> list[MemoryResultDict]:
+        from trw_memory._client_recall import merge_tier_results as _impl
+
+        return _impl(local_results, tier_only_results, limit, query_tokens, config, query_embedding)
+
+    @staticmethod
+    def _tier_result_from_entry(entry: dict[str, object]) -> MemoryResultDict:
+        from trw_memory._client_recall import tier_result_from_entry as _impl
+
+        return _impl(entry)
 
     def _should_attempt_remote_publish(self, entry: MemoryEntry) -> bool:
         """Return whether this entry should attempt the remote publish path."""
