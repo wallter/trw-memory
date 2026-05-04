@@ -229,96 +229,22 @@ class SQLiteBackend(StorageBackend):
     # Integrity & recovery
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _connect(
-        db_path: Path,
-        *,
-        dbapi: Any,
-        timeout: float,
-        check_same_thread: bool,
-        cached_statements: int | None = None,
-        sqlcipher_key_hex: str | None = None,
-    ) -> Any:
-        """Delegate to ``_connection.connect`` (PRD-DIST-245 batch 82)."""
-        return _connection_connect(
-            db_path,
-            dbapi=dbapi,
-            timeout=timeout,
-            check_same_thread=check_same_thread,
-            cached_statements=cached_statements,
-            sqlcipher_key_hex=sqlcipher_key_hex,
-        )
-
-    @staticmethod
-    def _open_and_configure(
-        db_path: Path,
-        *,
-        dbapi: Any = sqlite3,
-        sqlcipher_key_hex: str | None = None,
-    ) -> Any:
-        """Delegate to ``_connection.open_and_configure``."""
-        return _connection_open_and_configure(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
-
-    @staticmethod
-    def _open_without_integrity_check(
-        db_path: Path,
-        *,
-        dbapi: Any = sqlite3,
-        sqlcipher_key_hex: str | None = None,
-    ) -> Any:
-        """Delegate to ``_connection.open_without_integrity_check``."""
-        return _connection_open_without_integrity_check(
-            db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex
-        )
-
-    @staticmethod
-    def _db_has_data(
-        db_path: Path,
-        *,
-        dbapi: Any = sqlite3,
-        sqlcipher_key_hex: str | None = None,
-    ) -> bool:
-        """Delegate to ``_connection.db_has_data``."""
-        return _connection_db_has_data(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
+    # Connection-mgmt + corrupt-backup + recovery delegators are direct
+    # staticmethod aliases — the parent module imports each helper as
+    # `_connection_*` / `_*_impl` / `_recovery_*` and re-exposes them
+    # under their existing class-method names.
+    _connect = staticmethod(_connection_connect)
+    _open_and_configure = staticmethod(_connection_open_and_configure)
+    _open_without_integrity_check = staticmethod(_connection_open_without_integrity_check)
+    _db_has_data = staticmethod(_connection_db_has_data)
+    _salvage_via_recover_cli = staticmethod(_salvage_via_recover_cli_impl)
+    _rotate_corrupt_backup = staticmethod(_rotate_corrupt_backup_impl)
+    _prune_corrupt_backups = staticmethod(_prune_corrupt_backups_impl)
+    recover_db = staticmethod(_recovery_recover_db)
 
     def _run_integrity_check(self) -> bool:
         """Delegate to ``_stale_handle.run_integrity_check``."""
         return _stale_handle_run_integrity_check(self)
-
-    @staticmethod
-    def _salvage_via_recover_cli(backup_path: Path, dbapi: Any = sqlite3) -> list[Any]:
-        """Delegate to ``_corrupt_backup.salvage_via_recover_cli`` (PRD-CORE-138 FR04)."""
-        return _salvage_via_recover_cli_impl(backup_path, dbapi=dbapi)
-
-    @staticmethod
-    def _rotate_corrupt_backup(db_path: Path) -> Path:
-        """Delegate to ``_corrupt_backup.rotate_corrupt_backup`` (PRD-CORE-139 FR01)."""
-        return _rotate_corrupt_backup_impl(db_path)
-
-    @staticmethod
-    def _prune_corrupt_backups(parent: Path, keep_n: int) -> None:
-        """Delegate to ``_corrupt_backup.prune_corrupt_backups`` (PRD-CORE-139 FR03/FR04)."""
-        _prune_corrupt_backups_impl(parent, keep_n)
-
-    @staticmethod
-    def recover_db(
-        db_path: Path,
-        *,
-        dbapi: Any = sqlite3,
-        sqlcipher_key_hex: str | None = None,
-        recovery_policy: Literal["strict", "empty_ok"] = "strict",
-        corrupt_backup_keep: int = 5,
-        rebuild_from_cold: bool = True,
-    ) -> Any:
-        """Delegate to ``_recovery.recover_db`` (PRD-DIST-245 batch 83)."""
-        return _recovery_recover_db(
-            db_path,
-            dbapi=dbapi,
-            sqlcipher_key_hex=sqlcipher_key_hex,
-            recovery_policy=recovery_policy,
-            corrupt_backup_keep=corrupt_backup_keep,
-            rebuild_from_cold=rebuild_from_cold,
-        )
 
     @staticmethod
     def check_integrity(
@@ -468,22 +394,10 @@ class SQLiteBackend(StorageBackend):
 
     @contextlib.contextmanager
     def transaction(self) -> Iterator[SQLiteBackend]:
-        """Context manager that batches multiple writes into one SQLite transaction.
+        """PRD-FIX-088 FR02: batch N writes into one BEGIN IMMEDIATE / COMMIT.
 
-        PRD-FIX-088 FR02: When a caller wraps a series of ``update()`` (or other
-        mutating) calls in ``with backend.transaction():``, the per-call
-        ``commit()`` is suppressed and a single ``BEGIN IMMEDIATE`` / ``COMMIT``
-        bracket is used instead.  This collapses N implicit transactions to one
-        explicit transaction, which is cheaper and avoids holding the SQLite
-        write-lock across N round-trips.
-
-        Re-entrant by depth: nested ``transaction()`` calls do not re-issue
-        ``BEGIN``; only the outermost issues ``BEGIN IMMEDIATE`` / ``COMMIT``.
-        Inner exceptions still propagate; the outermost handler issues
-        ``ROLLBACK`` and re-raises.
-
-        Yields:
-            ``self`` for fluent chaining (callers normally ignore the value).
+        Re-entrant by depth — only the outermost ``transaction()`` issues
+        BEGIN/COMMIT; inner exceptions propagate; outermost issues ROLLBACK.
         """
         is_outer = self._skip_commit_depth == 0
         if is_outer:
