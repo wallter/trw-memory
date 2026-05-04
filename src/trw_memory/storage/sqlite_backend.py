@@ -25,7 +25,6 @@ from typing import Any, ClassVar, Literal
 import structlog
 
 from trw_memory.exceptions import (
-    CorruptDatabaseUnsalvageableError,
     EncryptionUnavailableError,
     StaleConnectionError,
     StorageError,
@@ -41,7 +40,7 @@ from trw_memory.storage._shared import (
     serialize_update_value,
     validate_update_fields,
 )
-from trw_memory.storage._stale_handle_detector import StaleHandleDetector, write_sentinel
+from trw_memory.storage._stale_handle_detector import StaleHandleDetector
 from trw_memory.storage._utf8_validator import validate_utf8_fields
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.sync.delta import DeltaTracker
@@ -159,6 +158,8 @@ from trw_memory.storage._connection import (
     open_and_configure as _connection_open_and_configure,
     open_without_integrity_check as _connection_open_without_integrity_check,
 )
+# recover_db extracted to _recovery.py (PRD-DIST-245 batch 83).
+from trw_memory.storage._recovery import recover_db as _recovery_recover_db
 
 
 # ---------------------------------------------------------------------------
@@ -463,245 +464,15 @@ class SQLiteBackend(StorageBackend):
         corrupt_backup_keep: int = 5,
         rebuild_from_cold: bool = True,
     ) -> Any:
-        """Recover from a corrupt database by salvaging rows into a fresh DB.
-
-        1. Move corrupt file to ``memory.db.corrupt.<UTC-ISO>.bak``
-           (PRD-CORE-139 FR01) and prune old timestamped backups beyond
-           ``corrupt_backup_keep`` (FR03/FR04). Legacy ``.corrupt.bak`` and
-           ``.corrupt.bak.1`` files are preserved.
-        2. Try salvage via in-process ``SELECT * FROM memories``.
-        3. On ``DatabaseError`` (e.g., destroyed ``sqlite_master``), fall back
-           to the ``sqlite3 .recover`` CLI (PRD-CORE-138 FR04).
-        4. PRD-CORE-140 FR03: when both salvage paths yield zero rows, the
-           backup is non-empty, ``recovery_policy == "strict"``, AND
-           ``rebuild_from_cold`` is True, run the cold-tier rebuild into the
-           freshly opened DB. If rebuild yields >0 rows, the strict-refusal
-           raise is suppressed.
-        5. If the salvage-and-rebuild combined still yielded zero rows AND
-           the backup is non-empty AND ``recovery_policy == "strict"`` (default),
-           raise :class:`CorruptDatabaseUnsalvageableError` preserving the backup.
-        6. Under ``recovery_policy == "empty_ok"`` preserve legacy behavior:
-           create a fresh empty DB and log ``rows_salvaged=0``.
-
-        Returns:
-            A new :class:`sqlite3.Connection` to the recovered database.
-
-        Raises:
-            CorruptDatabaseUnsalvageableError: Under ``strict`` policy when
-                salvage + cold-rebuild both yield zero rows from a non-empty
-                ``.corrupt.bak``.
-        """
-        # PRD-CORE-139 FR01/FR03/FR04: timestamped rotation + filename-based pruning.
-        backup_path = SQLiteBackend._rotate_corrupt_backup(db_path)
-        SQLiteBackend._prune_corrupt_backups(db_path.parent, keep_n=corrupt_backup_keep)
-        # Also remove stale WAL/SHM files for the corrupt DB
-        for suffix in (".db-wal", ".db-shm"):
-            wal = db_path.with_name(db_path.name.replace(".db", suffix))
-            with contextlib.suppress(OSError):
-                wal.unlink()
-
-        # P3 — write cross-process sentinel so peer consumers detect stale FDs.
-        # Written early (before the fresh DB exists) so any peer doing a precheck
-        # between now and the fresh-DB creation will see the sentinel and
-        # schedule a reconnect on their next read.
-        write_sentinel(db_path, backup_path)
-
-        salvage_primary_failed = False
-        rows: list[Any] = []
-        try:
-            # Attempt to salvage rows from the corrupt database.
-            old_conn = SQLiteBackend._connect(
-                backup_path,
-                dbapi=dbapi,
-                timeout=5.0,
-                check_same_thread=True,
-                sqlcipher_key_hex=sqlcipher_key_hex,
-            )
-            try:
-                rows = list(old_conn.execute("SELECT * FROM memories").fetchall())
-            except sqlite3.DatabaseError:
-                salvage_primary_failed = True
-                rows = []
-            old_conn.close()
-        except sqlite3.DatabaseError:
-            salvage_primary_failed = True
-            rows = []
-
-        # FR04: second salvage path via sqlite3 CLI .recover when primary yielded no rows.
-        salvage_cli_failed = False
-        cli_used = False
-        if not rows:
-            cli_used = True
-            rows = SQLiteBackend._salvage_via_recover_cli(backup_path, dbapi=dbapi)
-            salvage_cli_failed = not rows
-
-        recovered_rows = len(rows)
-
-        # FR03: strict-mode refusal on non-empty backup with zero salvaged rows.
-        # Page-size heuristic: SQLite default page is 4096 bytes. Backups smaller
-        # than one page cannot contain real row data — treat them as genuinely
-        # empty and fall through to the legacy empty-DB creation path.
-        page_size = 4096
-        try:
-            backup_size = backup_path.stat().st_size
-        except OSError:
-            backup_size = 0
-
-        # PRD-CORE-140 FR03: gated cold-tier rebuild before strict-refusal raise.
-        # Gate: strict policy AND knob enabled AND salvage yielded zero rows AND
-        # backup is non-empty. When all four hold, open the new DB early, run the
-        # rebuild, and only re-raise the strict error if rebuild also yielded zero.
-        strict_refuse = not rows and backup_size > page_size and recovery_policy == "strict"
-        cold_rebuild_attempted = False
-        cold_rebuild_rows = 0
-        new_conn: Any = None
-
-        if strict_refuse and rebuild_from_cold:
-            logger.debug(
-                "cold_rebuild_gate_evaluated",
-                policy=recovery_policy,
-                knob=True,
-                recovered_rows=recovered_rows,
-                decision="run",
-            )
-            # Lazy import: avoids circular-import at module-load time.
-            from trw_memory.storage._cold_rebuild import rebuild_from_cold as _rebuild_fn
-
-            new_conn = SQLiteBackend._connect(
-                db_path,
-                dbapi=dbapi,
-                timeout=30.0,
-                check_same_thread=False,
-                sqlcipher_key_hex=sqlcipher_key_hex,
-            )
-            new_conn.execute("PRAGMA journal_mode=WAL")
-            new_conn.execute("PRAGMA synchronous=NORMAL")
-            ensure_schema(new_conn)
-            rebuild_base = _resolve_cold_rebuild_base(db_path)
-            try:
-                cold_rebuild_rows = _rebuild_fn(rebuild_base, new_conn)
-            except Exception:
-                logger.exception(
-                    "cold_rebuild_failed",
-                    db=str(db_path),
-                    base_dir=str(rebuild_base),
-                )
-                cold_rebuild_rows = 0
-            cold_rebuild_attempted = True
-            if cold_rebuild_rows > 0:
-                # Strict gate satisfied by rebuild — suppress the raise.
-                strict_refuse = False
-        elif strict_refuse:
-            logger.debug(
-                "cold_rebuild_gate_evaluated",
-                policy=recovery_policy,
-                knob=False,
-                recovered_rows=recovered_rows,
-                decision="skip_knob_off",
-            )
-        else:
-            logger.debug(
-                "cold_rebuild_gate_evaluated",
-                policy=recovery_policy,
-                knob=rebuild_from_cold,
-                recovered_rows=recovered_rows,
-                decision="skip_gate_not_met",
-            )
-
-        if strict_refuse:
-            # Close the fresh conn opened for an unsuccessful rebuild (if any)
-            # so we don't leak a handle on the raise path. Also delete the
-            # just-created DB file and its WAL sidecars so the caller observes
-            # the same post-state as pre-PRD-CORE-140 (backup preserved; no
-            # stub DB at db_path).
-            if new_conn is not None:
-                with contextlib.suppress(sqlite3.Error):
-                    new_conn.close()
-                with contextlib.suppress(OSError):
-                    db_path.unlink(missing_ok=True)
-                for suffix in (".db-wal", ".db-shm"):
-                    sidecar = db_path.with_name(db_path.name.replace(".db", suffix))
-                    with contextlib.suppress(OSError):
-                        sidecar.unlink(missing_ok=True)
-            logger.error(
-                "db_recovery_refused_strict",
-                action="refuse_empty_fallback",
-                db_path=str(db_path),
-                backup_path=str(backup_path),
-                backup_size_bytes=backup_size,
-                salvage_primary_failed=salvage_primary_failed,
-                salvage_cli_failed=salvage_cli_failed,
-                cold_rebuild_attempted=cold_rebuild_attempted,
-                cold_rebuild_rows=cold_rebuild_rows,
-            )
-            raise CorruptDatabaseUnsalvageableError(
-                "database disk image is malformed and salvage yielded 0 rows",
-                backup_path=str(backup_path),
-            )
-
-        if new_conn is None:
-            new_conn = SQLiteBackend._connect(
-                db_path,
-                dbapi=dbapi,
-                timeout=30.0,
-                check_same_thread=False,
-                sqlcipher_key_hex=sqlcipher_key_hex,
-            )
-            new_conn.execute("PRAGMA journal_mode=WAL")
-            new_conn.execute("PRAGMA synchronous=NORMAL")
-            ensure_schema(new_conn)
-
-        if rows:
-            # Security: recovered row keys come from a corrupt/attacker-
-            # influenced DB dump. Splicing them into SQL without validation
-            # is an injection vector. Keep only columns in the current schema
-            # allowlist; project each row by positional index (works with
-            # both sqlite3.Row and the iterable row objects used in tests).
-            raw_cols = list(rows[0].keys())
-            safe_indices = [i for i, c in enumerate(raw_cols) if c in ENTRY_COLUMNS]
-            safe_cols = [raw_cols[i] for i in safe_indices]
-            dropped = [c for c in raw_cols if c not in ENTRY_COLUMNS]
-            if dropped:
-                logger.warning(
-                    "db_recovery_dropped_unknown_columns",
-                    columns=dropped,
-                    db=str(db_path),
-                )
-            if safe_cols:
-                placeholders = ", ".join(["?"] * len(safe_cols))
-                cols_sql = ", ".join(safe_cols)
-                insert_sql = f"INSERT OR IGNORE INTO memories ({cols_sql}) VALUES ({placeholders})"  # noqa: S608
-                for row in rows:
-                    with contextlib.suppress(sqlite3.Error):
-                        row_values = tuple(row)
-                        new_conn.execute(insert_sql, tuple(row_values[i] for i in safe_indices))
-                new_conn.commit()
-
-        if cold_rebuild_attempted and cold_rebuild_rows > 0:
-            logger.warning(
-                "db_recovered",
-                db=str(db_path),
-                backup=str(backup_path),
-                rows_salvaged=recovered_rows,
-                rebuilt_from_cold=cold_rebuild_rows,
-                source="cold_rebuild",
-            )
-        elif cli_used and rows:
-            logger.warning(
-                "db_recovered_via_cli",
-                db=str(db_path),
-                backup=str(backup_path),
-                rows_salvaged=recovered_rows,
-                source="sqlite3_cli_dump",
-            )
-        else:
-            logger.warning(
-                "db_recovered",
-                db=str(db_path),
-                backup=str(backup_path),
-                rows_salvaged=recovered_rows,
-            )
-        return new_conn
+        """Delegate to ``_recovery.recover_db`` (PRD-DIST-245 batch 83)."""
+        return _recovery_recover_db(
+            db_path,
+            dbapi=dbapi,
+            sqlcipher_key_hex=sqlcipher_key_hex,
+            recovery_policy=recovery_policy,
+            corrupt_backup_keep=corrupt_backup_keep,
+            rebuild_from_cold=rebuild_from_cold,
+        )
 
     @staticmethod
     def check_integrity(
