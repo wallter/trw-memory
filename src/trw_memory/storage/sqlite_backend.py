@@ -22,12 +22,8 @@ from typing import Any, ClassVar, Literal
 
 import structlog
 
-from trw_memory.exceptions import (
-    EncryptionUnavailableError,
-    StaleConnectionError,
-)
+from trw_memory.exceptions import EncryptionUnavailableError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
-from trw_memory.storage._schema import ensure_schema
 from trw_memory.storage._shared import (
     ENTRY_COLUMNS,
     IMMUTABLE_FIELDS,
@@ -187,6 +183,14 @@ from trw_memory.storage._init_helpers import (
     register_writer_registry as _init_register_writer_registry,
     start_integrity_scheduler as _init_start_integrity_scheduler,
 )
+# Stale-handle + integrity-check helpers extracted to _stale_handle.py
+# (PRD-DIST-245 batch 89).
+from trw_memory.storage._stale_handle import (
+    ensure_connection_fresh as _stale_handle_ensure_fresh,
+    handle_integrity_regression as _stale_handle_integrity_regression,
+    reconnect as _stale_handle_reconnect,
+    run_integrity_check as _stale_handle_run_integrity_check,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -278,63 +282,16 @@ class SQLiteBackend(StorageBackend):
         )
 
     def _handle_integrity_regression(self, _db_path: Path, _detail: str) -> None:
-        """Callback invoked by :class:`IntegrityScheduler` on a failed probe.
-
-        Sets :attr:`integrity_warning` so external code can observe the
-        regression (same flag used by the transient-WAL-contention path).
-        """
-        self.integrity_warning = True
-
-    # ------------------------------------------------------------------
-    # P3 — Stale-handle detection + reconnect
-    # ------------------------------------------------------------------
+        """Delegate to ``_stale_handle.handle_integrity_regression``."""
+        _stale_handle_integrity_regression(self)
 
     def _reconnect(self) -> None:
-        """Close the current connection and reopen against the current DB file.
-
-        Called when :meth:`_ensure_connection_fresh` detects a stale handle.
-
-        Raises:
-            StaleConnectionError: If reopening the connection fails.
-        """
-        try:
-            with contextlib.suppress(sqlite3.Error):
-                self._conn.close()
-            if self._sqlcipher_key_hex is not None:
-                self._conn = self._open_and_configure(
-                    self._db_path,
-                    dbapi=self._dbapi,
-                    sqlcipher_key_hex=self._sqlcipher_key_hex,
-                )
-            else:
-                self._conn = self._open_and_configure(self._db_path)
-            ensure_schema(self._conn)
-            self._stale_detector.reset()
-            self.reconnect_count += 1
-            logger.info(
-                "memory_stale_handle_reconnected",
-                db_path=str(self._db_path),
-                reconnect_count=self.reconnect_count,
-            )
-        except Exception as exc:
-            raise StaleConnectionError(
-                f"Failed to reopen stale connection to {self._db_path}: {exc}",
-                path=str(self._db_path),
-            ) from exc
+        """Delegate to ``_stale_handle.reconnect``."""
+        _stale_handle_reconnect(self)
 
     def _ensure_connection_fresh(self) -> None:
-        """Check whether the connection has gone stale; reconnect if so.
-
-        This is a best-effort probe — NOT a consistency guarantee.  The check
-        is cached for ``TRW_MEMORY_STALE_HANDLE_CHECK_SECS`` (default 1s) so
-        the steady-state cost on a warm kernel page cache is effectively zero.
-
-        Raises:
-            StaleConnectionError: If a stale handle is detected and reconnect
-                fails.
-        """
-        if self._stale_detector.is_stale():
-            self._reconnect()
+        """Delegate to ``_stale_handle.ensure_connection_fresh``."""
+        _stale_handle_ensure_fresh(self)
 
     # ------------------------------------------------------------------
     # Integrity & recovery
@@ -393,12 +350,8 @@ class SQLiteBackend(StorageBackend):
         return _connection_db_has_data(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
 
     def _run_integrity_check(self) -> bool:
-        """Run PRAGMA quick_check and return True if the database is healthy."""
-        try:
-            rows = self._conn.execute("PRAGMA quick_check").fetchall()
-            return len(rows) == 1 and rows[0][0] == "ok"
-        except sqlite3.DatabaseError:
-            return False
+        """Delegate to ``_stale_handle.run_integrity_check``."""
+        return _stale_handle_run_integrity_check(self)
 
     @staticmethod
     def _salvage_via_recover_cli(backup_path: Path, dbapi: Any = sqlite3) -> list[Any]:
