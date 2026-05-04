@@ -27,18 +27,13 @@ from trw_memory.exceptions import (
     StaleConnectionError,
 )
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
-from trw_memory.storage._schema import ensure_schema, ensure_vec_table
+from trw_memory.storage._schema import ensure_schema
 from trw_memory.storage._shared import (
     ENTRY_COLUMNS,
     IMMUTABLE_FIELDS,
 )
 from trw_memory.storage._stale_handle_detector import StaleHandleDetector
 from trw_memory.storage.interface import StorageBackend
-
-try:
-    import sqlite_vec
-except ImportError:  # pragma: no cover — optional dep
-    sqlite_vec = None
 
 logger = structlog.get_logger(__name__)
 SQLCIPHER_REQUIRED_MESSAGE = (
@@ -185,6 +180,13 @@ from trw_memory.storage._crud_ops import (
     store as _crud_ops_store,
     update as _crud_ops_update,
 )
+# __init__ helpers extracted to _init_helpers.py (PRD-DIST-245 batch 88).
+from trw_memory.storage._init_helpers import (
+    load_vec_extension as _init_load_vec_extension,
+    open_connection_with_recovery as _init_open_connection_with_recovery,
+    register_writer_registry as _init_register_writer_registry,
+    start_integrity_scheduler as _init_start_integrity_scheduler,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -245,101 +247,35 @@ class SQLiteBackend(StorageBackend):
         self.quarantine_count_utf8: int = 0
         # P3 — reconnect counter (incremented on each stale-handle reopen)
         self.reconnect_count: int = 0
-        try:
-            if sqlcipher_key_hex is None:
-                self._conn = self._open_and_configure(db_path)
-            else:
-                self._conn = self._open_and_configure(
-                    db_path,
-                    dbapi=self._dbapi,
-                    sqlcipher_key_hex=sqlcipher_key_hex,
-                )
-        except sqlite3.DatabaseError:
-            # quick_check failed — but this can be transient (WAL contention,
-            # concurrent MCP server access). Check if DB actually has data
-            # before destroying it with auto-recovery.
-            if self._db_has_data(db_path, dbapi=self._dbapi, sqlcipher_key_hex=sqlcipher_key_hex):
-                logger.warning(
-                    "db_integrity_check_failed_but_has_data",
-                    db=str(db_path),
-                    action="open_anyway",
-                    hint="quick_check failed but DB has rows — likely transient WAL contention, not corruption",
-                )
-                self._conn = self._open_without_integrity_check(
-                    db_path,
-                    dbapi=self._dbapi,
-                    sqlcipher_key_hex=sqlcipher_key_hex,
-                )
-                self.integrity_warning = True
-            else:
-                logger.exception("db_corrupt_detected", db=str(db_path), action="auto_recover")
-                self._conn = self.recover_db(
-                    db_path,
-                    dbapi=self._dbapi,
-                    sqlcipher_key_hex=sqlcipher_key_hex,
-                    recovery_policy=self._recovery_policy,
-                    corrupt_backup_keep=self._corrupt_backup_keep,
-                    rebuild_from_cold=self._rebuild_from_cold,
-                )
-                self.recovered = True
 
-        ensure_schema(self._conn)
+        # Connection open + auto-recovery (PRD-DIST-245 batch 88)
+        self._conn, self.integrity_warning, self.recovered = _init_open_connection_with_recovery(
+            self,
+            db_path,
+            dbapi=self._dbapi,
+            sqlcipher_key_hex=sqlcipher_key_hex,
+            recovery_policy=self._recovery_policy,
+            corrupt_backup_keep=self._corrupt_backup_keep,
+            rebuild_from_cold=self._rebuild_from_cold,
+        )
 
         # P3 — stale-handle detector (belt + suspenders: inode + sentinel).
-        # Only meaningful for real files; :memory: paths get a no-op detector.
         self._stale_detector = StaleHandleDetector(db_path)
 
-        vec_module = sqlite_vec
-        if vec_module is not None:
-            try:
-                # AttributeError: Python built without SQLITE_ENABLE_LOAD_EXTENSION
-                # (common on macOS system Python and some python.org builds).
-                self._conn.enable_load_extension(True)
-                vec_module.load(self._conn)
-                self._conn.enable_load_extension(False)
-                ensure_vec_table(self._conn, self._dim)
-                self._vec_available = True
-                logger.debug("sqlite_vec_loaded", db=str(db_path))
-            except (sqlite3.Error, OSError, AttributeError) as exc:
-                self._vec_available = False
-                logger.warning(
-                    "sqlite_vec_load_failed",
-                    db=str(db_path),
-                    reason=type(exc).__name__,
-                    detail=str(exc),
-                    hint="Python lacks SQLite load_extension support; vector search disabled, BM25 still works",
-                )
-        else:
-            logger.debug("sqlite_vec_unavailable", reason="not_installed")
+        # sqlite-vec extension load (fail-open)
+        self._vec_available = _init_load_vec_extension(self._conn, db_path, self._dim)
 
-        # PRD-INFRA-064 (B3): multi-writer advisory registry — advisory ONLY,
-        # registry failures MUST NOT raise (advisory-only invariant).
-        try:
-            from trw_memory.storage._writer_registry import WriterRegistry
+        # PRD-INFRA-064 (B3): multi-writer advisory registry (fail-open)
+        self._writer_registry = _init_register_writer_registry(
+            db_path, self._concurrent_writer_warn_threshold
+        )
 
-            self._writer_registry = WriterRegistry(
-                db_path,
-                warn_threshold=self._concurrent_writer_warn_threshold,
-            )
-            self._writer_registry.register()
-        except Exception:  # justified: advisory-only invariant — never block open
-            logger.debug("writer_registry_unavailable", db=str(db_path), exc_info=True)
-            self._writer_registry = None
-
-        # PRD-INFRA-063 (B2): periodic integrity scheduler — opt-in via
-        # interval > 0. Dedicated read-only connection; observability only.
-        try:
-            from trw_memory.storage._integrity_scheduler import IntegrityScheduler
-
-            self._integrity_scheduler = IntegrityScheduler(
-                db_path,
-                interval_minutes=self._integrity_check_interval_minutes,
-                on_regression=self._handle_integrity_regression,
-            )
-            self._integrity_scheduler.start()
-        except Exception:  # justified: observability scheduler must not block open
-            logger.debug("integrity_scheduler_unavailable", db=str(db_path), exc_info=True)
-            self._integrity_scheduler = None
+        # PRD-INFRA-063 (B2): periodic integrity scheduler (fail-open)
+        self._integrity_scheduler = _init_start_integrity_scheduler(
+            db_path,
+            interval_minutes=self._integrity_check_interval_minutes,
+            on_regression=self._handle_integrity_regression,
+        )
 
     def _handle_integrity_regression(self, _db_path: Path, _detail: str) -> None:
         """Callback invoked by :class:`IntegrityScheduler` on a failed probe.
