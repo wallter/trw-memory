@@ -272,6 +272,13 @@ from trw_memory._graph_cross_project import (  # noqa: E402
     persist_cross_validated_entry as _persist_cross_validated_entry,
     project_scope_key as _project_scope_key,
 )
+# Importance boost / decay cluster extracted to _graph_decay.py
+# (PRD-DIST-245 batch 94). Re-exports preserve back-compat names.
+from trw_memory._graph_decay import (  # noqa: E402
+    apply_importance_boost as apply_importance_boost,
+    apply_importance_decay as apply_importance_decay,
+    memory_decay_pass as memory_decay_pass,
+)
 
 
 def list_org_shared_entries(
@@ -530,117 +537,6 @@ def detect_cross_validation(
     return False
 
 
-def apply_importance_boost(
-    entry: MemoryEntry,
-    reason: str = "cross_validated",
-    delta: float = IMPORTANCE_BOOST,
-) -> MemoryEntry:
-    """Apply an importance boost to an entry, capped at 1.0.
-
-    Records the boost in outcome_history.
-    """
-    new_importance = min(round(entry.importance + delta, 4), 1.0)
-    now = datetime.now(timezone.utc).isoformat()
-    outcome = f"importance_boost:delta=+{delta:.2f}:reason={reason}:new_value={new_importance:.4f}:timestamp={now}"
-
-    return entry.model_copy(
-        update={
-            "importance": new_importance,
-            "outcome_history": [*entry.outcome_history, outcome],
-            "cross_validated": True,
-            "updated_at": datetime.now(timezone.utc),
-        }
-    )
-
-
-def apply_importance_decay(
-    entry: MemoryEntry,
-    delta: float = DECAY_DELTA,
-) -> MemoryEntry:
-    """Apply importance decay for unused shared memories.
-
-    Floors at 0.0. Records in outcome_history.
-    """
-    new_importance = max(round(entry.importance - delta, 4), 0.0)
-    now = datetime.now(timezone.utc).isoformat()
-    outcome = f"importance_decay:delta=-{delta:.2f}:reason=unused_90d:new_value={new_importance:.4f}:timestamp={now}"
-
-    return entry.model_copy(
-        update={
-            "importance": new_importance,
-            "outcome_history": [*entry.outcome_history, outcome],
-            "updated_at": datetime.now(timezone.utc),
-        }
-    )
-
-
-def memory_decay_pass(
-    conn: sqlite3.Connection,
-    cutoff_days: int = 90,
-    batch_size: int = 1000,
-    *,
-    lock: threading.Lock | None = None,
-) -> dict[str, int]:
-    """Run decay pass on cross-validated memories unused for cutoff_days.
-
-    Args:
-        lock: Optional threading lock for thread-safe commit.
-
-    Returns:
-        {"processed": int, "remaining": int, "total_decayed": int}
-    """
-    if batch_size <= 0:
-        msg = "batch_size must be positive"
-        raise ValueError(msg)
-
-    effective_batch_size = min(batch_size, 1000)
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=cutoff_days)).isoformat()
-
-    rows = conn.execute(
-        "SELECT id, importance FROM memories WHERE cross_validated = 1 "
-        "AND COALESCE(last_accessed_at, created_at) < ? "
-        "LIMIT ?",
-        (cutoff, effective_batch_size),
-    ).fetchall()
-
-    total = conn.execute(
-        "SELECT COUNT(*) FROM memories WHERE cross_validated = 1 AND COALESCE(last_accessed_at, created_at) < ?",
-        (cutoff,),
-    ).fetchone()
-    total_qualifying = total[0] if total else 0
-
-    # Direct SQL for batch performance — StorageBackend.update() is
-    # per-entry and would create N+1 round-trips for 1000-row batches.
-    decayed = 0
-    # Capture timestamp once before the loop: all entries in one decay pass
-    # should share the same timestamp for consistency and performance.
-    batch_now = datetime.now(timezone.utc).isoformat()
-    with _optional_lock(lock):
-        try:
-            for entry_id, raw_importance in rows:
-                new_value = max(round(float(raw_importance) - DECAY_DELTA, 4), 0.0)
-                outcome = (
-                    f"importance_decay:delta=-{DECAY_DELTA:.2f}:"
-                    f"reason=unused_90d:new_value={new_value:.4f}:timestamp={batch_now}"
-                )
-                conn.execute(
-                    "UPDATE memories SET importance = ?, "
-                    "outcome_history = json_insert(outcome_history, '$[#]', ?) "
-                    "WHERE id = ?",
-                    (new_value, outcome, entry_id),
-                )
-                decayed += 1
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            logger.exception("memory_decay_pass_failed")
-            raise
-
-    return {
-        "processed": decayed,
-        "remaining": max(total_qualifying - decayed, 0),
-        "total_decayed": decayed,
-    }
 
 
 # ---------------------------------------------------------------------------
