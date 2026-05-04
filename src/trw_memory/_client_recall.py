@@ -66,7 +66,7 @@ _FALLBACK_TF_SCALE: float = 10.0
 
 
 def _entry_to_result(entry: MemoryEntry, score: float = 0.0) -> "MemoryResultDict":
-    from trw_memory.client import _entry_to_result as _impl
+    from trw_memory._client_distilled_tiering import entry_to_result as _impl
     return _impl(entry, score=score)
 
 

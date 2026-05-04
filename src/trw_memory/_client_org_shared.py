@@ -71,7 +71,7 @@ async def merge_shared_results(
         # Look up `fetch_shared_memories` via parent module so test patches
         # on `trw_memory.client.fetch_shared_memories` propagate.
         from trw_memory import client as _client_module
-        _fetch = _client_module.fetch_shared_memories  # type: ignore[attr-defined]
+        _fetch = _client_module.fetch_shared_memories
         shared = await asyncio.to_thread(
             functools.partial(
                 _fetch,

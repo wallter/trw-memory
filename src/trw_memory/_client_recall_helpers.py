@@ -25,7 +25,6 @@ from typing import TYPE_CHECKING, cast
 
 import structlog
 
-from trw_memory.graph import list_org_shared_entries
 from trw_memory.lifecycle.scoring import entry_utility
 from trw_memory.lifecycle.tiers._runtime import remember_entry_data_in_tiers, tier_candidates
 from trw_memory.lifecycle.tiers._scoring import compute_importance_score
@@ -39,7 +38,7 @@ logger = structlog.get_logger(__name__)
 
 
 def _entry_to_result(entry: object, score: float = 0.0) -> "MemoryResultDict":
-    from trw_memory.client import _entry_to_result as _impl
+    from trw_memory._client_distilled_tiering import entry_to_result as _impl
 
     return _impl(entry, score=score)  # type: ignore[arg-type]
 
@@ -69,9 +68,10 @@ async def merge_org_results(
 ) -> "list[MemoryResultDict]":
     """Append cross-validated sibling-project memories after local results."""
     try:
+        from trw_memory import client as _c
         org_entries = await asyncio.to_thread(
             functools.partial(
-                list_org_shared_entries,
+                _c.list_org_shared_entries,
                 client._config,
                 client._namespace,
                 exclude_keys={(result["namespace"], result["memory_id"]) for result in local_results},

@@ -26,11 +26,9 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trw_memory.exceptions import MemoryNotFoundError
-from trw_memory.lifecycle.tiers._runtime import remove_entry_from_tiers
 from trw_memory.security.rbac import Permission
 from trw_memory.security.runtime import (
     append_audit_event,
-    delete_quarantined_entries,
     list_quarantined_entries,
 )
 
@@ -47,7 +45,7 @@ def _client_logger() -> Any:
 
 
 def _entry_to_result(entry: Any, score: float = 0.0) -> "MemoryResultDict":
-    from trw_memory.client import _entry_to_result as _impl
+    from trw_memory._client_distilled_tiering import entry_to_result as _impl
     return _impl(entry, score=score)
 
 
@@ -58,6 +56,7 @@ async def forget_impl(
     actor: str | None = None,
 ) -> "ForgetResultDict":
     """Async impl for :meth:`MemoryClient.forget`."""
+    from trw_memory import client as _c
     client._require_permission(Permission.DELETE, "forget")
     client._maybe_start_retry_drain()
     if not memory_id and not actor:
@@ -74,8 +73,8 @@ async def forget_impl(
                     continue
                 if backend.delete(candidate.id):
                     deleted_count += 1
-                    remove_entry_from_tiers(client._config, client._namespace, candidate.id)
-            deleted_count += delete_quarantined_entries(client._config, namespace=client._namespace, actor=actor)
+                    _c.remove_entry_from_tiers(client._config, client._namespace, candidate.id)
+            deleted_count += _c.delete_quarantined_entries(client._config, namespace=client._namespace, actor=actor)
             append_audit_event(
                 client._config,
                 "forget",
@@ -94,7 +93,7 @@ async def forget_impl(
         assert memory_id is not None  # noqa: S101
         existing = backend.get(memory_id)
         if existing is None:
-            quarantined_deleted = delete_quarantined_entries(
+            quarantined_deleted = _c.delete_quarantined_entries(
                 client._config,
                 namespace=client._namespace,
                 memory_id=memory_id,
@@ -120,7 +119,7 @@ async def forget_impl(
             raise MemoryNotFoundError(f"Memory entry {memory_id!r} not found in namespace {client._namespace!r}")
         remote_id = existing.remote_id
         backend.delete(memory_id)
-        remove_entry_from_tiers(client._config, client._namespace, memory_id)
+        _c.remove_entry_from_tiers(client._config, client._namespace, memory_id)
         append_audit_event(
             client._config,
             "forget",

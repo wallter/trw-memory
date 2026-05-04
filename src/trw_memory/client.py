@@ -14,80 +14,39 @@ Usage::
 from __future__ import annotations
 
 import asyncio
-import functools
-import inspect
-import os
-import socket
 import threading
 import uuid
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime
 from typing import Any, Literal, Protocol, TypedDict, cast, runtime_checkable
 
 import structlog
 from typing_extensions import NotRequired
 
 from trw_memory.embeddings.interface import EmbeddingProvider
-from trw_memory.exceptions import (
-    MemoryConnectionError,
-    MemoryNotFoundError,
-    SchemaValidationError,
-    StorageError,
-    ToolAlreadyRegisteredError,
-)
-from trw_memory.graph import list_org_shared_entries, schedule_graph_update
-from trw_memory.lifecycle._recall import record_recall_access
-from trw_memory.lifecycle.scoring import entry_utility
-from trw_memory.lifecycle.tiers._runtime import (
-    get_tier_manager,
-    remember_entry_data_in_tiers,
-    remember_entry_in_tiers,
-    remove_entry_from_tiers,
-    tier_candidates,
-    tier_runtime_enabled,
-    warmup_tier_manager,
-)
-from trw_memory.lifecycle.tiers._scoring import compute_importance_score
+from trw_memory.exceptions import MemoryConnectionError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
-from trw_memory.namespaces.manager import NamespaceManager
-from trw_memory.namespaces.validation import validate_namespace
-from trw_memory.retrieval.dense import cosine_similarity
-from trw_memory.retrieval.source_policy import apply_source_policy
-from trw_memory.security.pii import anonymize_installation_id
-from trw_memory.security.poisoning import validate_store_inputs
-from trw_memory.security.rbac import Permission, require_namespace_permission
-from trw_memory.security.recall_filter import filter_recall_window
+from trw_memory.security.rbac import Permission, require_namespace_permission as require_namespace_permission  # noqa: F401 — re-exported for downstream consumers
 from trw_memory.security.runtime import (
-    append_audit_event,
     audit_entry,
-    delete_quarantined_entries,
-    initialize_canaries,
-    list_quarantined_entries,
-    prepare_entry_for_store,
-    probe_canaries,
+    delete_quarantined_entries as delete_quarantined_entries,  # noqa: F401 — test-patched
     review_quarantined_entry,
-    should_halt_recalls,
-    store_quarantined_entry,
 )
-from trw_memory.security.startup import verify_defaults
-from trw_memory.security.telemetry_emit import build_security_traceability, emit_security_event
+from trw_memory.graph import list_org_shared_entries as list_org_shared_entries  # noqa: F401 — test-patched at module path
+from trw_memory.lifecycle.tiers._runtime import remove_entry_from_tiers as remove_entry_from_tiers  # noqa: F401 — test-patched
 from trw_memory.storage.interface import StorageBackend
-from trw_memory.sync.conflict import init_clock
 from trw_memory.sync.remote import (
-    _anonymize_entry,
-    drain_retry_queue,
-    fetch_shared_memories,
-    publish_memory_result,
-    retire_remote_memory,
+    _anonymize_entry as _anonymize_entry,  # noqa: F401 — test-patched
+    drain_retry_queue as drain_retry_queue,  # noqa: F401 — test-patched
+    fetch_shared_memories as fetch_shared_memories,  # noqa: F401 — test-patched
+    publish_memory_result as publish_memory_result,  # noqa: F401 — test-patched
+    retire_remote_memory as retire_remote_memory,  # noqa: F401 — test-patched
 )
 from trw_memory.sync.retry_queue import RetryQueue
-from trw_memory.sync.subscriber import SSESubscriber
+from trw_memory.sync.subscriber import SSESubscriber as SSESubscriber  # noqa: F401 — test-patched
 
 logger = structlog.get_logger(__name__)
-SHARED_EVENT_CACHE_MAX = 256
 
 __all__ = [
     "BulkStoreItemResult",
@@ -135,65 +94,16 @@ def _make_id() -> str:
     return f"M-{uuid.uuid4().hex[:16]}"
 
 
-class MemoryResultDict(TypedDict):
-    """Shape of a single result dict returned by recall/search."""
-
-    memory_id: str
-    content: str
-    detail: str
-    tags: list[str]
-    importance: float
-    score: float
-    created_at: str
-    updated_at: str
-    namespace: str
-    source: str
-    last_accessed_at: NotRequired[str]
-    q_value: NotRequired[float]
-    q_observations: NotRequired[int]
-    recurrence: NotRequired[int]
-    access_count: NotRequired[int]
-    expires: NotRequired[str]
-    metadata: NotRequired[dict[str, str]]
-    anomaly_dimension: NotRequired[str]
-    z_score: NotRequired[float]
-    _relevance_hint: NotRequired[float]
-
-
-class StoreResultDict(TypedDict):
-    """Shape of the dict returned by MemoryClient.store()."""
-
-    memory_id: str
-    namespace: str
-    status: str
-    timestamp: str
-    quarantined: NotRequired[bool]
-    stored: NotRequired[bool]
-    anomaly_dimension: NotRequired[str]
-    z_score: NotRequired[float]
-
-
-class ForgetResultDict(TypedDict):
-    """Shape of the dict returned by MemoryClient.forget()."""
-
-    memory_id: str
-    status: str
-    namespace: str
-    entries_deleted: NotRequired[int]
-
-
-@runtime_checkable
-class AgentWithRegisterTool(Protocol):
-    """Protocol for agent objects that expose a ``register_tool`` method."""
-
-    def register_tool(self, name: str, fn: Callable[..., Coroutine[object, object, object]]) -> None: ...
-
-
-@runtime_checkable
-class AgentWithToolDecorator(Protocol):
-    """Protocol for agent objects that expose a ``tool()`` decorator factory."""
-
-    def tool(self) -> Callable[[Callable[..., Coroutine[object, object, object]]], None]: ...
+# TypedDict shapes + agent protocols extracted to _client_models.py
+# (PRD-DIST-246 batch 113). Re-exports preserve the public API.
+from trw_memory._client_models import (  # noqa: E402
+    AgentWithRegisterTool as AgentWithRegisterTool,
+    AgentWithToolDecorator as AgentWithToolDecorator,
+    ForgetResultDict as ForgetResultDict,
+    MemoryResultDict as MemoryResultDict,
+    StoreResultDict as StoreResultDict,
+    _ToolFn as _ToolFn,
+)
 
 
 # Distilled-tiering helpers + entry-to-result extracted to
@@ -226,8 +136,6 @@ def _create_local_backend(config: MemoryConfig, namespace: str) -> StorageBacken
     return create_backend_from_config(config, namespace)
 
 
-# Type alias for the async tool functions produced by _make_tool_functions.
-_ToolFn = Callable[..., Coroutine[object, object, object]]
 
 
 class MemoryClient:
@@ -240,6 +148,30 @@ class MemoryClient:
         timeout: Timeout in seconds for remote operations.
     """
 
+    # Instance attribute declarations — `__init__` body lives in
+    # `_client_lifecycle.init_client` (PRD-DIST-246 batch 111), so mypy
+    # needs explicit class-level type hints to see these attributes.
+    _namespace: str
+    _timeout: float
+    _lock: asyncio.Lock
+    _tools_registered: bool
+    _backend: StorageBackend | None
+    _resolved_mode: str
+    _config: MemoryConfig
+    _project_root: str
+    _installation_id: str
+    _local_node_id: str
+    _background_tasks: set[asyncio.Task[None]]
+    _retry_queue: RetryQueue
+    _retry_drain_started: bool
+    _shared_event_cache: list[MemoryResultDict]
+    _shared_event_cache_lock: threading.Lock
+    _pending_remote_retirements: set[str]
+    _pending_remote_retirements_lock: threading.Lock
+    _sse_subscriber: SSESubscriber | None
+    _sse_subscriber_started: bool
+    _tier_manager: object | None
+
     def __init__(
         self,
         namespace: str,
@@ -248,75 +180,15 @@ class MemoryClient:
     ) -> None:
         """Initialise a MemoryClient with namespace isolation and mode selection.
 
-        Mode selection logic:
-
-        - ``"local"`` — create a SQLite or YAML backend directly (controlled
-          by ``MEMORY_STORAGE_BACKEND`` env var).  Raises
-          :class:`MemoryConnectionError` if backend creation fails.
-        - ``"mcp"`` — reserved for future MCP stdio transport (currently
-          raises :class:`NotImplementedError`).
-        - ``"auto"`` (default) — attempt ``"local"`` first; if that fails,
-          raise :class:`MemoryConnectionError` (MCP fallback not yet available).
-
-        Args:
-            namespace: Isolation scope (e.g. ``"project:my-app"``, ``"default"``).
-                Must pass :func:`~trw_memory.namespaces.validation.validate_namespace`.
-            mode: Transport mode — ``"local"``, ``"mcp"``, or ``"auto"``.
-            timeout: Timeout in seconds for future remote operations.
-
-        Raises:
-            ValueError: If *namespace* fails validation.
-            NotImplementedError: If *mode* is ``"mcp"``.
-            MemoryConnectionError: If no backend can be established.
+        Implementation lives in ``_client_lifecycle.init_client``
+        (PRD-DIST-246 batch 111). Mode is one of ``"local"`` / ``"mcp"``
+        / ``"auto"``. Sets up state, validates namespace, opens the
+        backend, runs security defaults verification, seeds canaries,
+        warms the tier manager, and starts the SSE subscription.
         """
-        validate_namespace(namespace)
-        self._namespace = namespace
-        self._timeout = timeout
-        self._lock = asyncio.Lock()
-        self._tools_registered = False
-        self._backend: StorageBackend | None = None
-        self._resolved_mode: str = ""
-        self._config = MemoryConfig()
-        self._project_root = str(Path.cwd())
-        self._installation_id = f"{socket.gethostname()}:{Path(self._config.storage_path).resolve()}"
-        self._local_node_id = anonymize_installation_id(self._installation_id)
-        self._background_tasks: set[asyncio.Task[None]] = set()
-        self._retry_queue = RetryQueue(Path(self._config.storage_path) / "sync_queue.jsonl")
-        self._retry_drain_started = False
-        self._shared_event_cache: list[MemoryResultDict] = []
-        self._shared_event_cache_lock = threading.Lock()
-        self._pending_remote_retirements: set[str] = set()
-        self._pending_remote_retirements_lock = threading.Lock()
-        self._sse_subscriber: SSESubscriber | None = None
-        self._sse_subscriber_started = False
-        self._tier_manager = None
+        from trw_memory._client_lifecycle import init_client as _impl
 
-        if mode == "mcp":
-            raise NotImplementedError("MCP mode is not yet implemented")
-
-        if mode in ("local", "auto"):
-            try:
-                self._backend = _create_local_backend(self._config, namespace)
-                verify_defaults(self._config)
-                initialize_canaries(self._config, backend=self._backend)
-                self._resolved_mode = "local"
-                logger.debug(
-                    "client_initialized",
-                    op="init",
-                    namespace=namespace,
-                    mode=self._resolved_mode,
-                    backend=self._config.storage_backend,
-                )
-                if tier_runtime_enabled(self._config):
-                    self._tier_manager = warmup_tier_manager(self._config, namespace, self._backend)
-            except (OSError, ValueError, ImportError) as exc:
-                if mode == "local":
-                    raise MemoryConnectionError(f"Failed to create local backend: {exc}") from exc
-
-        if mode == "auto" and self._backend is None:
-            raise MemoryConnectionError("No connection mode available. Tried: local.")
-
-        self._maybe_start_sse_subscription()
+        _impl(self, namespace, mode=mode, timeout=timeout)
 
     def __repr__(self) -> str:
         return f"MemoryClient(namespace={self._namespace!r}, mode={self._resolved_mode!r})"
@@ -559,60 +431,19 @@ class MemoryClient:
 
         return _impl(entry)
 
+    # ---- Remote publish aliases (PRD-DIST-246 batch 111) -------------------
+
     def _should_attempt_remote_publish(self, entry: MemoryEntry) -> bool:
-        """Return whether this entry should attempt the remote publish path."""
-        return (
-            not self._config.local_only
-            and self._config.sync_enabled
-            and bool(self._config.platform_url)
-            and entry.importance >= self._config.sync_min_importance
-        )
+        from trw_memory._client_lifecycle import should_attempt_remote_publish as _impl
+        return _impl(self, entry)
 
     def _schedule_background_task(self, coro: Coroutine[object, object, None]) -> None:
-        """Track a background task so shutdown can await sync side effects safely."""
-        task = asyncio.create_task(coro)
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+        from trw_memory._client_lifecycle import schedule_background_task as _impl
+        _impl(self, coro)
 
     async def _publish_entry(self, entry: MemoryEntry, embedding: list[float] | None) -> None:
-        """Best-effort remote publish for a freshly stored entry."""
-        publish_result = await asyncio.to_thread(
-            functools.partial(
-                publish_memory_result,
-                entry,
-                self._config,
-                embedding=embedding,
-                project_root=self._project_root,
-            )
-        )
-        if publish_result["success"]:
-            async with self._lock:
-                backend = self._get_backend()
-                backend.update(
-                    entry.id,
-                    published_to_platform=True,
-                    remote_id=publish_result["remote_id"],
-                    last_synced_at=datetime.now(timezone.utc),
-                )
-            return
-
-        retryable = publish_result.get("retryable", not publish_result["success"])
-        if not retryable:
-            return
-
-        payload = await asyncio.to_thread(_anonymize_entry, entry, self._project_root)
-        if embedding is not None:
-            payload["embedding"] = embedding
-        queue_payload = cast("dict[str, object]", payload)
-        enqueued = await asyncio.to_thread(self._retry_queue.enqueue, entry.id, queue_payload)
-        if not enqueued:
-            logger.warning(
-                "memory_sync_queue_full",
-                op="store",
-                outcome="failure",
-                memory_id=entry.id,
-                namespace=self._namespace,
-            )
+        from trw_memory._client_lifecycle import publish_entry as _impl
+        await _impl(self, entry, embedding)
 
     # ---- Org-shared helper aliases (PRD-DIST-246 batch 107) ---------------
     # Implementations live in `_client_org_shared.py`; thin wrappers here
@@ -776,10 +607,11 @@ class MemoryClient:
     # Context manager
     # ------------------------------------------------------------------
 
+    # ---- Lifecycle aliases (PRD-DIST-246 batches 111+112) -----------------
+
     async def __aenter__(self) -> MemoryClient:
-        """Enter the async context manager."""
-        self._maybe_start_retry_drain()
-        return self
+        from trw_memory._client_lifecycle import aenter as _impl
+        return await _impl(self)
 
     async def __aexit__(
         self,
@@ -787,186 +619,45 @@ class MemoryClient:
         exc_val: BaseException | None,
         exc_tb: object,
     ) -> None:
-        """Exit the async context manager, closing the backend."""
-        await self.close()
+        from trw_memory._client_lifecycle import aexit as _impl
+        await _impl(self, exc_type, exc_val, cast("Any", exc_tb))
 
     async def close(self) -> None:
-        """Close the underlying backend and release resources."""
-        if self._sse_subscriber is not None:
-            self._sse_subscriber.stop()
-            self._sse_subscriber = None
-            self._sse_subscriber_started = False
-        if self._background_tasks:
-            await asyncio.gather(*list(self._background_tasks), return_exceptions=True)
-        if self._backend is not None:
-            self._backend.close()
-            self._backend = None
-            logger.debug("client_closed", op="close", namespace=self._namespace)
+        from trw_memory._client_lifecycle import close_client as _impl
+        await _impl(self)
 
     def _should_start_retry_drain(self) -> bool:
-        """Return whether entering a client session should drain queued publishes."""
-        return (
-            not self._retry_drain_started
-            and not self._config.local_only
-            and self._config.sync_enabled
-            and bool(self._config.platform_url)
-            and self._retry_queue.depth() > 0
-        )
+        from trw_memory._client_lifecycle import should_start_retry_drain as _impl
+        return _impl(self)
 
     def _should_start_sse_subscription(self) -> bool:
-        """Return whether this client should own a live shared-learning subscription."""
-        return (
-            not self._sse_subscriber_started
-            and not self._config.local_only
-            and self._config.sync_enabled
-            and bool(self._config.platform_url)
-            and bool(self._config.platform_api_key)
-        )
+        from trw_memory._client_lifecycle import should_start_sse_subscription as _impl
+        return _impl(self)
 
     def _maybe_start_sse_subscription(self) -> None:
-        """Start the SSE subscriber once per client when remote sync is enabled."""
-        if not self._should_start_sse_subscription():
-            return
-        subscriber = SSESubscriber(self._config, on_event=self._handle_sse_event)
-        subscriber.start()
-        self._sse_subscriber = subscriber
-        self._sse_subscriber_started = True
+        from trw_memory._client_lifecycle import maybe_start_sse_subscription as _impl
+        _impl(self)
 
     def _maybe_start_retry_drain(self) -> None:
-        """Start queue recovery once the client is actively used in a live loop."""
-        if self._should_start_retry_drain():
-            self._retry_drain_started = True
-            self._schedule_background_task(self._drain_retry_queue())
+        from trw_memory._client_lifecycle import maybe_start_retry_drain as _impl
+        _impl(self)
 
     def _handle_sse_event(self, event: dict[str, object]) -> None:
-        """Merge SSE learning events into the next shared recall path."""
-        event_type = str(event.get("type", ""))
-        if event_type in {"learning_published", "learning_updated"}:
-            self._cache_shared_event(event)
-            return
-        if event_type == "learning_retired":
-            remote_id = str(event.get("id", ""))
-            if not remote_id:
-                return
-            with self._pending_remote_retirements_lock:
-                self._pending_remote_retirements.add(remote_id)
-            with self._shared_event_cache_lock:
-                self._shared_event_cache = [
-                    cached for cached in self._shared_event_cache if cached["memory_id"] != remote_id
-                ]
+        from trw_memory._client_lifecycle import handle_sse_event as _impl
+        _impl(self, event)
 
     def _cache_shared_event(self, event: dict[str, object]) -> None:
-        """Store a lightweight shared result so the next recall can surface it."""
-        remote_id = str(event.get("id", "")).strip()
-        summary = str(event.get("summary", "")).strip()
-        if not remote_id or not summary:
-            return
-        shared_content = summary if summary.startswith("[shared] ") else f"[shared] {summary}"
-        cached: MemoryResultDict = {
-            "memory_id": remote_id,
-            "content": shared_content,
-            "detail": "",
-            "tags": [],
-            "importance": 0.0,
-            "score": 0.0,
-            "created_at": "",
-            "updated_at": "",
-            "namespace": "shared",
-            "source": "shared",
-        }
-        with self._shared_event_cache_lock:
-            self._shared_event_cache = [
-                existing for existing in self._shared_event_cache if existing["memory_id"] != remote_id
-            ]
-            self._shared_event_cache.append(cached)
-            if len(self._shared_event_cache) > SHARED_EVENT_CACHE_MAX:
-                # Keep the most recent shared events so a burst cannot grow memory usage without bound.
-                self._shared_event_cache = self._shared_event_cache[-SHARED_EVENT_CACHE_MAX:]
+        from trw_memory._client_lifecycle import cache_shared_event as _impl
+        _impl(self, event)
 
     async def _drain_retry_queue(self) -> None:
-        """Best-effort background drain for queued publish payloads."""
-        queued_before = {record["entry_id"] for record in self._retry_queue.snapshot()}
-        result = await asyncio.to_thread(drain_retry_queue, self._retry_queue, self._config)
-        queued_after = {record["entry_id"] for record in self._retry_queue.snapshot()}
-        drained_ids = queued_before - queued_after
-        if drained_ids:
-            async with self._lock:
-                backend = self._get_backend()
-                synced_at = datetime.now(timezone.utc)
-                for entry_id in drained_ids:
-                    remote_id = result["remote_ids"].get(entry_id)
-                    if remote_id is not None:
-                        backend.update(
-                            entry_id,
-                            published_to_platform=True,
-                            remote_id=remote_id,
-                            last_synced_at=synced_at,
-                        )
-                    else:
-                        backend.update(
-                            entry_id,
-                            published_to_platform=True,
-                            last_synced_at=synced_at,
-                        )
-        logger.debug(
-            "memory_sync_queue_drained",
-            op="session_start",
-            outcome="success",
-            namespace=self._namespace,
-            drained=result["drained"],
-            failed=result["failed"],
-            skipped=result["skipped"],
-        )
+        from trw_memory._client_lifecycle import drain_retry_queue_impl as _impl
+        await _impl(self)
 
     async def _retire_remote_entry(self, memory_id: str, remote_id: str) -> None:
-        """Best-effort remote retirement for a locally deleted published entry."""
-        retired = await asyncio.to_thread(retire_remote_memory, remote_id, self._config)
-        if retired:
-            logger.debug(
-                "memory_remote_retired",
-                op="forget",
-                outcome="success",
-                memory_id=memory_id,
-                remote_id=remote_id,
-                namespace=self._namespace,
-            )
-            return
-        logger.warning(
-            "memory_remote_retire_failed",
-            op="forget",
-            outcome="failure",
-            memory_id=memory_id,
-            remote_id=remote_id,
-            namespace=self._namespace,
-        )
+        from trw_memory._client_lifecycle import retire_remote_entry as _impl
+        await _impl(self, memory_id, remote_id)
 
     async def _apply_pending_remote_retirements(self) -> None:
-        """Mark matching local entries as pending_delete when remote retirement wins."""
-        with self._pending_remote_retirements_lock:
-            remote_ids = set(self._pending_remote_retirements)
-            self._pending_remote_retirements.clear()
-        if not remote_ids:
-            return
-
-        async with self._lock:
-            backend = self._get_backend()
-            limit = max(backend.count(namespace=self._namespace), 1)
-            entries = backend.list_entries(namespace=self._namespace, limit=limit)
-            unresolved = set(remote_ids)
-            for entry in entries:
-                if entry.remote_id not in unresolved:
-                    continue
-                # Package-local sync does not yet increment vector clocks on every
-                # mutation, so last_synced_at is the only trustworthy shipped
-                # signal that the local row has previously converged with remote.
-                if entry.last_synced_at is None:
-                    continue
-                updated = backend.update(
-                    entry.id,
-                    pending_delete=True,
-                )
-                if updated is not None:
-                    unresolved.discard(str(entry.remote_id))
-        if unresolved:
-            with self._pending_remote_retirements_lock:
-                self._pending_remote_retirements.update(unresolved)
+        from trw_memory._client_lifecycle import apply_pending_remote_retirements as _impl
+        await _impl(self)
