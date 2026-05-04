@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
 import os
 from dataclasses import dataclass
@@ -13,7 +12,6 @@ from time import time
 import structlog
 
 from trw_memory.exceptions import (
-    CanaryTamperError,
     PIIBlockError,
     ProvenanceKeyUnavailableError,
     RateLimitError,
@@ -22,7 +20,6 @@ from trw_memory.exceptions import (
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.audit import AuditLog
-from trw_memory.security.canary import _CANARY_FIXTURES, PINNED_HASHES
 from trw_memory.security.pii import PIIMatch
 from trw_memory.security.poisoning import quarantine_entry, score_entry_anomaly, validate_entry_payload
 from trw_memory.security.provenance import build_entry_provenance, derive_verify_key, verify_entry_provenance
@@ -34,7 +31,6 @@ from trw_memory.storage.persistence import lock_for_rmw, read_yaml, write_yaml
 
 _AUDIT_MAINTENANCE_CACHE: set[str] = set()
 logger = structlog.get_logger(__name__)
-_CANARY_STATE: dict[str, dict[str, object]] = {}
 
 
 @dataclass(frozen=True)
@@ -463,106 +459,10 @@ def _apply_sec001_intake(
     return entry
 
 
-def initialize_canaries(config: MemoryConfig, *, backend: StorageBackend) -> None:
-    state_key = str(resolve_security_path(config, "quarantine_db_path", create_parent=True))
-    if _CANARY_STATE.get(state_key, {}).get("seeded"):
-        return
-    seeded = 0
-    fixture_map = dict(_CANARY_FIXTURES)
-    for canary_id, expected_hash in list(PINNED_HASHES.items())[: config.canary_injection_rate]:
-        if backend.get(canary_id) is not None:
-            seeded += 1
-            continue
-        content = fixture_map[canary_id]
-        backend.store(
-            MemoryEntry(
-                id=canary_id,
-                content=content,
-                namespace="default",
-                metadata={
-                    "system_canary": "true",
-                    "provenance_content_hash": expected_hash,
-                },
-            )
-        )
-        seeded += 1
-    _CANARY_STATE[state_key] = {"seeded": True, "recall_count": 0, "failed": False}
-    telemetry_session_id, telemetry_run_id = _resolve_security_trace_context(session_id="canary-bootstrap")
-    emit_security_event(
-        config,
-        emitter="canary",
-        session_id=telemetry_session_id,
-        run_id=telemetry_run_id,
-        payload={
-            "event_name": "canary_seeded",
-            "seeded_count": seeded,
-            "canary_injection_rate": config.canary_injection_rate,
-            "traceability": build_security_traceability(
-                live_path="security.runtime.initialize_canaries",
-                requirement_ids=["FR-007", "NFR-010", "NFR-011"],
-            ),
-        },
-    )
-
-
-def probe_canaries(config: MemoryConfig, *, backend: StorageBackend) -> None:
-    state_key = str(resolve_security_path(config, "quarantine_db_path", create_parent=True))
-    state = _CANARY_STATE.setdefault(state_key, {"seeded": False, "recall_count": 0, "failed": False})
-    if not state["seeded"]:
-        initialize_canaries(config, backend=backend)
-    raw_recall_count = state.get("recall_count", 0)
-    recall_count = int(raw_recall_count if isinstance(raw_recall_count, (int, float, str)) else 0)
-    recall_count += 1
-    state["recall_count"] = recall_count
-    if recall_count % config.canary_probe_interval != 0:
-        return
-    for canary_id, expected_hash in list(PINNED_HASHES.items())[: config.canary_injection_rate]:
-        entry = backend.get(canary_id)
-        if entry is None:
-            state["failed"] = True
-            telemetry_session_id, telemetry_run_id = _resolve_security_trace_context(session_id="canary-probe")
-            emit_security_event(
-                config,
-                emitter="canary",
-                session_id=telemetry_session_id,
-                run_id=telemetry_run_id,
-                payload={
-                    "event_name": "canary_missing",
-                    "canary_id": canary_id,
-                    "fail_mode": config.canary_fail_mode,
-                    "traceability": build_security_traceability(
-                        live_path="security.runtime.probe_canaries",
-                        requirement_ids=["FR-007", "NFR-010", "NFR-011"],
-                    ),
-                },
-            )
-            raise CanaryTamperError(f"missing canary {canary_id}")
-        current_hash = hashlib.sha256(entry.content.encode("utf-8")).hexdigest()
-        if current_hash != expected_hash:
-            state["failed"] = True
-            entry.metadata["quarantined"] = "true"
-            backend.store(entry)
-            telemetry_session_id, telemetry_run_id = _resolve_security_trace_context(session_id="canary-probe")
-            emit_security_event(
-                config,
-                emitter="canary",
-                session_id=telemetry_session_id,
-                run_id=telemetry_run_id,
-                payload={
-                    "event_name": "canary_hash_drift",
-                    "canary_id": canary_id,
-                    "expected_hash": expected_hash,
-                    "observed_hash": current_hash,
-                    "fail_mode": config.canary_fail_mode,
-                    "traceability": build_security_traceability(
-                        live_path="security.runtime.probe_canaries",
-                        requirement_ids=["FR-007", "FR-009", "NFR-010", "NFR-011"],
-                    ),
-                },
-            )
-            raise CanaryTamperError(f"canary drift detected for {canary_id}")
-
-
-def should_halt_recalls(config: MemoryConfig) -> bool:
-    state_key = str(resolve_security_path(config, "quarantine_db_path", create_parent=True))
-    return bool(_CANARY_STATE.get(state_key, {}).get("failed")) and config.canary_fail_mode == "halt"
+# Canary FR-007 helpers extracted to _runtime_canary.py (PRD-DIST-245 batch 101).
+from trw_memory.security._runtime_canary import (
+    CANARY_STATE as _CANARY_STATE,
+    initialize_canaries as initialize_canaries,
+    probe_canaries as probe_canaries,
+    should_halt_recalls as should_halt_recalls,
+)
