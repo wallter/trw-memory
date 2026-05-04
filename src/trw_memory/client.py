@@ -885,147 +885,55 @@ class MemoryClient:
                 namespace=self._namespace,
             )
 
+    # ---- Org-shared helper aliases (PRD-DIST-246 batch 107) ---------------
+    # Implementations live in `_client_org_shared.py`; thin wrappers here
+    # preserve `monkeypatch.setattr(client, "_X", ...)` test patches and
+    # `MemoryClient._coerce_float(...)` static-call sites.
+
     async def _merge_shared_results(
         self,
         query: str,
         local_results: list[MemoryResultDict],
         limit: int,
     ) -> list[MemoryResultDict]:
-        """Fetch shared memories and append them after local results."""
-        try:
-            await self._apply_pending_remote_retirements()
-            local_entries = await self._load_entries_for_results(local_results)
-            embedder = self._get_embedder()
-            cached_shared = await self._dedupe_cached_shared_results(
-                self._snapshot_cached_shared_results(query),
-                local_entries=local_entries,
-                embedder=embedder,
-            )
-            query_embedding: list[float] | None = None
-            if embedder is not None and query.strip():
-                query_embedding = await asyncio.to_thread(embedder.embed, query)
-
-            shared = await asyncio.to_thread(
-                functools.partial(
-                    fetch_shared_memories,
-                    query,
-                    self._config,
-                    embedding=query_embedding,
-                    limit=limit,
-                    local_entries=local_entries,
-                    embedder=embedder,
-                )
-            )
-        except Exception:
-            # Shared recall must never block or break local recall; the local
-            # path is the contract, and remote enrichment is opportunistic.
-            logger.debug(
-                "memory_shared_recall_failed",
-                op="recall",
-                outcome="failure",
-                namespace=self._namespace,
-                exc_info=True,
-            )
-            return self._merge_shared_candidates(local_results, self._snapshot_cached_shared_results(query))
-        await self._mark_fetch_retirements(shared)
-        live_shared = [
-            self._shared_result_to_result(item) for item in shared if not self._is_retired_shared_result(item)
-        ]
-        return self._merge_shared_candidates(local_results, [*live_shared, *cached_shared])
+        from trw_memory._client_org_shared import merge_shared_results as _impl
+        return await _impl(self, query, local_results, limit)
 
     async def _load_entries_for_results(self, results: list[MemoryResultDict]) -> list[MemoryEntry]:
-        """Materialize local entries for dedup against shared results."""
-        result_ids = [result["memory_id"] for result in results if result.get("source", "local") == "local"]
-        if not result_ids:
-            return []
-
-        async with self._lock:
-            backend = self._get_backend()
-            loaded: list[MemoryEntry] = []
-            for entry_id in result_ids:
-                entry = backend.get(entry_id)
-                if entry is not None:
-                    loaded.append(entry)
-            return loaded
+        from trw_memory._client_org_shared import load_entries_for_results as _impl
+        return await _impl(self, results)
 
     @staticmethod
     def _shared_result_to_result(result: dict[str, object]) -> MemoryResultDict:
-        """Normalize a shared remote result into the client result shape."""
-        memory_id = str(result.get("memory_id", result.get("id", result.get("remote_id", ""))))
-        detail = str(result.get("detail", ""))
-        raw_tags = result.get("tags", [])
-        tags = [str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else []
-        importance_raw = result.get("importance", result.get("impact", 0.0))
-        score_raw = result.get("score", importance_raw)
-        namespace = str(result.get("namespace", "shared"))
-        created_at = str(result.get("created_at", ""))
-        updated_at = str(result.get("updated_at", created_at))
-        source = str(result.get("source", "shared"))
-        shared_result: MemoryResultDict = {
-            "memory_id": memory_id,
-            "content": str(result.get("content", "")),
-            "detail": detail,
-            "tags": tags,
-            "importance": MemoryClient._coerce_float(importance_raw),
-            "score": MemoryClient._coerce_float(score_raw),
-            "created_at": created_at,
-            "updated_at": updated_at,
-            "namespace": namespace,
-            "source": source,
-        }
-        return shared_result
+        from trw_memory._client_org_shared import shared_result_to_result as _impl
+        return _impl(result)
 
     @staticmethod
     def _coerce_float(value: object) -> float:
-        """Convert loosely typed payload values into floats with a safe default."""
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            try:
-                return float(value)
-            except ValueError:
-                return 0.0
-        return 0.0
+        from trw_memory._client_org_shared import coerce_float as _impl
+        return _impl(value)
 
     @staticmethod
     def _is_retired_shared_result(result: dict[str, object]) -> bool:
-        """Return whether a shared result represents a remote retirement."""
-        status = str(result.get("status", "")).lower()
-        return status in {"obsolete", "deleted"}
+        from trw_memory._client_org_shared import is_retired_shared_result as _impl
+        return _impl(result)
 
     def _merge_shared_candidates(
         self,
         local_results: list[MemoryResultDict],
         shared_results: list[MemoryResultDict],
     ) -> list[MemoryResultDict]:
-        """Append shared results after local ones while suppressing exact duplicates."""
-        seen_ids = {result["memory_id"] for result in local_results}
-        seen_content = {result["content"] for result in local_results}
-        merged = list(local_results)
-        for result in shared_results:
-            if result["memory_id"] in seen_ids or result["content"] in seen_content:
-                continue
-            merged.append(result)
-            seen_ids.add(result["memory_id"])
-            seen_content.add(result["content"])
-        return merged
+        from trw_memory._client_org_shared import merge_shared_candidates as _impl
+        return _impl(local_results, shared_results)
 
     def _snapshot_cached_shared_results(self, query: str) -> list[MemoryResultDict]:
-        """Return cached SSE shared results relevant to the current query."""
-        with self._shared_event_cache_lock:
-            cached = list(self._shared_event_cache)
-        if not query.strip():
-            return cached
-        return [result for result in cached if self._matches_query(result, query)]
+        from trw_memory._client_org_shared import snapshot_cached_shared_results as _impl
+        return _impl(self, query)
 
     @staticmethod
     def _matches_query(result: MemoryResultDict, query: str) -> bool:
-        """Apply the same simple token matching used by fallback recall."""
-        query_terms = {term for term in query.lower().split() if term}
-        if not query_terms:
-            return True
-        text = f"{result['content']} {result['detail']} {' '.join(result['tags'])}".lower()
-        return any(term in text for term in query_terms)
+        from trw_memory._client_org_shared import matches_query as _impl
+        return _impl(result, query)
 
     async def _dedupe_cached_shared_results(
         self,
@@ -1035,59 +943,23 @@ class MemoryClient:
         embedder: EmbeddingProvider | None,
         dedup_threshold: float = 0.92,
     ) -> list[MemoryResultDict]:
-        """Apply the same exact/semantic dedup rules to cached SSE results."""
-        if not cached_results or not local_entries:
-            return cached_results
-
-        local_remote_ids = {str(entry.remote_id) for entry in local_entries if entry.remote_id}
-        local_contents = {entry.content.lower().strip() for entry in local_entries}
-
-        candidates: list[MemoryResultDict] = []
-        candidate_texts: list[str] = []
-        for result in cached_results:
-            normalized_content = self._strip_shared_prefix(result["content"]).strip()
-            if result["memory_id"] in local_remote_ids or normalized_content.lower() in local_contents:
-                continue
-            candidates.append(result)
-            candidate_texts.append(f"{normalized_content} {result['detail']}".strip())
-
-        if not candidates or embedder is None or not embedder.available():
-            return candidates
-
-        local_texts = [f"{entry.content} {entry.detail}".strip() for entry in local_entries]
-        vectors = await asyncio.to_thread(embedder.embed_batch, [*local_texts, *candidate_texts])
-        local_vectors = [vector for vector in vectors[: len(local_entries)] if vector is not None]
-        remote_vectors = vectors[len(local_entries) :]
-        if not local_vectors:
-            return candidates
-
-        deduped: list[MemoryResultDict] = []
-        for candidate, remote_vector in zip(candidates, remote_vectors, strict=False):
-            if remote_vector is None:
-                deduped.append(candidate)
-                continue
-            if any(cosine_similarity(remote_vector, local_vector) > dedup_threshold for local_vector in local_vectors):
-                continue
-            deduped.append(candidate)
-        return deduped
+        from trw_memory._client_org_shared import dedupe_cached_shared_results as _impl
+        return await _impl(
+            self,
+            cached_results,
+            local_entries=local_entries,
+            embedder=embedder,
+            dedup_threshold=dedup_threshold,
+        )
 
     @staticmethod
     def _strip_shared_prefix(content: str) -> str:
-        """Normalize cached shared content for dedup comparisons."""
-        return content.removeprefix("[shared] ")
+        from trw_memory._client_org_shared import strip_shared_prefix as _impl
+        return _impl(content)
 
     async def _mark_fetch_retirements(self, shared_results: list[dict[str, object]]) -> None:
-        """Record retirement markers returned from remote fetches."""
-        remote_ids = {
-            str(result.get("id", result.get("remote_id", "")))
-            for result in shared_results
-            if self._is_retired_shared_result(result)
-        }
-        if not remote_ids:
-            return
-        with self._pending_remote_retirements_lock:
-            self._pending_remote_retirements.update(remote_id for remote_id in remote_ids if remote_id)
-        await self._apply_pending_remote_retirements()
+        from trw_memory._client_org_shared import mark_fetch_retirements as _impl
+        await _impl(self, shared_results)
 
     async def forget(self, memory_id: str | None = None, *, actor: str | None = None) -> ForgetResultDict:
         """Delete a memory entry.
