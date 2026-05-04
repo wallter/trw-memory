@@ -196,140 +196,19 @@ class AgentWithToolDecorator(Protocol):
     def tool(self) -> Callable[[Callable[..., Coroutine[object, object, object]]], None]: ...
 
 
-# --- PRD-DIST-005 FR-6: recall-side tiering for distilled records ---
-
-# Default dampening factor for records with source="distilled:*" or
-# tags prefixed "distill:". On new-repo installs the distilled tier may
-# flood memory; dampening ensures curated learnings retain priority while
-# distilled records still contribute.
-#
-# Overridable via TRW_MEMORY_DISTILLED_RECALL_WEIGHT env var (float).
-# Set to 1.0 to disable dampening; per-query opt-out via the
-# `include_distilled` kwarg on MemoryClient.recall.
-DEFAULT_DISTILLED_RECALL_WEIGHT: float = 0.75
-
-
-def _get_distilled_recall_weight() -> float:
-    """Resolve the dampening weight from env or fall back to default.
-
-    Invalid env values log a warning + use the default.
-    """
-    raw = os.environ.get("TRW_MEMORY_DISTILLED_RECALL_WEIGHT")
-    if not raw:
-        return DEFAULT_DISTILLED_RECALL_WEIGHT
-    try:
-        weight = float(raw)
-    except ValueError:
-        logger.warning(
-            "distilled_recall_weight_invalid",
-            raw=raw,
-            default=DEFAULT_DISTILLED_RECALL_WEIGHT,
-        )
-        return DEFAULT_DISTILLED_RECALL_WEIGHT
-    if not 0.0 <= weight <= 1.0:
-        logger.warning(
-            "distilled_recall_weight_out_of_range",
-            raw=weight,
-            default=DEFAULT_DISTILLED_RECALL_WEIGHT,
-        )
-        return DEFAULT_DISTILLED_RECALL_WEIGHT
-    return weight
-
-
-def _is_distilled_result(result: MemoryResultDict) -> bool:
-    """True if the record was written by trw-distill.
-
-    Recognizes distilled records via two complementary markers:
-      - any tag starts with ``distill:`` (e.g. ``distill:decision``,
-        ``distill:rationale``)
-      - metadata.source starts with ``distilled:`` (e.g.
-        ``distilled:git:<sha>..<sha>``)
-
-    Both markers are set by trw-distill's ingestion writer so recall
-    can match regardless of which one survives a serialization path.
-    """
-    tags = result.get("tags", []) or []
-    for tag in tags:
-        if isinstance(tag, str) and tag.startswith(("distill:", "distilled:")):
-            return True
-    metadata = result.get("metadata") or {}
-    if isinstance(metadata, dict):
-        src = str(metadata.get("source", ""))
-        if src.startswith("distilled:"):
-            return True
-    return False
-
-
-def apply_distilled_tiering(
-    results: list[MemoryResultDict],
-    *,
-    weight: float | None = None,
-    include_distilled: bool = True,
-) -> list[MemoryResultDict]:
-    """Apply PRD-DIST-005 FR-6 tiering to a recall result list.
-
-    When ``include_distilled=False``, distilled records are removed.
-    When ``include_distilled=True`` and ``weight < 1.0``, distilled record
-    scores are multiplied by ``weight`` and the list is re-sorted. At
-    ``weight=1.0`` (or env-override), this is a no-op passthrough.
-
-    The input list is not mutated; a new sorted list is returned.
-    """
-    if not include_distilled:
-        return [r for r in results if not _is_distilled_result(r)]
-
-    effective_weight = weight if weight is not None else _get_distilled_recall_weight()
-    if effective_weight >= 1.0 - 1e-9:
-        return list(results)
-
-    dampened: list[MemoryResultDict] = []
-    for r in results:
-        if _is_distilled_result(r):
-            # Create a shallow copy so we don't mutate the caller's input.
-            new_r = dict(r)
-            new_r["score"] = float(r.get("score", 0.0)) * effective_weight
-            dampened.append(new_r)  # type: ignore[arg-type]
-        else:
-            dampened.append(r)
-    dampened.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
-    return dampened
-
-
-# --- end FR-6 helpers ---
-
-
-def _entry_to_result(entry: MemoryEntry, score: float = 0.0) -> MemoryResultDict:
-    """Convert a MemoryEntry to a result dict."""
-    result: MemoryResultDict = {
-        "memory_id": entry.id,
-        "content": entry.content,
-        "detail": entry.detail,
-        "tags": list(entry.tags),
-        "importance": entry.importance,
-        "score": score,
-        "created_at": entry.created_at.isoformat(),
-        "updated_at": entry.updated_at.isoformat(),
-        "namespace": entry.namespace,
-        "source": "local",
-        "last_accessed_at": entry.last_accessed_at.isoformat() if entry.last_accessed_at is not None else "",
-        "q_value": entry.q_value,
-        "q_observations": entry.q_observations,
-        "recurrence": entry.recurrence,
-        "access_count": entry.access_count,
-        "_relevance_hint": score,
-    }
-    if entry.metadata:
-        result["metadata"] = dict(entry.metadata)
-        if "anomaly_dimension" in entry.metadata:
-            result["anomaly_dimension"] = entry.metadata["anomaly_dimension"]
-        if "z_score" in entry.metadata:
-            try:
-                result["z_score"] = float(entry.metadata["z_score"])
-            except ValueError:
-                pass
-    if entry.expires:
-        result["expires"] = entry.expires
-    return result
+# Distilled-tiering helpers + entry-to-result extracted to
+# _client_distilled_tiering.py (PRD-DIST-246 batch 109). Re-exports
+# preserve the public API surface (`apply_distilled_tiering` is part of
+# the documented client.py exports) and the internal lookup paths used
+# by `_client_recall.py` / `_client_recall_helpers.py` /
+# `_client_org_shared.py`.
+from trw_memory._client_distilled_tiering import (  # noqa: E402
+    DEFAULT_DISTILLED_RECALL_WEIGHT as DEFAULT_DISTILLED_RECALL_WEIGHT,
+    apply_distilled_tiering as apply_distilled_tiering,
+    entry_to_result as _entry_to_result,
+    get_distilled_recall_weight as _get_distilled_recall_weight,
+    is_distilled_result as _is_distilled_result,
+)
 
 
 def _create_local_backend(config: MemoryConfig, namespace: str) -> StorageBackend:
