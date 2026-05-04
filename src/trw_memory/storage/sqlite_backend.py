@@ -13,11 +13,10 @@ from __future__ import annotations
 
 import contextlib
 import importlib
-import json
 import sqlite3
 import threading
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
@@ -26,23 +25,15 @@ import structlog
 from trw_memory.exceptions import (
     EncryptionUnavailableError,
     StaleConnectionError,
-    StorageError,
 )
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
-from trw_memory.storage._row_mapper import entry_to_row, row_to_entry
 from trw_memory.storage._schema import ensure_schema, ensure_vec_table
 from trw_memory.storage._shared import (
-    DICT_FIELDS,
     ENTRY_COLUMNS,
     IMMUTABLE_FIELDS,
-    LIST_FIELDS,
-    serialize_update_value,
-    validate_update_fields,
 )
 from trw_memory.storage._stale_handle_detector import StaleHandleDetector
-from trw_memory.storage._utf8_validator import validate_utf8_fields
 from trw_memory.storage.interface import StorageBackend
-from trw_memory.sync.delta import DeltaTracker
 
 try:
     import sqlite_vec
@@ -184,6 +175,15 @@ from trw_memory.storage._query_ops import (
     list_entries as _query_ops_list_entries,
     list_namespaces as _query_ops_list_namespaces,
     search as _query_ops_search,
+)
+# CRUD ops extracted to _crud_ops.py (PRD-DIST-245 batch 87).
+from trw_memory.storage._crud_ops import (
+    delete as _crud_ops_delete,
+    get as _crud_ops_get,
+    increment_access_counts as _crud_ops_increment_access_counts,
+    increment_session_counts as _crud_ops_increment_session_counts,
+    store as _crud_ops_store,
+    update as _crud_ops_update,
 )
 
 
@@ -613,164 +613,37 @@ class SQLiteBackend(StorageBackend):
         return where_sql, params
 
     # ------------------------------------------------------------------
-    # StorageBackend interface
+    # StorageBackend interface — CRUD ops delegated to _crud_ops.py
+    # (PRD-DIST-245 batch 87)
     # ------------------------------------------------------------------
 
     def store(self, entry: MemoryEntry) -> None:
-        """INSERT OR REPLACE the entry into the memories table.
-
-        Args:
-            entry: Memory entry to persist.
-
-        Raises:
-            Utf8ValidationError: If any TEXT-column field contains invalid UTF-8.
-            StorageError: If the write fails.
-        """
-        # P1 — write-time UTF-8 validation (prevention layer).
-        # Validate before computing sync_hash so a bad entry never mutates state.
-        validate_utf8_fields(
-            {
-                "id": entry.id,
-                "content": entry.content,
-                "detail": entry.detail,
-                "nudge_line": entry.nudge_line,
-                "type": entry.type,
-                "namespace": entry.namespace,
-                "source": entry.source,
-                "source_identity": entry.source_identity,
-                "client_profile": entry.client_profile,
-                "model_id": entry.model_id,
-                "consolidated_into": entry.consolidated_into,
-                "remote_id": entry.remote_id,
-                "expires_at": entry.expires,
-                "task_type": entry.task_type,
-                "phase_origin": entry.phase_origin,
-                "team_origin": entry.team_origin,
-                "outcome_correlation": entry.outcome_correlation,
-                "sync_hash": entry.sync_hash,
-            }
-        )
-
-        # Auto dirty-mark for sync pipeline (PRD-INFRA-051)
-        entry.sync_seq = (entry.sync_seq or 0) + 1
-        entry.sync_hash = DeltaTracker.compute_sync_hash(entry)
-        entry.last_synced_at = None
-
-        placeholders = ", ".join(["?"] * len(_COLUMNS))
-        sql = f"INSERT OR REPLACE INTO memories ({_INSERT_COLUMNS_SQL}) VALUES ({placeholders})"  # noqa: S608 — _INSERT_COLUMNS_SQL is a static constant (no user input); values are parameterized
-        try:
-            with self._lock:
-                self._conn.execute(sql, entry_to_row(entry))
-                self._conn.commit()
-            logger.debug("memory_stored", entry_id=entry.id)
-        except (sqlite3.Error, json.JSONDecodeError) as exc:
-            raise StorageError(
-                f"Failed to store entry {entry.id}: {exc}",
-                path=str(self._db_path),
-            ) from exc
+        """INSERT OR REPLACE the entry into the memories table."""
+        _crud_ops_store(self, _INSERT_COLUMNS_SQL, _COLUMNS, entry)
 
     def get(self, entry_id: str) -> MemoryEntry | None:
-        """Retrieve an entry by id.
-
-        Args:
-            entry_id: Target entry id.
-
-        Returns:
-            :class:`MemoryEntry` or ``None`` if not found.
-
-        Raises:
-            StorageError: If the query fails.
-        """
-        sql = f"SELECT {_SELECT_COLUMNS_SQL} FROM memories WHERE id = ?"  # noqa: S608 — _SELECT_COLUMNS_SQL is a static constant; entry_id is a parameterized ?
-        try:
-            with self._lock:
-                row = self._conn.execute(sql, (entry_id,)).fetchone()
-            if row is None:
-                return None
-            return row_to_entry(tuple(row))
-        except (sqlite3.Error, ValueError, KeyError) as exc:
-            raise StorageError(
-                f"Failed to get entry {entry_id}: {exc}",
-                path=str(self._db_path),
-            ) from exc
+        """Retrieve an entry by id."""
+        return _crud_ops_get(self, _SELECT_COLUMNS_SQL, entry_id)
 
     def update(self, entry_id: str, **fields: object) -> MemoryEntry | None:
-        """Apply a partial update to an existing entry.
+        """Apply a partial update to an existing entry."""
+        return _crud_ops_update(self, _SELECT_COLUMNS_SQL, _VALID_UPDATE_COLUMNS, entry_id, **fields)
 
-        Args:
-            entry_id: Target entry id.
-            **fields: Fields to update.
+    def increment_session_counts(
+        self, entry_ids: list[str], *, updated_at: datetime | None = None
+    ) -> int:
+        """Increment session_count for multiple entries in one transaction."""
+        return _crud_ops_increment_session_counts(self, entry_ids, updated_at=updated_at)
 
-        Returns:
-            Updated :class:`MemoryEntry` or ``None`` if not found.
+    def increment_access_counts(
+        self, entry_ids: list[str], *, accessed_at: datetime | None = None
+    ) -> int:
+        """Increment access_count and last_accessed_at in one transaction."""
+        return _crud_ops_increment_access_counts(self, entry_ids, accessed_at=accessed_at)
 
-        Raises:
-            StorageError: If the update fails.
-        """
-        if not fields:
-            return self.get(entry_id)
-
-        existing = self.get(entry_id)
-        if existing is None:
-            return None
-
-        try:
-            # Serialise list/dict fields to JSON for SQLite
-            set_parts: list[str] = []
-            values: list[object] = []
-
-            # Auto-set updated_at when not explicitly provided
-            field_dict: dict[str, object] = dict(fields)
-            if "updated_at" not in field_dict:
-                field_dict["updated_at"] = datetime.now(timezone.utc)
-
-            try:
-                validate_update_fields(field_dict, _VALID_UPDATE_COLUMNS)
-            except ValueError as ve:
-                raise StorageError(
-                    f"Invalid update field: {ve.args[0]!r}",
-                    path=str(self._db_path),
-                ) from None
-
-            # Mark dirty for sync pipeline (PRD-INFRA-051)
-            # Skip when the caller is explicitly setting sync bookkeeping fields
-            # (for example ``mark_synced()`` only updates ``last_synced_at``).
-            if not {"sync_seq", "sync_hash", "last_synced_at"} & field_dict.keys():
-                updated_entry = existing.model_copy(deep=True)
-                for key, val in field_dict.items():
-                    setattr(updated_entry, key, val)
-                next_sync_seq = (existing.sync_seq or 0) + 1
-                field_dict["sync_seq"] = next_sync_seq
-                updated_entry.sync_seq = next_sync_seq
-                field_dict["sync_hash"] = DeltaTracker.compute_sync_hash(updated_entry)
-                field_dict["last_synced_at"] = None
-
-            for key, val in field_dict.items():
-                sql_key = "expires_at" if key == "expires" else key
-                set_parts.append(f"{sql_key} = ?")
-                normalised = serialize_update_value(key, val)
-                # SQLite needs JSON strings for list/dict columns
-                if (key in LIST_FIELDS and isinstance(normalised, list)) or (
-                    key in DICT_FIELDS and isinstance(normalised, dict)
-                ):
-                    values.append(json.dumps(normalised))
-                else:
-                    values.append(normalised)
-
-            values.append(entry_id)
-            sql = f"UPDATE memories SET {', '.join(set_parts)} WHERE id = ?"  # noqa: S608 — column names come from the validated UPDATABLE_FIELDS whitelist; values are parameterized
-            with self._lock:
-                self._conn.execute(sql, values)
-                if self._skip_commit_depth == 0:
-                    self._conn.commit()
-            return self.get(entry_id)
-        except StorageError:
-            raise
-        except (sqlite3.Error, ValueError, TypeError, json.JSONDecodeError) as exc:
-            raise StorageError(
-                f"Failed to update entry {entry_id}: {exc}",
-                path=str(self._db_path),
-            ) from exc
+    def delete(self, entry_id: str) -> bool:
+        """Remove an entry from memories (and vec_index when available)."""
+        return _crud_ops_delete(self, entry_id)
 
     @contextlib.contextmanager
     def transaction(self) -> Iterator[SQLiteBackend]:
@@ -811,90 +684,6 @@ class SQLiteBackend(StorageBackend):
             raise
         finally:
             self._skip_commit_depth -= 1
-
-    def increment_session_counts(self, entry_ids: list[str], *, updated_at: datetime | None = None) -> int:
-        """Increment ``session_count`` for multiple entries in one transaction."""
-        if not entry_ids:
-            return 0
-
-        now = updated_at or datetime.now(timezone.utc)
-        values = [(now.isoformat(), entry_id) for entry_id in entry_ids]
-
-        try:
-            sql = """
-                UPDATE memories
-                SET session_count = COALESCE(session_count, 0) + 1,
-                    updated_at = ?,
-                    sync_seq = COALESCE(sync_seq, 0) + 1,
-                    last_synced_at = NULL
-                WHERE id = ?
-            """
-            with self._lock:
-                before = self._conn.total_changes
-                self._conn.executemany(sql, values)
-                self._conn.commit()
-                return int(self._conn.total_changes - before)
-        except sqlite3.Error as exc:
-            raise StorageError(
-                f"Failed to increment session counts: {exc}",
-                path=str(self._db_path),
-            ) from exc
-
-    def increment_access_counts(self, entry_ids: list[str], *, accessed_at: datetime | None = None) -> int:
-        """Increment ``access_count`` and ``last_accessed_at`` for entries in one transaction."""
-        if not entry_ids:
-            return 0
-
-        now = accessed_at or datetime.now(timezone.utc)
-        values = [(now.isoformat(), now.isoformat(), entry_id) for entry_id in entry_ids]
-
-        try:
-            sql = """
-                UPDATE memories
-                SET access_count = COALESCE(access_count, 0) + 1,
-                    last_accessed_at = ?,
-                    updated_at = ?,
-                    sync_seq = COALESCE(sync_seq, 0) + 1,
-                    last_synced_at = NULL
-                WHERE id = ?
-            """
-            with self._lock:
-                before = self._conn.total_changes
-                self._conn.executemany(sql, values)
-                self._conn.commit()
-                return int(self._conn.total_changes - before)
-        except sqlite3.Error as exc:
-            raise StorageError(
-                f"Failed to increment access counts: {exc}",
-                path=str(self._db_path),
-            ) from exc
-
-    def delete(self, entry_id: str) -> bool:
-        """Remove an entry from the memories table (and vec_index if present).
-
-        Args:
-            entry_id: Target entry id.
-
-        Returns:
-            ``True`` if deleted, ``False`` if not found.
-
-        Raises:
-            StorageError: If the deletion fails.
-        """
-        try:
-            with self._lock:
-                cursor = self._conn.execute("DELETE FROM memories WHERE id = ?", (entry_id,))
-                deleted = cursor.rowcount > 0
-                if deleted and self._vec_available:
-                    self._delete_vector(entry_id)
-                self._conn.commit()
-            logger.debug("memory_deleted", entry_id=entry_id, existed=deleted)
-            return bool(deleted)
-        except sqlite3.Error as exc:
-            raise StorageError(
-                f"Failed to delete entry {entry_id}: {exc}",
-                path=str(self._db_path),
-            ) from exc
 
     # ------------------------------------------------------------------
     # Query / list / namespace ops (delegated to _query_ops.py
