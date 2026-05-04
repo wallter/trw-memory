@@ -6,7 +6,6 @@ Supports 13 typed edge types (PRD-CORE-107).  Graph traversal via BFS up to dept
 from __future__ import annotations
 
 import contextlib
-import json
 import sqlite3
 import threading
 from collections import deque
@@ -36,10 +35,9 @@ __all__ = [
     "wait_for_graph_updates",
 ]
 
-from trw_memory.exceptions import DimensionMismatchError, StorageError
+from trw_memory.exceptions import StorageError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
-from trw_memory.retrieval.dense import cosine_similarity
 from trw_memory.storage.interface import StorageBackend
 
 logger = structlog.get_logger(__name__)
@@ -435,54 +433,8 @@ def detect_cross_validation(
     return False
 
 
-
-
-def _safe_cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Cosine similarity with graceful degradation for graph operations.
-
-    Delegates to ``retrieval.dense.cosine_similarity`` but returns 0.0
-    on dimension mismatch.  Other ``ValueError`` subclasses are re-raised
-    so callers can distinguish true zero-similarity from incompatible vectors.
-    """
-    try:
-        return cosine_similarity(a, b)
-    except DimensionMismatchError:
-        logger.debug(
-            "cosine_dimension_mismatch",
-            len_a=len(a),
-            len_b=len(b),
-        )
-        return 0.0
-
-
-def _upsert_edge(
-    conn: sqlite3.Connection,
-    source_id: str,
-    target_id: str,
-    edge_type: str,
-    weight: float,
-    created_at: str,
-    *,
-    metadata: dict[str, str] | None = None,
-) -> None:
-    """Insert or update an edge in the graph.
-
-    Args:
-        metadata: Optional key-value metadata stored as JSON alongside the edge.
-
-    Raises:
-        ValueError: If *edge_type* is not in :data:`VALID_EDGE_TYPES`.
-    """
-    if edge_type not in VALID_EDGE_TYPES:
-        raise ValueError(f"Invalid edge type {edge_type!r}. Must be one of: {', '.join(sorted(VALID_EDGE_TYPES))}")
-    meta_json = json.dumps(metadata) if metadata else "{}"
-    if len(meta_json) > 4096:
-        raise ValueError(f"edge metadata exceeds 4096 byte limit ({len(meta_json)} bytes)")
-    conn.execute(
-        "INSERT INTO memory_graph_edges "
-        "(source_id, target_id, edge_type, weight, created_at, edge_metadata) "
-        "VALUES (?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT (source_id, target_id, edge_type) "
-        "DO UPDATE SET weight = ?, edge_metadata = ?",
-        (source_id, target_id, edge_type, weight, created_at, meta_json, weight, meta_json),
-    )
+# Graph primitives extracted to _graph_primitives.py (PRD-DIST-245 batch 98).
+from trw_memory._graph_primitives import (  # noqa: E402
+    _safe_cosine_similarity as _safe_cosine_similarity,
+    _upsert_edge as _upsert_edge,
+)
