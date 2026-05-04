@@ -279,6 +279,12 @@ from trw_memory._graph_decay import (  # noqa: E402
     apply_importance_decay as apply_importance_decay,
     memory_decay_pass as memory_decay_pass,
 )
+# Edge-creation cluster extracted to _graph_edges.py (PRD-DIST-245 batch 95).
+from trw_memory._graph_edges import (  # noqa: E402
+    create_consolidation_edges as create_consolidation_edges,
+    create_similarity_edges as create_similarity_edges,
+    create_tag_cooccurrence_edges as create_tag_cooccurrence_edges,
+)
 
 
 def list_org_shared_entries(
@@ -323,118 +329,6 @@ def list_org_shared_entries(
     matches.sort(key=lambda entry: (entry.importance, entry.updated_at), reverse=True)
     return matches[:limit]
 
-
-def create_similarity_edges(
-    entry: MemoryEntry,
-    conn: sqlite3.Connection,
-    embedding: list[float] | None = None,
-    candidate_embeddings: list[tuple[str, list[float]]] | None = None,
-    *,
-    lock: threading.Lock | None = None,
-) -> int:
-    """Create similarity edges between entry and candidates above threshold.
-
-    Args:
-        entry: The newly written entry.
-        conn: SQLite connection (must have memory_graph_edges table).
-        embedding: The entry's embedding vector.
-        candidate_embeddings: List of (entry_id, embedding) pairs to compare against.
-        lock: Optional threading lock for thread-safe commit.
-
-    Returns:
-        Number of edges created.
-    """
-    if embedding is None or candidate_embeddings is None:
-        return 0
-
-    created = 0
-    now = datetime.now(timezone.utc).isoformat()
-
-    with _optional_lock(lock):
-        for cand_id, cand_emb in candidate_embeddings:
-            if cand_id == entry.id:
-                continue
-            sim = _safe_cosine_similarity(embedding, cand_emb)
-            if sim > SIMILARITY_THRESHOLD:
-                _upsert_edge(conn, entry.id, cand_id, "similarity", round(sim, 4), now)
-                _upsert_edge(conn, cand_id, entry.id, "similarity", round(sim, 4), now)
-                created += 2
-
-        conn.commit()
-    logger.debug("similarity_edges_created", entry_id=entry.id, count=created)
-    return created
-
-
-def create_tag_cooccurrence_edges(
-    entry: MemoryEntry,
-    conn: sqlite3.Connection,
-    candidate_entries: list[MemoryEntry] | None = None,
-    *,
-    lock: threading.Lock | None = None,
-) -> int:
-    """Create tag co-occurrence edges for entries sharing 2+ tags.
-
-    Uses Jaccard similarity as weight.
-    Limited to 500 most recent candidates.
-
-    Args:
-        lock: Optional threading lock for thread-safe commit.
-    """
-    if not entry.tags or candidate_entries is None:
-        return 0
-
-    entry_tags = set(entry.tags)
-    created = 0
-    now = datetime.now(timezone.utc).isoformat()
-
-    with _optional_lock(lock):
-        for cand in candidate_entries[:CANDIDATE_LIMIT]:
-            if cand.id == entry.id or not cand.tags:
-                continue
-            cand_tags = set(cand.tags)
-            shared = entry_tags & cand_tags
-            if len(shared) >= TAG_COOCCURRENCE_MIN_SHARED:
-                union_size = len(entry_tags | cand_tags)
-                jaccard = len(shared) / union_size if union_size > 0 else 0.0
-                _upsert_edge(conn, entry.id, cand.id, "tag_cooccurrence", round(jaccard, 4), now)
-                _upsert_edge(conn, cand.id, entry.id, "tag_cooccurrence", round(jaccard, 4), now)
-                created += 2
-
-        conn.commit()
-    logger.debug("tag_edges_created", entry_id=entry.id, count=created)
-    return created
-
-
-def create_consolidation_edges(
-    entry: MemoryEntry,
-    conn: sqlite3.Connection,
-    *,
-    lock: threading.Lock | None = None,
-) -> int:
-    """Create consolidation lineage edges from consolidated_from.
-
-    Args:
-        lock: Optional threading lock for thread-safe commit.
-    """
-    if not entry.consolidated_from:
-        return 0
-
-    created = 0
-    now = datetime.now(timezone.utc).isoformat()
-
-    with _optional_lock(lock):
-        for source_id in entry.consolidated_from:
-            # Check source exists
-            row = conn.execute("SELECT id FROM memories WHERE id = ?", (source_id,)).fetchone()
-            if row is None:
-                logger.debug("consolidation_edge_skip_missing", source_id=source_id)
-                continue
-            _upsert_edge(conn, entry.id, source_id, "consolidation", 1.0, now)
-            created += 1
-
-        conn.commit()
-    logger.debug("consolidation_edges_created", entry_id=entry.id, count=created)
-    return created
 
 
 def graph_query(
