@@ -160,6 +160,12 @@ from trw_memory.storage._connection import (
 )
 # recover_db extracted to _recovery.py (PRD-DIST-245 batch 83).
 from trw_memory.storage._recovery import recover_db as _recovery_recover_db
+# Resilient row materialisation extracted to _resilient_fetch.py
+# (PRD-DIST-245 batch 84).
+from trw_memory.storage._resilient_fetch import (
+    fetch_rows_resilient as _resilient_fetch_rows_resilient,
+    fetch_rows_via_bytes_fallback as _resilient_fetch_rows_via_bytes_fallback,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -514,11 +520,8 @@ class SQLiteBackend(StorageBackend):
         return self._vec_available
 
     # ------------------------------------------------------------------
-    # Filter helpers
-    # ------------------------------------------------------------------
-
-    # ------------------------------------------------------------------
-    # P2 — Resilient row materialisation
+    # P2 — Resilient row materialisation (extracted to _resilient_fetch.py
+    # PRD-DIST-245 batch 84)
     # ------------------------------------------------------------------
 
     def _fetch_rows_resilient(
@@ -527,68 +530,15 @@ class SQLiteBackend(StorageBackend):
         *,
         table: str = "memories",
     ) -> list[MemoryEntry]:
-        """Iterate a cursor row-by-row, quarantining bad-UTF-8 rows.
-
-        The sqlite3.OperationalError("Could not decode to UTF-8 column ...")
-        is raised by the C extension during row fetch.  We use a fallback
-        connection with ``text_factory=bytes`` to read raw rows when the
-        primary cursor fails, then decode each column individually, replacing
-        undecidable bytes with the Unicode replacement character and marking
-        the row as quarantined.
-
-        Strategy:
-          1. Attempt ``fetchall()`` on the primary cursor.
-          2. On UTF-8 decode failure, fall back to a secondary bytes-mode
-             connection that re-executes the same SQL and reads all rows as
-             bytes objects.  For each bytes row we attempt str decode; rows
-             that cannot be decoded at all are quarantined.
-
-        Per-row errors:
-          - Increment ``self.quarantine_count_utf8``.
-          - Emit a structlog WARN event with action="memory_row_utf8_quarantined".
-          - Skip the row from the return list.
-
-        Non-UTF-8 errors (e.g. schema errors) are re-raised so callers can
-        convert them to ``StorageError`` as before.
-
-        Args:
-            cursor: Active sqlite3 cursor after ``execute()``.
-            table: Table name for logging context.
-
-        Returns:
-            List of successfully materialised MemoryEntry objects.
-        """
-        # Fast path: all rows are clean UTF-8.
-        try:
-            raw_rows = cursor.fetchall()
-        except (sqlite3.OperationalError, UnicodeDecodeError) as exc:
-            err_str = str(exc)
-            if "UTF-8" not in err_str and "decode" not in err_str.lower() and not isinstance(exc, UnicodeDecodeError):
-                raise  # non-UTF-8 error — propagate
-
-            # Slow path: re-read rows via a bytes-mode connection.
-            return self._fetch_rows_via_bytes_fallback(cursor, table=table)
-
-        results: list[MemoryEntry] = []
-        for idx, raw_row in enumerate(raw_rows):
-            try:
-                entry = row_to_entry(tuple(raw_row))
-                results.append(entry)
-            except (UnicodeDecodeError, UnicodeEncodeError) as exc:
-                self.quarantine_count_utf8 += 1
-                row_id: str | None = None
-                with contextlib.suppress(Exception):
-                    row_id = str(raw_row[0])
-                logger.warning(
-                    "db_bad_utf8_row_quarantined",
-                    action="memory_row_utf8_quarantined",
-                    row_id=row_id,
-                    column="detail",
-                    db_path=str(self._db_path),
-                    table=table,
-                    row_index=idx,
-                    error=str(exc),
-                )
+        """Delegate to ``_resilient_fetch.fetch_rows_resilient``."""
+        results, delta = _resilient_fetch_rows_resilient(
+            cursor,
+            db_path=self._db_path,
+            dbapi=self._dbapi,
+            select_columns_sql=_SELECT_COLUMNS_SQL,
+            table=table,
+        )
+        self.quarantine_count_utf8 += delta
         return results
 
     def _fetch_rows_via_bytes_fallback(
@@ -597,88 +547,20 @@ class SQLiteBackend(StorageBackend):
         *,
         table: str = "memories",
     ) -> list[MemoryEntry]:
-        """Fallback: re-execute via bytes-mode connection to isolate bad rows.
-
-        Opens a second connection with ``text_factory=bytes`` so we get raw
-        bytes per column.  We then attempt UTF-8 decode per column; rows where
-        any column cannot decode at all are quarantined (counted + logged) and
-        omitted from the result.
-
-        This is the slow path — invoked only when the primary cursor fails.
-        """
-        # Reconstruct the SQL and parameters from the cursor description.
-        # Since we can't re-read them, use the table scan approach: read all
-        # ids via a bytes connection and then re-fetch individually.
-        # Simpler: re-query the full table via bytes connection and filter.
-        results: list[MemoryEntry] = []
-        try:
-            raw_conn = self._dbapi.connect(str(self._db_path))
-            raw_conn.text_factory = bytes
-            raw_rows = raw_conn.execute(
-                f"SELECT {_SELECT_COLUMNS_SQL} FROM {table} ORDER BY updated_at DESC"  # noqa: S608
-            ).fetchall()
-            raw_conn.close()
-        except Exception:
-            # Can't even open the fallback — return empty so callers don't crash.
-            logger.warning(
-                "db_utf8_fallback_failed",
-                action="memory_row_utf8_quarantined",
-                db_path=str(self._db_path),
-                table=table,
-            )
-            return []
-
-        for idx, raw_row in enumerate(raw_rows):
-            # Decode each bytes value to str; skip row if any column fails entirely.
-            decoded: list[object] = []
-            row_bad = False
-            bad_col: str | None = None
-            for col_idx, val in enumerate(raw_row):
-                if isinstance(val, bytes):
-                    try:
-                        decoded.append(val.decode("utf-8", errors="strict"))
-                    except (UnicodeDecodeError, ValueError):
-                        row_bad = True
-                        with contextlib.suppress(Exception):
-                            bad_col = cursor.description[col_idx][0] if cursor.description else None
-                        break
-                else:
-                    decoded.append(val)
-
-            if row_bad:
-                self.quarantine_count_utf8 += 1
-                row_id_str: str | None = None
-                with contextlib.suppress(Exception):
-                    first = raw_row[0]
-                    row_id_str = first.decode("utf-8", errors="replace") if isinstance(first, bytes) else str(first)
-                logger.warning(
-                    "db_bad_utf8_row_quarantined",
-                    action="memory_row_utf8_quarantined",
-                    row_id=row_id_str,
-                    column=bad_col or "unknown",
-                    db_path=str(self._db_path),
-                    table=table,
-                    row_index=idx,
-                )
-                continue
-
-            try:
-                entry = row_to_entry(tuple(decoded))
-                results.append(entry)
-            except Exception:
-                # Unexpected mapping failure — quarantine silently.
-                self.quarantine_count_utf8 += 1
-                logger.warning(
-                    "db_bad_utf8_row_quarantined",
-                    action="memory_row_utf8_quarantined",
-                    row_id=None,
-                    column="row_to_entry",
-                    db_path=str(self._db_path),
-                    table=table,
-                    row_index=idx,
-                )
-
+        """Delegate to ``_resilient_fetch.fetch_rows_via_bytes_fallback``."""
+        results, delta = _resilient_fetch_rows_via_bytes_fallback(
+            cursor,
+            db_path=self._db_path,
+            dbapi=self._dbapi,
+            select_columns_sql=_SELECT_COLUMNS_SQL,
+            table=table,
+        )
+        self.quarantine_count_utf8 += delta
         return results
+
+    # ------------------------------------------------------------------
+    # Filter helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _build_filter_clause(
