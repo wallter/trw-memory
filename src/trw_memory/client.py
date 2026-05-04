@@ -1092,105 +1092,13 @@ class MemoryClient:
     async def forget(self, memory_id: str | None = None, *, actor: str | None = None) -> ForgetResultDict:
         """Delete a memory entry.
 
-        Args:
-            memory_id: ID of the memory to delete.
-            actor: Optional actor identity for GDPR-style bulk erasure.
-
-        Returns:
-            Dict with ``memory_id``, ``status``, ``namespace``.
-
-        Raises:
-            MemoryNotFoundError: If *memory_id* does not exist or belongs
-                to a different namespace.
+        Implementation lives in ``_client_forget_search.forget_impl``
+        (PRD-DIST-246 batch 106). Supports memory_id-targeted delete and
+        actor-scoped GDPR bulk erasure; quarantine-aware.
         """
-        self._require_permission(Permission.DELETE, "forget")
-        self._maybe_start_retry_drain()
-        if not memory_id and not actor:
-            raise ValueError("memory_id or actor must be provided")
-        async with self._lock:
-            backend = self._get_backend()
-            if actor:
-                deleted_count = 0
-                for candidate in backend.list_entries(
-                    namespace=self._namespace,
-                    limit=max(10_000, backend.count(namespace=self._namespace)),
-                ):
-                    if candidate.source_identity != actor:
-                        continue
-                    if backend.delete(candidate.id):
-                        deleted_count += 1
-                        remove_entry_from_tiers(self._config, self._namespace, candidate.id)
-                deleted_count += delete_quarantined_entries(self._config, namespace=self._namespace, actor=actor)
-                append_audit_event(
-                    self._config,
-                    "forget",
-                    actor=actor,
-                    namespace=self._namespace,
-                    data={"entries_deleted": deleted_count, "selector": "actor"},
-                )
-                actor_forget_result: ForgetResultDict = {
-                    "memory_id": "",
-                    "status": "deleted",
-                    "namespace": self._namespace,
-                    "entries_deleted": deleted_count,
-                }
-                return actor_forget_result
+        from trw_memory._client_forget_search import forget_impl as _impl
 
-            assert memory_id is not None  # noqa: S101 — narrowed by branch above
-            existing = backend.get(memory_id)
-            if existing is None:
-                quarantined_deleted = delete_quarantined_entries(
-                    self._config,
-                    namespace=self._namespace,
-                    memory_id=memory_id,
-                )
-                if quarantined_deleted == 0:
-                    raise MemoryNotFoundError(f"Memory entry {memory_id!r} not found")
-                append_audit_event(
-                    self._config,
-                    "forget",
-                    entry_id=memory_id,
-                    actor="",
-                    namespace=self._namespace,
-                    data={"entries_deleted": quarantined_deleted, "quarantined": True},
-                )
-                quarantined_forget_result: ForgetResultDict = {
-                    "memory_id": memory_id,
-                    "status": "deleted",
-                    "namespace": self._namespace,
-                    "entries_deleted": quarantined_deleted,
-                }
-                return quarantined_forget_result
-            if existing.namespace != self._namespace:
-                raise MemoryNotFoundError(f"Memory entry {memory_id!r} not found in namespace {self._namespace!r}")
-            remote_id = existing.remote_id
-            backend.delete(memory_id)
-            remove_entry_from_tiers(self._config, self._namespace, memory_id)
-            append_audit_event(
-                self._config,
-                "forget",
-                entry_id=memory_id,
-                actor=existing.source_identity,
-                namespace=self._namespace,
-                data={"entries_deleted": 1, "quarantined": False},
-            )
-        if remote_id:
-            self._schedule_background_task(self._retire_remote_entry(memory_id, remote_id))
-
-        logger.debug(
-            "memory_forgotten",
-            op="forget",
-            outcome="success",
-            memory_id=memory_id,
-            namespace=self._namespace,
-        )
-        forget_result: ForgetResultDict = {
-            "memory_id": memory_id,
-            "status": "deleted",
-            "namespace": self._namespace,
-            "entries_deleted": 1,
-        }
-        return forget_result
+        return await _impl(self, memory_id, actor=actor)
 
     async def search(
         self,
@@ -1202,86 +1110,22 @@ class MemoryClient:
         actor: str | None = None,
         status: str | None = None,
     ) -> list[MemoryResultDict]:
-        """Search memories with filters.
+        """Filtered search (tags + min_importance + since + status filter).
 
-        Args:
-            tags: If provided, results must contain all listed tags.
-            min_importance: Lower bound on importance (inclusive, ``[0.0, 1.0]``).
-            since: If provided, only return entries created after this time.
-            limit: Maximum number of results (must be >= 1).
-
-        Returns:
-            List of result dicts ordered by importance descending.
-
-        Raises:
-            ValueError: If *limit* < 1 or *min_importance* out of range.
+        Implementation lives in ``_client_forget_search.search_impl``
+        (PRD-DIST-246 batch 106).
         """
-        if limit < 1:
-            raise ValueError(f"limit must be >= 1, got {limit}")
-        if not 0.0 <= min_importance <= 1.0:
-            raise ValueError(f"min_importance must be in [0.0, 1.0], got {min_importance}")
-        if status is not None and status not in {"active", "resolved", "obsolete", "archived", "quarantined"}:
-            raise ValueError(f"status must be one of active/resolved/obsolete/archived/quarantined, got {status!r}")
-        self._require_permission(Permission.READ, "search")
-        self._maybe_start_retry_drain()
-        await self._apply_pending_remote_retirements()
+        from trw_memory._client_forget_search import search_impl as _impl
 
-        if status == "quarantined":
-            entries = list_quarantined_entries(
-                self._config,
-                namespace=self._namespace,
-                actor=actor,
-                limit=max(limit * 5, 10_000) if actor is not None else limit * 5,
-            )
-        else:
-            async with self._lock:
-                fetch_limit = limit * 5
-                if actor is not None:
-                    fetch_limit = max(fetch_limit, self._get_backend().count(namespace=self._namespace))
-                entries = self._get_backend().list_entries(
-                    namespace=self._namespace,
-                    limit=fetch_limit,  # over-fetch to allow for post-filtering
-                )
-
-        # Post-filter
-        tag_set: set[str] = set(tags) if tags else set()
-        results: list[MemoryResultDict] = []
-        for entry in entries:
-            if actor is not None and entry.source_identity != actor:
-                continue
-            if status is not None and status != "quarantined" and entry.status.value != status:
-                continue
-            if entry.importance < min_importance:
-                continue
-            if tag_set and not tag_set.issubset(set(entry.tags)):
-                continue
-            if since is not None and entry.created_at < since:
-                continue
-            results.append(_entry_to_result(entry, score=entry.importance))
-
-        results.sort(key=lambda r: float(r["score"]), reverse=True)
-        final = results[:limit]
-        logger.debug(
-            "memory_searched",
-            op="search",
-            outcome="success",
-            namespace=self._namespace,
-            tag_filter=tags,
+        return await _impl(
+            self,
+            tags=tags,
             min_importance=min_importance,
-            result_count=len(final),
+            since=since,
+            limit=limit,
+            actor=actor,
+            status=status,
         )
-        append_audit_event(
-            self._config,
-            "access",
-            actor=actor or "",
-            namespace=self._namespace,
-            data={
-                "entries_returned": len(final),
-                "status": status or "",
-                "tag_filter": tags or [],
-            },
-        )
-        return final
 
     async def audit_learning(self, learning_id: str) -> dict[str, object]:
         """Return SEC-001 audit data for an active or quarantined learning."""
