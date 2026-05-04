@@ -15,7 +15,6 @@ import contextlib
 import importlib
 import json
 import sqlite3
-import struct
 import threading
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -165,6 +164,16 @@ from trw_memory.storage._recovery import recover_db as _recovery_recover_db
 from trw_memory.storage._resilient_fetch import (
     fetch_rows_resilient as _resilient_fetch_rows_resilient,
     fetch_rows_via_bytes_fallback as _resilient_fetch_rows_via_bytes_fallback,
+)
+# Vector operations extracted to _vector_ops.py (PRD-DIST-245 batch 85).
+from trw_memory.storage._vector_ops import (
+    delete_vector as _vec_ops_delete_vector,
+    delete_vector_internal as _vec_ops_delete_vector_internal,
+    existing_vector_ids as _vec_ops_existing_vector_ids,
+    get_stored_embeddings as _vec_ops_get_stored_embeddings,
+    search_vectors as _vec_ops_search_vectors,
+    upsert_vector as _vec_ops_upsert_vector,
+    vector_exists as _vec_ops_vector_exists,
 )
 
 
@@ -877,49 +886,6 @@ class SQLiteBackend(StorageBackend):
                 path=str(self._db_path),
             ) from exc
 
-    def _delete_vector(self, entry_id: str) -> None:
-        """Remove the vector row for *entry_id* (no-op if absent)."""
-        row = self._conn.execute("SELECT rowid FROM vec_index WHERE entry_id = ?", (entry_id,)).fetchone()
-        if row is None:
-            return
-        rowid: int = row[0]
-        self._conn.execute("DELETE FROM vec_memories WHERE rowid = ?", (rowid,))
-        self._conn.execute("DELETE FROM vec_index WHERE rowid = ?", (rowid,))
-
-    def delete_vector(self, entry_id: str) -> bool:
-        """Public vector-row deletion helper for warm-tier maintenance."""
-        if not self._vec_available:
-            return False
-        with self._lock:
-            before = self._conn.total_changes
-            self._delete_vector(entry_id)
-            self._conn.commit()
-            return bool(self._conn.total_changes > before)
-
-    def vector_exists(self, entry_id: str) -> bool:
-        """Return whether vec_index currently contains *entry_id*."""
-        if not self._vec_available:
-            return False
-        row = self._conn.execute("SELECT 1 FROM vec_index WHERE entry_id = ?", (entry_id,)).fetchone()
-        return row is not None
-
-    def existing_vector_ids(self) -> set[str]:
-        """Return the set of entry IDs that currently have a stored vector.
-
-        Empty set when sqlite-vec is unavailable. Single-query bulk lookup so
-        callers (e.g. backfill loops) can skip already-embedded entries
-        without paying per-entry round-trips.
-        """
-        if not self._vec_available:
-            return set()
-        try:
-            with self._lock:
-                rows = self._conn.execute("SELECT entry_id FROM vec_index").fetchall()
-        except sqlite3.Error:
-            logger.debug("existing_vector_ids_query_failed", exc_info=True)
-            return set()
-        return {str(r[0]) for r in rows}
-
     def search(
         self,
         query: str,
@@ -1179,109 +1145,53 @@ class SQLiteBackend(StorageBackend):
         self.close()
 
     # ------------------------------------------------------------------
-    # Vector operations (sqlite-vec)
+    # Vector operations (delegated to _vector_ops.py — PRD-DIST-245 batch 85)
     # ------------------------------------------------------------------
 
+    def _delete_vector(self, entry_id: str) -> None:
+        """Internal vector deletion (caller holds the lock)."""
+        _vec_ops_delete_vector_internal(self._conn, entry_id)
+
+    def delete_vector(self, entry_id: str) -> bool:
+        """Public vector-row deletion."""
+        return _vec_ops_delete_vector(
+            self._conn, self._lock, vec_available=self._vec_available, entry_id=entry_id
+        )
+
+    def vector_exists(self, entry_id: str) -> bool:
+        """Single-row vec_index probe."""
+        return _vec_ops_vector_exists(self._conn, vec_available=self._vec_available, entry_id=entry_id)
+
+    def existing_vector_ids(self) -> set[str]:
+        """Bulk set of entry IDs with stored vectors."""
+        return _vec_ops_existing_vector_ids(
+            self._conn, self._lock, vec_available=self._vec_available
+        )
+
     def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:
-        """Insert or update a vector in vec_memories.
-
-        No-op when sqlite-vec is not available.
-
-        Args:
-            entry_id: The corresponding memory entry id.
-            embedding: Dense float vector (length must equal *dim*).
-        """
-        if not self._vec_available:
-            return
-
-        emb_bytes = struct.pack(f"{self._dim}f", *embedding)
-
-        with self._lock:
-            # Ensure a vec_index row exists and get its rowid
-            self._conn.execute("INSERT OR IGNORE INTO vec_index(entry_id) VALUES(?)", (entry_id,))
-            row = self._conn.execute("SELECT rowid FROM vec_index WHERE entry_id = ?", (entry_id,)).fetchone()
-            rowid: int = row[0]
-
-            # Delete old vector then insert fresh (idempotent upsert)
-            self._conn.execute("DELETE FROM vec_memories WHERE rowid = ?", (rowid,))
-            self._conn.execute(
-                "INSERT INTO vec_memories(rowid, embedding) VALUES(?, ?)",
-                (rowid, emb_bytes),
-            )
-            self._conn.commit()
-        logger.debug("vector_upserted", entry_id=entry_id)
+        """Insert or update a vector in vec_memories."""
+        _vec_ops_upsert_vector(
+            self._conn,
+            self._lock,
+            vec_available=self._vec_available,
+            dim=self._dim,
+            entry_id=entry_id,
+            embedding=embedding,
+        )
 
     def search_vectors(self, query_embedding: list[float], top_k: int = 25) -> list[tuple[str, float]]:
-        """KNN search in vec_memories.
-
-        No-op (returns empty list) when sqlite-vec is not available.
-
-        Args:
-            query_embedding: Query vector (length must equal *dim*).
-            top_k: Number of nearest neighbours to return.
-
-        Returns:
-            List of ``(entry_id, distance)`` pairs sorted by distance ascending.
-        """
-        if not self._vec_available:
-            return []
-
-        query_bytes = struct.pack(f"{self._dim}f", *query_embedding)
-        try:
-            with self._lock:
-                rows = self._conn.execute(
-                    """
-                    SELECT vi.entry_id, vm.distance
-                    FROM vec_memories vm
-                    JOIN vec_index vi ON vm.rowid = vi.rowid
-                    WHERE vm.embedding MATCH ? AND k = ?
-                    ORDER BY vm.distance
-                    """,
-                    (query_bytes, top_k),
-                ).fetchall()
-            return [(str(r[0]), float(r[1])) for r in rows]
-        except sqlite3.Error:
-            logger.debug("vector_search_error", exc_info=True)
-            return []
+        """KNN search in vec_memories."""
+        return _vec_ops_search_vectors(
+            self._conn,
+            self._lock,
+            vec_available=self._vec_available,
+            dim=self._dim,
+            query_embedding=query_embedding,
+            top_k=top_k,
+        )
 
     def get_stored_embeddings(self, entry_ids: list[str]) -> dict[str, list[float]]:
-        """Load stored vectors for the requested entry IDs.
-
-        Returns an empty dict when sqlite-vec is unavailable or when none of the
-        requested IDs currently have persisted vectors.
-        """
-        if not self._vec_available or not entry_ids:
-            return {}
-
-        placeholders = ", ".join(["?"] * len(entry_ids))
-        sql = f"""
-            SELECT vi.entry_id, vm.embedding
-            FROM vec_memories vm
-            JOIN vec_index vi ON vm.rowid = vi.rowid
-            WHERE vi.entry_id IN ({placeholders})
-        """  # noqa: S608 — placeholder count is derived from entry_ids length only; values bound separately
-        try:
-            with self._lock:
-                rows = self._conn.execute(sql, entry_ids).fetchall()
-        except sqlite3.Error:
-            logger.debug("vector_load_error", exc_info=True)
-            return {}
-
-        embeddings: dict[str, list[float]] = {}
-        for row in rows:
-            raw = row[1]
-            if raw is None:
-                continue
-            # sqlite-vec stores float arrays as packed blobs; unpack them here so
-            # the retrieval layer receives the same list[float] shape as embed().
-            blob = bytes(raw)
-            if len(blob) % 4 != 0:
-                logger.debug(
-                    "vector_load_skipped_invalid_blob",
-                    entry_id=str(row[0]),
-                    blob_len=len(blob),
-                )
-                continue
-            dim = len(blob) // 4
-            embeddings[str(row[0])] = list(struct.unpack(f"{dim}f", blob))
-        return embeddings
+        """Bulk lookup of packed embedding blobs."""
+        return _vec_ops_get_stored_embeddings(
+            self._conn, self._lock, vec_available=self._vec_available, entry_ids=entry_ids
+        )
