@@ -257,186 +257,21 @@ def update_entry_graph(
     }
 
 
-def _project_scope_key(namespace: str) -> str | None:
-    """Return a stable project key for project-scoped namespaces."""
-    if namespace == "default":
-        return "default"
-    if namespace.startswith("project:"):
-        return namespace.split(":", 1)[1]
-    return None
-
-
-def _cross_validation_prefix(project_id: str) -> str:
-    return f"cross_validated:project_id={project_id}:"
-
-
-def _entry_has_cross_validation(entry: MemoryEntry, project_id: str) -> bool:
-    prefix = _cross_validation_prefix(project_id)
-    return any(event.startswith(prefix) for event in entry.outcome_history)
-
-
-def _append_cross_validation(entry: MemoryEntry, project_id: str, similarity: float) -> MemoryEntry:
-    now = datetime.now(timezone.utc)
-    outcome = f"cross_validated:project_id={project_id}:similarity={similarity:.4f}:timestamp={now.isoformat()}"
-    return entry.model_copy(
-        update={
-            "cross_validated": True,
-            "outcome_history": [*entry.outcome_history, outcome],
-            "updated_at": now,
-        }
-    )
-
-
-def _persist_cross_validated_entry(
-    backend: StorageBackend,
-    original: MemoryEntry,
-    updated: MemoryEntry,
-) -> None:
-    if updated == original:
-        return
-    backend.update(
-        original.id,
-        cross_validated=updated.cross_validated,
-        importance=updated.importance,
-        outcome_history=updated.outcome_history,
-        updated_at=updated.updated_at,
-    )
-
-
-def _entry_update_lock(backend: StorageBackend, entry_id: str) -> threading.Lock:
-    """Return a stable per-entry lock for in-process cross-validation updates."""
-    backend_key = str(getattr(backend, "_db_path", f"backend:{id(backend)}"))
-    key = (backend_key, entry_id)
-    with _ENTRY_UPDATE_LOCKS_GUARD:
-        return _ENTRY_UPDATE_LOCKS.setdefault(key, threading.Lock())
-
-
-def _backend_update_guard(backend: StorageBackend) -> contextlib.AbstractContextManager[Path | None]:
-    """Return a cross-process guard for backend RMW updates when the store has a stable on-disk path."""
-    from trw_memory.storage.persistence import lock_for_rmw
-
-    db_path = getattr(backend, "_db_path", None)
-    if isinstance(db_path, Path):
-        return lock_for_rmw(db_path)
-
-    entries_dir = getattr(backend, "_dir", None)
-    if isinstance(entries_dir, Path):
-        return lock_for_rmw(entries_dir / ".graph-update")
-
-    return contextlib.nullcontext()
-
-
-def _merge_cross_validated_entry(
-    backend: StorageBackend,
-    entry_id: str,
-    project_id: str,
-    similarity: float,
-) -> tuple[MemoryEntry | None, bool]:
-    """Atomically append a single project's validation and boost once."""
-    # The thread lock prevents same-process races; the file-backed guard closes the
-    # remaining gap where two separate processes open the same store concurrently.
-    with _entry_update_lock(backend, entry_id), _backend_update_guard(backend):
-        current = backend.get(entry_id)
-        if current is None:
-            return None, False
-        if _entry_has_cross_validation(current, project_id):
-            return current, False
-
-        updated = _append_cross_validation(current, project_id, similarity)
-        updated = apply_importance_boost(updated)
-        _persist_cross_validated_entry(backend, current, updated)
-        reloaded = backend.get(entry_id)
-        return (reloaded or updated), True
-
-
-def _apply_cross_project_validation(
-    entry: MemoryEntry,
-    backend: StorageBackend,
-    conn: sqlite3.Connection,
-    *,
-    embedding: list[float] | None = None,
-    config: MemoryConfig | None = None,
-) -> int:
-    """Cross-validate against sibling project stores when embeddings exist.
-
-    Package-local cross-project evidence comes from sibling on-disk project
-    namespaces. This keeps the feature usable without waiting on a platform-side
-    embedding feed while still failing closed when embeddings are unavailable.
-    """
-    if embedding is None:
-        return 0
-
-    current_project = _project_scope_key(entry.namespace)
-    if current_project is None:
-        return 0
-
-    from trw_memory.integrations._backend import discover_namespace_backends
-
-    cfg = config or MemoryConfig()
-    matched_projects = 0
-    current_entry = entry
-
-    with discover_namespace_backends(cfg) as stores:
-        for namespaces, remote_backend in stores:
-            project_namespaces = [
-                namespace
-                for namespace in namespaces
-                if (project_id := _project_scope_key(namespace)) is not None and project_id != current_project
-            ]
-            for namespace in project_namespaces:
-                project_id = _project_scope_key(namespace)
-                if project_id is None:
-                    continue
-
-                remote_entries = remote_backend.list_entries(
-                    status=MemoryStatus.ACTIVE,
-                    namespace=namespace,
-                    limit=CANDIDATE_LIMIT,
-                )
-                if not remote_entries:
-                    continue
-
-                remote_embeddings = remote_backend.get_stored_embeddings([candidate.id for candidate in remote_entries])
-                remote_candidates = [
-                    (candidate, remote_embedding)
-                    for candidate in remote_entries
-                    if (remote_embedding := remote_embeddings.get(candidate.id)) is not None
-                ]
-                remote_payload = [
-                    (candidate.id, project_id, remote_embedding) for candidate, remote_embedding in remote_candidates
-                ]
-                if not detect_cross_validation(
-                    current_entry,
-                    conn,
-                    embedding=embedding,
-                    remote_entries=remote_payload,
-                ):
-                    continue
-
-                for remote_entry, remote_embedding in remote_candidates:
-                    similarity = _safe_cosine_similarity(embedding, remote_embedding)
-                    if similarity <= CROSS_VALIDATION_THRESHOLD:
-                        continue
-
-                    merged_entry, applied = _merge_cross_validated_entry(
-                        backend,
-                        entry.id,
-                        project_id,
-                        similarity,
-                    )
-                    if merged_entry is not None:
-                        current_entry = merged_entry
-                    if applied:
-                        matched_projects += 1
-
-                    _merge_cross_validated_entry(
-                        remote_backend,
-                        remote_entry.id,
-                        current_project,
-                        similarity,
-                    )
-
-    return matched_projects
+# Cross-project validation cluster extracted to _graph_cross_project.py
+# (PRD-DIST-245 batch 93). Re-exports preserve back-compat names.
+from trw_memory._graph_cross_project import (  # noqa: E402
+    _ENTRY_UPDATE_LOCKS as _ENTRY_UPDATE_LOCKS,
+    _ENTRY_UPDATE_LOCKS_GUARD as _ENTRY_UPDATE_LOCKS_GUARD,
+    append_cross_validation as _append_cross_validation,
+    apply_cross_project_validation as _apply_cross_project_validation,
+    backend_update_guard as _backend_update_guard,
+    cross_validation_prefix as _cross_validation_prefix,
+    entry_has_cross_validation as _entry_has_cross_validation,
+    entry_update_lock as _entry_update_lock,
+    merge_cross_validated_entry as _merge_cross_validated_entry,
+    persist_cross_validated_entry as _persist_cross_validated_entry,
+    project_scope_key as _project_scope_key,
+)
 
 
 def list_org_shared_entries(
