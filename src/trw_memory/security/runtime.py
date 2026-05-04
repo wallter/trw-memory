@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import math
 import os
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,7 +24,7 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.audit import AuditLog
 from trw_memory.security.canary import _CANARY_FIXTURES, PINNED_HASHES
-from trw_memory.security.pii import PIIMatch, PIIType, detect_pii
+from trw_memory.security.pii import PIIMatch
 from trw_memory.security.poisoning import quarantine_entry, score_entry_anomaly, validate_entry_payload
 from trw_memory.security.provenance import build_entry_provenance, derive_verify_key, verify_entry_provenance
 from trw_memory.security.startup import _discover_anchor, resolve_security_path, verify_defaults
@@ -36,20 +35,6 @@ from trw_memory.storage.persistence import lock_for_rmw, read_yaml, write_yaml
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 _NAMESPACE_METADATA_FILE = "namespace.txt"
-_BLOCKING_PII_TYPES = frozenset({PIIType.API_KEY})
-_REDACTED_PII_TYPES = frozenset(
-    {
-        PIIType.EMAIL,
-        PIIType.IP_ADDRESS,
-        PIIType.CUSTOM,
-    }
-)
-_CODE_SNIPPET_PATTERNS = (
-    re.compile(r"\bdef\s+\w+\s*\("),
-    re.compile(r"\bclass\s+\w+"),
-    re.compile(r"\bimport\s+\w+"),
-    re.compile(r"\bfunction\s+\w+\s*\("),
-)
 _AUDIT_MAINTENANCE_CACHE: set[str] = set()
 logger = structlog.get_logger(__name__)
 _CANARY_STATE: dict[str, dict[str, object]] = {}
@@ -281,111 +266,14 @@ def enforce_write_rate_limit(
         write_yaml(state_path, {"sessions": sessions})
 
 
-def _apply_runtime_pii_policy(entry: MemoryEntry, config: MemoryConfig) -> tuple[MemoryEntry, list[PIIMatch]]:
-    if not config.pii_enabled:
-        return entry, []
-
-    content_matches = detect_pii(
-        entry.content,
-        entropy_threshold=config.pii_entropy_threshold,
-        custom_patterns=config.pii_custom_patterns,
-    )
-    detail_matches = detect_pii(
-        entry.detail,
-        entropy_threshold=config.pii_entropy_threshold,
-        custom_patterns=config.pii_custom_patterns,
-    )
-    all_matches = content_matches + detail_matches
-    if not all_matches:
-        return entry, []
-
-    blocking = [match for match in all_matches if match.pii_type in _BLOCKING_PII_TYPES]
-    if blocking:
-        detected_type = str(blocking[0].pii_type)
-        logger.warning(
-            "memory_store_pii_blocked", detected_type=detected_type, namespace=entry.namespace, entry_id=entry.id
-        )
-        raise PIIBlockError(f"memory entry blocked by PII policy: {detected_type}", detected_type=detected_type)
-
-    new_content = _replace_pii(entry.content, content_matches)
-    new_detail = _replace_pii(entry.detail, detail_matches)
-    metadata = dict(entry.metadata)
-    metadata["pii_types"] = ",".join(sorted({match.pii_type for match in all_matches}))
-    if any(match.pii_type == PIIType.HIGH_ENTROPY for match in all_matches):
-        metadata["contains_high_entropy_token"] = "true"  # noqa: S105 — flag value, not a credential
-    return entry.model_copy(update={"content": new_content, "detail": new_detail, "metadata": metadata}), all_matches
-
-
-def _replace_pii(text: str, matches: list[PIIMatch]) -> str:
-    if not matches:
-        return text
-    result = text
-    for match in sorted(matches, key=lambda item: item.start, reverse=True):
-        if match.pii_type == PIIType.FILE_PATH:
-            replacement = _hash_path_components(match.value)
-        elif match.pii_type in _REDACTED_PII_TYPES:
-            replacement = _redaction_marker(match.pii_type)
-        else:
-            continue
-        result = result[: match.start] + replacement + result[match.end :]
-    return result
-
-
-def _short_hash(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
-
-
-def _hash_path_components(path_value: str) -> str:
-    is_windows = ":\\" in path_value
-    separator = "\\" if is_windows else "/"
-    components = [component for component in re.split(r"[\\/]+", path_value) if component]
-    hashed = [hashlib.sha256(component.encode("utf-8")).hexdigest()[:8] for component in components]
-    prefix = "C:\\" if is_windows and path_value[:2].isalpha() else ("/" if path_value.startswith("/") else "")
-    return prefix + separator.join(hashed)
-
-
-def _redaction_marker(pii_type: PIIType) -> str:
-    if pii_type == PIIType.EMAIL:
-        return "<email>"
-    if pii_type == PIIType.IP_ADDRESS:
-        return "<ip>"
-    if pii_type == PIIType.CUSTOM:
-        return "<custom_pii>"
-    return f"<{pii_type}>"
-
-
-def _flag_code_snippet(entry: MemoryEntry) -> MemoryEntry:
-    """Authoritatively set the system code-flag metadata key.
-
-    Strips any caller-provided value of ``SYSTEM_CODE_FLAG_KEY`` and sets
-    it to "true" iff the combined content matches a code-snippet pattern.
-    This guarantees callers cannot pre-seed the bypass flag — see security
-    audit 2026-04-18 H2. The descriptive ``"code_snippet_flagged"`` tag is
-    still appended for backward-compat visibility in UI listings.
-    """
-    from trw_memory.security.poisoning import SYSTEM_CODE_FLAG_KEY
-
-    combined = f"{entry.content}\n{entry.detail}"
-    is_code = any(pattern.search(combined) for pattern in _CODE_SNIPPET_PATTERNS)
-
-    # Start by stripping any caller-supplied system-flag key.
-    metadata = {k: v for k, v in entry.metadata.items() if k != SYSTEM_CODE_FLAG_KEY}
-    tags = list(entry.tags)
-    updates: dict[str, object] = {}
-
-    if is_code:
-        metadata[SYSTEM_CODE_FLAG_KEY] = "true"
-        if "code_snippet_flagged" not in tags:
-            tags.append("code_snippet_flagged")
-
-    if metadata != entry.metadata:
-        updates["metadata"] = metadata
-    if tags != list(entry.tags):
-        updates["tags"] = tags
-
-    if updates:
-        return entry.model_copy(update=updates)
-    return entry
+# PII redaction helpers extracted to _runtime_pii.py (PRD-DIST-245 batch 99).
+from trw_memory.security._runtime_pii import (
+    apply_runtime_pii_policy as _apply_runtime_pii_policy,
+    flag_code_snippet as _flag_code_snippet,
+    hash_path_components as _hash_path_components,
+    redaction_marker as _redaction_marker,
+    replace_pii as _replace_pii,
+)
 
 
 def _actor_for_entry(entry: MemoryEntry) -> str:
