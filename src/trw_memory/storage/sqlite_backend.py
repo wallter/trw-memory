@@ -175,6 +175,16 @@ from trw_memory.storage._vector_ops import (
     upsert_vector as _vec_ops_upsert_vector,
     vector_exists as _vec_ops_vector_exists,
 )
+# Query / list / namespace operations extracted to _query_ops.py
+# (PRD-DIST-245 batch 86).
+from trw_memory.storage._query_ops import (
+    count as _query_ops_count,
+    delete_by_namespace as _query_ops_delete_by_namespace,
+    entries_with_assertions as _query_ops_entries_with_assertions,
+    list_entries as _query_ops_list_entries,
+    list_namespaces as _query_ops_list_namespaces,
+    search as _query_ops_search,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -886,6 +896,11 @@ class SQLiteBackend(StorageBackend):
                 path=str(self._db_path),
             ) from exc
 
+    # ------------------------------------------------------------------
+    # Query / list / namespace ops (delegated to _query_ops.py
+    # — PRD-DIST-245 batch 86)
+    # ------------------------------------------------------------------
+
     def search(
         self,
         query: str,
@@ -896,129 +911,29 @@ class SQLiteBackend(StorageBackend):
         min_importance: float = 0.0,
         namespace: str | None = None,
     ) -> list[MemoryEntry]:
-        """Keyword LIKE search on content + detail + tags with filters.
-
-        Args:
-            query: Free-text search term (case-insensitive substring match).
-            top_k: Maximum results to return.
-            tags: If provided, entries must contain ALL listed tags.
-            status: If provided, restrict to this status.
-            min_importance: Lower bound on importance (inclusive).
-            namespace: If provided, restrict to this namespace.
-
-        Returns:
-            Up to *top_k* matching :class:`MemoryEntry` objects.
-
-        Raises:
-            StorageError: If the query fails.
-        """
-        # Keyword match — LIKE on id, content, detail, tags JSON
-        # Escape LIKE metacharacters to prevent unintended wildcard expansion
-        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        like_term = f"%{escaped}%"
-        like_clause = (
-            "(id LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\' "
-            "OR detail LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')"
-        )
-        like_params: list[object] = [like_term, like_term, like_term, like_term]
-
-        filter_sql, filter_params = self._build_filter_clause(
+        """Keyword LIKE search on content + detail + tags with filters."""
+        return _query_ops_search(
+            self,
+            _SELECT_COLUMNS_SQL,
+            query=query,
+            top_k=top_k,
+            tags=tags,
             status=status,
-            namespace=namespace,
             min_importance=min_importance,
+            namespace=namespace,
         )
-
-        # Combine LIKE clause with filter clauses
-        if filter_sql == "1":
-            where_sql = like_clause
-        else:
-            where_sql = f"{like_clause} AND {filter_sql}"
-        params: list[object] = like_params + filter_params
-
-        sql = (
-            f"SELECT {_SELECT_COLUMNS_SQL} FROM memories WHERE {where_sql} "  # noqa: S608 — _SELECT_COLUMNS_SQL and where_sql are built from static constants and ? placeholders only
-            f"ORDER BY importance DESC, updated_at DESC LIMIT ?"
-        )
-        params.append(top_k)
-
-        # P3 — stale-handle precheck
-        self._ensure_connection_fresh()
-
-        try:
-            with self._lock:
-                cursor = self._conn.execute(sql, params)
-                # P2 — resilient cursor iteration
-                results = self._fetch_rows_resilient(cursor)
-
-            # Post-filter by tags (all-of semantics)
-            if tags:
-                required = set(tags)
-                results = [e for e in results if required.issubset(set(e.tags))]
-
-            return results[:top_k]
-        except (sqlite3.Error, ValueError, KeyError) as exc:
-            raise StorageError(
-                f"Failed to search memories: {exc}",
-                path=str(self._db_path),
-            ) from exc
 
     def count(self, namespace: str | None = None) -> int:
-        """Return the number of stored entries.
-
-        Args:
-            namespace: If provided, count only this namespace.
-
-        Returns:
-            Entry count.
-
-        Raises:
-            StorageError: If the count query fails.
-        """
-        try:
-            with self._lock:
-                if namespace is not None:
-                    row = self._conn.execute(
-                        "SELECT COUNT(*) FROM memories WHERE namespace = ?",
-                        (namespace,),
-                    ).fetchone()
-                else:
-                    row = self._conn.execute("SELECT COUNT(*) FROM memories").fetchone()
-            return int(row[0]) if row else 0
-        except sqlite3.Error as exc:
-            raise StorageError(
-                f"Failed to count memories: {exc}",
-                path=str(self._db_path),
-            ) from exc
+        """Return the number of stored entries."""
+        return _query_ops_count(self, namespace)
 
     def entries_with_assertions(self) -> list[MemoryEntry]:
-        """Return all entries that have non-empty assertions (PRD-CORE-086 FR07).
-
-        Used by ``trw_session_start`` to compute assertion health summary
-        from cached ``last_result`` fields without running verification I/O.
-
-        Returns:
-            List of MemoryEntry objects that have at least one assertion.
-        """
-        # P3 — stale-handle precheck
-        self._ensure_connection_fresh()
-
-        try:
-            with self._lock:
-                cursor = self._conn.execute(
-                    "SELECT * FROM memories WHERE assertions IS NOT NULL AND assertions != '[]'",
-                )
-                # P2 — resilient cursor iteration
-                return self._fetch_rows_resilient(cursor)
-        except sqlite3.Error as exc:
-            logger.debug("entries_with_assertions_query_failed", exc_info=True)
-            raise StorageError(
-                f"Failed to query entries with assertions: {exc}",
-                path=str(self._db_path),
-            ) from exc
+        """PRD-CORE-086 FR07 query for assertion-health summary."""
+        return _query_ops_entries_with_assertions(self)
 
     def count_with_assertions(self) -> list[MemoryEntry]:
         """Backward-compatible alias for PRD-CORE-086 FR07 traceability."""
-        return self.entries_with_assertions()
+        return _query_ops_entries_with_assertions(self)
 
     def list_entries(
         self,
@@ -1027,94 +942,22 @@ class SQLiteBackend(StorageBackend):
         namespace: str | None = None,
         limit: int = 100,
     ) -> list[MemoryEntry]:
-        """Return entries with optional filters, ordered by updated_at desc.
-
-        Args:
-            status: If provided, filter by this status.
-            namespace: If provided, filter by this namespace.
-            limit: Maximum entries to return.
-
-        Returns:
-            Up to *limit* matching :class:`MemoryEntry` objects.
-
-        Raises:
-            StorageError: If the query fails.
-        """
-        where_sql, params = self._build_filter_clause(
+        """Return entries with optional filters, ordered by updated_at desc."""
+        return _query_ops_list_entries(
+            self,
+            _SELECT_COLUMNS_SQL,
             status=status,
             namespace=namespace,
+            limit=limit,
         )
-        sql = (
-            f"SELECT {_SELECT_COLUMNS_SQL} FROM memories WHERE {where_sql} "  # noqa: S608 — _SELECT_COLUMNS_SQL and where_sql are built from static constants and ? placeholders only
-            f"ORDER BY updated_at DESC LIMIT ?"
-        )
-        params.append(limit)
-
-        # P3 — stale-handle precheck (cached; cheap on warm path)
-        self._ensure_connection_fresh()
-
-        try:
-            with self._lock:
-                cursor = self._conn.execute(sql, params)
-                # P2 — resilient cursor iteration: skip bad-UTF-8 rows
-                return self._fetch_rows_resilient(cursor)
-        except (sqlite3.Error, ValueError, KeyError) as exc:
-            raise StorageError(
-                f"Failed to list entries: {exc}",
-                path=str(self._db_path),
-            ) from exc
-
-    # ------------------------------------------------------------------
-    # Namespace operations
-    # ------------------------------------------------------------------
 
     def list_namespaces(self) -> list[str]:
-        """Return all distinct namespaces that have stored entries.
-
-        Returns:
-            Sorted list of namespace strings.
-
-        Raises:
-            StorageError: If the query fails.
-        """
-        try:
-            with self._lock:
-                rows = self._conn.execute("SELECT DISTINCT namespace FROM memories ORDER BY namespace").fetchall()
-            return [str(row[0]) for row in rows]
-        except sqlite3.Error as exc:
-            raise StorageError(
-                f"Failed to list namespaces: {exc}",
-                path=str(self._db_path),
-            ) from exc
+        """Return all distinct namespaces that have stored entries."""
+        return _query_ops_list_namespaces(self)
 
     def delete_by_namespace(self, namespace: str) -> int:
-        """Delete all entries in a namespace.
-
-        Args:
-            namespace: Namespace to clear.
-
-        Returns:
-            Number of entries deleted.
-
-        Raises:
-            StorageError: If the deletion fails.
-        """
-        try:
-            with self._lock:
-                cursor = self._conn.execute("DELETE FROM memories WHERE namespace = ?", (namespace,))
-                deleted = cursor.rowcount
-                self._conn.commit()
-            logger.debug(
-                "namespace_deleted",
-                namespace=namespace,
-                entries_deleted=deleted,
-            )
-            return int(deleted)
-        except sqlite3.Error as exc:
-            raise StorageError(
-                f"Failed to delete namespace {namespace!r}: {exc}",
-                path=str(self._db_path),
-            ) from exc
+        """Delete all entries in a namespace."""
+        return _query_ops_delete_by_namespace(self, namespace)
 
     def close(self) -> None:
         """Close the database connection."""
