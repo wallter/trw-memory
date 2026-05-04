@@ -10,7 +10,6 @@ import json
 import sqlite3
 import threading
 from collections import deque
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
 
@@ -74,15 +73,6 @@ VALID_EDGE_TYPES: frozenset[str] = frozenset(
     }
 )
 
-# Propagation rates for impact spreading along edge types
-_PROPAGATION_RATES: dict[str, float] = {
-    "evidence_for": 0.3,
-    "co_anchored": 0.2,
-    "same_root_cause": 0.15,
-    "related_to": 0.1,
-    "depends_on": 0.1,
-}
-_NEGATIVE_MULTIPLIER = 0.5
 _ENTRY_UPDATE_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _ENTRY_UPDATE_LOCKS_GUARD = threading.Lock()
 _BACKGROUND_GRAPH_THREADS: set[threading.Thread] = set()
@@ -292,6 +282,13 @@ from trw_memory._graph_clusters import (  # noqa: E402
     detect_clusters as detect_clusters,
     propagate_impact as propagate_impact,
 )
+# Conflict detection + co-anchored edges extracted to _graph_conflicts.py
+# (PRD-DIST-245 batch 97).
+from trw_memory._graph_conflicts import (  # noqa: E402
+    create_co_anchored_edges as create_co_anchored_edges,
+    filter_conflicts as filter_conflicts,
+    get_conflicts as get_conflicts,
+)
 
 
 def list_org_shared_entries(
@@ -436,128 +433,6 @@ def detect_cross_validation(
             return True
 
     return False
-
-
-
-
-# ---------------------------------------------------------------------------
-# PRD-CORE-107: Typed relationships — co-anchoring, conflicts, clusters,
-#               impact propagation
-# ---------------------------------------------------------------------------
-
-
-def create_co_anchored_edges(
-    conn: sqlite3.Connection,
-    entry_id: str,
-    anchor_files: list[str],
-    max_per_file: int = 50,
-) -> int:
-    """Create ``co_anchored`` edges for entries sharing anchor files.
-
-    Capped at *max_per_file* per anchor file to prevent explosion.
-    """
-    now = datetime.now(timezone.utc).isoformat()
-    created = 0
-
-    for anchor_file in anchor_files:
-        # SQLite JSON: find entries whose anchors array contains an object
-        # with a matching "file" value.  json_each expands the array.
-        rows = conn.execute(
-            "SELECT DISTINCT m.id FROM memories m, json_each(m.anchors) je "
-            "WHERE json_extract(je.value, '$.file') = ? "
-            "AND m.id != ? "
-            "LIMIT ?",
-            (anchor_file, entry_id, max_per_file),
-        ).fetchall()
-
-        for (other_id,) in rows:
-            meta = {"anchor_file": anchor_file}
-            _upsert_edge(conn, entry_id, other_id, "co_anchored", 0.8, now, metadata=meta)
-            created += 1
-
-    if created:
-        conn.commit()
-    logger.debug("co_anchored_edges_created", entry_id=entry_id, count=created)
-    return created
-
-
-def get_conflicts(
-    conn: sqlite3.Connection,
-    entry_id: str,
-) -> list[dict[str, str]]:
-    """Return ``conflicts_with`` edges involving *entry_id* (both directions)."""
-    rows = conn.execute(
-        "SELECT source_id, target_id, edge_metadata "
-        "FROM memory_graph_edges "
-        "WHERE edge_type = 'conflicts_with' "
-        "AND (source_id = ? OR target_id = ?)",
-        (entry_id, entry_id),
-    ).fetchall()
-
-    return [
-        {
-            "source_id": row[0],
-            "target_id": row[1],
-            "edge_metadata": row[2] or "{}",
-        }
-        for row in rows
-    ]
-
-
-def filter_conflicts(
-    entries: list[dict[str, object]],
-    conn: sqlite3.Connection,
-) -> list[dict[str, object]]:
-    """Suppress lower-importance side of ``conflicts_with`` edges in *entries*.
-
-    Equal-importance pairs are kept (no suppression).
-    """
-    if len(entries) < 2:
-        return list(entries)
-
-    entry_ids = {str(e["id"]) for e in entries}
-    importance_map: dict[str, float] = {
-        str(e["id"]): float(e.get("importance", 0.5))  # type: ignore[arg-type]
-        for e in entries
-    }
-
-    suppressed: set[str] = set()
-
-    for entry in entries:
-        eid = str(entry["id"])
-        if eid in suppressed:
-            continue
-        conflicts = get_conflicts(conn, eid)
-        for conflict in conflicts:
-            # Determine the other side of the conflict
-            other_id = conflict["target_id"] if conflict["source_id"] == eid else conflict["source_id"]
-            if other_id not in entry_ids or other_id in suppressed:
-                continue
-
-            my_imp = importance_map.get(eid, 0.5)
-            other_imp = importance_map.get(other_id, 0.5)
-
-            if my_imp > other_imp:
-                suppressed.add(other_id)
-                logger.debug(
-                    "conflict_suppressed",
-                    kept=eid,
-                    suppressed_id=other_id,
-                    importance_kept=my_imp,
-                    importance_suppressed=other_imp,
-                )
-            elif other_imp > my_imp:
-                suppressed.add(eid)
-                logger.debug(
-                    "conflict_suppressed",
-                    kept=other_id,
-                    suppressed_id=eid,
-                    importance_kept=other_imp,
-                    importance_suppressed=my_imp,
-                )
-                break  # this entry is suppressed, stop checking its conflicts
-
-    return [e for e in entries if str(e["id"]) not in suppressed]
 
 
 
