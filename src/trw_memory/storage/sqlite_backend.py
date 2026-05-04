@@ -156,13 +156,10 @@ class SQLiteBackend(StorageBackend):
     ) -> None:
         self._db_path = db_path
         self._dim = dim
-        self._vec_available = False
         self._lock = threading.Lock()
-        # PRD-FIX-088 FR02: Open-transaction depth counter.
-        # When >0, mutating methods (``update`` etc.) skip per-row ``commit()``
-        # so a caller-controlled outer transaction can batch many writes.
-        # Re-entrant by depth; only the outermost ``transaction()`` issues
-        # ``BEGIN IMMEDIATE`` / ``COMMIT``.
+        # PRD-FIX-088 FR02: open-transaction depth — mutating methods skip
+        # per-row commit when >0 so caller-controlled outer transaction
+        # batches N writes into one BEGIN IMMEDIATE / COMMIT.
         self._skip_commit_depth: int = 0
         self._dbapi: Any = _import_sqlcipher_driver() if sqlcipher_key_hex is not None else sqlite3
         self._sqlcipher_key_hex = sqlcipher_key_hex
@@ -171,14 +168,8 @@ class SQLiteBackend(StorageBackend):
         self._rebuild_from_cold = rebuild_from_cold
         self._integrity_check_interval_minutes = integrity_check_interval_minutes
         self._concurrent_writer_warn_threshold = concurrent_writer_warn_threshold
-        # PRD-INFRA-063 (B2) + PRD-INFRA-064 (B3) hooks — populated after open.
-        self._integrity_scheduler: Any = None
-        self._writer_registry: Any = None
-
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.recovered = False
-        self.integrity_warning = False
         # P2 — per-row UTF-8 quarantine counter (incremented on each skipped row)
         self.quarantine_count_utf8: int = 0
         # P3 — reconnect counter (incremented on each stale-handle reopen)
@@ -455,9 +446,8 @@ class SQLiteBackend(StorageBackend):
         """PRD-CORE-086 FR07 query for assertion-health summary."""
         return _query_ops_entries_with_assertions(self)
 
-    def count_with_assertions(self) -> list[MemoryEntry]:
-        """Backward-compatible alias for PRD-CORE-086 FR07 traceability."""
-        return _query_ops_entries_with_assertions(self)
+    # Backward-compat alias for PRD-CORE-086 FR07 traceability.
+    count_with_assertions = entries_with_assertions
 
     def list_entries(
         self,
@@ -484,14 +474,11 @@ class SQLiteBackend(StorageBackend):
         return _query_ops_delete_by_namespace(self, namespace)
 
     def close(self) -> None:
-        """Close the database connection."""
-        # PRD-INFRA-063: stop the integrity scheduler BEFORE closing the
-        # connection so the background thread unwinds cleanly.
+        """Stop integrity scheduler + writer registry, then close connection."""
         if self._integrity_scheduler is not None:
             with contextlib.suppress(Exception):
                 self._integrity_scheduler.stop(timeout=2.0)
             self._integrity_scheduler = None
-        # PRD-INFRA-064: remove our writer-registry lockfile.
         if self._writer_registry is not None:
             with contextlib.suppress(Exception):
                 self._writer_registry.close()
@@ -503,12 +490,7 @@ class SQLiteBackend(StorageBackend):
     def __enter__(self) -> SQLiteBackend:
         return self
 
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: object,
-    ) -> None:
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
         self.close()
 
     # ------------------------------------------------------------------
@@ -537,25 +519,13 @@ class SQLiteBackend(StorageBackend):
 
     def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:
         """Insert or update a vector in vec_memories."""
-        _vec_ops_upsert_vector(
-            self._conn,
-            self._lock,
-            vec_available=self._vec_available,
-            dim=self._dim,
-            entry_id=entry_id,
-            embedding=embedding,
-        )
+        _vec_ops_upsert_vector(self._conn, self._lock, vec_available=self._vec_available,
+                               dim=self._dim, entry_id=entry_id, embedding=embedding)
 
     def search_vectors(self, query_embedding: list[float], top_k: int = 25) -> list[tuple[str, float]]:
         """KNN search in vec_memories."""
-        return _vec_ops_search_vectors(
-            self._conn,
-            self._lock,
-            vec_available=self._vec_available,
-            dim=self._dim,
-            query_embedding=query_embedding,
-            top_k=top_k,
-        )
+        return _vec_ops_search_vectors(self._conn, self._lock, vec_available=self._vec_available,
+                                       dim=self._dim, query_embedding=query_embedding, top_k=top_k)
 
     def get_stored_embeddings(self, entry_ids: list[str]) -> dict[str, list[float]]:
         """Bulk lookup of packed embedding blobs."""
