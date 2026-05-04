@@ -172,12 +172,7 @@ class MemoryClient:
     _sse_subscriber_started: bool
     _tier_manager: object | None
 
-    def __init__(
-        self,
-        namespace: str,
-        mode: Literal["local", "mcp", "auto"] = "auto",
-        timeout: float = 5.0,
-    ) -> None:
+    def __init__(self, namespace: str, mode: Literal["local", "mcp", "auto"] = "auto", timeout: float = 5.0) -> None:
         """Initialise a MemoryClient with namespace isolation and mode selection.
 
         Implementation lives in ``_client_lifecycle.init_client``
@@ -240,27 +235,9 @@ class MemoryClient:
         """
         from trw_memory._client_store import store_impl as _impl
 
-        return await _impl(
-            self,
-            content,
-            tags=tags,
-            importance=importance,
-            detail=detail,
-            metadata=metadata,
-            expires=expires,
-            source=source,
-            source_identity=source_identity,
-            session_id=session_id,
-            entry_id=entry_id,
-        )
+        return await _impl(self, content, tags=tags, importance=importance, detail=detail, metadata=metadata, expires=expires, source=source, source_identity=source_identity, session_id=session_id, entry_id=entry_id)
 
-    async def bulk_store(
-        self,
-        requests: list[BulkStoreRequest],
-        *,
-        skip_audit_per_item: bool = True,
-        skip_remote_publish: bool = True,
-    ) -> BulkStoreSummary:
+    async def bulk_store(self, requests: list[BulkStoreRequest], *, skip_audit_per_item: bool = True, skip_remote_publish: bool = True) -> BulkStoreSummary:
         """Store many records in one batched operation.
 
         Implementation lives in ``_client_bulk_store.bulk_store_impl``
@@ -269,12 +246,7 @@ class MemoryClient:
         overhead for throughput; per-item security checks (PII /
         poisoning) still run on every record.
         """
-        return await _bulk_store_impl(
-            self,
-            requests,
-            skip_audit_per_item=skip_audit_per_item,
-            skip_remote_publish=skip_remote_publish,
-        )
+        return await _bulk_store_impl(self, requests, skip_audit_per_item=skip_audit_per_item, skip_remote_publish=skip_remote_publish)
 
     async def recall(
         self,
@@ -304,22 +276,7 @@ class MemoryClient:
         """
         from trw_memory._client_recall import recall_impl as _recall_impl
 
-        return await _recall_impl(
-            self,
-            query,
-            limit=limit,
-            tags=tags,
-            min_score=min_score,
-            include_org_memories=include_org_memories,
-            include_shared=include_shared,
-            token_budget=token_budget,
-            include_distilled=include_distilled,
-            distilled_weight=distilled_weight,
-            include_source_kinds=include_source_kinds,
-            exclude_source_kinds=exclude_source_kinds,
-            source_weights=source_weights,
-            exclude_expired=exclude_expired,
-        )
+        return await _recall_impl(self, query, limit=limit, tags=tags, min_score=min_score, include_org_memories=include_org_memories, include_shared=include_shared, token_budget=token_budget, include_distilled=include_distilled, distilled_weight=distilled_weight, include_source_kinds=include_source_kinds, exclude_source_kinds=exclude_source_kinds, source_weights=source_weights, exclude_expired=exclude_expired)
 
     def _get_embedder(self) -> EmbeddingProvider | None:
         """Try to obtain a local embedding provider; return None on failure.
@@ -349,43 +306,22 @@ class MemoryClient:
         return _impl(self, results)
 
     @staticmethod
-    def _apply_budget(
-        results: list[MemoryResultDict],
-        token_budget: int | None,
-    ) -> list[MemoryResultDict]:
+    def _apply_budget(results: list[MemoryResultDict], token_budget: int | None) -> list[MemoryResultDict]:
         from trw_memory._client_recall import apply_budget as _impl
 
         return _impl(results, token_budget)
 
-    async def _merge_org_results(
-        self,
-        query: str,
-        local_results: list[MemoryResultDict],
-        limit: int,
-        tags: list[str] | None,
-        min_score: float,
-    ) -> list[MemoryResultDict]:
+    async def _merge_org_results(self, query: str, local_results: list[MemoryResultDict], limit: int, tags: list[str] | None, min_score: float) -> list[MemoryResultDict]:
         from trw_memory._client_recall import merge_org_results as _impl
 
         return await _impl(self, query, local_results, limit, tags, min_score)
 
-    async def _try_hybrid_recall(
-        self,
-        query: str,
-        limit: int,
-        tags: list[str] | None,
-    ) -> list[MemoryResultDict] | None:
+    async def _try_hybrid_recall(self, query: str, limit: int, tags: list[str] | None) -> list[MemoryResultDict] | None:
         from trw_memory._client_recall import try_hybrid_recall as _impl
 
         return await _impl(self, query, limit, tags)
 
-    async def _fallback_recall(
-        self,
-        query: str,
-        limit: int,
-        tags: list[str] | None,
-        min_score: float,
-    ) -> list[MemoryResultDict]:
+    async def _fallback_recall(self, query: str, limit: int, tags: list[str] | None, min_score: float) -> list[MemoryResultDict]:
         from trw_memory._client_recall import fallback_recall as _impl
 
         return await _impl(self, query, limit, tags, min_score)
@@ -395,14 +331,7 @@ class MemoryClient:
 
         await _impl(self, results)
 
-    def _tier_results(
-        self,
-        backend: StorageBackend,
-        query: str,
-        tags: list[str] | None,
-        limit: int,
-        query_embedding: list[float] | None = None,
-    ) -> list[MemoryResultDict]:
+    def _tier_results(self, backend: StorageBackend, query: str, tags: list[str] | None, limit: int, query_embedding: list[float] | None = None) -> list[MemoryResultDict]:
         from trw_memory._client_recall import tier_results as _impl
 
         return _impl(self, backend, query, tags, limit, query_embedding)
@@ -450,12 +379,7 @@ class MemoryClient:
     # preserve `monkeypatch.setattr(client, "_X", ...)` test patches and
     # `MemoryClient._coerce_float(...)` static-call sites.
 
-    async def _merge_shared_results(
-        self,
-        query: str,
-        local_results: list[MemoryResultDict],
-        limit: int,
-    ) -> list[MemoryResultDict]:
+    async def _merge_shared_results(self, query: str, local_results: list[MemoryResultDict], limit: int) -> list[MemoryResultDict]:
         from trw_memory._client_org_shared import merge_shared_results as _impl
         return await _impl(self, query, local_results, limit)
 
@@ -478,11 +402,7 @@ class MemoryClient:
         from trw_memory._client_org_shared import is_retired_shared_result as _impl
         return _impl(result)
 
-    def _merge_shared_candidates(
-        self,
-        local_results: list[MemoryResultDict],
-        shared_results: list[MemoryResultDict],
-    ) -> list[MemoryResultDict]:
+    def _merge_shared_candidates(self, local_results: list[MemoryResultDict], shared_results: list[MemoryResultDict]) -> list[MemoryResultDict]:
         from trw_memory._client_org_shared import merge_shared_candidates as _impl
         return _impl(local_results, shared_results)
 
@@ -504,13 +424,7 @@ class MemoryClient:
         dedup_threshold: float = 0.92,
     ) -> list[MemoryResultDict]:
         from trw_memory._client_org_shared import dedupe_cached_shared_results as _impl
-        return await _impl(
-            self,
-            cached_results,
-            local_entries=local_entries,
-            embedder=embedder,
-            dedup_threshold=dedup_threshold,
-        )
+        return await _impl(self, cached_results, local_entries=local_entries, embedder=embedder, dedup_threshold=dedup_threshold)
 
     @staticmethod
     def _strip_shared_prefix(content: str) -> str:
@@ -549,27 +463,13 @@ class MemoryClient:
         """
         from trw_memory._client_forget_search import search_impl as _impl
 
-        return await _impl(
-            self,
-            tags=tags,
-            min_importance=min_importance,
-            since=since,
-            limit=limit,
-            actor=actor,
-            status=status,
-        )
+        return await _impl(self, tags=tags, min_importance=min_importance, since=since, limit=limit, actor=actor, status=status)
 
     async def audit_learning(self, learning_id: str) -> dict[str, object]:
         """Return SEC-001 audit data for an active or quarantined learning."""
         return audit_entry(self._config, learning_id=learning_id, active_backend=self._get_backend())
 
-    async def review_quarantined(
-        self,
-        learning_id: str,
-        *,
-        decision: Literal["approve", "reject"],
-        reviewer_id: str,
-    ) -> dict[str, str]:
+    async def review_quarantined(self, learning_id: str, *, decision: Literal["approve", "reject"], reviewer_id: str) -> dict[str, str]:
         """Review a quarantined learning and either promote or reject it."""
         return review_quarantined_entry(
             self._config,
@@ -594,12 +494,7 @@ class MemoryClient:
         from trw_memory._client_tools_binding import register_tools as _impl
         _impl(self, agent)
 
-    def auto_recall(
-        self,
-        query_from: str,
-        limit: int = 10,
-        min_score: float = 0.0,
-    ) -> Callable[[Callable[..., Coroutine[object, object, object]]], Callable[..., Coroutine[object, object, object]]]:
+    def auto_recall(self, query_from: str, limit: int = 10, min_score: float = 0.0) -> Callable[[Callable[..., Coroutine[object, object, object]]], Callable[..., Coroutine[object, object, object]]]:
         from trw_memory._client_tools_binding import auto_recall as _impl
         return _impl(self, query_from, limit=limit, min_score=min_score)
 
@@ -613,12 +508,7 @@ class MemoryClient:
         from trw_memory._client_lifecycle import aenter as _impl
         return await _impl(self)
 
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: object,
-    ) -> None:
+    async def __aexit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: object) -> None:
         from trw_memory._client_lifecycle import aexit as _impl
         await _impl(self, exc_type, exc_val, cast("Any", exc_tb))
 
