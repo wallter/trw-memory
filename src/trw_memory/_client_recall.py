@@ -103,7 +103,8 @@ async def recall_impl(
     client._require_permission(Permission.READ, "recall")
     client._maybe_start_retry_drain()
     await client._apply_pending_remote_retirements()
-    if should_halt_recalls(client._config):
+    backend = client._backend
+    if backend is not None and should_halt_recalls(client._config, backend=backend):
         from trw_memory.exceptions import CanaryTamperError
 
         raise CanaryTamperError("recall halted after canary tamper")

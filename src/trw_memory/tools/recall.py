@@ -105,7 +105,7 @@ def memory_recall_impl(
     cfg = config or MemoryConfig()
     require_namespace_permission(cfg, namespace, Permission.READ, "recall")
     initialize_canaries(cfg, backend=backend)
-    if should_halt_recalls(cfg):
+    if should_halt_recalls(cfg, backend=backend):
         from trw_memory.exceptions import CanaryTamperError
 
         raise CanaryTamperError("recall halted after canary tamper")

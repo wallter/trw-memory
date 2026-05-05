@@ -16,9 +16,14 @@ mechanism:
 
 State:
 
-- ``CANARY_STATE`` — process-wide dict keyed by quarantine-DB path
-  containing ``{seeded, recall_count, failed}``. Survives across
-  module reloads only within a single process.
+- ``CANARY_STATE`` — process-wide dict keyed by ``(quarantine-DB
+  path, backend identity)`` containing ``{seeded, recall_count,
+  failed}``. Survives across module reloads only within a single
+  process. The composite key is required so multiple memory
+  backends sharing one quarantine DB (the trw-distill lab pattern)
+  each get their canaries seeded and probed independently — cycle
+  121 surfaced ``CanaryTamperError`` on every recall when only the
+  quarantine path keyed the state.
 
 `_resolve_security_trace_context` is looked up lazily from the
 parent ``runtime`` module to break the import cycle.
@@ -53,8 +58,24 @@ def _trace_context(*, session_id: str | None = None) -> tuple[str, str | None]:
     return result
 
 
+def _backend_identity(backend: StorageBackend) -> str:
+    """Stable identity string for the backend's data store."""
+    db_path = getattr(backend, "_db_path", None)
+    if db_path is not None:
+        return str(db_path)
+    dir_path = getattr(backend, "_dir", None)
+    if dir_path is not None:
+        return str(dir_path)
+    return repr(backend)
+
+
+def _state_key(config: MemoryConfig, backend: StorageBackend) -> str:
+    quarantine_path = str(resolve_security_path(config, "quarantine_db_path", create_parent=True))
+    return f"{quarantine_path}::{_backend_identity(backend)}"
+
+
 def initialize_canaries(config: MemoryConfig, *, backend: StorageBackend) -> None:
-    state_key = str(resolve_security_path(config, "quarantine_db_path", create_parent=True))
+    state_key = _state_key(config, backend)
     if CANARY_STATE.get(state_key, {}).get("seeded"):
         return
     seeded = 0
@@ -96,7 +117,7 @@ def initialize_canaries(config: MemoryConfig, *, backend: StorageBackend) -> Non
 
 
 def probe_canaries(config: MemoryConfig, *, backend: StorageBackend) -> None:
-    state_key = str(resolve_security_path(config, "quarantine_db_path", create_parent=True))
+    state_key = _state_key(config, backend)
     state: dict[str, Any] = CANARY_STATE.setdefault(
         state_key, {"seeded": False, "recall_count": 0, "failed": False}
     )
@@ -155,6 +176,6 @@ def probe_canaries(config: MemoryConfig, *, backend: StorageBackend) -> None:
             raise CanaryTamperError(f"canary drift detected for {canary_id}")
 
 
-def should_halt_recalls(config: MemoryConfig) -> bool:
-    state_key = str(resolve_security_path(config, "quarantine_db_path", create_parent=True))
+def should_halt_recalls(config: MemoryConfig, *, backend: StorageBackend) -> bool:
+    state_key = _state_key(config, backend)
     return bool(CANARY_STATE.get(state_key, {}).get("failed")) and config.canary_fail_mode == "halt"
