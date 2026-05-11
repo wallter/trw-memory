@@ -2,6 +2,55 @@
 
 All notable changes to the TRW Memory package.
 
+## [Unreleased]
+
+### Changed
+
+- **Module-decomposition campaign (PRD-DIST-245 / PRD-DIST-246).** `storage/sqlite_backend.py`
+  (1133 → 343 LOC), `graph.py` (833 → 357 LOC), `security/runtime.py` (715 → 395 LOC), and
+  `client.py` (1823 → 428 LOC) were each decomposed below the 350-LOC review gate by extracting
+  cohesive `_*.py` helper modules (e.g. `storage/_schema.py`, `_row_mapper.py`, `_recovery.py`,
+  `_cold_rebuild.py`, `_snapshot.py`, `_utf8_validator.py`, `_stale_handle*.py`, `_writer_registry.py`,
+  `_integrity_scheduler.py`; `_graph_edges.py`, `_graph_clusters.py`, `_graph_conflicts.py`,
+  `_graph_decay.py`, `_graph_cross_project.py`, `_graph_primitives.py`; `security/_runtime_anomaly.py`,
+  `_runtime_canary.py`, `_runtime_pii.py`, `_runtime_quarantine.py`; `_client_recall.py`,
+  `_client_store.py`, `_client_forget_search.py`, `_client_lifecycle.py`, `_client_bulk_store.py`,
+  `_client_models.py`, `_client_org_shared.py`, `_client_recall_helpers.py`, `_client_tools_binding.py`,
+  `_client_distilled_tiering.py`). Behaviour-preserving — public re-exports unchanged, full suite green.
+  Numerous test files were likewise split for `pytest-xdist` parallelism.
+
+### Added
+
+- **`bandit/` package — adaptive-selection primitives.** `BanditSelector` / `BanditDecision`
+  (Thompson Sampling with a sliding observation window, cold-start round-robin, and a floor-rate
+  exploration guarantee), `ContextualBanditSelector` (LinUCB with Sherman-Morrison incremental
+  updates — no per-step matrix inversion), and `PageHinkleyDetector` (change-point detection for
+  non-stationary reward streams). Dependency-light building blocks for adaptive learning-selection /
+  nudge-selection in the surrounding framework. Exposed via `trw_memory.bandit`.
+
+### Fixed
+
+- **Canary state keyed per `(quarantine, backend)` pair** (commit `4c52caa47`) — canary
+  bookkeeping previously collided across quarantine/backend combinations; the key is now the pair.
+- **PRD-DIST-255 closed as not-reproducible** (commit `43acb4f19`) — the reported issue could not
+  be reproduced; 7 regression tests added to lock the current correct behaviour.
+
+## [0.8.2] — 2026-05-03
+
+### Added
+
+- **`SQLiteBackend.transaction()` context manager** (commit `55aa0bc49`, PRD-FIX-088 FR02
+  prerequisite). Re-entrant transaction bracket so callers can collapse N writes into a single
+  `BEGIN IMMEDIATE` / `COMMIT` instead of paying a commit per row. The outermost call issues the
+  `BEGIN IMMEDIATE` / `COMMIT`; nested calls only increment a `_skip_commit_depth` counter (and
+  `update()` honours that counter); exceptions trigger `ROLLBACK` with logged best-effort cleanup.
+  The `StorageBackend` ABC default is a no-op pass-through so non-supporting backends (YAML) work
+  transparently — callers don't need `hasattr` guards. **Why:** trw-mcp's `_batch_sync_to_sqlite`
+  was committing per-row across 2,823 entries during Q-learning outcome correlation (~91 s wall
+  time on the dev repo); without a backend-level transaction primitive the trw-mcp side couldn't
+  chunk those into a few transactions. Additive API → version bump `0.8.1 → 0.8.2`; existing
+  recovery + bulk-update suites (30 tests) remain green.
+
 ## [0.8.1] — 2026-04-27
 
 ### Fixed
@@ -70,7 +119,7 @@ All notable changes to the TRW Memory package.
   `tests/test_embeddings.py` cases pin both the masking and the
   no-mask happy path.
 
-## [Unreleased]
+## [0.7.0 → 0.8.0 interim] — 2026-04-19/20 (folded into the 0.8.0 release)
 
 ### Added
 
