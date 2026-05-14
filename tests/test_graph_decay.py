@@ -160,8 +160,7 @@ class TestMemoryDecayPassBatch:
         )
         for start in range(0, 50_000, 5_000):
             rows = [
-                (f"decay-{idx}", "content", old_date, old_date, old_date, 1, 0.8)
-                for idx in range(start, start + 5_000)
+                (f"decay-{idx}", "content", old_date, old_date, old_date, 1, 0.8) for idx in range(start, start + 5_000)
             ]
             conn.executemany(insert_sql, rows)
         conn.commit()

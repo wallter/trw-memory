@@ -90,10 +90,7 @@ class TestCheckSize:
 
     def test_detail_field_included_in_size(self) -> None:
         """Both content and detail contribute to size calculation."""
-        entries = [
-            make_entry(entry_id=f"M-{index}", content="A" * 50, detail="B" * 50)
-            for index in range(20)
-        ]
+        entries = [make_entry(entry_id=f"M-{index}", content="A" * 50, detail="B" * 50) for index in range(20)]
         entries.append(
             make_entry(
                 entry_id="M-giant",

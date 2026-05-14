@@ -58,7 +58,9 @@ logger = structlog.get_logger(__name__)
 def _client_logger() -> Any:
     """Parent-module logger lookup so test patches on ``trw_memory.client.logger`` propagate."""
     from trw_memory import client as _c
+
     return _c.logger
+
 
 # Fallback recall scoring (used when hybrid retrieval pipeline is unavailable).
 _FALLBACK_TF_WEIGHT: float = 0.7
@@ -68,11 +70,13 @@ _FALLBACK_TF_SCALE: float = 10.0
 
 def _entry_to_result(entry: MemoryEntry, score: float = 0.0) -> MemoryResultDict:
     from trw_memory._client_distilled_tiering import entry_to_result as _impl
+
     return _impl(entry, score=score)
 
 
 def _create_local_backend(config: Any, namespace: str) -> Any:
     from trw_memory.client import _create_local_backend as _impl
+
     return _impl(config, namespace)
 
 

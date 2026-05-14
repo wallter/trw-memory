@@ -97,9 +97,7 @@ class TestStoredEmbeddings:
 
 
 class TestExistingVectorIds:
-    def test_existing_vector_ids_returns_empty_when_vec_unavailable(
-        self, backend: SQLiteBackend
-    ) -> None:
+    def test_existing_vector_ids_returns_empty_when_vec_unavailable(self, backend: SQLiteBackend) -> None:
         if backend._vec_available:
             pytest.skip("sqlite-vec available; covered by populated test")
         assert backend.existing_vector_ids() == set()

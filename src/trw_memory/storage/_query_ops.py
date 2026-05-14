@@ -55,8 +55,7 @@ def search(
     escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     like_term = f"%{escaped}%"
     like_clause = (
-        "(id LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\' "
-        "OR detail LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')"
+        "(id LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\' OR detail LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')"
     )
     like_params: list[object] = [like_term, like_term, like_term, like_term]
     filter_sql, filter_params = backend._build_filter_clause(
@@ -153,9 +152,7 @@ def list_namespaces(backend: SQLiteBackend) -> list[str]:
     """Return all distinct namespaces that have stored entries."""
     try:
         with backend._lock:
-            rows = backend._conn.execute(
-                "SELECT DISTINCT namespace FROM memories ORDER BY namespace"
-            ).fetchall()
+            rows = backend._conn.execute("SELECT DISTINCT namespace FROM memories ORDER BY namespace").fetchall()
         return [str(row[0]) for row in rows]
     except sqlite3.Error as exc:
         raise StorageError(
@@ -168,9 +165,7 @@ def delete_by_namespace(backend: SQLiteBackend, namespace: str) -> int:
     """Delete all entries in a namespace."""
     try:
         with backend._lock:
-            cursor = backend._conn.execute(
-                "DELETE FROM memories WHERE namespace = ?", (namespace,)
-            )
+            cursor = backend._conn.execute("DELETE FROM memories WHERE namespace = ?", (namespace,))
             deleted = cursor.rowcount
             backend._conn.commit()
         logger.debug("namespace_deleted", namespace=namespace, entries_deleted=deleted)

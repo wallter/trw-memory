@@ -73,7 +73,9 @@ class TestMemorySearchImpl:
         cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
 
         with create_backend_from_config(cfg, "project:default") as backend:
-            backend.store(MemoryEntry(id="M-alice", content="alpha", namespace="project:default", source_identity="alice"))
+            backend.store(
+                MemoryEntry(id="M-alice", content="alpha", namespace="project:default", source_identity="alice")
+            )
             result = memory_search_impl("project:default", backend=backend, config=cfg, actor="alice")
 
         assert result["total"] == 1

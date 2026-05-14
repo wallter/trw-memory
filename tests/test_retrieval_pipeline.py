@@ -160,4 +160,3 @@ class TestHybridSearchDegradation:
         with patch("trw_memory.retrieval.pipeline.dense_search", return_value=[]):
             results = hybrid_search("pydantic", entries, embedder=None)
         assert len(results) >= 1
-

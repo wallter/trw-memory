@@ -40,9 +40,16 @@ class TestUpdatePreservesNewFields:
         assert len(loaded.assertions) == 1
 
     def test_update_assertions_directly(self, backend: YAMLBackend) -> None:
-        entry = MemoryEntry(id="M-upd-assert", content="direct assertion update test", created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+        entry = MemoryEntry(
+            id="M-upd-assert",
+            content="direct assertion update test",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
         backend.store(entry)
-        result = backend.update("M-upd-assert", assertions=[Assertion(type=AssertionType.GLOB_EXISTS, pattern="", target="src/**/*.py")])
+        result = backend.update(
+            "M-upd-assert", assertions=[Assertion(type=AssertionType.GLOB_EXISTS, pattern="", target="src/**/*.py")]
+        )
         assert result is not None
         assert len(result.assertions) == 1
         assert result.assertions[0].target == "src/**/*.py"
@@ -88,9 +95,16 @@ class TestMalformedAssertions:
 class TestSQLiteAssertionsUpdate:
     def test_sqlite_update_assertions_directly(self, tmp_path: Path) -> None:
         db = SQLiteBackend(tmp_path / "test.db")
-        entry = MemoryEntry(id="M-sql-assert", content="sqlite assertions update", created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+        entry = MemoryEntry(
+            id="M-sql-assert",
+            content="sqlite assertions update",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
         db.store(entry)
-        result = db.update("M-sql-assert", assertions=[Assertion(type=AssertionType.GLOB_EXISTS, pattern="", target="src/**/*.py")])
+        result = db.update(
+            "M-sql-assert", assertions=[Assertion(type=AssertionType.GLOB_EXISTS, pattern="", target="src/**/*.py")]
+        )
         assert result is not None
         assert len(result.assertions) == 1
         assert result.assertions[0].target == "src/**/*.py"

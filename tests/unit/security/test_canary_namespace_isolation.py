@@ -54,9 +54,7 @@ def test_initialize_canaries_seeds_each_backend_under_shared_quarantine(
         initialize_canaries(config, backend=backend_a)
         initialize_canaries(config, backend=backend_b)
         assert backend_a.get("canary-001") is not None, "backend A missing canary"
-        assert backend_b.get("canary-001") is not None, (
-            "backend B canary not seeded — state-key collision regressed"
-        )
+        assert backend_b.get("canary-001") is not None, "backend B canary not seeded — state-key collision regressed"
 
 
 def test_probe_canaries_per_backend_does_not_cross_pollute(tmp_path: Path) -> None:

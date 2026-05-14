@@ -261,9 +261,7 @@ def delete(backend: SQLiteBackend, entry_id: str) -> bool:
     """Remove an entry from memories (and vec_index when available)."""
     try:
         with backend._lock:
-            cursor = backend._conn.execute(
-                "DELETE FROM memories WHERE id = ?", (entry_id,)
-            )
+            cursor = backend._conn.execute("DELETE FROM memories WHERE id = ?", (entry_id,))
             deleted = cursor.rowcount > 0
             if deleted and backend._vec_available:
                 backend._delete_vector(entry_id)

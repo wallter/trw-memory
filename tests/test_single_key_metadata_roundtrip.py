@@ -57,9 +57,7 @@ class TestSingleKeyMetadataRoundTrip:
         )
 
     @pytest.mark.asyncio
-    async def test_client_store_then_get_preserves_user_keys(
-        self, memory_client: MemoryClient
-    ) -> None:
+    async def test_client_store_then_get_preserves_user_keys(self, memory_client: MemoryClient) -> None:
         """MemoryClient.store + backend.get: user metadata + installation_id co-exist.
 
         The store path adds ``installation_id`` automatically. So the stored
@@ -74,16 +72,12 @@ class TestSingleKeyMetadataRoundTrip:
         backend = memory_client._get_backend()
         entry = backend.get(memory_id)
         assert entry is not None
-        assert entry.metadata.get("utility_grade") == "R3", (
-            f"client.store dropped utility_grade: {entry.metadata!r}"
-        )
+        assert entry.metadata.get("utility_grade") == "R3", f"client.store dropped utility_grade: {entry.metadata!r}"
         # installation_id is always added by the store path.
         assert "installation_id" in entry.metadata
 
     @pytest.mark.asyncio
-    async def test_client_recall_returns_user_metadata(
-        self, memory_client: MemoryClient
-    ) -> None:
+    async def test_client_recall_returns_user_metadata(self, memory_client: MemoryClient) -> None:
         """MemoryClient.recall: user metadata flows through into result dicts.
 
         This is the original cycle-111 bug surface. ``recall`` should
@@ -103,14 +97,10 @@ class TestSingleKeyMetadataRoundTrip:
         )
         assert match is not None, f"recall results: {results}"
         meta = match.get("metadata", {})
-        assert meta.get("utility_grade") == "R3", (
-            f"recall path dropped utility_grade: metadata={meta!r}"
-        )
+        assert meta.get("utility_grade") == "R3", f"recall path dropped utility_grade: metadata={meta!r}"
 
     @pytest.mark.asyncio
-    async def test_bulk_store_then_recall_preserves_user_keys(
-        self, memory_client: MemoryClient
-    ) -> None:
+    async def test_bulk_store_then_recall_preserves_user_keys(self, memory_client: MemoryClient) -> None:
         """bulk_store + recall: same path the cycle-111 fixture used.
 
         This is the exact reproducer for the trw-distill cycle-111 audit's
@@ -139,14 +129,10 @@ class TestSingleKeyMetadataRoundTrip:
         )
         assert match is not None, f"recall results: {[r.get('memory_id') for r in results]}"
         meta = match.get("metadata", {})
-        assert meta.get("utility_grade") == "R3", (
-            f"bulk_store + recall path dropped utility_grade: metadata={meta!r}"
-        )
+        assert meta.get("utility_grade") == "R3", f"bulk_store + recall path dropped utility_grade: metadata={meta!r}"
 
     @pytest.mark.asyncio
-    async def test_recall_returns_metadata_field_at_all(
-        self, memory_client: MemoryClient
-    ) -> None:
+    async def test_recall_returns_metadata_field_at_all(self, memory_client: MemoryClient) -> None:
         """Diagnostic: recall result should always include a metadata field.
 
         Even if the bug were intermittent, the metadata key should always
@@ -175,9 +161,7 @@ class TestSingleKeyMetadataRoundTrip:
         assert "metadata" in match
         meta = match["metadata"]
         # At minimum, installation_id should be present (set by store path).
-        assert "installation_id" in meta or "utility_grade" in meta, (
-            f"recall returned empty metadata dict: {meta!r}"
-        )
+        assert "installation_id" in meta or "utility_grade" in meta, f"recall returned empty metadata dict: {meta!r}"
 
 
 class TestUserKeyDropDiagnostic:

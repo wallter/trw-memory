@@ -47,11 +47,13 @@ logger = structlog.get_logger(__name__)
 def _client_logger() -> Any:
     """Parent-module logger lookup so test patches on ``trw_memory.client.logger`` propagate."""
     from trw_memory import client as _c
+
     return _c.logger
 
 
 def _make_id() -> str:
     from trw_memory.client import _make_id as _impl
+
     return _impl()
 
 
@@ -181,9 +183,7 @@ async def store_impl(
                     raise StorageError(
                         f"failed to persist vector for {entry.id!r}; rollback did not complete cleanly"
                     ) from exc
-                raise StorageError(
-                    f"failed to persist vector for {entry.id!r}; entry write was rolled back"
-                ) from exc
+                raise StorageError(f"failed to persist vector for {entry.id!r}; entry write was rolled back") from exc
         try:
             schedule_graph_update(entry, backend, embedding=embedding, config=client._config)
         except RuntimeError:

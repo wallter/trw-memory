@@ -62,23 +62,16 @@ def open_connection_with_recovery(
         if sqlcipher_key_hex is None:
             conn = backend._open_and_configure(db_path)
         else:
-            conn = backend._open_and_configure(
-                db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex
-            )
+            conn = backend._open_and_configure(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
     except sqlite3.DatabaseError:
         if backend._db_has_data(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex):
             logger.warning(
                 "db_integrity_check_failed_but_has_data",
                 db=str(db_path),
                 action="open_anyway",
-                hint=(
-                    "quick_check failed but DB has rows — likely transient WAL "
-                    "contention, not corruption"
-                ),
+                hint=("quick_check failed but DB has rows — likely transient WAL contention, not corruption"),
             )
-            conn = backend._open_without_integrity_check(
-                db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex
-            )
+            conn = backend._open_without_integrity_check(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
             integrity_warning = True
         else:
             logger.exception("db_corrupt_detected", db=str(db_path), action="auto_recover")
@@ -118,10 +111,7 @@ def load_vec_extension(conn: Any, db_path: Path, dim: int) -> bool:
             db=str(db_path),
             reason=type(exc).__name__,
             detail=str(exc),
-            hint=(
-                "Python lacks SQLite load_extension support; vector search "
-                "disabled, BM25 still works"
-            ),
+            hint=("Python lacks SQLite load_extension support; vector search disabled, BM25 still works"),
         )
         return False
 

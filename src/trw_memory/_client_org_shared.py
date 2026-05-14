@@ -44,6 +44,7 @@ logger = structlog.get_logger(__name__)
 def _client_logger() -> Any:
     """Parent-module logger lookup so test patches on ``trw_memory.client.logger`` propagate."""
     from trw_memory import client as _c
+
     return _c.logger
 
 
@@ -71,6 +72,7 @@ async def merge_shared_results(
         # Look up `fetch_shared_memories` via parent module so test patches
         # on `trw_memory.client.fetch_shared_memories` propagate.
         from trw_memory import client as _client_module
+
         _fetch = _client_module.fetch_shared_memories
         shared = await asyncio.to_thread(
             functools.partial(
@@ -93,9 +95,7 @@ async def merge_shared_results(
         )
         return merge_shared_candidates(local_results, snapshot_cached_shared_results(client, query))
     await mark_fetch_retirements(client, shared)
-    live_shared = [
-        shared_result_to_result(item) for item in shared if not is_retired_shared_result(item)
-    ]
+    live_shared = [shared_result_to_result(item) for item in shared if not is_retired_shared_result(item)]
     return merge_shared_candidates(local_results, [*live_shared, *cached_shared])
 
 

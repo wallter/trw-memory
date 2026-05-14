@@ -147,7 +147,9 @@ def test_fr04_recover_cli_malformed_dump_falls_through(tmp_path: Path, monkeypat
     _corrupt_sqlite_master(db_path)
 
     def _bad_dump(*_args: Any, **_kwargs: Any) -> Any:
-        return subprocess.CompletedProcess(args=["sqlite3"], returncode=0, stdout=b"THIS IS NOT VALID SQL AT ALL;;", stderr=b"")
+        return subprocess.CompletedProcess(
+            args=["sqlite3"], returncode=0, stdout=b"THIS IS NOT VALID SQL AT ALL;;", stderr=b""
+        )
 
     monkeypatch.setattr(subprocess, "run", _bad_dump)
     with pytest.raises(CorruptDatabaseUnsalvageableError):

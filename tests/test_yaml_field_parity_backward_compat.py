@@ -16,7 +16,12 @@ from ._test_yaml_field_parity_support import backend, write_entry_yaml
 @pytest.mark.unit
 class TestBackwardCompatDefaults:
     def test_missing_fields_have_defaults(self, backend: YAMLBackend) -> None:
-        entry = MemoryEntry(id="M-old-1", content="legacy entry", created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+        entry = MemoryEntry(
+            id="M-old-1",
+            content="legacy entry",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
         backend.store(entry)
         loaded = backend.get("M-old-1")
         assert loaded is not None
@@ -29,7 +34,13 @@ class TestBackwardCompatDefaults:
         assert loaded.assertions == []
 
     def test_remote_id_none_round_trip(self, backend: YAMLBackend) -> None:
-        entry = MemoryEntry(id="M-none-rid", content="no remote id", created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc), remote_id=None)
+        entry = MemoryEntry(
+            id="M-none-rid",
+            content="no remote id",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            remote_id=None,
+        )
         backend.store(entry)
         loaded = backend.get("M-none-rid")
         assert loaded is not None and loaded.remote_id is None

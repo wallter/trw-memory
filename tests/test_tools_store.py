@@ -85,8 +85,12 @@ class TestMemoryStoreImpl:
         cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
 
         with create_backend_from_config(cfg, "project:default") as backend:
-            backend.store(MemoryEntry(id="M-alice", content="alice entry", namespace="project:default", source_identity="alice"))
-            backend.store(MemoryEntry(id="M-bob", content="bob entry", namespace="project:default", source_identity="bob"))
+            backend.store(
+                MemoryEntry(id="M-alice", content="alice entry", namespace="project:default", source_identity="alice")
+            )
+            backend.store(
+                MemoryEntry(id="M-bob", content="bob entry", namespace="project:default", source_identity="bob")
+            )
 
             result = memory_forget_impl(None, None, "project:default", backend=backend, config=cfg, actor="alice")
             remaining = memory_search_impl("project:default", backend=backend, config=cfg, actor="alice")

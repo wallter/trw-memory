@@ -27,6 +27,7 @@ from trw_memory.storage._shared import (
     ENTRY_COLUMNS,
     IMMUTABLE_FIELDS,
 )
+
 # SQLCipher driver/pragma + cold-rebuild base extracted to _sqlcipher_setup.py
 # (PRD-DIST-245 batch 90). Re-exports preserve back-compat names.
 from trw_memory.storage._sqlcipher_setup import (
@@ -70,6 +71,7 @@ from trw_memory.storage._corrupt_backup import (
     rotate_corrupt_backup as _rotate_corrupt_backup_impl,
     salvage_via_recover_cli as _salvage_via_recover_cli_impl,
 )
+
 # Connection-management helpers extracted to _connection.py (PRD-DIST-245
 # batch 82). Re-exports preserve the public API surface.
 from trw_memory.storage._connection import (
@@ -78,14 +80,17 @@ from trw_memory.storage._connection import (
     open_and_configure as _connection_open_and_configure,
     open_without_integrity_check as _connection_open_without_integrity_check,
 )
+
 # recover_db extracted to _recovery.py (PRD-DIST-245 batch 83).
 from trw_memory.storage._recovery import recover_db as _recovery_recover_db
+
 # Resilient row materialisation extracted to _resilient_fetch.py
 # (PRD-DIST-245 batch 84).
 from trw_memory.storage._resilient_fetch import (
     fetch_rows_resilient as _resilient_fetch_rows_resilient,
     fetch_rows_via_bytes_fallback as _resilient_fetch_rows_via_bytes_fallback,
 )
+
 # Vector operations extracted to _vector_ops.py (PRD-DIST-245 batch 85).
 from trw_memory.storage._vector_ops import (
     delete_vector as _vec_ops_delete_vector,
@@ -96,6 +101,7 @@ from trw_memory.storage._vector_ops import (
     upsert_vector as _vec_ops_upsert_vector,
     vector_exists as _vec_ops_vector_exists,
 )
+
 # Query / list / namespace operations extracted to _query_ops.py
 # (PRD-DIST-245 batch 86).
 from trw_memory.storage._query_ops import (
@@ -106,6 +112,7 @@ from trw_memory.storage._query_ops import (
     list_namespaces as _query_ops_list_namespaces,
     search as _query_ops_search,
 )
+
 # CRUD ops extracted to _crud_ops.py (PRD-DIST-245 batch 87).
 from trw_memory.storage._crud_ops import (
     delete as _crud_ops_delete,
@@ -115,6 +122,7 @@ from trw_memory.storage._crud_ops import (
     store as _crud_ops_store,
     update as _crud_ops_update,
 )
+
 # __init__ helpers extracted to _init_helpers.py (PRD-DIST-245 batch 88).
 from trw_memory.storage._init_helpers import (
     load_vec_extension as _init_load_vec_extension,
@@ -122,6 +130,7 @@ from trw_memory.storage._init_helpers import (
     register_writer_registry as _init_register_writer_registry,
     start_integrity_scheduler as _init_start_integrity_scheduler,
 )
+
 # Stale-handle + integrity-check helpers extracted to _stale_handle.py
 # (PRD-DIST-245 batch 89).
 from trw_memory.storage._stale_handle import (
@@ -200,9 +209,7 @@ class SQLiteBackend(StorageBackend):
         self._vec_available = _init_load_vec_extension(self._conn, db_path, self._dim)
 
         # PRD-INFRA-064 (B3): multi-writer advisory registry (fail-open)
-        self._writer_registry = _init_register_writer_registry(
-            db_path, self._concurrent_writer_warn_threshold
-        )
+        self._writer_registry = _init_register_writer_registry(db_path, self._concurrent_writer_warn_threshold)
 
         # PRD-INFRA-063 (B2): periodic integrity scheduler (fail-open)
         self._integrity_scheduler = _init_start_integrity_scheduler(
@@ -374,15 +381,11 @@ class SQLiteBackend(StorageBackend):
         """Apply a partial update to an existing entry."""
         return _crud_ops_update(self, _SELECT_COLUMNS_SQL, _VALID_UPDATE_COLUMNS, entry_id, **fields)
 
-    def increment_session_counts(
-        self, entry_ids: list[str], *, updated_at: datetime | None = None
-    ) -> int:
+    def increment_session_counts(self, entry_ids: list[str], *, updated_at: datetime | None = None) -> int:
         """Increment session_count for multiple entries in one transaction."""
         return _crud_ops_increment_session_counts(self, entry_ids, updated_at=updated_at)
 
-    def increment_access_counts(
-        self, entry_ids: list[str], *, accessed_at: datetime | None = None
-    ) -> int:
+    def increment_access_counts(self, entry_ids: list[str], *, accessed_at: datetime | None = None) -> int:
         """Increment access_count and last_accessed_at in one transaction."""
         return _crud_ops_increment_access_counts(self, entry_ids, accessed_at=accessed_at)
 
@@ -510,9 +513,7 @@ class SQLiteBackend(StorageBackend):
 
     def delete_vector(self, entry_id: str) -> bool:
         """Public vector-row deletion."""
-        return _vec_ops_delete_vector(
-            self._conn, self._lock, vec_available=self._vec_available, entry_id=entry_id
-        )
+        return _vec_ops_delete_vector(self._conn, self._lock, vec_available=self._vec_available, entry_id=entry_id)
 
     def vector_exists(self, entry_id: str) -> bool:
         """Single-row vec_index probe."""
@@ -520,19 +521,29 @@ class SQLiteBackend(StorageBackend):
 
     def existing_vector_ids(self) -> set[str]:
         """Bulk set of entry IDs with stored vectors."""
-        return _vec_ops_existing_vector_ids(
-            self._conn, self._lock, vec_available=self._vec_available
-        )
+        return _vec_ops_existing_vector_ids(self._conn, self._lock, vec_available=self._vec_available)
 
     def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:
         """Insert or update a vector in vec_memories."""
-        _vec_ops_upsert_vector(self._conn, self._lock, vec_available=self._vec_available,
-                               dim=self._dim, entry_id=entry_id, embedding=embedding)
+        _vec_ops_upsert_vector(
+            self._conn,
+            self._lock,
+            vec_available=self._vec_available,
+            dim=self._dim,
+            entry_id=entry_id,
+            embedding=embedding,
+        )
 
     def search_vectors(self, query_embedding: list[float], top_k: int = 25) -> list[tuple[str, float]]:
         """KNN search in vec_memories."""
-        return _vec_ops_search_vectors(self._conn, self._lock, vec_available=self._vec_available,
-                                       dim=self._dim, query_embedding=query_embedding, top_k=top_k)
+        return _vec_ops_search_vectors(
+            self._conn,
+            self._lock,
+            vec_available=self._vec_available,
+            dim=self._dim,
+            query_embedding=query_embedding,
+            top_k=top_k,
+        )
 
     def get_stored_embeddings(self, entry_ids: list[str]) -> dict[str, list[float]]:
         """Bulk lookup of packed embedding blobs."""

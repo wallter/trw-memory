@@ -56,8 +56,7 @@ class _InMemoryBackend(StorageBackend):
             results = [
                 entry
                 for entry in results
-                if (entry.status.value if isinstance(entry.status, MemoryStatus) else str(entry.status))
-                == status_value
+                if (entry.status.value if isinstance(entry.status, MemoryStatus) else str(entry.status)) == status_value
             ]
         return results[:top_k]
 
@@ -79,8 +78,7 @@ class _InMemoryBackend(StorageBackend):
             results = [
                 entry
                 for entry in results
-                if (entry.status.value if isinstance(entry.status, MemoryStatus) else str(entry.status))
-                == status_value
+                if (entry.status.value if isinstance(entry.status, MemoryStatus) else str(entry.status)) == status_value
             ]
         if namespace is not None:
             results = [entry for entry in results if entry.namespace == namespace]

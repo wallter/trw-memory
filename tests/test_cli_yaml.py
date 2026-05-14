@@ -161,9 +161,7 @@ class TestExportImportRoundTrip:
     ) -> None:
         mock_config_cls.return_value = MagicMock()
         mock_backend = MagicMock()
-        mock_backend.list_entries.return_value = [
-            _mock_entry(entry_id="M-yaml", content="yaml roundtrip", tags=["yr"])
-        ]
+        mock_backend.list_entries.return_value = [_mock_entry(entry_id="M-yaml", content="yaml roundtrip", tags=["yr"])]
         mock_backend_fn.return_value = mock_backend
 
         out_path = str(tmp_path / "roundtrip.yaml")

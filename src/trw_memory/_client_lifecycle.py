@@ -59,11 +59,13 @@ SHARED_EVENT_CACHE_MAX = 256
 def _client_logger() -> Any:
     """Parent-module logger lookup so test patches on ``trw_memory.client.logger`` propagate."""
     from trw_memory import client as _c
+
     return _c.logger
 
 
 def _create_local_backend(config: MemoryConfig, namespace: str) -> StorageBackend:
     from trw_memory.client import _create_local_backend as _impl
+
     return _impl(config, namespace)
 
 
@@ -155,6 +157,7 @@ async def publish_entry(
     embedding: list[float] | None,
 ) -> None:
     from trw_memory import client as _c
+
     publish_result = await asyncio.to_thread(
         functools.partial(
             _c.publish_memory_result,
@@ -249,6 +252,7 @@ def maybe_start_retry_drain(client: MemoryClient) -> None:
 
 async def drain_retry_queue_impl(client: MemoryClient) -> None:
     from trw_memory import client as _c
+
     queued_before = {record["entry_id"] for record in client._retry_queue.snapshot()}
     result = await asyncio.to_thread(_c.drain_retry_queue, client._retry_queue, client._config)
     queued_after = {record["entry_id"] for record in client._retry_queue.snapshot()}
@@ -302,6 +306,7 @@ def maybe_start_sse_subscription(client: MemoryClient) -> None:
     if not should_start_sse_subscription(client):
         return
     from trw_memory import client as _c
+
     subscriber = _c.SSESubscriber(
         client._config,
         on_event=lambda event: handle_sse_event(client, event),
@@ -366,6 +371,7 @@ async def retire_remote_entry(
     remote_id: str,
 ) -> None:
     from trw_memory import client as _c
+
     retired = await asyncio.to_thread(_c.retire_remote_memory, remote_id, client._config)
     if retired:
         _client_logger().debug(

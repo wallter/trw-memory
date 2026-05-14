@@ -41,11 +41,13 @@ logger = structlog.get_logger(__name__)
 def _client_logger() -> Any:
     """Parent-module logger lookup so test patches on ``trw_memory.client.logger`` propagate."""
     from trw_memory import client as _c
+
     return _c.logger
 
 
 def _entry_to_result(entry: Any, score: float = 0.0) -> MemoryResultDict:
     from trw_memory._client_distilled_tiering import entry_to_result as _impl
+
     return _impl(entry, score=score)
 
 
@@ -57,6 +59,7 @@ async def forget_impl(
 ) -> ForgetResultDict:
     """Async impl for :meth:`MemoryClient.forget`."""
     from trw_memory import client as _c
+
     client._require_permission(Permission.DELETE, "forget")
     client._maybe_start_retry_drain()
     if not memory_id and not actor:

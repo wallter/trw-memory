@@ -120,8 +120,7 @@ class TestWriteTimeValidation:
 
     def test_score_entry_anomaly_flags_large_outlier(self) -> None:
         reference = [
-            make_entry(entry_id=f"M-{index}", content="normal content", detail="ok", metadata={})
-            for index in range(20)
+            make_entry(entry_id=f"M-{index}", content="normal content", detail="ok", metadata={}) for index in range(20)
         ]
         outlier = make_entry(entry_id="M-outlier", content="A" * 5000, detail="")
         anomaly = score_entry_anomaly(outlier, reference, z_threshold=3.0)

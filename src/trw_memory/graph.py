@@ -261,6 +261,7 @@ from trw_memory._graph_cross_project import (  # noqa: E402
     persist_cross_validated_entry as _persist_cross_validated_entry,
     project_scope_key as _project_scope_key,
 )
+
 # Importance boost / decay cluster extracted to _graph_decay.py
 # (PRD-DIST-245 batch 94). Re-exports preserve back-compat names.
 from trw_memory._graph_decay import (  # noqa: E402
@@ -268,12 +269,14 @@ from trw_memory._graph_decay import (  # noqa: E402
     apply_importance_decay as apply_importance_decay,
     memory_decay_pass as memory_decay_pass,
 )
+
 # Edge-creation cluster extracted to _graph_edges.py (PRD-DIST-245 batch 95).
 from trw_memory._graph_edges import (  # noqa: E402
     create_consolidation_edges as create_consolidation_edges,
     create_similarity_edges as create_similarity_edges,
     create_tag_cooccurrence_edges as create_tag_cooccurrence_edges,
 )
+
 # Cluster detection + impact propagation extracted to _graph_clusters.py
 # (PRD-DIST-245 batch 96).
 from trw_memory._graph_clusters import (  # noqa: E402
@@ -281,6 +284,7 @@ from trw_memory._graph_clusters import (  # noqa: E402
     detect_clusters as detect_clusters,
     propagate_impact as propagate_impact,
 )
+
 # Conflict detection + co-anchored edges extracted to _graph_conflicts.py
 # (PRD-DIST-245 batch 97).
 from trw_memory._graph_conflicts import (  # noqa: E402
@@ -331,7 +335,6 @@ def list_org_shared_entries(
 
     matches.sort(key=lambda entry: (entry.importance, entry.updated_at), reverse=True)
     return matches[:limit]
-
 
 
 def graph_query(

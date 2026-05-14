@@ -69,6 +69,7 @@ async def merge_org_results(
     """Append cross-validated sibling-project memories after local results."""
     try:
         from trw_memory import client as _c
+
         org_entries = await asyncio.to_thread(
             functools.partial(
                 _c.list_org_shared_entries,

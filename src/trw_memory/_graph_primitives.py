@@ -69,8 +69,7 @@ def _upsert_edge(
 
     if edge_type not in _graph.VALID_EDGE_TYPES:
         raise ValueError(
-            f"Invalid edge type {edge_type!r}. "
-            f"Must be one of: {', '.join(sorted(_graph.VALID_EDGE_TYPES))}"
+            f"Invalid edge type {edge_type!r}. Must be one of: {', '.join(sorted(_graph.VALID_EDGE_TYPES))}"
         )
     meta_json = json.dumps(metadata) if metadata else "{}"
     if len(meta_json) > 4096:

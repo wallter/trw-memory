@@ -155,7 +155,9 @@ class TestRbacEnforcement:
         client: MemoryClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        entries = [MemoryEntry(id=f"M-seed-{index}", content="seed", namespace="default") for index in range(10_050)] + [
+        entries = [
+            MemoryEntry(id=f"M-seed-{index}", content="seed", namespace="default") for index in range(10_050)
+        ] + [
             MemoryEntry(
                 id=f"M-alice-{index}",
                 content="alice memory",
@@ -167,9 +169,9 @@ class TestRbacEnforcement:
         deleted_ids: set[str] = set()
         backend = MagicMock()
         backend.count.return_value = len(entries)
-        backend.list_entries.side_effect = lambda **kwargs: [
-            entry for entry in entries if entry.id not in deleted_ids
-        ][: int(kwargs["limit"])]
+        backend.list_entries.side_effect = lambda **kwargs: [entry for entry in entries if entry.id not in deleted_ids][
+            : int(kwargs["limit"])
+        ]
         backend.delete.side_effect = lambda entry_id: deleted_ids.add(entry_id) is None
         monkeypatch.setattr(client, "_get_backend", lambda: backend)
         monkeypatch.setattr("trw_memory.client.remove_entry_from_tiers", lambda *args, **kwargs: None)

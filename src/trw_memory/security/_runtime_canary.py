@@ -118,9 +118,7 @@ def initialize_canaries(config: MemoryConfig, *, backend: StorageBackend) -> Non
 
 def probe_canaries(config: MemoryConfig, *, backend: StorageBackend) -> None:
     state_key = _state_key(config, backend)
-    state: dict[str, Any] = CANARY_STATE.setdefault(
-        state_key, {"seeded": False, "recall_count": 0, "failed": False}
-    )
+    state: dict[str, Any] = CANARY_STATE.setdefault(state_key, {"seeded": False, "recall_count": 0, "failed": False})
     if not state["seeded"]:
         initialize_canaries(config, backend=backend)
     raw_recall_count = state.get("recall_count", 0)
