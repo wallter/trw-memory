@@ -1,3 +1,4 @@
+# ruff: noqa: F401,F811
 """Core SQLiteBackend storage behavior tests."""
 
 from __future__ import annotations

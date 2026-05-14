@@ -1,3 +1,4 @@
+# ruff: noqa: F401,F811
 """SQLiteBackend edge-case and integration-adjacent tests."""
 
 from __future__ import annotations

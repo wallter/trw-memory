@@ -1,3 +1,4 @@
+# ruff: noqa: F401
 """Direct hydrator unit tests for cold rebuild."""
 
 from __future__ import annotations
@@ -6,7 +7,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from trw_memory.storage._cold_rebuild import _HydrationError, _hydrate_yaml
+from trw_memory.storage._cold_rebuild import _hydrate_yaml, _HydrationError
 
 from ._test_cold_rebuild_support import _configure_structlog
 

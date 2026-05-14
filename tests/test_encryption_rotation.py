@@ -1,3 +1,4 @@
+# ruff: noqa: F401
 """Rotation and SQLCipher integration tests for trw_memory.security.encryption."""
 
 from __future__ import annotations
@@ -17,9 +18,9 @@ from trw_memory.security import derive_namespace_key, generate_master_key, rotat
 from trw_memory.tools.recall import memory_recall_impl
 
 from ._test_encryption_support import (
-    _RotatingSQLCipherDBAPI,
     _load_real_sqlcipher_driver_or_skip,
     _make_entry,
+    _RotatingSQLCipherDBAPI,
     clear_master_key_cache_fixture,
 )
 

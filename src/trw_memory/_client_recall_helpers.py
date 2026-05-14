@@ -37,16 +37,16 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
-def _entry_to_result(entry: object, score: float = 0.0) -> "MemoryResultDict":
+def _entry_to_result(entry: object, score: float = 0.0) -> MemoryResultDict:
     from trw_memory._client_distilled_tiering import entry_to_result as _impl
 
     return _impl(entry, score=score)  # type: ignore[arg-type]
 
 
 def apply_budget(
-    results: "list[MemoryResultDict]",
+    results: list[MemoryResultDict],
     token_budget: int | None,
-) -> "list[MemoryResultDict]":
+) -> list[MemoryResultDict]:
     """Token-budget filtering (pure). When ``token_budget`` is None, returns input unchanged."""
     if token_budget is None or not results:
         return results
@@ -59,13 +59,13 @@ def apply_budget(
 
 
 async def merge_org_results(
-    client: "MemoryClient",
+    client: MemoryClient,
     query: str,
-    local_results: "list[MemoryResultDict]",
+    local_results: list[MemoryResultDict],
     limit: int,
     tags: list[str] | None,
     min_score: float,
-) -> "list[MemoryResultDict]":
+) -> list[MemoryResultDict]:
     """Append cross-validated sibling-project memories after local results."""
     try:
         from trw_memory import client as _c
@@ -108,13 +108,13 @@ async def merge_org_results(
 
 
 def tier_results(
-    client: "MemoryClient",
+    client: MemoryClient,
     backend: StorageBackend,
     query: str,
     tags: list[str] | None,
     limit: int,
     query_embedding: list[float] | None = None,
-) -> "list[MemoryResultDict]":
+) -> list[MemoryResultDict]:
     """Collect local tier-managed candidates for this namespace."""
     candidates = tier_candidates(
         client._config,
@@ -129,8 +129,8 @@ def tier_results(
 
 
 def remember_results_in_tiers(
-    client: "MemoryClient",
-    results: "list[MemoryResultDict]",
+    client: MemoryClient,
+    results: list[MemoryResultDict],
 ) -> None:
     """Keep the hot/warm tiers aligned with the entries callers actually saw."""
     recalled_at = datetime.now(timezone.utc).isoformat()
@@ -154,13 +154,13 @@ def remember_results_in_tiers(
 
 
 def merge_tier_results(
-    local_results: "list[MemoryResultDict]",
-    tier_only_results: "list[MemoryResultDict]",
+    local_results: list[MemoryResultDict],
+    tier_only_results: list[MemoryResultDict],
     limit: int,
     query_tokens: list[str],
     config: MemoryConfig,
     query_embedding: list[float] | None = None,
-) -> "list[MemoryResultDict]":
+) -> list[MemoryResultDict]:
     """Merge tier-only candidates into the normal local recall results."""
     if not tier_only_results:
         return local_results[:limit]
@@ -191,7 +191,7 @@ def merge_tier_results(
     return merged[:limit]
 
 
-def tier_result_from_entry(entry: dict[str, object]) -> "MemoryResultDict":
+def tier_result_from_entry(entry: dict[str, object]) -> MemoryResultDict:
     """Convert a tier-managed entry dict into the client recall result shape."""
     from trw_memory.client import MemoryClient
 

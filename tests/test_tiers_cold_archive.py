@@ -1,3 +1,4 @@
+# ruff: noqa: F811
 """Tests for lifecycle/tiers.py cold archive and promote workflows."""
 
 from __future__ import annotations

@@ -11,6 +11,7 @@ from tests._test_client_support import _RecordingSQLCipherDBAPI
 from trw_memory.client import MemoryClient
 from trw_memory.exceptions import EncryptionUnavailableError
 
+
 class TestConstructor:
     def test_local_mode_creates_backend(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "s"))

@@ -1,3 +1,4 @@
+# ruff: noqa: F401
 """Focused clustering tests for lifecycle/consolidation.py."""
 
 from __future__ import annotations
@@ -7,7 +8,6 @@ from unittest.mock import MagicMock
 from trw_memory.lifecycle.consolidation import _mean_pairwise_similarity, find_clusters
 
 from ._test_consolidation_support import (
-    _InMemoryBackend,
     _V1,
     _V2,
     _V3,
@@ -15,6 +15,7 @@ from ._test_consolidation_support import (
     _W1,
     _W2,
     _W3,
+    _InMemoryBackend,
     _make_embedder,
     _make_entry,
 )

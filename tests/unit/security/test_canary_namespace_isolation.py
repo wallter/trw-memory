@@ -20,12 +20,12 @@ import pytest
 
 from trw_memory.exceptions import CanaryTamperError
 from trw_memory.models.config import MemoryConfig
+from trw_memory.security._runtime_canary import CANARY_STATE
 from trw_memory.security.runtime import (
     initialize_canaries,
     probe_canaries,
     should_halt_recalls,
 )
-from trw_memory.security._runtime_canary import CANARY_STATE
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 

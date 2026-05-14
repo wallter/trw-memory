@@ -72,7 +72,7 @@ def get_distilled_recall_weight() -> float:
     return weight
 
 
-def is_distilled_result(result: "MemoryResultDict") -> bool:
+def is_distilled_result(result: MemoryResultDict) -> bool:
     """True if the record was written by trw-distill.
 
     Recognizes distilled records via two complementary markers:
@@ -92,11 +92,11 @@ def is_distilled_result(result: "MemoryResultDict") -> bool:
 
 
 def apply_distilled_tiering(
-    results: "list[MemoryResultDict]",
+    results: list[MemoryResultDict],
     *,
     weight: float | None = None,
     include_distilled: bool = True,
-) -> "list[MemoryResultDict]":
+) -> list[MemoryResultDict]:
     """Apply PRD-DIST-005 FR-6 tiering to a recall result list.
 
     When ``include_distilled=False``, distilled records are removed.
@@ -125,7 +125,7 @@ def apply_distilled_tiering(
     return dampened
 
 
-def entry_to_result(entry: MemoryEntry, score: float = 0.0) -> "MemoryResultDict":
+def entry_to_result(entry: MemoryEntry, score: float = 0.0) -> MemoryResultDict:
     """Convert a MemoryEntry to a result dict."""
     result: MemoryResultDict = {
         "memory_id": entry.id,

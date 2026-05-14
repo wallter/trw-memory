@@ -1,3 +1,4 @@
+# ruff: noqa: F401
 """Core rebuild and hydrator-mapping tests."""
 
 from __future__ import annotations

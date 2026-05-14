@@ -1,3 +1,4 @@
+# ruff: noqa: E402,F401,I001
 """Shared runtime security helpers for store/search/forget paths."""
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ logger = structlog.get_logger(__name__)
 
 # Anomaly-stats helpers extracted to _runtime_anomaly.py
 # (PRD-DIST-245 batch 102). Re-exports preserve back-compat names.
-from trw_memory.security._runtime_anomaly import (  # noqa: E402
+from trw_memory.security._runtime_anomaly import (
     AnomalyStats as AnomalyStats,
     build_anomaly_stats as _build_anomaly_stats,
     score_anomaly as _score_entry_anomaly,

@@ -53,14 +53,14 @@ def _client_logger() -> Any:
     return _c.logger
 
 
-def make_tool_functions(client: "MemoryClient") -> "dict[str, _ToolFn]":
+def make_tool_functions(client: MemoryClient) -> dict[str, _ToolFn]:
     """Create the shared tool functions for agent registration."""
 
     async def memory_store(
         content: str,
         tags: list[str] | None = None,
         importance: float = 0.5,
-    ) -> "StoreResultDict":
+    ) -> StoreResultDict:
         return await client.store(content, tags=tags, importance=importance)
 
     async def memory_recall(
@@ -74,7 +74,7 @@ def make_tool_functions(client: "MemoryClient") -> "dict[str, _ToolFn]":
         exclude_source_kinds: list[str] | None = None,
         source_weights: dict[str, float] | None = None,
         exclude_expired: bool = True,
-    ) -> "list[MemoryResultDict]":
+    ) -> list[MemoryResultDict]:
         return await client.recall(
             query,
             limit=limit,
@@ -88,7 +88,7 @@ def make_tool_functions(client: "MemoryClient") -> "dict[str, _ToolFn]":
             exclude_expired=exclude_expired,
         )
 
-    async def memory_forget(memory_id: str | None = None, actor: str | None = None) -> "ForgetResultDict":
+    async def memory_forget(memory_id: str | None = None, actor: str | None = None) -> ForgetResultDict:
         return await client.forget(memory_id, actor=actor)
 
     async def memory_search(
@@ -97,7 +97,7 @@ def make_tool_functions(client: "MemoryClient") -> "dict[str, _ToolFn]":
         limit: int = 50,
         actor: str | None = None,
         status: str | None = None,
-    ) -> "list[MemoryResultDict]":
+    ) -> list[MemoryResultDict]:
         return await client.search(
             tags=tags,
             min_importance=min_importance,
@@ -115,8 +115,8 @@ def make_tool_functions(client: "MemoryClient") -> "dict[str, _ToolFn]":
 
 
 def register_tools(
-    client: "MemoryClient",
-    agent: "AgentWithRegisterTool | AgentWithToolDecorator",
+    client: MemoryClient,
+    agent: AgentWithRegisterTool | AgentWithToolDecorator,
 ) -> None:
     """Register memory tools with an agent framework."""
     if client._tools_registered:
@@ -141,7 +141,7 @@ def register_tools(
 
 
 def auto_recall(
-    client: "MemoryClient",
+    client: MemoryClient,
     query_from: str,
     limit: int = 10,
     min_score: float = 0.0,

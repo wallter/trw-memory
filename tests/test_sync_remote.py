@@ -1,3 +1,4 @@
+# ruff: noqa: F401
 """Tests for trw_memory.sync.remote — PRD-CORE-047."""
 
 from __future__ import annotations
@@ -24,7 +25,11 @@ from trw_memory.sync.remote import (
 
 from ._test_sync_support import (
     make_sync_config as _make_config,
+)
+from ._test_sync_support import (
     make_sync_entry as _make_entry,
+)
+from ._test_sync_support import (
     mock_httpx_client as _mock_httpx_client,
 )
 

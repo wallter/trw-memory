@@ -1,3 +1,4 @@
+# ruff: noqa: F401,F811
 """E2E CRUD and validation tests for trw-memory."""
 
 from __future__ import annotations

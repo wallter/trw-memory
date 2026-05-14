@@ -56,7 +56,7 @@ def _make_id() -> str:
 
 
 async def store_impl(
-    client: "MemoryClient",
+    client: MemoryClient,
     content: str,
     tags: list[str] | None = None,
     importance: float = 0.5,
@@ -68,7 +68,7 @@ async def store_impl(
     source_identity: str = "",
     session_id: str | None = None,
     entry_id: str | None = None,
-) -> "StoreResultDict":
+) -> StoreResultDict:
     """Async impl for :meth:`MemoryClient.store`.
 
     See the method docstring for full arg/return semantics. Implementation

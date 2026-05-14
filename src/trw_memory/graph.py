@@ -1,3 +1,4 @@
+# ruff: noqa: F401,I001
 """Knowledge graph -- edge creation, traversal, cross-validation, importance ops.
 
 Supports 13 typed edge types (PRD-CORE-107).  Graph traversal via BFS up to depth 3.

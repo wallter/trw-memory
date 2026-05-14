@@ -1,3 +1,4 @@
+# ruff: noqa: F401,F811
 """YAML field parity update-path and malformed-data tests."""
 
 from __future__ import annotations

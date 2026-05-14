@@ -1,3 +1,4 @@
+# ruff: noqa: F401,F811
 """Tests for VSCode and adapter factory integrations."""
 
 from __future__ import annotations

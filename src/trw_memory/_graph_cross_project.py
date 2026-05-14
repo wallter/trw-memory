@@ -28,16 +28,12 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import structlog
 
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.interface import StorageBackend
-
-if TYPE_CHECKING:
-    pass
 
 logger = structlog.get_logger(__name__)
 

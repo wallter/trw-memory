@@ -1,3 +1,4 @@
+# ruff: noqa: F401
 """Recovery-path tests for cold rebuild integration."""
 
 from __future__ import annotations

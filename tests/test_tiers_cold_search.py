@@ -1,3 +1,4 @@
+# ruff: noqa: F811
 """Tests for lifecycle/tiers.py cold search behavior and edge cases."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# ruff: noqa: F811
 """Performance contract tests for lifecycle/tiers.py."""
 
 from __future__ import annotations

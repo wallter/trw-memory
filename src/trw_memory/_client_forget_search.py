@@ -44,17 +44,17 @@ def _client_logger() -> Any:
     return _c.logger
 
 
-def _entry_to_result(entry: Any, score: float = 0.0) -> "MemoryResultDict":
+def _entry_to_result(entry: Any, score: float = 0.0) -> MemoryResultDict:
     from trw_memory._client_distilled_tiering import entry_to_result as _impl
     return _impl(entry, score=score)
 
 
 async def forget_impl(
-    client: "MemoryClient",
+    client: MemoryClient,
     memory_id: str | None = None,
     *,
     actor: str | None = None,
-) -> "ForgetResultDict":
+) -> ForgetResultDict:
     """Async impl for :meth:`MemoryClient.forget`."""
     from trw_memory import client as _c
     client._require_permission(Permission.DELETE, "forget")
@@ -148,7 +148,7 @@ async def forget_impl(
 
 
 async def search_impl(
-    client: "MemoryClient",
+    client: MemoryClient,
     tags: list[str] | None = None,
     min_importance: float = 0.0,
     since: datetime | None = None,
@@ -156,7 +156,7 @@ async def search_impl(
     *,
     actor: str | None = None,
     status: str | None = None,
-) -> "list[MemoryResultDict]":
+) -> list[MemoryResultDict]:
     """Async impl for :meth:`MemoryClient.search`."""
     if limit < 1:
         raise ValueError(f"limit must be >= 1, got {limit}")

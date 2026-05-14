@@ -1,3 +1,4 @@
+# ruff: noqa: F401,F811
 """Round-trip integration tests for adapter families."""
 
 from __future__ import annotations

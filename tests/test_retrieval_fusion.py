@@ -30,7 +30,7 @@ class TestRRFFuse:
         r1 = [("shared", 1.0), ("only_r1", 0.5)]
         r2 = [("shared", 1.0), ("only_r2", 0.5)]
         result = rrf_fuse([r1, r2])
-        assert [entry_id for entry_id, _ in result][0] == "shared"
+        assert next(entry_id for entry_id, _ in result) == "shared"
 
     def test_custom_k_value(self) -> None:
         ranking = [("a", 1.0)]

@@ -1,3 +1,4 @@
+# ruff: noqa: F401
 """CLI coverage for cold-tier restore."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# ruff: noqa: F401
 """Malformed-input, logging, and guard tests for cold rebuild."""
 
 from __future__ import annotations

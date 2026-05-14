@@ -13,13 +13,13 @@ from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.yaml_backend import YAMLBackend
 
 from ._test_consolidation_support import (
-    _InMemoryBackend,
     _V1,
     _V2,
     _V3,
     _W1,
     _W2,
     _W3,
+    _InMemoryBackend,
     _make_embedder,
     _make_entry,
 )

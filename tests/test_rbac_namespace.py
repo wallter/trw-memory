@@ -47,7 +47,7 @@ class TestRequireNamespacePermission:
     ) -> None:
         config = MemoryConfig(
             rbac_enabled=True,
-            default_role=cast(Literal["admin", "reader", "writer", "none"], role),
+            default_role=cast("Literal['admin', 'reader', 'writer', 'none']", role),
         )
 
         if allowed:

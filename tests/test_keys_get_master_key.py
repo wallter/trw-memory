@@ -1,3 +1,4 @@
+# ruff: noqa: F401
 """Tests for ``trw_memory.security.keys.get_master_key``."""
 
 from __future__ import annotations

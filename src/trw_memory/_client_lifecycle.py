@@ -47,7 +47,6 @@ from trw_memory.security.runtime import initialize_canaries
 from trw_memory.security.startup import verify_defaults
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.sync.retry_queue import RetryQueue
-from trw_memory.sync.subscriber import SSESubscriber
 
 if TYPE_CHECKING:
     from trw_memory.client import MemoryClient, MemoryResultDict
@@ -74,7 +73,7 @@ def _create_local_backend(config: MemoryConfig, namespace: str) -> StorageBacken
 
 
 def init_client(
-    client: "MemoryClient",
+    client: MemoryClient,
     namespace: str,
     mode: Literal["local", "mcp", "auto"] = "auto",
     timeout: float = 5.0,
@@ -135,7 +134,7 @@ def init_client(
 # ---------------------------------------------------------------------------
 
 
-def should_attempt_remote_publish(client: "MemoryClient", entry: MemoryEntry) -> bool:
+def should_attempt_remote_publish(client: MemoryClient, entry: MemoryEntry) -> bool:
     return (
         not client._config.local_only
         and client._config.sync_enabled
@@ -144,14 +143,14 @@ def should_attempt_remote_publish(client: "MemoryClient", entry: MemoryEntry) ->
     )
 
 
-def schedule_background_task(client: "MemoryClient", coro: Coroutine[object, object, None]) -> None:
+def schedule_background_task(client: MemoryClient, coro: Coroutine[object, object, None]) -> None:
     task = asyncio.create_task(coro)
     client._background_tasks.add(task)
     task.add_done_callback(client._background_tasks.discard)
 
 
 async def publish_entry(
-    client: "MemoryClient",
+    client: MemoryClient,
     entry: MemoryEntry,
     embedding: list[float] | None,
 ) -> None:
@@ -200,13 +199,13 @@ async def publish_entry(
 # ---------------------------------------------------------------------------
 
 
-async def aenter(client: "MemoryClient") -> "MemoryClient":
+async def aenter(client: MemoryClient) -> MemoryClient:
     maybe_start_retry_drain(client)
     return client
 
 
 async def aexit(
-    client: "MemoryClient",
+    client: MemoryClient,
     exc_type: type[BaseException] | None,
     exc_val: BaseException | None,
     exc_tb: TracebackType | None,
@@ -214,7 +213,7 @@ async def aexit(
     await close_client(client)
 
 
-async def close_client(client: "MemoryClient") -> None:
+async def close_client(client: MemoryClient) -> None:
     if client._sse_subscriber is not None:
         client._sse_subscriber.stop()
         client._sse_subscriber = None
@@ -232,7 +231,7 @@ async def close_client(client: "MemoryClient") -> None:
 # ---------------------------------------------------------------------------
 
 
-def should_start_retry_drain(client: "MemoryClient") -> bool:
+def should_start_retry_drain(client: MemoryClient) -> bool:
     return (
         not client._retry_drain_started
         and not client._config.local_only
@@ -242,13 +241,13 @@ def should_start_retry_drain(client: "MemoryClient") -> bool:
     )
 
 
-def maybe_start_retry_drain(client: "MemoryClient") -> None:
+def maybe_start_retry_drain(client: MemoryClient) -> None:
     if should_start_retry_drain(client):
         client._retry_drain_started = True
         schedule_background_task(client, drain_retry_queue_impl(client))
 
 
-async def drain_retry_queue_impl(client: "MemoryClient") -> None:
+async def drain_retry_queue_impl(client: MemoryClient) -> None:
     from trw_memory import client as _c
     queued_before = {record["entry_id"] for record in client._retry_queue.snapshot()}
     result = await asyncio.to_thread(_c.drain_retry_queue, client._retry_queue, client._config)
@@ -289,7 +288,7 @@ async def drain_retry_queue_impl(client: "MemoryClient") -> None:
 # ---------------------------------------------------------------------------
 
 
-def should_start_sse_subscription(client: "MemoryClient") -> bool:
+def should_start_sse_subscription(client: MemoryClient) -> bool:
     return (
         not client._sse_subscriber_started
         and not client._config.local_only
@@ -299,7 +298,7 @@ def should_start_sse_subscription(client: "MemoryClient") -> bool:
     )
 
 
-def maybe_start_sse_subscription(client: "MemoryClient") -> None:
+def maybe_start_sse_subscription(client: MemoryClient) -> None:
     if not should_start_sse_subscription(client):
         return
     from trw_memory import client as _c
@@ -312,7 +311,7 @@ def maybe_start_sse_subscription(client: "MemoryClient") -> None:
     client._sse_subscriber_started = True
 
 
-def handle_sse_event(client: "MemoryClient", event: dict[str, object]) -> None:
+def handle_sse_event(client: MemoryClient, event: dict[str, object]) -> None:
     event_type = str(event.get("type", ""))
     if event_type in {"learning_published", "learning_updated"}:
         cache_shared_event(client, event)
@@ -329,7 +328,7 @@ def handle_sse_event(client: "MemoryClient", event: dict[str, object]) -> None:
             ]
 
 
-def cache_shared_event(client: "MemoryClient", event: dict[str, object]) -> None:
+def cache_shared_event(client: MemoryClient, event: dict[str, object]) -> None:
     remote_id = str(event.get("id", "")).strip()
     summary = str(event.get("summary", "")).strip()
     if not remote_id or not summary:
@@ -362,7 +361,7 @@ def cache_shared_event(client: "MemoryClient", event: dict[str, object]) -> None
 
 
 async def retire_remote_entry(
-    client: "MemoryClient",
+    client: MemoryClient,
     memory_id: str,
     remote_id: str,
 ) -> None:
@@ -388,7 +387,7 @@ async def retire_remote_entry(
     )
 
 
-async def apply_pending_remote_retirements(client: "MemoryClient") -> None:
+async def apply_pending_remote_retirements(client: MemoryClient) -> None:
     with client._pending_remote_retirements_lock:
         remote_ids = set(client._pending_remote_retirements)
         client._pending_remote_retirements.clear()

@@ -10,7 +10,8 @@ from unittest.mock import patch
 from trw_memory.sync.remote import clear_retry_queue, drain_retry_queue
 from trw_memory.sync.retry_queue import MAX_QUEUE_BYTES, MAX_QUEUE_DEPTH, MAX_RETRIES, RetryQueue
 
-from ._test_sync_support import make_sync_config as _make_config, mock_httpx_client as _mock_httpx_client
+from ._test_sync_support import make_sync_config as _make_config
+from ._test_sync_support import mock_httpx_client as _mock_httpx_client
 
 
 class TestRetryQueue:

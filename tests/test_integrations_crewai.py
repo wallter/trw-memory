@@ -1,3 +1,4 @@
+# ruff: noqa: F401,F811
 """Tests for the CrewAI integration adapter."""
 
 from __future__ import annotations

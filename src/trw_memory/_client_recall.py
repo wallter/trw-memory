@@ -1,3 +1,4 @@
+# ruff: noqa: I001
 """Recall cluster — public ``recall`` + 8 internal helpers.
 
 Belongs to ``client.py``. Re-exported there for back-compat.
@@ -65,7 +66,7 @@ _FALLBACK_IMPORTANCE_WEIGHT: float = 0.3
 _FALLBACK_TF_SCALE: float = 10.0
 
 
-def _entry_to_result(entry: MemoryEntry, score: float = 0.0) -> "MemoryResultDict":
+def _entry_to_result(entry: MemoryEntry, score: float = 0.0) -> MemoryResultDict:
     from trw_memory._client_distilled_tiering import entry_to_result as _impl
     return _impl(entry, score=score)
 
@@ -76,7 +77,7 @@ def _create_local_backend(config: Any, namespace: str) -> Any:
 
 
 async def recall_impl(
-    client: "MemoryClient",
+    client: MemoryClient,
     query: str,
     limit: int = 10,
     tags: list[str] | None = None,
@@ -91,7 +92,7 @@ async def recall_impl(
     exclude_source_kinds: list[str] | None = None,
     source_weights: dict[str, float] | None = None,
     exclude_expired: bool = True,
-) -> "list[MemoryResultDict]":
+) -> list[MemoryResultDict]:
     """Async impl for :meth:`MemoryClient.recall`.
 
     See the method docstring for full arg/return semantics.
@@ -225,9 +226,9 @@ async def recall_impl(
 
 
 def apply_recall_security(
-    client: "MemoryClient",
-    results: "list[MemoryResultDict]",
-) -> "list[MemoryResultDict]":
+    client: MemoryClient,
+    results: list[MemoryResultDict],
+) -> list[MemoryResultDict]:
     if client._backend is not None:
         probe_canaries(client._config, backend=client._backend)
     if not client._config.enable_recall_filter:
@@ -292,11 +293,11 @@ from trw_memory._client_recall_helpers import (  # noqa: E402
 
 
 async def try_hybrid_recall(
-    client: "MemoryClient",
+    client: MemoryClient,
     query: str,
     limit: int,
     tags: list[str] | None,
-) -> "list[MemoryResultDict] | None":
+) -> list[MemoryResultDict] | None:
     """Hybrid pipeline (BM25 + dense + RRF). Returns None to signal fallback."""
     try:
         from trw_memory.retrieval.pipeline import hybrid_search
@@ -349,12 +350,12 @@ async def try_hybrid_recall(
 
 
 async def fallback_recall(
-    client: "MemoryClient",
+    client: MemoryClient,
     query: str,
     limit: int,
     tags: list[str] | None,
     min_score: float,
-) -> "list[MemoryResultDict]":
+) -> list[MemoryResultDict]:
     """LIKE + TF + importance scoring. Used when hybrid pipeline is unavailable."""
     async with client._lock:
         entries = client._get_backend().search(
@@ -394,8 +395,8 @@ async def fallback_recall(
 
 
 async def record_recall_access_impl(
-    client: "MemoryClient",
-    results: "list[MemoryResultDict]",
+    client: MemoryClient,
+    results: list[MemoryResultDict],
 ) -> None:
     """Persist access metadata for the entries that were actually returned."""
     grouped: dict[str, list[str]] = {}

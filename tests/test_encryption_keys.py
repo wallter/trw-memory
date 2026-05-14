@@ -1,3 +1,4 @@
+# ruff: noqa: F401
 """Key derivation and namespace isolation tests for trw_memory.security.encryption."""
 
 from __future__ import annotations

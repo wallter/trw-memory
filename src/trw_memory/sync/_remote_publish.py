@@ -15,11 +15,11 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.pii import anonymize_installation_id, redact_paths, strip_pii
 from trw_memory.sync._remote_common import (
-    AnonymizedEntry,
     MAX_DETAIL_LENGTH,
-    MAX_TAGS_COUNT,
     MAX_SUMMARY_LENGTH,
+    MAX_TAGS_COUNT,
     PUBLISH_TIMEOUT,
+    AnonymizedEntry,
     PublishResult,
     RetryDrainResult,
     SnapshotHashPayload,

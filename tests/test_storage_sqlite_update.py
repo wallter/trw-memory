@@ -1,3 +1,4 @@
+# ruff: noqa: F401,F811
 """SQLiteBackend update-path tests."""
 
 from __future__ import annotations

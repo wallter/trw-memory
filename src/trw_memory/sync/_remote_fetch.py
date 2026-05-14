@@ -11,7 +11,12 @@ from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.dense import cosine_similarity
-from trw_memory.sync._remote_common import FETCH_TIMEOUT, _raise_local_only_violation, build_platform_headers, is_valid_platform_url
+from trw_memory.sync._remote_common import (
+    FETCH_TIMEOUT,
+    _raise_local_only_violation,
+    build_platform_headers,
+    is_valid_platform_url,
+)
 
 logger = structlog.get_logger(__name__)
 

@@ -1,3 +1,4 @@
+# ruff: noqa: F401,F811
 """YAML field parity backward-compatibility tests."""
 
 from __future__ import annotations

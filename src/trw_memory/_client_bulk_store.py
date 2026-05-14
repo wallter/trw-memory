@@ -114,7 +114,7 @@ def _make_id() -> str:
 
 
 async def bulk_store_impl(
-    client: "MemoryClient",
+    client: MemoryClient,
     requests: list[BulkStoreRequest],
     *,
     skip_audit_per_item: bool = True,

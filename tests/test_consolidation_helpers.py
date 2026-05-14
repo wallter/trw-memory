@@ -20,8 +20,9 @@ from trw_memory.lifecycle.consolidation import (
 )
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.storage.sqlite_backend import SQLiteBackend
 
-from ._test_consolidation_support import _InMemoryBackend, _V1, _make_embedder, _make_entry
+from ._test_consolidation_support import _V1, _InMemoryBackend, _make_embedder, _make_entry
 
 
 class TestRedactPaths:

@@ -1,3 +1,4 @@
+# ruff: noqa: F811
 """Tests for lifecycle/tiers.py sweep behavior."""
 
 from __future__ import annotations

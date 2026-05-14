@@ -48,11 +48,11 @@ def _client_logger() -> Any:
 
 
 async def merge_shared_results(
-    client: "MemoryClient",
+    client: MemoryClient,
     query: str,
-    local_results: "list[MemoryResultDict]",
+    local_results: list[MemoryResultDict],
     limit: int,
-) -> "list[MemoryResultDict]":
+) -> list[MemoryResultDict]:
     """Fetch shared memories and append them after local results."""
     try:
         await client._apply_pending_remote_retirements()
@@ -100,8 +100,8 @@ async def merge_shared_results(
 
 
 async def load_entries_for_results(
-    client: "MemoryClient",
-    results: "list[MemoryResultDict]",
+    client: MemoryClient,
+    results: list[MemoryResultDict],
 ) -> list[MemoryEntry]:
     """Materialize local entries for dedup against shared results."""
     result_ids = [result["memory_id"] for result in results if result.get("source", "local") == "local"]
@@ -118,7 +118,7 @@ async def load_entries_for_results(
         return loaded
 
 
-def shared_result_to_result(result: dict[str, object]) -> "MemoryResultDict":
+def shared_result_to_result(result: dict[str, object]) -> MemoryResultDict:
     """Normalize a shared remote result into the client result shape."""
     memory_id = str(result.get("memory_id", result.get("id", result.get("remote_id", ""))))
     detail = str(result.get("detail", ""))
@@ -164,9 +164,9 @@ def is_retired_shared_result(result: dict[str, object]) -> bool:
 
 
 def merge_shared_candidates(
-    local_results: "list[MemoryResultDict]",
-    shared_results: "list[MemoryResultDict]",
-) -> "list[MemoryResultDict]":
+    local_results: list[MemoryResultDict],
+    shared_results: list[MemoryResultDict],
+) -> list[MemoryResultDict]:
     """Append shared results after local ones while suppressing exact duplicates."""
     seen_ids = {result["memory_id"] for result in local_results}
     seen_content = {result["content"] for result in local_results}
@@ -181,9 +181,9 @@ def merge_shared_candidates(
 
 
 def snapshot_cached_shared_results(
-    client: "MemoryClient",
+    client: MemoryClient,
     query: str,
-) -> "list[MemoryResultDict]":
+) -> list[MemoryResultDict]:
     """Return cached SSE shared results relevant to the current query."""
     with client._shared_event_cache_lock:
         cached = list(client._shared_event_cache)
@@ -192,7 +192,7 @@ def snapshot_cached_shared_results(
     return [result for result in cached if matches_query(result, query)]
 
 
-def matches_query(result: "MemoryResultDict", query: str) -> bool:
+def matches_query(result: MemoryResultDict, query: str) -> bool:
     """Apply the same simple token matching used by fallback recall."""
     query_terms = {term for term in query.lower().split() if term}
     if not query_terms:
@@ -202,13 +202,13 @@ def matches_query(result: "MemoryResultDict", query: str) -> bool:
 
 
 async def dedupe_cached_shared_results(
-    client: "MemoryClient",
-    cached_results: "list[MemoryResultDict]",
+    client: MemoryClient,
+    cached_results: list[MemoryResultDict],
     *,
     local_entries: list[MemoryEntry],
     embedder: EmbeddingProvider | None,
     dedup_threshold: float = 0.92,
-) -> "list[MemoryResultDict]":
+) -> list[MemoryResultDict]:
     """Apply the same exact/semantic dedup rules to cached SSE results."""
     if not cached_results or not local_entries:
         return cached_results
@@ -252,7 +252,7 @@ def strip_shared_prefix(content: str) -> str:
 
 
 async def mark_fetch_retirements(
-    client: "MemoryClient",
+    client: MemoryClient,
     shared_results: list[dict[str, object]],
 ) -> None:
     """Record retirement markers returned from remote fetches."""

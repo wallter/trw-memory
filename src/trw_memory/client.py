@@ -1,3 +1,4 @@
+# ruff: noqa: E402,F401,I001,RUF100
 """MemoryClient — Python SDK for trw-memory.
 
 Provides a high-level async API for storing, recalling, searching, and

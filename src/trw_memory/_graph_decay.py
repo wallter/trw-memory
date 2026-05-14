@@ -20,6 +20,7 @@ Extracted as PRD-DIST-245 Phase 2 batch 94.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
@@ -34,7 +35,7 @@ IMPORTANCE_BOOST = 0.05
 DECAY_DELTA = 0.1
 
 
-def _optional_lock_safe(lock: threading.Lock | None):  # type: ignore[no-untyped-def]
+def _optional_lock_safe(lock: threading.Lock | None) -> contextlib.AbstractContextManager[bool]:
     """Look up _optional_lock via the parent graph module."""
     from trw_memory import graph as _graph_module
 
