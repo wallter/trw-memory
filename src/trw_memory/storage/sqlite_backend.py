@@ -8,6 +8,7 @@ Graceful degradation: if sqlite-vec is not installed, all metadata operations
 continue to work; only :meth:`upsert_vector` and :meth:`search_vectors` become
 no-ops.
 """
+# ruff: noqa: E402,I001 - facade re-export imports are intentionally grouped near delegator comments.
 
 from __future__ import annotations
 
@@ -41,6 +42,12 @@ from trw_memory.storage._stale_handle_detector import StaleHandleDetector
 from trw_memory.storage.interface import StorageBackend
 
 logger = structlog.get_logger(__name__)
+__all__ = [
+    "SQLiteBackend",
+    "_apply_sqlcipher_pragmas",
+    "_import_sqlcipher_driver",
+    "_resolve_cold_rebuild_base",
+]
 # ---------------------------------------------------------------------------
 # Column helpers
 # ---------------------------------------------------------------------------
