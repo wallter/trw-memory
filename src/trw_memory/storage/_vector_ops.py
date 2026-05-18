@@ -24,6 +24,7 @@ Extracted as PRD-DIST-245 Phase 1 batch 85.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import struct
 import threading
@@ -34,14 +35,32 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 
+def _is_optional_vec_unavailable_error(exc: sqlite3.Error) -> bool:
+    """Return True when SQLite cannot open sqlite-vec's ``vec0`` module."""
+    message = str(exc).lower()
+    return "no such module: vec0" in message or ("no such module" in message and "vec" in message)
+
+
 def delete_vector_internal(conn: Any, entry_id: str) -> None:
     """Remove the vector row for *entry_id* (no-op if absent). Caller holds the lock."""
-    row = conn.execute("SELECT rowid FROM vec_index WHERE entry_id = ?", (entry_id,)).fetchone()
-    if row is None:
-        return
-    rowid: int = row[0]
-    conn.execute("DELETE FROM vec_memories WHERE rowid = ?", (rowid,))
-    conn.execute("DELETE FROM vec_index WHERE rowid = ?", (rowid,))
+    try:
+        row = conn.execute("SELECT rowid FROM vec_index WHERE entry_id = ?", (entry_id,)).fetchone()
+        if row is None:
+            return
+        rowid: int = row[0]
+        conn.execute("DELETE FROM vec_memories WHERE rowid = ?", (rowid,))
+        conn.execute("DELETE FROM vec_index WHERE rowid = ?", (rowid,))
+    except sqlite3.Error as exc:
+        if _is_optional_vec_unavailable_error(exc):
+            logger.warning(
+                "vector_index_unavailable",
+                op="delete",
+                entry_id=entry_id,
+                detail=str(exc),
+                hint="sqlite-vec virtual table unavailable; canonical memory row operation continues",
+            )
+            return
+        raise
 
 
 def delete_vector(
@@ -65,8 +84,20 @@ def vector_exists(conn: Any, *, vec_available: bool, entry_id: str) -> bool:
     """Return whether vec_index currently contains *entry_id*."""
     if not vec_available:
         return False
-    row = conn.execute("SELECT 1 FROM vec_index WHERE entry_id = ?", (entry_id,)).fetchone()
-    return row is not None
+    try:
+        row = conn.execute("SELECT 1 FROM vec_index WHERE entry_id = ?", (entry_id,)).fetchone()
+        return row is not None
+    except sqlite3.Error as exc:
+        if _is_optional_vec_unavailable_error(exc):
+            logger.warning(
+                "vector_index_unavailable",
+                op="exists",
+                entry_id=entry_id,
+                detail=str(exc),
+                hint="sqlite-vec virtual table unavailable; treating vector row as absent",
+            )
+            return False
+        raise
 
 
 def existing_vector_ids(
@@ -103,16 +134,30 @@ def upsert_vector(
     if not vec_available:
         return
     emb_bytes = struct.pack(f"{dim}f", *embedding)
-    with lock:
-        conn.execute("INSERT OR IGNORE INTO vec_index(entry_id) VALUES(?)", (entry_id,))
-        row = conn.execute("SELECT rowid FROM vec_index WHERE entry_id = ?", (entry_id,)).fetchone()
-        rowid: int = row[0]
-        conn.execute("DELETE FROM vec_memories WHERE rowid = ?", (rowid,))
-        conn.execute(
-            "INSERT INTO vec_memories(rowid, embedding) VALUES(?, ?)",
-            (rowid, emb_bytes),
-        )
-        conn.commit()
+    try:
+        with lock:
+            conn.execute("INSERT OR IGNORE INTO vec_index(entry_id) VALUES(?)", (entry_id,))
+            row = conn.execute("SELECT rowid FROM vec_index WHERE entry_id = ?", (entry_id,)).fetchone()
+            rowid: int = row[0]
+            conn.execute("DELETE FROM vec_memories WHERE rowid = ?", (rowid,))
+            conn.execute(
+                "INSERT INTO vec_memories(rowid, embedding) VALUES(?, ?)",
+                (rowid, emb_bytes),
+            )
+            conn.commit()
+    except sqlite3.Error as exc:
+        if _is_optional_vec_unavailable_error(exc):
+            with contextlib.suppress(sqlite3.Error):
+                conn.rollback()
+            logger.warning(
+                "vector_index_unavailable",
+                op="upsert",
+                entry_id=entry_id,
+                detail=str(exc),
+                hint="sqlite-vec virtual table unavailable; canonical memory write is preserved",
+            )
+            return
+        raise
     logger.debug("vector_upserted", entry_id=entry_id)
 
 

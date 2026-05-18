@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
 
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.storage._vector_ops import delete_vector_internal, upsert_vector, vector_exists
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 from ._test_storage_sqlite_support import backend, make_entry
@@ -115,6 +118,81 @@ class TestExistingVectorIds:
 
         ids = backend.existing_vector_ids()
         assert ids == {a.id, b.id}
+
+
+class _FetchOneResult:
+    def __init__(self, row: tuple[int, ...] | None) -> None:
+        self._row = row
+
+    def fetchone(self) -> tuple[int, ...] | None:
+        return self._row
+
+
+class _Vec0MissingConn:
+    total_changes = 0
+
+    def __init__(self) -> None:
+        self.rollback_called = False
+        self.commit_called = False
+        self.statements: list[str] = []
+
+    def execute(self, sql: str, _params: object = ()) -> _FetchOneResult:
+        self.statements.append(sql)
+        if "SELECT rowid" in sql:
+            return _FetchOneResult((7,))
+        if "vec_memories" in sql:
+            raise sqlite3.OperationalError("no such module: vec0")
+        return _FetchOneResult(None)
+
+    def commit(self) -> None:
+        self.commit_called = True
+
+    def rollback(self) -> None:
+        self.rollback_called = True
+
+
+class _AlwaysFailConn:
+    def __init__(self, error: sqlite3.Error) -> None:
+        self.error = error
+
+    def execute(self, _sql: str, _params: object = ()) -> _FetchOneResult:
+        raise self.error
+
+
+class TestOptionalVecModuleUnavailable:
+    def test_upsert_vector_preserves_canonical_write_when_vec0_module_is_missing(self) -> None:
+        conn = _Vec0MissingConn()
+
+        upsert_vector(
+            conn,
+            threading.Lock(),
+            vec_available=True,
+            dim=2,
+            entry_id="vec-missing",
+            embedding=[0.1, 0.2],
+        )
+
+        assert conn.rollback_called is True
+        assert conn.commit_called is False
+        assert any("vec_memories" in statement for statement in conn.statements)
+
+    def test_delete_vector_internal_ignores_missing_optional_vec0_module(self) -> None:
+        conn = _Vec0MissingConn()
+
+        delete_vector_internal(conn, "vec-missing")
+
+        assert any("vec_memories" in statement for statement in conn.statements)
+
+    def test_vector_exists_treats_missing_optional_vec0_module_as_absent(self) -> None:
+        conn = _AlwaysFailConn(sqlite3.OperationalError("no such module: vec0"))
+
+        assert vector_exists(conn, vec_available=True, entry_id="vec-missing") is False
+
+    def test_vector_exists_still_raises_non_optional_sqlite_errors(self) -> None:
+        conn = _AlwaysFailConn(sqlite3.DatabaseError("database disk image is malformed"))
+
+        with pytest.raises(sqlite3.DatabaseError, match="malformed"):
+            vector_exists(conn, vec_available=True, entry_id="still-bad")
 
 
 class TestListEntriesCombinedFilters:

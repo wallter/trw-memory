@@ -216,9 +216,8 @@ class TestInitAutoRecovery:
         # Backup should exist (PRD-CORE-139: timestamped filename).
         assert len(_timestamped_backups(tmp_path)) == 1
 
-    def test_preserves_db_with_data_on_transient_failure(self, tmp_path: Path, monkeypatch: object) -> None:
-        """When quick_check fails but DB has readable data, open anyway
-        instead of destroying the database with auto-recovery."""
+    def test_recovers_db_with_data_on_quick_check_failure(self, tmp_path: Path) -> None:
+        """Readable rows do not make a failed quick_check safe to keep using."""
         from unittest.mock import patch
 
         db_path = tmp_path / "memory.db"
@@ -229,27 +228,25 @@ class TestInitAutoRecovery:
         backend.store(entry)
         backend.close()
 
-        # Simulate transient quick_check failure by patching
-        # _open_and_configure to always raise, while _db_has_data
-        # returns True (DB file is fine, just quick_check fails)
+        # Simulate a quick_check failure after retries. _db_has_data returns
+        # True for this DB, but that only proves row readability, not B-tree
+        # health; init should recover instead of opening the file anyway.
         def _failing_open(db_path_arg: Path) -> None:
-            raise sqlite3.DatabaseError("simulated transient failure")
+            raise sqlite3.DatabaseError("database disk image is malformed (quick_check failed twice)")
 
         with patch.object(SQLiteBackend, "_open_and_configure", staticmethod(_failing_open)):
             backend2 = SQLiteBackend(db_path)
-            # Should NOT auto-recover — DB has data
-            assert backend2.recovered is False
-            assert backend2.integrity_warning is True
+            assert backend2.recovered is True
+            assert backend2.integrity_warning is False
 
-            # Data should still be accessible
+            # Data should still be accessible after primary salvage.
             result = backend2.get("L-preserve")
             assert result is not None
             assert result.content == "must not be lost"
             backend2.close()
 
-            # No backup should be created (neither legacy nor timestamped).
             assert not db_path.with_suffix(".db.corrupt.bak").exists()
-            assert _timestamped_backups(tmp_path) == []
+            assert len(_timestamped_backups(tmp_path)) == 1
 
     def test_db_has_data_returns_false_for_empty(self, tmp_path: Path) -> None:
         db_path = tmp_path / "empty.db"

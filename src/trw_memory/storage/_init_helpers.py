@@ -7,7 +7,8 @@ that mutate the backend instance.
 4 helpers covering the side-init concerns:
 
 - ``open_connection_with_recovery`` — open + WAL + auto-recovery on
-  quick_check failure (transient-WAL-contention guard via db_has_data).
+  quick_check corruption failures; explicit lock/busy failures may still
+  fall back to opening without a quick_check after a data-presence probe.
   Returns ``(conn, integrity_warning, recovered)``.
 - ``load_vec_extension`` — load sqlite-vec when available; populate
   vec_index/vec_memories tables; flip ``_vec_available``.
@@ -40,6 +41,12 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
+def _is_lock_contention_error(exc: sqlite3.DatabaseError) -> bool:
+    """Return True for SQLite lock/busy errors, not structural corruption."""
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
+
+
 def open_connection_with_recovery(
     backend: SQLiteBackend,
     db_path: Path,
@@ -52,9 +59,11 @@ def open_connection_with_recovery(
 ) -> tuple[Any, bool, bool]:
     """Open connection with WAL + auto-recovery on quick_check failure.
 
-    Returns ``(conn, integrity_warning, recovered)``. The recovery path
-    is gated by ``db_has_data`` so transient WAL contention doesn't
-    destroy a DB with real rows.
+    Returns ``(conn, integrity_warning, recovered)``. A failed ``PRAGMA
+    quick_check`` after retry is treated as corruption even when rows remain
+    readable; a row-count probe proves data exists, not that the B-tree is
+    healthy. Only explicit lock/busy failures keep the old non-destructive
+    fallback path.
     """
     integrity_warning = False
     recovered = False
@@ -63,18 +72,27 @@ def open_connection_with_recovery(
             conn = backend._open_and_configure(db_path)
         else:
             conn = backend._open_and_configure(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
-    except sqlite3.DatabaseError:
-        if backend._db_has_data(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex):
+    except sqlite3.DatabaseError as exc:
+        if _is_lock_contention_error(exc) and backend._db_has_data(
+            db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex
+        ):
             logger.warning(
-                "db_integrity_check_failed_but_has_data",
+                "db_integrity_check_deferred_due_to_lock",
                 db=str(db_path),
                 action="open_anyway",
-                hint=("quick_check failed but DB has rows — likely transient WAL contention, not corruption"),
+                hint=("quick_check could not complete because SQLite reported lock/busy; opening without probe"),
             )
             conn = backend._open_without_integrity_check(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
             integrity_warning = True
         else:
-            logger.exception("db_corrupt_detected", db=str(db_path), action="auto_recover")
+            has_data = backend._db_has_data(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
+            logger.exception(
+                "db_corrupt_detected",
+                db=str(db_path),
+                action="auto_recover",
+                has_data=has_data,
+                reason=str(exc),
+            )
             conn = backend.recover_db(
                 db_path,
                 dbapi=dbapi,

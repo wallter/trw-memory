@@ -13,8 +13,9 @@ delegators.
   + sqlcipher key-pragma application when ``sqlcipher_key_hex`` is
   provided.
 - ``open_and_configure`` — open + WAL mode + retry-once quick_check.
-- ``open_without_integrity_check`` — open without quick_check (used
-  when DB has data but quick_check fails transiently).
+- ``open_without_integrity_check`` — open without quick_check (reserved
+  for explicit SQLite lock/busy contention; structural quick_check failures
+  must recover instead of continuing against a damaged B-tree).
 - ``db_has_data`` — non-destructive row-count probe.
 
 Extracted as PRD-DIST-245 Phase 1 batch 82.
@@ -118,7 +119,7 @@ def open_without_integrity_check(
     dbapi: Any = sqlite3,
     sqlcipher_key_hex: str | None = None,
 ) -> Any:
-    """Open a connection skipping integrity check (transient WAL contention path)."""
+    """Open a connection skipping integrity check for explicit lock/busy contention only."""
     conn = connect(
         db_path,
         dbapi=dbapi,
@@ -141,8 +142,8 @@ def db_has_data(
 ) -> bool:
     """Probe whether the DB at ``db_path`` has any rows in ``memories``.
 
-    Non-destructive: prevents auto-recovery from destroying a DB that has
-    data but fails quick_check due to transient WAL contention.
+    Non-destructive: this proves rows are readable; it does not prove the
+    database is structurally healthy after a failed quick_check.
     """
     try:
         conn = connect(
