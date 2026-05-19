@@ -310,9 +310,16 @@ async def try_hybrid_recall(
 
     async with client._lock:
         backend = client._get_backend()
+        # PRD-DIST-2047 c796: load up to hybrid_search_candidate_pool_size
+        # entries (default 1000) so BM25 + dense can rank the full namespace.
+        # Pre-c796 the pool was capped at limit*5 (=50 for default limit=10),
+        # which silently lost targets ranked past position 50 on namespaces > 50.
+        candidate_pool_size = max(
+            limit * 5, client._config.hybrid_search_candidate_pool_size
+        )
         all_entries = backend.list_entries(
             namespace=client._namespace,
-            limit=limit * 5,
+            limit=candidate_pool_size,
         )
         stored_embeddings = backend.get_stored_embeddings([entry.id for entry in all_entries])
 
@@ -320,6 +327,12 @@ async def try_hybrid_recall(
         return None
 
     embedder = client._get_embedder()
+    # PRD-DIST-2047 c796: auto-scale bm25/vector candidate caps to namespace
+    # size so the 50-default acts as a FLOOR, not a CEILING. Eliminates the
+    # structural cap on recall@10 for namespaces > 50 records.
+    namespace_size = len(all_entries)
+    effective_bm25_candidates = max(client._config.bm25_candidates, namespace_size)
+    effective_vector_candidates = max(client._config.vector_candidates, namespace_size)
 
     try:
         ranked = hybrid_search(
@@ -327,6 +340,8 @@ async def try_hybrid_recall(
             entries=all_entries,
             embedder=embedder,
             stored_embeddings=stored_embeddings or None,
+            bm25_candidates=effective_bm25_candidates,
+            vector_candidates=effective_vector_candidates,
             top_k=limit * 3,
         )
     except Exception:

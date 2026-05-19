@@ -91,6 +91,20 @@ class MemoryConfig(BaseSettings):
     bm25_candidates: int = Field(default=50, gt=0, description="Number of BM25 candidates to consider")
     vector_candidates: int = Field(default=50, gt=0, description="Number of dense vector candidates to consider")
     rrf_k: int = Field(default=60, gt=0, description="RRF constant k for reciprocal rank fusion")
+    hybrid_search_candidate_pool_size: int = Field(
+        default=1000,
+        ge=10,
+        description=(
+            "PRD-DIST-2047 c796: max entries loaded from a namespace for the "
+            "hybrid_search candidate pool. Pre-c796 the pool was capped at "
+            "limit*5 (=50 for default limit=10), which silently lost targets "
+            "ranked past position 50 on namespaces > 50 records. Set higher "
+            "for very large namespaces; recall-time cost is O(namespace_size) "
+            "for BM25 + O(namespace_size × embedding_dim) for dense search "
+            "when the auto-scaled bm25_candidates/vector_candidates lift the "
+            "50-cap floor."
+        ),
+    )
 
     # Dedup
     dedup_enabled: bool = Field(default=True, description="Enable semantic deduplication")
