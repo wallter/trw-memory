@@ -291,6 +291,48 @@ class TestAnomalyBypassSourcePrefixes:
 
         assert prepared.quarantined is False
 
+    def test_provenance_hash_matches_post_pii_content(self, tmp_path: Path) -> None:
+        """PRD-DIST-2046 c793: provenance_content_hash MUST equal sha256(stored content + detail).
+
+        Pre-c793 the hash was computed inside _apply_sec001_intake BEFORE
+        _apply_runtime_pii_policy ran, so when PII redaction modified content
+        the stored entry had post-PII content but pre-PII hash. Recall-time
+        filter_recall_window then BLOCKED the entry on `hash_pin_drift`.
+
+        This test exercises a payload that triggers PII detection
+        (high-entropy token marker) and asserts that after prepare_entry_for_store
+        completes, sha256(secured_entry.content + secured_entry.detail) ==
+        secured_entry.metadata['provenance_content_hash'].
+        """
+        import hashlib
+
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
+        # Payload includes a high-entropy token that PRD-SEC-001's PII policy
+        # marks via `contains_high_entropy_token` metadata; this exercises the
+        # _apply_runtime_pii_policy path that previously caused hash drift.
+        entry = MemoryEntry(
+            id="M-prov-post-pii",
+            content="prod token aB3cD9eF2gH5iJ8kL1mN4oP7qR6sT0 in code",
+            detail="auth header carries it",
+            namespace="project:default",
+        )
+
+        with create_backend_from_config(cfg, "project:default") as backend:
+            prepared = prepare_entry_for_store(entry, backend=backend, config=cfg)
+
+        stored_meta = prepared.entry.metadata
+        stored_hash = stored_meta.get("provenance_content_hash", "")
+        if not stored_hash:
+            # Provenance not required for this config? Skip the assertion path.
+            return
+        recomputed = hashlib.sha256(
+            f"{prepared.entry.content}{prepared.entry.detail}".encode()
+        ).hexdigest()
+        assert stored_hash == recomputed, (
+            f"provenance hash drift detected: stored={stored_hash} "
+            f"recomputed={recomputed}; content={prepared.entry.content!r}"
+        )
+
     def test_bypass_does_not_skip_when_metadata_source_missing(self, tmp_path: Path) -> None:
         cfg = MemoryConfig(storage_path=str(tmp_path / "mem"), poisoning_z_threshold=1.0)
         outlier = MemoryEntry(

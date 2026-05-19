@@ -129,6 +129,15 @@ def prepare_entry_for_store(
         )
         validate_entry_payload(secured_entry, max_chars=config.max_entry_chars)
         secured_entry, pii_matches = _apply_runtime_pii_policy(secured_entry, config)
+        # PRD-DIST-2046 c793: compute provenance hash AFTER PII redaction so the
+        # stored hash reflects the stored content. Prevents recall-time
+        # hash_pin_drift block in filter_recall_window mode=redact.
+        secured_entry = _apply_provenance_hash(
+            secured_entry,
+            config=config,
+            session_id=session_id,
+            trw_dir=trw_dir,
+        )
         anomaly, anomaly_stats = _score_entry_anomaly(
             secured_entry,
             backend,
@@ -409,35 +418,58 @@ def _apply_sec001_intake(
         if config.trust_scoring_mode == "enforce" and trust_result.score < config.trust_score_threshold:
             entry = quarantine_entry(entry)
 
-    if config.provenance_required:
-        try:
-            from trw_memory.security.keys import get_or_create_ed25519_key_at_path
-
-            signing_key = get_or_create_ed25519_key_at_path(
-                resolve_security_path(
-                    config,
-                    "provenance_signing_key_path",
-                    trw_dir=anchor_dir,
-                    create_parent=True,
-                )
-            )
-            if signing_key is None:
-                raise ProvenanceKeyUnavailableError("provenance signing key unavailable")
-        except Exception as exc:
-            if isinstance(exc, ProvenanceKeyUnavailableError):
-                raise
-            raise ProvenanceKeyUnavailableError(f"unable to load provenance key: {exc}") from exc
-        provenance_metadata = build_entry_provenance(
-            learning_id=entry.id,
-            content=entry.content,
-            detail=entry.detail,
-            author=_actor_for_entry(entry),
-            session_id=_resolve_provenance_session_id(entry, session_id),
-            ts=datetime.now(timezone.utc).isoformat(),
-            signing_key=signing_key,
-        )
-        entry = entry.model_copy(update={"metadata": {**entry.metadata, **provenance_metadata}})
+    # Provenance hash + signature moved to _apply_provenance_hash (PRD-DIST-2046 c793)
+    # so it runs AFTER _apply_runtime_pii_policy, ensuring the stored hash reflects
+    # the stored content (eliminating the c792 hash_pin_drift recall-time block).
     return entry
+
+
+def _apply_provenance_hash(
+    entry: MemoryEntry,
+    *,
+    config: MemoryConfig,
+    session_id: str | None,
+    trw_dir: Path | None = None,
+) -> MemoryEntry:
+    """Compute the provenance content hash + signature on the FINAL stored content.
+
+    PRD-DIST-2046 c793: must be called AFTER _apply_runtime_pii_policy in
+    prepare_entry_for_store so the stored hash reflects what's actually
+    stored. Previously this step ran inside _apply_sec001_intake (before
+    PII redaction), causing hash drift at recall time when PII modified
+    content (c792 root cause: 12/39 baseline drops on c763 via
+    filter_recall_window hash_pin_drift block).
+    """
+    if not config.provenance_required:
+        return entry
+    anchor_dir = trw_dir or _discover_anchor(config)
+    try:
+        from trw_memory.security.keys import get_or_create_ed25519_key_at_path
+
+        signing_key = get_or_create_ed25519_key_at_path(
+            resolve_security_path(
+                config,
+                "provenance_signing_key_path",
+                trw_dir=anchor_dir,
+                create_parent=True,
+            )
+        )
+        if signing_key is None:
+            raise ProvenanceKeyUnavailableError("provenance signing key unavailable")
+    except Exception as exc:
+        if isinstance(exc, ProvenanceKeyUnavailableError):
+            raise
+        raise ProvenanceKeyUnavailableError(f"unable to load provenance key: {exc}") from exc
+    provenance_metadata = build_entry_provenance(
+        learning_id=entry.id,
+        content=entry.content,
+        detail=entry.detail,
+        author=_actor_for_entry(entry),
+        session_id=_resolve_provenance_session_id(entry, session_id),
+        ts=datetime.now(timezone.utc).isoformat(),
+        signing_key=signing_key,
+    )
+    return entry.model_copy(update={"metadata": {**entry.metadata, **provenance_metadata}})
 
 
 # Canary FR-007 helpers extracted to _runtime_canary.py (PRD-DIST-245 batch 101).
