@@ -4,7 +4,7 @@ Belongs to ``client.py`` recall pipeline. Re-exported via
 ``_client_recall.py``. Split out from the parent recall module so each
 file stays under the 350 effective-LOC gate (PRD-DIST-246 batch 105).
 
-6 helpers:
+7 helpers:
 
 - ``apply_budget`` — pure token-budget filtering.
 - ``merge_org_results`` — append cross-validated sibling memories.
@@ -12,6 +12,7 @@ file stays under the 350 effective-LOC gate (PRD-DIST-246 batch 105).
 - ``remember_results_in_tiers`` — keep hot/warm tiers aligned.
 - ``merge_tier_results`` — fuse tier-only candidates with composite score.
 - ``tier_result_from_entry`` — tier-entry → result-dict.
+- ``apply_admission_filter`` — PRD-DIST-2049 c802 confidence / currentness filter.
 
 Extracted as PRD-DIST-246 batch 105 (sub-split).
 """
@@ -199,6 +200,15 @@ def tier_result_from_entry(entry: dict[str, object]) -> MemoryResultDict:
     raw_score = entry.get("score")
     score = float(str(raw_score)) if raw_score is not None else entry_utility(entry)
     raw_tags = entry.get("tags", [])
+    raw_metadata = entry.get("metadata") or {}
+    # PRD-DIST-2049 c802: preserve metadata so the recall-time admission
+    # filter (and any downstream consumer) can read `currentness_status` and
+    # related fields. Pre-c802 this helper dropped metadata silently.
+    metadata: dict[str, str] = (
+        {str(k): str(v) for k, v in raw_metadata.items() if isinstance(raw_metadata, dict)}
+        if isinstance(raw_metadata, dict)
+        else {}
+    )
     tier_result: MemoryResultDict = {
         "memory_id": str(entry.get("id", entry.get("memory_id", ""))),
         "content": str(entry.get("content", "")),
@@ -215,6 +225,73 @@ def tier_result_from_entry(entry: dict[str, object]) -> MemoryResultDict:
         "q_observations": int(str(entry.get("q_observations", 0))),
         "recurrence": int(str(entry.get("recurrence", 1))),
         "access_count": int(str(entry.get("access_count", 0))),
+        "metadata": metadata,
         "_relevance_hint": MemoryClient._coerce_float(entry.get("_tier_relevance", score)),
     }
     return tier_result
+
+
+def apply_admission_filter(
+    results: list[MemoryResultDict],
+    *,
+    confidence_floor: float | None,
+    exclude_historical_only: bool,
+    namespace: str = "",
+) -> list[MemoryResultDict]:
+    """PRD-DIST-2049 c802: opt-in recall-time confidence / currentness filter.
+
+    Applied between ``merge_tier_results`` and ``apply_source_policy`` in
+    ``recall_impl``. When both args are falsy (None / False) returns the
+    input list unchanged (bit-for-bit; satisfies the default-OFF regression
+    guarantee).
+
+    OR semantics — a record is suppressed if EITHER:
+
+    - ``confidence_floor`` is a float and the record's
+      ``metadata['confidence']`` is below it (records without a confidence
+      field are treated as 0.0, so they are dropped when a floor is set).
+    - ``exclude_historical_only`` is True and the record's
+      ``metadata['currentness_status']`` equals ``'historical_only'``.
+
+    Emits a ``recall_filter.admission`` structlog event when at least one
+    record was suppressed, mirroring the ``recall_filter.enforce`` and
+    ``anomaly_quarantine_bypass`` event-name conventions.
+    """
+    if confidence_floor is None and not exclude_historical_only:
+        return results
+    kept: list[MemoryResultDict] = []
+    dropped_confidence = 0
+    dropped_historical = 0
+    for r in results:
+        meta = r.get("metadata") or {}
+        if exclude_historical_only and meta.get("currentness_status") == "historical_only":
+            dropped_historical += 1
+            continue
+        if confidence_floor is not None:
+            # Prefer explicit metadata.confidence (string-coerced) when present;
+            # fall back to the result's ``importance`` field which carries the
+            # producer-supplied confidence on trw-distill ingest paths.
+            raw: object = meta.get("confidence")
+            if raw is None:
+                raw = r.get("importance")
+            try:
+                conf = float(raw) if raw is not None else 0.0  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                conf = 0.0
+            if conf < confidence_floor:
+                dropped_confidence += 1
+                continue
+        kept.append(r)
+    if dropped_confidence or dropped_historical:
+        logger.debug(
+            "recall_filter.admission",
+            operation="recall_admission_filter",
+            namespace=namespace,
+            confidence_floor=confidence_floor,
+            exclude_historical_only=exclude_historical_only,
+            input_count=len(results),
+            kept_count=len(kept),
+            dropped_confidence=dropped_confidence,
+            dropped_historical=dropped_historical,
+        )
+    return kept

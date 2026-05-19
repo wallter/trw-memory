@@ -105,6 +105,35 @@ class MemoryConfig(BaseSettings):
             "50-cap floor."
         ),
     )
+    recall_confidence_filter: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("recall_confidence_filter", "memory_recall_confidence_filter"),
+        description=(
+            "PRD-DIST-2049 c802: opt-in recall-time confidence floor. When "
+            "set, records with metadata['confidence'] < value are suppressed "
+            "from MemoryClient.recall() results between merge_tier_results "
+            "and apply_source_policy. Default None = filter OFF (current "
+            "behavior bit-for-bit). Closes the c800/c801 contamination lever "
+            "(2-5pp absolute SC2 lift on full-corpus shapes across "
+            "Python/TS/PHP)."
+        ),
+    )
+    recall_filter_historical_only: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("recall_filter_historical_only", "memory_recall_filter_historical_only"),
+        description=(
+            "PRD-DIST-2049 c802: opt-in suppression of F2-softened records. "
+            "When True, records with metadata['currentness_status'] == "
+            "'historical_only' are suppressed from MemoryClient.recall() "
+            "results between merge_tier_results and apply_source_policy. "
+            "Default False = filter OFF. Mirrors the trw-distill eval-side "
+            "_retrieval_policy_filter behaviour into the memory-side recall "
+            "path (closes the c800 c763 finding that the F2 label is "
+            "necessary but not fully sufficient at recall time)."
+        ),
+    )
 
     # Dedup
     dedup_enabled: bool = Field(default=True, description="Enable semantic deduplication")

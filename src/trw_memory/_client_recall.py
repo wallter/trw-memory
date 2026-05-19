@@ -96,6 +96,8 @@ async def recall_impl(
     exclude_source_kinds: list[str] | None = None,
     source_weights: dict[str, float] | None = None,
     exclude_expired: bool = True,
+    confidence_floor: float | None = None,
+    exclude_historical_only: bool | None = None,
 ) -> list[MemoryResultDict]:
     """Async impl for :meth:`MemoryClient.recall`.
 
@@ -135,12 +137,41 @@ async def recall_impl(
         else:
             tier_local_results = []
 
+    # PRD-DIST-2049 c802: resolve per-call kwargs vs config defaults (per-call wins
+    # when non-None; config drives when caller omits).
+    effective_confidence_floor = (
+        confidence_floor if confidence_floor is not None else client._config.recall_confidence_filter
+    )
+    effective_exclude_historical = (
+        exclude_historical_only
+        if exclude_historical_only is not None
+        else client._config.recall_filter_historical_only
+    )
+
     hybrid_results = await client._try_hybrid_recall(query, limit, tags)
     if hybrid_results is not None:
         filtered = [r for r in hybrid_results if r["score"] >= min_score]
+        # PRD-DIST-2049 c802: apply admission filter on the FULL hybrid candidate
+        # pool (top ~limit*3 = 30) AND on the tier candidate pool BEFORE merge.
+        # This lets the filter promote baseline records that would otherwise be
+        # displaced past top-K by zombie / historical_only competitors — closes
+        # the c800/c801 contamination lever rather than just decorating the
+        # already-displaced top-K.
+        filtered = apply_admission_filter(
+            filtered,
+            confidence_floor=effective_confidence_floor,
+            exclude_historical_only=effective_exclude_historical,
+            namespace=client._namespace,
+        )
+        filtered_tier = apply_admission_filter(
+            tier_local_results,
+            confidence_floor=effective_confidence_floor,
+            exclude_historical_only=effective_exclude_historical,
+            namespace=client._namespace,
+        )
         final_pre_policy = client._merge_tier_results(
             filtered[:limit],
-            tier_local_results,
+            filtered_tier,
             limit,
             query.lower().split(),
             client._config,
@@ -188,9 +219,23 @@ async def recall_impl(
         return final
 
     results = await client._fallback_recall(query, limit, tags, min_score)
+    # PRD-DIST-2049 c802: apply filter on fallback candidates AND tier candidates
+    # before merge, mirroring the hybrid path.
+    results = apply_admission_filter(
+        results,
+        confidence_floor=effective_confidence_floor,
+        exclude_historical_only=effective_exclude_historical,
+        namespace=client._namespace,
+    )
+    filtered_tier_fallback = apply_admission_filter(
+        tier_local_results,
+        confidence_floor=effective_confidence_floor,
+        exclude_historical_only=effective_exclude_historical,
+        namespace=client._namespace,
+    )
     results = client._merge_tier_results(
         results,
-        tier_local_results,
+        filtered_tier_fallback,
         limit,
         query.lower().split(),
         client._config,
@@ -291,6 +336,7 @@ def apply_recall_security(
 # `apply_budget` and `merge_org_results` extracted to
 # _client_recall_helpers.py (PRD-DIST-246 batch 105 sub-split).
 from trw_memory._client_recall_helpers import (  # noqa: E402
+    apply_admission_filter as apply_admission_filter,
     apply_budget as apply_budget,
     merge_org_results as merge_org_results,
 )

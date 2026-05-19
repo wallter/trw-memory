@@ -279,6 +279,8 @@ class MemoryClient:
         exclude_source_kinds: list[str] | None = None,
         source_weights: dict[str, float] | None = None,
         exclude_expired: bool = True,
+        confidence_floor: float | None = None,
+        exclude_historical_only: bool | None = None,
     ) -> list[MemoryResultDict]:
         """Search memories by keyword query using hybrid retrieval.
 
@@ -306,6 +308,8 @@ class MemoryClient:
             exclude_source_kinds=exclude_source_kinds,
             source_weights=source_weights,
             exclude_expired=exclude_expired,
+            confidence_floor=confidence_floor,
+            exclude_historical_only=exclude_historical_only,
         )
 
     def _get_embedder(self) -> EmbeddingProvider | None:
