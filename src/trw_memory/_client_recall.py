@@ -380,6 +380,11 @@ async def try_hybrid_recall(
     effective_bm25_candidates = max(client._config.bm25_candidates, namespace_size)
     effective_vector_candidates = max(client._config.vector_candidates, namespace_size)
 
+    # PRD-DIST-2050 c804: deepen the candidate pool when the admission filter
+    # is opt-in enabled, so baseline records ranked past top-30 can survive the
+    # filter and enter the merged top-K. Default multiplier=3 preserves pre-c804
+    # behaviour (top-30); operators raise via MEMORY_RECALL_TOP_K_MULTIPLIER.
+    effective_top_k = limit * client._config.recall_top_k_multiplier
     try:
         ranked = hybrid_search(
             query=query,
@@ -388,7 +393,7 @@ async def try_hybrid_recall(
             stored_embeddings=stored_embeddings or None,
             bm25_candidates=effective_bm25_candidates,
             vector_candidates=effective_vector_candidates,
-            top_k=limit * 3,
+            top_k=effective_top_k,
         )
     except Exception:
         logger.debug(

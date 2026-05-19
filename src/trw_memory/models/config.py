@@ -134,6 +134,23 @@ class MemoryConfig(BaseSettings):
             "necessary but not fully sufficient at recall time)."
         ),
     )
+    recall_top_k_multiplier: int = Field(
+        default=3,
+        ge=1,
+        le=50,
+        validation_alias=AliasChoices("recall_top_k_multiplier", "memory_recall_top_k_multiplier"),
+        description=(
+            "PRD-DIST-2050 c804: depth multiplier for the hybrid_search "
+            "candidate pool returned by _try_hybrid_recall. Effective top_k "
+            "= limit * recall_top_k_multiplier (default 3 → top-30 for "
+            "limit=10, matches pre-c804 hardcoded behaviour). Raise to 10 "
+            "or higher when the recall-time admission filter (PRD-DIST-2049) "
+            "is enabled on pure-zombie corpora — c803 found those filters "
+            "can suppress but not promote baseline records ranked past the "
+            "current top-30 candidate pool depth. Capped at 50 to keep "
+            "downstream per-result cost bounded."
+        ),
+    )
 
     # Dedup
     dedup_enabled: bool = Field(default=True, description="Enable semantic deduplication")
