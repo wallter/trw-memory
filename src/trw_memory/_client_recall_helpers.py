@@ -164,6 +164,13 @@ def merge_tier_results(
     query_embedding: list[float] | None = None,
 ) -> list[MemoryResultDict]:
     """Merge tier-only candidates into the normal local recall results."""
+    # PRD-DIST-2051 c806: when opt-in flag is set AND hybrid has produced
+    # enough candidates, preserve the BM25+dense+RRF ordering instead of
+    # rescoring via compute_importance_score. c805 per-layer trace showed the
+    # rescore mixes incomparable score scales (RRF 1/(1+rank) vs tier-only
+    # entry_utility absolute) and pushes high-rank hybrid results past top-K.
+    if config.recall_preserve_hybrid_order and len(local_results) >= limit:
+        return local_results[:limit]
     if not tier_only_results:
         return local_results[:limit]
     merged = list(local_results)

@@ -151,6 +151,21 @@ class MemoryConfig(BaseSettings):
             "downstream per-result cost bounded."
         ),
     )
+    recall_preserve_hybrid_order: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("recall_preserve_hybrid_order", "memory_recall_preserve_hybrid_order"),
+        description=(
+            "PRD-DIST-2051 c806: when True, merge_tier_results returns "
+            "local_results[:limit] (preserving the BM25+dense+RRF ordering "
+            "from _try_hybrid_recall) whenever len(local_results) >= limit. "
+            "Skips the compute_importance_score rescore that mixes hybrid "
+            "RRF (1/(1+rank)) and tier-only entry_utility (absolute) scales. "
+            "c805 trace showed all 4 missing hono baselines were at "
+            "hybrid_rank=2 but got pushed past top-10 by the rescore. "
+            "Default False preserves pre-c806 behaviour bit-for-bit; "
+            "operators opt in to the fix per namespace."
+        ),
+    )
 
     # Dedup
     dedup_enabled: bool = Field(default=True, description="Enable semantic deduplication")
