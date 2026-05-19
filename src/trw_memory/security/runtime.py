@@ -77,6 +77,26 @@ def append_audit_event(
     get_audit_log(config).append(op, entry_id=entry_id, actor=actor, namespace=namespace, data=data or {})
 
 
+def _should_bypass_anomaly_quarantine(entry: MemoryEntry, config: MemoryConfig) -> bool:
+    """Return True when ``entry.metadata['source']`` starts with one of the
+    configured bypass prefixes (PRD-DIST-2045).
+
+    The bypass exists for source-grounded automated ingestion paths whose
+    producer pipeline has already validated record provenance (assertions,
+    file paths, commit SHAs). Empty prefix list disables the bypass and
+    restores the original "every write goes through anomaly quarantine"
+    behavior. PRD-SEC-001 trust-scoring and PII redaction still apply.
+    """
+
+    prefixes = config.anomaly_bypass_source_prefixes
+    if not prefixes:
+        return False
+    metadata_source = entry.metadata.get("source", "")
+    if not metadata_source:
+        return False
+    return any(metadata_source.startswith(prefix) for prefix in prefixes)
+
+
 def prepare_entry_for_store(
     entry: MemoryEntry,
     *,
@@ -133,6 +153,19 @@ def prepare_entry_for_store(
     _write_anomaly_stats(config, anomaly_stats)
 
     if anomaly is None or not config.poisoning_detection_enabled:
+        return PreparedStoreEntry(entry=secured_entry, op=op, pii_matches=tuple(pii_matches))
+
+    if _should_bypass_anomaly_quarantine(secured_entry, config):
+        dimension, z_score = anomaly
+        logger.debug(
+            "anomaly_quarantine_bypass",
+            entry_id=secured_entry.id,
+            namespace=secured_entry.namespace,
+            metadata_source=secured_entry.metadata.get("source", ""),
+            anomaly_dimension=dimension,
+            z_score=z_score,
+            outcome="bypassed_via_anomaly_bypass_source_prefixes",
+        )
         return PreparedStoreEntry(entry=secured_entry, op=op, pii_matches=tuple(pii_matches))
 
     dimension, z_score = anomaly

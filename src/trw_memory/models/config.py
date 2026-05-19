@@ -165,6 +165,18 @@ class MemoryConfig(BaseSettings):
     # Poisoning defense
     poisoning_detection_enabled: bool = Field(default=True, description="Enable statistical poisoning detection")
     poisoning_z_threshold: float = Field(default=3.0, gt=0.0, description="Z-score threshold for anomaly detection")
+    anomaly_bypass_source_prefixes: list[str] = Field(
+        default_factory=lambda: ["distilled:", "distilled-git:"],
+        description=(
+            "Source-identifier prefixes (matched against metadata['source']) that "
+            "bypass anomaly-based quarantine in prepare_entry_for_store. Intended "
+            "for source-grounded automated ingestion paths whose producer pipeline "
+            "has already validated record provenance (e.g. trw-distill). The "
+            "PRD-SEC-001 anomaly defense remains active for all non-matching writes. "
+            "Set to [] to disable the bypass and apply anomaly quarantine to every "
+            "write."
+        ),
+    )
     quarantine_path: str = Field(default="", description="Directory where quarantined entries are written")
     enable_trust_scoring: bool = Field(default=True, description="Enable SEC-001 trust scoring on all ingest paths")
     trust_score_threshold: float = Field(default=0.5, ge=0.0, le=1.0, description="SEC-001 quarantine threshold")

@@ -189,3 +189,121 @@ class TestRuntimePoisoningPolicy:
         cfg = MemoryConfig(storage_path=str(tmp_path / "mem"), audit_enabled=False)
         append_audit_event(cfg, "store", entry_id="M-001", namespace="project:default")
         assert Path(cfg.audit_log_path).exists() is False
+
+
+class TestAnomalyBypassSourcePrefixes:
+    """PRD-DIST-2045 — per-source carve-out for anomaly quarantine.
+
+    The c789 investigation found that PRD-SEC-001 _score_entry_anomaly
+    quarantines source-grounded distill records as statistical outliers on
+    entry_length / tag_count. The carve-out bypasses anomaly quarantine
+    when entry.metadata['source'] starts with one of the configured
+    prefixes (default ['distilled:', 'distilled-git:']). PRD-SEC-001 trust
+    scoring + PII redaction still apply.
+    """
+
+    @staticmethod
+    def _seed_namespace(backend: object, n: int = 120) -> None:
+        for index in range(n):
+            backend.store(  # type: ignore[attr-defined]
+                MemoryEntry(
+                    id=f"M-seed-{index}",
+                    content="seed",
+                    namespace="project:default",
+                    importance=0.5,
+                    tags=["s1"],
+                )
+            )
+
+    def test_bypass_skips_quarantine_for_distilled_source(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"), poisoning_z_threshold=1.0)
+        # outlier entry: many more tags than seeded baseline
+        outlier = MemoryEntry(
+            id="M-distill",
+            content="outlier-content",
+            namespace="project:default",
+            tags=[f"t{i}" for i in range(30)],
+            metadata={"source": "distilled:git:DEADBEEF..CAFEBABE"},
+        )
+
+        with create_backend_from_config(cfg, "project:default") as backend:
+            self._seed_namespace(backend)
+            prepared = prepare_entry_for_store(outlier, backend=backend, config=cfg)
+
+        assert prepared.quarantined is False
+        assert prepared.entry.id == "M-distill"
+
+    def test_bypass_does_not_skip_for_agent_source(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"), poisoning_z_threshold=1.0)
+        outlier = MemoryEntry(
+            id="M-agent",
+            content="outlier-content",
+            namespace="project:default",
+            tags=[f"t{i}" for i in range(30)],
+            metadata={"source": "agent:my-tool"},
+        )
+
+        with create_backend_from_config(cfg, "project:default") as backend:
+            self._seed_namespace(backend)
+            prepared = prepare_entry_for_store(outlier, backend=backend, config=cfg)
+
+        assert prepared.quarantined is True
+        assert prepared.anomaly_dimension == "tag_count"
+
+    def test_bypass_disabled_when_prefix_list_empty(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(
+            storage_path=str(tmp_path / "mem"),
+            poisoning_z_threshold=1.0,
+            anomaly_bypass_source_prefixes=[],
+        )
+        outlier = MemoryEntry(
+            id="M-distill",
+            content="outlier-content",
+            namespace="project:default",
+            tags=[f"t{i}" for i in range(30)],
+            metadata={"source": "distilled:git:DEADBEEF..CAFEBABE"},
+        )
+
+        with create_backend_from_config(cfg, "project:default") as backend:
+            self._seed_namespace(backend)
+            prepared = prepare_entry_for_store(outlier, backend=backend, config=cfg)
+
+        # With bypass disabled, the distilled record is quarantined like any other outlier.
+        assert prepared.quarantined is True
+
+    def test_bypass_skips_for_custom_prefix_via_config(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(
+            storage_path=str(tmp_path / "mem"),
+            poisoning_z_threshold=1.0,
+            anomaly_bypass_source_prefixes=["my-pipeline:"],
+        )
+        outlier = MemoryEntry(
+            id="M-custom",
+            content="outlier-content",
+            namespace="project:default",
+            tags=[f"t{i}" for i in range(30)],
+            metadata={"source": "my-pipeline:job-42"},
+        )
+
+        with create_backend_from_config(cfg, "project:default") as backend:
+            self._seed_namespace(backend)
+            prepared = prepare_entry_for_store(outlier, backend=backend, config=cfg)
+
+        assert prepared.quarantined is False
+
+    def test_bypass_does_not_skip_when_metadata_source_missing(self, tmp_path: Path) -> None:
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"), poisoning_z_threshold=1.0)
+        outlier = MemoryEntry(
+            id="M-no-source",
+            content="outlier-content",
+            namespace="project:default",
+            tags=[f"t{i}" for i in range(30)],
+            metadata={},
+        )
+
+        with create_backend_from_config(cfg, "project:default") as backend:
+            self._seed_namespace(backend)
+            prepared = prepare_entry_for_store(outlier, backend=backend, config=cfg)
+
+        # No metadata['source'] → bypass cannot match → quarantined as usual.
+        assert prepared.quarantined is True
