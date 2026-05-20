@@ -94,6 +94,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_wiki_lint.add_argument("path", help="JSON file containing a list of wiki page objects")
     p_wiki_lint.add_argument("--top-limit", type=int, default=20, help="Maximum top findings to print")
 
+    # --- code-index/search ---
+    p_code_index = subparsers.add_parser("code-index", help="Index source code for explicit code search")
+    p_code_index.add_argument("root", help="Repository or source root to index")
+    p_code_index.add_argument("--namespace", default="default", help="Code-index namespace")
+
+    p_code_search = subparsers.add_parser("code-search", help="Search explicit code-index chunks")
+    p_code_search.add_argument("root", help="Repository or source root to search")
+    p_code_search.add_argument("query", help="Lexical code search query")
+    p_code_search.add_argument("--namespace", default="default", help="Code-index namespace")
+    p_code_search.add_argument("--path-glob", default=None, help="Optional path glob filter")
+    p_code_search.add_argument("--language", default=None, help="Optional language filter")
+    p_code_search.add_argument("--limit", type=int, default=10, help="Maximum results")
+
+    p_code_symbol = subparsers.add_parser("code-symbol", help="Look up explicit code-index symbols")
+    p_code_symbol.add_argument("root", help="Repository or source root to search")
+    p_code_symbol.add_argument("name", help="Exact symbol name")
+    p_code_symbol.add_argument("--namespace", default="default", help="Code-index namespace")
+    p_code_symbol.add_argument("--kind", default=None, help="Optional symbol kind")
+    p_code_symbol.add_argument("--path", default=None, help="Optional exact source path")
+
     # --- forget ---
     p_forget = subparsers.add_parser("forget", help="Delete a memory entry")
     p_forget.add_argument("memory_id", help="ID of the entry to delete")

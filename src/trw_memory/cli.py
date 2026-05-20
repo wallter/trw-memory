@@ -37,6 +37,7 @@ from trw_memory.client import MemoryClient, _create_local_backend
 from trw_memory.embeddings import get_local_embedder
 from trw_memory.lifecycle.consolidation import consolidate_cycle
 from trw_memory.models.config import MemoryConfig
+from trw_memory.tools.code_index import memory_code_index_impl, memory_code_search_impl, memory_code_symbol_impl
 from trw_memory.tools.wiki_lint import memory_wiki_lint_impl
 
 __all__ = ["main"]
@@ -180,6 +181,47 @@ def _handle_wiki_lint(args: argparse.Namespace) -> int:
     return 0
 
 
+@_cli_error_boundary
+def _handle_code_index(args: argparse.Namespace) -> int:
+    print(json.dumps(memory_code_index_impl(args.root, namespace=args.namespace), sort_keys=True))
+    return 0
+
+
+@_cli_error_boundary
+def _handle_code_search(args: argparse.Namespace) -> int:
+    print(
+        json.dumps(
+            memory_code_search_impl(
+                args.root,
+                args.query,
+                namespace=args.namespace,
+                path_glob=args.path_glob,
+                language=args.language,
+                limit=args.limit,
+            ),
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+@_cli_error_boundary
+def _handle_code_symbol(args: argparse.Namespace) -> int:
+    print(
+        json.dumps(
+            memory_code_symbol_impl(
+                args.root,
+                args.name,
+                namespace=args.namespace,
+                kind=args.kind,
+                path=args.path,
+            ),
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 async def _dispatch(args: argparse.Namespace) -> int:
     handlers: dict[str, Callable[..., object]] = {
         "store": _handle_store,
@@ -193,6 +235,9 @@ async def _dispatch(args: argparse.Namespace) -> int:
         "restore": _handle_restore,
         "snapshot": _handle_snapshot,
         "wiki-lint": _handle_wiki_lint,
+        "code-index": _handle_code_index,
+        "code-search": _handle_code_search,
+        "code-symbol": _handle_code_symbol,
     }
     handler = handlers.get(args.command)
     if handler is None:
