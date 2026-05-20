@@ -96,7 +96,7 @@ class TestRecall:
         await client.close()
 
     def test_merge_tier_results_reranks_by_composite_score(self) -> None:
-        cfg = MemoryConfig()
+        cfg = MemoryConfig(recall_preserve_hybrid_order=False)
         local_results: list[MemoryResultDict] = [
             MemoryResultDict(
                 memory_id="M-local",
@@ -138,6 +138,76 @@ class TestRecall:
 
         merged = MemoryClient._merge_tier_results(local_results, tier_results, 5, ["deploy"], cfg, None)
         assert [result["memory_id"] for result in merged] == ["M-tier", "M-local"]
+
+    def test_merge_tier_results_preserves_hybrid_order_by_default(self) -> None:
+        cfg = MemoryConfig()
+        local_results: list[MemoryResultDict] = [
+            MemoryResultDict(
+                memory_id="M-local-1",
+                content="deploy lesson",
+                detail="first hybrid result",
+                tags=[],
+                importance=0.1,
+                score=0.01,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                updated_at=datetime.now(timezone.utc).isoformat(),
+                last_accessed_at=datetime.now(timezone.utc).isoformat(),
+                namespace="default",
+                source="local",
+                q_value=0.1,
+                q_observations=1,
+                recurrence=1,
+                access_count=0,
+            ),
+            MemoryResultDict(
+                memory_id="M-local-2",
+                content="deploy lesson second",
+                detail="second hybrid result",
+                tags=[],
+                importance=0.1,
+                score=0.01,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                updated_at=datetime.now(timezone.utc).isoformat(),
+                last_accessed_at=datetime.now(timezone.utc).isoformat(),
+                namespace="default",
+                source="local",
+                q_value=0.1,
+                q_observations=1,
+                recurrence=1,
+                access_count=0,
+            ),
+        ]
+        tier_results: list[MemoryResultDict] = [
+            MemoryResultDict(
+                memory_id="M-tier-high-value",
+                content="deploy high value",
+                detail="would win the legacy rescore",
+                tags=[],
+                importance=1.0,
+                score=1.0,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                updated_at=datetime.now(timezone.utc).isoformat(),
+                last_accessed_at=datetime.now(timezone.utc).isoformat(),
+                namespace="default",
+                source="local",
+                q_value=1.0,
+                q_observations=10,
+                recurrence=3,
+                access_count=10,
+            )
+        ]
+
+        merged = MemoryClient._merge_tier_results(local_results, tier_results, 2, ["deploy"], cfg, None)
+
+        assert cfg.recall_preserve_hybrid_order is True
+        assert [result["memory_id"] for result in merged] == ["M-local-1", "M-local-2"]
+
+    def test_memory_recall_preserve_hybrid_order_can_opt_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MEMORY_RECALL_PRESERVE_HYBRID_ORDER", "false")
+
+        cfg = MemoryConfig()
+
+        assert cfg.recall_preserve_hybrid_order is False
 
     async def test_forget_removes_entry_from_warm_tier(
         self,

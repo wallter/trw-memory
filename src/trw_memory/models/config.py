@@ -100,7 +100,7 @@ class MemoryConfig(BaseSettings):
             "limit*5 (=50 for default limit=10), which silently lost targets "
             "ranked past position 50 on namespaces > 50 records. Set higher "
             "for very large namespaces; recall-time cost is O(namespace_size) "
-            "for BM25 + O(namespace_size × embedding_dim) for dense search "
+            "for BM25 + O(namespace_size x embedding_dim) for dense search "
             "when the auto-scaled bm25_candidates/vector_candidates lift the "
             "50-cap floor."
         ),
@@ -152,18 +152,20 @@ class MemoryConfig(BaseSettings):
         ),
     )
     recall_preserve_hybrid_order: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("recall_preserve_hybrid_order", "memory_recall_preserve_hybrid_order"),
         description=(
-            "PRD-DIST-2051 c806: when True, merge_tier_results returns "
+            "PRD-DIST-2051 c806 / PRD-DIST-2058 c817: when True, "
+            "merge_tier_results returns "
             "local_results[:limit] (preserving the BM25+dense+RRF ordering "
             "from _try_hybrid_recall) whenever len(local_results) >= limit. "
             "Skips the compute_importance_score rescore that mixes hybrid "
             "RRF (1/(1+rank)) and tier-only entry_utility (absolute) scales. "
             "c805 trace showed all 4 missing hono baselines were at "
-            "hybrid_rank=2 but got pushed past top-10 by the rescore. "
-            "Default False preserves pre-c806 behaviour bit-for-bit; "
-            "operators opt in to the fix per namespace."
+            "hybrid_rank=2 but got pushed past top-10 by the rescore; "
+            "c811-c815 showed default-ON is robust across curated-query "
+            "oracles, languages, and K-depths. Set "
+            "MEMORY_RECALL_PRESERVE_HYBRID_ORDER=false to opt out."
         ),
     )
 

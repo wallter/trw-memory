@@ -23,6 +23,7 @@ Designed as the storage backend for [trw-mcp](https://github.com/wallter/trw-mcp
 
 - **MemoryClient SDK** -- High-level async Python client with store/recall/forget/search
 - **Hybrid Search (BM25 + vector)** -- BM25 keyword matching + dense vector similarity via sqlite-vec, combined with Reciprocal Rank Fusion (RRF). [Learn more](https://trwframework.com/docs)
+- **Hybrid order preservation by default** -- recall preserves the hybrid BM25+dense+RRF order when enough local candidates are already available, avoiding a legacy score-scale mismatch in tier merging. To restore the legacy tier rescore for a workload, set `MEMORY_RECALL_PRESERVE_HYBRID_ORDER=false`.
 - **Tiered Storage** -- Hot/warm/cold tiers for fast recall, warm-sidecar persistence, recall-time cold promotion, and explicit sweep-based archiving/purging. [Architecture details](https://trwframework.com/docs)
 - **Semantic Deduplication** -- Detects and merges near-duplicate learnings using cosine similarity (0.85 threshold)
 - **Knowledge Graph for AI** -- Tag co-occurrence and similarity edges, BFS traversal, importance boost/decay, cross-validation propagation. [Docs](https://trwframework.com/docs)

@@ -6,6 +6,49 @@ All notable changes to the TRW Memory package.
 
 ### Changed
 
+- **PRD-DIST-2058 — `MEMORY_RECALL_PRESERVE_HYBRID_ORDER` is now the default.**
+  `MemoryConfig.recall_preserve_hybrid_order` now defaults to `True`, so
+  `MemoryClient.recall()` preserves the hybrid BM25+dense+RRF ordering whenever
+  the hybrid retriever already produced enough local candidates. This avoids the
+  c805 score-scale mismatch where the legacy tier merge compared hybrid RRF
+  scores with tier-only `entry_utility` scores and pushed high-rank hybrid hits
+  out of the top-K. The opt-out remains available:
+  set `MEMORY_RECALL_PRESERVE_HYBRID_ORDER=false` to restore the legacy rescore.
+  trw-distill c811-c815 validated the flip across 4 curated-query oracles,
+  3 languages, and K=10/20/30/50 sweeps; the strongest observed curated-query
+  lift was Recall@5 `0.4167 → 1.0000` on the trw-framework oracle.
+
+## [0.8.3] — 2026-05-17
+
+### Fixed
+
+- **Prefer `pysqlite3-binary` over stdlib `sqlite3` to mitigate the SQLite
+  WAL-reset bug.** `storage/_dbapi.py` performs a one-time swap of
+  `sys.modules["sqlite3"]` to `pysqlite3` at package import so every
+  subsequent `import sqlite3` resolves to a modern SQLite build, independent
+  of the Python interpreter's bundled version. The dev repo was running
+  stdlib SQLite 3.45.1, which carries the WAL-reset bug (fix landed in
+  3.51.3 / backports 3.44.6 and 3.50.7). pysqlite3-binary's current wheel
+  ships 3.51.1 — short of the fix, but still a multi-release upgrade that
+  pulls in unrelated correctness and performance improvements. The shim
+  reports the active backend, version, and a conservative
+  `is_wal_reset_safe()` verdict so observability can confirm the upgrade
+  landed. Absence of the wheel is a silent no-op; behaviour is unchanged in
+  that fallback. Dep is required-but-platform-conditional (skipped on
+  Windows where pysqlite3 wheels are not currently published).
+
+- **`storage/_snapshot.py` and `storage/_integrity_scheduler.py` now set
+  `busy_timeout=30000` on every ad-hoc sqlite connection.** Both paths
+  previously relied solely on the `timeout=` connect parameter, which is not
+  the same as the SQLite-level busy_timeout that the primary backend honours.
+  Under multi-process WAL contention this caused the snapshot path to fail
+  fast on `SQLITE_BUSY` and the integrity scheduler to report spurious
+  "regression" events whenever a long-running checkpoint happened to overlap
+  the probe. Snapshot connect also now passes `check_same_thread=False`
+  because `VACUUM INTO` may run from a background thread.
+
+### Changed
+
 - **Module-decomposition campaign (PRD-DIST-245 / PRD-DIST-246).** `storage/sqlite_backend.py`
   (1133 → 343 LOC), `graph.py` (833 → 357 LOC), `security/runtime.py` (715 → 395 LOC), and
   `client.py` (1823 → 428 LOC) were each decomposed below the 350-LOC review gate by extracting
