@@ -11,11 +11,12 @@
 # so no submodule loads first.
 try:
     import sys as _sys
-    import pysqlite3 as _pysqlite3  # noqa: F401
+
+    import pysqlite3 as _pysqlite3  # type: ignore[import-untyped]
 
     _sys.modules["sqlite3"] = _pysqlite3
     _sys.modules["sqlite3.dbapi2"] = _pysqlite3.dbapi2
-    _pysqlite3._trw_pysqlite3_active = True  # type: ignore[attr-defined]
+    _pysqlite3._trw_pysqlite3_active = True
 except ImportError:
     # Fall through with stdlib sqlite3 — older bundled SQLite carries the
     # WAL-reset bug, but the engine still works.
@@ -24,9 +25,9 @@ except ImportError:
 # Re-import the observability shim so callers can ask ``_dbapi.backend()``
 # without having to handle the optional dep themselves. By now ``sqlite3``
 # is already swapped; the import is purely for the helper API.
-from trw_memory.storage import _dbapi as _dbapi  # noqa: F401, I001, E402
+from trw_memory.storage import _dbapi as _dbapi  # noqa: I001
 
-import logging  # noqa: E402
+import logging
 
 # Library best practice: prevent "No handler found" warnings.
 # The consuming application (trw-mcp, user projects) configures logging.

@@ -143,9 +143,7 @@ async def recall_impl(
         confidence_floor if confidence_floor is not None else client._config.recall_confidence_filter
     )
     effective_exclude_historical = (
-        exclude_historical_only
-        if exclude_historical_only is not None
-        else client._config.recall_filter_historical_only
+        exclude_historical_only if exclude_historical_only is not None else client._config.recall_filter_historical_only
     )
 
     hybrid_results = await client._try_hybrid_recall(query, limit, tags)
@@ -360,9 +358,7 @@ async def try_hybrid_recall(
         # entries (default 1000) so BM25 + dense can rank the full namespace.
         # Pre-c796 the pool was capped at limit*5 (=50 for default limit=10),
         # which silently lost targets ranked past position 50 on namespaces > 50.
-        candidate_pool_size = max(
-            limit * 5, client._config.hybrid_search_candidate_pool_size
-        )
+        candidate_pool_size = max(limit * 5, client._config.hybrid_search_candidate_pool_size)
         all_entries = backend.list_entries(
             namespace=client._namespace,
             limit=candidate_pool_size,

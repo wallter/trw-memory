@@ -67,19 +67,19 @@ def _install_pysqlite3_if_available() -> tuple[str, str]:
         return ("pysqlite3", stdlib_sqlite.sqlite_version)
 
     try:
-        import pysqlite3  # noqa: PLC0415 — runtime probe; absence is the no-op path
+        import pysqlite3  # type: ignore[import-untyped]
     except ImportError:
         # Fallback path: stdlib sqlite3 (may carry the WAL-reset bug on older
         # interpreter builds). We do not warn — this is a soft preference.
         if stdlib_sqlite is None:
-            import sqlite3 as _sqlite3  # noqa: PLC0415
+            import sqlite3 as _sqlite3
 
             stdlib_sqlite = _sqlite3
         return ("sqlite3", stdlib_sqlite.sqlite_version)
 
     sys.modules["sqlite3"] = pysqlite3
     sys.modules["sqlite3.dbapi2"] = pysqlite3.dbapi2
-    pysqlite3._trw_pysqlite3_active = True  # type: ignore[attr-defined]
+    pysqlite3._trw_pysqlite3_active = True
     logger.debug(
         "pysqlite3_active sqlite_version=%s threadsafety=%s",
         pysqlite3.sqlite_version,

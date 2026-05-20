@@ -87,7 +87,9 @@ def lint_wiki_pages(
                 )
                 continue
             inbound[ref.target_slug].add(page.slug)
-            if ref.bidirectional and page.slug not in {backref.target_slug for backref in pages_by_slug[ref.target_slug].outbound_refs}:
+            if ref.bidirectional and page.slug not in {
+                backref.target_slug for backref in pages_by_slug[ref.target_slug].outbound_refs
+            }:
                 findings.append(
                     WikiLintFinding(
                         code="asymmetric_ref",

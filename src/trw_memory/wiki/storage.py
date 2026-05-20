@@ -76,7 +76,9 @@ def replace_wiki_refs_for_entry(backend: SQLiteBackend, entry: MemoryEntry) -> i
             if backend._skip_commit_depth == 0:
                 backend._conn.commit()
     except (sqlite3.Error, ValueError) as exc:
-        raise StorageError(f"Failed to replace wiki refs for entry {entry.id}: {exc}", path=str(backend._db_path)) from exc
+        raise StorageError(
+            f"Failed to replace wiki refs for entry {entry.id}: {exc}", path=str(backend._db_path)
+        ) from exc
     return len(rows)
 
 
@@ -90,7 +92,9 @@ def purge_wiki_refs_for_entry(backend: SQLiteBackend, entry_id: str) -> int:
                 backend._conn.commit()
             return int(cursor.rowcount)
     except sqlite3.Error as exc:
-        raise StorageError(f"Failed to purge wiki refs for entry {entry_id}: {exc}", path=str(backend._db_path)) from exc
+        raise StorageError(
+            f"Failed to purge wiki refs for entry {entry_id}: {exc}", path=str(backend._db_path)
+        ) from exc
 
 
 def query_wiki_outbound_refs(

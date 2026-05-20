@@ -4,6 +4,7 @@ Unit tests for ``apply_admission_filter`` helper + integration tests via
 ``MemoryClient.recall`` to confirm both env-var (config) and per-call kwarg
 routes plumb correctly.
 """
+
 from __future__ import annotations
 
 from typing import cast
@@ -103,9 +104,7 @@ class TestRecallFilterIntegration:
         results = await client.recall("record")
         assert len(results) >= 2, f"expected >=2 results with filter OFF, got {[r['memory_id'] for r in results]}"
 
-    async def test_recall_per_call_confidence_floor_suppresses_zombie(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_recall_per_call_confidence_floor_suppresses_zombie(self, client: MemoryClient) -> None:
         await client.store("alpha record", importance=0.9)
         await client.store("alpha record zombie", importance=0.65)
         filtered = await client.recall("alpha", confidence_floor=0.7)
@@ -115,9 +114,7 @@ class TestRecallFilterIntegration:
         # high-conf record present
         assert any("alpha record" == c for c in contents), f"expected high-conf present, got {contents}"
 
-    async def test_recall_per_call_historical_only_suppresses(
-        self, client: MemoryClient
-    ) -> None:
+    async def test_recall_per_call_historical_only_suppresses(self, client: MemoryClient) -> None:
         await client.store("beta current record", importance=0.8)
         await client.store(
             "beta historical record",

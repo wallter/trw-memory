@@ -325,9 +325,7 @@ class TestAnomalyBypassSourcePrefixes:
         if not stored_hash:
             # Provenance not required for this config? Skip the assertion path.
             return
-        recomputed = hashlib.sha256(
-            f"{prepared.entry.content}{prepared.entry.detail}".encode()
-        ).hexdigest()
+        recomputed = hashlib.sha256(f"{prepared.entry.content}{prepared.entry.detail}".encode()).hexdigest()
         assert stored_hash == recomputed, (
             f"provenance hash drift detected: stored={stored_hash} "
             f"recomputed={recomputed}; content={prepared.entry.content!r}"

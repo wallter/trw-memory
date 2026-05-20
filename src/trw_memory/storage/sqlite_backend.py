@@ -504,17 +504,13 @@ class SQLiteBackend(StorageBackend):
                 self._conn.commit()
         return deleted
 
-    def query_wiki_outbound_refs(
-        self, source_slug: str, *, namespace: str | None = None
-    ) -> list[StoredWikiReference]:
+    def query_wiki_outbound_refs(self, source_slug: str, *, namespace: str | None = None) -> list[StoredWikiReference]:
         """Return deterministic persisted outbound wiki refs for ``source_slug``."""
         from trw_memory.wiki.storage import query_wiki_outbound_refs
 
         return list(query_wiki_outbound_refs(self, source_slug, namespace=namespace))
 
-    def query_wiki_inbound_refs(
-        self, target_slug: str, *, namespace: str | None = None
-    ) -> list[StoredWikiReference]:
+    def query_wiki_inbound_refs(self, target_slug: str, *, namespace: str | None = None) -> list[StoredWikiReference]:
         """Return deterministic persisted inbound wiki refs for ``target_slug``."""
         from trw_memory.wiki.storage import query_wiki_inbound_refs
 

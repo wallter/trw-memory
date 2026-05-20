@@ -19,6 +19,13 @@ To classify a test file:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import pytest
+
 # MUST be the very first runtime import: ``trw_memory.__init__`` runs the
 # pysqlite3 shim which swaps ``sys.modules["sqlite3"]`` to pysqlite3. If
 # any test module's ``import sqlite3`` resolves BEFORE the swap, the
@@ -26,17 +33,9 @@ from __future__ import annotations
 # pysqlite3 classes that production code raises, and ``except`` clauses
 # silently miss them. Pulling trw_memory in here at the top of conftest
 # guarantees the swap is in place before any test module is loaded.
-import trw_memory as _trw_memory_shim_trigger  # noqa: F401, E402
-
-from collections.abc import Iterator  # noqa: E402
-from datetime import datetime, timezone  # noqa: E402
-from pathlib import Path  # noqa: E402
-from typing import Any  # noqa: E402
-
-import pytest  # noqa: E402
-
-from trw_memory.client import MemoryClient  # noqa: E402
-from trw_memory.graph import wait_for_graph_updates  # noqa: E402
+import trw_memory as _trw_memory_shim_trigger  # noqa: F401
+from trw_memory.client import MemoryClient
+from trw_memory.graph import wait_for_graph_updates
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.security.keys import clear_key_cache
