@@ -48,8 +48,12 @@ def test_indexer_removes_chunks_and_symbols_for_deleted_files(tmp_path: Path) ->
 def test_indexer_default_excludes_skip_vendor_build_binary_large_and_secret_like_files(tmp_path: Path) -> None:
     (tmp_path / "node_modules").mkdir()
     (tmp_path / "node_modules" / "dep.py").write_text("def dep():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "vendor").mkdir()
+    (tmp_path / "vendor" / "vendored.py").write_text("def vendored():\n    return 1\n", encoding="utf-8")
     (tmp_path / "build").mkdir()
     (tmp_path / "build" / "generated.py").write_text("def generated():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "passwords.py").write_text("PASSWORD = 'example'\n", encoding="utf-8")
     (tmp_path / "secrets.env").write_text("TOKEN=abc", encoding="utf-8")
     (tmp_path / "image.png").write_bytes(b"\x89PNG\x00")
     (tmp_path / "app.py").write_text("def ok() -> int:\n    return 1\n", encoding="utf-8")
@@ -58,5 +62,5 @@ def test_indexer_default_excludes_skip_vendor_build_binary_large_and_secret_like
     result = CodeIndexer(root=tmp_path, store=store, namespace="project").index()
 
     assert result.indexed_files == 1
-    assert result.skipped_excluded == 4
+    assert result.skipped_excluded == 6
     assert [code_file.path for code_file in store.list_files(namespace="project")] == ["app.py"]

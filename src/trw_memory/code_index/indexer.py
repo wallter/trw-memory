@@ -13,8 +13,20 @@ from trw_memory.code_index.models import CodeChunk, CodeFile, CodeSymbol, conten
 
 __all__ = ["CodeIndexStats", "CodeIndexer", "InMemoryCodeIndex"]
 
-_DEFAULT_EXCLUDED_DIRS = frozenset({".git", ".hg", ".svn", ".venv", "venv", "node_modules", "build", "dist", "__pycache__"})
+_DEFAULT_EXCLUDED_DIRS = frozenset({
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "venv",
+    "node_modules",
+    "vendor",
+    "build",
+    "dist",
+    "__pycache__",
+})
 _DEFAULT_EXCLUDED_NAMES = frozenset({".env", ".env.local", "secrets.env"})
+_SECRET_LIKE_NAME_TOKENS = frozenset({"credential", "password", "secret", "token"})
 _BINARY_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".gz", ".tar", ".so", ".dll", ".exe"})
 _SOURCE_EXTENSIONS = frozenset({".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".md", ".txt"})
 
@@ -161,7 +173,8 @@ class CodeIndexer:
         parts = set(Path(relative_path).parts)
         if parts & _DEFAULT_EXCLUDED_DIRS:
             return True
-        if source_path.name in _DEFAULT_EXCLUDED_NAMES or "secret" in source_path.name.lower():
+        lowered_name = source_path.name.lower()
+        if source_path.name in _DEFAULT_EXCLUDED_NAMES or any(token in lowered_name for token in _SECRET_LIKE_NAME_TOKENS):
             return True
         if source_path.suffix.lower() in _BINARY_EXTENSIONS:
             return True
