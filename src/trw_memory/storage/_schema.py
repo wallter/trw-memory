@@ -90,6 +90,24 @@ CREATE TABLE IF NOT EXISTS memory_graph_edges (
 CREATE_IDX_MGE_SOURCE = "CREATE INDEX IF NOT EXISTS idx_mge_source ON memory_graph_edges(source_id, edge_type)"
 CREATE_IDX_MGE_TARGET = "CREATE INDEX IF NOT EXISTS idx_mge_target ON memory_graph_edges(target_id, edge_type)"
 
+CREATE_WIKI_REFS = """
+CREATE TABLE IF NOT EXISTS wiki_refs (
+    source_entry_id TEXT NOT NULL,
+    source_slug     TEXT NOT NULL,
+    target_slug     TEXT NOT NULL,
+    ref_type        TEXT NOT NULL,
+    label           TEXT DEFAULT '',
+    bidirectional   INTEGER NOT NULL DEFAULT 1 CHECK (bidirectional IN (0, 1)),
+    namespace       TEXT NOT NULL DEFAULT 'default',
+    updated_at      TEXT NOT NULL,
+    PRIMARY KEY (source_entry_id, target_slug, ref_type),
+    FOREIGN KEY (source_entry_id) REFERENCES memories(id) ON DELETE CASCADE
+)
+"""
+
+CREATE_IDX_WIKI_REFS_SOURCE = "CREATE INDEX IF NOT EXISTS idx_wiki_refs_source ON wiki_refs(source_slug, namespace)"
+CREATE_IDX_WIKI_REFS_TARGET = "CREATE INDEX IF NOT EXISTS idx_wiki_refs_target ON wiki_refs(target_slug, namespace)"
+
 CREATE_NAMESPACES = """
 CREATE TABLE IF NOT EXISTS memory_namespaces (
     namespace_id  TEXT PRIMARY KEY,
@@ -120,6 +138,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     try:
         cursor.execute(CREATE_MEMORIES)
         cursor.execute(CREATE_GRAPH_EDGES)
+        cursor.execute(CREATE_WIKI_REFS)
         cursor.execute(CREATE_NAMESPACES)
 
         # Migration: rename columns from older schema versions.
@@ -137,6 +156,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         cursor.execute(CREATE_IDX_STATUS)
         cursor.execute(CREATE_IDX_MGE_SOURCE)
         cursor.execute(CREATE_IDX_MGE_TARGET)
+        cursor.execute(CREATE_IDX_WIKI_REFS_SOURCE)
+        cursor.execute(CREATE_IDX_WIKI_REFS_TARGET)
 
         # Migration: add missing columns to memory_namespaces
         for col_name, col_def in [

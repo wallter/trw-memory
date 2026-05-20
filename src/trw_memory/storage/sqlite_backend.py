@@ -18,7 +18,7 @@ import threading
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import structlog
 
@@ -41,6 +41,9 @@ from trw_memory.storage._sqlcipher_setup import (
 )
 from trw_memory.storage._stale_handle_detector import StaleHandleDetector
 from trw_memory.storage.interface import StorageBackend
+
+if TYPE_CHECKING:
+    from trw_memory.wiki.storage import StoredWikiReference
 
 logger = structlog.get_logger(__name__)
 __all__ = [
@@ -372,6 +375,9 @@ class SQLiteBackend(StorageBackend):
     def store(self, entry: MemoryEntry) -> None:
         """INSERT OR REPLACE the entry into the memories table."""
         _crud_ops_store(self, _INSERT_COLUMNS_SQL, _COLUMNS, entry)
+        from trw_memory.wiki.storage import replace_wiki_refs_for_entry
+
+        replace_wiki_refs_for_entry(self, entry)
 
     def get(self, entry_id: str) -> MemoryEntry | None:
         """Retrieve an entry by id."""
@@ -379,7 +385,12 @@ class SQLiteBackend(StorageBackend):
 
     def update(self, entry_id: str, **fields: object) -> MemoryEntry | None:
         """Apply a partial update to an existing entry."""
-        return _crud_ops_update(self, _SELECT_COLUMNS_SQL, _VALID_UPDATE_COLUMNS, entry_id, **fields)
+        updated = _crud_ops_update(self, _SELECT_COLUMNS_SQL, _VALID_UPDATE_COLUMNS, entry_id, **fields)
+        if updated is not None and "metadata" in fields:
+            from trw_memory.wiki.storage import replace_wiki_refs_for_entry
+
+            replace_wiki_refs_for_entry(self, updated)
+        return updated
 
     def increment_session_counts(self, entry_ids: list[str], *, updated_at: datetime | None = None) -> int:
         """Increment session_count for multiple entries in one transaction."""
@@ -391,7 +402,12 @@ class SQLiteBackend(StorageBackend):
 
     def delete(self, entry_id: str) -> bool:
         """Remove an entry from memories (and vec_index when available)."""
-        return _crud_ops_delete(self, entry_id)
+        deleted = _crud_ops_delete(self, entry_id)
+        if deleted:
+            from trw_memory.wiki.storage import purge_wiki_refs_for_entry
+
+            purge_wiki_refs_for_entry(self, entry_id)
+        return deleted
 
     @contextlib.contextmanager
     def transaction(self) -> Iterator[SQLiteBackend]:
@@ -481,7 +497,28 @@ class SQLiteBackend(StorageBackend):
 
     def delete_by_namespace(self, namespace: str) -> int:
         """Delete all entries in a namespace."""
-        return _query_ops_delete_by_namespace(self, namespace)
+        deleted = _query_ops_delete_by_namespace(self, namespace)
+        if deleted:
+            with self._lock:
+                self._conn.execute("DELETE FROM wiki_refs WHERE namespace = ?", (namespace,))
+                self._conn.commit()
+        return deleted
+
+    def query_wiki_outbound_refs(
+        self, source_slug: str, *, namespace: str | None = None
+    ) -> list[StoredWikiReference]:
+        """Return deterministic persisted outbound wiki refs for ``source_slug``."""
+        from trw_memory.wiki.storage import query_wiki_outbound_refs
+
+        return list(query_wiki_outbound_refs(self, source_slug, namespace=namespace))
+
+    def query_wiki_inbound_refs(
+        self, target_slug: str, *, namespace: str | None = None
+    ) -> list[StoredWikiReference]:
+        """Return deterministic persisted inbound wiki refs for ``target_slug``."""
+        from trw_memory.wiki.storage import query_wiki_inbound_refs
+
+        return list(query_wiki_inbound_refs(self, target_slug, namespace=namespace))
 
     def close(self) -> None:
         """Stop integrity scheduler + writer registry, then close connection."""

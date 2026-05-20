@@ -57,7 +57,13 @@ def connect(
     if cached_statements is not None:
         kwargs["cached_statements"] = cached_statements
     conn = dbapi.connect(str(db_path), **kwargs)
-    conn.row_factory = sqlite3.Row
+    # Use the caller-provided ``dbapi`` for the Row factory so the type
+    # matches the cursor. With the pysqlite3 shim live, ``dbapi`` is
+    # usually pysqlite3 — but tests can pass stdlib ``sqlite3`` explicitly
+    # to drive deterministic exception classes, and any cross-module row
+    # factory would raise ``TypeError: Row() argument 1 must be
+    # sqlite3.Cursor, not pysqlite3.dbapi2.Cursor`` (or vice versa).
+    conn.row_factory = getattr(dbapi, "Row", sqlite3.Row)
     if sqlcipher_key_hex is not None:
         if len(sqlcipher_key_hex) != 64 or any(ch not in "0123456789abcdef" for ch in sqlcipher_key_hex):
             raise ValueError("sqlcipher_key_hex must be a 64-character lowercase hex string")

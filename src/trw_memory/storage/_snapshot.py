@@ -154,7 +154,11 @@ def create_snapshot(db_path: Path, dest: Path) -> Path:
 
     conn: sqlite3.Connection | None = None
     try:
-        conn = sqlite3.connect(str(db_path), timeout=30.0)
+        conn = sqlite3.connect(str(db_path), timeout=30.0, check_same_thread=False)
+        # Belt and suspenders against multi-process WAL contention while the
+        # snapshot runs: 30s busy_timeout matches the primary backend so
+        # snapshot can't be starved by foreground writers, and vice versa.
+        conn.execute("PRAGMA busy_timeout = 30000")
         # Use parameterized-literal quoting — VACUUM INTO does not support
         # bind parameters, so escape single quotes defensively.
         escaped = str(tmp).replace("'", "''")

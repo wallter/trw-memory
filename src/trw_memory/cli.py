@@ -6,8 +6,10 @@ import argparse
 import asyncio
 import functools
 import inspect
+import json
 import sys
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import ParamSpec, TypeVar, cast, overload
 
 import structlog
@@ -35,6 +37,7 @@ from trw_memory.client import MemoryClient, _create_local_backend
 from trw_memory.embeddings import get_local_embedder
 from trw_memory.lifecycle.consolidation import consolidate_cycle
 from trw_memory.models.config import MemoryConfig
+from trw_memory.tools.wiki_lint import memory_wiki_lint_impl
 
 __all__ = ["main"]
 
@@ -163,6 +166,20 @@ def _handle_snapshot(args: argparse.Namespace) -> int:
     return handle_snapshot(args, config_cls=MemoryConfig)
 
 
+@_cli_error_boundary
+def _handle_wiki_lint(args: argparse.Namespace) -> int:
+    raw_pages = json.loads(Path(args.path).read_text(encoding="utf-8"))
+    if not isinstance(raw_pages, list):
+        raise TypeError("wiki-lint input must be a JSON list")
+    pages: list[dict[str, object]] = []
+    for index, raw_page in enumerate(raw_pages):
+        if not isinstance(raw_page, dict):
+            raise TypeError(f"wiki-lint item {index} must be an object")
+        pages.append({str(key): value for key, value in raw_page.items()})
+    print(json.dumps(memory_wiki_lint_impl(pages, top_limit=args.top_limit), sort_keys=True))
+    return 0
+
+
 async def _dispatch(args: argparse.Namespace) -> int:
     handlers: dict[str, Callable[..., object]] = {
         "store": _handle_store,
@@ -175,6 +192,7 @@ async def _dispatch(args: argparse.Namespace) -> int:
         "forget": _handle_forget,
         "restore": _handle_restore,
         "snapshot": _handle_snapshot,
+        "wiki-lint": _handle_wiki_lint,
     }
     handler = handlers.get(args.command)
     if handler is None:

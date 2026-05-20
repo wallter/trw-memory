@@ -205,6 +205,11 @@ class IntegrityScheduler:
             # Reconfirms the URI mode=ro intent and blocks any accidental write.
             with contextlib.suppress(sqlite3.Error):
                 conn.execute("PRAGMA query_only = 1")
+            # Match the primary backend's busy_timeout so a long-running
+            # checkpoint doesn't cause spurious "regression" reports from
+            # the scheduler when SQLite returns BUSY on the quick_check probe.
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute("PRAGMA busy_timeout = 30000")
             rows = conn.execute("PRAGMA quick_check").fetchall()
             detail = rows[0][0] if rows else "empty"
             ok = len(rows) == 1 and rows[0][0] == "ok"

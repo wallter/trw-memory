@@ -89,6 +89,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("--namespace", default="default", help="Namespace")
     p_status.add_argument("--format", dest="fmt", choices=["table", "json"], default="table", help="Output format")
 
+    # --- wiki-lint ---
+    p_wiki_lint = subparsers.add_parser("wiki-lint", help="Lint wiki page JSON")
+    p_wiki_lint.add_argument("path", help="JSON file containing a list of wiki page objects")
+    p_wiki_lint.add_argument("--top-limit", type=int, default=20, help="Maximum top findings to print")
+
     # --- forget ---
     p_forget = subparsers.add_parser("forget", help="Delete a memory entry")
     p_forget.add_argument("memory_id", help="ID of the entry to delete")

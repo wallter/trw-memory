@@ -1,6 +1,6 @@
 """FastMCP server entry point for trw-memory.
 
-Registers all 6 MCP tools and exposes a ``main()`` callable for the
+Registers MCP tools and exposes a ``main()`` callable for the
 ``trw-memory`` console script defined in pyproject.toml.
 
 fastmcp is an optional dependency (``pip install trw-memory[mcp]``).
@@ -23,6 +23,7 @@ def _register_tools() -> None:
     from trw_memory.tools.search import register_search_tool
     from trw_memory.tools.status import register_status_tool
     from trw_memory.tools.store import register_store_tool
+    from trw_memory.tools.wiki_lint import register_wiki_lint_tool
 
     register_store_tool(mcp)
     register_recall_tool(mcp)
@@ -32,6 +33,7 @@ def _register_tools() -> None:
     register_consolidate_tool(mcp)
     register_search_tool(mcp)
     register_status_tool(mcp)
+    register_wiki_lint_tool(mcp)
 
 
 _register_tools()
