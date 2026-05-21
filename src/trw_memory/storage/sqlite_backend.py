@@ -208,6 +208,28 @@ class SQLiteBackend(StorageBackend):
             recovery_inline_max_bytes=recovery_inline_max_bytes,
         )
 
+        # WAL-reset-bug safety gate. The active SQLite engine carries the
+        # WAL-reset corruption bug (sqlite.org/wal.html §walresetbug) unless it
+        # is >= 3.51.3 (or backport 3.44.6 / 3.50.7). When unsafe we cannot fix
+        # the engine (no fixed pysqlite3 wheel exists yet) so we warn loudly and
+        # rely on single-connection checkpoint serialization (see checkpoint_wal)
+        # to avoid the two-connection race that detonates the bug.
+        from trw_memory.storage import _dbapi as _driver
+
+        self.wal_reset_safe: bool = _driver.is_wal_reset_safe()
+        if not self.wal_reset_safe:
+            logger.warning(
+                "sqlite_wal_reset_unsafe",
+                sqlite_version=_driver.sqlite_version(),
+                driver=_driver.backend(),
+                detail=(
+                    "Active SQLite predates the 3.51.3 WAL-reset fix; WAL "
+                    "checkpoints are serialized on the single owning connection "
+                    "to avoid the corruption race. Upgrade to a pysqlite3 build "
+                    "bundling SQLite>=3.51.3 when one is published."
+                ),
+            )
+
         # P3 — stale-handle detector (belt + suspenders: inode + sentinel).
         self._stale_detector = StaleHandleDetector(db_path)
 
@@ -295,6 +317,11 @@ class SQLiteBackend(StorageBackend):
     def vec_available(self) -> bool:
         """``True`` when sqlite-vec is loaded and the virtual table exists."""
         return self._vec_available
+
+    @property
+    def db_path(self) -> Path:
+        """Filesystem path of the backing database file."""
+        return self._db_path
 
     # ------------------------------------------------------------------
     # P2 — Resilient row materialisation (extracted to _resilient_fetch.py
@@ -538,6 +565,50 @@ class SQLiteBackend(StorageBackend):
 
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
         self.close()
+
+    def checkpoint_wal(self, mode: str = "TRUNCATE") -> dict[str, object]:
+        """Checkpoint the WAL on the single owning connection under the lock.
+
+        This is the structural fix for the SQLite WAL-reset corruption bug
+        (sqlite.org/wal.html §walresetbug, fixed in 3.51.3): the bug requires
+        TWO OR MORE connections checkpointing the same WAL concurrently. By
+        routing every checkpoint through ``self._conn`` while holding
+        ``self._lock`` — the same connection and lock all writes use — there is
+        never a second checkpointer to race, so the bug cannot fire even on an
+        unpatched engine.
+
+        TRUNCATE reclaims WAL file space; it falls back to PASSIVE when readers
+        still hold pages (``busy=1``). Fail-open: never raises.
+        """
+        normalized = mode.upper()
+        if normalized not in ("PASSIVE", "FULL", "RESTART", "TRUNCATE"):
+            normalized = "PASSIVE"
+        # On an engine WITHOUT the WAL-reset fix, never run a *resetting*
+        # checkpoint (TRUNCATE/RESTART). A WAL reset that races any other
+        # writer/checkpoint — including a checkpoint from another PROCESS that
+        # also holds this db — is the precise trigger for the corruption bug
+        # (sqlite.org/wal.html §walresetbug). PASSIVE/FULL never reset the WAL,
+        # so they cannot trigger it regardless of connection/process count.
+        # The gate self-resolves once a fixed engine (>=3.51.3) is installed.
+        if not self.wal_reset_safe and normalized in ("TRUNCATE", "RESTART"):
+            normalized = "PASSIVE"
+        with self._lock:
+            try:
+                row = self._conn.execute(f"PRAGMA wal_checkpoint({normalized})").fetchone()  # noqa: S608 - allowlisted mode
+                busy = int(row[0]) if row else 1
+                checkpointed = int(row[2]) if row and row[2] is not None else 0
+                used = normalized
+                if busy == 1 and normalized in ("TRUNCATE", "RESTART"):
+                    # Readers held pages; fall back to the non-blocking PASSIVE
+                    # checkpoint (still on this same connection — no race).
+                    row = self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+                    busy = int(row[0]) if row else 1
+                    checkpointed = int(row[2]) if row and row[2] is not None else 0
+                    used = "PASSIVE"
+                return {"busy": busy, "checkpointed": checkpointed, "mode": used}
+            except sqlite3.Error as exc:
+                logger.warning("wal_checkpoint_failed", error=str(exc), db=str(self._db_path))
+                return {"busy": 1, "checkpointed": 0, "mode": "error"}
 
     # ------------------------------------------------------------------
     # Vector operations (delegated to _vector_ops.py — PRD-DIST-245 batch 85)

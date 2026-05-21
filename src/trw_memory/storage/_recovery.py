@@ -140,30 +140,99 @@ def _backend_corrupt_backup_helpers() -> Any:
     return _sqlite_backend_module.SQLiteBackend
 
 
+_SALVAGE_INDEXES = (
+    "idx_memories_status",
+    "idx_memories_namespace",
+    "idx_memories_sync_seq",
+    "sqlite_autoindex_memories_1",
+)
+
+
+def _collect_salvage_rowids(conn: Any) -> list[int]:
+    """Collect ``memories`` rowids by scanning a secondary INDEX btree.
+
+    Walking an index avoids the corrupt table-leaf pages that abort a plain
+    ``SELECT * FROM memories``. Falls back to a direct rowid scan when no index
+    is usable (e.g. a healthy DB or index-only corruption).
+    """
+    for idx in _SALVAGE_INDEXES:
+        rowids: list[int] = []
+        try:
+            cur = conn.execute(f"SELECT rowid FROM memories INDEXED BY {idx}")  # noqa: S608 - allowlisted index name
+            while True:
+                try:
+                    row = cur.fetchone()
+                except sqlite3.DatabaseError:
+                    break
+                if row is None:
+                    break
+                rowids.append(row[0])
+            if rowids:
+                return rowids
+        except sqlite3.DatabaseError:
+            continue
+    rowids = []
+    with contextlib.suppress(sqlite3.DatabaseError):
+        for row in conn.execute("SELECT rowid FROM memories"):
+            rowids.append(row[0])
+    return rowids
+
+
 def _attempt_primary_salvage(
     backup_path: Path,
     *,
     dbapi: Any,
     sqlcipher_key_hex: str | None,
 ) -> tuple[bool, list[Any]]:
-    """Try in-process ``SELECT * FROM memories`` salvage."""
+    """Robustly salvage ``memories`` rows from a (possibly corrupt) backup.
+
+    Walks rowids via a secondary index and fetches each row individually,
+    skipping the rows that live on corrupt leaf pages. This recovers the
+    maximum readable set instead of the prior behavior, which aborted at the
+    first corrupt page and salvaged ZERO rows (the 2026-05-20 data-loss path).
+
+    Returns ``(primary_failed, rows)`` — ``primary_failed`` is True only when
+    nothing at all could be read.
+    """
     try:
         old_conn = _connection_connect(
             backup_path,
             dbapi=dbapi,
-            timeout=5.0,
+            timeout=15.0,
             check_same_thread=True,
             sqlcipher_key_hex=sqlcipher_key_hex,
         )
-        try:
-            rows = list(old_conn.execute("SELECT * FROM memories").fetchall())
-            return False, rows
-        except sqlite3.DatabaseError:
-            return True, []
-        finally:
-            old_conn.close()
     except sqlite3.DatabaseError:
         return True, []
+    try:
+        rowids = _collect_salvage_rowids(old_conn)
+        rows: list[Any] = []
+        page_failures = 0
+        for rid in rowids:
+            try:
+                row = old_conn.execute("SELECT * FROM memories WHERE rowid=?", (rid,)).fetchone()
+            except sqlite3.DatabaseError:
+                page_failures += 1
+                continue
+            if row is not None:
+                rows.append(row)
+        if not rows:
+            # No index path worked; last-ditch plain scan (healthy DBs).
+            with contextlib.suppress(sqlite3.DatabaseError):
+                rows = list(old_conn.execute("SELECT * FROM memories").fetchall())
+        if page_failures:
+            logger.warning(
+                "db_salvage_partial",
+                db=str(backup_path),
+                salvaged=len(rows),
+                page_failures=page_failures,
+            )
+        return (not rows), rows
+    except sqlite3.DatabaseError:
+        return True, []
+    finally:
+        with contextlib.suppress(sqlite3.Error):
+            old_conn.close()
 
 
 def _open_recovered_conn(
@@ -180,8 +249,12 @@ def _open_recovered_conn(
         check_same_thread=False,
         sqlcipher_key_hex=sqlcipher_key_hex,
     )
+    # Match the hardened open profile (gap: recovered conn was less configured
+    # than a normal open — no busy_timeout / journal_size_limit).
+    new_conn.execute("PRAGMA busy_timeout = 30000")
     new_conn.execute("PRAGMA journal_mode=WAL")
     new_conn.execute("PRAGMA synchronous=NORMAL")
+    new_conn.execute("PRAGMA journal_size_limit = 67108864")
     ensure_schema(new_conn)
     return new_conn
 

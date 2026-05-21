@@ -102,6 +102,9 @@ def open_and_configure(
     sync_result = conn.execute("PRAGMA synchronous=NORMAL").fetchone()
     if sync_result and sync_result[0] not in ("1", 1):
         logger.warning("synchronous_normal_not_set", got=sync_result[0] if sync_result else None)
+    # Cap WAL file growth at 64 MiB so a stalled checkpoint cannot let the WAL
+    # grow unbounded (a large stale WAL widens the window for inconsistency).
+    conn.execute("PRAGMA journal_size_limit = 67108864")
 
     for attempt in range(2):
         rows = conn.execute("PRAGMA quick_check").fetchall()
@@ -137,6 +140,7 @@ def open_without_integrity_check(
     conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA journal_size_limit = 67108864")
     return conn
 
 

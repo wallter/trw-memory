@@ -168,7 +168,19 @@ def rotate_key(namespace: str, new_passphrase: str, config: MemoryConfig | None 
     )
     try:
         checkpoint_conn.execute("PRAGMA busy_timeout = 30000")
-        checkpoint_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        # TRUNCATE is required to fully flush the WAL before the re-key copy
+        # below. Key rotation must be EXCLUSIVE: on an engine without the
+        # WAL-reset fix, a TRUNCATE racing another connection is the corruption
+        # trigger (sqlite.org/wal.html §walresetbug). Enforce exclusivity
+        # MECHANICALLY — if the checkpoint reports busy=1, another connection
+        # holds the WAL, so abort rather than risk a racing / partial flush.
+        checkpoint_row = checkpoint_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if checkpoint_row is not None and checkpoint_row[0] == 1:
+            raise KeyRotationError(
+                "key rotation requires exclusive database access, but another "
+                "connection holds the WAL (wal_checkpoint busy=1)",
+                path=str(db_path),
+            )
     finally:
         checkpoint_conn.close()
 

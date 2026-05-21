@@ -60,12 +60,14 @@ class _RotatingSQLCipherConnection:
         *,
         integrity_result: str = "ok",
         mutate_on_rekey: bytes | None = None,
+        wal_checkpoint_busy: bool = False,
     ) -> None:
         object.__setattr__(self, "_conn", conn)
         object.__setattr__(self, "_statements", statements)
         object.__setattr__(self, "_db_path", db_path)
         object.__setattr__(self, "_integrity_result", integrity_result)
         object.__setattr__(self, "_mutate_on_rekey", mutate_on_rekey)
+        object.__setattr__(self, "_wal_checkpoint_busy", wal_checkpoint_busy)
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._conn, name)
@@ -76,6 +78,9 @@ class _RotatingSQLCipherConnection:
     def execute(self, sql: str, *args: object) -> sqlite3.Cursor | _StaticCursor:
         self._statements.append(sql)
         normalized = sql.strip().upper()
+        if normalized.startswith("PRAGMA WAL_CHECKPOINT") and self._wal_checkpoint_busy:
+            # Simulate another connection holding the WAL (busy=1).
+            return _StaticCursor([(1, 0, 0)])
         if normalized.startswith("PRAGMA REKEY") and self._mutate_on_rekey is not None:
             with self._db_path.open("ab") as handle:
                 handle.write(self._mutate_on_rekey)
@@ -95,10 +100,12 @@ class _RotatingSQLCipherDBAPI:
         *,
         integrity_result: str = "ok",
         mutate_on_rekey: bytes | None = None,
+        wal_checkpoint_busy: bool = False,
     ) -> None:
         self._statements = statements
         self._integrity_result = integrity_result
         self._mutate_on_rekey = mutate_on_rekey
+        self._wal_checkpoint_busy = wal_checkpoint_busy
 
     def connect(self, database: str, **kwargs: object) -> _RotatingSQLCipherConnection:
         conn = sqlite3.connect(database, **kwargs)
@@ -108,6 +115,7 @@ class _RotatingSQLCipherDBAPI:
             Path(database),
             integrity_result=self._integrity_result,
             mutate_on_rekey=self._mutate_on_rekey,
+            wal_checkpoint_busy=self._wal_checkpoint_busy,
         )
 
 

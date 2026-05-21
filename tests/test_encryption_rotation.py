@@ -68,6 +68,45 @@ class TestRotateKey:
         assert "PRAGMA kdf_iter = 256000" in statements
         assert any(statement.startswith("PRAGMA rekey = \"x'") for statement in statements)
 
+    def test_rotate_key_aborts_when_wal_checkpoint_busy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the pre-rotation WAL checkpoint reports busy=1 (another connection
+        holds the WAL), rotation aborts rather than risk a racing TRUNCATE on an
+        unsafe engine / a partial WAL flush before re-key."""
+        old_key = generate_master_key()
+        new_key = generate_master_key()
+        monkeypatch.setenv("MEMORY_MASTER_KEY", old_key.hex())
+        mock_keyring = MagicMock()
+
+        config = MemoryConfig(
+            storage_backend="sqlite",
+            storage_path=str(tmp_path / "storage"),
+            encryption_enabled=True,
+            key_source="keyring",
+            auto_generate_key=False,
+            rbac_enabled=True,
+        )
+        statements: list[str] = []
+        monkeypatch.setattr(
+            "trw_memory.storage.sqlite_backend._import_sqlcipher_driver",
+            lambda: _RotatingSQLCipherDBAPI(statements, wal_checkpoint_busy=True),
+        )
+
+        with (
+            patch("trw_memory.security.keys._keyring", mock_keyring),
+            patch("trw_memory.security.keys._KEYRING_AVAILABLE", True),
+        ):
+            backend = create_backend_from_config(config, "default")
+            backend.store(_make_entry(content="rotation target", detail="keep me"))
+            backend.close()
+
+            with pytest.raises(KeyRotationError, match="exclusive database access"):
+                rotate_key("default", new_key.hex(), config)
+
+        # Aborted before re-key: no PRAGMA rekey should have been issued.
+        assert not any(s.startswith("PRAGMA rekey") for s in statements)
+
     def test_rotate_key_restores_backup_on_integrity_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
