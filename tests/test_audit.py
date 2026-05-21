@@ -90,6 +90,28 @@ class TestSecurityMaintenanceQueue:
         assert drained == {"drained": 1, "queued": 1}
         assert security_runtime.drain_security_maintenance_queue(second) == {"drained": 1, "queued": 0}
 
+    def test_security_maintenance_enqueue_is_thread_safe_and_deduplicated(self, tmp_path: Path) -> None:
+        security_runtime._AUDIT_MAINTENANCE_CACHE.clear()
+        security_runtime._AUDIT_MAINTENANCE_QUEUE.clear()
+        cfg = MemoryConfig(
+            audit_log_path=str(tmp_path / "audit.jsonl"),
+            security_maintenance_inline=False,
+        )
+        barrier = threading.Barrier(8)
+
+        def _enqueue() -> None:
+            barrier.wait()
+            security_runtime.ensure_security_maintenance(cfg)
+
+        threads = [threading.Thread(target=_enqueue) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert security_runtime.security_maintenance_status()["queued"] == 1
+        assert security_runtime.drain_security_maintenance_queue(cfg) == {"drained": 1, "queued": 0}
+
 
 class TestAuditLogVerify:
     def test_verify_chain_missing_file_returns_empty_valid_result(self, tmp_path: Path) -> None:

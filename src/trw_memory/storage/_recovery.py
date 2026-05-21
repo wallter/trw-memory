@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import sqlite3
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,7 +70,22 @@ def write_recovery_state(db_path: Path, *, status: str, reason: str, db_size_byt
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     with contextlib.suppress(OSError):
-        state_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path_str = tempfile.mkstemp(
+            dir=str(state_path.parent),
+            prefix=f".{state_path.name}.",
+            suffix=".tmp",
+        )
+        tmp_path = Path(tmp_path_str)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            tmp_path.replace(state_path)
+        except OSError:
+            tmp_path.unlink(missing_ok=True)
+            raise
 
 
 def classify_recovery_preflight(db_path: Path, *, inline_max_bytes: int) -> RecoveryPreflight:

@@ -436,6 +436,28 @@ class TestMemoryStatusImpl:
         assert posture["recall_filter_mode"] == "disabled"
         assert posture["provenance_mode"] == "optional"
 
+    def test_positive_quarantine_count_reports_security_posture(self) -> None:
+        backend = _mock_backend()
+        cfg = MemoryConfig()
+        with patch("trw_memory.tools.status.list_quarantined_entries", return_value=[_make_entry()]):
+            result = memory_status_impl("project:default", backend=backend, config=cfg)
+
+        posture = result["security_posture"]
+        assert isinstance(posture, dict)
+        assert posture["status"] == "degraded"
+        assert posture["quarantine_count"] == 1
+
+    def test_quarantine_count_failure_reports_degraded_posture(self) -> None:
+        backend = _mock_backend()
+        cfg = MemoryConfig()
+        with patch("trw_memory.tools.status.list_quarantined_entries", side_effect=RuntimeError("quarantine db down")):
+            result = memory_status_impl("project:default", backend=backend, config=cfg)
+
+        posture = result["security_posture"]
+        assert isinstance(posture, dict)
+        assert posture["status"] == "degraded"
+        assert posture["quarantine_count"] is None
+
     def test_status_introspection_lists_live_recovery_and_security_config(self) -> None:
         backend = _mock_backend()
         result = memory_status_impl(None, backend=backend)

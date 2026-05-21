@@ -10,7 +10,7 @@ import pytest
 
 from trw_memory.exceptions import CorruptDatabaseUnsalvageableError
 from trw_memory.storage._init_helpers import open_connection_with_recovery
-from trw_memory.storage._recovery import classify_recovery_preflight, recovery_state_path
+from trw_memory.storage._recovery import classify_recovery_preflight, recovery_state_path, write_recovery_state
 
 
 class _FakeBackend:
@@ -116,3 +116,14 @@ def test_degraded_preflight_blocks_inline_recovery_and_persists_state(tmp_path: 
 
     assert backend.recover_called is False
     assert "degraded_open_with_background_recovery" in recovery_state_path(db_path).read_text(encoding="utf-8")
+
+
+def test_recovery_state_write_is_valid_json_and_classifies_hard_fail(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.db"
+    db_path.write_bytes(b"0123456789")
+
+    write_recovery_state(db_path, status="hard_fail", reason="inline_recovery_failed", db_size_bytes=10)
+
+    state = recovery_state_path(db_path).read_text(encoding="utf-8")
+    assert '"status": "hard_fail"' in state
+    assert classify_recovery_preflight(db_path, inline_max_bytes=1024).classification == "hard_fail"

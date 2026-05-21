@@ -46,6 +46,7 @@ def _security_posture(cfg: MemoryConfig) -> dict[str, object] | None:
     }
     queued_raw = maintenance.get("queued", 0)
     queued_count = queued_raw if isinstance(queued_raw, int) else 0
+    quarantine_degraded = quarantine_count is None or quarantine_count > 0
     degraded = (
         not cfg.enable_recall_filter
         or not cfg.enable_trust_scoring
@@ -53,6 +54,7 @@ def _security_posture(cfg: MemoryConfig) -> dict[str, object] | None:
         or not cfg.pii_enabled
         or cfg.canary_fail_mode != "halt"
         or queued_count > 0
+        or quarantine_degraded
     )
     non_default = (
         cfg.recall_filter_mode != "redact"

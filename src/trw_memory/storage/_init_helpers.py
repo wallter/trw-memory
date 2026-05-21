@@ -72,7 +72,7 @@ def open_connection_with_recovery(
     recovered = False
     preflight = classify_recovery_preflight(db_path, inline_max_bytes=recovery_inline_max_bytes)
     backend.recovery_preflight = preflight
-    if preflight.classification == "hard_fail":
+    if preflight.classification == "hard_fail" and recovery_policy == "strict":
         raise CorruptDatabaseUnsalvageableError(
             f"memory recovery previously hard-failed for {db_path}",
             backup_path=preflight.state_path,

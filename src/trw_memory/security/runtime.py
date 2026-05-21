@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -32,6 +33,7 @@ from trw_memory.storage.persistence import lock_for_rmw, read_yaml, write_yaml
 
 _AUDIT_MAINTENANCE_CACHE: set[str] = set()
 _AUDIT_MAINTENANCE_QUEUE: deque[str] = deque(maxlen=128)
+_AUDIT_MAINTENANCE_LOCK = threading.RLock()
 logger = structlog.get_logger(__name__)
 
 
@@ -275,14 +277,15 @@ from trw_memory.security._runtime_quarantine import (
 def ensure_security_maintenance(config: MemoryConfig) -> None:
     """Run or enqueue once-per-process audit retention maintenance for a config path."""
     cache_key = f"{config.audit_log_path}:{config.audit_retention_days}"
-    if cache_key in _AUDIT_MAINTENANCE_CACHE:
-        return
-    if not config.security_maintenance_inline:
-        if cache_key not in _AUDIT_MAINTENANCE_QUEUE:
-            _AUDIT_MAINTENANCE_QUEUE.append(cache_key)
-            logger.debug("security_maintenance_enqueued", audit_log_path=config.audit_log_path)
-        return
-    _drain_security_maintenance_key(config, cache_key)
+    with _AUDIT_MAINTENANCE_LOCK:
+        if cache_key in _AUDIT_MAINTENANCE_CACHE:
+            return
+        if not config.security_maintenance_inline:
+            if cache_key not in _AUDIT_MAINTENANCE_QUEUE:
+                _AUDIT_MAINTENANCE_QUEUE.append(cache_key)
+                logger.debug("security_maintenance_enqueued", audit_log_path=config.audit_log_path)
+            return
+        _drain_security_maintenance_key(config, cache_key)
 
 
 def _drain_security_maintenance_key(config: MemoryConfig, cache_key: str) -> None:
@@ -296,25 +299,28 @@ def drain_security_maintenance_queue(config: MemoryConfig) -> dict[str, object]:
     drained = 0
     cache_key = f"{config.audit_log_path}:{config.audit_retention_days}"
     retained: list[str] = []
-    while _AUDIT_MAINTENANCE_QUEUE:
-        queued_key = _AUDIT_MAINTENANCE_QUEUE.popleft()
-        if queued_key != cache_key:
-            retained.append(queued_key)
-            continue
-        _drain_security_maintenance_key(config, queued_key)
-        drained += 1
-    _AUDIT_MAINTENANCE_QUEUE.extend(retained)
-    return {"drained": drained, "queued": len(_AUDIT_MAINTENANCE_QUEUE)}
+    with _AUDIT_MAINTENANCE_LOCK:
+        while _AUDIT_MAINTENANCE_QUEUE:
+            queued_key = _AUDIT_MAINTENANCE_QUEUE.popleft()
+            if queued_key != cache_key:
+                retained.append(queued_key)
+                continue
+            _drain_security_maintenance_key(config, queued_key)
+            drained += 1
+        _AUDIT_MAINTENANCE_QUEUE.extend(retained)
+        queued = len(_AUDIT_MAINTENANCE_QUEUE)
+    return {"drained": drained, "queued": queued}
 
 
 def security_maintenance_status() -> dict[str, object]:
     """Return compact process-local maintenance queue state."""
-    return {
-        "queued": len(_AUDIT_MAINTENANCE_QUEUE),
-        "processed": len(_AUDIT_MAINTENANCE_CACHE),
-        "bounded": True,
-        "max_queue_size": _AUDIT_MAINTENANCE_QUEUE.maxlen,
-    }
+    with _AUDIT_MAINTENANCE_LOCK:
+        return {
+            "queued": len(_AUDIT_MAINTENANCE_QUEUE),
+            "processed": len(_AUDIT_MAINTENANCE_CACHE),
+            "bounded": True,
+            "max_queue_size": _AUDIT_MAINTENANCE_QUEUE.maxlen,
+        }
 
 
 def _rejection_reason(exc: Exception) -> str:
