@@ -102,15 +102,21 @@ def sqlite_version() -> str:
 
 
 def is_wal_reset_safe() -> bool:
-    """``True`` when the active driver carries the WAL-reset bug fix."""
+    """``True`` when the active driver carries the WAL-reset bug fix.
+
+    The fix landed in SQLite 3.51.3, with backports to the 3.44.x and 3.50.x
+    series at 3.44.6 and 3.50.7. Any 3.52+ (or 4.x) release carries it too,
+    which the ``>= (3, 51, 3)`` tuple comparison covers.
+    """
     parts = SQLITE_VERSION.split(".")
     try:
         major, minor, patch = int(parts[0]), int(parts[1]), int(parts[2])
     except (ValueError, IndexError):
         return False
-    if (major, minor) >= (3, 51) and (major, minor, patch) >= (3, 51, 3):
+    version = (major, minor, patch)
+    if version >= (3, 51, 3):
         return True
-    # Backports: 3.44.6 and 3.50.7
-    if (major, minor) == (3, 44) and patch >= 6:
-        return True
+    # Backports onto the 3.44.x and 3.50.x maintenance series.
+    if (major, minor) == (3, 44):
+        return patch >= 6
     return (major, minor) == (3, 50) and patch >= 7

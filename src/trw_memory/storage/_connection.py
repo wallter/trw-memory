@@ -32,6 +32,34 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+# Cap WAL file growth so a stalled checkpoint cannot let the WAL grow unbounded
+# (a large stale WAL widens the window for WAL-reset inconsistency). 64 MiB.
+WAL_JOURNAL_SIZE_LIMIT_BYTES = 67108864
+# Lock-wait window applied to every open path so a transient checkpoint/writer
+# does not raise "database is locked" immediately.
+_BUSY_TIMEOUT_MS = 30000
+
+
+def apply_open_pragmas(conn: Any, *, verify: bool = False) -> None:
+    """Apply the standard durable-open PRAGMA profile to *conn*.
+
+    The single source of truth for the open profile shared by
+    ``open_and_configure``, ``open_without_integrity_check``, and the recovered
+    connection in ``_recovery._open_recovered_conn``: busy_timeout, WAL journal
+    mode, NORMAL synchronous, and a bounded WAL size limit.
+
+    When *verify* is True the WAL/synchronous results are checked and a warning
+    is logged if the engine did not honour them (used on the primary open path).
+    """
+    conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+    wal_result = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+    if verify and wal_result and wal_result[0] != "wal":
+        logger.warning("wal_mode_not_enabled", got=wal_result[0])
+    sync_result = conn.execute("PRAGMA synchronous=NORMAL").fetchone()
+    if verify and sync_result and sync_result[0] not in ("1", 1):
+        logger.warning("synchronous_normal_not_set", got=sync_result[0] if sync_result else None)
+    conn.execute(f"PRAGMA journal_size_limit = {WAL_JOURNAL_SIZE_LIMIT_BYTES}")
+
 
 def _apply_sqlcipher_pragmas_safe(conn: Any) -> None:
     """Apply the sqlcipher KDF + cipher pragmas via the parent module."""
@@ -95,16 +123,7 @@ def open_and_configure(
         cached_statements=0,
         sqlcipher_key_hex=sqlcipher_key_hex,
     )
-    conn.execute("PRAGMA busy_timeout = 30000")
-    wal_result = conn.execute("PRAGMA journal_mode=WAL").fetchone()
-    if wal_result and wal_result[0] != "wal":
-        logger.warning("wal_mode_not_enabled", got=wal_result[0])
-    sync_result = conn.execute("PRAGMA synchronous=NORMAL").fetchone()
-    if sync_result and sync_result[0] not in ("1", 1):
-        logger.warning("synchronous_normal_not_set", got=sync_result[0] if sync_result else None)
-    # Cap WAL file growth at 64 MiB so a stalled checkpoint cannot let the WAL
-    # grow unbounded (a large stale WAL widens the window for inconsistency).
-    conn.execute("PRAGMA journal_size_limit = 67108864")
+    apply_open_pragmas(conn, verify=True)
 
     for attempt in range(2):
         rows = conn.execute("PRAGMA quick_check").fetchall()
@@ -137,10 +156,7 @@ def open_without_integrity_check(
         cached_statements=0,
         sqlcipher_key_hex=sqlcipher_key_hex,
     )
-    conn.execute("PRAGMA busy_timeout = 30000")
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA journal_size_limit = 67108864")
+    apply_open_pragmas(conn)
     return conn
 
 

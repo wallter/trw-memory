@@ -1,6 +1,6 @@
 """WAL-reset corruption hardening (2026-05-20 memory.db corruption incident).
 
-Covers the three structural fixes:
+Covers the structural fixes:
 1. Boot-time warning when the active SQLite engine predates the 3.51.3
    WAL-reset bug fix (is_wal_reset_safe() is False).
 2. checkpoint_wal serializes on the single owning connection (the fix that
@@ -8,6 +8,10 @@ Covers the three structural fixes:
 3. Robust primary salvage walks rowids via a secondary index and skips
    corrupt leaf pages instead of aborting at the first one (the data-loss
    path that salvaged 0 rows on 2026-05-20).
+4. The WAL-checkpoint primitive (`_wal_checkpoint.run_checkpoint` /
+   `normalize_mode`): the unsafe-engine resetting-mode gate, the busy
+   PASSIVE fallback, fail-open on sqlite errors, and the exported
+   `CheckpointResult` contract.
 """
 
 from __future__ import annotations
@@ -20,7 +24,6 @@ import structlog
 
 from trw_memory.storage import _recovery
 from trw_memory.storage.sqlite_backend import SQLiteBackend
-
 
 # ---------------------------------------------------------------------------
 # 1. Boot-time WAL-reset safety gate
@@ -158,7 +161,7 @@ def test_concurrent_checkpoints_serialize_without_error(tmp_path: Path) -> None:
             barrier.wait()  # maximize contention
             try:
                 results.append(backend.checkpoint_wal("TRUNCATE"))
-            except BaseException as exc:  # noqa: BLE001 - record any failure
+            except BaseException as exc:
                 errors.append(exc)
 
         threads = [threading.Thread(target=worker) for _ in range(8)]
@@ -185,6 +188,10 @@ class _FakeCursor:
 
     def fetchone(self) -> object:
         return self._rows.pop(0) if self._rows else None
+
+    def fetchall(self) -> list[object]:
+        rows, self._rows = self._rows, []
+        return rows
 
 
 class _FakeConn:
@@ -245,3 +252,200 @@ def test_robust_salvage_recovers_all_rows_on_healthy_db(tmp_path: Path) -> None:
     failed, rows = _recovery._attempt_primary_salvage(db, dbapi=sqlite3, sqlcipher_key_hex=None)
     assert failed is False
     assert len(rows) == 5
+
+
+class _AllIndexCorruptConn:
+    """Every index walk raises; only the plain-scan fallback yields rows."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def execute(self, sql: str, params: tuple[object, ...] | None = None) -> object:
+        if "INDEXED BY" in sql:
+            raise sqlite3.DatabaseError("index btree corrupt")
+        if "WHERE rowid=?" in sql:
+            assert params is not None
+            return _FakeResult({"id": f"id-{params[0]}", "rowid": params[0]})
+        if "SELECT rowid FROM memories" in sql:  # the no-index direct rowid scan
+            return iter([(7,), (9,)])
+        if sql == "SELECT * FROM memories":  # last-ditch plain scan
+            return _FakeCursor([])
+        raise sqlite3.DatabaseError("unexpected query")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_robust_salvage_falls_back_to_plain_rowid_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When every secondary index is unusable, salvage still recovers via a
+    direct rowid scan (the index-only-corruption / healthy-table case)."""
+    fake = _AllIndexCorruptConn()
+    monkeypatch.setattr(_recovery, "_connection_connect", lambda *a, **k: fake)
+
+    failed, rows = _recovery._attempt_primary_salvage(
+        Path("/nonexistent/backup.db"), dbapi=sqlite3, sqlcipher_key_hex=None
+    )
+
+    assert failed is False
+    assert sorted(r["id"] for r in rows) == ["id-7", "id-9"]
+    assert fake.closed is True
+
+
+class _EmptyConn:
+    """No rowids anywhere — salvage must report total failure (failed=True)."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def execute(self, sql: str, params: tuple[object, ...] | None = None) -> object:
+        if "INDEXED BY" in sql:
+            return _FakeCursor([None])
+        if "SELECT rowid FROM memories" in sql:
+            return iter([])
+        if sql == "SELECT * FROM memories":
+            return _FakeCursor([])
+        raise sqlite3.DatabaseError("unexpected query")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_robust_salvage_reports_failure_when_nothing_readable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """primary_failed is True only when zero rows can be read by any path."""
+    fake = _EmptyConn()
+    monkeypatch.setattr(_recovery, "_connection_connect", lambda *a, **k: fake)
+
+    failed, rows = _recovery._attempt_primary_salvage(
+        Path("/nonexistent/backup.db"), dbapi=sqlite3, sqlcipher_key_hex=None
+    )
+
+    assert failed is True
+    assert rows == []
+    assert fake.closed is True
+
+
+def test_robust_salvage_logs_partial_when_pages_fail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A corrupt-page skip emits db_salvage_partial with the failure count."""
+    fake = _FakeConn()  # rowid 2 lives on a corrupt page
+    monkeypatch.setattr(_recovery, "_connection_connect", lambda *a, **k: fake)
+
+    with structlog.testing.capture_logs() as logs:
+        _recovery._attempt_primary_salvage(
+            Path("/nonexistent/backup.db"), dbapi=sqlite3, sqlcipher_key_hex=None
+        )
+
+    partials = [log for log in logs if log.get("event") == "db_salvage_partial"]
+    assert len(partials) == 1
+    assert partials[0]["page_failures"] == 1
+    assert partials[0]["salvaged"] == 2
+
+
+# ---------------------------------------------------------------------------
+# 4. WAL-checkpoint primitive (mode coercion, busy fallback, fail-open)
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeMode:
+    """normalize_mode is the single source of truth for the unsafe-engine gate."""
+
+    @pytest.mark.parametrize("mode", ["TRUNCATE", "RESTART", "PASSIVE", "FULL"])
+    def test_safe_engine_passes_valid_modes_through(self, mode: str) -> None:
+        from trw_memory.storage._wal_checkpoint import normalize_mode
+
+        assert normalize_mode(mode, wal_reset_safe=True) == mode
+
+    @pytest.mark.parametrize(
+        ("mode", "expected"),
+        [("TRUNCATE", "PASSIVE"), ("RESTART", "PASSIVE"), ("PASSIVE", "PASSIVE"), ("FULL", "FULL")],
+    )
+    def test_unsafe_engine_downgrades_only_resetting_modes(self, mode: str, expected: str) -> None:
+        from trw_memory.storage._wal_checkpoint import normalize_mode
+
+        # The invariant: TRUNCATE/RESTART (the WAL-reset modes) downgrade;
+        # PASSIVE/FULL (never reset the WAL) pass through unchanged.
+        assert normalize_mode(mode, wal_reset_safe=False) == expected
+
+    @pytest.mark.parametrize("evil", ["DROP TABLE memories", "", "truncate; DELETE", "garbage"])
+    def test_unknown_mode_collapses_to_passive(self, evil: str) -> None:
+        from trw_memory.storage._wal_checkpoint import normalize_mode
+
+        assert normalize_mode(evil, wal_reset_safe=True) == "PASSIVE"
+
+    def test_lowercase_is_normalized(self) -> None:
+        from trw_memory.storage._wal_checkpoint import normalize_mode
+
+        assert normalize_mode("truncate", wal_reset_safe=True) == "TRUNCATE"
+
+
+def test_run_checkpoint_busy_resetting_falls_back_to_passive() -> None:
+    """A TRUNCATE that returns busy=1 retries PASSIVE on the SAME callable."""
+    from trw_memory.storage._wal_checkpoint import run_checkpoint
+
+    calls: list[str] = []
+
+    def execute(sql: str) -> object:
+        calls.append(sql)
+        if "TRUNCATE" in sql:
+            return (1, 5, 0)  # busy=1
+        return (0, 5, 5)  # PASSIVE succeeds
+
+    result = run_checkpoint(execute, "TRUNCATE", wal_reset_safe=True, db_path=":mem:")
+
+    assert result == {"busy": 0, "checkpointed": 5, "mode": "PASSIVE"}
+    assert "TRUNCATE" in calls[0]
+    assert "PASSIVE" in calls[1]
+    assert len(calls) == 2
+
+
+def test_run_checkpoint_passive_does_not_retry_on_busy() -> None:
+    """A non-resetting checkpoint that is busy does NOT issue a second PRAGMA."""
+    from trw_memory.storage._wal_checkpoint import run_checkpoint
+
+    calls: list[str] = []
+
+    def execute(sql: str) -> object:
+        calls.append(sql)
+        return (1, 0, 0)  # busy=1
+
+    result = run_checkpoint(execute, "PASSIVE", wal_reset_safe=True, db_path=":mem:")
+
+    assert result["mode"] == "PASSIVE"
+    assert result["busy"] == 1
+    assert len(calls) == 1, "PASSIVE must not trigger a fallback checkpoint"
+
+
+def test_run_checkpoint_fail_open_on_sqlite_error() -> None:
+    """Any sqlite3.Error yields mode='error', busy=1, and is logged not raised."""
+    from trw_memory.storage._wal_checkpoint import run_checkpoint
+
+    def execute(sql: str) -> object:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    with structlog.testing.capture_logs() as logs:
+        result = run_checkpoint(execute, "TRUNCATE", wal_reset_safe=True, db_path="/x.db")
+
+    assert result == {"busy": 1, "checkpointed": 0, "mode": "error"}
+    failures = [log for log in logs if log.get("event") == "wal_checkpoint_failed"]
+    assert len(failures) == 1
+
+
+def test_run_checkpoint_missing_row_treated_as_busy() -> None:
+    """A None result row (no row returned) is treated as busy, not crash."""
+    from trw_memory.storage._wal_checkpoint import run_checkpoint
+
+    result = run_checkpoint(lambda sql: None, "PASSIVE", wal_reset_safe=True, db_path=":mem:")
+
+    assert result["busy"] == 1
+    assert result["checkpointed"] == 0
+
+
+def test_checkpoint_result_is_a_dict_with_public_export() -> None:
+    """CheckpointResult is re-exported from trw_memory.storage and is a dict
+    at runtime (so .get()-based consumers like trw-mcp keep working)."""
+    from trw_memory.storage import CheckpointMode, CheckpointResult  # public import surface
+
+    result: CheckpointResult = {"busy": 0, "checkpointed": 3, "mode": "TRUNCATE"}
+    assert isinstance(result, dict)
+    assert result.get("mode") == "TRUNCATE"
+    # CheckpointMode is the Literal alias consumers use for the mode field.
+    assert CheckpointMode is not None

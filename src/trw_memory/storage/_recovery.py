@@ -33,7 +33,12 @@ from typing import Any, Literal
 import structlog
 
 from trw_memory.exceptions import CorruptDatabaseUnsalvageableError
-from trw_memory.storage._connection import connect as _connection_connect
+from trw_memory.storage._connection import (
+    apply_open_pragmas,
+)
+from trw_memory.storage._connection import (
+    connect as _connection_connect,
+)
 from trw_memory.storage._schema import ensure_schema
 from trw_memory.storage._shared import ENTRY_COLUMNS
 from trw_memory.storage._stale_handle_detector import write_sentinel
@@ -266,12 +271,9 @@ def _open_recovered_conn(
         check_same_thread=False,
         sqlcipher_key_hex=sqlcipher_key_hex,
     )
-    # Match the hardened open profile (gap: recovered conn was less configured
-    # than a normal open — no busy_timeout / journal_size_limit).
-    new_conn.execute("PRAGMA busy_timeout = 30000")
-    new_conn.execute("PRAGMA journal_mode=WAL")
-    new_conn.execute("PRAGMA synchronous=NORMAL")
-    new_conn.execute("PRAGMA journal_size_limit = 67108864")
+    # Match the hardened open profile (busy_timeout + WAL + journal_size_limit)
+    # so a recovered connection is configured identically to a normal open.
+    apply_open_pragmas(new_conn)
     ensure_schema(new_conn)
     return new_conn
 

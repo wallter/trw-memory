@@ -40,6 +40,11 @@ from trw_memory.storage._sqlcipher_setup import (
     resolve_cold_rebuild_base as _resolve_cold_rebuild_base,
 )
 from trw_memory.storage._stale_handle_detector import StaleHandleDetector
+from trw_memory.storage._wal_checkpoint import (
+    CheckpointMode as CheckpointMode,
+    CheckpointResult as CheckpointResult,
+    run_checkpoint as run_checkpoint,
+)
 from trw_memory.storage.interface import StorageBackend
 
 if TYPE_CHECKING:
@@ -47,10 +52,13 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 __all__ = [
+    "CheckpointMode",
+    "CheckpointResult",
     "SQLiteBackend",
     "_apply_sqlcipher_pragmas",
     "_import_sqlcipher_driver",
     "_resolve_cold_rebuild_base",
+    "run_checkpoint",
 ]
 # ---------------------------------------------------------------------------
 # Column helpers
@@ -566,7 +574,7 @@ class SQLiteBackend(StorageBackend):
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
         self.close()
 
-    def checkpoint_wal(self, mode: str = "TRUNCATE") -> dict[str, object]:
+    def checkpoint_wal(self, mode: str = "TRUNCATE") -> CheckpointResult:
         """Checkpoint the WAL on the single owning connection under the lock.
 
         This is the structural fix for the SQLite WAL-reset corruption bug
@@ -577,38 +585,23 @@ class SQLiteBackend(StorageBackend):
         never a second checkpointer to race, so the bug cannot fire even on an
         unpatched engine.
 
-        TRUNCATE reclaims WAL file space; it falls back to PASSIVE when readers
-        still hold pages (``busy=1``). Fail-open: never raises.
+        On an unsafe engine a resetting checkpoint (TRUNCATE/RESTART) is
+        downgraded to PASSIVE; otherwise TRUNCATE reclaims WAL file space and
+        falls back to PASSIVE when readers still hold pages (``busy=1``). The
+        mode coercion + fallback live in :mod:`_wal_checkpoint`; this method
+        only owns the connection + lock. Fail-open: never raises.
+
+        Returns:
+            A :class:`CheckpointResult` (a ``dict`` at runtime) — exported from
+            ``trw_memory.storage`` so consumers share a precise contract.
         """
-        normalized = mode.upper()
-        if normalized not in ("PASSIVE", "FULL", "RESTART", "TRUNCATE"):
-            normalized = "PASSIVE"
-        # On an engine WITHOUT the WAL-reset fix, never run a *resetting*
-        # checkpoint (TRUNCATE/RESTART). A WAL reset that races any other
-        # writer/checkpoint — including a checkpoint from another PROCESS that
-        # also holds this db — is the precise trigger for the corruption bug
-        # (sqlite.org/wal.html §walresetbug). PASSIVE/FULL never reset the WAL,
-        # so they cannot trigger it regardless of connection/process count.
-        # The gate self-resolves once a fixed engine (>=3.51.3) is installed.
-        if not self.wal_reset_safe and normalized in ("TRUNCATE", "RESTART"):
-            normalized = "PASSIVE"
         with self._lock:
-            try:
-                row = self._conn.execute(f"PRAGMA wal_checkpoint({normalized})").fetchone()  # noqa: S608 - allowlisted mode
-                busy = int(row[0]) if row else 1
-                checkpointed = int(row[2]) if row and row[2] is not None else 0
-                used = normalized
-                if busy == 1 and normalized in ("TRUNCATE", "RESTART"):
-                    # Readers held pages; fall back to the non-blocking PASSIVE
-                    # checkpoint (still on this same connection — no race).
-                    row = self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
-                    busy = int(row[0]) if row else 1
-                    checkpointed = int(row[2]) if row and row[2] is not None else 0
-                    used = "PASSIVE"
-                return {"busy": busy, "checkpointed": checkpointed, "mode": used}
-            except sqlite3.Error as exc:
-                logger.warning("wal_checkpoint_failed", error=str(exc), db=str(self._db_path))
-                return {"busy": 1, "checkpointed": 0, "mode": "error"}
+            return run_checkpoint(
+                lambda sql: self._conn.execute(sql).fetchone(),
+                mode,
+                wal_reset_safe=self.wal_reset_safe,
+                db_path=str(self._db_path),
+            )
 
     # ------------------------------------------------------------------
     # Vector operations (delegated to _vector_ops.py — PRD-DIST-245 batch 85)
