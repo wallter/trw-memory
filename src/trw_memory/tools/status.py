@@ -13,6 +13,7 @@ from trw_memory.integrations._backend import discover_namespace_backends
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.validation import validate_namespace
+from trw_memory.security.runtime import list_quarantined_entries, security_maintenance_status
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools._types import McpServer
 
@@ -20,6 +21,73 @@ logger = structlog.get_logger(__name__)
 
 # Canonical namespaces to include in per-namespace breakdown when no filter applied
 _COMMON_NAMESPACES = ["project:default", "global"]
+
+
+def _quarantine_count(cfg: MemoryConfig) -> int | None:
+    try:
+        return len(list_quarantined_entries(cfg, limit=10_000))
+    except Exception:  # broad catch: posture should never make status unusable
+        logger.debug("memory_status_quarantine_count_failed", exc_info=True)
+        return None
+
+
+def _security_posture(cfg: MemoryConfig) -> dict[str, object] | None:
+    """Return compact posture only when security is degraded or non-default."""
+    quarantine_count = _quarantine_count(cfg)
+    maintenance = security_maintenance_status()
+    signals: dict[str, object] = {
+        "recall_filter_mode": "disabled" if not cfg.enable_recall_filter else cfg.recall_filter_mode,
+        "trust_scoring_mode": "disabled" if not cfg.enable_trust_scoring else cfg.trust_scoring_mode,
+        "quarantine_count": quarantine_count,
+        "canary_status": "halt" if cfg.canary_fail_mode == "halt" else f"degraded:{cfg.canary_fail_mode}",
+        "provenance_mode": "required" if cfg.provenance_required else "optional",
+        "pii_mode": "disabled" if not cfg.pii_enabled else cfg.pii_action,
+        "maintenance": maintenance,
+    }
+    queued_raw = maintenance.get("queued", 0)
+    queued_count = queued_raw if isinstance(queued_raw, int) else 0
+    degraded = (
+        not cfg.enable_recall_filter
+        or not cfg.enable_trust_scoring
+        or not cfg.provenance_required
+        or not cfg.pii_enabled
+        or cfg.canary_fail_mode != "halt"
+        or queued_count > 0
+    )
+    non_default = (
+        cfg.recall_filter_mode != "redact"
+        or cfg.trust_scoring_mode != "observe"
+        or cfg.pii_action != "warn"
+        or not cfg.security_maintenance_inline
+    )
+    if not degraded and not non_default:
+        return None
+    return {"status": "degraded" if degraded else "non_default", **signals}
+
+
+def _status_introspection(cfg: MemoryConfig) -> dict[str, object]:
+    """Expose live tool/config inventory for generated docs checks."""
+    security_fields = sorted(
+        field_name
+        for field_name in MemoryConfig.model_fields
+        if field_name.startswith(("audit_", "pii_", "poisoning_", "quarantine_", "provenance_", "canary_"))
+        or field_name
+        in {
+            "enable_recall_filter",
+            "enable_trust_scoring",
+            "recall_filter_mode",
+            "trust_scoring_mode",
+            "security_maintenance_inline",
+        }
+    )
+    recovery_fields = sorted(field_name for field_name in MemoryConfig.model_fields if "recovery" in field_name)
+    return {
+        "tool": "memory_status",
+        "tool_version": 1,
+        "storage_backend": cfg.storage_backend,
+        "security_config_fields": security_fields,
+        "recovery_config_fields": recovery_fields,
+    }
 
 
 def memory_status_impl(
@@ -112,7 +180,10 @@ def memory_status_impl(
         "consolidation_enabled": cfg.consolidation_enabled,
         "hot_max_entries": cfg.hot_max_entries,
         "retention_days": cfg.retention_days,
+        "security_maintenance_inline": cfg.security_maintenance_inline,
+        "memory_recovery_inline_max_bytes": cfg.memory_recovery_inline_max_bytes,
     }
+    security_posture = _security_posture(cfg)
 
     logger.debug(
         "memory_status",
@@ -120,11 +191,15 @@ def memory_status_impl(
         total_entries=total_entries,
     )
 
-    return {
+    result: dict[str, object] = {
         "total_entries": total_entries,
         "namespaces": namespaces,
         "config": config_summary,
+        "introspection": _status_introspection(cfg),
     }
+    if security_posture is not None:
+        result["security_posture"] = security_posture
+    return result
 
 
 def register_status_tool(mcp: McpServer) -> None:

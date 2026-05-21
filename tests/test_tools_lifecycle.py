@@ -423,3 +423,25 @@ class TestMemoryStatusImpl:
         assert isinstance(config, dict)
         assert "dedup_enabled" in config
         assert "consolidation_enabled" in config
+
+    def test_degraded_security_posture_is_compactly_reported(self) -> None:
+        backend = _mock_backend()
+        cfg = MemoryConfig(enable_recall_filter=False, provenance_required=False)
+        with patch("trw_memory.tools.status.list_quarantined_entries", return_value=[]):
+            result = memory_status_impl("project:default", backend=backend, config=cfg)
+
+        posture = result["security_posture"]
+        assert isinstance(posture, dict)
+        assert posture["status"] == "degraded"
+        assert posture["recall_filter_mode"] == "disabled"
+        assert posture["provenance_mode"] == "optional"
+
+    def test_status_introspection_lists_live_recovery_and_security_config(self) -> None:
+        backend = _mock_backend()
+        result = memory_status_impl(None, backend=backend)
+
+        introspection = result["introspection"]
+        assert isinstance(introspection, dict)
+        assert introspection["tool"] == "memory_status"
+        assert "memory_recovery_inline_max_bytes" in introspection["recovery_config_fields"]
+        assert "security_maintenance_inline" in introspection["security_config_fields"]

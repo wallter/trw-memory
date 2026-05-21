@@ -135,6 +135,7 @@ def create_backend_from_config(
             recovery_policy=config.memory_recovery_policy,
             corrupt_backup_keep=config.memory_corrupt_backup_keep,
             rebuild_from_cold=config.memory_recovery_rebuild_from_cold,
+            recovery_inline_max_bytes=config.memory_recovery_inline_max_bytes,
         )
 
     from trw_memory.storage.yaml_backend import YAMLBackend
@@ -190,6 +191,7 @@ def discover_namespace_backends(
                         recovery_policy=config.memory_recovery_policy,
                         corrupt_backup_keep=config.memory_corrupt_backup_keep,
                         rebuild_from_cold=config.memory_recovery_rebuild_from_cold,
+                        recovery_inline_max_bytes=config.memory_recovery_inline_max_bytes,
                     )
                 )
                 namespaces = store_backend.list_namespaces()

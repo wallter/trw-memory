@@ -230,6 +230,13 @@ class MemoryConfig(BaseSettings):
     fsync_on_append: bool = Field(
         default=False, description="Call os.fsync() after each audit log write for crash safety"
     )
+    security_maintenance_inline: bool = Field(
+        default=True,
+        description=(
+            "When True, audit retention maintenance drains immediately at the operation boundary. "
+            "When False, maintenance is enqueued for an explicit deferred drain."
+        ),
+    )
 
     # PII
     pii_enabled: bool = Field(default=True, description="Enable PII detection in memory content")
@@ -317,6 +324,14 @@ class MemoryConfig(BaseSettings):
             "When True AND memory_recovery_policy='strict' AND salvage yields 0 rows from "
             "a non-empty backup, rebuild the DB from the cold YAML tier before raising "
             "CorruptDatabaseUnsalvageableError. Set to False to disable automatic rebuild."
+        ),
+    )
+    memory_recovery_inline_max_bytes: int = Field(
+        default=64 * 1024 * 1024,
+        ge=0,
+        description=(
+            "Maximum DB size eligible for inline recovery preflight. Larger stores are marked for "
+            "degraded-open/background recovery instead of doing heavy recovery work in startup."
         ),
     )
 

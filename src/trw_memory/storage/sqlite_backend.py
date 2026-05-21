@@ -170,6 +170,7 @@ class SQLiteBackend(StorageBackend):
         recovery_policy: Literal["strict", "empty_ok"] = "strict",
         corrupt_backup_keep: int = 5,
         rebuild_from_cold: bool = True,
+        recovery_inline_max_bytes: int = 64 * 1024 * 1024,
         integrity_check_interval_minutes: int = 0,
         concurrent_writer_warn_threshold: int = 4,
     ) -> None:
@@ -193,6 +194,7 @@ class SQLiteBackend(StorageBackend):
         self.quarantine_count_utf8: int = 0
         # P3 — reconnect counter (incremented on each stale-handle reopen)
         self.reconnect_count: int = 0
+        self.recovery_preflight: Any = None
 
         # Connection open + auto-recovery (PRD-DIST-245 batch 88)
         self._conn, self.integrity_warning, self.recovered = _init_open_connection_with_recovery(
@@ -203,6 +205,7 @@ class SQLiteBackend(StorageBackend):
             recovery_policy=self._recovery_policy,
             corrupt_backup_keep=self._corrupt_backup_keep,
             rebuild_from_cold=self._rebuild_from_cold,
+            recovery_inline_max_bytes=recovery_inline_max_bytes,
         )
 
         # P3 — stale-handle detector (belt + suspenders: inode + sentinel).

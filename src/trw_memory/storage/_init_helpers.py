@@ -28,6 +28,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trw_memory.exceptions import CorruptDatabaseUnsalvageableError
+from trw_memory.storage._recovery import classify_recovery_preflight, write_recovery_state
 from trw_memory.storage._schema import ensure_schema, ensure_vec_table
 
 try:
@@ -56,6 +58,7 @@ def open_connection_with_recovery(
     recovery_policy: str,
     corrupt_backup_keep: int,
     rebuild_from_cold: bool,
+    recovery_inline_max_bytes: int = 64 * 1024 * 1024,
 ) -> tuple[Any, bool, bool]:
     """Open connection with WAL + auto-recovery on quick_check failure.
 
@@ -67,6 +70,13 @@ def open_connection_with_recovery(
     """
     integrity_warning = False
     recovered = False
+    preflight = classify_recovery_preflight(db_path, inline_max_bytes=recovery_inline_max_bytes)
+    backend.recovery_preflight = preflight
+    if preflight.classification == "hard_fail":
+        raise CorruptDatabaseUnsalvageableError(
+            f"memory recovery previously hard-failed for {db_path}",
+            backup_path=preflight.state_path,
+        )
     try:
         if sqlcipher_key_hex is None:
             conn = backend._open_and_configure(db_path)
@@ -82,6 +92,12 @@ def open_connection_with_recovery(
                 action="open_anyway",
                 hint=("quick_check could not complete because SQLite reported lock/busy; opening without probe"),
             )
+            write_recovery_state(
+                db_path,
+                status="degraded_open_with_background_recovery",
+                reason="sqlite_lock_or_busy",
+                db_size_bytes=preflight.db_size_bytes,
+            )
             conn = backend._open_without_integrity_check(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
             integrity_warning = True
         else:
@@ -93,15 +109,47 @@ def open_connection_with_recovery(
                 has_data=has_data,
                 reason=str(exc),
             )
-            conn = backend.recover_db(
-                db_path,
-                dbapi=dbapi,
-                sqlcipher_key_hex=sqlcipher_key_hex,
-                recovery_policy=recovery_policy,  # type: ignore[arg-type]
-                corrupt_backup_keep=corrupt_backup_keep,
-                rebuild_from_cold=rebuild_from_cold,
-            )
-            recovered = True
+            if preflight.classification == "degraded_open_with_background_recovery":
+                write_recovery_state(
+                    db_path,
+                    status="degraded_open_with_background_recovery",
+                    reason=preflight.reason,
+                    db_size_bytes=preflight.db_size_bytes,
+                )
+                raise CorruptDatabaseUnsalvageableError(
+                    "database recovery requires background recovery outside startup budget",
+                    backup_path=preflight.state_path,
+                ) from exc
+            try:
+                write_recovery_state(
+                    db_path,
+                    status="running",
+                    reason="inline_recovery_started",
+                    db_size_bytes=preflight.db_size_bytes,
+                )
+                conn = backend.recover_db(
+                    db_path,
+                    dbapi=dbapi,
+                    sqlcipher_key_hex=sqlcipher_key_hex,
+                    recovery_policy=recovery_policy,  # type: ignore[arg-type]
+                    corrupt_backup_keep=corrupt_backup_keep,
+                    rebuild_from_cold=rebuild_from_cold,
+                )
+                write_recovery_state(
+                    db_path,
+                    status="recovered",
+                    reason="inline_recovery_succeeded",
+                    db_size_bytes=preflight.db_size_bytes,
+                )
+                recovered = True
+            except CorruptDatabaseUnsalvageableError:
+                write_recovery_state(
+                    db_path,
+                    status="hard_fail",
+                    reason="inline_recovery_failed",
+                    db_size_bytes=preflight.db_size_bytes,
+                )
+                raise
     ensure_schema(conn)
     return conn, integrity_warning, recovered
 

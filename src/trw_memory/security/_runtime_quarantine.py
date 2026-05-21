@@ -63,6 +63,7 @@ def open_quarantine_backend(config: MemoryConfig) -> SQLiteBackend:
         recovery_policy=config.memory_recovery_policy,
         corrupt_backup_keep=config.memory_corrupt_backup_keep,
         rebuild_from_cold=config.memory_recovery_rebuild_from_cold,
+        recovery_inline_max_bytes=config.memory_recovery_inline_max_bytes,
     )
 
 

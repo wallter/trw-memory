@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from trw_memory.models.config import MemoryConfig
+from trw_memory.security import runtime as security_runtime
 from trw_memory.security.audit import AuditLog, AuditRecord, audit_verify
 
 
@@ -49,6 +51,25 @@ class TestAuditLogAppend:
         assert sorted(payload) == ["actor", "data", "hash", "id", "namespace", "op", "prev_hash", "ts"]
         assert payload["op"] == "store"
         assert payload["id"] == "M-001"
+
+
+class TestSecurityMaintenanceQueue:
+    def test_security_maintenance_can_defer_to_bounded_queue(self, tmp_path: Path) -> None:
+        security_runtime._AUDIT_MAINTENANCE_CACHE.clear()
+        security_runtime._AUDIT_MAINTENANCE_QUEUE.clear()
+        cfg = MemoryConfig(
+            audit_log_path=str(tmp_path / "audit.jsonl"),
+            security_maintenance_inline=False,
+        )
+
+        security_runtime.ensure_security_maintenance(cfg)
+
+        status = security_runtime.security_maintenance_status()
+        assert status["bounded"] is True
+        assert status["queued"] == 1
+
+        drained = security_runtime.drain_security_maintenance_queue(cfg)
+        assert drained == {"drained": 1, "queued": 0}
 
 
 class TestAuditLogVerify:

@@ -6,7 +6,11 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from trw_memory.exceptions import CorruptDatabaseUnsalvageableError
 from trw_memory.storage._init_helpers import open_connection_with_recovery
+from trw_memory.storage._recovery import classify_recovery_preflight, recovery_state_path
 
 
 class _FakeBackend:
@@ -79,3 +83,36 @@ def test_lock_contention_with_rows_keeps_non_destructive_open_without_probe(tmp_
     assert backend.open_without_called is True
     assert integrity_warning is True
     assert recovered is False
+    assert recovery_state_path(tmp_path / "memory.db").exists()
+
+
+def test_preflight_classifies_large_db_as_degraded_open(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.db"
+    db_path.write_bytes(b"0123456789")
+
+    preflight = classify_recovery_preflight(db_path, inline_max_bytes=4)
+
+    assert preflight.classification == "degraded_open_with_background_recovery"
+    assert preflight.reason == "db_exceeds_inline_recovery_budget"
+    assert preflight.db_size_bytes == 10
+
+
+def test_degraded_preflight_blocks_inline_recovery_and_persists_state(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.db"
+    db_path.write_bytes(b"0123456789")
+    backend = _FakeBackend(sqlite3.DatabaseError("database disk image is malformed"))
+
+    with pytest.raises(CorruptDatabaseUnsalvageableError):
+        open_connection_with_recovery(
+            backend,  # type: ignore[arg-type]
+            db_path,
+            dbapi=sqlite3,
+            sqlcipher_key_hex=None,
+            recovery_policy="strict",
+            corrupt_backup_keep=5,
+            rebuild_from_cold=True,
+            recovery_inline_max_bytes=4,
+        )
+
+    assert backend.recover_called is False
+    assert "degraded_open_with_background_recovery" in recovery_state_path(db_path).read_text(encoding="utf-8")

@@ -73,6 +73,11 @@ def _map_trw_config_yaml_to_memory_settings(raw: dict[str, object]) -> dict[str,
             ("memory_recovery_rebuild_from_cold", "recovery_rebuild_from_cold"),
         ),
         (
+            "memory_recovery_inline_max_bytes",
+            ("memory_recovery_inline_max_bytes", "recovery_inline_max_bytes"),
+        ),
+        ("security_maintenance_inline", ("security_maintenance_inline", "memory_security_maintenance_inline")),
+        (
             "memory_integrity_check_interval_minutes",
             ("memory_integrity_check_interval_minutes", "integrity_check_interval_minutes"),
         ),
