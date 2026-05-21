@@ -71,6 +71,25 @@ class TestSecurityMaintenanceQueue:
         drained = security_runtime.drain_security_maintenance_queue(cfg)
         assert drained == {"drained": 1, "queued": 0}
 
+    def test_security_maintenance_preserves_other_config_queue_items(self, tmp_path: Path) -> None:
+        security_runtime._AUDIT_MAINTENANCE_CACHE.clear()
+        security_runtime._AUDIT_MAINTENANCE_QUEUE.clear()
+        first = MemoryConfig(
+            audit_log_path=str(tmp_path / "first.jsonl"),
+            security_maintenance_inline=False,
+        )
+        second = MemoryConfig(
+            audit_log_path=str(tmp_path / "second.jsonl"),
+            security_maintenance_inline=False,
+        )
+
+        security_runtime.ensure_security_maintenance(first)
+        security_runtime.ensure_security_maintenance(second)
+        drained = security_runtime.drain_security_maintenance_queue(first)
+
+        assert drained == {"drained": 1, "queued": 1}
+        assert security_runtime.drain_security_maintenance_queue(second) == {"drained": 1, "queued": 0}
+
 
 class TestAuditLogVerify:
     def test_verify_chain_missing_file_returns_empty_valid_result(self, tmp_path: Path) -> None:

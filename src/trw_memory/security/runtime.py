@@ -278,9 +278,9 @@ def ensure_security_maintenance(config: MemoryConfig) -> None:
     if cache_key in _AUDIT_MAINTENANCE_CACHE:
         return
     if not config.security_maintenance_inline:
-        _AUDIT_MAINTENANCE_CACHE.add(cache_key)
-        _AUDIT_MAINTENANCE_QUEUE.append(cache_key)
-        logger.debug("security_maintenance_enqueued", audit_log_path=config.audit_log_path)
+        if cache_key not in _AUDIT_MAINTENANCE_QUEUE:
+            _AUDIT_MAINTENANCE_QUEUE.append(cache_key)
+            logger.debug("security_maintenance_enqueued", audit_log_path=config.audit_log_path)
         return
     _drain_security_maintenance_key(config, cache_key)
 
@@ -295,12 +295,15 @@ def drain_security_maintenance_queue(config: MemoryConfig) -> dict[str, object]:
     """Drain queued audit-retention maintenance and report compact status."""
     drained = 0
     cache_key = f"{config.audit_log_path}:{config.audit_retention_days}"
+    retained: list[str] = []
     while _AUDIT_MAINTENANCE_QUEUE:
         queued_key = _AUDIT_MAINTENANCE_QUEUE.popleft()
         if queued_key != cache_key:
+            retained.append(queued_key)
             continue
         _drain_security_maintenance_key(config, queued_key)
         drained += 1
+    _AUDIT_MAINTENANCE_QUEUE.extend(retained)
     return {"drained": drained, "queued": len(_AUDIT_MAINTENANCE_QUEUE)}
 
 
