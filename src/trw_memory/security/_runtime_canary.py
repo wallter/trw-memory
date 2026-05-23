@@ -127,18 +127,56 @@ def probe_canaries(config: MemoryConfig, *, backend: StorageBackend) -> None:
     state["recall_count"] = recall_count
     if recall_count % config.canary_probe_interval != 0:
         return
+    fixture_map = dict(_CANARY_FIXTURES)
     for canary_id, expected_hash in list(PINNED_HASHES.items())[: config.canary_injection_rate]:
         entry = backend.get(canary_id)
         if entry is None:
-            state["failed"] = True
+            # PRD-FIX-102 (FR-1/FR-3): a MISSING canary is self-healed from the trusted,
+            # hash-pinned in-process fixture rather than halting ALL recall. A missing canary
+            # is a lost-detector (DB recovery/salvage, or a stale process-wide ``seeded`` flag
+            # that defeated initialize_canaries' idempotent re-seed) — NOT content tampering.
+            # The fixture content is pinned (PINNED_HASHES), so an attacker cannot inject
+            # content via this path; the recovery is audit-logged via ``canary_reseeded``.
+            # Drift (content present but tampered) below remains the genuine poisoning signal.
+            content = fixture_map.get(canary_id)
             telemetry_session_id, telemetry_run_id = _trace_context(session_id="canary-probe")
+            if content is None:
+                # No fixture to restore from — fall back to the tamper signal.
+                state["failed"] = True
+                emit_security_event(
+                    config,
+                    emitter="canary",
+                    session_id=telemetry_session_id,
+                    run_id=telemetry_run_id,
+                    payload={
+                        "event_name": "canary_missing",
+                        "canary_id": canary_id,
+                        "fail_mode": config.canary_fail_mode,
+                        "traceability": build_security_traceability(
+                            live_path="security.runtime.probe_canaries",
+                            requirement_ids=["FR-007", "NFR-010", "NFR-011"],
+                        ),
+                    },
+                )
+                raise CanaryTamperError(f"missing canary {canary_id}")
+            backend.store(
+                MemoryEntry(
+                    id=canary_id,
+                    content=content,
+                    namespace="default",
+                    metadata={
+                        "system_canary": "true",
+                        "provenance_content_hash": expected_hash,
+                    },
+                )
+            )
             emit_security_event(
                 config,
                 emitter="canary",
                 session_id=telemetry_session_id,
                 run_id=telemetry_run_id,
                 payload={
-                    "event_name": "canary_missing",
+                    "event_name": "canary_reseeded",
                     "canary_id": canary_id,
                     "fail_mode": config.canary_fail_mode,
                     "traceability": build_security_traceability(
@@ -147,9 +185,13 @@ def probe_canaries(config: MemoryConfig, *, backend: StorageBackend) -> None:
                     ),
                 },
             )
-            raise CanaryTamperError(f"missing canary {canary_id}")
+            continue
         current_hash = hashlib.sha256(entry.content.encode("utf-8")).hexdigest()
         if current_hash != expected_hash:
+            # PRD-FIX-102 (FR-2/FR-4): DRIFT is the genuine content-tamper signal. Always
+            # quarantine + emit, but RAISE only when ``canary_fail_mode == 'halt'`` (the
+            # default) — ``degrade``/``log-only`` set ``failed`` + emit without halting recall,
+            # making the previously-dead config knob live.
             state["failed"] = True
             entry.metadata["quarantined"] = "true"
             backend.store(entry)
@@ -171,7 +213,8 @@ def probe_canaries(config: MemoryConfig, *, backend: StorageBackend) -> None:
                     ),
                 },
             )
-            raise CanaryTamperError(f"canary drift detected for {canary_id}")
+            if config.canary_fail_mode == "halt":
+                raise CanaryTamperError(f"canary drift detected for {canary_id}")
 
 
 def should_halt_recalls(config: MemoryConfig, *, backend: StorageBackend) -> bool:

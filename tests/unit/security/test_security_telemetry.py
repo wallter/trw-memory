@@ -149,6 +149,68 @@ def test_probe_canaries_emits_canary_hash_drift_event(
     _assert_traceability(drift_payload, live_path="security.runtime.probe_canaries", requirement_id="FR-009")
 
 
+def test_probe_canaries_self_heals_missing_canary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRD-FIX-102 FR-1/FR-3/AC-1: a MISSING canary is re-seeded from the trusted pin
+    (no halt, no failed state), reproducing the WAL-salvage/stale-flag loss case."""
+    import hashlib
+
+    from trw_memory.security.canary import PINNED_HASHES
+    from trw_memory.security.runtime import should_halt_recalls
+
+    config = MemoryConfig(storage_path=str(tmp_path / "storage"), canary_probe_interval=1)
+    monkeypatch.setenv("TRW_SURFACE_SNAPSHOT_ID", "snap-reseed")
+
+    with SQLiteBackend(tmp_path / "memory.db", dim=config.embedding_dim) as backend:
+        initialize_canaries(config, backend=backend)
+        assert backend.delete("canary-001") is True  # simulate the salvage/loss
+        assert backend.get("canary-001") is None
+        # MUST NOT raise — self-heals instead of halting recall.
+        probe_canaries(config, backend=backend)
+        restored = backend.get("canary-001")
+        assert restored is not None
+        # Restored content is the trusted pin (FR-3: attacker cannot inject via this path).
+        assert (
+            hashlib.sha256(restored.content.encode("utf-8")).hexdigest()
+            == PINNED_HASHES["canary-001"]
+        )
+        # Recall is not halted after a self-heal.
+        assert should_halt_recalls(config, backend=backend) is False
+
+    payloads = [row["payload"] for row in _events_rows(config) if row.get("emitter") == "canary"]
+    assert any(
+        p.get("event_name") == "canary_reseeded" and p.get("canary_id") == "canary-001"
+        for p in payloads
+    )
+
+
+def test_probe_canaries_drift_log_only_does_not_raise(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRD-FIX-102 FR-2/AC-3: DRIFT under canary_fail_mode='log-only' emits but does NOT
+    raise (the previously-dead config knob is now live)."""
+    config = MemoryConfig(
+        storage_path=str(tmp_path / "storage"),
+        canary_probe_interval=1,
+        canary_fail_mode="log-only",
+    )
+    monkeypatch.setenv("TRW_SURFACE_SNAPSHOT_ID", "snap-logonly")
+
+    with SQLiteBackend(tmp_path / "memory.db", dim=config.embedding_dim) as backend:
+        initialize_canaries(config, backend=backend)
+        canary = backend.get("canary-001")
+        assert canary is not None
+        backend.store(canary.model_copy(update={"content": "tampered canary"}))
+        # log-only: drift is recorded but recall is NOT halted (no raise).
+        probe_canaries(config, backend=backend)
+
+    payloads = [row["payload"] for row in _events_rows(config) if row.get("emitter") == "canary"]
+    assert any(p.get("event_name") == "canary_hash_drift" for p in payloads)
+
+
 def test_emit_security_event_loads_surface_snapshot_id_from_run_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
