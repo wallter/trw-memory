@@ -217,6 +217,48 @@ def probe_canaries(config: MemoryConfig, *, backend: StorageBackend) -> None:
                 raise CanaryTamperError(f"canary drift detected for {canary_id}")
 
 
+def _has_canary_drift(config: MemoryConfig, *, backend: StorageBackend) -> bool:
+    """True iff any active canary is PRESENT but content-tampered (hash != pin) — a genuine
+    poisoning signal. A MISSING canary is NOT drift: it is recoverable (probe self-heals it
+    from the trusted pin, PRD-FIX-102). Read-only; does not mutate state or re-seed.
+    """
+    for canary_id, expected_hash in list(PINNED_HASHES.items())[: config.canary_injection_rate]:
+        entry = backend.get(canary_id)
+        if entry is None:
+            continue  # missing => recoverable, not a tamper
+        if hashlib.sha256(entry.content.encode("utf-8")).hexdigest() != expected_hash:
+            return True
+    return False
+
+
 def should_halt_recalls(config: MemoryConfig, *, backend: StorageBackend) -> bool:
     state_key = _state_key(config, backend)
-    return bool(CANARY_STATE.get(state_key, {}).get("failed")) and config.canary_fail_mode == "halt"
+    state = CANARY_STATE.get(state_key)
+    if not (state and state.get("failed") and config.canary_fail_mode == "halt"):
+        return False
+    # PRD-FIX-102 resilience completion (meta-harness C008): a sticky ``failed`` flag must not
+    # permanently halt recall AFTER the tamper condition has cleared (e.g. canaries lost to a DB
+    # salvage then self-healed/re-seeded). The flag is checked here, BEFORE probe_canaries runs,
+    # so a stuck process would otherwise never reach the probe's self-heal. Re-verify: only a
+    # CONFIRMED DRIFT (present + hash-mismatch) is a genuine persistent tamper that keeps halting.
+    # Missing/recovered canaries un-stick the flag so recall resumes (the probe then self-heals
+    # any still-missing canary from the trusted pin). Drift detection is unchanged.
+    if _has_canary_drift(config, backend=backend):
+        return True
+    state["failed"] = False
+    telemetry_session_id, telemetry_run_id = _trace_context(session_id="canary-recovered")
+    emit_security_event(
+        config,
+        emitter="canary",
+        session_id=telemetry_session_id,
+        run_id=telemetry_run_id,
+        payload={
+            "event_name": "canary_recovered",
+            "fail_mode": config.canary_fail_mode,
+            "traceability": build_security_traceability(
+                live_path="security.runtime.should_halt_recalls",
+                requirement_ids=["FR-007", "NFR-010", "NFR-011"],
+            ),
+        },
+    )
+    return False

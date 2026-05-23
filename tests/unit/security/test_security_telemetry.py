@@ -211,6 +211,67 @@ def test_probe_canaries_drift_log_only_does_not_raise(
     assert any(p.get("event_name") == "canary_hash_drift" for p in payloads)
 
 
+def test_should_halt_unsticks_on_canary_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRD-FIX-102 C008: a sticky failed flag un-sticks once canaries are present+valid
+    (drift gone) — recall resumes without a process restart. Emits canary_recovered."""
+    from trw_memory.security._runtime_canary import CANARY_STATE, _state_key
+    from trw_memory.security.runtime import should_halt_recalls
+
+    config = MemoryConfig(storage_path=str(tmp_path / "storage"), canary_fail_mode="halt")
+    monkeypatch.setenv("TRW_SURFACE_SNAPSHOT_ID", "snap-recover")
+    with SQLiteBackend(tmp_path / "memory.db", dim=config.embedding_dim) as backend:
+        initialize_canaries(config, backend=backend)
+        # Simulate a process that previously detected tamper (sticky failed flag).
+        CANARY_STATE[_state_key(config, backend)]["failed"] = True
+        # Canaries are present + valid now -> should NOT halt; flag un-sticks.
+        assert should_halt_recalls(config, backend=backend) is False
+        assert CANARY_STATE[_state_key(config, backend)]["failed"] is False
+
+    payloads = [row["payload"] for row in _events_rows(config) if row.get("emitter") == "canary"]
+    assert any(p.get("event_name") == "canary_recovered" for p in payloads)
+
+
+def test_should_halt_stays_on_confirmed_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRD-FIX-102 C008: a CONFIRMED drift (present + hash-mismatch) keeps halting — the
+    resilience un-stick must NOT mask a genuine persistent tamper."""
+    from trw_memory.security._runtime_canary import CANARY_STATE, _state_key
+    from trw_memory.security.runtime import should_halt_recalls
+
+    config = MemoryConfig(storage_path=str(tmp_path / "storage"), canary_fail_mode="halt")
+    monkeypatch.setenv("TRW_SURFACE_SNAPSHOT_ID", "snap-drift-halt")
+    with SQLiteBackend(tmp_path / "memory.db", dim=config.embedding_dim) as backend:
+        initialize_canaries(config, backend=backend)
+        canary = backend.get("canary-001")
+        assert canary is not None
+        backend.store(canary.model_copy(update={"content": "tampered"}))  # persistent drift
+        CANARY_STATE[_state_key(config, backend)]["failed"] = True
+        assert should_halt_recalls(config, backend=backend) is True
+        assert CANARY_STATE[_state_key(config, backend)]["failed"] is True
+
+
+def test_should_halt_unsticks_on_missing_canary(
+    tmp_path: Path,
+) -> None:
+    """PRD-FIX-102 C008: a MISSING canary is recoverable (probe self-heals), so it does NOT
+    keep recall halted — should_halt un-sticks so the probe can run + self-heal."""
+    from trw_memory.security._runtime_canary import CANARY_STATE, _state_key
+    from trw_memory.security.runtime import should_halt_recalls
+
+    config = MemoryConfig(storage_path=str(tmp_path / "storage"), canary_fail_mode="halt")
+    with SQLiteBackend(tmp_path / "memory.db", dim=config.embedding_dim) as backend:
+        initialize_canaries(config, backend=backend)
+        assert backend.delete("canary-001") is True  # lost to a salvage
+        CANARY_STATE[_state_key(config, backend)]["failed"] = True
+        # missing != drift -> un-stick (probe will self-heal on the next recall).
+        assert should_halt_recalls(config, backend=backend) is False
+
+
 def test_emit_security_event_loads_surface_snapshot_id_from_run_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
