@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import MutableMapping, Sequence
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
+import structlog
 
 from trw_memory.client import MemoryClient
 from trw_memory.exceptions import StorageError
@@ -250,3 +252,113 @@ def test_client_get_embedder_uses_configured_settings(
             backend.close()
 
     embedder_mock.assert_called_once_with(model_name="custom-model", dim=768)
+
+
+def _hybrid_recall_event(
+    logs: Sequence[MutableMapping[str, Any]],
+) -> MutableMapping[str, Any]:
+    """Return the single ``hybrid_recall_complete`` event emitted during a recall."""
+    matches = [event for event in logs if event.get("event") == "hybrid_recall_complete"]
+    assert len(matches) == 1, f"expected exactly one hybrid_recall_complete event, got {matches}"
+    return matches[0]
+
+
+class TestHybridRecallLatencyTelemetry:
+    """PRD-DIST-2047 Phase 2: per-recall latency + shape event for operator tuning.
+
+    Asserts that every terminating branch of ``try_hybrid_recall`` emits a
+    ``hybrid_recall_complete`` structlog event so operators can right-size
+    ``hybrid_search_candidate_pool_size`` against measured cost.
+    """
+
+    async def test_emits_telemetry_on_successful_recall(self, client: MemoryClient) -> None:
+        """Successful hybrid recall must emit `hybrid_recall_complete` with outcome=ok."""
+        real_backend = client._backend
+        assert real_backend is not None
+        real_backend.close()
+
+        entry = MemoryEntry(id="M-001", content="pydantic model", namespace="default")
+        backend = MagicMock()
+        backend.list_entries.return_value = [entry]
+        backend.get_stored_embeddings.return_value = {"M-001": [0.9, 0.1, 0.0]}
+        client._backend = backend
+
+        with (
+            patch.object(MemoryClient, "_get_embedder", return_value=_StubEmbedder()),
+            patch("trw_memory.retrieval.pipeline.hybrid_search", return_value=[entry]),
+            structlog.testing.capture_logs() as logs,
+        ):
+            await client.recall("pydantic")
+
+        event = _hybrid_recall_event(logs)
+        assert event["outcome"] == "ok"
+        assert event["namespace"] == "default"
+        assert event["namespace_size"] == 1
+        assert event["returned_count"] == 1
+        # Auto-scaled caps are max(config default, namespace_size); namespace_size=1
+        # is below the 50-floor so the floor wins.
+        assert event["effective_bm25_candidates"] == max(client._config.bm25_candidates, 1)
+        assert event["effective_vector_candidates"] == max(client._config.vector_candidates, 1)
+        assert (
+            cast("int", event["candidate_pool_size"])
+            >= client._config.hybrid_search_candidate_pool_size
+        )
+        # Latencies are non-negative floats rounded to 3 decimals.
+        for key in ("list_entries_ms", "hybrid_search_ms", "total_ms"):
+            assert isinstance(event[key], float)
+            assert cast("float", event[key]) >= 0.0
+
+    async def test_emits_telemetry_on_no_candidates(self, client: MemoryClient) -> None:
+        """Empty namespace must emit `hybrid_recall_complete` with outcome=no_candidates."""
+        real_backend = client._backend
+        assert real_backend is not None
+        real_backend.close()
+
+        backend = MagicMock()
+        backend.list_entries.return_value = []
+        backend.get_stored_embeddings.return_value = {}
+        client._backend = backend
+
+        with (
+            patch.object(MemoryClient, "_get_embedder", return_value=_StubEmbedder()),
+            structlog.testing.capture_logs() as logs,
+        ):
+            await client.recall("pydantic")
+
+        event = _hybrid_recall_event(logs)
+        assert event["outcome"] == "no_candidates"
+        assert event["namespace_size"] == 0
+        assert event["returned_count"] == 0
+        assert event["hybrid_search_ms"] == 0.0
+        assert cast("float", event["list_entries_ms"]) >= 0.0
+        assert cast("float", event["total_ms"]) >= 0.0
+
+    async def test_emits_telemetry_on_hybrid_search_failure(self, client: MemoryClient) -> None:
+        """hybrid_search raising must emit `hybrid_recall_complete` with outcome=hybrid_search_failed."""
+        real_backend = client._backend
+        assert real_backend is not None
+        real_backend.close()
+
+        entry = MemoryEntry(id="M-001", content="pydantic", namespace="default")
+        backend = MagicMock()
+        backend.list_entries.return_value = [entry]
+        backend.get_stored_embeddings.return_value = {"M-001": [0.9, 0.1, 0.0]}
+        client._backend = backend
+
+        with (
+            patch.object(MemoryClient, "_get_embedder", return_value=_StubEmbedder()),
+            patch(
+                "trw_memory.retrieval.pipeline.hybrid_search",
+                side_effect=RuntimeError("boom"),
+            ),
+            structlog.testing.capture_logs() as logs,
+        ):
+            await client.recall("pydantic")
+
+        event = _hybrid_recall_event(logs)
+        assert event["outcome"] == "hybrid_search_failed"
+        assert event["namespace_size"] == 1
+        assert event["returned_count"] == 0
+        # hybrid_search was called and took non-negative time even on failure.
+        assert cast("float", event["hybrid_search_ms"]) >= 0.0
+        assert cast("float", event["total_ms"]) >= 0.0
