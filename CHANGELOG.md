@@ -14,6 +14,13 @@ All notable changes to the TRW Memory package.
   rows of all statuses/namespaces, unbounded. The fallback now re-executes the exact query
   (where/params/order/limit). Strong-typed the resilient-fetch helpers (Protocols replace `Any`),
   narrowed broad excepts, and added an `outcome` field to quarantine logs.
+- **Trust-score-quarantined entries are now signed so they remain auditable** (SEC-001). The
+  `prepare_entry_for_store` early-return on the trust-score quarantine path skipped provenance
+  signing, so `audit_entry()` reported a quarantined entry as `legacy_unsigned` (no
+  `provenance_signature`) instead of `quarantined`. Signing now runs on that path too (best-effort:
+  a missing signing key leaves the still-quarantined entry unsigned rather than failing the store).
+  The anomaly-quarantine path already signed before quarantining; genuinely-unsigned legacy rows
+  still correctly audit as `legacy_unsigned`.
 
 ### Added
 
