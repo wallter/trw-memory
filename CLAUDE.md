@@ -44,3 +44,11 @@ pip install -e ".[dev,vectors,bm25]"                         # With optional dep
 - Pydantic v2: `use_enum_values=True` required for YAML round-trip; `populate_by_name=True` when using `Field(alias=...)`
 - structlog: never use `event=` as a kwarg — it's reserved; use `action=` or `operation=`
 - Coverage threshold: 85% (fail_under in pyproject.toml)
+
+## Releasing
+
+PyPI publishing is **CI-driven** — `.github/workflows/release.yml` in the public [trw-memory repo](https://github.com/wallter/trw-memory) runs on a **`v*` tag push** (`build → multi-OS/Python smoke matrix → PyPI Trusted Publishing` via OIDC). There is **no manual `twine`/upload and no PyPI token** — never add one. A branch push alone does not publish; only a `v*` tag does.
+
+- **Release `trw-memory` BEFORE `trw-mcp`.** trw-mcp's release builds against `trw-memory @ git+…@main`, so this package's public `main` must carry the new version first or trw-mcp's build/smoke-test resolves the wrong version.
+- Tag the **subtree-split commit** (the commit that exists in the public repo), not the monorepo commit — a tag on an unreachable SHA is ignored by Actions.
+- Full runbook: [`../docs/deployment/CLAUDE.md`](../docs/deployment/CLAUDE.md) §Public PyPI Releases.
