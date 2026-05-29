@@ -13,18 +13,20 @@ from trw_memory.code_index.models import CodeChunk, CodeFile, CodeSymbol, conten
 
 __all__ = ["CodeIndexStats", "CodeIndexer", "InMemoryCodeIndex"]
 
-_DEFAULT_EXCLUDED_DIRS = frozenset({
-    ".git",
-    ".hg",
-    ".svn",
-    ".venv",
-    "venv",
-    "node_modules",
-    "vendor",
-    "build",
-    "dist",
-    "__pycache__",
-})
+_DEFAULT_EXCLUDED_DIRS = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "venv",
+        "node_modules",
+        "vendor",
+        "build",
+        "dist",
+        "__pycache__",
+    }
+)
 _DEFAULT_EXCLUDED_NAMES = frozenset({".env", ".env.local", "secrets.env"})
 _SECRET_LIKE_NAME_TOKENS = frozenset({"credential", "password", "secret", "token"})
 _BINARY_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".gz", ".tar", ".so", ".dll", ".exe"})
@@ -54,7 +56,9 @@ class InMemoryCodeIndex:
         key = (code_file.namespace, code_file.path)
         self._files[key] = code_file
         self._chunks[key] = sorted(chunks, key=lambda chunk: (chunk.start_line, chunk.end_line, chunk.id))
-        self._symbols[key] = sorted(symbols, key=lambda symbol: (symbol.path, symbol.start_line, symbol.kind, symbol.name))
+        self._symbols[key] = sorted(
+            symbols, key=lambda symbol: (symbol.path, symbol.start_line, symbol.kind, symbol.name)
+        )
 
     def get_file(self, *, namespace: str, path: str) -> CodeFile | None:
         return self._files.get((namespace, validate_code_path(path)))
@@ -70,7 +74,11 @@ class InMemoryCodeIndex:
     def delete_missing(self, *, namespace: str, paths: set[str]) -> int:
         deleted = 0
         for stored_namespace, stored_path in list(self._files):
-            if stored_namespace == namespace and stored_path not in paths and self.delete_file(namespace=namespace, path=stored_path):
+            if (
+                stored_namespace == namespace
+                and stored_path not in paths
+                and self.delete_file(namespace=namespace, path=stored_path)
+            ):
                 deleted += 1
         return deleted
 
@@ -174,7 +182,9 @@ class CodeIndexer:
         if parts & _DEFAULT_EXCLUDED_DIRS:
             return True
         lowered_name = source_path.name.lower()
-        if source_path.name in _DEFAULT_EXCLUDED_NAMES or any(token in lowered_name for token in _SECRET_LIKE_NAME_TOKENS):
+        if source_path.name in _DEFAULT_EXCLUDED_NAMES or any(
+            token in lowered_name for token in _SECRET_LIKE_NAME_TOKENS
+        ):
             return True
         if source_path.suffix.lower() in _BINARY_EXTENSIONS:
             return True

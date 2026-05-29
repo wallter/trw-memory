@@ -26,9 +26,7 @@ def lookup_symbols(
             path=symbol.path,
             language=symbol.language,
             line_range=(symbol.start_line, symbol.end_line),
-            disambiguation=(
-                f"{symbol.language}:{symbol.kind}:{symbol.path}:{symbol.start_line}-{symbol.end_line}"
-            ),
+            disambiguation=(f"{symbol.language}:{symbol.kind}:{symbol.path}:{symbol.start_line}-{symbol.end_line}"),
         )
         for symbol in store.list_symbols(namespace=namespace, name=name, kind=kind, path=path)
     ]

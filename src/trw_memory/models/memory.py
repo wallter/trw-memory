@@ -100,16 +100,15 @@ class Assertion(BaseModel):
     commit_hash: str | None = Field(
         default=None,
         max_length=40,
-        description="The full SHA-1 Git commit hash when this assertion was created or verified"
+        description="The full SHA-1 Git commit hash when this assertion was created or verified",
     )
     line_range: tuple[int, int] | None = Field(
-        default=None,
-        description="The 1-indexed (start_line, end_line) target inside the file at that commit"
+        default=None, description="The 1-indexed (start_line, end_line) target inside the file at that commit"
     )
     git_url: str | None = Field(
         default=None,
         max_length=2048,
-        description="Auto-derived GitHub/GitLab URL pointing directly to the blob and lines"
+        description="Auto-derived GitHub/GitLab URL pointing directly to the blob and lines",
     )
 
     @field_validator("type", mode="before")

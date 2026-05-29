@@ -147,7 +147,9 @@ class CodeSymbol(BaseModel):
     def _validate_range_and_id(self) -> CodeSymbol:
         if self.end_line < self.start_line:
             raise ValueError("symbol end_line must be >= start_line")
-        expected_id = stable_code_symbol_id(self.namespace, self.path, self.name, self.kind, self.start_line, self.end_line)
+        expected_id = stable_code_symbol_id(
+            self.namespace, self.path, self.name, self.kind, self.start_line, self.end_line
+        )
         if self.id and self.id != expected_id:
             raise ValueError("code symbol id does not match stable id fields")
         self.id = expected_id

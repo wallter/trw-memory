@@ -220,7 +220,9 @@ def _python_symbols(tree: ast.AST, *, code_file: CodeFile) -> list[CodeSymbol]:
     return sorted(symbols, key=lambda symbol: (symbol.start_line, symbol.kind, symbol.name))
 
 
-def _python_symbol(code_file: CodeFile, node: ast.ClassDef | ast.AsyncFunctionDef | ast.FunctionDef, kind: str) -> CodeSymbol:
+def _python_symbol(
+    code_file: CodeFile, node: ast.ClassDef | ast.AsyncFunctionDef | ast.FunctionDef, kind: str
+) -> CodeSymbol:
     return CodeSymbol(
         namespace=code_file.namespace,
         file_id=code_file.id,
