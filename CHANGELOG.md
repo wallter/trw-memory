@@ -15,6 +15,13 @@ All notable changes to the TRW Memory package.
   (where/params/order/limit). Strong-typed the resilient-fetch helpers (Protocols replace `Any`),
   narrowed broad excepts, and added an `outcome` field to quarantine logs.
 
+### Added
+
+- **`bytes_fallback_failures` counter** on the resilient-fetch path. When the UTF-8 bytes-mode
+  fallback connection itself fails, the fetch fails open (`[]`) but now increments a process-wide
+  counter (`get_bytes_fallback_failures()` / `reset_bytes_fallback_failures()`) alongside the
+  `outcome=fallback_failed` warning log, so an otherwise-silent secondary drop is countable.
+
 
 ## [0.8.4] — 2026-05-28
 
