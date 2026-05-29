@@ -14,6 +14,11 @@ All notable changes to the TRW Memory package.
   rows of all statuses/namespaces, unbounded. The fallback now re-executes the exact query
   (where/params/order/limit). Strong-typed the resilient-fetch helpers (Protocols replace `Any`),
   narrowed broad excepts, and added an `outcome` field to quarantine logs.
+- **`pysqlite3-binary` is now a Linux-only dependency.** Upstream removed the macOS-arm64 wheels,
+  so `pip install trw-memory` failed with "No matching distribution found for pysqlite3-binary" on
+  `macos-latest` (arm64) — which blocked the release smoke matrix. The marker is now
+  `platform_system == 'Linux'`; macOS/Windows fall back to stdlib `sqlite3` via the `storage._dbapi`
+  shim (with the code-level WAL single-connection mitigation), exactly as the shim already supported.
 - **Trust-score-quarantined entries are now signed so they remain auditable** (SEC-001). The
   `prepare_entry_for_store` early-return on the trust-score quarantine path skipped provenance
   signing, so `audit_entry()` reported a quarantined entry as `legacy_unsigned` (no
