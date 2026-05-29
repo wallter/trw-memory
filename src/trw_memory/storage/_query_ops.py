@@ -33,11 +33,39 @@ import structlog
 
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.storage._resilient_fetch import is_utf8_decode_error
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from trw_memory.storage._resilient_fetch import FetchQuery
     from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 logger = structlog.get_logger(__name__)
+
+
+def _execute_resilient(
+    backend: SQLiteBackend,
+    sql: str,
+    params: Sequence[object],
+    *,
+    fetch_query: FetchQuery,
+) -> list[MemoryEntry]:
+    """Execute *sql* and materialise rows with UTF-8 quarantine resilience.
+
+    Must be called while holding ``backend._lock``. On SQLite >= 3.51 the
+    driver decodes TEXT during ``execute()``, so a UTF-8 decode error can
+    surface here rather than during fetch — both paths route to the
+    bytes-mode fallback, which re-executes ``fetch_query`` (preserving the
+    WHERE filter, ORDER BY, and LIMIT). Non-decode errors propagate.
+    """
+    try:
+        cursor = backend._conn.execute(sql, params)
+    except (sqlite3.OperationalError, UnicodeDecodeError) as exc:
+        if not is_utf8_decode_error(exc):
+            raise
+        return backend._fetch_rows_via_bytes_fallback(query=fetch_query)
+    return backend._fetch_rows_resilient(cursor, query=fetch_query)
 
 
 def search(
@@ -63,18 +91,19 @@ def search(
     )
     where_sql = like_clause if filter_sql == "1" else f"{like_clause} AND {filter_sql}"
     params: list[object] = like_params + filter_params
+    order_by = "importance DESC, updated_at DESC"
     sql = (
         f"SELECT {select_columns_sql} FROM memories WHERE {where_sql} "  # noqa: S608
-        f"ORDER BY importance DESC, updated_at DESC LIMIT ?"
+        f"ORDER BY {order_by} LIMIT ?"
     )
     params.append(top_k)
+    fetch_query = backend._fetch_query(where_sql=where_sql, params=params[:-1], order_by=order_by, limit=top_k)
 
     backend._ensure_connection_fresh()
 
     try:
         with backend._lock:
-            cursor = backend._conn.execute(sql, params)
-            results = backend._fetch_rows_resilient(cursor)
+            results = _execute_resilient(backend, sql, params, fetch_query=fetch_query)
         if tags:
             required = set(tags)
             results = [e for e in results if required.issubset(set(e.tags))]
@@ -104,15 +133,15 @@ def count(backend: SQLiteBackend, namespace: str | None = None) -> int:
         ) from exc
 
 
-def entries_with_assertions(backend: SQLiteBackend) -> list[MemoryEntry]:
+def entries_with_assertions(backend: SQLiteBackend, select_columns_sql: str) -> list[MemoryEntry]:
     """PRD-CORE-086 FR07 query for assertion-health summary."""
+    where_sql = "assertions IS NOT NULL AND assertions != '[]'"
+    sql = f"SELECT {select_columns_sql} FROM memories WHERE {where_sql}"  # noqa: S608
+    fetch_query = backend._fetch_query(where_sql=where_sql, order_by="updated_at DESC")
     backend._ensure_connection_fresh()
     try:
         with backend._lock:
-            cursor = backend._conn.execute(
-                "SELECT * FROM memories WHERE assertions IS NOT NULL AND assertions != '[]'",
-            )
-            return backend._fetch_rows_resilient(cursor)
+            return _execute_resilient(backend, sql, (), fetch_query=fetch_query)
     except sqlite3.Error as exc:
         logger.debug("entries_with_assertions_query_failed", exc_info=True)
         raise StorageError(
@@ -131,27 +160,18 @@ def list_entries(
 ) -> list[MemoryEntry]:
     """Return entries with optional filters, ordered by updated_at desc."""
     where_sql, params = backend._build_filter_clause(status=status, namespace=namespace)
+    order_by = "updated_at DESC"
     sql = (
         f"SELECT {select_columns_sql} FROM memories WHERE {where_sql} "  # noqa: S608
-        f"ORDER BY updated_at DESC LIMIT ?"
+        f"ORDER BY {order_by} LIMIT ?"
     )
+    filter_params = list(params)
     params.append(limit)
+    fetch_query = backend._fetch_query(where_sql=where_sql, params=filter_params, order_by=order_by, limit=limit)
     backend._ensure_connection_fresh()
     try:
         with backend._lock:
-            try:
-                cursor = backend._conn.execute(sql, params)
-            except (sqlite3.OperationalError, UnicodeDecodeError) as exc:
-                # SQLite >= 3.51 (pysqlite3) decodes TEXT columns during
-                # execute(), so a corrupt-UTF-8 row raises here rather than
-                # during fetch — bypassing the fetch-time resilient path.
-                # Route to the bytes-mode fallback so bad rows are quarantined
-                # instead of failing the whole listing.
-                msg = str(exc)
-                if isinstance(exc, UnicodeDecodeError) or "UTF-8" in msg or "decode" in msg.lower():
-                    return backend._fetch_rows_via_bytes_fallback(backend._conn.cursor())
-                raise
-            return backend._fetch_rows_resilient(cursor)
+            return _execute_resilient(backend, sql, params, fetch_query=fetch_query)
     except (sqlite3.Error, ValueError, KeyError) as exc:
         raise StorageError(
             f"Failed to list entries: {exc}",

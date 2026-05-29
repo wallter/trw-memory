@@ -15,7 +15,7 @@ from __future__ import annotations
 import contextlib
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
@@ -98,6 +98,8 @@ from trw_memory.storage._recovery import recover_db as _recovery_recover_db
 # Resilient row materialisation extracted to _resilient_fetch.py
 # (PRD-DIST-245 batch 84).
 from trw_memory.storage._resilient_fetch import (
+    FetchQuery,
+    _CursorLike,
     fetch_rows_resilient as _resilient_fetch_rows_resilient,
     fetch_rows_via_bytes_fallback as _resilient_fetch_rows_via_bytes_fallback,
 )
@@ -336,36 +338,51 @@ class SQLiteBackend(StorageBackend):
     # PRD-DIST-245 batch 84)
     # ------------------------------------------------------------------
 
+    def _fetch_query(
+        self,
+        *,
+        where_sql: str = "1",
+        params: Sequence[object] = (),
+        order_by: str = "updated_at DESC",
+        limit: int | None = None,
+        table: str = "memories",
+    ) -> FetchQuery:
+        """Build the :class:`FetchQuery` the resilient path re-executes."""
+        return FetchQuery(
+            select_columns_sql=_SELECT_COLUMNS_SQL,
+            table=table,
+            where_sql=where_sql,
+            params=tuple(params),
+            order_by=order_by,
+            limit=limit,
+        )
+
     def _fetch_rows_resilient(
         self,
-        cursor: Any,
+        cursor: _CursorLike,
         *,
-        table: str = "memories",
+        query: FetchQuery | None = None,
     ) -> list[MemoryEntry]:
         """Delegate to ``_resilient_fetch.fetch_rows_resilient``."""
         results, delta = _resilient_fetch_rows_resilient(
             cursor,
             db_path=self._db_path,
             dbapi=self._dbapi,
-            select_columns_sql=_SELECT_COLUMNS_SQL,
-            table=table,
+            query=query if query is not None else self._fetch_query(),
         )
         self.quarantine_count_utf8 += delta
         return results
 
     def _fetch_rows_via_bytes_fallback(
         self,
-        cursor: Any,
         *,
-        table: str = "memories",
+        query: FetchQuery | None = None,
     ) -> list[MemoryEntry]:
         """Delegate to ``_resilient_fetch.fetch_rows_via_bytes_fallback``."""
         results, delta = _resilient_fetch_rows_via_bytes_fallback(
-            cursor,
             db_path=self._db_path,
             dbapi=self._dbapi,
-            select_columns_sql=_SELECT_COLUMNS_SQL,
-            table=table,
+            query=query if query is not None else self._fetch_query(),
         )
         self.quarantine_count_utf8 += delta
         return results
@@ -508,7 +525,7 @@ class SQLiteBackend(StorageBackend):
 
     def entries_with_assertions(self) -> list[MemoryEntry]:
         """PRD-CORE-086 FR07 query for assertion-health summary."""
-        return _query_ops_entries_with_assertions(self)
+        return _query_ops_entries_with_assertions(self, _SELECT_COLUMNS_SQL)
 
     # Backward-compat alias for PRD-CORE-086 FR07 traceability.
     count_with_assertions = entries_with_assertions
