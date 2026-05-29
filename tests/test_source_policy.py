@@ -144,7 +144,7 @@ async def test_memory_client_store_preserves_expires_on_update(
         "Lifecycle bulletin for sprint 99",
         metadata={"source_kind": "lifecycle"},
         entry_id="M-fixed-expiry",
-        expires="2026-05-01T00:00:00+00:00",
+        expires="2099-01-01T00:00:00+00:00",
     )
     await client.store(
         "Lifecycle bulletin for sprint 99",
@@ -155,4 +155,4 @@ async def test_memory_client_store_preserves_expires_on_update(
     results = await client.recall("bulletin", include_source_kinds=["lifecycle"])
 
     assert results[0]["memory_id"] == "M-fixed-expiry"
-    assert results[0]["expires"] == "2026-05-01T00:00:00+00:00"
+    assert results[0]["expires"] == "2099-01-01T00:00:00+00:00"

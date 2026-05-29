@@ -139,7 +139,18 @@ def list_entries(
     backend._ensure_connection_fresh()
     try:
         with backend._lock:
-            cursor = backend._conn.execute(sql, params)
+            try:
+                cursor = backend._conn.execute(sql, params)
+            except (sqlite3.OperationalError, UnicodeDecodeError) as exc:
+                # SQLite >= 3.51 (pysqlite3) decodes TEXT columns during
+                # execute(), so a corrupt-UTF-8 row raises here rather than
+                # during fetch — bypassing the fetch-time resilient path.
+                # Route to the bytes-mode fallback so bad rows are quarantined
+                # instead of failing the whole listing.
+                msg = str(exc)
+                if isinstance(exc, UnicodeDecodeError) or "UTF-8" in msg or "decode" in msg.lower():
+                    return backend._fetch_rows_via_bytes_fallback(backend._conn.cursor())
+                raise
             return backend._fetch_rows_resilient(cursor)
     except (sqlite3.Error, ValueError, KeyError) as exc:
         raise StorageError(
