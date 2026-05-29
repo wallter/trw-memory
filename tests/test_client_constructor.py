@@ -32,7 +32,7 @@ class TestConstructor:
 
         with pytest.raises(
             EncryptionUnavailableError,
-            match=r"SQLCipher is required when memory_encryption_enabled=True\. Install with: pip install trw-memory\[encryption\]",
+            match=r"SQLCipher driver not installed",
         ):
             MemoryClient(namespace="default", mode="local")
 

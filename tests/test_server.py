@@ -134,9 +134,21 @@ class TestServerModule:
         sys.modules.pop("trw_memory.server", None)
 
     def test_eight_tools_registered(self) -> None:
-        """Exactly 8 tools must be registered via mcp.tool()."""
+        """All expected MCP tools must be registered via mcp.tool().
+
+        Asserts the exact set (not a magic count) so additions/removals are
+        caught explicitly. The code-index + wiki-lint tools were added after
+        the original 8.
+        """
         server_mod, mcp_instance, registered_tools = _reload_server_with_mock()
-        assert len(registered_tools) == 8, f"Expected 8 tools, got {len(registered_tools)}: {registered_tools}"
+        expected = {
+            "memory_store", "memory_recall", "memory_audit", "memory_review",
+            "memory_forget", "memory_consolidate", "memory_search", "memory_status",
+            "memory_wiki_lint", "memory_code_index", "memory_code_search", "memory_code_symbol",
+        }
+        assert set(registered_tools) == expected, (
+            f"registered tool set drift: {sorted(set(registered_tools) ^ expected)}"
+        )
         sys.modules.pop("trw_memory.server", None)
 
     def test_all_tool_modules_importable(self) -> None:
