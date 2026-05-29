@@ -40,6 +40,45 @@ logger = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Fallback-failure observability counter
+# ---------------------------------------------------------------------------
+#
+# The bytes-mode fallback fails open: when the *secondary* connection itself
+# raises (locked, missing file, cipher mismatch, ...) it returns ([], 0) so the
+# caller's per-row ``quarantine_count_utf8`` cannot reflect the drop — the rows
+# were never readable, so they are not "quarantined". That made the silent drop
+# invisible to counter-based monitoring (only a warning log fired). This
+# process-wide counter makes the fail-open event *countable* without changing
+# the fail-open behaviour or the ``(results, delta)`` return contract.
+
+
+@dataclass(slots=True)
+class _FallbackMetrics:
+    """Process-wide counter for bytes-mode fallback hard failures."""
+
+    bytes_fallback_failures: int = 0
+
+
+_fallback_metrics = _FallbackMetrics()
+
+
+def get_bytes_fallback_failures() -> int:
+    """Return the number of bytes-mode fallback connections that failed open.
+
+    Each increment corresponds to one ``fetch_rows_via_bytes_fallback`` call
+    whose secondary connection raised ``sqlite3.Error`` — i.e. rows that were
+    silently dropped (not row-level quarantined). Monitoring can poll this to
+    detect a degraded backend that the per-row quarantine counter cannot see.
+    """
+    return _fallback_metrics.bytes_fallback_failures
+
+
+def reset_bytes_fallback_failures() -> None:
+    """Reset the fallback-failure counter (test isolation / monitoring window)."""
+    _fallback_metrics.bytes_fallback_failures = 0
+
+
+# ---------------------------------------------------------------------------
 # Typing protocols — the resilient path runs against either stdlib ``sqlite3``
 # or the optional SQLCipher driver, so we describe the minimal surface we use
 # rather than binding to a concrete class.
@@ -213,8 +252,12 @@ def fetch_rows_via_bytes_fallback(
     except sqlite3.Error as exc:
         # The secondary connection itself failed (locked, missing file,
         # cipher mismatch, ...). We cannot recover rows here; surface the
-        # failure via the log and return empty rather than masking it as a
-        # partial result — the caller's quarantine counter stays accurate.
+        # failure via the log AND a distinct process-wide counter, then return
+        # empty rather than masking it as a partial result. The caller's per-row
+        # quarantine counter stays accurate (these rows were never read, so they
+        # are not row-level quarantined); the dedicated counter makes the silent
+        # drop countable for monitoring (F1).
+        _fallback_metrics.bytes_fallback_failures += 1
         logger.warning(
             "db_utf8_fallback_failed",
             action="memory_row_utf8_quarantined",
@@ -222,6 +265,7 @@ def fetch_rows_via_bytes_fallback(
             db_path=str(db_path),
             table=query.table,
             error=str(exc),
+            bytes_fallback_failures=_fallback_metrics.bytes_fallback_failures,
         )
         return [], 0
 

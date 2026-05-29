@@ -21,7 +21,9 @@ from trw_memory.storage._resilient_fetch import (
     FetchQuery,
     fetch_rows_resilient,
     fetch_rows_via_bytes_fallback,
+    get_bytes_fallback_failures,
     is_utf8_decode_error,
+    reset_bytes_fallback_failures,
 )
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
@@ -405,6 +407,56 @@ def test_bytes_fallback_logs_fallback_failed_when_connect_fails(tmp_path: Path) 
     assert failed, "Expected a db_utf8_fallback_failed log with outcome field"
 
 
+def test_bytes_fallback_failure_increments_distinct_counter(tmp_path: Path) -> None:
+    """F1: a hard fallback failure bumps the dedicated counter, not just a log.
+
+    The per-row quarantine counter (``quarantine_count_utf8``) cannot reflect a
+    failed *secondary connection* — those rows were never read, so ``delta`` is
+    0. The distinct ``bytes_fallback_failures`` counter exists precisely so the
+    silent drop is countable for monitoring.
+    """
+
+    class _FailingDBAPI:
+        def connect(self, database: str) -> object:
+            raise sqlite3.OperationalError("unable to open database file")
+
+    reset_bytes_fallback_failures()
+    assert get_bytes_fallback_failures() == 0
+
+    query = FetchQuery(select_columns_sql="id, content", where_sql="1", limit=10)
+    for _ in range(3):
+        results, delta = fetch_rows_via_bytes_fallback(
+            db_path=tmp_path / "memory.db",
+            dbapi=_FailingDBAPI(),  # type: ignore[arg-type]
+            query=query,
+        )
+        assert results == []
+        assert delta == 0  # per-row quarantine delta stays 0 (fail-open preserved)
+
+    # The distinct counter makes the otherwise-invisible drop countable.
+    assert get_bytes_fallback_failures() == 3
+
+
+def test_bytes_fallback_success_does_not_increment_failure_counter(tmp_path: Path) -> None:
+    """A successful (non-failing) fallback must NOT bump the failure counter."""
+    db_path = tmp_path / "memory.db"
+    backend = SQLiteBackend(db_path)
+    backend.store(_make_entry("M-good-001", "valid"))
+    backend.close()
+    _inject_bad_utf8_row(db_path, "M-bad-001")
+
+    reset_bytes_fallback_failures()
+    backend2 = SQLiteBackend(db_path)
+    # Force the execute-time decode error so the (working) bytes fallback runs.
+    backend2._conn = _ExecuteRaisesConn(backend2._conn)  # type: ignore[assignment]
+    results = backend2.list_entries(limit=100)
+
+    assert {e.id for e in results} == {"M-good-001"}
+    assert get_bytes_fallback_failures() == 0, "Working fallback must not count as a failure"
+    # Note: backend2._conn is the _ExecuteRaisesConn stub (no close()), matching
+    # the sibling execute-time test which also leaves the stub un-closed.
+
+
 # ---------------------------------------------------------------------------
 # row_to_entry failure on a cleanly-decoded row is quarantined (not raised)
 # ---------------------------------------------------------------------------
@@ -580,6 +632,82 @@ def test_search_skips_bad_utf8_row_and_preserves_filter(tmp_path: Path) -> None:
     assert "M-needle-good" in ids
     assert "M-needle-bad" not in ids
     assert backend2.quarantine_count_utf8 >= 1
+    backend2.close()
+
+
+def _store_good_row_with_content(
+    backend: SQLiteBackend,
+    db_path: Path | str,
+    entry_id: str,
+    content: str,
+    *,
+    status: MemoryStatus = MemoryStatus.ACTIVE,
+) -> None:
+    """Store a valid entry, then raw-UPDATE its ``content`` to caller value.
+
+    Lets tests place LIKE metacharacters (``%``/``_``) verbatim in content
+    without hand-crafting the full column tuple: the entry is created via the
+    backend (so every enum/JSON column is valid and ``row_to_entry`` succeeds),
+    then a raw UPDATE rewrites only ``content`` byte-exact.
+    """
+    backend.store(_make_entry(entry_id, status=status))
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("UPDATE memories SET content = ? WHERE id = ?", (content, entry_id))
+    conn.commit()
+    conn.close()
+
+
+def test_search_preserves_escape_clause_through_bytes_fallback(tmp_path: Path) -> None:
+    """F4: LIKE metacharacters stay literal across the degraded (bytes-mode) path.
+
+    A query of ``a%b`` must match only the row whose content is the literal
+    ``a%b`` — never ``aZZZb`` (which would match if ``%`` acted as a wildcard).
+    A bad-UTF-8 row forces the bytes-mode fallback, which re-executes the same
+    WHERE (carrying the ``ESCAPE '\\'`` clause via FetchQuery). Asserting only
+    the literal match returns proves the ESCAPE clause survived the fallback.
+    """
+    db_path = tmp_path / "memory.db"
+    backend = SQLiteBackend(db_path)
+
+    # Literal-metachar match target, a would-be wildcard victim, and a bad-UTF-8
+    # row whose id carries the literal term so it is a LIKE candidate — the
+    # decode error then fires while materialising the matched set (forcing the
+    # bytes-mode fallback). Its detail is the undecodable bytes.
+    _store_good_row_with_content(backend, db_path, "M-literal", "a%b literal percent")
+    _store_good_row_with_content(backend, db_path, "M-wildcard-victim", "aZZZb would-be wildcard")
+    backend.close()
+    _inject_bad_utf8_row(db_path, "a%b-bad", status="active")
+
+    backend2 = SQLiteBackend(db_path)
+    # The query 'a%b' is escaped to a literal; only M-literal (and the bad row,
+    # which is quarantined) are LIKE candidates. M-wildcard-victim must NOT match.
+    results = backend2.search(query="a%b", status=MemoryStatus.ACTIVE, top_k=50)
+    ids = {e.id for e in results}
+
+    assert "M-literal" in ids, "Literal 'a%b' content must match the escaped query"
+    assert "M-wildcard-victim" not in ids, "ESCAPE clause must stop '%' acting as a wildcard"
+    assert "a%b-bad" not in ids, "Bad-UTF-8 row is quarantined, not returned"
+    assert backend2.quarantine_count_utf8 >= 1, "Bad row forced the bytes-mode fallback"
+    backend2.close()
+
+
+def test_search_underscore_metachar_literal_through_fallback(tmp_path: Path) -> None:
+    """F4: a literal underscore query must not match arbitrary single chars."""
+    db_path = tmp_path / "memory.db"
+    backend = SQLiteBackend(db_path)
+
+    _store_good_row_with_content(backend, db_path, "M-underscore", "x_y literal underscore")
+    _store_good_row_with_content(backend, db_path, "M-single-char", "xQy single char")
+    backend.close()
+    _inject_bad_utf8_row(db_path, "x_y-bad", status="active")
+
+    backend2 = SQLiteBackend(db_path)
+    results = backend2.search(query="x_y", status=MemoryStatus.ACTIVE, top_k=50)
+    ids = {e.id for e in results}
+
+    assert "M-underscore" in ids, "Literal 'x_y' must match the escaped query"
+    assert "M-single-char" not in ids, "ESCAPE clause must stop '_' matching a single char"
+    assert backend2.quarantine_count_utf8 >= 1, "Bad row forced the bytes-mode fallback"
     backend2.close()
 
 
