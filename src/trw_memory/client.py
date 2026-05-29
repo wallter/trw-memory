@@ -50,6 +50,7 @@ from trw_memory.sync.subscriber import SSESubscriber as SSESubscriber  # noqa: F
 logger = structlog.get_logger(__name__)
 
 __all__ = [
+    "SHARED_EVENT_CACHE_MAX",
     "BulkStoreItemResult",
     "BulkStoreRequest",
     "BulkStoreSummary",
@@ -59,6 +60,13 @@ __all__ = [
     "StoreResultDict",
 ]
 
+
+# Shared-event-cache cap extracted to _client_lifecycle.py (PRD-DIST-246
+# batch 111). Re-export preserves the public API for downstream consumers
+# and tests that import the constant from the facade.
+from trw_memory._client_lifecycle import (  # noqa: E402
+    SHARED_EVENT_CACHE_MAX as SHARED_EVENT_CACHE_MAX,
+)
 
 # Bulk-store dataclasses extracted to _client_bulk_store.py
 # (PRD-DIST-246 batch 104). Re-exports preserve the public API.

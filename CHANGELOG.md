@@ -4,6 +4,18 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+## [0.8.4] — 2026-05-28
+
+### Fixed
+
+- **Restored `SHARED_EVENT_CACHE_MAX` re-export from `trw_memory.client`.**
+  The PRD-DIST-246 client.py decomposition moved the constant to the
+  `_client_lifecycle` sibling module but the `client.py` facade dropped the
+  re-export, breaking `from trw_memory.client import SHARED_EVENT_CACHE_MAX`
+  (a public-API regression that also broke `test_client_recall_sync.py`
+  collection). The facade re-exports it again and lists it in `__all__`.
+
+
 ### Changed
 
 - **PRD-DIST-2058 — `MEMORY_RECALL_PRESERVE_HYBRID_ORDER` is now the default.**
