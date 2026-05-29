@@ -4,6 +4,18 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+## [0.8.5] — 2026-05-29
+
+### Fixed
+
+- **`list_entries`/`search`/`entries_with_assertions` preserve their WHERE filter + LIMIT on the
+  UTF-8 bytes-fallback path.** Previously, when a corrupt-UTF-8 row triggered the resilient
+  bytes-mode re-execute, the fallback dropped the status/namespace filter and the LIMIT — returning
+  rows of all statuses/namespaces, unbounded. The fallback now re-executes the exact query
+  (where/params/order/limit). Strong-typed the resilient-fetch helpers (Protocols replace `Any`),
+  narrowed broad excepts, and added an `outcome` field to quarantine logs.
+
+
 ## [0.8.4] — 2026-05-28
 
 ### Fixed
