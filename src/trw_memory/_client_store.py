@@ -36,7 +36,7 @@ from trw_memory.security.runtime import (
     prepare_entry_for_store,
     store_quarantined_entry,
 )
-from trw_memory.sync.conflict import init_clock
+from trw_memory.sync.conflict import increment_clock, init_clock
 
 if TYPE_CHECKING:
     from trw_memory.client import MemoryClient, StoreResultDict
@@ -129,7 +129,11 @@ async def store_impl(
                     "expires": entry_expires,
                     "source": source,
                     "source_identity": source_identity or existing.source_identity,
-                    "vector_clock": init_clock(client._local_node_id),
+                    # FR04: advance the local node's counter on edit so causality
+                    # is expressible. Resetting to init_clock() here stalled the
+                    # clock at {node: 1}, making a locally-newer entry look
+                    # concurrent with its own stale remote snapshot.
+                    "vector_clock": increment_clock(existing.vector_clock, client._local_node_id),
                 }
             )
 

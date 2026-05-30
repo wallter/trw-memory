@@ -39,7 +39,7 @@ from trw_memory.security.runtime import (
     prepare_entry_for_store,
     store_quarantined_entry,
 )
-from trw_memory.sync.conflict import init_clock
+from trw_memory.sync.conflict import increment_clock, init_clock
 
 if TYPE_CHECKING:
     from trw_memory.client import MemoryClient
@@ -201,7 +201,10 @@ async def bulk_store_impl(
                         "updated_at": now,
                         "source": req.source,
                         "source_identity": req.source_identity or existing.source_identity,
-                        "vector_clock": init_clock(client._local_node_id),
+                        # FR04: advance, do not reset, the local node's counter on
+                        # edit (matches store_impl); a reset stalled causality at
+                        # {node: 1}. See test_sync_clock_monotonic.
+                        "vector_clock": increment_clock(existing.vector_clock, client._local_node_id),
                     }
                 )
 
