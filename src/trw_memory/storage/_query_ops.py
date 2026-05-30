@@ -9,6 +9,8 @@ that pass the backend handle.
 
 - ``search`` — keyword LIKE on id/content/detail/tags + filter clause +
   resilient row materialisation.
+- ``find_active_by_content`` — embedding-independent exact-content dedup
+  lookup (equality on content + detail, active + namespace scoped).
 - ``count`` — namespace-scoped or global COUNT(*).
 - ``entries_with_assertions`` — PRD-CORE-086 FR07 query for
   ``trw_session_start`` assertion-health summary.
@@ -111,6 +113,40 @@ def search(
     except (sqlite3.Error, ValueError, KeyError) as exc:
         raise StorageError(
             f"Failed to search memories: {exc}",
+            path=str(backend._db_path),
+        ) from exc
+
+
+def find_active_by_content(
+    backend: SQLiteBackend,
+    content: str,
+    detail: str,
+    *,
+    namespace: str = "default",
+) -> str | None:
+    """Return the id of an ACTIVE entry whose content + detail match exactly.
+
+    Embedding-independent exact-content dedup (PRD-CORE-042): equality match
+    on ``content`` and ``COALESCE(detail,'')`` within a namespace, scoped to
+    ``status='active'``. Sub-millisecond at current scale; a ``content_hash``
+    index is a future optimization (not added here to avoid a migration).
+
+    Returns the first matching id, or None when no exact active duplicate
+    exists. Read-only: never mutates.
+    """
+    sql = (
+        "SELECT id FROM memories "
+        "WHERE content = ? AND COALESCE(detail, '') = ? "
+        "AND status = ? AND namespace = ? LIMIT 1"
+    )
+    params: tuple[object, ...] = (content, detail, MemoryStatus.ACTIVE.value, namespace)
+    try:
+        with backend._lock:
+            row = backend._conn.execute(sql, params).fetchone()
+        return str(row[0]) if row else None
+    except sqlite3.Error as exc:
+        raise StorageError(
+            f"Failed to look up active entry by content: {exc}",
             path=str(backend._db_path),
         ) from exc
 

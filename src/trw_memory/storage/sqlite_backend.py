@@ -121,6 +121,7 @@ from trw_memory.storage._query_ops import (
     count as _query_ops_count,
     delete_by_namespace as _query_ops_delete_by_namespace,
     entries_with_assertions as _query_ops_entries_with_assertions,
+    find_active_by_content as _query_ops_find_active_by_content,
     list_entries as _query_ops_list_entries,
     list_namespaces as _query_ops_list_namespaces,
     search as _query_ops_search,
@@ -523,6 +524,20 @@ class SQLiteBackend(StorageBackend):
             min_importance=min_importance,
             namespace=namespace,
         )
+
+    def find_active_by_content(
+        self,
+        content: str,
+        detail: str,
+        *,
+        namespace: str = "default",
+    ) -> str | None:
+        """Return the id of an ACTIVE entry with exactly matching content + detail.
+
+        Embedding-independent exact-content dedup lookup (PRD-CORE-042).
+        Read-only; namespace-scoped. Returns None when no exact duplicate exists.
+        """
+        return _query_ops_find_active_by_content(self, content, detail, namespace=namespace)
 
     def count(self, namespace: str | None = None) -> int:
         """Return the number of stored entries."""
