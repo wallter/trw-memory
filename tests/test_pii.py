@@ -137,6 +137,38 @@ class TestDetectPII:
         key_matches = [m for m in matches if m.pii_type == PIIType.API_KEY]
         assert len(key_matches) >= 1
 
+    def test_detect_github_pat_classic(self) -> None:
+        """Classic GitHub PATs (ghp_ + 36 chars) are detected.
+
+        Regression: a 40-char GitHub PAT scores ~4.1 bits/char Shannon
+        entropy, below the 4.5 default threshold, and has no
+        "<prefix>[-_]" separator, so it matched NEITHER the generic
+        API_KEY pattern NOR the high-entropy backstop — it leaked
+        silently. Without the provider-specific pattern this asserts
+        len() == 0.
+        """
+        leaked = "ghp_16C7e42F292c6912E7710c838347Ae178B4a"
+        matches = detect_pii(f"token is {leaked}")
+        key_matches = [m for m in matches if m.pii_type == PIIType.API_KEY]
+        assert len(key_matches) == 1
+        assert key_matches[0].value == leaked
+
+    def test_detect_github_pat_fine_grained(self) -> None:
+        """Fine-grained GitHub PATs (github_pat_...) are detected."""
+        leaked = "github_pat_11ABCDEFG0abcdefghijkl_mnopQRSTUVwxyz0123456789ABCDEF"
+        matches = detect_pii(f"export GH={leaked}")
+        key_matches = [m for m in matches if m.pii_type == PIIType.API_KEY]
+        assert len(key_matches) == 1
+        assert leaked in key_matches[0].value
+
+    def test_detect_aws_access_key_id(self) -> None:
+        """AWS access key IDs (AKIA/ASIA + 16 base32) are detected."""
+        leaked = "AKIAIOSFODNN7EXAMPLE"
+        matches = detect_pii(f"aws_access_key_id={leaked}")
+        key_matches = [m for m in matches if m.pii_type == PIIType.API_KEY]
+        assert len(key_matches) == 1
+        assert key_matches[0].value == leaked
+
     def test_detect_ip_address(self) -> None:
         """IPv4 addresses are detected."""
         matches = detect_pii("Server is reachable at 192.168.1.10")
@@ -322,6 +354,25 @@ class TestStripPII:
         """token- prefixed keys are replaced."""
         result = strip_pii("token-abcdefghijklmnopqrstuvwxyz")
         assert "<api_key>" in result
+
+    def test_github_pat_replaced(self) -> None:
+        """GitHub PATs are scrubbed from telemetry text.
+
+        Regression: strip_pii's API-key pattern required a
+        "<prefix>[-_]" separator, so a ghp_ PAT survived telemetry
+        anonymization. Without the provider-specific sub fails on the
+        leaked-value assertion below.
+        """
+        leaked = "ghp_16C7e42F292c6912E7710c838347Ae178B4a"
+        result = strip_pii(f"token is {leaked}")
+        assert "<api_key>" in result
+        assert leaked not in result
+
+    def test_aws_access_key_replaced(self) -> None:
+        """AWS access key IDs are scrubbed from telemetry text."""
+        leaked = "AKIAIOSFODNN7EXAMPLE"
+        result = strip_pii(f"key={leaked}")
+        assert leaked not in result
 
     def test_clean_text_unchanged(self) -> None:
         """Text without PII is returned unchanged."""
