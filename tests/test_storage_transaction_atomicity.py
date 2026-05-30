@@ -10,10 +10,13 @@ Covers:
   (``skip_commit`` flag) so the vector lands at the outermost COMMIT.
 - S1: a row + its vector written inside ``transaction()`` commit exactly once
   and are atomic — both present on success, neither on a mid-transaction error.
+- S8: ``delete_by_namespace`` removes entries + wiki_refs + vectors inside ONE
+  transaction so a crash can never leave orphan wiki refs or vector rows.
 """
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from types import TracebackType
 
@@ -282,5 +285,237 @@ def test_transaction_commits_exactly_once(tmp_path: Path) -> None:
             backend._conn = real_conn
 
         assert commit_calls["n"] == 1, f"expected exactly one commit, got {commit_calls['n']}"
+    finally:
+        backend.close()
+
+
+# ---------------------------------------------------------------------------
+# S8 — delete_by_namespace: entries + wiki_refs + vectors atomic (both-or-neither)
+# ---------------------------------------------------------------------------
+
+
+def _wiki_entry_with_ref(entry_id: str, *, namespace: str, slug: str) -> MemoryEntry:
+    """Build an entry carrying a single outbound wiki ref so a row lands in wiki_refs.
+
+    ``slug`` must satisfy WikiPage validation (lowercase alphanumeric, single
+    hyphen separators) — independent of the entry id, which has no such rule.
+    """
+    from trw_memory.wiki.models import WikiPage, WikiReference
+
+    page = WikiPage(
+        kind="topic",
+        slug=f"topic/{slug}",
+        title=entry_id,
+        outbound_refs=[WikiReference(target_slug="topic/target", ref_type="related")],
+    )
+    return MemoryEntry(
+        id=entry_id,
+        content=page.title,
+        namespace=namespace,
+        metadata=page.to_memory_metadata(),
+    )
+
+
+def test_delete_by_namespace_removes_entries_and_wiki_refs_atomically(tmp_path: Path) -> None:
+    """S8: a successful namespace delete clears entries AND companion wiki_refs.
+
+    Observed via a second connection that reads committed-only state.
+    """
+    import sqlite3
+
+    db_path = tmp_path / "s8ok.db"
+    backend = SQLiteBackend(db_path)
+    try:
+        backend.store(_wiki_entry_with_ref("M-ns1", namespace="doomed", slug="ns-one"))
+        backend.store(_wiki_entry_with_ref("M-ns2", namespace="doomed", slug="ns-two"))
+        backend.store(_wiki_entry_with_ref("M-keep", namespace="other", slug="ns-keep"))
+
+        observer = sqlite3.connect(str(db_path))
+        try:
+            # Precondition: 2 doomed entries + 2 doomed wiki_refs are committed.
+            assert (
+                observer.execute(
+                    "SELECT COUNT(*) FROM memories WHERE namespace = ?", ("doomed",)
+                ).fetchone()[0]
+                == 2
+            )
+            assert (
+                observer.execute(
+                    "SELECT COUNT(*) FROM wiki_refs WHERE namespace = ?", ("doomed",)
+                ).fetchone()[0]
+                == 2
+            )
+
+            deleted = backend.delete_by_namespace("doomed")
+            assert deleted == 2
+
+            # Both entries and their wiki_refs are gone; the other namespace
+            # is untouched — no orphan refs survive.
+            assert (
+                observer.execute(
+                    "SELECT COUNT(*) FROM memories WHERE namespace = ?", ("doomed",)
+                ).fetchone()[0]
+                == 0
+            )
+            assert (
+                observer.execute(
+                    "SELECT COUNT(*) FROM wiki_refs WHERE namespace = ?", ("doomed",)
+                ).fetchone()[0]
+                == 0
+            )
+            assert (
+                observer.execute(
+                    "SELECT COUNT(*) FROM wiki_refs WHERE namespace = ?", ("other",)
+                ).fetchone()[0]
+                == 1
+            )
+        finally:
+            observer.close()
+    finally:
+        backend.close()
+
+
+def test_delete_by_namespace_rollback_leaves_entries_and_wiki_refs_intact(tmp_path: Path) -> None:
+    """S8: a crash AFTER the entry DELETE but BEFORE wiki_refs cleanup rolls BOTH back.
+
+    Without the single-transaction wrapper the memories DELETE had already
+    committed on its own, so a later crash would leave orphan wiki_refs (and the
+    entries gone). We force a failure on the wiki_refs DELETE and prove — via a
+    fresh observer connection reading committed-only state — that the entry rows
+    AND the wiki_refs are both still present (neither side of the delete landed).
+    """
+    import sqlite3
+
+    db_path = tmp_path / "s8rollback.db"
+    backend = SQLiteBackend(db_path)
+    try:
+        backend.store(_wiki_entry_with_ref("M-rb1", namespace="doomed", slug="rb-one"))
+        backend.store(_wiki_entry_with_ref("M-rb2", namespace="doomed", slug="rb-two"))
+
+        # The C-extension Connection's ``execute`` attribute is read-only, so we
+        # wrap the live connection in a thin delegating proxy that raises on the
+        # companion wiki_refs DELETE (after the memories DELETE has been staged
+        # inside the open transaction) and forwards everything else verbatim.
+        real_conn = backend._conn
+
+        class _FailingWikiCleanupConn:
+            def execute(self, sql: str, *args: object) -> object:
+                if "DELETE FROM wiki_refs" in sql:
+                    raise RuntimeError("crash-before-wiki-cleanup")
+                return real_conn.execute(sql, *args)
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(real_conn, name)
+
+        backend._conn = _FailingWikiCleanupConn()
+        try:
+            with pytest.raises(RuntimeError, match="crash-before-wiki-cleanup"):
+                backend.delete_by_namespace("doomed")
+        finally:
+            backend._conn = real_conn
+
+        observer = sqlite3.connect(str(db_path))
+        try:
+            # Entries survived — the staged memories DELETE was rolled back.
+            assert (
+                observer.execute(
+                    "SELECT COUNT(*) FROM memories WHERE namespace = ?", ("doomed",)
+                ).fetchone()[0]
+                == 2
+            ), "entries were deleted despite the rolled-back transaction"
+            # wiki_refs survived too — no orphan/partial state.
+            assert (
+                observer.execute(
+                    "SELECT COUNT(*) FROM wiki_refs WHERE namespace = ?", ("doomed",)
+                ).fetchone()[0]
+                == 2
+            ), "wiki_refs were partially cleaned despite rollback"
+        finally:
+            observer.close()
+        # Backend's own connection agrees the entries are still live.
+        assert backend.get("M-rb1") is not None
+        assert backend.get("M-rb2") is not None
+    finally:
+        backend.close()
+
+
+def test_delete_by_namespace_empty_namespace_is_noop(tmp_path: Path) -> None:
+    """S8: deleting an empty namespace returns 0 and opens no transaction."""
+    db_path = tmp_path / "s8empty.db"
+    backend = SQLiteBackend(db_path)
+    try:
+        assert backend.delete_by_namespace("never-existed") == 0
+    finally:
+        backend.close()
+
+
+def test_concurrent_outer_transactions_do_not_nest_begin(tmp_path: Path) -> None:
+    """S8 follow-on: concurrent ``transaction()`` callers serialize, never nest BEGIN.
+
+    Before the ``_txn_serializer`` guard, two threads could both issue
+    ``BEGIN IMMEDIATE`` on the single shared connection, and the second raised
+    ``OperationalError: cannot start a transaction within a transaction``. The
+    serializer makes outer transactions mutually exclusive; here 8 threads each
+    open a transaction and store one row — all must succeed with zero errors.
+    """
+    db_path = tmp_path / "concurrent_txn.db"
+    backend = SQLiteBackend(db_path)
+    try:
+        errors: list[str] = []
+        errors_lock = threading.Lock()
+        barrier = threading.Barrier(8)
+
+        def worker(i: int) -> None:
+            try:
+                barrier.wait(timeout=5)
+                with backend.transaction():
+                    backend.store(make_entry(entry_id=f"M-conc-{i}"))
+            except Exception as exc:  # record any thread failure for assertion
+                with errors_lock:
+                    errors.append(repr(exc))
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert errors == [], f"concurrent transactions raced: {errors}"
+        assert backend.count() == 8
+    finally:
+        backend.close()
+
+
+def test_nested_transaction_under_serializer_does_not_deadlock(tmp_path: Path) -> None:
+    """The serializer is re-entrant: same-thread nested transaction() never deadlocks."""
+    db_path = tmp_path / "nested_serialized.db"
+    backend = SQLiteBackend(db_path)
+    try:
+        with backend.transaction():
+            with backend.transaction():
+                backend.store(make_entry(entry_id="M-nested-ok"))
+        assert backend.get("M-nested-ok") is not None
+    finally:
+        backend.close()
+
+
+def test_delete_by_namespace_removes_vectors_atomically(tmp_path: Path) -> None:
+    """S8: vec_index rows for namespace entries are cleaned up in the same delete."""
+    pytest.importorskip("sqlite_vec")
+    db_path = tmp_path / "s8vec.db"
+    backend = SQLiteBackend(db_path)
+    if not backend._vec_available:
+        backend.close()
+        pytest.skip("sqlite-vec extension not available")
+    try:
+        emb = [1.0] * backend._dim
+        backend.store(make_entry(entry_id="M-vec-ns", namespace="doomed"))
+        backend.upsert_vector("M-vec-ns", emb)
+        assert backend.vector_exists("M-vec-ns") is True
+
+        backend.delete_by_namespace("doomed")
+
+        assert backend.get("M-vec-ns") is None
+        assert backend.vector_exists("M-vec-ns") is False
     finally:
         backend.close()

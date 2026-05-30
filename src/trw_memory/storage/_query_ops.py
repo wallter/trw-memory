@@ -243,12 +243,19 @@ def list_namespaces(backend: SQLiteBackend) -> list[str]:
 
 
 def delete_by_namespace(backend: SQLiteBackend, namespace: str) -> int:
-    """Delete all entries in a namespace."""
+    """Delete all entries in a namespace.
+
+    Commit is suppressed when called inside a ``transaction()`` block
+    (``_skip_commit_depth > 0``) so the memories DELETE batches with the
+    companion wiki_refs / vector cleanup into the outer COMMIT — see
+    ``SQLiteBackend.delete_by_namespace`` for the atomic wrapper.
+    """
     try:
         with backend._lock:
             cursor = backend._conn.execute("DELETE FROM memories WHERE namespace = ?", (namespace,))
             deleted = cursor.rowcount
-            backend._conn.commit()
+            if backend._skip_commit_depth == 0:
+                backend._conn.commit()
         logger.debug("namespace_deleted", namespace=namespace, entries_deleted=deleted)
         return int(deleted)
     except sqlite3.Error as exc:

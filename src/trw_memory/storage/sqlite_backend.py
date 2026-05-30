@@ -193,6 +193,14 @@ class SQLiteBackend(StorageBackend):
         # per-row commit when >0 so caller-controlled outer transaction
         # batches N writes into one BEGIN IMMEDIATE / COMMIT.
         self._skip_commit_depth: int = 0
+        # S8 follow-on: serialize OUTER transaction() bodies so two threads
+        # cannot both hold an open BEGIN IMMEDIATE on the single shared
+        # connection (which raises "cannot start a transaction within a
+        # transaction"). Re-entrant so same-thread nested transaction() calls
+        # do not self-deadlock; held only by the outermost transaction, and is
+        # a DIFFERENT lock from ``_lock`` (which inner delegated writes acquire),
+        # so no deadlock arises between the two.
+        self._txn_serializer = threading.RLock()
         self._dbapi: Any = _import_sqlcipher_driver() if sqlcipher_key_hex is not None else sqlite3
         self._sqlcipher_key_hex = sqlcipher_key_hex
         self._recovery_policy = recovery_policy
@@ -476,41 +484,53 @@ class SQLiteBackend(StorageBackend):
 
         Re-entrant by depth — only the outermost ``transaction()`` issues
         BEGIN/COMMIT; inner exceptions propagate; outermost issues ROLLBACK.
+
+        Concurrency: the re-entrant ``_txn_serializer`` is held for the whole
+        body so two threads cannot both open a BEGIN IMMEDIATE on the single
+        shared connection (SQLite raises "cannot start a transaction within a
+        transaction"). It is acquired BEFORE ``is_outer`` is decided, so the
+        depth==0 read that classifies a call as outer cannot race a peer thread.
+        Same-thread nested ``transaction()`` calls re-enter the RLock and are
+        classified inner by depth, so they never re-issue BEGIN.
         """
-        is_outer = self._skip_commit_depth == 0
-        if is_outer:
-            # S2 fix: raise the skip-commit gate INSIDE the same lock that
-            # issues BEGIN IMMEDIATE, before the lock releases. Otherwise a
-            # concurrent writer acquiring the lock in the window between
-            # BEGIN and the depth bump reads ``_skip_commit_depth == 0`` and
-            # commits the outer transaction prematurely.
-            with self._lock:
-                self._conn.execute("BEGIN IMMEDIATE")
-                self._skip_commit_depth += 1
-        else:
-            self._skip_commit_depth += 1
+        self._txn_serializer.acquire()
         try:
-            yield self
+            is_outer = self._skip_commit_depth == 0
             if is_outer:
+                # S2 fix: raise the skip-commit gate INSIDE the same lock that
+                # issues BEGIN IMMEDIATE, before the lock releases. Otherwise a
+                # concurrent writer acquiring the lock in the window between
+                # BEGIN and the depth bump reads ``_skip_commit_depth == 0`` and
+                # commits the outer transaction prematurely.
                 with self._lock:
-                    self._conn.commit()
-        except BaseException:
-            if is_outer:
-                try:
-                    with self._lock:
-                        self._conn.rollback()
-                except sqlite3.Error:
-                    logger.exception("transaction_rollback_failed", db=str(self._db_path))
-            raise
-        finally:
-            # Symmetric to the increment: drop the outer gate under the lock so
-            # the depth transition back to 0 is atomic with respect to other
-            # writers that consult it.
-            if is_outer:
-                with self._lock:
-                    self._skip_commit_depth -= 1
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    self._skip_commit_depth += 1
             else:
-                self._skip_commit_depth -= 1
+                self._skip_commit_depth += 1
+            try:
+                yield self
+                if is_outer:
+                    with self._lock:
+                        self._conn.commit()
+            except BaseException:
+                if is_outer:
+                    try:
+                        with self._lock:
+                            self._conn.rollback()
+                    except sqlite3.Error:
+                        logger.exception("transaction_rollback_failed", db=str(self._db_path))
+                raise
+            finally:
+                # Symmetric to the increment: drop the outer gate under the lock so
+                # the depth transition back to 0 is atomic with respect to other
+                # writers that consult it.
+                if is_outer:
+                    with self._lock:
+                        self._skip_commit_depth -= 1
+                else:
+                    self._skip_commit_depth -= 1
+        finally:
+            self._txn_serializer.release()
 
     # ------------------------------------------------------------------
     # Query / list / namespace ops (delegated to _query_ops.py
@@ -593,12 +613,31 @@ class SQLiteBackend(StorageBackend):
         return _query_ops_list_namespaces(self)
 
     def delete_by_namespace(self, namespace: str) -> int:
-        """Delete all entries in a namespace."""
-        deleted = _query_ops_delete_by_namespace(self, namespace)
-        if deleted:
+        """Delete all entries in a namespace atomically.
+
+        S8 fix: the entry-row DELETE, the companion ``wiki_refs`` cleanup, and
+        per-entry vector removal all run inside ONE ``transaction()`` so a crash
+        can never leave orphan wiki refs or vector rows pointing at deleted
+        entries — it is all-or-nothing.
+        """
+        # Snapshot the namespace's entry IDs BEFORE the delete so vec_index rows
+        # (keyed on entry_id, not namespace) can be cleaned up in the same txn.
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id FROM memories WHERE namespace = ?",
+                (namespace,),
+            ).fetchall()
+        entry_ids = [str(row[0]) for row in rows]
+        if not entry_ids:
+            return 0
+
+        with self.transaction():
+            deleted = _query_ops_delete_by_namespace(self, namespace)
             with self._lock:
                 self._conn.execute("DELETE FROM wiki_refs WHERE namespace = ?", (namespace,))
-                self._conn.commit()
+                if self._vec_available:
+                    for entry_id in entry_ids:
+                        self._delete_vector(entry_id)
         return deleted
 
     def query_wiki_outbound_refs(self, source_slug: str, *, namespace: str | None = None) -> list[StoredWikiReference]:
