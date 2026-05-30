@@ -37,8 +37,8 @@ def test_transaction_outer_bumps_depth_while_lock_held(tmp_path: Path) -> None:
     were outside the lock (the bug), the depth would still read 0 at release.
     """
     backend = SQLiteBackend(tmp_path / "s2.db")
+    real_lock = backend._lock  # bind before try so the finally can always restore it
     try:
-        real_lock = backend._lock
         depth_at_release: list[int] = []
 
         class _RecordingLock:
