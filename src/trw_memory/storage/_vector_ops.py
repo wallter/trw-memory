@@ -142,6 +142,21 @@ def upsert_vector(
     """
     if not vec_available:
         return
+    if len(embedding) != dim:
+        # A fixed-dim vec0 table cannot hold a wrong-length vector (e.g. an
+        # embedding-model swap leaving config.embedding_dim stale). Skip the
+        # vector write the same way the vec-unavailable path does: the canonical
+        # row + BM25 still provide retrieval. struct.pack would otherwise raise
+        # an uncaught struct.error and fail the whole store transaction.
+        logger.warning(
+            "vector_dimension_mismatch",
+            op="upsert",
+            entry_id=entry_id,
+            expected_dim=dim,
+            actual_dim=len(embedding),
+            hint="embedding length != backend dim; canonical memory write is preserved, vector skipped",
+        )
+        return
     emb_bytes = struct.pack(f"{dim}f", *embedding)
     try:
         with lock:
@@ -186,6 +201,17 @@ def search_vectors(
 ) -> list[tuple[str, float]]:
     """KNN search in vec_memories. Empty list when sqlite-vec absent."""
     if not vec_available:
+        return []
+    if len(query_embedding) != dim:
+        # A query vector whose length differs from the indexed dim (model swap)
+        # cannot match the fixed-dim vec0 table. Degrade to "no dense hits" so
+        # the caller falls back to BM25, rather than raising an uncaught
+        # struct.error from the pack below.
+        logger.debug(
+            "vector_search_dimension_mismatch",
+            expected_dim=dim,
+            actual_dim=len(query_embedding),
+        )
         return []
     query_bytes = struct.pack(f"{dim}f", *query_embedding)
     try:

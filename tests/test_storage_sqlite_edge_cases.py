@@ -6,11 +6,17 @@ from __future__ import annotations
 import sqlite3
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
-from trw_memory.storage._vector_ops import delete_vector_internal, upsert_vector, vector_exists
+from trw_memory.storage._vector_ops import (
+    delete_vector_internal,
+    search_vectors,
+    upsert_vector,
+    vector_exists,
+)
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 from ._test_storage_sqlite_support import backend, make_entry
@@ -195,6 +201,125 @@ class TestOptionalVecModuleUnavailable:
             vector_exists(conn, vec_available=True, entry_id="still-bad")
 
 
+class _RecordingConn:
+    """Connection stub that records SQL but never opens a real vec0 table.
+
+    Used to prove the dimension-mismatch guard short-circuits BEFORE any
+    struct.pack / SQL execution — these tests need no sqlite-vec install.
+    """
+
+    total_changes = 0
+
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+        self.rollback_called = False
+        self.commit_called = False
+
+    def execute(self, sql: str, _params: object = ()) -> _FetchOneResult:
+        self.statements.append(sql)
+        return _FetchOneResult(None)
+
+    def commit(self) -> None:
+        self.commit_called = True
+
+    def rollback(self) -> None:
+        self.rollback_called = True
+
+
+class TestVectorDimensionMismatch:
+    """A vector whose length != the indexed dim must degrade, not crash.
+
+    Before the guard, ``struct.pack(f"{dim}f", *embedding)`` raised an uncaught
+    ``struct.error`` (NOT a ``sqlite3.Error``), which propagated through
+    ``backend.transaction()`` in the store path and failed the entire write —
+    violating the documented "canonical memory write is preserved" contract.
+    These run without sqlite-vec because the guard fires before any SQL.
+    """
+
+    def test_upsert_vector_skips_wrong_length_embedding_without_raising(self) -> None:
+        conn = _RecordingConn()
+
+        # dim=384 table, but a 3-element embedding (e.g. stale config after a
+        # model swap). Must NOT raise struct.error and must NOT touch the DB.
+        upsert_vector(
+            conn,
+            threading.Lock(),
+            vec_available=True,
+            dim=384,
+            entry_id="dim-mismatch",
+            embedding=[0.1, 0.2, 0.3],
+        )
+
+        assert conn.statements == []
+        assert conn.commit_called is False
+        assert conn.rollback_called is False
+
+    def test_upsert_vector_skips_too_long_embedding_without_raising(self) -> None:
+        conn = _RecordingConn()
+
+        upsert_vector(
+            conn,
+            threading.Lock(),
+            vec_available=True,
+            dim=4,
+            entry_id="too-long",
+            embedding=[0.1] * 768,
+        )
+
+        assert conn.statements == []
+
+    def test_upsert_vector_does_not_break_outer_transaction_on_mismatch(self) -> None:
+        # skip_commit=True is the in-transaction store path. A mismatch must
+        # leave the owner's outer transaction intact (no rollback), so the
+        # canonical row written alongside still commits.
+        conn = _RecordingConn()
+
+        upsert_vector(
+            conn,
+            threading.Lock(),
+            vec_available=True,
+            dim=384,
+            entry_id="in-txn",
+            embedding=[0.5, 0.6],
+            skip_commit=True,
+        )
+
+        assert conn.rollback_called is False
+        assert conn.statements == []
+
+    def test_search_vectors_returns_empty_on_wrong_length_query(self) -> None:
+        conn = _RecordingConn()
+
+        results = search_vectors(
+            conn,
+            threading.Lock(),
+            vec_available=True,
+            dim=384,
+            query_embedding=[0.1, 0.2, 0.3],
+        )
+
+        assert results == []
+        assert conn.statements == []
+
+    def test_upsert_then_store_row_survives_dimension_mismatch_end_to_end(self, tmp_path: Path) -> None:
+        """Integration: a wrong-dim embedding leaves the canonical row intact."""
+        pytest.importorskip("sqlite_vec")
+
+        be = SQLiteBackend(tmp_path / "dim.db", dim=384)
+        if not be._vec_available:
+            pytest.skip("sqlite-vec did not load in this environment")
+        entry = make_entry("e2e-dim", "content that must survive")
+        be.store(entry)
+        # Wrong-length vector (config drift). Must not raise; row must persist.
+        be.upsert_vector(entry.id, [0.1] * 768)
+
+        preserved = be.get(entry.id)
+        assert preserved is not None
+        assert preserved.content == "content that must survive"
+        # No vector was stored, so the id is absent from the index.
+        assert entry.id not in be.existing_vector_ids()
+
+
 class TestListEntriesCombinedFilters:
     """FR03: list_entries with combined status + namespace filters."""
 
@@ -267,7 +392,7 @@ class TestSqliteVecExtensionLoadFailure:
             def __getattr__(self, name: str) -> object:
                 return getattr(self._conn, name)
 
-        def connect_proxy(*args: object, **kwargs: object) -> object:
+        def connect_proxy(*args: Any, **kwargs: Any) -> object:
             return _ConnProxy(original_connect(*args, **kwargs), exc)
 
         monkeypatch.setattr(sqlite3, "connect", connect_proxy)
