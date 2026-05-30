@@ -210,6 +210,20 @@ class MemoryConfig(BaseSettings):
         description="Maximum composite tier score allowed before a cold entry is purged",
     )
 
+    # Forced importance-tier distribution caps (mirror trw-mcp impact_tier_*_cap)
+    impact_tier_critical_cap: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description="Maximum fraction of active entries allowed in the critical importance tier (>=0.9)",
+    )
+    impact_tier_high_cap: float = Field(
+        default=0.20,
+        ge=0.0,
+        le=1.0,
+        description="Maximum fraction of active entries allowed in the high importance tier (0.7-0.89)",
+    )
+
     # Scoring
     decay_half_life_days: float = Field(default=14.0, gt=0.0, description="Half-life in days for recency decay")
     decay_use_exponent: float = Field(default=0.6, ge=0.0, le=1.0, description="Exponent for utility-based decay")

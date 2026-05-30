@@ -22,11 +22,15 @@ from __future__ import annotations
 
 import math
 from datetime import date, datetime, timezone
+from typing import TYPE_CHECKING
 
 import structlog
 
 from trw_memory.lifecycle._utils import days_since_access as _days_since_access
 from trw_memory.models.config import MemoryConfig
+
+if TYPE_CHECKING:
+    from trw_memory.storage.interface import StorageBackend
 
 logger = structlog.get_logger(__name__)
 
@@ -345,27 +349,43 @@ def compute_calibration_accuracy(recall_stats: dict[str, object]) -> float:
 def enforce_tier_distribution(
     entries: list[tuple[str, float]],
     *,
-    critical_cap: float = 0.05,
-    high_cap: float = 0.20,
+    critical_cap: float | None = None,
+    high_cap: float | None = None,
     entry_dates: dict[str, str] | None = None,
+    config: MemoryConfig | None = None,
 ) -> list[tuple[str, float]]:
     """Enforce forced distribution caps on importance tier percentages.
 
-    When a tier exceeds its cap (critical >5%, high >20%), demotes the
-    lowest-scored entry in that tier to the next tier down. Only one
-    demotion per tier per call.
+    When a tier exceeds its cap (critical >5%, high >20% by default), demotes
+    the lowest-scored entry in that tier to the next tier down. Only one
+    demotion per tier per call — callers may iterate to convergence via
+    :func:`converge_tier_distribution`.
+
+    Caps are config-driven (mirrors trw-mcp ``enforce_tier_distribution``):
+    an explicit ``critical_cap``/``high_cap`` wins when provided, otherwise the
+    value resolves from ``config`` (defaulting to ``MemoryConfig()``). This keeps
+    the two implementations from drifting — the same ``.trw/config.yaml`` knobs
+    now govern both.
 
     Args:
         entries: List of (memory_id, importance_score) tuples.
         critical_cap: Maximum fraction allowed in critical tier (0.9-1.0).
+            ``None`` resolves from ``config.impact_tier_critical_cap``.
         high_cap: Maximum fraction allowed in high tier (0.7-0.89).
+            ``None`` resolves from ``config.impact_tier_high_cap``.
         entry_dates: Optional mapping of memory_id -> ISO datetime string for
-            time-decay-aware tier classification.
+            time-decay-aware tier classification. Demotion target scores remain
+            absolute — decay only affects which entries classify into each tier.
+        config: MemoryConfig used to source caps when not given explicitly.
 
     Returns:
         List of (memory_id, new_importance) tuples for changed entries.
         Empty list if no demotions were needed.
     """
+    cfg = config or MemoryConfig()
+    effective_critical_cap = critical_cap if critical_cap is not None else cfg.impact_tier_critical_cap
+    effective_high_cap = high_cap if high_cap is not None else cfg.impact_tier_high_cap
+
     if not entries:
         return []
 
@@ -401,7 +421,7 @@ def enforce_tier_distribution(
     demotions: list[tuple[str, float]] = []
 
     # Enforce critical cap: demote lowest-scored critical → high
-    if critical and len(critical) / total > critical_cap:
+    if critical and len(critical) / total > effective_critical_cap:
         critical_sorted = sorted(critical, key=lambda x: x[1])
         victim_id, victim_score = critical_sorted[0]
         new_score = round(min(0.89, max(0.7, victim_score - 0.1)), 4)
@@ -421,7 +441,7 @@ def enforce_tier_distribution(
     effective_high_count = len(effective_high) + len(demotions)
 
     # Enforce high cap: demote lowest-scored high → medium
-    if effective_high_count > 0 and effective_high_count / total > high_cap:
+    if effective_high_count > 0 and effective_high_count / total > effective_high_cap:
         high_sorted = sorted(
             [(mid, s) for mid, s in high if mid not in demoted_ids],
             key=lambda x: x[1],
@@ -440,6 +460,125 @@ def enforce_tier_distribution(
             )
 
     return demotions
+
+
+def converge_tier_distribution(
+    entries: list[tuple[str, float]],
+    *,
+    critical_cap: float | None = None,
+    high_cap: float | None = None,
+    entry_dates: dict[str, str] | None = None,
+    config: MemoryConfig | None = None,
+    max_iterations: int = 1000,
+) -> list[tuple[str, float]]:
+    """Batch-converge an over-cap tier cluster to within its caps.
+
+    ``enforce_tier_distribution`` demotes at most one entry per tier per call,
+    so a cluster that is many entries over a cap never heals at write time
+    (R-RANK-003). This helper iterates that single-step enforcement on an
+    in-memory working set until no further demotion is produced, then returns
+    the *net* score change per entry (one tuple per entry that ended below its
+    starting tier, carrying its final score).
+
+    This is a pure function — it does not touch storage. Use
+    :func:`persist_tier_convergence` to apply the result atomically.
+
+    Args:
+        entries: List of (memory_id, importance_score) tuples.
+        critical_cap: See :func:`enforce_tier_distribution`.
+        high_cap: See :func:`enforce_tier_distribution`.
+        entry_dates: Optional decay-aware classification dates.
+        config: MemoryConfig used to source caps when not given explicitly.
+        max_iterations: Hard ceiling on convergence steps (safety bound).
+
+    Returns:
+        List of (memory_id, final_importance) tuples for every entry whose
+        score changed from its starting value. Empty when already within caps.
+    """
+    if not entries:
+        return []
+
+    # Working set keyed by id so repeated demotions compound on the same entry.
+    working: dict[str, float] = {}
+    order: list[str] = []
+    original: dict[str, float] = {}
+    for mid, score in entries:
+        if mid not in working:
+            order.append(mid)
+        working[mid] = score
+        original.setdefault(mid, score)
+
+    for _ in range(max(1, max_iterations)):
+        snapshot = [(mid, working[mid]) for mid in order]
+        step = enforce_tier_distribution(
+            snapshot,
+            critical_cap=critical_cap,
+            high_cap=high_cap,
+            entry_dates=entry_dates,
+            config=config,
+        )
+        if not step:
+            break
+        working.update(dict(step))
+
+    changed: list[tuple[str, float]] = [
+        (mid, working[mid]) for mid in order if working[mid] != original[mid]
+    ]
+
+    if changed:
+        logger.info(
+            "tier_convergence",
+            n_changed=len(changed),
+            total=len(order),
+        )
+    return changed
+
+
+def persist_tier_convergence(
+    backend: StorageBackend,
+    entries: list[tuple[str, float]],
+    *,
+    critical_cap: float | None = None,
+    high_cap: float | None = None,
+    entry_dates: dict[str, str] | None = None,
+    config: MemoryConfig | None = None,
+) -> list[tuple[str, float]]:
+    """Converge a tier cluster and persist the demotions atomically.
+
+    Wraps :func:`converge_tier_distribution` and writes every resulting score
+    change inside a single ``backend.transaction()`` so the cluster either
+    converges fully or not at all — no partially-demoted intermediate state is
+    ever committed. Uses the committed thread-safe ``transaction()`` (PRD-FIX-088
+    FR02), so concurrent writers cannot observe a half-applied convergence.
+
+    Args:
+        backend: Storage backend exposing ``transaction()`` and ``update()``.
+        entries: List of (memory_id, importance_score) tuples.
+        critical_cap: See :func:`enforce_tier_distribution`.
+        high_cap: See :func:`enforce_tier_distribution`.
+        entry_dates: Optional decay-aware classification dates.
+        config: MemoryConfig used to source caps when not given explicitly.
+
+    Returns:
+        The list of (memory_id, final_importance) changes that were persisted.
+        Empty when the cluster was already within caps (no transaction opened).
+    """
+    changes = converge_tier_distribution(
+        entries,
+        critical_cap=critical_cap,
+        high_cap=high_cap,
+        entry_dates=entry_dates,
+        config=config,
+    )
+    if not changes:
+        return []
+
+    with backend.transaction() as txn:
+        for mid, new_score in changes:
+            txn.update(mid, importance=new_score)
+
+    logger.info("tier_convergence_persisted", n_persisted=len(changes))
+    return changes
 
 
 # ---------------------------------------------------------------------------
