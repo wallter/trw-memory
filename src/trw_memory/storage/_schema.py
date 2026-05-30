@@ -74,6 +74,16 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE_IDX_NAMESPACE = "CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace)"
 CREATE_IDX_STATUS = "CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)"
 
+# Composite indexes for the recall list / search ORDER BY clauses
+# (F-007). Forward-only additive migration — IF NOT EXISTS, no
+# destructive schema change. ``list_entries`` orders by updated_at DESC
+# within a namespace; ``search`` orders by importance DESC, updated_at DESC.
+CREATE_IDX_NS_UPDATED = "CREATE INDEX IF NOT EXISTS idx_memories_ns_updated ON memories(namespace, updated_at DESC)"
+CREATE_IDX_NS_IMPORTANCE = (
+    "CREATE INDEX IF NOT EXISTS idx_memories_ns_importance "
+    "ON memories(namespace, importance DESC, updated_at DESC)"
+)
+
 CREATE_GRAPH_EDGES = """
 CREATE TABLE IF NOT EXISTS memory_graph_edges (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -154,6 +164,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
         cursor.execute(CREATE_IDX_NAMESPACE)
         cursor.execute(CREATE_IDX_STATUS)
+        cursor.execute(CREATE_IDX_NS_UPDATED)
+        cursor.execute(CREATE_IDX_NS_IMPORTANCE)
         cursor.execute(CREATE_IDX_MGE_SOURCE)
         cursor.execute(CREATE_IDX_MGE_TARGET)
         cursor.execute(CREATE_IDX_WIKI_REFS_SOURCE)

@@ -131,6 +131,7 @@ from trw_memory.storage._crud_ops import (
     delete as _crud_ops_delete,
     get as _crud_ops_get,
     increment_access_counts as _crud_ops_increment_access_counts,
+    increment_recall_access as _crud_ops_increment_recall_access,
     increment_session_counts as _crud_ops_increment_session_counts,
     store as _crud_ops_store,
     update as _crud_ops_update,
@@ -455,6 +456,10 @@ class SQLiteBackend(StorageBackend):
         """Increment access_count and last_accessed_at in one transaction."""
         return _crud_ops_increment_access_counts(self, entry_ids, accessed_at=accessed_at)
 
+    def increment_recall_access(self, entry_ids: list[str], *, accessed_at: datetime | None = None) -> int:
+        """F-008: increment access_count + recall_count + last_accessed_at in ONE commit."""
+        return _crud_ops_increment_recall_access(self, entry_ids, accessed_at=accessed_at)
+
     def delete(self, entry_id: str) -> bool:
         """Remove an entry from memories (and vec_index when available)."""
         deleted = _crud_ops_delete(self, entry_id)
@@ -523,9 +528,17 @@ class SQLiteBackend(StorageBackend):
         """Return the number of stored entries."""
         return _query_ops_count(self, namespace)
 
-    def entries_with_assertions(self) -> list[MemoryEntry]:
-        """PRD-CORE-086 FR07 query for assertion-health summary."""
-        return _query_ops_entries_with_assertions(self, _SELECT_COLUMNS_SQL)
+    def entries_with_assertions(
+        self,
+        *,
+        status: MemoryStatus | None = MemoryStatus.ACTIVE,
+    ) -> list[MemoryEntry]:
+        """PRD-CORE-086 FR07 query for assertion-health summary.
+
+        F7: defaults to active-only so obsolete entries' stale assertions
+        don't pollute the session-start summary. ``status=None`` = all statuses.
+        """
+        return _query_ops_entries_with_assertions(self, _SELECT_COLUMNS_SQL, status=status)
 
     # Backward-compat alias for PRD-CORE-086 FR07 traceability.
     count_with_assertions = entries_with_assertions

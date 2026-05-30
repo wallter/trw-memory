@@ -205,6 +205,39 @@ class StorageBackend(ABC):
         """
         return 0
 
+    def increment_recall_access(self, entry_ids: list[str], *, accessed_at: datetime | None = None) -> int:
+        """Increment ``access_count`` and ``recall_count`` for recalled entries.
+
+        F-008: backends that support bulk mutation should override this to do
+        the work in a single statement / commit. The default falls back to a
+        per-entry get+update loop so non-SQLite backends keep correct
+        semantics (each distinct id incremented once).
+
+        Args:
+            entry_ids: Entry ids that were surfaced by recall (may contain dups).
+            accessed_at: Timestamp to stamp onto ``last_accessed_at``.
+
+        Returns:
+            Number of entries updated.
+        """
+        seen: set[str] = set()
+        updated = 0
+        for entry_id in entry_ids:
+            if entry_id in seen:
+                continue
+            seen.add(entry_id)
+            entry = self.get(entry_id)
+            if entry is None:
+                continue
+            self.update(
+                entry_id,
+                access_count=entry.access_count + 1,
+                recall_count=entry.recall_count + 1,
+                last_accessed_at=accessed_at,
+            )
+            updated += 1
+        return updated
+
     @contextlib.contextmanager
     def transaction(self) -> Iterator[StorageBackend]:
         """Optional batching context — backends that support transactions

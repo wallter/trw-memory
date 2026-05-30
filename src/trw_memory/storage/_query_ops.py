@@ -133,15 +133,29 @@ def count(backend: SQLiteBackend, namespace: str | None = None) -> int:
         ) from exc
 
 
-def entries_with_assertions(backend: SQLiteBackend, select_columns_sql: str) -> list[MemoryEntry]:
-    """PRD-CORE-086 FR07 query for assertion-health summary."""
+def entries_with_assertions(
+    backend: SQLiteBackend,
+    select_columns_sql: str,
+    *,
+    status: MemoryStatus | None = MemoryStatus.ACTIVE,
+) -> list[MemoryEntry]:
+    """PRD-CORE-086 FR07 query for assertion-health summary.
+
+    F7: defaults to ``status='active'`` so that stale assertions on
+    OBSOLETE/ARCHIVED entries don't pollute the session-start assertion-health
+    summary with false failures. Pass ``status=None`` to include every status.
+    """
     where_sql = "assertions IS NOT NULL AND assertions != '[]'"
+    params: tuple[object, ...] = ()
+    if status is not None:
+        where_sql = f"{where_sql} AND status = ?"
+        params = (status.value,)
     sql = f"SELECT {select_columns_sql} FROM memories WHERE {where_sql}"  # noqa: S608
-    fetch_query = backend._fetch_query(where_sql=where_sql, order_by="updated_at DESC")
+    fetch_query = backend._fetch_query(where_sql=where_sql, params=params, order_by="updated_at DESC")
     backend._ensure_connection_fresh()
     try:
         with backend._lock:
-            return _execute_resilient(backend, sql, (), fetch_query=fetch_query)
+            return _execute_resilient(backend, sql, params, fetch_query=fetch_query)
     except sqlite3.Error as exc:
         logger.debug("entries_with_assertions_query_failed", exc_info=True)
         raise StorageError(
