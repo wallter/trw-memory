@@ -263,24 +263,20 @@ async def bulk_store_impl(
             if client._namespace.startswith("team:"):
                 NamespaceManager(backend).ensure_team_namespace(client._namespace, created_at=now)
 
-            backend.store(entry)
-            if embedding is not None:
-                try:
-                    backend.upsert_vector(entry.id, embedding)
-                except Exception as exc:
-                    try:
-                        backend.delete(entry.id)
-                    except Exception:
-                        logger.exception(
-                            "bulk_store_vector_rollback_failed",
-                            memory_id=entry.id,
-                        )
-                        raise StorageError(
-                            f"failed to persist vector for {entry.id!r}; rollback did not complete cleanly"
-                        ) from exc
-                    raise StorageError(
-                        f"failed to persist vector for {entry.id!r}; entry write was rolled back"
-                    ) from exc
+            # S1 fix (mirrors _client_store): per-entry row+vector atomicity.
+            # Each entry keeps its own commit granularity (matching the prior
+            # per-entry commit), but row and vector now land in ONE transaction
+            # so a crash between them can't leave a row with no vector. No manual
+            # compensating delete — the block's ROLLBACK handles failure.
+            try:
+                with backend.transaction():
+                    backend.store(entry)
+                    if embedding is not None:
+                        backend.upsert_vector(entry.id, embedding)
+            except Exception as exc:
+                raise StorageError(
+                    f"failed to persist entry+vector for {entry.id!r}; transaction rolled back"
+                ) from exc
 
             try:
                 schedule_graph_update(entry, backend, embedding=embedding, config=client._config)

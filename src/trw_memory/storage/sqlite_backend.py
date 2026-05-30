@@ -479,9 +479,16 @@ class SQLiteBackend(StorageBackend):
         """
         is_outer = self._skip_commit_depth == 0
         if is_outer:
+            # S2 fix: raise the skip-commit gate INSIDE the same lock that
+            # issues BEGIN IMMEDIATE, before the lock releases. Otherwise a
+            # concurrent writer acquiring the lock in the window between
+            # BEGIN and the depth bump reads ``_skip_commit_depth == 0`` and
+            # commits the outer transaction prematurely.
             with self._lock:
                 self._conn.execute("BEGIN IMMEDIATE")
-        self._skip_commit_depth += 1
+                self._skip_commit_depth += 1
+        else:
+            self._skip_commit_depth += 1
         try:
             yield self
             if is_outer:
@@ -496,7 +503,14 @@ class SQLiteBackend(StorageBackend):
                     logger.exception("transaction_rollback_failed", db=str(self._db_path))
             raise
         finally:
-            self._skip_commit_depth -= 1
+            # Symmetric to the increment: drop the outer gate under the lock so
+            # the depth transition back to 0 is atomic with respect to other
+            # writers that consult it.
+            if is_outer:
+                with self._lock:
+                    self._skip_commit_depth -= 1
+            else:
+                self._skip_commit_depth -= 1
 
     # ------------------------------------------------------------------
     # Query / list / namespace ops (delegated to _query_ops.py
@@ -677,6 +691,7 @@ class SQLiteBackend(StorageBackend):
             dim=self._dim,
             entry_id=entry_id,
             embedding=embedding,
+            skip_commit=self._skip_commit_depth != 0,
         )
 
     def search_vectors(self, query_embedding: list[float], top_k: int = 25) -> list[tuple[str, float]]:

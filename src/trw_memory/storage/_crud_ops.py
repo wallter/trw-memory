@@ -112,7 +112,11 @@ def store(
     try:
         with backend._lock:
             backend._conn.execute(sql, entry_to_row(entry))
-            backend._conn.commit()
+            # S9 fix: suppress the commit when inside a ``transaction()`` block
+            # so a store() batched with other writes commits exactly once at
+            # the outermost COMMIT — matching update()/increment_recall_access.
+            if backend._skip_commit_depth == 0:
+                backend._conn.commit()
         logger.debug("memory_stored", entry_id=entry.id)
     except (sqlite3.Error, json.JSONDecodeError) as exc:
         raise StorageError(

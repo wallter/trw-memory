@@ -171,19 +171,20 @@ async def store_impl(
         embedding = embedder.embed(f"{entry.content} {entry.detail}") if embedder is not None else None
         if client._namespace.startswith("team:"):
             NamespaceManager(backend).ensure_team_namespace(client._namespace, created_at=now)
-        backend.store(entry)
-        if embedding is not None:
-            try:
-                backend.upsert_vector(entry.id, embedding)
-            except Exception as exc:
-                try:
-                    backend.delete(entry.id)
-                except Exception:
-                    _client_logger().exception("memory_store_vector_rollback_failed", memory_id=entry.id)
-                    raise StorageError(
-                        f"failed to persist vector for {entry.id!r}; rollback did not complete cleanly"
-                    ) from exc
-                raise StorageError(f"failed to persist vector for {entry.id!r}; entry write was rolled back") from exc
+        # S1 fix: commit the row + its vector in ONE transaction so a crash
+        # between the two writes can no longer leave a row with no vector.
+        # store() and upsert_vector() defer their commit inside the block
+        # (PRD S9/S3); the outermost COMMIT lands both atomically, and any
+        # exception triggers a single ROLLBACK — no manual compensating delete.
+        try:
+            with backend.transaction():
+                backend.store(entry)
+                if embedding is not None:
+                    backend.upsert_vector(entry.id, embedding)
+        except Exception as exc:
+            raise StorageError(
+                f"failed to persist entry+vector for {entry.id!r}; transaction rolled back"
+            ) from exc
         try:
             schedule_graph_update(entry, backend, embedding=embedding, config=client._config)
         except RuntimeError:

@@ -129,8 +129,17 @@ def upsert_vector(
     dim: int,
     entry_id: str,
     embedding: list[float],
+    skip_commit: bool = False,
 ) -> None:
-    """Insert or update a vector in vec_memories. No-op when sqlite-vec absent."""
+    """Insert or update a vector in vec_memories. No-op when sqlite-vec absent.
+
+    When ``skip_commit`` is True the write is staged but NOT committed — used
+    when the caller is inside a backend ``transaction()`` block so the vector
+    write commits atomically with the row write at the outermost COMMIT
+    (mirrors the ``delete_vector_internal`` / ``delete_vector`` split). On the
+    vec-unavailable fallback the connection-wide ``rollback()`` is likewise
+    suppressed so an in-flight outer transaction is left intact for its owner.
+    """
     if not vec_available:
         return
     emb_bytes = struct.pack(f"{dim}f", *embedding)
@@ -144,11 +153,16 @@ def upsert_vector(
                 "INSERT INTO vec_memories(rowid, embedding) VALUES(?, ?)",
                 (rowid, emb_bytes),
             )
-            conn.commit()
+            if not skip_commit:
+                conn.commit()
     except sqlite3.Error as exc:
         if _is_optional_vec_unavailable_error(exc):
-            with contextlib.suppress(sqlite3.Error):
-                conn.rollback()
+            if not skip_commit:
+                # Standalone upsert: undo the partial vec writes. Inside a
+                # transaction we must NOT rollback — that would discard the
+                # owner's outer batch; leave cleanup to the outermost handler.
+                with contextlib.suppress(sqlite3.Error):
+                    conn.rollback()
             logger.warning(
                 "vector_index_unavailable",
                 op="upsert",
