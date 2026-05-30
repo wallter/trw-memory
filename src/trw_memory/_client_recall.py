@@ -416,6 +416,7 @@ async def try_hybrid_recall(
             stored_embeddings=stored_embeddings or None,
             bm25_candidates=effective_bm25_candidates,
             vector_candidates=effective_vector_candidates,
+            importance_alpha=client._config.rrf_importance_alpha,
             top_k=effective_top_k,
         )
     except Exception:
