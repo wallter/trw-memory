@@ -4,6 +4,43 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Vector clock advanced on local update** (commit `b134d9ffc`). The vector clock was being reset
+  instead of incremented on local writes, causing team-sync conflict resolution to pick the wrong
+  winning value when two nodes updated the same entry. All local stores now call
+  `_advance_local_clock()`.
+- **Vector dimension mismatch guarded in native sqlite-vec pack path** — an uncaught `struct.error`
+  from a mismatched embedding dimension failed the whole store silently; the error is now caught,
+  logged with `outcome=dimension_mismatch`, and raised as `DimensionMismatchError`.
+- **GitHub PAT and AWS access-key patterns added to PII scan** — secrets matching `ghp_`/`ghs_`/
+  `gho_` (GitHub PAT) and `AKIA[0-9A-Z]{16}` (AWS Access Key ID) were not detected by the PII
+  scanner, so they could be stored in plaintext.
+- **Obsolete neighbours filtered from graph related-recall** — `get_related()` was returning
+  `obsolete`/`superseded` neighbour entries the same as main recall; obsolete entries are now
+  filtered out before the result is returned.
+- **Config-driven tier caps + batch tier convergence** (store-audit S12, recall R-RANK-003).
+  Per-tier entry caps are now read from `MemoryConfig` at runtime; the batch tier-assignment loop
+  converges in a bounded number of passes instead of potentially oscillating.
+- **Recall ranks session-start baseline by utility, not recency, and blends impact into RRF fusion**
+  (recall audit R-RANK-002/004, R-FUSION-001). Shared fix with trw-mcp — see trw-mcp changelog.
+- **`transaction()` made thread-safe; namespace-delete and consolidation atomicity gaps closed**
+  (store-audit S4/S8). `transaction()` now acquires the write-lock before entering the SQLite
+  transaction so concurrent threads cannot interleave writes. `delete_namespace` and
+  `consolidate_entries` are wrapped in transactions to prevent partial updates.
+- **Store + vector writes made atomic; transaction-depth TOCTOU closed** (store-audit S1/S2/S3/S9).
+  The primary-store INSERT and the sqlite-vec INSERT are now inside the same `BEGIN IMMEDIATE` block
+  so a failure mid-sequence cannot leave orphan vector rows. The transaction-depth check used a
+  read-check-write sequence that could race; it is now protected by the write-lock.
+- **Dedup works on default installs; merge stops losing data** (store-audit P0/P1). The dedup path
+  was gated on optional `[vectors]` being installed; semantic dedup now falls back to BM25-only
+  similarity on plain installs. The merge-on-dedup path was discarding the incumbent entry's tags
+  and namespace before overwriting; all fields are now merged.
+- **Recall correctness and performance** (recall audit C6/C7/C11/P-007/P-008). Expiry filter
+  applied before scoring (expired entries no longer appear in results), obsolete/superseded vectors
+  pruned from the vector index on recall, batch recall-access uses a single SQL `IN (…)` query
+  instead of N round-trips, and missing indexes on `(status, namespace)` and `created_at` added.
+
 ## [0.8.5] — 2026-05-29
 
 ### Fixed
@@ -36,6 +73,17 @@ All notable changes to the TRW Memory package.
 
 
 ## [0.8.4] — 2026-05-28
+
+### Added
+
+- **Recall-latency telemetry on the hybrid retrieval path** (PRD-DIST-2047 Phase 2,
+  commit `a6e756bde`). `try_hybrid_recall` now emits a `hybrid_recall_complete`
+  structlog event on every terminating branch (`ok`, `no_candidates`,
+  `empty_ranking`, `hybrid_search_failed`). The event carries
+  `list_entries_ms`, `hybrid_search_ms`, `total_ms`, `namespace_size`,
+  `candidate_pool_size`, `effective_bm25_candidates`, and
+  `effective_vector_candidates` so retrieval latency and candidate-pool
+  health can be diagnosed from structured logs without instrumentation changes.
 
 ### Fixed
 
