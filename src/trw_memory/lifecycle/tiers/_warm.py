@@ -268,8 +268,20 @@ class WarmTierStore:
                                 continue
                             item = dict(sidecar_entry)
                             item["id"] = eid
-                            item["_tier_relevance"] = float(1.0 - dist)
-                            item["score"] = float(1.0 - dist)
+                            # sqlite-vec vec0 float[] returns L2 (Euclidean)
+                            # distance, not cosine. For the unit-normalized
+                            # embeddings this engine stores
+                            # (normalize_embeddings=True),
+                            # cosine_similarity = 1 - distance**2 / 2 (since
+                            # distance**2 = 2 * (1 - cos)). The prior
+                            # `1 - distance` under-scored every moderately-similar
+                            # hit (cos=0.5 -> 0.0) and could even go negative,
+                            # distorting cross-tier importance scoring. Order is
+                            # unchanged (both are monotonic in distance); only
+                            # the magnitude is corrected.
+                            similarity = 1.0 - (dist * dist) / 2.0
+                            item["_tier_relevance"] = float(similarity)
+                            item["score"] = float(similarity)
                             results.append(item)
                         return results
             except (OSError, ValueError):

@@ -13,6 +13,7 @@ import pytest
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage._vector_ops import (
     delete_vector_internal,
+    get_stored_embeddings,
     search_vectors,
     upsert_vector,
     vector_exists,
@@ -103,6 +104,40 @@ class TestStoredEmbeddings:
 
         assert set(embeddings) == {entry.id}
         assert embeddings[entry.id] == pytest.approx([0.1] * backend._dim)
+
+    def test_get_stored_embeddings_real_sql_error_logs_warning(self) -> None:
+        """A REAL sqlite error (corruption/IO) must surface at WARNING, not be
+        silently swallowed at debug — a bulk-backfill caller reads {} as 'no
+        stored embeddings' and re-embeds everything."""
+        from structlog.testing import capture_logs
+
+        class _BoomConn:
+            def execute(self, _sql: str, _params: Any) -> Any:
+                raise sqlite3.OperationalError("disk I/O error")
+
+        with capture_logs() as logs:
+            result = get_stored_embeddings(
+                _BoomConn(), threading.Lock(), vec_available=True, entry_ids=["x"]
+            )
+        assert result == {}
+        load_errors = [e for e in logs if e.get("event") == "vector_load_error"]
+        assert load_errors and load_errors[0]["log_level"] == "warning"
+
+    def test_get_stored_embeddings_vec_absent_stays_debug(self) -> None:
+        """The expected vec0-module-absent case stays at debug (graceful)."""
+        from structlog.testing import capture_logs
+
+        class _VecAbsentConn:
+            def execute(self, _sql: str, _params: Any) -> Any:
+                raise sqlite3.OperationalError("no such module: vec0")
+
+        with capture_logs() as logs:
+            result = get_stored_embeddings(
+                _VecAbsentConn(), threading.Lock(), vec_available=True, entry_ids=["x"]
+            )
+        assert result == {}
+        load_errors = [e for e in logs if e.get("event") == "vector_load_error"]
+        assert load_errors and load_errors[0]["log_level"] == "debug"
 
 
 class TestExistingVectorIds:

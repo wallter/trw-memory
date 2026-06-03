@@ -265,8 +265,15 @@ def get_stored_embeddings(
     try:
         with lock:
             rows = conn.execute(sql, entry_ids).fetchall()
-    except sqlite3.Error:
-        logger.debug("vector_load_error", exc_info=True)
+    except sqlite3.Error as exc:
+        # Match search_vectors: only the expected vec0-module-absent case stays
+        # at debug. A REAL SQL error (corruption, I/O, locked DB) returns {} —
+        # which a bulk-backfill caller reads as "no stored embeddings" and
+        # re-embeds everything — so surface it at warning, not silently.
+        if _is_optional_vec_unavailable_error(exc):
+            logger.debug("vector_load_error", exc_info=True)
+        else:
+            logger.warning("vector_load_error", exc_info=True)
         return {}
 
     embeddings: dict[str, list[float]] = {}

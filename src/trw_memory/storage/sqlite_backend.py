@@ -620,18 +620,22 @@ class SQLiteBackend(StorageBackend):
         can never leave orphan wiki refs or vector rows pointing at deleted
         entries — it is all-or-nothing.
         """
-        # Snapshot the namespace's entry IDs BEFORE the delete so vec_index rows
-        # (keyed on entry_id, not namespace) can be cleaned up in the same txn.
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT id FROM memories WHERE namespace = ?",
-                (namespace,),
-            ).fetchall()
-        entry_ids = [str(row[0]) for row in rows]
-        if not entry_ids:
-            return 0
-
         with self.transaction():
+            # Snapshot the namespace's entry IDs INSIDE the BEGIN IMMEDIATE txn so
+            # vec_index rows (keyed on entry_id, not namespace) are cleaned up for
+            # exactly the rows the DELETE removes. Reading the IDs before the txn
+            # left a TOCTOU: a concurrent INSERT between the SELECT and BEGIN got
+            # deleted from `memories` (DELETE WHERE namespace) but its vec rows
+            # were missed (stale id list) → orphan vec hits. The write lock here
+            # blocks concurrent writers, so the snapshot matches the delete.
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT id FROM memories WHERE namespace = ?",
+                    (namespace,),
+                ).fetchall()
+            entry_ids = [str(row[0]) for row in rows]
+            if not entry_ids:
+                return 0
             deleted = _query_ops_delete_by_namespace(self, namespace)
             with self._lock:
                 self._conn.execute("DELETE FROM wiki_refs WHERE namespace = ?", (namespace,))
