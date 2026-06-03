@@ -115,8 +115,14 @@ def existing_vector_ids(
     try:
         with lock:
             rows = conn.execute("SELECT entry_id FROM vec_index").fetchall()
-    except sqlite3.Error:
-        logger.debug("existing_vector_ids_query_failed", exc_info=True)
+    except sqlite3.Error as exc:
+        # Real SQL error here (vec_available was already True) → surface at
+        # warning so a bulk backfill doesn't silently re-embed everything on a
+        # transient table error; only the vec0-absent case stays at debug.
+        if _is_optional_vec_unavailable_error(exc):
+            logger.debug("existing_vector_ids_query_failed", exc_info=True)
+        else:
+            logger.warning("existing_vector_ids_query_failed", exc_info=True)
         return set()
     return {str(row[0]) for row in rows}
 
@@ -227,8 +233,15 @@ def search_vectors(
                 (query_bytes, top_k),
             ).fetchall()
         return [(str(r[0]), float(r[1])) for r in rows]
-    except sqlite3.Error:
-        logger.debug("vector_search_error", exc_info=True)
+    except sqlite3.Error as exc:
+        # Keep the graceful BM25-only fallback (return []), but surface a REAL
+        # SQL error (corruption, I/O) at warning — only the expected
+        # vec0-module-absent case stays at debug. Otherwise vector search silently
+        # degrades with no operator signal (the compounding-pipeline silent-rot class).
+        if _is_optional_vec_unavailable_error(exc):
+            logger.debug("vector_search_error", exc_info=True)
+        else:
+            logger.warning("vector_search_error", exc_info=True)
         return []
 
 

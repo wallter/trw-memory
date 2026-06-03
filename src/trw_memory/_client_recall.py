@@ -421,7 +421,10 @@ async def try_hybrid_recall(
         )
     except Exception:
         hybrid_search_ms = (perf_counter() - hybrid_search_start) * 1000.0
-        logger.debug(
+        # warning, not debug: hybrid search failing silently drops recall to the
+        # weaker fallback path with no operator-visible signal — the exact
+        # silent-degradation class that let the compounding pipeline rot.
+        logger.warning(
             "hybrid_search_failed",
             op="recall",
             outcome="failure",
