@@ -117,6 +117,24 @@ def prepare_entry_for_store(
     flagged_entry = _flag_code_snippet(entry)
     secured_entry = _apply_sec001_intake(flagged_entry, config=config, session_id=session_id, trw_dir=trw_dir)
     if secured_entry.metadata.get("quarantined") == "true":
+        # A trust-score quarantine must still carry provenance so it stays
+        # auditable: audit_entry() then reports `quarantined` + verified rather
+        # than `legacy_unsigned`. The normal path signs at _apply_provenance_hash
+        # (post-PII, below); this early return must not silently skip signing.
+        # No PII-redaction runs on the quarantine path, so signing the
+        # quarantined content as-is keeps the stored hash + signature internally
+        # consistent. Best-effort: if the signing key is unavailable we keep the
+        # (still-quarantined) entry unsigned rather than failing the store — a
+        # held entry is never recalled until a review approves it.
+        try:
+            secured_entry = _apply_provenance_hash(secured_entry, config=config, session_id=session_id, trw_dir=trw_dir)
+        except ProvenanceKeyUnavailableError:
+            logger.warning(
+                "quarantine_provenance_sign_skipped",
+                entry_id=secured_entry.id,
+                namespace=secured_entry.namespace,
+                outcome="signing_key_unavailable",
+            )
         trust_score = float(secured_entry.metadata.get("trust_score", "0.0") or "0.0")
         return PreparedStoreEntry(
             entry=secured_entry,

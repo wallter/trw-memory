@@ -90,8 +90,9 @@ client.register_tools(agent)
 
 # Or use the auto_recall decorator
 @client.auto_recall(query_from="prompt")
-async def handle_prompt(prompt: str, recalled_memories: list = []) -> str:
+async def handle_prompt(prompt: str, recalled_memories: list | None = None) -> str:
     # recalled_memories is automatically injected with relevant context
+    recalled_memories = recalled_memories or []
     return f"Found {len(recalled_memories)} relevant memories"
 ```
 

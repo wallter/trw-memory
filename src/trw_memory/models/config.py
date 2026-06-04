@@ -91,6 +91,20 @@ class MemoryConfig(BaseSettings):
     bm25_candidates: int = Field(default=50, gt=0, description="Number of BM25 candidates to consider")
     vector_candidates: int = Field(default=50, gt=0, description="Number of dense vector candidates to consider")
     rrf_k: int = Field(default=60, gt=0, description="RRF constant k for reciprocal rank fusion")
+    rrf_importance_alpha: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("rrf_importance_alpha", "memory_rrf_importance_alpha"),
+        description=(
+            "R-FUSION-001: blend weight on the (normalised) RRF position score "
+            "vs. the entry's importance in hybrid_search. final = alpha * "
+            "rrf_norm + (1 - alpha) * importance. 1.0 = pure position (legacy "
+            "behaviour, ignores importance); 0.0 = pure importance. Default 0.7 "
+            "lets a high-impact entry edge out an equally-ranked low-impact one "
+            "without overriding strong relevance signal."
+        ),
+    )
     hybrid_search_candidate_pool_size: int = Field(
         default=1000,
         ge=10,
@@ -194,6 +208,20 @@ class MemoryConfig(BaseSettings):
         ge=0.0,
         le=1.0,
         description="Maximum composite tier score allowed before a cold entry is purged",
+    )
+
+    # Forced importance-tier distribution caps (mirror trw-mcp impact_tier_*_cap)
+    impact_tier_critical_cap: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description="Maximum fraction of active entries allowed in the critical importance tier (>=0.9)",
+    )
+    impact_tier_high_cap: float = Field(
+        default=0.20,
+        ge=0.0,
+        le=1.0,
+        description="Maximum fraction of active entries allowed in the high importance tier (0.7-0.89)",
     )
 
     # Scoring

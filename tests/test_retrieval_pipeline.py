@@ -160,3 +160,67 @@ class TestHybridSearchDegradation:
         with patch("trw_memory.retrieval.pipeline.dense_search", return_value=[]):
             results = hybrid_search("pydantic", entries, embedder=None)
         assert len(results) >= 1
+
+
+class TestHybridSearchImportanceBlend:
+    """R-FUSION-001 wiring: importance_alpha reorders the pipeline output.
+
+    These tests drive ``hybrid_search`` (the live MemoryClient hybrid path)
+    with two entries that TIE on fused position, then assert impact breaks the
+    tie. Each test FAILS against the pre-fix pipeline (which always called
+    ``rrf_fuse`` position-only and never threaded importance).
+    """
+
+    def _tied_entries(self) -> list[MemoryEntry]:
+        # Two entries; one high-impact, one low-impact. The BM25/dense stubs
+        # below place each at rank 0 of a separate ranking, so position-only
+        # RRF scores them equally — impact is the only differentiator.
+        return [
+            make_entry("low", "shared topic content", importance=0.10),
+            make_entry("high", "shared topic content", importance=0.95),
+        ]
+
+    def _patched_rankings(self) -> tuple[object, object]:
+        # bm25 ranks 'low' first, dense ranks 'high' first → both at rank 0 in
+        # their own list → equal RRF score.
+        bm25 = patch(
+            "trw_memory.retrieval.pipeline.bm25_search",
+            return_value=[("low", 5.0)],
+        )
+        dense = patch(
+            "trw_memory.retrieval.pipeline.dense_search",
+            return_value=[("high", 0.9)],
+        )
+        return bm25, dense
+
+    def test_default_alpha_does_not_reorder_by_impact(self) -> None:
+        entries = self._tied_entries()
+        bm25, dense = self._patched_rankings()
+        with bm25, dense:
+            # Default importance_alpha=1.0 → position-only. With a position tie,
+            # impact must NOT be the decider (legacy behaviour preserved).
+            results = hybrid_search(
+                "shared",
+                entries,
+                embedder=StubEmbedder(),
+                stored_embeddings={"low": [0.1, 0.2, 0.3], "high": [0.1, 0.2, 0.3]},
+            )
+        ids = [e.id for e in results]
+        # Both present; impact 0.95 'high' does NOT get promoted above 'low'
+        # purely by impact at alpha=1.0 (tie-break falls to dict/iteration order).
+        assert set(ids) == {"low", "high"}
+        assert ids[0] == "low"
+
+    def test_importance_alpha_promotes_high_impact(self) -> None:
+        entries = self._tied_entries()
+        bm25, dense = self._patched_rankings()
+        with bm25, dense:
+            results = hybrid_search(
+                "shared",
+                entries,
+                embedder=StubEmbedder(),
+                stored_embeddings={"low": [0.1, 0.2, 0.3], "high": [0.1, 0.2, 0.3]},
+                importance_alpha=0.7,
+            )
+        ids = [e.id for e in results]
+        assert ids[0] == "high", "importance_alpha must promote the 0.95-impact entry"

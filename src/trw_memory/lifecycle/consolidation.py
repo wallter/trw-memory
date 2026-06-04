@@ -336,6 +336,12 @@ def _archive_originals(
 
     On failure, logs ERROR and raises the exception (caller handles rollback).
 
+    S4 fix: all per-entry archival updates run inside ONE ``storage.transaction()``
+    so a crash mid-loop can never leave a cluster partially archived — either every
+    original gets ``status=archived`` + ``consolidated_into`` or none do. The
+    interface default ``transaction()`` is a no-op pass-through, so YAML/other
+    backends keep their prior per-call-commit behaviour.
+
     Args:
         cluster: Original MemoryEntry objects being archived.
         consolidated_id: ID of the newly created consolidated entry.
@@ -343,29 +349,30 @@ def _archive_originals(
     """
     processed: list[str] = []
 
-    for entry in cluster:
-        try:
-            updated = storage.update(
-                entry.id,
-                consolidated_into=consolidated_id,
-                status=MemoryStatus.ARCHIVED,
-                updated_at=datetime.now(timezone.utc),
-            )
-            if updated is None:
-                raise StorageError(f"failed to archive original entry {entry.id!r}")
-            processed.append(entry.id)
-        except (
-            StorageError,
-            ValueError,
-            RuntimeError,
-        ) as exc:  # per-item error handling: re-raise but log each failure individually
-            logger.exception(
-                "consolidation_archive_failed",
-                entry_id=entry.id,
-                consolidated_id=consolidated_id,
-                error=str(exc),
-            )
-            raise
+    with storage.transaction():
+        for entry in cluster:
+            try:
+                updated = storage.update(
+                    entry.id,
+                    consolidated_into=consolidated_id,
+                    status=MemoryStatus.ARCHIVED,
+                    updated_at=datetime.now(timezone.utc),
+                )
+                if updated is None:
+                    raise StorageError(f"failed to archive original entry {entry.id!r}")
+                processed.append(entry.id)
+            except (
+                StorageError,
+                ValueError,
+                RuntimeError,
+            ) as exc:  # per-item error handling: re-raise but log each failure individually
+                logger.exception(
+                    "consolidation_archive_failed",
+                    entry_id=entry.id,
+                    consolidated_id=consolidated_id,
+                    error=str(exc),
+                )
+                raise
 
     logger.info(
         "consolidation_archive_complete",

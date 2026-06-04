@@ -91,6 +91,22 @@ _PII_PATTERNS: list[tuple[PIIType, re.Pattern[str], float]] = [
         ),
         0.9,
     ),
+    # Provider-specific secret shapes that lack a "<prefix>[-_]" separator and
+    # fall below the Shannon-entropy backstop (e.g. a 40-char GitHub PAT scores
+    # ~4.1 bits/char, under the 4.5 default). These leaked silently before — a
+    # token in `content`/`detail` matched neither the generic API_KEY pattern
+    # nor the high-entropy path. Patterns are anchored + bounded (no nested
+    # quantifiers) so they stay ReDoS-free.
+    (
+        PIIType.API_KEY,
+        re.compile(
+            # GitHub: ghp_/gho_/ghu_/ghs_/ghr_ + 36 base62, or github_pat_ + long body
+            r"\b(?:gh[posru]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,})\b"
+            # AWS access key IDs: AKIA/ASIA + 16 uppercase base32
+            r"|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b",
+        ),
+        0.95,
+    ),
     (
         PIIType.IP_ADDRESS,
         re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
@@ -305,6 +321,14 @@ def strip_pii(text: str) -> str:
         "<api_key>",
         text,
         flags=re.IGNORECASE,
+    )
+    # Provider-specific secret shapes without a "<prefix>[-_]" separator
+    # (GitHub PATs, AWS access key IDs) — see _PII_PATTERNS above.
+    text = re.sub(
+        r"\b(?:gh[posru]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,})\b"
+        r"|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b",
+        "<api_key>",
+        text,
     )
     return text
 

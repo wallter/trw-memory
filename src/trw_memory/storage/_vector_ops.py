@@ -115,8 +115,14 @@ def existing_vector_ids(
     try:
         with lock:
             rows = conn.execute("SELECT entry_id FROM vec_index").fetchall()
-    except sqlite3.Error:
-        logger.debug("existing_vector_ids_query_failed", exc_info=True)
+    except sqlite3.Error as exc:
+        # Real SQL error here (vec_available was already True) → surface at
+        # warning so a bulk backfill doesn't silently re-embed everything on a
+        # transient table error; only the vec0-absent case stays at debug.
+        if _is_optional_vec_unavailable_error(exc):
+            logger.debug("existing_vector_ids_query_failed", exc_info=True)
+        else:
+            logger.warning("existing_vector_ids_query_failed", exc_info=True)
         return set()
     return {str(row[0]) for row in rows}
 
@@ -129,9 +135,33 @@ def upsert_vector(
     dim: int,
     entry_id: str,
     embedding: list[float],
+    skip_commit: bool = False,
 ) -> None:
-    """Insert or update a vector in vec_memories. No-op when sqlite-vec absent."""
+    """Insert or update a vector in vec_memories. No-op when sqlite-vec absent.
+
+    When ``skip_commit`` is True the write is staged but NOT committed — used
+    when the caller is inside a backend ``transaction()`` block so the vector
+    write commits atomically with the row write at the outermost COMMIT
+    (mirrors the ``delete_vector_internal`` / ``delete_vector`` split). On the
+    vec-unavailable fallback the connection-wide ``rollback()`` is likewise
+    suppressed so an in-flight outer transaction is left intact for its owner.
+    """
     if not vec_available:
+        return
+    if len(embedding) != dim:
+        # A fixed-dim vec0 table cannot hold a wrong-length vector (e.g. an
+        # embedding-model swap leaving config.embedding_dim stale). Skip the
+        # vector write the same way the vec-unavailable path does: the canonical
+        # row + BM25 still provide retrieval. struct.pack would otherwise raise
+        # an uncaught struct.error and fail the whole store transaction.
+        logger.warning(
+            "vector_dimension_mismatch",
+            op="upsert",
+            entry_id=entry_id,
+            expected_dim=dim,
+            actual_dim=len(embedding),
+            hint="embedding length != backend dim; canonical memory write is preserved, vector skipped",
+        )
         return
     emb_bytes = struct.pack(f"{dim}f", *embedding)
     try:
@@ -144,11 +174,16 @@ def upsert_vector(
                 "INSERT INTO vec_memories(rowid, embedding) VALUES(?, ?)",
                 (rowid, emb_bytes),
             )
-            conn.commit()
+            if not skip_commit:
+                conn.commit()
     except sqlite3.Error as exc:
         if _is_optional_vec_unavailable_error(exc):
-            with contextlib.suppress(sqlite3.Error):
-                conn.rollback()
+            if not skip_commit:
+                # Standalone upsert: undo the partial vec writes. Inside a
+                # transaction we must NOT rollback — that would discard the
+                # owner's outer batch; leave cleanup to the outermost handler.
+                with contextlib.suppress(sqlite3.Error):
+                    conn.rollback()
             logger.warning(
                 "vector_index_unavailable",
                 op="upsert",
@@ -173,6 +208,17 @@ def search_vectors(
     """KNN search in vec_memories. Empty list when sqlite-vec absent."""
     if not vec_available:
         return []
+    if len(query_embedding) != dim:
+        # A query vector whose length differs from the indexed dim (model swap)
+        # cannot match the fixed-dim vec0 table. Degrade to "no dense hits" so
+        # the caller falls back to BM25, rather than raising an uncaught
+        # struct.error from the pack below.
+        logger.debug(
+            "vector_search_dimension_mismatch",
+            expected_dim=dim,
+            actual_dim=len(query_embedding),
+        )
+        return []
     query_bytes = struct.pack(f"{dim}f", *query_embedding)
     try:
         with lock:
@@ -187,8 +233,15 @@ def search_vectors(
                 (query_bytes, top_k),
             ).fetchall()
         return [(str(r[0]), float(r[1])) for r in rows]
-    except sqlite3.Error:
-        logger.debug("vector_search_error", exc_info=True)
+    except sqlite3.Error as exc:
+        # Keep the graceful BM25-only fallback (return []), but surface a REAL
+        # SQL error (corruption, I/O) at warning — only the expected
+        # vec0-module-absent case stays at debug. Otherwise vector search silently
+        # degrades with no operator signal (the compounding-pipeline silent-rot class).
+        if _is_optional_vec_unavailable_error(exc):
+            logger.debug("vector_search_error", exc_info=True)
+        else:
+            logger.warning("vector_search_error", exc_info=True)
         return []
 
 
@@ -212,8 +265,15 @@ def get_stored_embeddings(
     try:
         with lock:
             rows = conn.execute(sql, entry_ids).fetchall()
-    except sqlite3.Error:
-        logger.debug("vector_load_error", exc_info=True)
+    except sqlite3.Error as exc:
+        # Match search_vectors: only the expected vec0-module-absent case stays
+        # at debug. A REAL SQL error (corruption, I/O, locked DB) returns {} —
+        # which a bulk-backfill caller reads as "no stored embeddings" and
+        # re-embeds everything — so surface it at warning, not silently.
+        if _is_optional_vec_unavailable_error(exc):
+            logger.debug("vector_load_error", exc_info=True)
+        else:
+            logger.warning("vector_load_error", exc_info=True)
         return {}
 
     embeddings: dict[str, list[float]] = {}

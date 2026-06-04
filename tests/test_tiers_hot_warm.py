@@ -250,6 +250,33 @@ class TestWarmTier:
 
         assert mgr.warm_search(["semantic"], [1.0, 0.0], top_k=5) == []
 
+    def test_warm_search_score_is_cosine_from_l2_distance(
+        self, mgr: TierManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """vec0 float[] returns L2 distance; for unit-normalized embeddings the
+        score must be cosine = 1 - dist**2/2, not the prior 1 - dist (which
+        under-scored every moderately-similar hit and could go negative)."""
+        entry = _make_entry("e1", importance=0.5, days_old=0).model_dump(mode="json")
+        entry["content"] = "shared token"
+        mgr.warm_add("e1", entry, None)
+
+        dist = 1.0  # L2 distance → cosine 1 - 1/2 = 0.5 (old formula gave 1-1=0.0)
+
+        class _FakeBackend:
+            def search_vectors(self, _q: list[float], top_k: int) -> list[tuple[str, float]]:
+                return [("e1", dist)][:top_k]
+
+        monkeypatch.setattr(mgr._warm_store, "_get_warm_backend", lambda dim=None: _FakeBackend())
+
+        results = mgr.warm_search(["shared"], [1.0, 0.0], top_k=5)
+        assert results, "in-sidecar hit should be returned"
+        # _tier_relevance is the raw cosine the fix controls (it then feeds the
+        # composite importance score). Assert it equals 1 - dist**2/2, not the
+        # buggy 1 - dist.
+        expected = 1.0 - dist * dist / 2.0
+        assert results[0]["_tier_relevance"] == pytest.approx(expected)
+        assert results[0]["_tier_relevance"] != pytest.approx(1.0 - dist)
+
     def test_warm_remove_deletes_vector_rows(self, mgr: TierManager, monkeypatch: pytest.MonkeyPatch) -> None:
         class _FakeBackend:
             def __init__(self) -> None:

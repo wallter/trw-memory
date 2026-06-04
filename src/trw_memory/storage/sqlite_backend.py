@@ -15,7 +15,7 @@ from __future__ import annotations
 import contextlib
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
@@ -98,6 +98,8 @@ from trw_memory.storage._recovery import recover_db as _recovery_recover_db
 # Resilient row materialisation extracted to _resilient_fetch.py
 # (PRD-DIST-245 batch 84).
 from trw_memory.storage._resilient_fetch import (
+    FetchQuery,
+    _CursorLike,
     fetch_rows_resilient as _resilient_fetch_rows_resilient,
     fetch_rows_via_bytes_fallback as _resilient_fetch_rows_via_bytes_fallback,
 )
@@ -119,6 +121,7 @@ from trw_memory.storage._query_ops import (
     count as _query_ops_count,
     delete_by_namespace as _query_ops_delete_by_namespace,
     entries_with_assertions as _query_ops_entries_with_assertions,
+    find_active_by_content as _query_ops_find_active_by_content,
     list_entries as _query_ops_list_entries,
     list_namespaces as _query_ops_list_namespaces,
     search as _query_ops_search,
@@ -129,6 +132,7 @@ from trw_memory.storage._crud_ops import (
     delete as _crud_ops_delete,
     get as _crud_ops_get,
     increment_access_counts as _crud_ops_increment_access_counts,
+    increment_recall_access as _crud_ops_increment_recall_access,
     increment_session_counts as _crud_ops_increment_session_counts,
     store as _crud_ops_store,
     update as _crud_ops_update,
@@ -189,6 +193,14 @@ class SQLiteBackend(StorageBackend):
         # per-row commit when >0 so caller-controlled outer transaction
         # batches N writes into one BEGIN IMMEDIATE / COMMIT.
         self._skip_commit_depth: int = 0
+        # S8 follow-on: serialize OUTER transaction() bodies so two threads
+        # cannot both hold an open BEGIN IMMEDIATE on the single shared
+        # connection (which raises "cannot start a transaction within a
+        # transaction"). Re-entrant so same-thread nested transaction() calls
+        # do not self-deadlock; held only by the outermost transaction, and is
+        # a DIFFERENT lock from ``_lock`` (which inner delegated writes acquire),
+        # so no deadlock arises between the two.
+        self._txn_serializer = threading.RLock()
         self._dbapi: Any = _import_sqlcipher_driver() if sqlcipher_key_hex is not None else sqlite3
         self._sqlcipher_key_hex = sqlcipher_key_hex
         self._recovery_policy = recovery_policy
@@ -336,36 +348,51 @@ class SQLiteBackend(StorageBackend):
     # PRD-DIST-245 batch 84)
     # ------------------------------------------------------------------
 
+    def _fetch_query(
+        self,
+        *,
+        where_sql: str = "1",
+        params: Sequence[object] = (),
+        order_by: str = "updated_at DESC",
+        limit: int | None = None,
+        table: str = "memories",
+    ) -> FetchQuery:
+        """Build the :class:`FetchQuery` the resilient path re-executes."""
+        return FetchQuery(
+            select_columns_sql=_SELECT_COLUMNS_SQL,
+            table=table,
+            where_sql=where_sql,
+            params=tuple(params),
+            order_by=order_by,
+            limit=limit,
+        )
+
     def _fetch_rows_resilient(
         self,
-        cursor: Any,
+        cursor: _CursorLike,
         *,
-        table: str = "memories",
+        query: FetchQuery | None = None,
     ) -> list[MemoryEntry]:
         """Delegate to ``_resilient_fetch.fetch_rows_resilient``."""
         results, delta = _resilient_fetch_rows_resilient(
             cursor,
             db_path=self._db_path,
             dbapi=self._dbapi,
-            select_columns_sql=_SELECT_COLUMNS_SQL,
-            table=table,
+            query=query if query is not None else self._fetch_query(),
         )
         self.quarantine_count_utf8 += delta
         return results
 
     def _fetch_rows_via_bytes_fallback(
         self,
-        cursor: Any,
         *,
-        table: str = "memories",
+        query: FetchQuery | None = None,
     ) -> list[MemoryEntry]:
         """Delegate to ``_resilient_fetch.fetch_rows_via_bytes_fallback``."""
         results, delta = _resilient_fetch_rows_via_bytes_fallback(
-            cursor,
             db_path=self._db_path,
             dbapi=self._dbapi,
-            select_columns_sql=_SELECT_COLUMNS_SQL,
-            table=table,
+            query=query if query is not None else self._fetch_query(),
         )
         self.quarantine_count_utf8 += delta
         return results
@@ -438,6 +465,10 @@ class SQLiteBackend(StorageBackend):
         """Increment access_count and last_accessed_at in one transaction."""
         return _crud_ops_increment_access_counts(self, entry_ids, accessed_at=accessed_at)
 
+    def increment_recall_access(self, entry_ids: list[str], *, accessed_at: datetime | None = None) -> int:
+        """F-008: increment access_count + recall_count + last_accessed_at in ONE commit."""
+        return _crud_ops_increment_recall_access(self, entry_ids, accessed_at=accessed_at)
+
     def delete(self, entry_id: str) -> bool:
         """Remove an entry from memories (and vec_index when available)."""
         deleted = _crud_ops_delete(self, entry_id)
@@ -453,27 +484,53 @@ class SQLiteBackend(StorageBackend):
 
         Re-entrant by depth — only the outermost ``transaction()`` issues
         BEGIN/COMMIT; inner exceptions propagate; outermost issues ROLLBACK.
+
+        Concurrency: the re-entrant ``_txn_serializer`` is held for the whole
+        body so two threads cannot both open a BEGIN IMMEDIATE on the single
+        shared connection (SQLite raises "cannot start a transaction within a
+        transaction"). It is acquired BEFORE ``is_outer`` is decided, so the
+        depth==0 read that classifies a call as outer cannot race a peer thread.
+        Same-thread nested ``transaction()`` calls re-enter the RLock and are
+        classified inner by depth, so they never re-issue BEGIN.
         """
-        is_outer = self._skip_commit_depth == 0
-        if is_outer:
-            with self._lock:
-                self._conn.execute("BEGIN IMMEDIATE")
-        self._skip_commit_depth += 1
+        self._txn_serializer.acquire()
         try:
-            yield self
+            is_outer = self._skip_commit_depth == 0
             if is_outer:
+                # S2 fix: raise the skip-commit gate INSIDE the same lock that
+                # issues BEGIN IMMEDIATE, before the lock releases. Otherwise a
+                # concurrent writer acquiring the lock in the window between
+                # BEGIN and the depth bump reads ``_skip_commit_depth == 0`` and
+                # commits the outer transaction prematurely.
                 with self._lock:
-                    self._conn.commit()
-        except BaseException:
-            if is_outer:
-                try:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    self._skip_commit_depth += 1
+            else:
+                self._skip_commit_depth += 1
+            try:
+                yield self
+                if is_outer:
                     with self._lock:
-                        self._conn.rollback()
-                except sqlite3.Error:
-                    logger.exception("transaction_rollback_failed", db=str(self._db_path))
-            raise
+                        self._conn.commit()
+            except BaseException:
+                if is_outer:
+                    try:
+                        with self._lock:
+                            self._conn.rollback()
+                    except sqlite3.Error:
+                        logger.exception("transaction_rollback_failed", db=str(self._db_path))
+                raise
+            finally:
+                # Symmetric to the increment: drop the outer gate under the lock so
+                # the depth transition back to 0 is atomic with respect to other
+                # writers that consult it.
+                if is_outer:
+                    with self._lock:
+                        self._skip_commit_depth -= 1
+                else:
+                    self._skip_commit_depth -= 1
         finally:
-            self._skip_commit_depth -= 1
+            self._txn_serializer.release()
 
     # ------------------------------------------------------------------
     # Query / list / namespace ops (delegated to _query_ops.py
@@ -502,13 +559,35 @@ class SQLiteBackend(StorageBackend):
             namespace=namespace,
         )
 
+    def find_active_by_content(
+        self,
+        content: str,
+        detail: str,
+        *,
+        namespace: str = "default",
+    ) -> str | None:
+        """Return the id of an ACTIVE entry with exactly matching content + detail.
+
+        Embedding-independent exact-content dedup lookup (PRD-CORE-042).
+        Read-only; namespace-scoped. Returns None when no exact duplicate exists.
+        """
+        return _query_ops_find_active_by_content(self, content, detail, namespace=namespace)
+
     def count(self, namespace: str | None = None) -> int:
         """Return the number of stored entries."""
         return _query_ops_count(self, namespace)
 
-    def entries_with_assertions(self) -> list[MemoryEntry]:
-        """PRD-CORE-086 FR07 query for assertion-health summary."""
-        return _query_ops_entries_with_assertions(self)
+    def entries_with_assertions(
+        self,
+        *,
+        status: MemoryStatus | None = MemoryStatus.ACTIVE,
+    ) -> list[MemoryEntry]:
+        """PRD-CORE-086 FR07 query for assertion-health summary.
+
+        F7: defaults to active-only so obsolete entries' stale assertions
+        don't pollute the session-start summary. ``status=None`` = all statuses.
+        """
+        return _query_ops_entries_with_assertions(self, _SELECT_COLUMNS_SQL, status=status)
 
     # Backward-compat alias for PRD-CORE-086 FR07 traceability.
     count_with_assertions = entries_with_assertions
@@ -534,12 +613,35 @@ class SQLiteBackend(StorageBackend):
         return _query_ops_list_namespaces(self)
 
     def delete_by_namespace(self, namespace: str) -> int:
-        """Delete all entries in a namespace."""
-        deleted = _query_ops_delete_by_namespace(self, namespace)
-        if deleted:
+        """Delete all entries in a namespace atomically.
+
+        S8 fix: the entry-row DELETE, the companion ``wiki_refs`` cleanup, and
+        per-entry vector removal all run inside ONE ``transaction()`` so a crash
+        can never leave orphan wiki refs or vector rows pointing at deleted
+        entries — it is all-or-nothing.
+        """
+        with self.transaction():
+            # Snapshot the namespace's entry IDs INSIDE the BEGIN IMMEDIATE txn so
+            # vec_index rows (keyed on entry_id, not namespace) are cleaned up for
+            # exactly the rows the DELETE removes. Reading the IDs before the txn
+            # left a TOCTOU: a concurrent INSERT between the SELECT and BEGIN got
+            # deleted from `memories` (DELETE WHERE namespace) but its vec rows
+            # were missed (stale id list) → orphan vec hits. The write lock here
+            # blocks concurrent writers, so the snapshot matches the delete.
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT id FROM memories WHERE namespace = ?",
+                    (namespace,),
+                ).fetchall()
+            entry_ids = [str(row[0]) for row in rows]
+            if not entry_ids:
+                return 0
+            deleted = _query_ops_delete_by_namespace(self, namespace)
             with self._lock:
                 self._conn.execute("DELETE FROM wiki_refs WHERE namespace = ?", (namespace,))
-                self._conn.commit()
+                if self._vec_available:
+                    for entry_id in entry_ids:
+                        self._delete_vector(entry_id)
         return deleted
 
     def query_wiki_outbound_refs(self, source_slug: str, *, namespace: str | None = None) -> list[StoredWikiReference]:
@@ -632,6 +734,7 @@ class SQLiteBackend(StorageBackend):
             dim=self._dim,
             entry_id=entry_id,
             embedding=embedding,
+            skip_commit=self._skip_commit_depth != 0,
         )
 
     def search_vectors(self, query_embedding: list[float], top_k: int = 25) -> list[tuple[str, float]]:

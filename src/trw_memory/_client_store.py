@@ -36,7 +36,7 @@ from trw_memory.security.runtime import (
     prepare_entry_for_store,
     store_quarantined_entry,
 )
-from trw_memory.sync.conflict import init_clock
+from trw_memory.sync.conflict import increment_clock, init_clock
 
 if TYPE_CHECKING:
     from trw_memory.client import MemoryClient, StoreResultDict
@@ -129,7 +129,11 @@ async def store_impl(
                     "expires": entry_expires,
                     "source": source,
                     "source_identity": source_identity or existing.source_identity,
-                    "vector_clock": init_clock(client._local_node_id),
+                    # FR04: advance the local node's counter on edit so causality
+                    # is expressible. Resetting to init_clock() here stalled the
+                    # clock at {node: 1}, making a locally-newer entry look
+                    # concurrent with its own stale remote snapshot.
+                    "vector_clock": increment_clock(existing.vector_clock, client._local_node_id),
                 }
             )
 
@@ -171,19 +175,20 @@ async def store_impl(
         embedding = embedder.embed(f"{entry.content} {entry.detail}") if embedder is not None else None
         if client._namespace.startswith("team:"):
             NamespaceManager(backend).ensure_team_namespace(client._namespace, created_at=now)
-        backend.store(entry)
-        if embedding is not None:
-            try:
-                backend.upsert_vector(entry.id, embedding)
-            except Exception as exc:
-                try:
-                    backend.delete(entry.id)
-                except Exception:
-                    _client_logger().exception("memory_store_vector_rollback_failed", memory_id=entry.id)
-                    raise StorageError(
-                        f"failed to persist vector for {entry.id!r}; rollback did not complete cleanly"
-                    ) from exc
-                raise StorageError(f"failed to persist vector for {entry.id!r}; entry write was rolled back") from exc
+        # S1 fix: commit the row + its vector in ONE transaction so a crash
+        # between the two writes can no longer leave a row with no vector.
+        # store() and upsert_vector() defer their commit inside the block
+        # (PRD S9/S3); the outermost COMMIT lands both atomically, and any
+        # exception triggers a single ROLLBACK — no manual compensating delete.
+        try:
+            with backend.transaction():
+                backend.store(entry)
+                if embedding is not None:
+                    backend.upsert_vector(entry.id, embedding)
+        except Exception as exc:
+            raise StorageError(
+                f"failed to persist entry+vector for {entry.id!r}; transaction rolled back"
+            ) from exc
         try:
             schedule_graph_update(entry, backend, embedding=embedding, config=client._config)
         except RuntimeError:

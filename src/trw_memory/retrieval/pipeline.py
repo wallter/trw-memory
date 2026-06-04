@@ -32,6 +32,7 @@ def hybrid_search(
     bm25_candidates: int = 50,
     vector_candidates: int = 50,
     rrf_k: int = 60,
+    importance_alpha: float = 1.0,
     top_k: int = 25,
 ) -> list[MemoryEntry]:
     """Hybrid BM25 + vector search with RRF fusion.
@@ -64,6 +65,10 @@ def hybrid_search(
             :func:`~trw_memory.retrieval.dense.dense_search`.
         rrf_k: RRF smoothing constant forwarded to
             :func:`~trw_memory.retrieval.fusion.rrf_fuse`.
+        importance_alpha: R-FUSION-001 blend weight on the normalised RRF
+            position score vs. the candidate's ``importance``. ``1.0`` (the
+            default) preserves pure position-only fusion; lower values let a
+            high-impact entry edge out an equally-ranked low-impact one.
         top_k: Final number of entries to return after fusion.
 
     Returns:
@@ -105,7 +110,11 @@ def hybrid_search(
         return []
 
     # --------------------------------------------------------------- RRF
-    fused = rrf_fuse(rankings, k=rrf_k)
+    # R-FUSION-001: blend the entry's importance into the position-only RRF
+    # score so two equally-ranked candidates are broken by impact. alpha=1.0
+    # (default) keeps the legacy pure-position behaviour bit-for-bit.
+    importances = {e.id: e.importance for e in entries} if importance_alpha < 1.0 else None
+    fused = rrf_fuse(rankings, k=rrf_k, importances=importances, alpha=importance_alpha)
 
     # Map fused ids back to MemoryEntry objects, preserving fusion order
     results: list[MemoryEntry] = []

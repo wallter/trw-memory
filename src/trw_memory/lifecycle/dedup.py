@@ -14,10 +14,59 @@ import structlog
 
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.models.memory import Assertion, MemoryEntry, MemoryStatus, ProtectionTier
 from trw_memory.retrieval.dense import cosine_similarity
 
 logger = structlog.get_logger(__name__)
+
+# Strength ordering for protection-preserving merges (higher index = stronger).
+_PROTECTION_TIER_ORDER: tuple[str, ...] = (
+    ProtectionTier.LOW.value,
+    ProtectionTier.NORMAL.value,
+    ProtectionTier.HIGH.value,
+    ProtectionTier.CRITICAL.value,
+    ProtectionTier.PROTECTED.value,
+    ProtectionTier.PERMANENT.value,
+)
+
+
+def _tier_value(tier: ProtectionTier | str) -> str:
+    """Normalise a protection tier (enum or str) to its string value."""
+    return tier.value if isinstance(tier, ProtectionTier) else str(tier)
+
+
+def _stronger_protection_tier(
+    existing: ProtectionTier | str,
+    incoming: ProtectionTier | str,
+) -> str:
+    """Return the string value of the stronger of two protection tiers.
+
+    Unknown tiers fall back to NORMAL's rank so an unrecognised value never
+    outranks a known stronger tier.
+    """
+    normal_rank = _PROTECTION_TIER_ORDER.index(ProtectionTier.NORMAL.value)
+
+    def rank(t: ProtectionTier | str) -> int:
+        v = _tier_value(t)
+        return _PROTECTION_TIER_ORDER.index(v) if v in _PROTECTION_TIER_ORDER else normal_rank
+
+    existing_v = _tier_value(existing)
+    incoming_v = _tier_value(incoming)
+    return incoming_v if rank(incoming) > rank(existing) else existing_v
+
+
+def _union_assertions(existing: list[Assertion], incoming: list[Assertion]) -> list[Assertion]:
+    """Union two assertion lists, de-duplicating by (type, pattern, target)."""
+    merged: list[Assertion] = list(existing)
+    seen: set[tuple[str, str, str]] = {
+        (_tier_value(a.type), a.pattern, a.target) for a in existing
+    }
+    for a in incoming:
+        key = (_tier_value(a.type), a.pattern, a.target)
+        if key not in seen:
+            merged.append(a)
+            seen.add(key)
+    return merged
 
 
 class DedupResult(NamedTuple):
@@ -174,6 +223,22 @@ def merge_entries(
     if new_entry.id and new_entry.id not in existing_merged:
         existing_merged.append(new_entry.id)
 
+    # Accumulation fields — mirror consolidation._create_consolidated_entry so
+    # merges don't silently discard Q-learning history or feedback counters:
+    #   q_value: max (best observed signal survives)
+    #   q_observations / access_count / recall_count / helpful_count /
+    #     sessions_surfaced: sum (cumulative counters)
+    #   protection_tier: keep the stronger tier
+    #   assertions: union by (type, pattern, target)
+    merged_q_value = max(existing.q_value, new_entry.q_value)
+    merged_q_observations = existing.q_observations + new_entry.q_observations
+    merged_access_count = existing.access_count + new_entry.access_count
+    merged_recall_count = existing.recall_count + new_entry.recall_count
+    merged_helpful_count = existing.helpful_count + new_entry.helpful_count
+    merged_sessions_surfaced = existing.sessions_surfaced + new_entry.sessions_surfaced
+    merged_protection_tier = _stronger_protection_tier(existing.protection_tier, new_entry.protection_tier)
+    merged_assertions = _union_assertions(existing.assertions, new_entry.assertions)
+
     logger.debug(
         "dedup_merge_complete",
         existing_id=existing.id,
@@ -189,6 +254,14 @@ def merge_entries(
             "recurrence": merged_recurrence,
             "detail": merged_detail,
             "merged_from": existing_merged,
+            "q_value": merged_q_value,
+            "q_observations": merged_q_observations,
+            "access_count": merged_access_count,
+            "recall_count": merged_recall_count,
+            "helpful_count": merged_helpful_count,
+            "sessions_surfaced": merged_sessions_surfaced,
+            "protection_tier": merged_protection_tier,
+            "assertions": merged_assertions,
             "updated_at": datetime.now(timezone.utc),
         }
     )

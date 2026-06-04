@@ -14,7 +14,7 @@ from trw_memory.lifecycle._recall import record_recall_access
 from trw_memory.lifecycle.scoring import entry_utility, rank_by_utility
 from trw_memory.lifecycle.tiers._scoring import compute_importance_score
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import MemoryEntry
+from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.security.recall_filter import filter_recall_window
 from trw_memory.security.telemetry_emit import build_security_traceability, emit_security_event
 from trw_memory.storage.interface import StorageBackend
@@ -181,6 +181,12 @@ def _graph_related(
     for node in related_nodes:
         entry = backend.get(str(node["id"]))
         if entry is None:
+            # Dangling edge -- the target row was deleted; skip without crashing.
+            continue
+        if entry.status != MemoryStatus.ACTIVE:
+            # The primary recall path lists only ACTIVE entries; the graph
+            # related path must not re-surface obsolete / archived / poisoned /
+            # resolved learnings (same obsolete-leak class fixed in recall).
             continue
         item = entry.model_dump(mode="json")
         item.update(node)

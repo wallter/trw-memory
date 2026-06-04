@@ -416,11 +416,15 @@ async def try_hybrid_recall(
             stored_embeddings=stored_embeddings or None,
             bm25_candidates=effective_bm25_candidates,
             vector_candidates=effective_vector_candidates,
+            importance_alpha=client._config.rrf_importance_alpha,
             top_k=effective_top_k,
         )
     except Exception:
         hybrid_search_ms = (perf_counter() - hybrid_search_start) * 1000.0
-        logger.debug(
+        # warning, not debug: hybrid search failing silently drops recall to the
+        # weaker fallback path with no operator-visible signal — the exact
+        # silent-degradation class that let the compounding pipeline rot.
+        logger.warning(
             "hybrid_search_failed",
             op="recall",
             outcome="failure",

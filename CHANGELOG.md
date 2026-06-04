@@ -4,7 +4,86 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Vector clock advanced on local update** (commit `b134d9ffc`). The vector clock was being reset
+  instead of incremented on local writes, causing team-sync conflict resolution to pick the wrong
+  winning value when two nodes updated the same entry. All local stores now call
+  `_advance_local_clock()`.
+- **Vector dimension mismatch guarded in native sqlite-vec pack path** — an uncaught `struct.error`
+  from a mismatched embedding dimension failed the whole store silently; the error is now caught,
+  logged with `outcome=dimension_mismatch`, and raised as `DimensionMismatchError`.
+- **GitHub PAT and AWS access-key patterns added to PII scan** — secrets matching `ghp_`/`ghs_`/
+  `gho_` (GitHub PAT) and `AKIA[0-9A-Z]{16}` (AWS Access Key ID) were not detected by the PII
+  scanner, so they could be stored in plaintext.
+- **Obsolete neighbours filtered from graph related-recall** — `get_related()` was returning
+  `obsolete`/`superseded` neighbour entries the same as main recall; obsolete entries are now
+  filtered out before the result is returned.
+- **Config-driven tier caps + batch tier convergence** (store-audit S12, recall R-RANK-003).
+  Per-tier entry caps are now read from `MemoryConfig` at runtime; the batch tier-assignment loop
+  converges in a bounded number of passes instead of potentially oscillating.
+- **Recall ranks session-start baseline by utility, not recency, and blends impact into RRF fusion**
+  (recall audit R-RANK-002/004, R-FUSION-001). Shared fix with trw-mcp — see trw-mcp changelog.
+- **`transaction()` made thread-safe; namespace-delete and consolidation atomicity gaps closed**
+  (store-audit S4/S8). `transaction()` now acquires the write-lock before entering the SQLite
+  transaction so concurrent threads cannot interleave writes. `delete_namespace` and
+  `consolidate_entries` are wrapped in transactions to prevent partial updates.
+- **Store + vector writes made atomic; transaction-depth TOCTOU closed** (store-audit S1/S2/S3/S9).
+  The primary-store INSERT and the sqlite-vec INSERT are now inside the same `BEGIN IMMEDIATE` block
+  so a failure mid-sequence cannot leave orphan vector rows. The transaction-depth check used a
+  read-check-write sequence that could race; it is now protected by the write-lock.
+- **Dedup works on default installs; merge stops losing data** (store-audit P0/P1). The dedup path
+  was gated on optional `[vectors]` being installed; semantic dedup now falls back to BM25-only
+  similarity on plain installs. The merge-on-dedup path was discarding the incumbent entry's tags
+  and namespace before overwriting; all fields are now merged.
+- **Recall correctness and performance** (recall audit C6/C7/C11/P-007/P-008). Expiry filter
+  applied before scoring (expired entries no longer appear in results), obsolete/superseded vectors
+  pruned from the vector index on recall, batch recall-access uses a single SQL `IN (…)` query
+  instead of N round-trips, and missing indexes on `(status, namespace)` and `created_at` added.
+
+## [0.8.5] — 2026-05-29
+
+### Fixed
+
+- **`list_entries`/`search`/`entries_with_assertions` preserve their WHERE filter + LIMIT on the
+  UTF-8 bytes-fallback path.** Previously, when a corrupt-UTF-8 row triggered the resilient
+  bytes-mode re-execute, the fallback dropped the status/namespace filter and the LIMIT — returning
+  rows of all statuses/namespaces, unbounded. The fallback now re-executes the exact query
+  (where/params/order/limit). Strong-typed the resilient-fetch helpers (Protocols replace `Any`),
+  narrowed broad excepts, and added an `outcome` field to quarantine logs.
+- **`pysqlite3-binary` is now a Linux-only dependency.** Upstream removed the macOS-arm64 wheels,
+  so `pip install trw-memory` failed with "No matching distribution found for pysqlite3-binary" on
+  `macos-latest` (arm64) — which blocked the release smoke matrix. The marker is now
+  `platform_system == 'Linux'`; macOS/Windows fall back to stdlib `sqlite3` via the `storage._dbapi`
+  shim (with the code-level WAL single-connection mitigation), exactly as the shim already supported.
+- **Trust-score-quarantined entries are now signed so they remain auditable** (SEC-001). The
+  `prepare_entry_for_store` early-return on the trust-score quarantine path skipped provenance
+  signing, so `audit_entry()` reported a quarantined entry as `legacy_unsigned` (no
+  `provenance_signature`) instead of `quarantined`. Signing now runs on that path too (best-effort:
+  a missing signing key leaves the still-quarantined entry unsigned rather than failing the store).
+  The anomaly-quarantine path already signed before quarantining; genuinely-unsigned legacy rows
+  still correctly audit as `legacy_unsigned`.
+
+### Added
+
+- **`bytes_fallback_failures` counter** on the resilient-fetch path. When the UTF-8 bytes-mode
+  fallback connection itself fails, the fetch fails open (`[]`) but now increments a process-wide
+  counter (`get_bytes_fallback_failures()` / `reset_bytes_fallback_failures()`) alongside the
+  `outcome=fallback_failed` warning log, so an otherwise-silent secondary drop is countable.
+
+
 ## [0.8.4] — 2026-05-28
+
+### Added
+
+- **Recall-latency telemetry on the hybrid retrieval path** (PRD-DIST-2047 Phase 2,
+  commit `a6e756bde`). `try_hybrid_recall` now emits a `hybrid_recall_complete`
+  structlog event on every terminating branch (`ok`, `no_candidates`,
+  `empty_ranking`, `hybrid_search_failed`). The event carries
+  `list_entries_ms`, `hybrid_search_ms`, `total_ms`, `namespace_size`,
+  `candidate_pool_size`, `effective_bm25_candidates`, and
+  `effective_vector_candidates` so retrieval latency and candidate-pool
+  health can be diagnosed from structured logs without instrumentation changes.
 
 ### Fixed
 

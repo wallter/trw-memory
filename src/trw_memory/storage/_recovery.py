@@ -293,11 +293,24 @@ def _restore_rows(new_conn: Any, rows: list[Any], *, db_path: Path) -> None:
     placeholders = ", ".join(["?"] * len(safe_cols))
     cols_sql = ", ".join(safe_cols)
     insert_sql = f"INSERT OR IGNORE INTO memories ({cols_sql}) VALUES ({placeholders})"  # noqa: S608
+    failed = 0
     for row in rows:
-        with contextlib.suppress(sqlite3.Error):
+        try:
             row_values = tuple(row)
             new_conn.execute(insert_sql, tuple(row_values[i] for i in safe_indices))
+        except sqlite3.Error:
+            failed += 1
     new_conn.commit()
+    if failed:
+        # Surface partial salvage: without this the caller logs rows_salvaged =
+        # len(rows) (the backup-scan count), overstating the rows actually
+        # committed and hiding data loss from an operator watching db_recovered.
+        logger.warning(
+            "db_recovery_insert_failures",
+            db=str(db_path),
+            attempted=len(rows),
+            failed=failed,
+        )
 
 
 def _cleanup_strict_refuse(new_conn: Any, db_path: Path) -> None:

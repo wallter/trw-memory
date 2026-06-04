@@ -17,14 +17,17 @@ Covers:
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from itertools import pairwise
 
 from trw_memory.lifecycle.scoring import (
     apply_time_decay,
     bayesian_calibrate,
     compute_calibration_accuracy,
     compute_utility_score,
+    converge_tier_distribution,
     enforce_tier_distribution,
     entry_utility,
+    persist_tier_convergence,
     rank_by_utility,
     update_q_value,
     utility_based_prune_candidates,
@@ -368,6 +371,204 @@ def test_enforce_tier_demotes_high() -> None:
 
 def test_enforce_tier_empty_input() -> None:
     assert enforce_tier_distribution([]) == []
+
+
+# ---------------------------------------------------------------------------
+# S12: caps are config-driven (no drift vs trw-mcp)
+# ---------------------------------------------------------------------------
+
+
+def _critical_heavy_entries() -> list[tuple[str, float]]:
+    # 3/5 = 60% critical — over the default 5% cap, under a custom 70% cap.
+    return [
+        ("M-001", 0.98),
+        ("M-002", 0.95),
+        ("M-003", 0.91),
+        ("M-004", 0.60),
+        ("M-005", 0.50),
+    ]
+
+
+def test_enforce_tier_caps_resolve_from_config() -> None:
+    # FAILS before fix: with caps hardcoded to 0.05, a config raising the cap
+    # to 0.70 would be ignored and a demotion would still occur.
+    entries = _critical_heavy_entries()
+    cfg = MemoryConfig(impact_tier_critical_cap=0.7, impact_tier_high_cap=0.9)
+    result = enforce_tier_distribution(entries, config=cfg)
+    assert result == []  # 60% critical is within the config's 70% cap
+
+
+def test_enforce_tier_explicit_cap_overrides_config() -> None:
+    # Explicit cap must win over the config value.
+    entries = _critical_heavy_entries()
+    cfg = MemoryConfig(impact_tier_critical_cap=0.7)
+    result = enforce_tier_distribution(entries, critical_cap=0.05, config=cfg)
+    assert len(result) >= 1  # tight explicit cap forces a demotion
+
+
+def test_enforce_tier_default_config_matches_legacy_caps() -> None:
+    # No behaviour change when caps unspecified: default config == old literals.
+    entries = _critical_heavy_entries()
+    assert enforce_tier_distribution(entries) != []  # default 0.05 cap exceeded
+
+
+# ---------------------------------------------------------------------------
+# R-RANK-003: converge_tier_distribution heals over-cap clusters in one pass
+# ---------------------------------------------------------------------------
+
+
+def _over_cap_critical_cluster() -> list[tuple[str, float]]:
+    # 8 critical out of 10 (80%); default critical cap is 5% (=> max 0 allowed
+    # by the >cap rule until count/total <= 0.05, i.e. 0 of 10 may stay critical).
+    return [
+        ("M-001", 0.99),
+        ("M-002", 0.98),
+        ("M-003", 0.97),
+        ("M-004", 0.96),
+        ("M-005", 0.95),
+        ("M-006", 0.94),
+        ("M-007", 0.93),
+        ("M-008", 0.92),
+        ("M-009", 0.40),
+        ("M-010", 0.30),
+    ]
+
+
+def test_single_enforce_leaves_cluster_over_cap() -> None:
+    # Baseline: a single enforce call demotes at most one per tier — the
+    # cluster is STILL over the critical cap afterwards. This is what
+    # converge_tier_distribution must fix.
+    entries = _over_cap_critical_cluster()
+    one_step = enforce_tier_distribution(entries)
+    # only one critical demotion in a single call
+    assert len(one_step) <= 2  # at most one critical + one cascaded high
+    # apply the step and recount critical members
+    moved = dict(one_step)
+    remaining_critical = sum(1 for mid, sc in entries if moved.get(mid, sc) >= 0.9)
+    assert remaining_critical / len(entries) > 0.05  # STILL over cap
+
+
+def test_converge_brings_critical_within_cap() -> None:
+    # FAILS without converge_tier_distribution: a single enforce pass cannot
+    # heal an 8-over-cap cluster.
+    entries = _over_cap_critical_cluster()
+    changes = converge_tier_distribution(entries)
+    final = dict(entries)
+    final.update(dict(changes))
+    critical_count = sum(1 for sc in final.values() if sc >= 0.9)
+    # critical cap is 0.05 => at most floor(0.05 * 10) = 0 may remain
+    assert critical_count / len(entries) <= 0.05
+
+
+def test_converge_no_op_within_caps() -> None:
+    entries = [
+        ("M-001", 0.95),  # 1/20 = 5% critical — within cap
+        *[(f"M-{i:03d}", 0.5) for i in range(2, 21)],
+    ]
+    assert converge_tier_distribution(entries) == []
+
+
+def test_converge_empty_input() -> None:
+    assert converge_tier_distribution([]) == []
+
+
+# ---------------------------------------------------------------------------
+# R-RANK-003 persistence: atomic convergence via backend.transaction()
+# ---------------------------------------------------------------------------
+
+
+def test_persist_tier_convergence_atomic(tmp_path: object) -> None:
+    from pathlib import Path
+
+    from trw_memory.models.memory import MemoryEntry
+    from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+    assert isinstance(tmp_path, Path)
+    backend = SQLiteBackend(tmp_path / "converge.db")
+    ids: list[str] = []
+    for mid, score in _over_cap_critical_cluster():
+        backend.store(MemoryEntry(id=mid, content="c", importance=score))
+        ids.append(mid)
+
+    entries = [(mid, score) for mid, score in _over_cap_critical_cluster()]
+    persisted = persist_tier_convergence(backend, entries)
+    assert persisted  # something was demoted
+
+    # All persisted changes are visible in the backend (committed).
+    for mid, new_score in persisted:
+        stored = backend.get(mid)
+        assert stored is not None
+        assert abs(stored.importance - new_score) < 1e-6
+
+    # Cluster is within cap after persistence.
+    final_critical = sum(1 for mid in ids if (e := backend.get(mid)) and e.importance >= 0.9)
+    assert final_critical / len(ids) <= 0.05
+
+
+def test_persist_tier_convergence_no_op_within_caps(tmp_path: object) -> None:
+    from pathlib import Path
+
+    from trw_memory.models.memory import MemoryEntry
+    from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+    assert isinstance(tmp_path, Path)
+    backend = SQLiteBackend(tmp_path / "noop.db")
+    entries: list[tuple[str, float]] = []
+    backend.store(MemoryEntry(id="M-001", content="c", importance=0.95))
+    entries.append(("M-001", 0.95))
+    for i in range(2, 21):
+        mid = f"M-{i:03d}"
+        backend.store(MemoryEntry(id=mid, content="c", importance=0.5))
+        entries.append((mid, 0.5))
+
+    assert persist_tier_convergence(backend, entries) == []
+    # unchanged
+    e = backend.get("M-001")
+    assert e is not None and abs(e.importance - 0.95) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Decay correctness: bounded, monotonic, no NaN at extreme ages
+# ---------------------------------------------------------------------------
+
+
+def test_apply_time_decay_bounded_and_monotonic_over_ages() -> None:
+    now = _now_utc()
+    ages = [0, 1, 30, 100, 365, 1000, 5000, 100_000]
+    results = [apply_time_decay(1.0, now - timedelta(days=a)) for a in ages]
+    # bounded [0,1], finite (no NaN/inf)
+    for r in results:
+        assert 0.0 <= r <= 1.0
+        assert r == r  # NaN != NaN
+    # non-increasing with age (monotonic decay)
+    for earlier, later in pairwise(results):
+        assert later <= earlier + 1e-9
+
+
+def test_apply_time_decay_zero_age_not_penalized() -> None:
+    # A brand-new entry keeps (essentially) its full impact.
+    assert apply_time_decay(0.8, _now_utc()) >= 0.8 - 1e-6
+
+
+def test_apply_time_decay_future_timestamp_not_penalized() -> None:
+    # Clock skew: a future created_at clamps days to 0 (no over-1.0, no NaN).
+    future = _now_utc() + timedelta(days=10)
+    r = apply_time_decay(0.9, future)
+    assert 0.0 <= r <= 1.0
+    assert abs(r - 0.9) < 1e-6
+
+
+def test_compute_utility_score_extreme_age_bounded() -> None:
+    # Very large age must not produce NaN/negative; retention -> 0.
+    score = compute_utility_score(
+        q_value=0.9,
+        days_since_last_access=10_000_000,
+        recurrence_count=1,
+        base_impact=0.9,
+        q_observations=10,
+    )
+    assert 0.0 <= score <= 1.0
+    assert score == score  # not NaN
 
 
 # ---------------------------------------------------------------------------

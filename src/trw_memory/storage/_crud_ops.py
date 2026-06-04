@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from trw_memory.exceptions import StorageError
-from trw_memory.models.memory import MemoryEntry
+from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage._row_mapper import entry_to_row, row_to_entry
 from trw_memory.storage._shared import (
     DICT_FIELDS,
@@ -49,6 +49,28 @@ if TYPE_CHECKING:
     from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 logger = structlog.get_logger(__name__)
+
+# F11: statuses that retire an entry from active recall. When an update
+# transitions an entry into one of these, its dense vector is removed from
+# the KNN index so stale vectors stop polluting dense recall. The entry row
+# itself is preserved for audit (no hard delete).
+_TERMINAL_STATUS_VALUES: frozenset[str] = frozenset(
+    {
+        MemoryStatus.OBSOLETE.value,
+        MemoryStatus.OBSOLETE_POISONED.value,
+        MemoryStatus.ARCHIVED.value,
+        MemoryStatus.RESOLVED.value,
+    }
+)
+
+
+def _normalise_status_value(value: object) -> str | None:
+    """Return the string status value for an update field, or None if absent/odd."""
+    if isinstance(value, MemoryStatus):
+        return value.value
+    if isinstance(value, str):
+        return value
+    return None
 
 
 def store(
@@ -90,7 +112,11 @@ def store(
     try:
         with backend._lock:
             backend._conn.execute(sql, entry_to_row(entry))
-            backend._conn.commit()
+            # S9 fix: suppress the commit when inside a ``transaction()`` block
+            # so a store() batched with other writes commits exactly once at
+            # the outermost COMMIT — matching update()/increment_recall_access.
+            if backend._skip_commit_depth == 0:
+                backend._conn.commit()
         logger.debug("memory_stored", entry_id=entry.id)
     except (sqlite3.Error, json.JSONDecodeError) as exc:
         raise StorageError(
@@ -172,10 +198,23 @@ def update(
             else:
                 values.append(normalised)
 
+        # F11: detect a transition INTO a terminal (non-active) status so we
+        # can prune the now-stale dense vector after the row update lands.
+        new_status = _normalise_status_value(fields["status"]) if "status" in fields else None
+        prune_vector = (
+            new_status is not None
+            and new_status in _TERMINAL_STATUS_VALUES
+            and existing.status != new_status
+        )
+
         values.append(entry_id)
         sql = f"UPDATE memories SET {', '.join(set_parts)} WHERE id = ?"  # noqa: S608
         with backend._lock:
             backend._conn.execute(sql, values)
+            if prune_vector and backend._vec_available:
+                # Keep the entry row for audit; drop only the KNN vector so
+                # dense recall stops returning the retired entry.
+                backend._delete_vector(entry_id)
             if backend._skip_commit_depth == 0:
                 backend._conn.commit()
         return get(backend, select_columns_sql, entry_id)
@@ -253,6 +292,54 @@ def increment_access_counts(
     except sqlite3.Error as exc:
         raise StorageError(
             f"Failed to increment access counts: {exc}",
+            path=str(backend._db_path),
+        ) from exc
+
+
+def increment_recall_access(
+    backend: SQLiteBackend,
+    entry_ids: list[str],
+    *,
+    accessed_at: datetime | None = None,
+) -> int:
+    """F-008: batch recall bookkeeping in ONE UPDATE / one commit.
+
+    Increments ``access_count`` AND ``recall_count`` and stamps
+    ``last_accessed_at`` for every id in ``entry_ids`` using a single
+    ``WHERE id IN (...)`` statement — replacing the per-entry get+update loop
+    (2 statements + 1 WAL append per entry) that amplified WAL writes on every
+    recall. De-duplicates ids so each entry is incremented at most once per
+    call (matching the prior loop's per-id semantics). Returns rows updated.
+    """
+    if not entry_ids:
+        return 0
+
+    # Preserve order while de-duplicating (each entry counted once per call).
+    unique_ids = list(dict.fromkeys(entry_ids))
+    now = accessed_at or datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    placeholders = ", ".join(["?"] * len(unique_ids))
+    sql = f"""
+        UPDATE memories
+        SET access_count = COALESCE(access_count, 0) + 1,
+            recall_count = COALESCE(recall_count, 0) + 1,
+            last_accessed_at = ?,
+            updated_at = ?,
+            sync_seq = COALESCE(sync_seq, 0) + 1,
+            last_synced_at = NULL
+        WHERE id IN ({placeholders})
+    """  # noqa: S608 — placeholders are positional binds, not interpolated values.
+    params: list[object] = [now_iso, now_iso, *unique_ids]
+    try:
+        with backend._lock:
+            before = backend._conn.total_changes
+            backend._conn.execute(sql, params)
+            if backend._skip_commit_depth == 0:
+                backend._conn.commit()
+            return int(backend._conn.total_changes - before)
+    except sqlite3.Error as exc:
+        raise StorageError(
+            f"Failed to increment recall access: {exc}",
             path=str(backend._db_path),
         ) from exc
 

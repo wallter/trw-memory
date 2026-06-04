@@ -217,3 +217,62 @@ class TestArchiveOriginals:
         storage.update_override = _fail_update
         with pytest.raises(RuntimeError):
             _archive_originals([e1], "M-cons", storage)
+
+    def test_archival_is_atomic_partial_failure_rolls_back_all(self, tmp_path: Path) -> None:
+        """S4: a crash mid-loop rolls back EVERY archival update (all-or-nothing).
+
+        Two originals are archived against a real on-disk SQLiteBackend. We force
+        a failure on the SECOND entry's UPDATE, after the FIRST has been staged
+        inside the shared ``transaction()``. A fresh observer connection (reading
+        committed-only state) must show BOTH originals still ACTIVE with no
+        ``consolidated_into`` — proving the first entry's archival did not leak
+        out on its own per-call commit (the pre-fix behaviour).
+        """
+        import sqlite3
+
+        db_path = tmp_path / "archive_atomic.db"
+        backend = SQLiteBackend(db_path)
+        try:
+            e1 = _make_entry("M-orig1")
+            e2 = _make_entry("M-orig2")
+            backend.store(e1)
+            backend.store(e2)
+
+            real_conn = backend._conn
+
+            class _FailSecondUpdateConn:
+                def execute(self, sql: str, params: object = (), /) -> object:
+                    # Fail the UPDATE that targets the second original only, so
+                    # the first original's UPDATE has already been staged inside
+                    # the open transaction when the crash hits. The entry id is
+                    # the trailing bound parameter of ``UPDATE ... WHERE id = ?``.
+                    if sql.strip().startswith("UPDATE memories") and isinstance(params, (list, tuple)) and params and params[-1] == "M-orig2":
+                        raise RuntimeError("crash-on-second-archival")
+                    return real_conn.execute(sql, params)
+
+                def __getattr__(self, name: str) -> object:
+                    return getattr(real_conn, name)
+
+            backend._conn = _FailSecondUpdateConn()
+            try:
+                with pytest.raises(RuntimeError, match="crash-on-second-archival"):
+                    _archive_originals([e1, e2], "M-cons", backend)
+            finally:
+                backend._conn = real_conn
+
+            observer = sqlite3.connect(str(db_path))
+            try:
+                rows = observer.execute(
+                    "SELECT id, status, consolidated_into FROM memories "
+                    "WHERE id IN ('M-orig1', 'M-orig2') ORDER BY id"
+                ).fetchall()
+            finally:
+                observer.close()
+            # Both originals survived UN-archived — the first entry's staged
+            # UPDATE was rolled back together with the failed second one.
+            assert rows == [
+                ("M-orig1", "active", None),
+                ("M-orig2", "active", None),
+            ], f"partial archival leaked despite rollback: {rows}"
+        finally:
+            backend.close()

@@ -59,7 +59,14 @@ async def test_client_store_upserts_vector_when_embedder_available(client: Memor
 
 
 async def test_client_store_rolls_back_when_vector_upsert_fails(client: MemoryClient) -> None:
-    """A vector write failure must not leave the primary row committed."""
+    """A vector write failure must not leave the primary row committed.
+
+    Post S1/S3/S9: the row + vector write share a single ``backend.transaction()``
+    that ROLLS BACK on any exception — replacing the old compensating
+    ``backend.delete()``. We assert the store + upsert run inside the
+    transaction context and that the failure surfaces as a rolled-back
+    StorageError.
+    """
     real_backend = client._backend
     assert real_backend is not None
     real_backend.close()
@@ -75,7 +82,9 @@ async def test_client_store_rolls_back_when_vector_upsert_fails(client: MemoryCl
         await client.store("vectorized content", detail="with detail")
 
     backend.store.assert_called_once()
-    backend.delete.assert_called_once()
+    # Atomicity is now provided by the transaction context, not a manual delete.
+    backend.transaction.assert_called_once()
+    backend.delete.assert_not_called()
 
 
 async def test_client_recall_passes_stored_embeddings_to_hybrid_search(client: MemoryClient) -> None:
