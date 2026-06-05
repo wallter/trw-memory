@@ -147,7 +147,7 @@ async def recall_impl(
         exclude_historical_only if exclude_historical_only is not None else client._config.recall_filter_historical_only
     )
 
-    hybrid_results = await client._try_hybrid_recall(query, limit, tags)
+    hybrid_results = await client._try_hybrid_recall(query, limit, tags, query_embedding=query_embedding)
     if hybrid_results is not None:
         filtered = [r for r in hybrid_results if r["score"] >= min_score]
         # PRD-DIST-2049 c802: apply admission filter on the FULL hybrid candidate
@@ -346,6 +346,7 @@ async def try_hybrid_recall(
     query: str,
     limit: int,
     tags: list[str] | None,
+    query_embedding: list[float] | None = None,
 ) -> list[MemoryResultDict] | None:
     """Hybrid pipeline (BM25 + dense + RRF). Returns None to signal fallback.
 
@@ -355,6 +356,11 @@ async def try_hybrid_recall(
     size ``hybrid_search_candidate_pool_size`` against measured cost. The
     event fires on every terminating exit (success, no-candidates, hybrid-
     search-failed) so operators can attribute latency to outcome.
+
+    *query_embedding* is the query vector the caller already computed (for tier
+    scoring); when supplied it is forwarded to ``hybrid_search`` so the dense
+    step reuses it instead of re-embedding the query. ``None`` preserves the
+    legacy behaviour of embedding the query inside the dense step.
     """
     try:
         from trw_memory.retrieval.pipeline import hybrid_search
@@ -413,6 +419,7 @@ async def try_hybrid_recall(
             query=query,
             entries=all_entries,
             embedder=embedder,
+            query_embedding=query_embedding,
             stored_embeddings=stored_embeddings or None,
             bm25_candidates=effective_bm25_candidates,
             vector_candidates=effective_vector_candidates,

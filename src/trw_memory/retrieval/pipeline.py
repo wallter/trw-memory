@@ -28,6 +28,7 @@ def hybrid_search(
     entries: list[MemoryEntry],
     *,
     embedder: EmbeddingProvider | None = None,
+    query_embedding: list[float] | None = None,
     stored_embeddings: dict[str, list[float]] | None = None,
     bm25_candidates: int = 50,
     vector_candidates: int = 50,
@@ -55,7 +56,15 @@ def hybrid_search(
             objects to rank.  Typically the full active entry set from the
             storage backend.
         embedder: Optional embedding provider used for dense search.  When
-            ``None`` or unavailable the dense path is skipped.
+            ``None`` or unavailable the dense path is skipped (unless
+            *query_embedding* is supplied).
+        query_embedding: Pre-computed query vector forwarded to
+            :func:`~trw_memory.retrieval.dense.dense_search`.  When supplied the
+            dense path reuses it instead of calling ``embedder.embed(query)``,
+            avoiding a redundant embedding pass when the caller already computed
+            the query vector (e.g. for tier scoring).  ``None`` (the default)
+            preserves the legacy behaviour of embedding the query inside the
+            dense step bit-for-bit.
         stored_embeddings: Mapping of ``entry_id`` → embedding vector.
             Required for dense search; dense path is skipped when ``None`` or
             empty.
@@ -90,11 +99,12 @@ def hybrid_search(
         rankings.append(bm25_results)
 
     # -------------------------------------------------------------- Dense
-    if embedder is not None or stored_embeddings:
+    if embedder is not None or query_embedding is not None or stored_embeddings:
         dense_results = dense_search(
             query=query,
             entry_ids=entry_ids,
             embedder=embedder,
+            query_embedding=query_embedding,
             stored_embeddings=stored_embeddings,
             top_k=vector_candidates,
         )

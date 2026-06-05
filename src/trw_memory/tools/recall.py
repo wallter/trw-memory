@@ -174,10 +174,13 @@ def memory_recall_impl(
         query_embedding = embedder.embed(query) if embedder is not None else None
         # dense_search() needs the stored vector map, not just the entry IDs, so
         # tool recall must hydrate the embeddings before calling hybrid_search().
+        # Forward the already-computed query_embedding (also used below for tier
+        # scoring) so the dense step reuses it instead of re-embedding the query.
         ranked = hybrid_search(
             query=query,
             entries=all_entries,
             embedder=embedder,
+            query_embedding=query_embedding,
             stored_embeddings=stored_embeddings or None,
             top_k=limit * 4,  # over-fetch before score filtering
         )

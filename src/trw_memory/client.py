@@ -360,10 +360,16 @@ class MemoryClient:
 
         return await _impl(self, query, local_results, limit, tags, min_score)
 
-    async def _try_hybrid_recall(self, query: str, limit: int, tags: list[str] | None) -> list[MemoryResultDict] | None:
+    async def _try_hybrid_recall(
+        self,
+        query: str,
+        limit: int,
+        tags: list[str] | None,
+        query_embedding: list[float] | None = None,
+    ) -> list[MemoryResultDict] | None:
         from trw_memory._client_recall import try_hybrid_recall as _impl
 
-        return await _impl(self, query, limit, tags)
+        return await _impl(self, query, limit, tags, query_embedding=query_embedding)
 
     async def _fallback_recall(
         self, query: str, limit: int, tags: list[str] | None, min_score: float
