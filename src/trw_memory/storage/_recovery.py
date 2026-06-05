@@ -93,6 +93,53 @@ def write_recovery_state(db_path: Path, *, status: str, reason: str, db_size_byt
             raise
 
 
+def _read_persisted_recovery_status(state_path: Path) -> str:
+    """Read the advisory recovery-state sidecar status, fail-closed to ``""``.
+
+    The sidecar is *advisory*: an absent, unreadable, non-UTF-8, malformed,
+    non-object, or non-string-status file must never break bounded startup
+    classification. Returns the ``status`` string only when the sidecar holds a
+    JSON object whose ``status`` field is itself a string; otherwise ``""``.
+
+    Reads raw bytes and decodes explicitly so non-UTF-8 content surfaces as a
+    caught ``UnicodeDecodeError`` (a ``ValueError`` subclass that escapes
+    ``suppress(OSError, JSONDecodeError)``) rather than crashing the caller.
+
+    Diagnostics are content-free — ``reason``/``error_type`` only. The filesystem
+    path, raw bytes, and decoded payload are never logged, so a poisoned or
+    secret-bearing sidecar cannot leak through startup logs.
+    """
+    try:
+        raw_bytes = state_path.read_bytes()
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        logger.debug("recovery_state_unreadable", reason="read_failed", error_type=type(exc).__name__)
+        return ""
+
+    try:
+        text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        logger.debug("recovery_state_unreadable", reason="non_utf8")
+        return ""
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        logger.debug("recovery_state_unreadable", reason="malformed_json")
+        return ""
+
+    if not isinstance(parsed, dict):
+        logger.debug("recovery_state_unreadable", reason="non_object_json")
+        return ""
+
+    status = parsed.get("status", "")
+    if not isinstance(status, str):
+        logger.debug("recovery_state_unreadable", reason="non_string_status")
+        return ""
+    return status
+
+
 def classify_recovery_preflight(db_path: Path, *, inline_max_bytes: int) -> RecoveryPreflight:
     """Classify whether startup can recover inline or should degrade/fail early."""
     state_path = recovery_state_path(db_path)
@@ -100,12 +147,7 @@ def classify_recovery_preflight(db_path: Path, *, inline_max_bytes: int) -> Reco
     with contextlib.suppress(OSError):
         db_size_bytes = db_path.stat().st_size
 
-    persisted_status = ""
-    if state_path.exists():
-        with contextlib.suppress(OSError, json.JSONDecodeError):
-            raw_state = json.loads(state_path.read_text(encoding="utf-8"))
-            if isinstance(raw_state, dict):
-                persisted_status = str(raw_state.get("status", ""))
+    persisted_status = _read_persisted_recovery_status(state_path)
 
     if persisted_status == "hard_fail":
         return RecoveryPreflight(
