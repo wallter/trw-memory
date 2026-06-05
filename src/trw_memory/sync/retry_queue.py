@@ -155,12 +155,21 @@ class RetryQueue:
         if not self._path.exists():
             return []
         entries: list[QueueRecord] = []
-        for line in self._path.read_text().strip().splitlines():
-            if line.strip():
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    logger.warning("retry_queue_corrupt_record_dropped", line_preview=line[:100])
+        for line_number, line in enumerate(self._path.read_text().splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                # Fail open: drop the corrupt row but preserve valid records.
+                # Never log raw line content — the payload may carry sensitive
+                # memory text or metadata. Emit only structural locators.
+                logger.warning(
+                    "retry_queue_corrupt_record_dropped",
+                    path=str(self._path),
+                    line_number=line_number,
+                    error_class=type(exc).__name__,
+                )
         return entries
 
     def _write_all(self, entries: list[QueueRecord]) -> None:

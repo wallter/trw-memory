@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from structlog.testing import capture_logs
+
 from trw_memory.sync.remote import clear_retry_queue, drain_retry_queue
 from trw_memory.sync.retry_queue import MAX_QUEUE_BYTES, MAX_QUEUE_DEPTH, MAX_RETRIES, RetryQueue
 
@@ -162,6 +164,39 @@ class TestRetryQueue:
         )
         queue = RetryQueue(queue_path)
         assert queue.depth() == 2
+
+    def test_corrupt_record_log_omits_payload_contents(self, tmp_path: Path) -> None:
+        """Corrupt-row observability must not leak raw payload text (privacy).
+
+        Regression: ``_read_all`` previously logged ``line_preview=line[:100]``,
+        which could surface sensitive memory content or metadata. The dropped-row
+        log must carry only structural locators (path, line number, error class).
+        """
+        secret = "SENTINEL-SECRET-cAfEbAbE-do-not-log"
+        queue_path = tmp_path / "queue.jsonl"
+        queue_path.write_text(
+            '{"entry_id": "M-001", "payload": {"summary": "valid"}, '
+            '"queued_at": "2026-01-01T00:00:00Z", "retry_count": 0, "last_error": null}\n'
+            f'{{"payload": "{secret}" not valid json\n',
+            encoding="utf-8",
+        )
+        queue = RetryQueue(queue_path)
+
+        with capture_logs() as logs:
+            depth = queue.depth()
+
+        # Fail-open: valid record preserved, corrupt row skipped.
+        assert depth == 1
+
+        dropped = [e for e in logs if e["event"] == "retry_queue_corrupt_record_dropped"]
+        assert len(dropped) == 1
+        record = dropped[0]
+        assert record["path"] == str(queue_path)
+        assert record["line_number"] == 2
+        assert record["error_class"] == "JSONDecodeError"
+        assert "line_preview" not in record
+        # The sentinel must never appear in any field of the emitted log event.
+        assert secret not in json.dumps(record)
 
     def test_empty_lines_in_queue_are_harmless(self, tmp_path: Path) -> None:
         """Empty lines in the JSONL file should not cause errors."""
