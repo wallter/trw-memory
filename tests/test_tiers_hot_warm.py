@@ -277,6 +277,42 @@ class TestWarmTier:
         assert results[0]["_tier_relevance"] == pytest.approx(expected)
         assert results[0]["_tier_relevance"] != pytest.approx(1.0 - dist)
 
+    def test_warm_sidecar_corrupt_line_skipped_with_structured_event(self, mgr: TierManager) -> None:
+        """A corrupt sidecar row must not raise: the valid entry still searches
+        and lists, and a structured ``warm_tier_sidecar_corrupt_record_skipped``
+        event is emitted with locality (path, line_number, error_class) but
+        without the raw line contents."""
+        from structlog.testing import capture_logs
+
+        # Seed one valid record through the normal write path.
+        mgr.warm_add("good", {"id": "good", "content": "python programming", "tags": ["code"]}, None)
+
+        # Inject a corrupt JSON line *before* the valid one so the valid record
+        # is on line 2 — exercises line-number locality, not just line 1.
+        sidecar = mgr._warm_sidecar_path()
+        valid_line = sidecar.read_text(encoding="utf-8").strip()
+        sidecar.write_text("{not valid json,,,\n" + valid_line + "\n", encoding="utf-8")
+
+        with capture_logs() as logs:
+            search_results = mgr.warm_search(["python"], None)
+            listed = mgr._warm_store.warm_entries()
+
+        # Acceptance 1 + 3: valid entry still returned by search and list.
+        assert "good" in [str(r["id"]) for r in search_results]
+        assert "good" in [str(e.get("id")) for e in listed]
+
+        # Acceptance 2 + 3: structured event emitted with locality, no payload.
+        corrupt_events = [
+            log for log in logs if log.get("event") == "warm_tier_sidecar_corrupt_record_skipped"
+        ]
+        assert corrupt_events, "expected a structured corrupt-record event"
+        event = corrupt_events[0]
+        assert event["path"] == str(sidecar)
+        assert event["line_number"] == 1
+        assert event["error_class"] == "JSONDecodeError"
+        # The raw corrupt line must never be logged.
+        assert "not valid json" not in json.dumps(event)
+
     def test_warm_remove_deletes_vector_rows(self, mgr: TierManager, monkeypatch: pytest.MonkeyPatch) -> None:
         class _FakeBackend:
             def __init__(self) -> None:
