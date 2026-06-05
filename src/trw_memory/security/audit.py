@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import tempfile
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -136,18 +137,17 @@ class AuditLog:
 
     def read_all(self) -> list[AuditRecord]:
         """Read all audit records from disk."""
-        if not self._path.exists():
-            return []
         records: list[AuditRecord] = []
-        with self._path.open("r", encoding="utf-8") as fh:
-            for line_no, line in enumerate(fh, start=1):
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                try:
-                    records.append(AuditRecord.model_validate(json.loads(stripped)))
-                except (ValueError, TypeError, json.JSONDecodeError) as exc:
-                    raise StorageError(f"Corrupt audit record at line {line_no}: {exc}", path=str(self._path)) from exc
+        for line_no, data in self._iter_record_dicts():
+            try:
+                records.append(AuditRecord.model_validate(data))
+            except (ValueError, TypeError) as exc:
+                # Content-free: a pydantic ValidationError embeds the raw input
+                # payload, so surface only the line number and exception type.
+                raise StorageError(
+                    f"Corrupt audit record at line {line_no}: {type(exc).__name__}",
+                    path=str(self._path),
+                ) from None
         return records
 
     @staticmethod
@@ -166,21 +166,68 @@ class AuditLog:
             return value.isoformat()
         raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
-    def _read_last_hash_unlocked(self) -> str:
+    def _iter_record_dicts(self) -> Iterator[tuple[int, dict[str, object]]]:
+        """Yield ``(line_no, record)`` for each non-blank JSONL line.
+
+        Single Seam owning the audit log's read-path corruption policy:
+        it fails closed with a typed, content-free :class:`StorageError`
+        on a non-UTF-8 byte stream, an undecodable line, or a line that
+        is valid JSON but not an object. Callers (:meth:`read_all`,
+        :meth:`_read_last_hash_unlocked`) layer their own per-record
+        semantics on top, so the two read paths cannot drift into
+        asymmetric corruption handling — a tamper-evident hash chain
+        must treat a bad tail identically on every read. Diagnostics
+        never embed the raw line, so a corrupted record's payload cannot
+        leak into logs or exception messages.
+        """
         if not self._path.exists():
-            return _GENESIS_HASH
-        last_hash = _GENESIS_HASH
-        with self._path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                try:
-                    data = json.loads(stripped)
-                except json.JSONDecodeError as exc:
-                    raise StorageError(f"Corrupt audit record while loading tail: {exc}", path=str(self._path)) from exc
-                last_hash = str(data.get("hash", _GENESIS_HASH))
-        return last_hash
+            return
+        try:
+            with self._path.open("r", encoding="utf-8") as fh:
+                for line_no, line in enumerate(fh, start=1):
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        data = json.loads(stripped)
+                    except json.JSONDecodeError as exc:
+                        raise StorageError(
+                            f"Corrupt audit record at line {line_no}: {type(exc).__name__}",
+                            path=str(self._path),
+                        ) from exc
+                    if not isinstance(data, dict):
+                        raise StorageError(
+                            f"Corrupt audit record at line {line_no}: expected JSON object",
+                            path=str(self._path),
+                        ) from None
+                    yield line_no, data
+        except (OSError, UnicodeDecodeError) as exc:
+            raise StorageError(
+                f"Unable to read audit log: {type(exc).__name__}",
+                path=str(self._path),
+            ) from exc
+
+    def _read_last_hash_unlocked(self) -> str:
+        """Return the chain-head hash for the next append, failing closed.
+
+        The append write-path links each new record's ``prev_hash`` to
+        this value, so a corrupt tail must never crash the writer with a
+        raw decode/attribute error nor silently re-root the chain to
+        genesis — a truncated or tampered file resetting the hash linkage
+        would defeat the tamper-evidence. A genuinely empty/absent log
+        returns the genesis hash; a non-empty log whose any record lacks
+        a usable hash is treated as corruption.
+        """
+        last_hash: str | None = None
+        for _line_no, data in self._iter_record_dicts():
+            hash_value = data.get("hash")
+            if not isinstance(hash_value, str) or not hash_value:
+                raise StorageError(
+                    "Corrupt audit record at chain tail: missing hash",
+                    path=str(self._path),
+                ) from None
+            last_hash = hash_value
+        return last_hash if last_hash is not None else _GENESIS_HASH
 
     def _append_line_unlocked(self, record_data: dict[str, object]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
