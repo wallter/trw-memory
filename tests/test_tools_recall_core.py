@@ -281,3 +281,62 @@ class TestMemoryRecallImpl:
 
             memories = cast("list[dict[str, object]]", result["memories"])
             assert [memory["namespace"] for memory in memories] == ["project:default"]
+
+
+class TestMemoryRecallImplAdmissionPolicyParity:
+    """Recall-policy seam: the MCP tool path must enforce the SAME confidence /
+    currentness admission policy the SDK path (MemoryClient.recall) enforces,
+    instead of silently bypassing it.
+    """
+
+    def test_default_config_keeps_low_confidence_records(self) -> None:
+        # Default config (recall_confidence_filter=None) => filter OFF =>
+        # prior tool-path behavior bit-for-bit: low-importance record retained.
+        high = MemoryEntry(id="M-hi", content="alpha record", namespace="project:default", importance=0.9)
+        low = MemoryEntry(id="M-lo", content="alpha record zombie", namespace="project:default", importance=0.5)
+        backend = _mock_backend([high, low])
+
+        result = memory_recall_impl("", "project:default", backend=backend, include_org_memories=False)
+
+        ids = [m["id"] for m in cast("list[dict[str, object]]", result["memories"])]
+        assert "M-hi" in ids
+        assert "M-lo" in ids
+
+    def test_config_confidence_floor_suppresses_low_confidence_record(self) -> None:
+        high = MemoryEntry(id="M-hi", content="alpha record", namespace="project:default", importance=0.9)
+        low = MemoryEntry(id="M-lo", content="alpha record zombie", namespace="project:default", importance=0.5)
+        backend = _mock_backend([high, low])
+        cfg = MemoryConfig(recall_confidence_filter=0.7)
+
+        result = memory_recall_impl(
+            "", "project:default", backend=backend, config=cfg, include_org_memories=False
+        )
+
+        ids = [m["id"] for m in cast("list[dict[str, object]]", result["memories"])]
+        assert ids == ["M-hi"], f"expected sub-floor record suppressed on tool path, got {ids}"
+
+    def test_config_historical_only_suppresses_softened_record(self) -> None:
+        current = MemoryEntry(
+            id="M-cur",
+            content="beta current record",
+            namespace="project:default",
+            importance=0.8,
+            metadata={"currentness_status": "current"},
+        )
+        historical = MemoryEntry(
+            id="M-hist",
+            content="beta historical record",
+            namespace="project:default",
+            importance=0.8,
+            metadata={"currentness_status": "historical_only"},
+        )
+        backend = _mock_backend([current, historical])
+        cfg = MemoryConfig(recall_filter_historical_only=True)
+
+        result = memory_recall_impl(
+            "", "project:default", backend=backend, config=cfg, include_org_memories=False
+        )
+
+        ids = [m["id"] for m in cast("list[dict[str, object]]", result["memories"])]
+        assert "M-cur" in ids
+        assert "M-hist" not in ids, f"expected historical_only record suppressed on tool path, got {ids}"

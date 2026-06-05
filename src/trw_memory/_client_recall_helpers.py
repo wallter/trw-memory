@@ -238,67 +238,12 @@ def tier_result_from_entry(entry: dict[str, object]) -> MemoryResultDict:
     return tier_result
 
 
-def apply_admission_filter(
-    results: list[MemoryResultDict],
-    *,
-    confidence_floor: float | None,
-    exclude_historical_only: bool,
-    namespace: str = "",
-) -> list[MemoryResultDict]:
-    """PRD-DIST-2049 c802: opt-in recall-time confidence / currentness filter.
-
-    Applied between ``merge_tier_results`` and ``apply_source_policy`` in
-    ``recall_impl``. When both args are falsy (None / False) returns the
-    input list unchanged (bit-for-bit; satisfies the default-OFF regression
-    guarantee).
-
-    OR semantics — a record is suppressed if EITHER:
-
-    - ``confidence_floor`` is a float and the record's
-      ``metadata['confidence']`` is below it (records without a confidence
-      field are treated as 0.0, so they are dropped when a floor is set).
-    - ``exclude_historical_only`` is True and the record's
-      ``metadata['currentness_status']`` equals ``'historical_only'``.
-
-    Emits a ``recall_filter.admission`` structlog event when at least one
-    record was suppressed, mirroring the ``recall_filter.enforce`` and
-    ``anomaly_quarantine_bypass`` event-name conventions.
-    """
-    if confidence_floor is None and not exclude_historical_only:
-        return results
-    kept: list[MemoryResultDict] = []
-    dropped_confidence = 0
-    dropped_historical = 0
-    for r in results:
-        meta = r.get("metadata") or {}
-        if exclude_historical_only and meta.get("currentness_status") == "historical_only":
-            dropped_historical += 1
-            continue
-        if confidence_floor is not None:
-            # Prefer explicit metadata.confidence (string-coerced) when present;
-            # fall back to the result's ``importance`` field which carries the
-            # producer-supplied confidence on trw-distill ingest paths.
-            raw: object = meta.get("confidence")
-            if raw is None:
-                raw = r.get("importance")
-            try:
-                conf = float(raw) if raw is not None else 0.0  # type: ignore[arg-type]
-            except (TypeError, ValueError):
-                conf = 0.0
-            if conf < confidence_floor:
-                dropped_confidence += 1
-                continue
-        kept.append(r)
-    if dropped_confidence or dropped_historical:
-        logger.debug(
-            "recall_filter.admission",
-            operation="recall_admission_filter",
-            namespace=namespace,
-            confidence_floor=confidence_floor,
-            exclude_historical_only=exclude_historical_only,
-            input_count=len(results),
-            kept_count=len(kept),
-            dropped_confidence=dropped_confidence,
-            dropped_historical=dropped_historical,
-        )
-    return kept
+# ``apply_admission_filter`` was relocated to the shared recall-policy Module
+# ``trw_memory.retrieval.admission_policy`` (PRD-DIST-2049 recall-policy seam
+# unification) so the SDK recall path and the MCP tool path consume a single
+# Implementation. Re-exported here so existing call sites + test patches that
+# reference ``trw_memory._client_recall_helpers.apply_admission_filter`` keep
+# working unchanged.
+from trw_memory.retrieval.admission_policy import (  # noqa: E402
+    apply_admission_filter as apply_admission_filter,
+)
