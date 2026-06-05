@@ -252,6 +252,27 @@ class StorageBackend(ABC):
         """
         yield self
 
+    def supports_vectors(self) -> bool:
+        """Return whether this backend can persist and search dense vectors.
+
+        This is the explicit capability signal for the vector seam. The vector
+        extension methods (:meth:`upsert_vector`, :meth:`search_vectors`,
+        :meth:`get_stored_embeddings`, ...) silently no-op on backends without
+        vector support, so a caller that only computes an embedding in order to
+        persist it can consult this method first and skip the (expensive)
+        embedding-model call entirely when it would be wasted.
+
+        The default is ``False`` — backends gain vector support by overriding
+        this to report their real runtime state (e.g. whether ``sqlite-vec``
+        loaded and the virtual table exists). Returning ``False`` here is always
+        safe: it only ever suppresses work the no-op methods would discard.
+
+        Returns:
+            ``True`` when ``upsert_vector`` / ``search_vectors`` actually
+            persist and query vectors; ``False`` when they no-op.
+        """
+        return False
+
     def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:  # noqa: B027
         """Insert or update a dense vector associated with *entry_id*.
 

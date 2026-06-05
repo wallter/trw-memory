@@ -29,7 +29,7 @@ import structlog
 
 from trw_memory.exceptions import SchemaValidationError, StorageError
 from trw_memory.graph import schedule_graph_update
-from trw_memory.lifecycle.tiers._runtime import remember_entry_in_tiers
+from trw_memory.lifecycle.tiers._runtime import embedding_has_consumer, remember_entry_in_tiers
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.security.poisoning import validate_store_inputs
@@ -243,7 +243,10 @@ async def bulk_store_impl(
             decisions[i] = decision
 
         embeddings: list[list[float] | None] = []
-        if accepted_entries and embedder is not None:
+        # Skip the batch embed when no vector sink can consume the result — the
+        # warm tier, primary vector store, and remote publish are the only
+        # consumers, and all three are inert here when this returns False.
+        if accepted_entries and embedder is not None and embedding_has_consumer(client._config, backend):
             try:
                 texts = [f"{e.content} {e.detail}" for e in accepted_entries]
                 embeddings = embedder.embed_batch(texts)

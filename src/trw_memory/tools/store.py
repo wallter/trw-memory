@@ -22,7 +22,11 @@ from trw_memory.exceptions import (
     StorageError,
 )
 from trw_memory.graph import schedule_graph_update
-from trw_memory.lifecycle.tiers._runtime import remember_entry_in_tiers, supports_tier_runtime
+from trw_memory.lifecycle.tiers._runtime import (
+    embedding_has_consumer,
+    remember_entry_in_tiers,
+    supports_tier_runtime,
+)
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
@@ -159,7 +163,13 @@ def memory_store_impl(
         # embedding *before* opening the write transaction — it is pure CPU work
         # with no DB state, so a failure here must leave nothing written.
         embedding: list[float] | None = None
-        embedder = get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim)
+        # Resolve the embedder only when a vector sink can consume the result;
+        # otherwise the embed call is wasted on a no-op upsert_vector.
+        embedder = (
+            get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim)
+            if embedding_has_consumer(cfg, backend)
+            else None
+        )
         if embedder is not None:
             try:
                 embedding = embedder.embed(f"{entry.content} {entry.detail}")

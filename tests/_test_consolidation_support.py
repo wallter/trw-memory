@@ -144,6 +144,12 @@ class _InMemoryBackend(StorageBackend):
     def close(self) -> None:
         return None
 
+    def supports_vectors(self) -> bool:
+        # This double persists and serves vectors via ``self._vectors``, so it
+        # must honestly report vector capability — store paths now consult this
+        # before paying for an embedding (see ``embedding_has_consumer``).
+        return True
+
     def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:
         if self.upsert_vector_override is not None:
             self.upsert_vector_override(entry_id, embedding)

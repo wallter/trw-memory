@@ -338,6 +338,14 @@ class SQLiteBackend(StorageBackend):
         """``True`` when sqlite-vec is loaded and the virtual table exists."""
         return self._vec_available
 
+    def supports_vectors(self) -> bool:
+        """Explicit vector-capability signal (see :class:`StorageBackend`).
+
+        Reflects the real ``sqlite-vec`` load state so callers can skip
+        embedding work that would otherwise no-op through ``upsert_vector``.
+        """
+        return self._vec_available
+
     @property
     def db_path(self) -> Path:
         """Filesystem path of the backing database file."""

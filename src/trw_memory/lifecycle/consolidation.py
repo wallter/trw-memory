@@ -281,9 +281,12 @@ def _create_consolidated_entry(
     )
 
     # Compute the embedding before opening the write transaction — pure CPU work
-    # with no DB state, so a failure here must leave nothing written.
+    # with no DB state, so a failure here must leave nothing written. The only
+    # sinks for a consolidated entry's vector are the backend vector store and
+    # graph similarity (which reads candidate vectors back from that store), so
+    # both collapse to ``supports_vectors``; skip the embed when it is False.
     embedding: list[float] | None = None
-    if embedder is not None and embedder.available():
+    if embedder is not None and embedder.available() and storage.supports_vectors():
         try:
             embedding = embedder.embed(f"{entry.content} {entry.detail}")
         except Exception as exc:

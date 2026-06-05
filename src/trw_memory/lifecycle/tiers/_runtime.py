@@ -34,6 +34,40 @@ def tier_runtime_enabled(config: MemoryConfig) -> bool:
     return not config.encryption_enabled
 
 
+def embedding_has_consumer(config: MemoryConfig, backend: StorageBackend) -> bool:
+    """Return whether a freshly computed dense embedding has any live sink.
+
+    Store paths compute an embedding purely to persist/search it. A dense
+    vector has exactly four potential sinks on the write path:
+
+    1. the primary backend's vector store (``backend.upsert_vector``);
+    2. the warm tier's own ``sqlite-vec`` sidecar, which is an independent
+       SQLite store and therefore usable even when the *primary* backend
+       cannot persist vectors (e.g. a YAML primary with ``sqlite-vec``
+       installed) — gated by :func:`tier_runtime_enabled`;
+    3. graph similarity edges, which read candidate vectors back from the
+       primary backend and so are already covered by ``supports_vectors``;
+    4. remote publish, which ships the vector to the platform.
+
+    When none of these are live, computing the embedding is pure waste —
+    every downstream ``upsert_vector`` would no-op. Returning ``True`` is the
+    conservative answer: it only ever asks the caller to keep doing the work
+    it already does today, so this never regresses existing behaviour.
+
+    Args:
+        config: Active memory configuration (tier + sync settings).
+        backend: The primary storage backend for this write.
+
+    Returns:
+        ``True`` when at least one vector sink can consume the embedding.
+    """
+    if backend.supports_vectors():
+        return True
+    if tier_runtime_enabled(config):
+        return True
+    return not config.local_only and config.sync_enabled and bool(config.platform_url)
+
+
 def get_tier_manager(config: MemoryConfig, namespace: str) -> TierManager:
     """Return the process-local TierManager for a namespace."""
     key = (str(Path(config.storage_path).resolve()), config.storage_backend, namespace)
