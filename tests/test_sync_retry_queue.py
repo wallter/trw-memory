@@ -16,6 +16,28 @@ from ._test_sync_support import make_sync_config as _make_config
 from ._test_sync_support import mock_httpx_client as _mock_httpx_client
 
 
+def _record_line(
+    entry_id: str,
+    payload: dict[str, Any],
+    *,
+    retry_count: int = 0,
+    last_error: str | None = None,
+) -> str:
+    """Serialise a well-formed ``QueueRecord`` as one JSONL line (with newline)."""
+    return (
+        json.dumps(
+            {
+                "entry_id": entry_id,
+                "payload": payload,
+                "queued_at": "2026-01-01T00:00:00Z",
+                "retry_count": retry_count,
+                "last_error": last_error,
+            }
+        )
+        + "\n"
+    )
+
+
 class TestRetryQueue:
     """FR06: RetryQueue provides JSONL persistence with depth cap."""
 
@@ -157,9 +179,9 @@ class TestRetryQueue:
         """Corrupt JSONL lines should be logged and skipped, not crash dequeue."""
         queue_path = tmp_path / "queue.jsonl"
         queue_path.write_text(
-            '{"entry_id": "M-001", "data": {"summary": "valid"}, "retries": 0}\n'
-            "not valid json at all\n"
-            '{"entry_id": "M-002", "data": {"summary": "also valid"}, "retries": 0}\n',
+            _record_line("M-001", {"summary": "valid"})
+            + "not valid json at all\n"
+            + _record_line("M-002", {"summary": "also valid"}),
             encoding="utf-8",
         )
         queue = RetryQueue(queue_path)
@@ -198,11 +220,135 @@ class TestRetryQueue:
         # The sentinel must never appear in any field of the emitted log event.
         assert secret not in json.dumps(record)
 
+    def test_valid_json_non_object_rows_are_skipped(self, tmp_path: Path) -> None:
+        """Valid JSON that is not a QueueRecord object (scalar/list) is dropped.
+
+        Regression: ``_read_all`` only guarded ``json.JSONDecodeError``, so a
+        valid-JSON scalar/list/legacy-dict slipped into ``list[QueueRecord]``
+        and crashed ``drain``/``depth`` on ``record["retry_count"]``.
+        """
+        queue_path = tmp_path / "queue.jsonl"
+        queue_path.write_text(
+            _record_line("M-001", {"summary": "valid"})
+            + "42\n"  # JSON scalar
+            + '"just a string"\n'  # JSON string scalar
+            + "[1, 2, 3]\n"  # JSON list
+            + _record_line("M-002", {"summary": "also valid"}),
+            encoding="utf-8",
+        )
+        queue = RetryQueue(queue_path)
+
+        with capture_logs() as logs:
+            depth = queue.depth()
+
+        # Fail-open: the two well-formed records survive; the three
+        # non-object rows are dropped without crashing.
+        assert depth == 2
+        dropped = [e for e in logs if e["event"] == "retry_queue_corrupt_record_dropped"]
+        assert len(dropped) == 3
+        assert {e["error_class"] for e in dropped} == {"NonObjectRow"}
+        assert {e["line_number"] for e in dropped} == {2, 3, 4}
+
+    def test_dict_missing_required_field_is_skipped_without_crashing(
+        self, tmp_path: Path
+    ) -> None:
+        """A dict missing retry_count or payload is dropped; drain/depth survive.
+
+        These wrong-shape dicts are exactly what would have crashed
+        ``drain`` at ``record["retry_count"]`` / ``record["payload"]``.
+        """
+        queue_path = tmp_path / "queue.jsonl"
+        queue_path.write_text(
+            # Missing retry_count
+            json.dumps(
+                {
+                    "entry_id": "M-001",
+                    "payload": {"summary": "no-retry-count"},
+                    "queued_at": "2026-01-01T00:00:00Z",
+                    "last_error": None,
+                }
+            )
+            + "\n"
+            # Missing payload
+            + json.dumps(
+                {
+                    "entry_id": "M-002",
+                    "queued_at": "2026-01-01T00:00:00Z",
+                    "retry_count": 0,
+                    "last_error": None,
+                }
+            )
+            + "\n"
+            # Wrong type: retry_count is a string
+            + json.dumps(
+                {
+                    "entry_id": "M-003",
+                    "payload": {"summary": "bad-type"},
+                    "queued_at": "2026-01-01T00:00:00Z",
+                    "retry_count": "0",
+                    "last_error": None,
+                }
+            )
+            + "\n"
+            + _record_line("M-OK", {"summary": "valid"}),
+            encoding="utf-8",
+        )
+        queue = RetryQueue(queue_path)
+
+        # depth() must not raise on the malformed rows.
+        assert queue.depth() == 1
+
+        # drain() must not raise (it indexes retry_count/payload) and must
+        # publish the one surviving valid record.
+        published: list[dict[str, object]] = []
+
+        def _capture(payload: dict[str, object]) -> bool:
+            published.append(payload)
+            return True
+
+        result = queue.drain(_capture)
+        assert result == {"drained": 1, "failed": 0, "skipped": 0}
+        assert published == [{"summary": "valid"}]
+        assert queue.depth() == 0
+
+    def test_schema_mismatch_log_omits_payload_contents(self, tmp_path: Path) -> None:
+        """A wrong-shape (but valid-JSON) row must not leak payload text to logs."""
+        secret = "SENTINEL-SECRET-dEadBeeF-do-not-log"
+        queue_path = tmp_path / "queue.jsonl"
+        queue_path.write_text(
+            _record_line("M-001", {"summary": "valid"})
+            # Wrong shape: a dict carrying sensitive text but missing retry_count.
+            + json.dumps(
+                {
+                    "entry_id": "M-002",
+                    "payload": {"summary": secret},
+                    "queued_at": "2026-01-01T00:00:00Z",
+                    "last_error": secret,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        queue = RetryQueue(queue_path)
+
+        with capture_logs() as logs:
+            depth = queue.depth()
+
+        assert depth == 1
+        dropped = [e for e in logs if e["event"] == "retry_queue_corrupt_record_dropped"]
+        assert len(dropped) == 1
+        record = dropped[0]
+        assert record["path"] == str(queue_path)
+        assert record["line_number"] == 2
+        assert record["error_class"] == "SchemaMismatch"
+        # The sentinel must never appear in any field of the emitted log event.
+        assert secret not in json.dumps(record)
+
     def test_empty_lines_in_queue_are_harmless(self, tmp_path: Path) -> None:
         """Empty lines in the JSONL file should not cause errors."""
         queue_path = tmp_path / "queue.jsonl"
         queue_path.write_text(
-            '{"entry_id": "M-001", "data": {"summary": "test"}, "retries": 0}\n\n\n',
+            _record_line("M-001", {"summary": "test"}) + "\n\n",
             encoding="utf-8",
         )
         queue = RetryQueue(queue_path)

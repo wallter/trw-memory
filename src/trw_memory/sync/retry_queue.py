@@ -158,19 +158,74 @@ class RetryQueue:
         for line_number, line in enumerate(self._path.read_text().splitlines(), start=1):
             if not line.strip():
                 continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError as exc:
-                # Fail open: drop the corrupt row but preserve valid records.
-                # Never log raw line content — the payload may carry sensitive
-                # memory text or metadata. Emit only structural locators.
-                logger.warning(
-                    "retry_queue_corrupt_record_dropped",
-                    path=str(self._path),
-                    line_number=line_number,
-                    error_class=type(exc).__name__,
-                )
+            record = self._parse_record(line, line_number)
+            if record is not None:
+                entries.append(record)
         return entries
+
+    def _parse_record(self, line: str, line_number: int) -> QueueRecord | None:
+        """Parse and validate a single JSONL row into a :class:`QueueRecord`.
+
+        Fail open: returns ``None`` for any row that is not a well-formed
+        ``QueueRecord`` — invalid JSON, valid-JSON-but-not-an-object (scalars,
+        lists), or a dict whose fields are missing or the wrong type. Dropping
+        such rows keeps one bad line from crashing ``drain``/``snapshot``, which
+        index ``record["retry_count"]`` and ``record["payload"]`` directly.
+
+        Validated shape (the fields ``enqueue``/``drain``/``snapshot`` rely on):
+        ``entry_id`` str, ``payload`` object, ``queued_at`` str,
+        ``retry_count`` int (not bool), ``last_error`` str-or-null.
+
+        Never logs raw row or payload contents — only structural locators
+        (path, line number, error class) so sensitive memory text cannot leak.
+        """
+        try:
+            raw = json.loads(line)
+        except json.JSONDecodeError as exc:
+            self._log_dropped_record(line_number, type(exc).__name__)
+            return None
+
+        if not isinstance(raw, dict):
+            self._log_dropped_record(line_number, "NonObjectRow")
+            return None
+
+        entry_id = raw.get("entry_id")
+        payload = raw.get("payload")
+        queued_at = raw.get("queued_at")
+        retry_count = raw.get("retry_count")
+        last_error = raw.get("last_error")
+
+        if (
+            not isinstance(entry_id, str)
+            or not isinstance(payload, dict)
+            or not isinstance(queued_at, str)
+            or not isinstance(retry_count, int)
+            or isinstance(retry_count, bool)
+            or not (last_error is None or isinstance(last_error, str))
+        ):
+            self._log_dropped_record(line_number, "SchemaMismatch")
+            return None
+
+        return QueueRecord(
+            entry_id=entry_id,
+            payload=payload,
+            queued_at=queued_at,
+            retry_count=retry_count,
+            last_error=last_error,
+        )
+
+    def _log_dropped_record(self, line_number: int, error_class: str) -> None:
+        """Emit the corrupt-row drop event with structural locators only.
+
+        Never include raw row or payload contents — the payload may carry
+        sensitive memory text or metadata.
+        """
+        logger.warning(
+            "retry_queue_corrupt_record_dropped",
+            path=str(self._path),
+            line_number=line_number,
+            error_class=error_class,
+        )
 
     def _write_all(self, entries: list[QueueRecord]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
