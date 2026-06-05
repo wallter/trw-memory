@@ -82,15 +82,32 @@ class WarmTierStore:
         reads rows through here instead of re-deriving how corruption is handled.
 
         Fail-open is preserved -- blank lines are ignored, and a row that is not
-        valid JSON or is not a JSON object is skipped rather than raised. Each
-        skip emits a structured ``warm_tier_sidecar_corrupt_record_skipped``
-        event carrying the sidecar path, the 1-based line number, and the error
-        class so operators get locality when warm recall misses because rows were
-        dropped. The raw line and any memory payload are deliberately never
-        logged.
+        valid JSON, is not a JSON object, or is not valid UTF-8 is skipped rather
+        than raised. Each skip emits a structured
+        ``warm_tier_sidecar_corrupt_record_skipped`` event carrying the sidecar
+        path, the 1-based line number, and the error class so operators get
+        locality when warm recall misses because rows were dropped. The raw line
+        and any memory payload are deliberately never logged.
+
+        Rows are read as raw bytes and decoded per line so a single non-UTF-8
+        row cannot abort the whole read: adjacent valid records (and their
+        line-number locality) survive a corrupt byte sequence anywhere in the
+        file. ``\r`` from CRLF-terminated rows is stripped, matching the prior
+        ``str.splitlines`` behaviour.
         """
-        for line_number, line in enumerate(sidecar.read_text(encoding="utf-8").splitlines(), start=1):
-            line_s = line.strip()
+        for line_number, byte_line in enumerate(sidecar.read_bytes().split(b"\n"), start=1):
+            if not byte_line.strip():
+                continue
+            try:
+                line_s = byte_line.decode("utf-8").strip()
+            except UnicodeDecodeError as exc:
+                logger.warning(
+                    "warm_tier_sidecar_corrupt_record_skipped",
+                    path=str(sidecar),
+                    line_number=line_number,
+                    error_class=type(exc).__name__,
+                )
+                continue
             if not line_s:
                 continue
             try:
