@@ -155,13 +155,38 @@ class RetryQueue:
         if not self._path.exists():
             return []
         entries: list[QueueRecord] = []
-        for line_number, line in enumerate(self._path.read_text().splitlines(), start=1):
-            if not line.strip():
+        # Read raw bytes and decode one line at a time so a single non-UTF-8
+        # row is isolated like any other corrupt row, rather than aborting the
+        # whole-file decode and bricking depth/snapshot/drain. ``bytes`` splits
+        # on the same ASCII line boundaries (\n, \r, \r\n) that the writer uses.
+        for line_number, raw_line in enumerate(self._path.read_bytes().splitlines(), start=1):
+            line = self._decode_line(raw_line, line_number)
+            if line is None or not line.strip():
                 continue
             record = self._parse_record(line, line_number)
             if record is not None:
                 entries.append(record)
         return entries
+
+    def _decode_line(self, raw_line: bytes, line_number: int) -> str | None:
+        """Decode one raw JSONL byte-line as UTF-8, isolating non-UTF-8 rows.
+
+        Fail open: a torn or non-UTF-8 line yields ``None`` (dropped with a
+        content-free diagnostic) instead of raising ``UnicodeDecodeError`` and
+        bricking ``depth``/``snapshot``/``drain`` for every adjacent valid
+        record. Records are written UTF-8 by :meth:`_write_all`, so a decode
+        failure marks a row corrupted at the byte layer — below the JSON
+        well-formedness that :meth:`_parse_record` guards.
+
+        Like :meth:`_parse_record`, never logs raw row bytes, decoded text, or
+        exception/offset detail — only structural locators (path, line number,
+        error class) so sensitive memory text cannot leak.
+        """
+        try:
+            return raw_line.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            self._log_dropped_record(line_number, type(exc).__name__)
+            return None
 
     def _parse_record(self, line: str, line_number: int) -> QueueRecord | None:
         """Parse and validate a single JSONL row into a :class:`QueueRecord`.

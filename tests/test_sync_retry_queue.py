@@ -344,6 +344,83 @@ class TestRetryQueue:
         # The sentinel must never appear in any field of the emitted log event.
         assert secret not in json.dumps(record)
 
+    def test_non_utf8_line_is_skipped_not_fatal(self, tmp_path: Path) -> None:
+        """A single non-UTF-8 row is isolated; valid adjacent records survive.
+
+        Regression: ``_read_all`` decoded the whole file via ``read_text()``
+        before per-row parsing, so one torn/non-UTF-8 byte raised
+        ``UnicodeDecodeError`` and bricked ``depth``/``snapshot``/``drain``,
+        contrary to the queue's fail-open corrupt-row contract.
+        """
+        queue_path = tmp_path / "queue.jsonl"
+        queue_path.write_bytes(
+            _record_line("M-001", {"summary": "valid"}).encode("utf-8")
+            # 0xFF is never a valid UTF-8 byte — decoding this line must fail.
+            + b"\xff\xfe torn non-utf-8 row\n"
+            + _record_line("M-002", {"summary": "also valid"}).encode("utf-8")
+        )
+        queue = RetryQueue(queue_path)
+
+        # depth/snapshot must not raise and must preserve both valid records.
+        assert queue.depth() == 2
+        snapshot = queue.snapshot()
+        assert [record["entry_id"] for record in snapshot] == ["M-001", "M-002"]
+
+        # drain must not raise and must publish the two surviving records.
+        published: list[dict[str, object]] = []
+
+        def _capture(payload: dict[str, object]) -> bool:
+            published.append(payload)
+            return True
+
+        result = queue.drain(_capture)
+        assert result == {"drained": 2, "failed": 0, "skipped": 0}
+        assert published == [{"summary": "valid"}, {"summary": "also valid"}]
+        assert queue.depth() == 0
+
+    def test_non_utf8_line_log_is_content_free(self, tmp_path: Path) -> None:
+        """The non-UTF-8 drop log carries only structural locators (privacy).
+
+        A torn row may embed sensitive memory text; the dropped-row event must
+        surface only path + line number + error class — never raw bytes, a line
+        preview, byte offsets, or exception text.
+        """
+        secret = "SENTINEL-NONUTF8-do-not-log"
+        queue_path = tmp_path / "queue.jsonl"
+        queue_path.write_bytes(
+            _record_line("M-001", {"summary": "valid"}).encode("utf-8")
+            + b"\xff " + secret.encode("utf-8") + b" \xfe\n"
+            + _record_line("M-002", {"summary": "also valid"}).encode("utf-8")
+        )
+        queue = RetryQueue(queue_path)
+
+        with capture_logs() as logs:
+            depth = queue.depth()
+
+        # Fail-open: the two well-formed records survive the torn middle row.
+        assert depth == 2
+        dropped = [e for e in logs if e["event"] == "retry_queue_corrupt_record_dropped"]
+        assert len(dropped) == 1
+        record = dropped[0]
+        assert record["path"] == str(queue_path)
+        assert record["line_number"] == 2
+        assert record["error_class"] == "UnicodeDecodeError"
+        assert "line_preview" not in record
+        # The sentinel must never appear in any field of the emitted log event.
+        assert secret not in json.dumps(record)
+
+    def test_crlf_line_endings_are_preserved(self, tmp_path: Path) -> None:
+        """Byte-level line splitting still handles \\r\\n records (no regression)."""
+        queue_path = tmp_path / "queue.jsonl"
+        queue_path.write_bytes(
+            _record_line("M-001", {"summary": "valid"}).replace("\n", "\r\n").encode("utf-8")
+            + _record_line("M-002", {"summary": "also valid"})
+            .replace("\n", "\r\n")
+            .encode("utf-8")
+        )
+        queue = RetryQueue(queue_path)
+        assert queue.depth() == 2
+
     def test_empty_lines_in_queue_are_harmless(self, tmp_path: Path) -> None:
         """Empty lines in the JSONL file should not cause errors."""
         queue_path = tmp_path / "queue.jsonl"
