@@ -213,3 +213,85 @@ class TestMemoryStoreImpl:
         audit_records = AuditLog(Path(cfg.audit_log_path)).read_all()
         assert audit_records[-1].op == "store_rejected"
         assert audit_records[-1].data["reason"] == "schema_invalid"
+
+    def test_store_vector_failure_rolls_back_row_no_orphan(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """S1-parity: if the vector write fails, the tool store path leaves NO row.
+
+        Before the transaction alignment, ``tools.store`` wrote the row first and
+        only deleted it via a best-effort compensating delete on vector failure —
+        a crash in that window orphaned a row with no vector. The row + vector now
+        share one ``backend.transaction()`` (matching ``MemoryClient.store()``), so
+        a vector failure rolls the row back atomically.
+        """
+        from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
+
+        class _VectorFailBackend(SQLiteBackend):
+            def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:
+                raise RuntimeError("simulated vector backend failure")
+
+        class _StubEmbedder:
+            def embed(self, text: str) -> list[float]:
+                return [0.1] * cfg.embedding_dim
+
+        monkeypatch.setattr(
+            "trw_memory.tools.store.get_local_embedder",
+            lambda **_kwargs: _StubEmbedder(),
+        )
+
+        backend = _VectorFailBackend(tmp_path / "store.db")
+        try:
+            result = memory_store_impl(
+                "atomic tool store content",
+                "project:default",
+                backend=backend,
+                config=cfg,
+                entry_id="M-atomic-tool",
+            )
+
+            assert result["status"] == "error"
+            # The row must NOT survive the failed vector write — no orphan.
+            assert backend.get("M-atomic-tool") is None
+        finally:
+            backend.close()
+
+    def test_store_commits_row_and_vector_together(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Happy path: a successful tool store lands the row AND its vector."""
+        pytest.importorskip("sqlite_vec")
+        from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
+
+        backend = SQLiteBackend(tmp_path / "store.db")
+        if not backend._vec_available:
+            backend.close()
+            pytest.skip("sqlite-vec extension not available")
+
+        class _StubEmbedder:
+            def embed(self, text: str) -> list[float]:
+                return [0.2] * backend._dim
+
+        monkeypatch.setattr(
+            "trw_memory.tools.store.get_local_embedder",
+            lambda **_kwargs: _StubEmbedder(),
+        )
+
+        try:
+            result = memory_store_impl(
+                "tool store with vector",
+                "project:default",
+                backend=backend,
+                config=cfg,
+                entry_id="M-with-vector",
+            )
+
+            assert result["status"] == "stored"
+            assert backend.get("M-with-vector") is not None
+            assert backend.vector_exists("M-with-vector") is True
+        finally:
+            backend.close()

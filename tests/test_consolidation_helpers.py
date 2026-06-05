@@ -181,9 +181,11 @@ class TestCreateConsolidatedEntry:
 
         storage.upsert_vector_override = _fail_vector
 
-        with pytest.raises(StorageError, match="entry write was rolled back"):
+        with pytest.raises(StorageError, match="transaction rolled back"):
             _create_consolidated_entry(cluster, "summary", "detail", storage, embedder=embedder)
 
+        # The row + vector share one transaction now, so the failed vector write
+        # rolls the entry back atomically — no orphan row survives.
         assert len(storage.list_entries()) == 0
 
 

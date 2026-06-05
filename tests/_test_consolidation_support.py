@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import contextlib
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from typing import Literal
 from unittest.mock import MagicMock
@@ -50,6 +51,24 @@ class _InMemoryBackend(StorageBackend):
         self.update_override: Callable[[str, dict[str, object]], MemoryEntry | None] | None = None
         self.delete_override: Callable[[str], bool] | None = None
         self.upsert_vector_override: Callable[[str, list[float]], None] | None = None
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[StorageBackend]:
+        """Atomic batch with rollback, modelling SQLite's ``transaction()``.
+
+        Snapshots the in-memory maps on entry and restores them if the block
+        raises, so tests assert the real production invariant (row + vector land
+        atomically; a vector failure leaves neither) rather than a
+        compensating-delete artifact.
+        """
+        data_snapshot = dict(self._data)
+        vectors_snapshot = dict(self._vectors)
+        try:
+            yield self
+        except Exception:
+            self._data = data_snapshot
+            self._vectors = vectors_snapshot
+            raise
 
     def store(self, entry: MemoryEntry) -> None:
         self._data[entry.id] = entry

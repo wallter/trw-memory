@@ -154,25 +154,33 @@ def memory_store_impl(
         entry = decision.entry
         if namespace.startswith("team:"):
             NamespaceManager(backend).ensure_team_namespace(namespace, created_at=now)
-        backend.store(entry)
+        # Mirror MemoryClient.store(): tool writes populate vectors too, otherwise
+        # tool-created memories rank differently from SDK-created ones. Compute the
+        # embedding *before* opening the write transaction — it is pure CPU work
+        # with no DB state, so a failure here must leave nothing written.
         embedding: list[float] | None = None
-        # Mirror MemoryClient.store(): tool writes should populate vectors too,
-        # otherwise tool-created memories rank differently from SDK-created ones.
         embedder = get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim)
         if embedder is not None:
             try:
                 embedding = embedder.embed(f"{entry.content} {entry.detail}")
+            except Exception as exc:
+                raise StorageError(
+                    f"failed to compute embedding for {entry_id!r}; entry was not written"
+                ) from exc
+        # S1-parity fix: commit the row + its vector in ONE transaction so a crash
+        # between the two writes can no longer leave a row with no vector, and a
+        # vector failure rolls the row back automatically. This matches
+        # MemoryClient.store() (_client_store.py) instead of the older
+        # compensating-delete path, giving both store seams one atomicity model.
+        try:
+            with backend.transaction():
+                backend.store(entry)
                 if embedding is not None:
                     backend.upsert_vector(entry.id, embedding)
-            except Exception as exc:
-                try:
-                    backend.delete(entry.id)
-                except Exception:
-                    logger.exception("memory_store_vector_rollback_failed", entry_id=entry_id)
-                    raise StorageError(
-                        f"failed to persist vector for {entry_id!r}; rollback did not complete cleanly"
-                    ) from exc
-                raise StorageError(f"failed to persist vector for {entry_id!r}; entry write was rolled back") from exc
+        except Exception as exc:
+            raise StorageError(
+                f"failed to persist entry+vector for {entry_id!r}; transaction rolled back"
+            ) from exc
         try:
             # Graph enrichment is a secondary index over the stored entry, so we
             # dispatch it after the canonical row/vector write succeeds.
