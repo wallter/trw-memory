@@ -145,9 +145,9 @@ class TestRecallHybridPath:
         We mock hybrid_search to return controlled entries so we can verify
         the positional scoring formula without depending on BM25 IDF behavior.
         """
-        from .conftest import make_entry
-
         from trw_memory.models.memory import MemoryStatus
+
+        from .conftest import make_entry
 
         e1 = make_entry(entry_id="M-001", content="first match", status=MemoryStatus.ACTIVE)
         e2 = make_entry(entry_id="M-002", content="second match", status=MemoryStatus.ACTIVE)
