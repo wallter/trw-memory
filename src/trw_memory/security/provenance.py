@@ -24,7 +24,9 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from trw_memory.exceptions import StorageError
 
 try:
     from nacl.exceptions import BadSignatureError
@@ -88,17 +90,42 @@ def _hash(entry: ProvenanceEntry) -> str:
 
 
 def _read_last(chain_path: Path) -> ProvenanceEntry | None:
+    """Return the last entry of the chain, or ``None`` for an empty/absent file.
+
+    Fails closed on a corrupt, truncated, or non-UTF-8 tail by raising a
+    typed, content-free :class:`StorageError`. A tamper-evident hash-chain
+    must never silently re-root to ``GENESIS`` on a bad tail (that would let
+    a corrupted file reset the prev-hash linkage), and the raw line must
+    never reach diagnostics — a pydantic ``ValidationError`` would otherwise
+    embed the record payload (learning_id, source_identity, content_hash).
+    """
     if not chain_path.exists():
         return None
     last_line = ""
-    with chain_path.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if line:
-                last_line = line
+    try:
+        with chain_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    last_line = line
+    except (OSError, UnicodeDecodeError) as exc:
+        _LOG.warning("provenance.read_last_unreadable", path=str(chain_path))
+        raise StorageError(
+            f"Unable to read provenance chain tail: {type(exc).__name__}",
+            path=str(chain_path),
+        ) from exc
     if not last_line:
         return None
-    return ProvenanceEntry.model_validate_json(last_line)
+    try:
+        return ProvenanceEntry.model_validate_json(last_line)
+    except ValidationError:
+        # Content-free: the ValidationError embeds the raw line, so suppress
+        # the cause chain (``from None``) and log only the path.
+        _LOG.warning("provenance.read_last_corrupt", path=str(chain_path))
+        raise StorageError(
+            "Corrupt provenance record at chain tail",
+            path=str(chain_path),
+        ) from None
 
 
 def append(chain_path: Path, entry: ProvenanceEntry) -> str:
