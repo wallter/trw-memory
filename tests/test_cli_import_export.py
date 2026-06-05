@@ -244,6 +244,59 @@ class TestImportCommand:
         captured = capsys.readouterr()
         assert "Imported 1" in captured.out
 
+    def test_import_invalid_json_reports_structural_reason_without_payload(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        fpath = tmp_path / "bad.json"
+        fpath.write_text('{"leaky-secret-key": not-json}')
+        ret = main(["import", str(fpath)])
+        assert ret == 1
+        err = capsys.readouterr().err
+        assert "is not valid JSON" in err
+        # Structural diagnostics only — never echo the offending payload content.
+        assert "leaky-secret-key" not in err
+
+    def test_import_non_utf8_fails_closed_without_byte_dump(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        fpath = tmp_path / "binary.json"
+        fpath.write_bytes(b"\xff\xfe\x00\x01not utf-8 bytes")
+        ret = main(["import", str(fpath)])
+        assert ret == 1
+        err = capsys.readouterr().err
+        assert "not valid UTF-8" in err
+        # The undecodable bytes must not be leaked into the diagnostic.
+        assert "\\xff" not in err
+
+    def test_import_directory_path_fails_closed(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        target = tmp_path / "a_directory.json"
+        target.mkdir()
+        ret = main(["import", str(target)])
+        assert ret == 1
+        err = capsys.readouterr().err
+        assert "Error:" in err
+        assert "directory" in err
+
+    def test_import_yaml_invalid_reports_structural_reason(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        fpath = tmp_path / "bad.yaml"
+        fpath.write_text("key: [unterminated\n")
+        ret = main(["import", str(fpath)])
+        assert ret == 1
+        err = capsys.readouterr().err
+        assert "is not valid YAML" in err
+
     @patch(f"{_CLI}._create_local_backend")
     @patch(f"{_CLI}.MemoryConfig")
     def test_import_non_list_tags_ignored(

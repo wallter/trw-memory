@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from trw_memory.cli_formatters import StatusDict
+from trw_memory.cli_json_input import JsonInputError, load_json_document, read_source_text
 from trw_memory.models.config import MemoryConfig
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.storage.interface import StorageBackend
@@ -99,6 +100,25 @@ def handle_export(
         backend.close()
 
 
+def _load_yaml_document(path: Path, *, source: str) -> Any:
+    """Read and safe-parse a UTF-8 YAML document, returning its top-level value.
+
+    Read/decode failures surface via :func:`read_source_text`; a malformed or
+    unsafe document (e.g. a ``!!python/object`` tag rejected by the safe loader)
+    raises a structural :class:`JsonInputError` naming only the parser failure
+    class — never the offending source line the YAML library would otherwise echo.
+    """
+    from ruamel.yaml import YAML
+    from ruamel.yaml.error import YAMLError
+
+    text = read_source_text(path, source=source)
+    yaml = YAML(typ="safe")
+    try:
+        return yaml.load(text)
+    except YAMLError as exc:
+        raise JsonInputError(f"{source} is not valid YAML ({type(exc).__name__})") from exc
+
+
 def handle_import(
     args: argparse.Namespace,
     *,
@@ -108,18 +128,14 @@ def handle_import(
     import_summary: Callable[..., str],
 ) -> int:
     file_path = Path(args.path)
-    if not file_path.exists():
-        print(f"Error: file not found: {args.path}", file=sys.stderr)
+    try:
+        if file_path.suffix in (".yaml", ".yml"):
+            data = _load_yaml_document(file_path, source=args.path)
+        else:
+            data = load_json_document(file_path, source=args.path)
+    except JsonInputError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
         return 1
-
-    raw_text = file_path.read_text(encoding="utf-8")
-    if file_path.suffix in (".yaml", ".yml"):
-        from ruamel.yaml import YAML
-
-        yaml = YAML(typ="safe")
-        data = yaml.load(raw_text)
-    else:
-        data = json.loads(raw_text)
 
     if not isinstance(data, list):
         print("Error: expected a JSON/YAML array of entries", file=sys.stderr)

@@ -24,6 +24,7 @@ from trw_memory.cli_formatters import (
     format_status,
     format_store_result,
 )
+from trw_memory.cli_json_input import JsonInputError, json_type_name, load_json_array
 from trw_memory.cli_parser import build_parser
 from trw_memory.cli_storage import (
     handle_consolidate,
@@ -169,14 +170,16 @@ def _handle_snapshot(args: argparse.Namespace) -> int:
 
 @_cli_error_boundary
 def _handle_wiki_lint(args: argparse.Namespace) -> int:
-    raw_pages = json.loads(Path(args.path).read_text(encoding="utf-8"))
-    if not isinstance(raw_pages, list):
-        raise TypeError("wiki-lint input must be a JSON list")
-    pages: list[dict[str, object]] = []
-    for index, raw_page in enumerate(raw_pages):
-        if not isinstance(raw_page, dict):
-            raise TypeError(f"wiki-lint item {index} must be an object")
-        pages.append({str(key): value for key, value in raw_page.items()})
+    try:
+        raw_pages = load_json_array(Path(args.path), source=args.path)
+        pages: list[dict[str, object]] = []
+        for index, raw_page in enumerate(raw_pages):
+            if not isinstance(raw_page, dict):
+                raise JsonInputError(f"{args.path} item {index} must be a JSON object, got {json_type_name(raw_page)}")
+            pages.append({str(key): value for key, value in raw_page.items()})
+    except JsonInputError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     print(json.dumps(memory_wiki_lint_impl(pages, top_limit=args.top_limit), sort_keys=True))
     return 0
 
