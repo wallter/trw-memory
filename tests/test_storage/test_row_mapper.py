@@ -196,3 +196,55 @@ def test_anchor_json_round_trip() -> None:
     assert restored.anchors[1].symbol_name == "MyClass"
     assert restored.anchors[1].signature == "class MyClass:"
     assert restored.anchor_validity == 0.5
+
+
+# ---------------------------------------------------------------------------
+# Corrupt-column resilience: a single bad JSON column must not crash row
+# mapping for an entire query (fail-open, mirroring assertions handling).
+# ---------------------------------------------------------------------------
+
+
+def test_corrupt_anchors_json_degrades_to_empty() -> None:
+    """A malformed anchors_json column maps to [] instead of raising."""
+    entry = MemoryEntry(id="L-anc-bad", content="corrupt anchors")
+    row = list(_entry_to_full_row(entry))
+    row[ENTRY_COLUMNS.index("anchors")] = "{not valid json"
+
+    restored = row_to_entry(tuple(row))
+
+    assert restored.anchors == []
+    assert restored.id == "L-anc-bad"
+
+
+def test_anchors_json_non_list_degrades_to_empty() -> None:
+    """A JSON object (non-list) in anchors_json degrades to [] rather than raising."""
+    entry = MemoryEntry(id="L-anc-obj", content="anchors object")
+    row = list(_entry_to_full_row(entry))
+    row[ENTRY_COLUMNS.index("anchors")] = '{"file": "x.py"}'
+
+    restored = row_to_entry(tuple(row))
+
+    assert restored.anchors == []
+
+
+def test_anchors_json_invalid_item_degrades_to_empty() -> None:
+    """An anchor item failing model validation degrades the list to []."""
+    entry = MemoryEntry(id="L-anc-inv", content="invalid anchor item")
+    row = list(_entry_to_full_row(entry))
+    # Missing required symbol_name -> Anchor validation fails.
+    row[ENTRY_COLUMNS.index("anchors")] = '[{"file": "src/mod.py"}]'
+
+    restored = row_to_entry(tuple(row))
+
+    assert restored.anchors == []
+
+
+def test_corrupt_assertions_json_degrades_to_empty() -> None:
+    """A malformed assertions_json column maps to [] instead of raising."""
+    entry = MemoryEntry(id="L-asr-bad", content="corrupt assertions")
+    row = list(_entry_to_full_row(entry))
+    row[ENTRY_COLUMNS.index("assertions")] = "not json at all"
+
+    restored = row_to_entry(tuple(row))
+
+    assert restored.assertions == []
