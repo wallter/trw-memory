@@ -139,8 +139,16 @@ class SSESubscriber:
                         "sse_event_received",
                         event_type=event_type,
                     )
-            except json.JSONDecodeError:
-                logger.debug("sse_malformed_json", data=data_str[:200])
+            except json.JSONDecodeError as exc:
+                # Content-free diagnostic: the SSE payload carries platform
+                # learning text, so log only structural locators (error class +
+                # length), never the raw data, matching the persisted-state
+                # readers (retry_queue / warm sidecar / recovery state).
+                logger.debug(
+                    "sse_malformed_json",
+                    error_class=type(exc).__name__,
+                    data_length=len(data_str),
+                )
             finally:
                 self._pending_event_id = None
                 self._pending_event_type = None

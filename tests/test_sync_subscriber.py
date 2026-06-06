@@ -127,6 +127,28 @@ class TestSSESubscriber:
         sub._process_line("data: {invalid json}")
         assert len(received) == 0
 
+    def test_process_line_malformed_json_diagnostic_is_content_free(self) -> None:
+        """The malformed-JSON diagnostic must not log the raw SSE payload.
+
+        The payload carries platform learning text; only structural locators
+        (error class + length) may be logged, matching the persisted-state
+        readers' content-free contract.
+        """
+        import structlog
+
+        cfg = _make_config()
+        sub = SSESubscriber(cfg, on_event=lambda data: None)
+        secret_payload = "{not json: SENSITIVE-MEMORY-TEXT-DO-NOT-LOG}"
+        with structlog.testing.capture_logs() as logs:
+            sub._process_line(f"data: {secret_payload}")
+        malformed = [e for e in logs if e.get("event") == "sse_malformed_json"]
+        assert len(malformed) == 1
+        entry = malformed[0]
+        assert entry["error_class"] == "JSONDecodeError"
+        assert entry["data_length"] == len(secret_payload)
+        # No field may carry the raw payload text.
+        assert all("SENSITIVE-MEMORY-TEXT-DO-NOT-LOG" not in str(v) for v in entry.values())
+
     def test_stop_sets_event(self) -> None:
         """Stop sets the internal stop event."""
         cfg = _make_config()
