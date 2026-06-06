@@ -50,8 +50,16 @@ def read_observe_clock(trw_dir: Path) -> ObserveClockState | None:
         return None
     try:
         yaml = YAML(typ="safe")
+        # Fail open on a corrupt sidecar: unreadable (OSError), non-UTF-8 from a
+        # torn/partial write (UnicodeDecodeError), or malformed YAML (YAMLError)
+        # yields ``None`` ("clock unset") rather than raising into the intake
+        # path (``trust_scorer.score_intake`` calls ``start_observe_clock`` ->
+        # ``read_observe_clock`` on every first-of-process write). Mirrors the
+        # namespace-sidecar seams in ``security/_runtime_quarantine`` and
+        # ``integrations/_backend``. ``UnicodeDecodeError`` subclasses
+        # ``ValueError``, not ``OSError``, so it must be listed explicitly.
         data = yaml.load(path.read_text(encoding="utf-8"))
-    except (OSError, YAMLError):
+    except (OSError, UnicodeDecodeError, YAMLError):
         _LOG.warning("observe_clock.read_failed", path=str(path), exc_info=True)
         return None
     if not isinstance(data, dict):
