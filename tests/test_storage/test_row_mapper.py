@@ -198,10 +198,49 @@ def test_anchor_json_round_trip() -> None:
     assert restored.anchor_validity == 0.5
 
 
+def test_anchor_validity_zero_survives_round_trip() -> None:
+    """anchor_validity=0.0 (all anchors stale) must NOT resurrect to 1.0.
+
+    Regression: the old ``float(str(v)) if v else 1.0`` falsy-check treated a
+    legitimate persisted 0.0 as missing and read it back as 1.0 (fresh),
+    inverting the staleness signal the lifecycle relies on.
+    """
+    entry = MemoryEntry(id="L-anc-zero", content="all anchors stale")
+    row = list(_entry_to_full_row(entry))
+    row[ENTRY_COLUMNS.index("anchor_validity")] = 0.0
+
+    restored = row_to_entry(tuple(row))
+
+    assert restored.anchor_validity == 0.0
+
+
 # ---------------------------------------------------------------------------
 # Corrupt-column resilience: a single bad JSON column must not crash row
 # mapping for an entire query (fail-open, mirroring assertions handling).
 # ---------------------------------------------------------------------------
+
+
+def test_corrupt_anchor_validity_degrades_to_default() -> None:
+    """A non-numeric anchor_validity column degrades to 1.0 instead of raising."""
+    entry = MemoryEntry(id="L-anc-val-bad", content="corrupt validity")
+    row = list(_entry_to_full_row(entry))
+    row[ENTRY_COLUMNS.index("anchor_validity")] = "not-a-number"
+
+    restored = row_to_entry(tuple(row))
+
+    assert restored.anchor_validity == 1.0
+    assert restored.id == "L-anc-val-bad"
+
+
+def test_null_anchor_validity_uses_default() -> None:
+    """A NULL anchor_validity column uses the 1.0 model default."""
+    entry = MemoryEntry(id="L-anc-val-null", content="null validity")
+    row = list(_entry_to_full_row(entry))
+    row[ENTRY_COLUMNS.index("anchor_validity")] = None
+
+    restored = row_to_entry(tuple(row))
+
+    assert restored.anchor_validity == 1.0
 
 
 def test_corrupt_anchors_json_degrades_to_empty() -> None:

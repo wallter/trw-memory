@@ -22,6 +22,7 @@ from trw_memory.models.memory import (
 )
 from trw_memory.storage._parsing import (
     parse_dt,
+    parse_float,
     parse_json_dict_int,
     parse_json_dict_str,
     parse_json_list,
@@ -152,7 +153,7 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         outcome_history=parse_json_list(outcome_json),
         assertions=assertions,
         anchors=parse_model_list(anchors_json, Anchor, strict=True),
-        anchor_validity=float(str(anchor_validity)) if anchor_validity else 1.0,
+        anchor_validity=parse_float(anchor_validity, default=1.0),
         type=MemoryType(type_),
         nudge_line=str(nudge_line) if nudge_line else "",
         expires=str(expires) if expires else "",

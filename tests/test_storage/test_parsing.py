@@ -12,6 +12,7 @@ import pytest
 
 from trw_memory.storage._parsing import (
     parse_dt,
+    parse_float,
     parse_json_dict_int,
     parse_json_dict_str,
     parse_json_list,
@@ -84,6 +85,28 @@ class TestParseJsonList:
 
     def test_malformed_uses_fallback(self) -> None:
         assert parse_json_list("{not json", fallback=["x"]) == ["x"]
+
+
+@pytest.mark.unit
+class TestParseFloat:
+    def test_valid_float_preserved(self) -> None:
+        assert parse_float(0.7, default=1.0) == 0.7
+        assert parse_float("0.25", default=1.0) == 0.25
+
+    def test_legitimate_zero_preserved(self) -> None:
+        # Regression: anchor_validity=0.0 means "all code anchors stale" — a
+        # meaningful signal. A naïve ``float(raw) if raw else default`` would
+        # resurrect it to the default (1.0 = fresh), inverting staleness.
+        assert parse_float(0.0, default=1.0) == 0.0
+        assert parse_float("0.0", default=1.0) == 0.0
+
+    def test_none_uses_default(self) -> None:
+        assert parse_float(None, default=1.0) == 1.0
+
+    def test_unparseable_uses_default(self) -> None:
+        assert parse_float("nope", default=1.0) == 1.0
+        assert parse_float("", default=1.0) == 1.0
+        assert parse_float([1, 2], default=1.0) == 1.0
 
 
 @pytest.mark.unit

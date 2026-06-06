@@ -29,6 +29,32 @@ def parse_dt(val: object) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def parse_float(raw: object, *, default: float) -> float:
+    """Coerce a persisted value to ``float``, falling back to *default*.
+
+    *default* is returned only when the value is genuinely absent (``None``)
+    or unparseable — a legitimately falsy ``0.0`` is preserved. The
+    distinction matters for fields like ``anchor_validity`` where ``0.0`` (all
+    code anchors stale) is a meaningful signal that must survive the
+    persistence round-trip; a naïve ``float(raw) if raw else default`` would
+    silently resurrect it to *default* (1.0 = fresh), inverting the staleness
+    score that the lifecycle relies on.
+
+    >>> parse_float(0.0, default=1.0)
+    0.0
+    >>> parse_float(None, default=1.0)
+    1.0
+    >>> parse_float("nope", default=1.0)
+    1.0
+    """
+    if raw is None:
+        return default
+    try:
+        return float(str(raw))
+    except (TypeError, ValueError):
+        return default
+
+
 def parse_json_list(raw: object, *, fallback: list[str] | None = None) -> list[str]:
     """Deserialise a JSON-encoded list, or return *fallback* on failure.
 
