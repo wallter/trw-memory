@@ -92,6 +92,51 @@ class TestMalformedAssertions:
 
 
 @pytest.mark.unit
+class TestMalformedVectorClock:
+    def test_vector_clock_with_non_int_value_degrades(self, backend: YAMLBackend) -> None:
+        # A corrupt secondary store can hand back an already-parsed dict whose
+        # value is not int-coercible. The load must fail open to an empty clock
+        # rather than crashing the whole entry read with a ValueError.
+        data: dict[str, object] = {
+            "id": "M-bad-vc",
+            "content": "bad vector clock",
+            "created_at": "2026-01-15T10:00:00+00:00",
+            "updated_at": "2026-01-15T10:00:00+00:00",
+            "vector_clock": {"node1": "not-an-int"},
+        }
+        write_entry_yaml(backend, "M-bad-vc", data)
+        loaded = backend.get("M-bad-vc")
+        assert loaded is not None
+        assert loaded.vector_clock == {}
+
+    def test_vector_clock_with_null_value_degrades(self, backend: YAMLBackend) -> None:
+        data: dict[str, object] = {
+            "id": "M-null-vc",
+            "content": "null vector clock value",
+            "created_at": "2026-01-15T10:00:00+00:00",
+            "updated_at": "2026-01-15T10:00:00+00:00",
+            "vector_clock": {"node1": None},
+        }
+        write_entry_yaml(backend, "M-null-vc", data)
+        loaded = backend.get("M-null-vc")
+        assert loaded is not None
+        assert loaded.vector_clock == {}
+
+    def test_valid_vector_clock_still_loads(self, backend: YAMLBackend) -> None:
+        data: dict[str, object] = {
+            "id": "M-good-vc",
+            "content": "valid vector clock",
+            "created_at": "2026-01-15T10:00:00+00:00",
+            "updated_at": "2026-01-15T10:00:00+00:00",
+            "vector_clock": {"node1": 7},
+        }
+        write_entry_yaml(backend, "M-good-vc", data)
+        loaded = backend.get("M-good-vc")
+        assert loaded is not None
+        assert loaded.vector_clock == {"node1": 7}
+
+
+@pytest.mark.unit
 class TestSQLiteAssertionsUpdate:
     def test_sqlite_update_assertions_directly(self, tmp_path: Path) -> None:
         db = SQLiteBackend(tmp_path / "test.db")

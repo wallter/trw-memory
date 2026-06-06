@@ -76,17 +76,30 @@ def parse_json_dict_str(raw: object) -> dict[str, str]:
 def parse_json_dict_int(raw: object) -> dict[str, int]:
     """Deserialise a JSON-encoded ``{str: int}`` dict, or return ``{}``.
 
+    Accepts a JSON string (SQLite TEXT column) or an already-parsed dict (YAML
+    secondary store). Both branches route the ``int(v)`` coercion through one
+    guarded conversion so a malformed value (``{"node1": "x"}``, ``null``) on a
+    pre-parsed dict degrades to ``{}`` instead of raising ``ValueError`` /
+    ``TypeError`` and crashing the whole entry load — the same fail-open
+    contract the JSON-string branch already had.
+
     >>> parse_json_dict_int('{"node1": 3}')
     {'node1': 3}
+    >>> parse_json_dict_int({"node1": "x"})
+    {}
     """
     if not raw:
         return {}
     if isinstance(raw, dict):
-        return {str(k): int(v) for k, v in raw.items()}
+        candidate: object = raw
+    else:
+        try:
+            candidate = json.loads(str(raw))
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    if not isinstance(candidate, dict):
+        return {}
     try:
-        parsed = json.loads(str(raw))
-        if isinstance(parsed, dict):
-            return {str(k): int(v) for k, v in parsed.items()}
-    except (json.JSONDecodeError, TypeError, ValueError):
-        pass
-    return {}
+        return {str(k): int(v) for k, v in candidate.items()}
+    except (TypeError, ValueError):
+        return {}
