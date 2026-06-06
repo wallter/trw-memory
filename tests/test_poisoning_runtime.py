@@ -347,3 +347,51 @@ class TestAnomalyBypassSourcePrefixes:
 
         # No metadata['source'] → bypass cannot match → quarantined as usual.
         assert prepared.quarantined is True
+
+
+class TestQuarantineNamespaceMetadata:
+    """``read_namespace_metadata`` must fail open on a corrupt sidecar.
+
+    Mirrors the storage-side seam: a single unreadable / non-UTF-8
+    ``namespace.txt`` in the quarantine tree yields ``None`` rather than
+    raising into the review/discovery path.
+    """
+
+    def test_missing_returns_none(self, tmp_path: Path) -> None:
+        from trw_memory.security._runtime_quarantine import read_namespace_metadata
+
+        assert read_namespace_metadata(tmp_path) is None
+
+    def test_roundtrip_returns_namespace(self, tmp_path: Path) -> None:
+        from trw_memory.security._runtime_quarantine import (
+            NAMESPACE_METADATA_FILE,
+            read_namespace_metadata,
+        )
+
+        (tmp_path / NAMESPACE_METADATA_FILE).write_text("project:default", encoding="utf-8")
+        assert read_namespace_metadata(tmp_path) == "project:default"
+
+    def test_non_utf8_fails_open(self, tmp_path: Path) -> None:
+        import structlog
+
+        from trw_memory.security._runtime_quarantine import (
+            NAMESPACE_METADATA_FILE,
+            read_namespace_metadata,
+        )
+
+        (tmp_path / NAMESPACE_METADATA_FILE).write_bytes(b"project:\x80\xffbad")
+        with structlog.testing.capture_logs() as logs:
+            assert read_namespace_metadata(tmp_path) is None
+        dropped = [r for r in logs if r["event"] == "namespace_metadata_read_failed"]
+        assert len(dropped) == 1
+        assert dropped[0]["error"] == "UnicodeDecodeError"
+        assert "project" not in repr(dropped[0])
+
+    def test_unreadable_sidecar_fails_open(self, tmp_path: Path) -> None:
+        from trw_memory.security._runtime_quarantine import (
+            NAMESPACE_METADATA_FILE,
+            read_namespace_metadata,
+        )
+
+        (tmp_path / NAMESPACE_METADATA_FILE).mkdir()
+        assert read_namespace_metadata(tmp_path) is None

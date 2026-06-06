@@ -61,7 +61,22 @@ def _read_namespace_metadata(namespace_dir: Path) -> str | None:
     metadata_path = namespace_dir / _NAMESPACE_METADATA_FILE
     if not metadata_path.exists():
         return None
-    namespace = metadata_path.read_text(encoding="utf-8").strip()
+    # Fail open: a single namespace whose ``namespace.txt`` is unreadable
+    # (OSError) or non-UTF-8 (UnicodeDecodeError from a torn/partial write)
+    # must not abort ``discover_namespace_backends`` for every OTHER namespace.
+    # The caller treats ``None`` as "skip this namespace" with a content-free
+    # warning, isolating one corrupt sidecar like any other discovery miss.
+    # Never log the decoded text or raw bytes — the stored namespace string can
+    # carry sensitive project identifiers; only the path + error class.
+    try:
+        namespace = metadata_path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning(
+            "namespace_metadata_read_failed",
+            path=str(metadata_path),
+            error=type(exc).__name__,
+        )
+        return None
     return namespace or None
 
 
