@@ -6,6 +6,11 @@ All notable changes to the TRW Memory package.
 
 ### Fixed
 
+
+- **Bandit deserializers fail open per arm.** `BanditSelector.from_json` and
+  `ContextualBanditSelector.from_dict` now skip malformed arms while preserving valid arm state,
+  parsed hyperparameters, and real `feature_dim`; one corrupt persisted row no longer resets the
+  whole selector or causes later dimension-mismatch failures.
 - **Vector clock advanced on local update** (commit `b134d9ffc`). The vector clock was being reset
   instead of incremented on local writes, causing team-sync conflict resolution to pick the wrong
   winning value when two nodes updated the same entry. All local stores now call
