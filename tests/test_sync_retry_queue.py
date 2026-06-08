@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -481,3 +483,96 @@ class TestModuleConstants:
 
     def test_max_retries(self) -> None:
         assert MAX_RETRIES == 5
+
+
+class TestDrainLockNotHeldDuringSleep:
+    """P1 regression: drain must NOT hold self._lock while sleeping.
+
+    Original bug: drain held self._lock across time.sleep(backoff_seconds)
+    inside the loop, starving enqueue/depth/snapshot for up to ~30s.
+    Fix: collect work under lock, release, sleep+publish, reacquire only
+    for write-back.
+    """
+
+    def test_enqueue_succeeds_concurrently_during_drain_backoff(
+        self, tmp_path: Path
+    ) -> None:
+        """A concurrent enqueue can complete while drain is sleeping (backoff).
+
+        Seeds the queue with a record that has retry_count=2 (backoff=2s),
+        patches time.sleep to inject a concurrent enqueue in the sleep window,
+        and asserts the enqueue completes without deadlock.
+        """
+        queue_path = tmp_path / "queue.jsonl"
+        # Seed one record that requires backoff (retry_count > 0).
+        queue_path.write_text(
+            json.dumps(
+                {
+                    "entry_id": "M-backoff",
+                    "payload": {"summary": "retry me"},
+                    "queued_at": "2026-01-01T00:00:00Z",
+                    "retry_count": 2,
+                    "last_error": "previous failure",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        queue = RetryQueue(queue_path)
+        concurrent_enqueue_completed = threading.Event()
+
+        def fake_sleep(seconds: float) -> None:
+            # While "sleeping" (lock must NOT be held), enqueue a new record.
+            result = queue.enqueue("M-concurrent", {"summary": "concurrent"})
+            if result:
+                concurrent_enqueue_completed.set()
+            # Do not actually sleep to keep tests fast.
+
+        with patch("trw_memory.sync.retry_queue.time.sleep", side_effect=fake_sleep):
+            queue.drain(lambda _: False)
+
+        # The key assertion: enqueue must have completed without deadlock.
+        # (Note: the drain's final _write_all may overwrite the concurrent enqueue's
+        # file write — that is an acknowledged limitation of the JSONL design and
+        # orthogonal to the lock-starve fix. The bug we are guarding against is
+        # the lock being held during sleep, causing enqueue to block indefinitely.)
+        assert concurrent_enqueue_completed.is_set(), (
+            "Concurrent enqueue during drain backoff must complete without deadlock — "
+            "drain must release self._lock before sleeping"
+        )
+
+    def test_depth_not_blocked_during_drain_publish(self, tmp_path: Path) -> None:
+        """depth() completes promptly while drain is publishing (lock released).
+
+        Seeds one record with no backoff needed (retry_count=0), uses a
+        publish_fn that checks depth() from a background thread to confirm
+        the lock is not held during publish.
+        """
+        queue_path = tmp_path / "queue.jsonl"
+        queue = RetryQueue(queue_path)
+        queue.enqueue("M-001", {"summary": "test"})
+
+        depth_during_publish: list[int] = []
+        depth_unblocked = threading.Event()
+
+        def publish_fn(payload: dict[str, Any]) -> bool:
+            # Check depth from a background thread; should not deadlock.
+            result: list[int] = []
+
+            def check_depth() -> None:
+                result.append(queue.depth())
+                depth_unblocked.set()
+
+            t = threading.Thread(target=check_depth, daemon=True)
+            t.start()
+            t.join(timeout=2.0)
+            depth_during_publish.extend(result)
+            return True
+
+        queue.drain(publish_fn)
+
+        assert depth_unblocked.is_set(), (
+            "depth() must not be blocked while drain is inside publish_fn — "
+            "lock must be released before calling publish_fn"
+        )
+        assert depth_during_publish, "depth() must return a value during drain"
