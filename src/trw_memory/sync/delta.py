@@ -73,6 +73,7 @@ class DeltaTracker:
         """Get entries needing sync (sync_seq > since_seq and not yet synced)."""
         # Try SQLite direct query for efficiency
         conn = getattr(backend, "_conn", None)
+        lock = getattr(backend, "_lock", None)
         if conn is not None:
             from trw_memory.storage._row_mapper import row_to_entry
             from trw_memory.storage._shared import ENTRY_COLUMNS
@@ -83,7 +84,14 @@ class DeltaTracker:
                 f"WHERE sync_seq > ? AND (last_synced_at IS NULL OR last_synced_at = '') "
                 f"ORDER BY sync_seq ASC"
             )
-            rows = conn.execute(sql, (since_seq,)).fetchall()
+            # Acquire backend._lock to match the locking pattern used by every
+            # other SQLite query in this backend (Bug: missing lock could race a
+            # concurrent write on the same connection).
+            if lock is not None:
+                with lock:
+                    rows = conn.execute(sql, (since_seq,)).fetchall()
+            else:
+                rows = conn.execute(sql, (since_seq,)).fetchall()
             return [row_to_entry(tuple(r)) for r in rows]
         # Fallback: list all and filter
         all_entries = backend.list_entries(limit=10000)

@@ -6,10 +6,12 @@ Covers:
 - FR05: DeltaTracker.get_dirty_entries
 - FR05: DeltaTracker.mark_synced
 - FR06: Auto dirty-marking on store/update
+- P1 regression: get_dirty_entries acquires backend._lock for thread-safety
 """
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -312,3 +314,53 @@ def test_yaml_roundtrip_sync_fields(tmp_path: Path) -> None:
     assert result.sync_hash != ""
     assert result.last_synced_at is None
     backend.close()
+
+
+# ---------------------------------------------------------------------------
+# P1 regression: get_dirty_entries acquires backend._lock
+# ---------------------------------------------------------------------------
+
+
+def test_get_dirty_entries_acquires_lock(tmp_path: Path) -> None:
+    """P1 regression: get_dirty_entries must hold backend._lock during the
+    SQL execute to prevent races with concurrent writes on the same connection.
+
+    Verifies that _lock is acquired by replacing it with an instrumented
+    threading.Lock subclass that records acquisition events.
+    """
+    backend = SQLiteBackend(tmp_path / "lock_test.db")
+    entry = MemoryEntry(id="M-lock-1", content="lock test entry")
+    backend.store(entry)
+
+    lock_acquired_during_query = threading.Event()
+    original_lock = backend._lock
+
+    class InstrumentedLock:
+        """Wraps the real lock and records when it is held during get_dirty_entries."""
+
+        def __enter__(self) -> "InstrumentedLock":
+            original_lock.acquire()
+            lock_acquired_during_query.set()
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            original_lock.release()
+
+        def acquire(self, *args: object, **kwargs: object) -> bool:
+            result = original_lock.acquire(*args, **kwargs)  # type: ignore[call-overload]
+            lock_acquired_during_query.set()
+            return result
+
+        def release(self) -> None:
+            original_lock.release()
+
+    backend._lock = InstrumentedLock()  # type: ignore[assignment]
+    try:
+        dirty = DeltaTracker.get_dirty_entries(backend, since_seq=0)
+        assert len(dirty) >= 1, "Should return the stored dirty entry"
+        assert lock_acquired_during_query.is_set(), (
+            "get_dirty_entries must acquire backend._lock during SQL execute"
+        )
+    finally:
+        backend._lock = original_lock
+        backend.close()
