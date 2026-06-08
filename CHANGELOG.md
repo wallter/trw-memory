@@ -16,6 +16,22 @@ All notable changes to the TRW Memory package.
 
 ### Changed
 
+- **Effective-LOC ratchet brought back to green (PRD-DIST-245).** Three modules had grown
+  past the 350-effective-LOC module gate; each was split along an existing cohesive seam,
+  preserving every public API and the documented monkeypatch seams via re-exports / a mixin:
+  - `storage/_recovery.py` (370 → 279): the bounded open-time preflight + advisory
+    recovery-state sidecar (`RecoveryPreflight`, `classify_recovery_preflight`,
+    `write_recovery_state`, `recovery_state_path`, `_read_persisted_recovery_status`) moved
+    to the new `storage/_recovery_preflight.py`; `_recovery.py` re-exports the four public
+    names so `_init_helpers` and tests resolve them unchanged.
+  - `storage/sqlite_backend.py` (465 → 446, baseline lowered 463 → 446): the standalone
+    `check_integrity` probe moved to `storage/_connection.py` (`check_integrity`); the
+    backend keeps a `staticmethod` alias so `SQLiteBackend.check_integrity` callers and
+    patches are unaffected.
+  - `client.py` (388 → 338, removed from the baseline): the org-shared recall alias group
+    (`_merge_shared_results`, `_coerce_float`, `_dedupe_cached_shared_results`, …) moved to
+    the new `OrgSharedAliasMixin` (`_client_org_shared_aliases.py`), mixed into
+    `MemoryClient` so `self._X` / `MemoryClient._X` resolution is unchanged via the MRO.
 - **Documentation accuracy pass.** README, `tests/CLAUDE.md`, and this changelog were
   reconciled against the source tree — the MCP tool list (now store/recall/search/forget/
   consolidate/status/audit/review/wiki-lint/code-index/search/symbol), the CLI command set
