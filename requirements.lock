@@ -82,7 +82,7 @@ sse-starlette==3.2.0
 starlette==0.52.1
 structlog==25.5.0
 trove-classifiers==2026.1.14.14
--e git+https://github.com/wallter/trw-framework.git@0c7d4263a89d57e5505b1fc0b8531aef9140f060#egg=trw_memory&subdirectory=trw-memory
+-e .
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 uvicorn==0.41.0

@@ -37,7 +37,14 @@ All notable changes to the TRW Memory package.
 
 ### Fixed
 
-
+- **Lock/version hygiene: uv.lock, requirements.lock, and pyproject realigned.** `pyproject.toml`
+  had been bumped to `0.8.5` while `uv.lock` still recorded the package at `0.8.1` (and was missing
+  the `pysqlite3-binary` Linux dependency), so `uv lock --check` failed. Regenerated `uv.lock` with
+  `uv lock` (no dependency upgrades — only the version bump and the already-declared
+  `pysqlite3-binary` pin). `requirements.lock` pinned the editable self-reference to a frozen git
+  commit (`...trw-framework.git@0c7d4263...#egg=trw_memory`) that drifts the moment `main` advances;
+  normalised it to a path install (`-e .`) so it never goes stale. Added two `tests/test_package.py`
+  guards: `test_uv_lock_version_matches_pyproject` and `test_requirements_lock_has_no_stale_self_pin`.
 - **Resilient fetch fast path now quarantines unmappable rows, not just bad-UTF-8 rows.**
   The common (non-fallback) row-materialisation loop in `fetch_rows_resilient` only caught
   `UnicodeDecodeError`/`UnicodeEncodeError`, so a single row whose columns decoded cleanly but
