@@ -4,6 +4,20 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+### Changed
+
+- **Hybrid recall pipeline extracted to its own deep module.** `_client_recall.py` (482
+  effective LOC, over the 350-LOC module gate) had the BM25 + dense + RRF pipeline
+  (`try_hybrid_recall`) and its private latency-telemetry helper
+  (`_emit_hybrid_recall_telemetry`) split into a new `_client_recall_hybrid.py` (154
+  effective LOC). The new module presents one narrow interface —
+  `try_hybrid_recall(...) -> list[MemoryResultDict] | None`, where `None` signals
+  fall-back — over a deep implementation (candidate-pool sizing, namespace-aware
+  BM25/vector candidate auto-scaling, RRF top-K depth, per-recall telemetry).
+  `_client_recall.py` re-exports `try_hybrid_recall`, so `MemoryClient._try_hybrid_recall`
+  and all public/back-compat imports are unchanged. Brings `_client_recall.py` to 341
+  effective LOC; behavior-preserving (no public API or recall-result change).
+
 ### Fixed
 
 

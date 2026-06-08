@@ -42,7 +42,7 @@ def _force_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setattr(
         "trw_memory.client.MemoryClient._try_hybrid_recall",
-        lambda self, query, limit, tags: _coro_none(),
+        lambda self, query, limit, tags, query_embedding=None: _coro_none(),
     )
 
 
