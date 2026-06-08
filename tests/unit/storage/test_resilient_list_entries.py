@@ -520,6 +520,36 @@ def test_bytes_fallback_quarantines_unmappable_row(tmp_path: Path) -> None:
     backend2.close()
 
 
+def test_fast_path_quarantines_unmappable_row_without_utf8_corruption(tmp_path: Path) -> None:
+    """A clean-UTF-8 row that fails row_to_entry is quarantined on the fast path.
+
+    Regression: the fast (non-fallback) path only caught UnicodeDecodeError, so a
+    single malformed-enum / schema-drift row raised ValueError out of the whole
+    listing — collapsing recall for every co-resident memory. No bad-UTF-8 row is
+    injected here, so the bytes-mode fallback is never engaged and the fast-path
+    quarantine branch is exercised directly.
+    """
+    db_path = tmp_path / "memory.db"
+    backend = SQLiteBackend(db_path)
+    backend.store(_make_entry("M-good-001", "valid"))
+    backend.store(_make_entry("M-good-002", "also valid"))
+    backend.close()
+
+    # Decodes cleanly (valid UTF-8) but carries an out-of-range status enum.
+    _inject_malformed_status_row(db_path, "M-bad-enum")
+
+    backend2 = SQLiteBackend(db_path)
+    with structlog.testing.capture_logs() as logs:
+        results = backend2.list_entries(limit=100)
+
+    ids = {e.id for e in results}
+    assert ids == {"M-good-001", "M-good-002"}, "Good rows must survive a co-resident bad row"
+    assert backend2.quarantine_count_utf8 >= 1, "The malformed row must be counted as quarantined"
+    columns = {log.get("column") for log in logs if log.get("action") == "memory_row_utf8_quarantined"}
+    assert "row_to_entry" in columns, "Fast-path unmappable row should log column='row_to_entry'"
+    backend2.close()
+
+
 # ---------------------------------------------------------------------------
 # search() and entries_with_assertions() share the same resilience
 # ---------------------------------------------------------------------------

@@ -7,6 +7,14 @@ All notable changes to the TRW Memory package.
 ### Fixed
 
 
+- **Resilient fetch fast path now quarantines unmappable rows, not just bad-UTF-8 rows.**
+  The common (non-fallback) row-materialisation loop in `fetch_rows_resilient` only caught
+  `UnicodeDecodeError`/`UnicodeEncodeError`, so a single row whose columns decoded cleanly but
+  failed `row_to_entry` — an out-of-range status/type/confidence/tier enum, a non-numeric scalar,
+  or schema drift from a newer writer — raised `ValueError`/`TypeError`/`KeyError` out of the whole
+  query, collapsing `list_entries`/`search`/recall for every co-resident memory. The fast path now
+  quarantines those rows (logging `column='row_to_entry'`, `outcome='quarantined'`) and increments
+  the quarantine counter, matching the bytes-mode fallback's existing behaviour.
 - **Bandit deserializers fail open per arm.** `BanditSelector.from_json` and
   `ContextualBanditSelector.from_dict` now skip malformed arms while preserving valid arm state,
   parsed hyperparameters, and real `feature_dim`; one corrupt persisted row no longer resets the
