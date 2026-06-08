@@ -11,6 +11,48 @@ from trw_memory.models.memory import MemoryStatus
 from ._test_dedup_support import StubEmbedder, make_entry
 
 
+def test_survivor_merged_content_in_updated_entries() -> None:
+    """P0 regression: merged survivor must appear in updated_entries.
+
+    Bug: original_map was built AFTER the mutation loop, so
+    ``current != orig`` always compared merged-vs-merged (False) and
+    the merged survivor was silently dropped from updated_entries.
+    Fix: snapshot original_map BEFORE the loop.
+
+    Verifies that after a near-duplicate merge the SURVIVOR entry (e1)
+    is present in updated_entries with the merged recurrence incremented.
+    """
+    embedder = StubEmbedder(available=True)
+    # e1 and e2 are near-duplicates (similarity >= merge_threshold, < skip)
+    sq = math.sqrt(1.0 - 0.81)  # yields cosine(e1, e2) ≈ 0.9
+    embedder.set_vector("alpha entry ", [1.0, 0.0, 0.0])
+    embedder.set_vector("alpha entry dupe ", [0.9, sq, 0.0])
+
+    e1 = make_entry("survivor", "alpha entry", recurrence=1)
+    e2 = make_entry("absorbed", "alpha entry dupe", recurrence=1)
+
+    config = MemoryConfig(
+        dedup_skip_threshold=0.95,
+        dedup_merge_threshold=0.85,
+    )
+    result = batch_dedup([e1, e2], embedder, config=config)
+
+    assert result["status"] == "completed"
+    assert result["entries_merged"] >= 1
+
+    updated_ids = {e.id for e in result["updated_entries"]}  # type: ignore[union-attr]
+    # The survivor (e1) must be in updated_entries with its merged state.
+    assert "survivor" in updated_ids, (
+        "Merged survivor 'survivor' must appear in updated_entries — "
+        "original_map was not snapshotted before the mutation loop"
+    )
+    # The survivor's recurrence should be incremented (merged e2 into it).
+    survivor = next(e for e in result["updated_entries"] if e.id == "survivor")  # type: ignore[union-attr]
+    assert survivor.recurrence > e1.recurrence, (
+        "Survivor recurrence must be incremented after merge"
+    )
+
+
 class TestBatchDedup:
     def test_embedder_unavailable_returns_skipped(self) -> None:
         embedder = StubEmbedder(available=False)

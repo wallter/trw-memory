@@ -326,6 +326,11 @@ def batch_dedup(
 
     merged_count = 0
     skipped_ids: set[str] = set()
+    # Snapshot originals BEFORE the mutation loop so the survivor-changed check
+    # at the end compares against pre-merge state, not post-merge state.
+    # (Bug: building original_map after the loop means merged_i == orig → always
+    # False → merged survivor silently dropped from updated_entries.)
+    original_map: dict[str, MemoryEntry] = {e.id: e for e, _ in active_entries}
     # Track updated entries by id
     updated_map: dict[str, MemoryEntry] = {e.id: e for e, _ in active_entries}
 
@@ -375,8 +380,7 @@ def batch_dedup(
                 skipped_ids.add(id_j)
                 merged_count += 1
 
-    # Collect all modified entries (only those that changed)
-    original_map = {e.id: e for e, _ in active_entries}
+    # Collect all modified entries (only those that changed vs the pre-loop snapshot)
     updated_entries: list[MemoryEntry] = []
     for entry_id, current in updated_map.items():
         orig = original_map.get(entry_id)
