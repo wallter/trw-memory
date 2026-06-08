@@ -137,8 +137,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="NAME_OR_LATEST",
         help=(
-            "Restore from a snapshot — pass 'latest' for the newest daily, "
-            "or a filename like 2026-04-13.db / 2026-W15.db (PRD-INFRA-065)"
+            "Restore from a snapshot — pass 'latest' for the newest snapshot "
+            "across daily and weekly tiers (by date), or a filename like "
+            "2026-04-13.db / 2026-W15.db (PRD-INFRA-065)"
         ),
     )
     p_restore.add_argument("--namespace", default="default", help="Namespace")

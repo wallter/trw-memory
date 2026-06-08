@@ -45,6 +45,15 @@ All notable changes to the TRW Memory package.
   commit (`...trw-framework.git@0c7d4263...#egg=trw_memory`) that drifts the moment `main` advances;
   normalised it to a path install (`-e .`) so it never goes stale. Added two `tests/test_package.py`
   guards: `test_uv_lock_version_matches_pyproject` and `test_requirements_lock_has_no_stale_self_pin`.
+- **`restore --from-snapshot latest` now picks the newest snapshot across BOTH tiers.**
+  `handle_restore` resolved `latest` with `listing["daily"] or listing["weekly"]`, so any
+  daily snapshot beat every weekly snapshot even when a weekly was strictly newer —
+  recovery-hostile, since `latest` could silently restore a stale daily over a fresher
+  weekly backup. A new `_snapshot.latest_snapshot(base_dir)` helper compares snapshots
+  across the daily and weekly tiers by the calendar date their filename encodes (weekly
+  `YYYY-Www` maps to its Sunday, ISO weekday 7), returning the newest; on a same-date tie the
+  finer-grained daily is preferred. Explicit-filename restore is unchanged. The `--from-snapshot`
+  help text now states `latest` means newest across tiers. (Reviewer P2.)
 - **Resilient fetch fast path now quarantines unmappable rows, not just bad-UTF-8 rows.**
   The common (non-fallback) row-materialisation loop in `fetch_rows_resilient` only caught
   `UnicodeDecodeError`/`UnicodeEncodeError`, so a single row whose columns decoded cleanly but
