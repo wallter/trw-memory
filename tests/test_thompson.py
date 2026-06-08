@@ -171,6 +171,48 @@ def test_json_corrupt_missing_keys_returns_fresh() -> None:
     assert len(result._arms) == 0
 
 
+def test_json_non_dict_arm_value_does_not_raise() -> None:
+    """A non-dict arm value must not escape as AttributeError.
+
+    Regression: ``arm_dict.get(...)`` on a string/list/int value raised
+    AttributeError, which was outside the caught exception tuple and so
+    propagated out of from_json, defeating the documented fail-safe contract.
+    """
+    result = BanditSelector.from_json('{"arms": {"a": "garbage", "b": 42, "c": [1, 2]}}')
+    assert isinstance(result, BanditSelector)
+    # All three arm values are structurally invalid -> all skipped.
+    assert len(result._arms) == 0
+
+
+def test_json_corrupt_arm_skipped_preserves_valid_arms() -> None:
+    """One malformed arm is skipped; the remaining valid arms are restored."""
+    payload = (
+        '{"arms": {'
+        '"good": {"alpha": 3.0, "beta": 1.5, "window": [0.9, 0.8], "exposure_count": 2}, '
+        '"bad_type": "not-a-dict", '
+        '"bad_window": {"alpha": 2.0, "beta": 1.0, "window": ["nan-ish"], "exposure_count": 0}'
+        '}}'
+    )
+    result = BanditSelector.from_json(payload)
+    assert set(result._arms.keys()) == {"good"}
+    assert result._arms["good"].alpha == pytest.approx(3.0)
+    assert result._arms["good"].beta == pytest.approx(1.5)
+    assert result._arms["good"].window == pytest.approx([0.9, 0.8])
+    assert result._arms["good"].exposure_count == 2
+
+
+def test_json_non_iterable_window_arm_skipped() -> None:
+    """An arm whose window is not iterable is skipped, not fatal."""
+    payload = (
+        '{"arms": {'
+        '"keep": {"alpha": 2.0, "beta": 1.0, "window": [], "exposure_count": 1}, '
+        '"drop": {"alpha": 2.0, "beta": 1.0, "window": 5, "exposure_count": 0}'
+        '}}'
+    )
+    result = BanditSelector.from_json(payload)
+    assert set(result._arms.keys()) == {"keep"}
+
+
 # ---------------------------------------------------------------------------
 # test_empty_eligible_raises
 # ---------------------------------------------------------------------------
