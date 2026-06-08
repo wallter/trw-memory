@@ -335,46 +335,62 @@ class ContextualBanditSelector:
     def from_dict(cls, data: dict[str, Any]) -> ContextualBanditSelector:
         """Deserialize from dict.
 
-        Returns a fresh instance with default parameters on malformed
-        input.
+        A single malformed arm entry is skipped (per-arm fail-open) rather
+        than discarding every valid arm and resetting the feature dimension,
+        matching :meth:`from_compact_dict` and
+        :meth:`BanditSelector.from_json`. The deserialize falls back to a
+        fresh default instance only when the top-level hyperparameters are
+        themselves unparseable -- a single corrupt arm must not reset
+        ``feature_dim`` (which would later raise a dimension-mismatch on
+        every contextual ``select()``).
         """
         import json
 
         try:
             feature_dim = int(data["feature_dim"])
             alpha = float(data["alpha"])
-            arms_data = data.get("arms", {})
+        except (TypeError, ValueError, KeyError):
+            _logger.warning("contextual_from_dict_failed", exc_info=True)
+            return cls(feature_dim=2, alpha=1.0)
 
-            if not isinstance(arms_data, dict):
-                _logger.warning("contextual_from_dict_bad_arms_type")
-                return cls(feature_dim=feature_dim, alpha=alpha)
+        selector = cls(feature_dim=feature_dim, alpha=alpha)
 
-            selector = cls(feature_dim=feature_dim, alpha=alpha)
+        arms_data = data.get("arms", {})
+        if not isinstance(arms_data, dict):
+            _logger.warning("contextual_from_dict_bad_arms_type")
+            return selector
 
-            for arm_id, arm_dict in arms_data.items():
+        skipped = 0
+        for arm_id, arm_dict in arms_data.items():
+            if not isinstance(arm_dict, dict):
+                skipped += 1
+                continue
+            try:
                 a_inv = [[float(v) for v in row] for row in arm_dict["A_inv"]]
                 b = [float(v) for v in arm_dict["b"]]
                 n_obs = int(arm_dict["n_obs"])
-
-                selector._arms[arm_id] = ContextualArmState(
+                selector._arms[str(arm_id)] = ContextualArmState(
                     A_inv=a_inv,
                     b=b,
                     n_obs=n_obs,
                 )
+            except (TypeError, ValueError, KeyError, IndexError, AttributeError):
+                # Per-arm fail-open: one arm with a non-numeric cell or a
+                # missing field must not abort the restore of the rest.
+                skipped += 1
+        if skipped:
+            _logger.warning("contextual_from_dict_skipped_arms", skipped=skipped)
 
-            # Restore Thompson fallback state if present (backward-compatible)
-            thompson_state = data.get("thompson_state")
-            if thompson_state is not None:
-                try:
-                    selector._thompson = BanditSelector.from_json(json.dumps(thompson_state))
-                except Exception:  # justified: Thompson restore is best-effort
-                    _logger.debug("contextual_thompson_restore_failed", exc_info=True)
-                    selector._thompson = BanditSelector()
+        # Restore Thompson fallback state if present (backward-compatible)
+        thompson_state = data.get("thompson_state")
+        if thompson_state is not None:
+            try:
+                selector._thompson = BanditSelector.from_json(json.dumps(thompson_state))
+            except Exception:  # justified: Thompson restore is best-effort
+                _logger.debug("contextual_thompson_restore_failed", exc_info=True)
+                selector._thompson = BanditSelector()
 
-            return selector
-        except (TypeError, ValueError, KeyError, IndexError, AttributeError):
-            _logger.warning("contextual_from_dict_failed", exc_info=True)
-            return cls(feature_dim=2, alpha=1.0)
+        return selector
 
     def _select_decision_with_score(
         self,
