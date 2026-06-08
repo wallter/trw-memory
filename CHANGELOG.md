@@ -4,8 +4,25 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+### Added
+
+- **Explicit code index — MCP tools + CLI.** `memory_code_index`, `memory_code_search`, and
+  `memory_code_symbol` MCP tools (registered by `tools/code_index.py`) and the matching
+  `trw-memory code-index` / `code-search` / `code-symbol` CLI subcommands expose the
+  `code_index/` chunker/indexer/symbol/search engine for lexical code search and symbol lookup.
+- **Wiki lint — MCP tool + CLI.** `memory_wiki_lint` MCP tool and the `trw-memory wiki-lint`
+  CLI subcommand lint wiki page JSON for missing targets, backlinks, and provenance gaps,
+  backed by the `wiki/` indexer/lint package.
+
 ### Changed
 
+- **Documentation accuracy pass.** README, `tests/CLAUDE.md`, and this changelog were
+  reconciled against the source tree — the MCP tool list (now store/recall/search/forget/
+  consolidate/status/audit/review/wiki-lint/code-index/search/symbol), the CLI command set
+  (restore/snapshot/wiki-lint/code-*), the `MemoryClient` public surface
+  (`bulk_store`/`audit_learning`/`review_quarantined`), optional-dependency extras
+  (`[encryption]`, `[all-integrations]`), and the architecture overview were corrected, and
+  drift-prone hardcoded file/test/LOC counts were de-quantified.
 - **Hybrid recall pipeline extracted to its own deep module.** `_client_recall.py` (482
   effective LOC, over the 350-LOC module gate) had the BM25 + dense + RRF pipeline
   (`try_hybrid_recall`) and its private latency-telemetry helper

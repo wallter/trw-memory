@@ -23,10 +23,9 @@ cd trw-memory
 
 ## Test Count & Performance
 
-- **1,423 tests** across 49 files
-- **Collection**: ~0.4s
-- **Full suite**: ~5-8 minutes
-- **Coverage threshold**: 85%
+- **Test count**: a broad suite spanning the test files in `tests/` (run `pytest --collect-only -q | tail -1` for the live count — it drifts)
+- **Full suite**: several minutes — run targeted files during implementation
+- **Coverage threshold**: 85% (`fail_under` in `pyproject.toml`)
 
 ## Package Architecture
 
@@ -40,7 +39,7 @@ trw-memory is a standalone memory engine with these modules:
 | `sync/` | `test_sync*.py` | Remote publish/fetch, vector clocks |
 | `lifecycle/` | `test_lifecycle*.py` | Tier promotion/demotion, decay |
 | `security/` | `test_security*.py` | Encryption for entry fields |
-| `tools/` | `test_tools*.py` | MCP tool wrappers |
+| `tools/` | `test_tools*.py` | MCP tool wrappers (store/recall/search/forget/consolidate/status/audit/review/wiki-lint/code-index/search/symbol) |
 
 ## Shared Fixtures (conftest.py)
 
@@ -98,10 +97,11 @@ pytest.importorskip("sqlite_vec")
 ### structlog Reserved Keywords
 Never use `event=` as a kwarg in structlog calls — it's reserved. Use alternative names like `action=` or `operation=`.
 
-## Test Classification (Planned)
+## Test Classification
 
-Currently no markers are defined. Planned classification:
+Markers are defined in `pyproject.toml` (`[tool.pytest.ini_options] markers`):
 
-- **Unit**: Tests with in-memory backends, no `tmp_path`
-- **Integration**: Tests using `tmp_path`, file-based backends, dual-write
-- **Slow**: Tests loading sentence-transformer models, full consolidation cycles
+- **`unit`**: pure unit tests — no filesystem I/O beyond `tmp_path`, mocks only, fast
+- **`integration`**: uses real filesystem / sqlite / network — slower, still isolated
+- **`slow`**: individual-test runtime > 5 seconds — excluded from default runs
+- **`network`**: requires external network access (embedding models, API calls)
