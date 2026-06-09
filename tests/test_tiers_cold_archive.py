@@ -76,6 +76,39 @@ class TestColdTier:
         assert entry_file.exists()
         assert not any(path.name == "e-warm-fail.yaml" for path in mgr._cold_dir().rglob("*.yaml"))
 
+    def test_cold_remove_deletes_archived_entry(self, mgr: TierManager) -> None:
+        from trw_memory.storage.persistence import write_yaml
+
+        cold_partition = mgr._cold_dir() / "2026" / "01"
+        cold_partition.mkdir(parents=True, exist_ok=True)
+        yaml_file = cold_partition / "e1-archived.yaml"
+        write_yaml(yaml_file, {"id": "e1", "content": "erase me", "tags": []})
+
+        removed = mgr.cold_remove("e1")
+
+        assert removed == 1
+        assert not yaml_file.exists()
+
+    def test_cold_remove_returns_zero_when_not_archived(self, mgr: TierManager) -> None:
+        assert mgr.cold_remove("never-archived") == 0
+
+    def test_cold_remove_leaves_other_entries_intact(self, mgr: TierManager) -> None:
+        from trw_memory.storage.persistence import read_yaml, write_yaml
+
+        cold_partition = mgr._cold_dir() / "2026" / "01"
+        cold_partition.mkdir(parents=True, exist_ok=True)
+        target = cold_partition / "target.yaml"
+        other = cold_partition / "other.yaml"
+        write_yaml(target, {"id": "target", "content": "delete", "tags": []})
+        write_yaml(other, {"id": "other", "content": "keep", "tags": []})
+
+        removed = mgr.cold_remove("target")
+
+        assert removed == 1
+        assert not target.exists()
+        assert other.exists()
+        assert read_yaml(other)["id"] == "other"
+
     def test_cold_promote_finds_entry(self, mgr: TierManager, mem_dir: Path) -> None:
         from trw_memory.storage.persistence import write_yaml
 
@@ -92,6 +125,29 @@ class TestColdTier:
 
     def test_cold_promote_returns_none_if_not_found(self, mgr: TierManager) -> None:
         assert mgr.cold_promote("nonexistent-id") is None
+
+
+class TestRemoveEntryFromTiersErasesCold:
+    def test_remove_entry_from_tiers_deletes_cold_archive_copy(self, tmp_path: Path) -> None:
+        from trw_memory.lifecycle.tiers._runtime import get_tier_manager, remove_entry_from_tiers
+        from trw_memory.models.config import MemoryConfig
+        from trw_memory.storage.persistence import write_yaml
+
+        config = MemoryConfig(storage_path=str(tmp_path / "storage"), storage_backend="sqlite")
+        namespace = "default"
+
+        # Seed a cold-archived entry directly in the namespace tier manager's cold dir.
+        manager = get_tier_manager(config, namespace)
+        cold_partition = manager._cold_dir() / "2026" / "01"
+        cold_partition.mkdir(parents=True, exist_ok=True)
+        yaml_file = cold_partition / "gdpr-target.yaml"
+        write_yaml(yaml_file, {"id": "gdpr-target", "content": "right to be forgotten", "tags": []})
+        assert yaml_file.exists()
+
+        remove_entry_from_tiers(config, namespace, "gdpr-target")
+
+        # GDPR erasure must remove the entry from the cold tier, not just hot/warm.
+        assert not yaml_file.exists()
 
     def test_cold_promote_updates_last_accessed(self, mgr: TierManager) -> None:
         from trw_memory.storage.persistence import write_yaml

@@ -135,7 +135,13 @@ def remember_entry_data_in_tiers(config: MemoryConfig, entry_data: dict[str, obj
 
 
 def remove_entry_from_tiers(config: MemoryConfig, namespace: str, entry_id: str) -> None:
-    """Delete an entry from the runtime tier system."""
+    """Delete an entry from EVERY runtime tier (hot, warm, and cold).
+
+    Erasure / GDPR ``forget`` flows rely on this removing the entry from all
+    tiers. Cold-tier deletion is required because :func:`cold_archive` moves an
+    entry out of the canonical backend into the YAML archive — without scanning
+    cold, a forgotten entry could survive there permanently.
+    """
     if not tier_runtime_enabled(config):
         return
     manager = get_tier_manager(config, namespace)
@@ -144,6 +150,10 @@ def remove_entry_from_tiers(config: MemoryConfig, namespace: str, entry_id: str)
         manager.warm_remove(entry_id)
     except (OSError, ValueError):
         logger.warning("tier_warm_remove_failed", namespace=namespace, entry_id=entry_id, exc_info=True)
+    try:
+        manager.cold_remove(entry_id)
+    except OSError:
+        logger.warning("tier_cold_remove_failed", namespace=namespace, entry_id=entry_id, exc_info=True)
 
 
 def tier_candidates(

@@ -6,6 +6,14 @@ All notable changes to the TRW Memory package.
 
 ### Fixed
 
+- **Tier erasure now deletes the cold YAML archive copy (GDPR completeness).**
+  `remove_entry_from_tiers` previously removed an entry only from the hot and
+  warm tiers, so a `forget` / `forget actor=...` bulk erasure left any
+  cold-archived copy permanently on disk — a data-deletion / compliance gap.
+  A new `ColdTierStore.cold_remove` (exposed via `TierManager.cold_remove`)
+  scans the cold partition tree by entry `id` and unlinks the matching file(s);
+  `remove_entry_from_tiers` now invokes it so erasure spans all three tiers.
+
 - **FastMCP lock surfaces now require the patched 3.2.x floor.**
   The optional MCP extra and `requirements.lock` no longer allow/pin
   vulnerable FastMCP 3.0.x installs, and package tests now guard the

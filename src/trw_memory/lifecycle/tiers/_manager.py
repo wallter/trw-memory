@@ -223,6 +223,10 @@ class TierManager:
         """Base cold archive directory."""
         return self._cold_store._cold_dir()
 
+    def cold_remove(self, entry_id: str) -> int:
+        """Permanently delete an entry from the cold YAML archive."""
+        return self._cold_store.cold_remove(entry_id)
+
     def cold_archive(self, entry_id: str, entry_path: Path) -> None:
         """Move a warm-tier YAML entry to the cold archive partition."""
         self._cold_store.cold_archive(entry_id, entry_path)
