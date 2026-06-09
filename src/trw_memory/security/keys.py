@@ -60,6 +60,11 @@ _KEY_LENGTH = 32
 # inserted in the count->fetch window are still re-encrypted (coverage is
 # re-verified against count() afterward).
 _ROTATION_FETCH_HEADROOM = 1000
+# Bound on the convergence sweep in rotate_master_key. Each sweep re-reads the
+# live backend and re-encrypts only newly-seen rows; a quiet (or quiescing)
+# store converges in 1-2 passes. The cap stops an adversary inserting faster
+# than we rotate from spinning the loop forever.
+_ROTATION_MAX_SWEEPS = 100
 _ENV_VAR = "MEMORY_MASTER_KEY"
 _CACHED_MASTER_KEY: bytes | None = None
 _CACHED_SOURCE: str | None = None
@@ -328,45 +333,59 @@ def rotate_master_key(
 
     Raises:
         ConfigError: If either key is not 32 bytes.
-        KeyRotationError: If, after paginating, not every entry was
-            re-encrypted (e.g. a concurrent insert outran the rotation).
+        KeyRotationError: If, after the bounded convergence sweep, entries are
+            still being inserted faster than they can be re-encrypted.
     """
     if len(old_key) != _KEY_LENGTH:
         raise ConfigError(f"old_key must be {_KEY_LENGTH} bytes, got {len(old_key)}")
     if len(new_key) != _KEY_LENGTH:
         raise ConfigError(f"new_key must be {_KEY_LENGTH} bytes, got {len(new_key)}")
 
-    # Re-encrypt EVERY entry — never a silent cap. ``store`` preserves the
-    # entry's ``updated_at`` (INSERT OR REPLACE), so the ``ORDER BY updated_at
-    # DESC`` window is stable across re-encryption and a single fetch sized to
-    # the live count covers all rows. The previous hardcoded ``limit=100_000``
-    # silently left any surplus entries encrypted under the OLD key.
-    total = backend.count()
-    # Headroom absorbs entries inserted between count() and the fetch.
-    fetch_limit = total + _ROTATION_FETCH_HEADROOM
-    entries = backend.list_entries(limit=fetch_limit)
-
+    # Re-encrypt EVERY entry — never a silent cap, and never against a stale
+    # PRE-rotation snapshot. The prior implementation fetched once and compared
+    # the processed count against a count() taken BEFORE re-encryption, so any
+    # entry inserted concurrently DURING the loop was never fetched and escaped
+    # re-encryption while leaving the snapshot check satisfied (count == total)
+    # — those rows stayed on the OLD key.
+    #
+    # Fix: sweep repeatedly, each pass re-reading the LIVE backend and processing
+    # only IDs not yet seen, until a pass discovers no new entries. ``store``
+    # preserves ``updated_at`` (INSERT OR REPLACE), so re-encrypted rows do not
+    # churn the ORDER BY window; only genuinely-new concurrent inserts appear in
+    # a later pass. The sweep is bounded so a writer inserting faster than we can
+    # rotate cannot spin forever.
     processed_ids: set[str] = set()
-    for entry in entries:
-        if entry.id in processed_ids:
-            continue
-        ns_key_old = derive_namespace_key_bytes(old_key, entry.namespace)
-        ns_key_new = derive_namespace_key_bytes(new_key, entry.namespace)
+    for _ in range(_ROTATION_MAX_SWEEPS):
+        live_count = backend.count()
+        fetch_limit = live_count + _ROTATION_FETCH_HEADROOM
+        entries = backend.list_entries(limit=fetch_limit)
 
-        decrypted = decrypt_entry_fields(entry, ns_key_old)
-        re_encrypted = encrypt_entry_fields(decrypted, ns_key_new)
-        backend.store(re_encrypted)
-        processed_ids.add(entry.id)
+        new_this_pass = 0
+        for entry in entries:
+            if entry.id in processed_ids:
+                continue
+            ns_key_old = derive_namespace_key_bytes(old_key, entry.namespace)
+            ns_key_new = derive_namespace_key_bytes(new_key, entry.namespace)
 
-    count = len(processed_ids)
-    if count < total:
-        raise KeyRotationError(
-            f"key rotation re-encrypted {count} of {total} entries; "
-            "not all data was rotated to the new key",
-        )
+            decrypted = decrypt_entry_fields(entry, ns_key_old)
+            re_encrypted = encrypt_entry_fields(decrypted, ns_key_new)
+            backend.store(re_encrypted)
+            processed_ids.add(entry.id)
+            new_this_pass += 1
 
-    logger.info("key_rotation_complete", entries_rotated=count)
-    return count
+        # Converged: a full pass over the LIVE backend found nothing new, AND the
+        # live count is fully covered by what we processed. Re-read the count
+        # AFTER the pass so a row inserted mid-pass forces another sweep.
+        if new_this_pass == 0 and backend.count() <= len(processed_ids):
+            count = len(processed_ids)
+            logger.info("key_rotation_complete", entries_rotated=count)
+            return count
+
+    raise KeyRotationError(
+        f"key rotation did not converge after {_ROTATION_MAX_SWEEPS} sweeps "
+        f"({len(processed_ids)} entries re-encrypted); entries are being inserted "
+        "faster than they can be rotated — quiesce writes and retry",
+    )
 
 
 # ---------------------------------------------------------------------------

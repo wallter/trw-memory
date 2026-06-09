@@ -160,11 +160,17 @@ class TestRotateMasterKey:
                 ns_key_new = derive_namespace_key_bytes(new_key, stored.namespace)
                 assert decrypt_entry_fields(stored, ns_key_new).content == expected
 
-    def test_rotate_raises_when_coverage_incomplete(self, tmp_path: Path) -> None:
-        """If the backend reports more entries than it returns, rotation must
-        RAISE rather than silently leave data under the old key."""
+    def test_rotate_raises_when_coverage_incomplete(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the backend perpetually reports more entries than it returns,
+        rotation must RAISE (never converge) rather than silently leave data
+        under the old key."""
         from trw_memory.exceptions import KeyRotationError
         from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+        # Keep the sweep bound small so the non-convergence path is fast.
+        monkeypatch.setattr("trw_memory.security.keys._ROTATION_MAX_SWEEPS", 3)
 
         old_key = generate_master_key()
         new_key = generate_master_key()
@@ -175,11 +181,60 @@ class TestRotateMasterKey:
                 ns_key = derive_namespace_key_bytes(old_key, entry.namespace)
                 backend.store(encrypt_entry_fields(entry, ns_key))
 
-            # count() reports more than list_entries returns.
+            # count() reports more than list_entries ever returns → never converges.
             object.__setattr__(backend, "count", lambda namespace=None: 99)
 
-            with pytest.raises(KeyRotationError, match="not all data was rotated"):
+            with pytest.raises(KeyRotationError, match="did not converge"):
                 rotate_master_key(old_key, new_key, backend)
+
+    def test_rotate_re_encrypts_entry_inserted_during_rotation(self, tmp_path: Path) -> None:
+        """A row inserted concurrently DURING the sweep must still be rotated.
+
+        Regression (v0.9.2): the prior single-fetch + PRE-rotation count snapshot
+        let a concurrent insert escape re-encryption while the count check stayed
+        satisfied. The convergence sweep must pick it up on a later pass and leave
+        it decryptable ONLY under the new key.
+        """
+        from cryptography.exceptions import InvalidTag
+
+        from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+        old_key = generate_master_key()
+        new_key = generate_master_key()
+
+        with SQLiteBackend(tmp_path / "concurrent.db") as backend:
+            base = _make_entry("base-0", "base content")
+            ns_key_old = derive_namespace_key_bytes(old_key, base.namespace)
+            backend.store(encrypt_entry_fields(base, ns_key_old))
+
+            # Wrap list_entries so the FIRST pass simulates a concurrent writer
+            # inserting a brand-new row (encrypted under the OLD key) right after
+            # the rotation read it — exactly the row the old code missed.
+            real_list = backend.list_entries
+            injected = {"done": False}
+
+            def list_with_injection(*args: object, **kwargs: object) -> list[MemoryEntry]:
+                result = real_list(*args, **kwargs)  # type: ignore[arg-type]
+                if not injected["done"]:
+                    injected["done"] = True
+                    late = _make_entry("late-1", "late content")
+                    late_key_old = derive_namespace_key_bytes(old_key, late.namespace)
+                    backend.store(encrypt_entry_fields(late, late_key_old))
+                return result
+
+            object.__setattr__(backend, "list_entries", list_with_injection)
+
+            count = rotate_master_key(old_key, new_key, backend)
+            assert count == 2  # base + the concurrently-inserted row
+
+            stored = backend.get("late-1")
+            assert stored is not None
+            ns_key_new = derive_namespace_key_bytes(new_key, stored.namespace)
+            assert decrypt_entry_fields(stored, ns_key_new).content == "late content"
+            # And it must NO LONGER decrypt under the old key.
+            late_old_again = derive_namespace_key_bytes(old_key, stored.namespace)
+            with pytest.raises(InvalidTag):
+                decrypt_entry_fields(stored, late_old_again)
 
     def test_old_key_cannot_decrypt_after_rotation(self, tmp_path: Path) -> None:
         from cryptography.exceptions import InvalidTag
