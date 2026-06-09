@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trw_memory.exceptions import MemoryNotFoundError
+from trw_memory.models.memory import MemoryStatus
 from trw_memory.security.rbac import Permission
 from trw_memory.security.runtime import (
     append_audit_event,
@@ -181,10 +182,23 @@ async def search_impl(
     else:
         async with client._lock:
             fetch_limit = limit * 5
+            # Resolve status enum BEFORE the count call so we count only the
+            # same status we will subsequently list, keeping fetch_limit
+            # proportional to the actual matching population.
+            _status_enum: MemoryStatus | None = None
+            if status is not None:
+                try:
+                    _status_enum = MemoryStatus(status)
+                except ValueError:
+                    _status_enum = None
             if actor is not None:
-                fetch_limit = max(fetch_limit, client._get_backend().count(namespace=client._namespace))
+                fetch_limit = max(
+                    fetch_limit,
+                    client._get_backend().count(namespace=client._namespace),
+                )
             entries = client._get_backend().list_entries(
                 namespace=client._namespace,
+                status=_status_enum,
                 limit=fetch_limit,
             )
 
@@ -193,7 +207,7 @@ async def search_impl(
     for entry in entries:
         if actor is not None and entry.source_identity != actor:
             continue
-        if status is not None and status != "quarantined" and entry.status.value != status:
+        if status is not None and status != "quarantined" and str(entry.status) != status:
             continue
         if entry.importance < min_importance:
             continue

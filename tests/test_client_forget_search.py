@@ -130,3 +130,76 @@ class TestSearch:
         results = await client.search()
         importances = [r["importance"] for r in results]
         assert importances == sorted(importances, reverse=True)
+
+    async def test_search_status_filter_passes_enum_to_list_entries(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """P1 regression: search(status='active') must push the enum filter to list_entries.
+
+        Without the fix, list_entries is called without a status argument and returns
+        ALL entries (including obsolete ones), which the Python post-filter then prunes.
+        When there are many obsolete entries and fetch_limit = limit * 5, the truncated
+        result set can return fewer results than the actual active population.
+        """
+        from trw_memory.models.memory import MemoryStatus
+
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+
+        client = MemoryClient(namespace="default", mode="local")
+
+        # Store 10 active entries
+        for index in range(10):
+            await client.store(f"active content {index}", importance=0.6)
+
+        # Track what status list_entries receives
+        backend = client._get_backend()
+        original = backend.list_entries
+        received_statuses: list[MemoryStatus | None] = []
+
+        def tracked(
+            *,
+            status: MemoryStatus | None = None,
+            namespace: str | None = None,
+            limit: int = 100,
+        ) -> list:
+            received_statuses.append(status)
+            return original(status=status, namespace=namespace, limit=limit)
+
+        from unittest.mock import patch
+
+        with patch.object(backend, "list_entries", side_effect=tracked):
+            results = await client.search(status="active", limit=5)
+
+        assert len(results) == 5
+        # list_entries must have been called with the ACTIVE enum, not None
+        assert any(s == MemoryStatus.ACTIVE for s in received_statuses), (
+            f"list_entries was never called with ACTIVE status; got: {received_statuses}"
+        )
+
+        await client.close()
+
+    async def test_search_status_filter_does_not_raise_on_status_value_access(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """P1 regression: entry.status.value raises AttributeError when use_enum_values=True.
+
+        MemoryEntry uses use_enum_values=True (Pydantic v2), so entry.status is a
+        plain str ("active"), not a MemoryStatus enum. Calling .value on a str raises
+        AttributeError. The post-filter must use str(entry.status) instead.
+        """
+        isolated = tmp_path / "isolated_status_value"
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(isolated))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+
+        client = MemoryClient(namespace="project:status-value-test", mode="local")
+        await client.store("test entry", importance=0.7)
+
+        # Must not raise AttributeError regardless of status parameter
+        active_results = await client.search(status="active")
+        assert len(active_results) == 1
+
+        obsolete_results = await client.search(status="obsolete")
+        assert len(obsolete_results) == 0
+
+        await client.close()
