@@ -31,7 +31,7 @@ All notable changes to the TRW Memory package.
     consolidation on a YAML backend (whose `transaction()` is a no-op) can no
     longer leave originals archived alongside a surviving consolidated entry.
 
-- **Package lock version now matches the 0.9.5 package bump.** `uv.lock` no
+- **Package lock version now matches the 0.9.6 package bump.** `uv.lock` no
   longer records the previous editable self-package version, restoring the
   package metadata guard.
 
