@@ -276,6 +276,65 @@ def test_client_get_embedder_uses_configured_settings(
     embedder_mock.assert_called_once_with(model_name="custom-model", dim=768)
 
 
+async def test_tag_filter_widens_top_k_to_full_pool(client: MemoryClient) -> None:
+    """A tag-filtered recall must rank the full candidate pool, not just top_k.
+
+    Regression for memory-retrieval-graph-1: the tag filter runs AFTER
+    hybrid_search truncates to ``top_k`` (= limit * recall_top_k_multiplier,
+    default 30). A tag-matching entry ranked past top_k would be silently
+    dropped. When tags are supplied, ``effective_top_k`` must be at least the
+    namespace size so the tag filter sees every loaded candidate.
+    """
+    real_backend = client._backend
+    assert real_backend is not None
+    real_backend.close()
+
+    # 40 entries — larger than the default top_k of 30 (limit 10 * multiplier 3).
+    entries = [
+        MemoryEntry(id=f"M-{i:03d}", content=f"content {i}", namespace="default", tags=["wanted"])
+        for i in range(40)
+    ]
+    backend = MagicMock()
+    backend.list_entries.return_value = entries
+    backend.get_stored_embeddings.return_value = {}
+    client._backend = backend
+
+    with (
+        patch.object(MemoryClient, "_get_embedder", return_value=_StubEmbedder()),
+        patch("trw_memory.retrieval.pipeline.hybrid_search", return_value=entries) as hybrid_search_mock,
+    ):
+        await client.recall("content", tags=["wanted"])
+
+    # Without the fix top_k would be 30 < 40, truncating the pool the tag filter
+    # operates on. The fix raises it to the full namespace size.
+    assert hybrid_search_mock.call_args.kwargs["top_k"] >= 40
+
+
+async def test_no_tags_keeps_default_top_k(client: MemoryClient) -> None:
+    """Tag-free recall must NOT widen top_k — preserves the configured pool depth."""
+    real_backend = client._backend
+    assert real_backend is not None
+    real_backend.close()
+
+    entries = [
+        MemoryEntry(id=f"M-{i:03d}", content=f"content {i}", namespace="default")
+        for i in range(40)
+    ]
+    backend = MagicMock()
+    backend.list_entries.return_value = entries
+    backend.get_stored_embeddings.return_value = {}
+    client._backend = backend
+
+    with (
+        patch.object(MemoryClient, "_get_embedder", return_value=_StubEmbedder()),
+        patch("trw_memory.retrieval.pipeline.hybrid_search", return_value=entries) as hybrid_search_mock,
+    ):
+        await client.recall("content", limit=10)
+
+    # No tags → unchanged default depth (limit 10 * multiplier 3 = 30).
+    assert hybrid_search_mock.call_args.kwargs["top_k"] == 10 * client._config.recall_top_k_multiplier
+
+
 def _hybrid_recall_event(
     logs: Sequence[MutableMapping[str, Any]],
 ) -> MutableMapping[str, Any]:

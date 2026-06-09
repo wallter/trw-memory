@@ -112,6 +112,16 @@ async def try_hybrid_recall(
     # filter and enter the merged top-K. Default multiplier=3 preserves pre-c804
     # behaviour (top-30); operators raise via MEMORY_RECALL_TOP_K_MULTIPLIER.
     effective_top_k = limit * client._config.recall_top_k_multiplier
+    # When a tag filter is requested it is applied AFTER hybrid_search ranks and
+    # truncates to top_k (below). Tag-matching entries ranked past top_k would be
+    # silently dropped, reducing recall below the caller-requested limit. Rank the
+    # FULL candidate pool when tags are present so the post-rank tag filter sees
+    # every entry the namespace scan loaded — the tag filter then narrows back
+    # down. namespace_size (== len(all_entries)) is already bounded by
+    # candidate_pool_size, so this cannot widen cost beyond the entries we already
+    # hold in memory.
+    if tags:
+        effective_top_k = max(effective_top_k, namespace_size)
     hybrid_search_start = perf_counter()
     try:
         ranked = hybrid_search(
