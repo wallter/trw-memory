@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, cast
 
 import structlog
 
+from trw_memory.storage.persistence import lock_for_rmw
+
 if TYPE_CHECKING:
     from trw_memory.storage.sqlite_backend import SQLiteBackend
 
@@ -187,35 +189,42 @@ class WarmTierStore:
             "entry": dict(entry_data),
         }
 
-        # Fast path: if sidecar doesn't exist or entry is new, just append
-        if not sidecar.exists():
-            sidecar.write_text(json.dumps(record) + "\n", encoding="utf-8")
-            return
+        # The entire read-modify-write must be serialized: two concurrent
+        # upserts (or an upsert racing purge_sidecar_entry) would otherwise
+        # read the same snapshot and clobber each other's rows on rewrite, or
+        # interleave the existence-check with another writer's append. The
+        # advisory lock is both in-process and cross-process (fcntl), matching
+        # yaml_backend's RMW discipline.
+        with lock_for_rmw(sidecar):
+            # Fast path: if sidecar doesn't exist or entry is new, just append
+            if not sidecar.exists():
+                sidecar.write_text(json.dumps(record) + "\n", encoding="utf-8")
+                return
 
-        # Single pass through the parsing Seam: collect surviving records while
-        # detecting whether this entry is already present.
-        survivors: list[dict[str, object]] = []
-        entry_exists = False
-        for _line_number, rec in self._iter_sidecar_records(sidecar):
-            if str(rec.get("id", "")) == entry_id:
-                entry_exists = True
-            else:
-                survivors.append(rec)
+            # Single pass through the parsing Seam: collect surviving records while
+            # detecting whether this entry is already present.
+            survivors: list[dict[str, object]] = []
+            entry_exists = False
+            for _line_number, rec in self._iter_sidecar_records(sidecar):
+                if str(rec.get("id", "")) == entry_id:
+                    entry_exists = True
+                else:
+                    survivors.append(rec)
 
-        if not entry_exists:
-            # Append-only: O(1) write for new entries (leaves existing rows,
-            # including any corrupt ones, untouched on disk).
-            with sidecar.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(record) + "\n")
-            return
+            if not entry_exists:
+                # Append-only: O(1) write for new entries (leaves existing rows,
+                # including any corrupt ones, untouched on disk).
+                with sidecar.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(record) + "\n")
+                return
 
-        # Update path: rewrite surviving records plus the new one (O(N) —
-        # infrequent). Corrupt rows are dropped by the Seam, as before.
-        survivors.append(record)
-        sidecar.write_text(
-            "\n".join(json.dumps(r) for r in survivors) + "\n",
-            encoding="utf-8",
-        )
+            # Update path: rewrite surviving records plus the new one (O(N) —
+            # infrequent). Corrupt rows are dropped by the Seam, as before.
+            survivors.append(record)
+            sidecar.write_text(
+                "\n".join(json.dumps(r) for r in survivors) + "\n",
+                encoding="utf-8",
+            )
 
     def warm_remove(self, entry_id: str) -> bool:
         """Delete an entry from the warm store and sidecar.
@@ -256,17 +265,21 @@ class WarmTierStore:
         """Remove an entry from the warm sidecar without touching vector state."""
         sidecar = self._warm_sidecar_path()
         sidecar_removed = False
-        if sidecar.exists():
-            survivors: list[dict[str, object]] = []
-            for _line_number, rec in self._iter_sidecar_records(sidecar):
-                if str(rec.get("id", "")) != entry_id:
-                    survivors.append(rec)
-                else:
-                    sidecar_removed = True
-            sidecar.write_text(
-                "\n".join(json.dumps(r) for r in survivors) + "\n" if survivors else "",
-                encoding="utf-8",
-            )
+        # Same advisory lock as _warm_sidecar_upsert: purge is also a
+        # read-modify-write on the sidecar, so it must serialize against
+        # concurrent upserts or one side's write is lost.
+        with lock_for_rmw(sidecar):
+            if sidecar.exists():
+                survivors: list[dict[str, object]] = []
+                for _line_number, rec in self._iter_sidecar_records(sidecar):
+                    if str(rec.get("id", "")) != entry_id:
+                        survivors.append(rec)
+                    else:
+                        sidecar_removed = True
+                sidecar.write_text(
+                    "\n".join(json.dumps(r) for r in survivors) + "\n" if survivors else "",
+                    encoding="utf-8",
+                )
         return sidecar_removed
 
     def warm_search(
