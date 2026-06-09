@@ -125,6 +125,11 @@ class FetchQuery:
     params: tuple[object, ...] = ()
     order_by: str = "updated_at DESC"
     limit: int | None = None
+    #: SQLCipher key (64-char lowercase hex) for the namespace's encrypted DB.
+    #: When set, the bytes-mode fallback keys its secondary connection before
+    #: reading, so encrypted stores don't silently return zero rows. ``None``
+    #: for plaintext stores.
+    sqlcipher_key_hex: str | None = None
 
     def build(self) -> tuple[str, tuple[object, ...]]:
         """Return the ``(sql, params)`` pair to re-execute in bytes mode."""
@@ -258,6 +263,13 @@ def fetch_rows_via_bytes_fallback(
         raw_conn = dbapi.connect(str(db_path))
         raw_conn.text_factory = bytes
         try:
+            # On an encrypted store the secondary connection MUST be keyed before
+            # any read, or every SELECT returns zero rows (SQLCipher treats the
+            # unkeyed handle as a blank DB) — silently dropping every row instead
+            # of quarantining only the bad-UTF-8 ones. Apply the key + cipher
+            # pragmas here so the fallback decodes real data rather than nothing.
+            if query.sqlcipher_key_hex is not None:
+                _apply_fallback_sqlcipher_key(raw_conn, query.sqlcipher_key_hex)
             byte_cursor = raw_conn.execute(sql, params)
             raw_rows = byte_cursor.fetchall()
             column_names = _column_names(byte_cursor)
@@ -350,6 +362,23 @@ def _decode_row_columns(
         else:
             decoded.append(val)
     return decoded, None
+
+
+def _apply_fallback_sqlcipher_key(conn: _ConnectionLike, sqlcipher_key_hex: str) -> None:
+    """Key + configure a bytes-mode SQLCipher connection for the fallback read.
+
+    Mirrors ``storage._connection.connect``'s keying path: validate the hex key,
+    apply ``PRAGMA key`` and the shared KDF/cipher pragmas. Raises ``ValueError``
+    on a malformed key — the caller's ``except sqlite3.Error`` does NOT catch
+    that, so a misconfigured key surfaces loudly rather than silently dropping
+    rows (the encrypted-store failure mode this fix exists to prevent).
+    """
+    from trw_memory.storage._connection import _apply_sqlcipher_pragmas_safe
+
+    if len(sqlcipher_key_hex) != 64 or any(ch not in "0123456789abcdef" for ch in sqlcipher_key_hex):
+        raise ValueError("sqlcipher_key_hex must be a 64-character lowercase hex string")
+    conn.execute(f"PRAGMA key = \"x'{sqlcipher_key_hex}'\"")
+    _apply_sqlcipher_pragmas_safe(conn)
 
 
 def _column_names(cursor: _CursorLike) -> tuple[str, ...]:

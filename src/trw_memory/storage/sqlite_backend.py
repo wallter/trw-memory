@@ -353,6 +353,10 @@ class SQLiteBackend(StorageBackend):
             params=tuple(params),
             order_by=order_by,
             limit=limit,
+            # Thread the namespace's SQLCipher key so the bytes-mode fallback can
+            # key its secondary connection — otherwise an encrypted store returns
+            # zero rows from the fallback instead of quarantining only bad rows.
+            sqlcipher_key_hex=self._sqlcipher_key_hex,
         )
 
     def _fetch_rows_resilient(
