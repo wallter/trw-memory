@@ -90,6 +90,33 @@ class TestSearch:
         assert "both" in ids
         assert "one" not in ids
 
+    def test_search_tag_filter_does_not_under_deliver_under_limit(self, backend: SQLiteBackend) -> None:
+        """The SQL LIMIT must apply AFTER tag filtering, not before.
+
+        Many high-importance query matches lack the tag; a few low-importance
+        ones have it. With a small top_k, applying the LIMIT before the tag
+        filter would truncate to the untagged rows and return ZERO tagged
+        results. The tag filter must run in SQL so top_k tagged rows survive.
+        """
+        for i in range(20):
+            backend.store(make_entry(f"untagged-{i}", "python tip", importance=0.9))
+        for i in range(3):
+            backend.store(make_entry(f"tagged-{i}", "python tip", tags=["howto"], importance=0.1))
+
+        results = backend.search("python", tags=["howto"], top_k=5)
+        ids = {entry.id for entry in results}
+        assert ids == {"tagged-0", "tagged-1", "tagged-2"}, ids
+
+    def test_search_tag_filter_no_substring_collision(self, backend: SQLiteBackend) -> None:
+        """A required tag must not match an entry whose tag merely contains it."""
+        backend.store(make_entry("exact", "python", tags=["howto"]))
+        backend.store(make_entry("superstring", "python", tags=["howto-extended"]))
+
+        results = backend.search("python", tags=["howto"])
+        ids = {entry.id for entry in results}
+        assert "exact" in ids
+        assert "superstring" not in ids
+
     def test_search_matches_entry_id(self, backend: SQLiteBackend) -> None:
         """FIX-055: search LIKE clause includes the id column."""
         backend.store(make_entry("L-b6911941", "some content about patterns"))

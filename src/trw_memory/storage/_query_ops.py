@@ -93,6 +93,22 @@ def search(
     )
     where_sql = like_clause if filter_sql == "1" else f"{like_clause} AND {filter_sql}"
     params: list[object] = like_params + filter_params
+
+    # Push the tag filter into SQL so the LIMIT is applied AFTER tag filtering,
+    # not before. Previously the SQL LIMIT truncated rows first and the
+    # in-memory tag filter pruned that truncated set, so tag-scoped searches
+    # under-delivered (returned fewer than top_k matching entries even when
+    # more existed). Tags are stored as a JSON array (e.g. ["foo","bar"]); we
+    # match each required tag as its JSON-quoted token to avoid substring
+    # collisions ("foo" must not match ["foobar"]). The in-memory issubset
+    # check below remains as the authoritative exact filter.
+    tag_clauses: list[str] = []
+    for tag in tags or []:
+        tag_clauses.append("tags LIKE ? ESCAPE '\\'")
+        escaped_tag = tag.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params.append(f'%"{escaped_tag}"%')
+    if tag_clauses:
+        where_sql = f"{where_sql} AND " + " AND ".join(tag_clauses)
     order_by = "importance DESC, updated_at DESC"
     sql = (
         f"SELECT {select_columns_sql} FROM memories WHERE {where_sql} "  # noqa: S608
