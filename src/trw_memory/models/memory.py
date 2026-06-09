@@ -431,66 +431,9 @@ class MemoryEntry(BaseModel):
         Returns:
             Dict suitable for YAML/JSON serialization.
         """
-        full: dict[str, object] = {
-            "id": self.id,
-            "content": self.content,
-            "detail": self.detail,
-            "tags": list(self.tags),
-            "evidence": list(self.evidence),
-            "importance": self.importance,
-            "status": self.status.value if hasattr(self.status, "value") else self.status,
-            "recurrence": self.recurrence,
-            "namespace": self.namespace,
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
-            "last_accessed_at": self.last_accessed_at.isoformat() if self.last_accessed_at else None,
-            "access_count": self.access_count,
-            "session_count": self.session_count,
-            "q_value": self.q_value,
-            "q_observations": self.q_observations,
-            "source": self.source,
-            "source_identity": self.source_identity,
-            "client_profile": self.client_profile,
-            "model_id": self.model_id,
-            "merged_from": list(self.merged_from),
-            "consolidated_from": list(self.consolidated_from),
-            "consolidated_into": self.consolidated_into,
-            "type": self.type.value if hasattr(self.type, "value") else self.type,
-            "nudge_line": self.nudge_line,
-            "expires": self.expires,
-            "confidence": self.confidence.value if hasattr(self.confidence, "value") else self.confidence,
-            "task_type": self.task_type,
-            "domain": list(self.domain),
-            "phase_origin": self.phase_origin,
-            "phase_affinity": list(self.phase_affinity),
-            "team_origin": self.team_origin,
-            "protection_tier": self.protection_tier.value
-            if hasattr(self.protection_tier, "value")
-            else self.protection_tier,
-            "metadata": dict(self.metadata),
-            "vector_clock": dict(self.vector_clock),
-            "remote_id": self.remote_id,
-            "published_to_platform": self.published_to_platform,
-            "pending_delete": self.pending_delete,
-            "sync_hash": self.sync_hash,
-            "sync_seq": self.sync_seq,
-            "last_synced_at": self.last_synced_at.isoformat() if self.last_synced_at else None,
-            "cross_validated": self.cross_validated,
-            "outcome_history": list(self.outcome_history),
-            "assertions": [a.model_dump() for a in self.assertions] if self.assertions else [],
-            "anchors": [a.model_dump() for a in self.anchors],
-            "anchor_validity": self.anchor_validity,
-            "sessions_surfaced": self.sessions_surfaced,
-            "avg_rework_delta": self.avg_rework_delta,
-            "outcome_correlation": self.outcome_correlation,
-            "recall_count": self.recall_count,
-            "helpful_count": self.helpful_count,
-            "unhelpful_count": self.unhelpful_count,
-        }
-        if fields is not None:
-            return {k: v for k, v in full.items() if k in fields}
-        return full
+        from trw_memory.models._memory_entry_serialization import memory_entry_to_dict
 
+        return memory_entry_to_dict(self, fields=fields)
 
 class MemoryIndex(BaseModel):
     """Index tracking all memory entries."""

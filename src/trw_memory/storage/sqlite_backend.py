@@ -155,6 +155,7 @@ from trw_memory.storage._stale_handle import (
     reconnect as _stale_handle_reconnect,
     run_integrity_check as _stale_handle_run_integrity_check,
 )
+from trw_memory.storage._transaction import transaction as _transaction_impl
 
 
 # ---------------------------------------------------------------------------
@@ -469,64 +470,12 @@ class SQLiteBackend(StorageBackend):
     def transaction(self) -> Iterator[SQLiteBackend]:
         """PRD-FIX-088 FR02: batch N writes into one BEGIN IMMEDIATE / COMMIT.
 
-        Re-entrant by depth — only the outermost ``transaction()`` issues
-        BEGIN/COMMIT; inner exceptions propagate; outermost issues ROLLBACK.
-
-        Concurrency: the re-entrant ``_txn_serializer`` is held for the whole
-        body so two threads cannot both open a BEGIN IMMEDIATE on the single
-        shared connection (SQLite raises "cannot start a transaction within a
-        transaction"). It is acquired BEFORE ``is_outer`` is decided, so the
-        depth==0 read that classifies a call as outer cannot race a peer thread.
-        Same-thread nested ``transaction()`` calls re-enter the RLock and are
-        classified inner by depth, so they never re-issue BEGIN.
+        Implementation lives in ``storage._transaction.transaction`` so the
+        concurrency-sensitive transaction seam is local and testable while this
+        backend remains the public adapter.
         """
-        self._txn_serializer.acquire()
-        try:
-            is_outer = self._skip_commit_depth == 0
-            if is_outer:
-                # S2 fix: raise the skip-commit gate INSIDE the same lock that
-                # issues BEGIN IMMEDIATE, before the lock releases. Otherwise a
-                # concurrent writer acquiring the lock in the window between
-                # BEGIN and the depth bump reads ``_skip_commit_depth == 0`` and
-                # commits the outer transaction prematurely.
-                with self._lock:
-                    self._conn.execute("BEGIN IMMEDIATE")
-                    self._skip_commit_depth += 1
-            else:
-                # Mutate the shared depth counter under the lock too: other writers
-                # (store/delete/increment_*) read ``_skip_commit_depth`` under this
-                # same lock to decide whether to commit, so a bare ``+= 1`` here
-                # races their read with no happens-before edge.
-                with self._lock:
-                    self._skip_commit_depth += 1
-            try:
-                yield self
-                if is_outer:
-                    with self._lock:
-                        self._conn.commit()
-            except BaseException:
-                if is_outer:
-                    try:
-                        with self._lock:
-                            self._conn.rollback()
-                    except sqlite3.Error:
-                        logger.exception("transaction_rollback_failed", db=str(self._db_path))
-                raise
-            finally:
-                # Symmetric to the increment: drop the outer gate under the lock so
-                # the depth transition back to 0 is atomic with respect to other
-                # writers that consult it.
-                if is_outer:
-                    with self._lock:
-                        self._skip_commit_depth -= 1
-                else:
-                    # Drop the nested gate under the lock too (symmetric to the
-                    # increment) so the decrement is ordered against the lock-held
-                    # reads other writers make on ``_skip_commit_depth``.
-                    with self._lock:
-                        self._skip_commit_depth -= 1
-        finally:
-            self._txn_serializer.release()
+        with _transaction_impl(self) as txn:
+            yield txn
 
     # ------------------------------------------------------------------
     # Query / list / namespace ops (delegated to _query_ops.py

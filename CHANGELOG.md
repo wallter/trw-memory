@@ -4,6 +4,14 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+### Changed
+
+- **Effective-LOC ratchet restored for trw-memory source files.** The SQLite transaction
+  implementation moved behind a focused `storage/_transaction.py` seam, and the
+  `MemoryEntry.to_dict()` field projection moved to `models/_memory_entry_serialization.py`.
+  This brings `storage/sqlite_backend.py` and `models/memory.py` back under their committed
+  ratchet baselines while preserving the public adapter methods.
+
 ### Fixed
 
 - **Package lock version now matches `pyproject.toml`.** `uv.lock` still recorded `trw-memory`
