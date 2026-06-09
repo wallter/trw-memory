@@ -701,8 +701,19 @@ class SQLiteBackend(StorageBackend):
         _vec_ops_delete_vector_internal(self._conn, entry_id)
 
     def delete_vector(self, entry_id: str) -> bool:
-        """Public vector-row deletion."""
-        return _vec_ops_delete_vector(self._conn, self._lock, vec_available=self._vec_available, entry_id=entry_id)
+        """Public vector-row deletion.
+
+        Defers the commit when inside a ``transaction()`` block so the vector
+        delete batches into the caller's outermost COMMIT (atomicity parity with
+        ``delete()``/``store()``).
+        """
+        return _vec_ops_delete_vector(
+            self._conn,
+            self._lock,
+            vec_available=self._vec_available,
+            entry_id=entry_id,
+            skip_commit=self._skip_commit_depth != 0,
+        )
 
     def vector_exists(self, entry_id: str) -> bool:
         """Single-row vec_index probe."""

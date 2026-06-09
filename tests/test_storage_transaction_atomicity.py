@@ -371,6 +371,61 @@ def test_store_and_vector_rollback_leaves_neither(tmp_path: Path) -> None:
         backend.close()
 
 
+def test_delete_vector_inside_transaction_defers_commit(tmp_path: Path) -> None:
+    """v0.9.2: delete_vector() inside transaction() rolls back with the tx.
+
+    The public delete_vector() previously committed unconditionally — the same
+    premature-commit bug class fixed in _crud_ops for v0.9.1 but missed here. If
+    it still committed eagerly, the vector delete would survive a rolled-back
+    transaction. We assert the vector is restored after rollback.
+    """
+    pytest.importorskip("sqlite_vec")
+    db_path = tmp_path / "delvec_defer.db"
+    backend = SQLiteBackend(db_path)
+    if not backend._vec_available:
+        backend.close()
+        pytest.skip("sqlite-vec extension not available")
+    try:
+        emb = [1.0] * backend._dim
+        entry = _vec_entry("M-delvec")
+        backend.store(entry)
+        backend.upsert_vector(entry.id, emb)
+        assert backend.vector_exists("M-delvec") is True
+
+        with pytest.raises(RuntimeError, match="mid-tx"):
+            with backend.transaction():
+                deleted = backend.delete_vector("M-delvec")
+                assert deleted is True
+                raise RuntimeError("mid-tx")
+
+        # The vector delete was staged in the rolled-back transaction, so the
+        # vector must still be present. An eager commit would have removed it.
+        assert backend.vector_exists("M-delvec") is True, (
+            "delete_vector() committed prematurely inside transaction()"
+        )
+    finally:
+        backend.close()
+
+
+def test_delete_vector_standalone_still_commits(tmp_path: Path) -> None:
+    """v0.9.2 regression: outside a transaction, delete_vector() commits now."""
+    pytest.importorskip("sqlite_vec")
+    db_path = tmp_path / "delvec_standalone.db"
+    backend = SQLiteBackend(db_path)
+    if not backend._vec_available:
+        backend.close()
+        pytest.skip("sqlite-vec extension not available")
+    try:
+        emb = [1.0] * backend._dim
+        entry = _vec_entry("M-delvec-now")
+        backend.store(entry)
+        backend.upsert_vector(entry.id, emb)
+        assert backend.delete_vector("M-delvec-now") is True
+        assert backend.vector_exists("M-delvec-now") is False
+    finally:
+        backend.close()
+
+
 def test_upsert_vector_standalone_still_commits(tmp_path: Path) -> None:
     """S3 regression: outside a transaction, upsert_vector() commits immediately."""
     pytest.importorskip("sqlite_vec")

@@ -69,14 +69,24 @@ def delete_vector(
     *,
     vec_available: bool,
     entry_id: str,
+    skip_commit: bool = False,
 ) -> bool:
-    """Public vector-row deletion helper for warm-tier maintenance."""
+    """Public vector-row deletion helper for warm-tier maintenance.
+
+    When ``skip_commit`` is True the delete is staged but NOT committed — used
+    when the caller is inside a backend ``transaction()`` block so the vector
+    delete batches into the caller's outermost COMMIT instead of prematurely
+    committing their open transaction. This mirrors the v0.9.1 ``_crud_ops``
+    defer-commit fix and the ``upsert_vector`` ``skip_commit`` flag; deleting
+    here unconditionally was the same premature-commit bug class missed in 0.9.1.
+    """
     if not vec_available:
         return False
     with lock:
         before = conn.total_changes
         delete_vector_internal(conn, entry_id)
-        conn.commit()
+        if not skip_commit:
+            conn.commit()
         return bool(conn.total_changes > before)
 
 
