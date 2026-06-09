@@ -4,6 +4,41 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+## [0.9.3] — 2026-06-09
+
+### Fixed
+
+- **`entries_with_assertions` no longer leaks cross-namespace rows and is bounded
+  (`storage/_query_ops.py`).** The query had no namespace predicate, so the
+  session-start assertion-health summary could aggregate assertions from other
+  namespaces; it also had no `LIMIT`, allowing an unbounded full-table scan on
+  large stores. Added optional `namespace` and `limit` (default 500) parameters,
+  mirrored on the `SQLiteBackend.entries_with_assertions` wrapper.
+- **Bytes-mode UTF-8 fallback now keys its secondary connection on encrypted
+  stores (`storage/_resilient_fetch.py`).** The fallback opened the secondary
+  connection without applying the SQLCipher key, so on an encrypted database
+  every SELECT ran against a blank handle and returned zero rows — silently
+  dropping all data instead of quarantining only the bad-UTF-8 rows. The
+  SQLCipher key is now threaded through `FetchQuery` and applied before the read;
+  a malformed key raises rather than silently dropping rows.
+- **Enum-typed string fields are validated before persistence
+  (`storage/_shared.py`).** `serialize_update_value` passed raw strings for
+  `status`/`confidence`/`protection_tier`/`type` through unvalidated, so an
+  invalid value persisted and made the row un-deserializable (permanent
+  quarantine) on the next read. The value now round-trips through the enum
+  constructor as a validation gate; the resulting `ValueError` is wrapped into a
+  `StorageError`, rejecting the bad write up front.
+- **`rotate_key` uses an engine-aware WAL checkpoint and a strict exclusivity
+  guard (`security/encryption.py`).** Key rotation always issued
+  `PRAGMA wal_checkpoint(TRUNCATE)`, which on a SQLite engine without the
+  WAL-reset fix (< 3.51.3) is the documented corruption trigger when racing
+  another connection. It now uses `TRUNCATE` only when the active driver is
+  WAL-reset-safe and `PASSIVE` (which never resets the WAL) otherwise.
+  Separately, the busy-check guard used `checkpoint_row is not None`, so a
+  `None` (abnormal/empty) PRAGMA response skipped the exclusivity check; the
+  guard now requires `busy == 0` and aborts on any non-zero busy **or** a missing
+  row — the safe default for a destructive rotation.
+
 ### Changed
 
 - **Effective-LOC ratchet restored for trw-memory source files.** The SQLite transaction
