@@ -4,6 +4,34 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+## [0.9.4] — 2026-06-09
+
+### Fixed
+
+- **Tag-filtered hybrid recall no longer silently drops valid hits ranked past
+  `top_k` (`_client_recall_hybrid.py`).** The tag filter ran AFTER `hybrid_search`
+  truncated the ranking to `top_k` (= `limit * recall_top_k_multiplier`, default
+  30), so tag-matching entries ranked beyond that depth were lost — reducing
+  recall below the caller-requested count on larger namespaces. When `tags` is
+  non-empty, `effective_top_k` is now raised to at least the namespace size (the
+  full already-loaded candidate pool) so the post-rank tag filter sees every
+  candidate. Tag-free recall is unchanged.
+- **`propagate_impact` rolls back partial writes on a mid-loop failure
+  (`_graph_clusters.py`).** The BFS importance-propagation loop issued one
+  uncommitted `UPDATE` per affected node and only committed after the loop, with
+  no exception handling. A failure mid-loop left a corrupt prefix of node-impact
+  writes dangling in the connection for a later unrelated commit to flush. The
+  loop is now wrapped in `try/except` that calls `conn.rollback()` and re-raises,
+  mirroring `memory_decay_pass`.
+- **`list_org_shared_entries` pushes `min_importance` into the storage layer
+  (`graph.py`, storage backends).** The function loaded up to 10,000 full
+  `MemoryEntry` objects per sibling namespace and discarded the low-importance
+  ones in Python. `list_entries` now accepts an optional `min_importance` filter
+  (threaded through the abstract interface, the SQLite `_build_filter_clause`
+  pushdown, and the YAML backend), so only rows the caller can keep are hydrated.
+  Result semantics are unchanged; the default `min_importance=0.0` preserves the
+  legacy no-filter behaviour for all other callers.
+
 ## [0.9.3] — 2026-06-09
 
 ### Fixed
