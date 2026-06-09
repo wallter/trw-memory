@@ -53,6 +53,10 @@ All notable changes to the TRW Memory package.
 
 ### Fixed
 
+- **Focused Ruff validation for sync tests is green again.** Removed a stale unused `time` import
+  from `tests/test_sync_retry_queue.py` and normalized the `InstrumentedLock` return annotation in
+  `tests/test_sync_delta.py` now that `from __future__ import annotations` is active.
+
 - **Lock/version hygiene: uv.lock, requirements.lock, and pyproject realigned.** `pyproject.toml`
   had been bumped to `0.8.5` while `uv.lock` still recorded the package at `0.8.1` (and was missing
   the `pysqlite3-binary` Linux dependency), so `uv lock --check` failed. Regenerated `uv.lock` with

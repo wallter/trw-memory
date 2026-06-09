@@ -338,7 +338,7 @@ def test_get_dirty_entries_acquires_lock(tmp_path: Path) -> None:
     class InstrumentedLock:
         """Wraps the real lock and records when it is held during get_dirty_entries."""
 
-        def __enter__(self) -> "InstrumentedLock":
+        def __enter__(self) -> InstrumentedLock:
             original_lock.acquire()
             lock_acquired_during_query.set()
             return self
@@ -358,9 +358,7 @@ def test_get_dirty_entries_acquires_lock(tmp_path: Path) -> None:
     try:
         dirty = DeltaTracker.get_dirty_entries(backend, since_seq=0)
         assert len(dirty) >= 1, "Should return the stored dirty entry"
-        assert lock_acquired_during_query.is_set(), (
-            "get_dirty_entries must acquire backend._lock during SQL execute"
-        )
+        assert lock_acquired_during_query.is_set(), "get_dirty_entries must acquire backend._lock during SQL execute"
     finally:
         backend._lock = original_lock
         backend.close()

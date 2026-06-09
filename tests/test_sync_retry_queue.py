@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -251,9 +250,7 @@ class TestRetryQueue:
         assert {e["error_class"] for e in dropped} == {"NonObjectRow"}
         assert {e["line_number"] for e in dropped} == {2, 3, 4}
 
-    def test_dict_missing_required_field_is_skipped_without_crashing(
-        self, tmp_path: Path
-    ) -> None:
+    def test_dict_missing_required_field_is_skipped_without_crashing(self, tmp_path: Path) -> None:
         """A dict missing retry_count or payload is dropped; drain/depth survive.
 
         These wrong-shape dicts are exactly what would have crashed
@@ -391,7 +388,9 @@ class TestRetryQueue:
         queue_path = tmp_path / "queue.jsonl"
         queue_path.write_bytes(
             _record_line("M-001", {"summary": "valid"}).encode("utf-8")
-            + b"\xff " + secret.encode("utf-8") + b" \xfe\n"
+            + b"\xff "
+            + secret.encode("utf-8")
+            + b" \xfe\n"
             + _record_line("M-002", {"summary": "also valid"}).encode("utf-8")
         )
         queue = RetryQueue(queue_path)
@@ -416,9 +415,7 @@ class TestRetryQueue:
         queue_path = tmp_path / "queue.jsonl"
         queue_path.write_bytes(
             _record_line("M-001", {"summary": "valid"}).replace("\n", "\r\n").encode("utf-8")
-            + _record_line("M-002", {"summary": "also valid"})
-            .replace("\n", "\r\n")
-            .encode("utf-8")
+            + _record_line("M-002", {"summary": "also valid"}).replace("\n", "\r\n").encode("utf-8")
         )
         queue = RetryQueue(queue_path)
         assert queue.depth() == 2
@@ -494,9 +491,7 @@ class TestDrainLockNotHeldDuringSleep:
     for write-back.
     """
 
-    def test_enqueue_succeeds_concurrently_during_drain_backoff(
-        self, tmp_path: Path
-    ) -> None:
+    def test_enqueue_succeeds_concurrently_during_drain_backoff(self, tmp_path: Path) -> None:
         """A concurrent enqueue can complete while drain is sleeping (backoff).
 
         Seeds the queue with a record that has retry_count=2 (backoff=2s),
