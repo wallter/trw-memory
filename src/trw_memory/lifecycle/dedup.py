@@ -315,14 +315,17 @@ def batch_dedup(
         skip_threshold = 0.95
         merge_threshold = 0.85
 
-    # Load all active entries with their embeddings
-    active_entries: list[tuple[MemoryEntry, list[float] | None]] = []
-    for entry in entries:
-        if entry.status != MemoryStatus.ACTIVE:
-            continue
-        text = entry.content + " " + entry.detail
-        vec = embedder.embed(text)
-        active_entries.append((entry, vec))
+    # Collect active entries then batch-embed in a single model call so the
+    # embedding provider (sentence-transformers, etc.) can process all texts
+    # together instead of N individual round-trips. This is the documented
+    # "dedup batch embed" optimisation (MEMORY.md). The previous loop called
+    # embedder.embed() per entry, defeating batching entirely.
+    only_active = [e for e in entries if e.status == MemoryStatus.ACTIVE]
+    texts = [e.content + " " + e.detail for e in only_active]
+    vectors = embedder.embed_batch(texts) if texts else []
+    active_entries: list[tuple[MemoryEntry, list[float] | None]] = [
+        (entry, vec) for entry, vec in zip(only_active, vectors, strict=True)
+    ]
 
     merged_count = 0
     skipped_ids: set[str] = set()
