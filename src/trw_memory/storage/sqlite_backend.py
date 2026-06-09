@@ -526,13 +526,21 @@ class SQLiteBackend(StorageBackend):
         self,
         *,
         status: MemoryStatus | None = MemoryStatus.ACTIVE,
+        namespace: str | None = None,
+        limit: int = 500,
     ) -> list[MemoryEntry]:
         """PRD-CORE-086 FR07 query for assertion-health summary.
 
         F7: defaults to active-only so obsolete entries' stale assertions
         don't pollute the session-start summary. ``status=None`` = all statuses.
+
+        ``namespace`` scopes the query to one namespace (omit for all). ``limit``
+        caps the scan (default 500) so the summary never triggers an unbounded
+        full-table scan on a large store.
         """
-        return _query_ops_entries_with_assertions(self, _SELECT_COLUMNS_SQL, status=status)
+        return _query_ops_entries_with_assertions(
+            self, _SELECT_COLUMNS_SQL, status=status, namespace=namespace, limit=limit
+        )
 
     # Backward-compat alias for PRD-CORE-086 FR07 traceability.
     count_with_assertions = entries_with_assertions

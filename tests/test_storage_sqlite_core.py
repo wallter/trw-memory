@@ -185,6 +185,35 @@ class TestEntriesWithAssertions:
         assert len(results) == 1
         assert results[0].id == "a1"
 
+    def _assertion_entry(self, entry_id: str, namespace: str) -> object:
+        return make_entry(entry_id, namespace=namespace).model_copy(
+            update={"assertions": [Assertion(type=AssertionType.GLOB_EXISTS, pattern="", target="src/main.py")]}
+        )
+
+    def test_namespace_scopes_out_other_namespaces(self, backend: SQLiteBackend) -> None:
+        """memory-storage-1: passing namespace excludes rows in other namespaces."""
+        backend.store(self._assertion_entry("ns-a", "alpha"))
+        backend.store(self._assertion_entry("ns-b", "beta"))
+
+        scoped = backend.entries_with_assertions(namespace="alpha")
+        assert {e.id for e in scoped} == {"ns-a"}
+
+    def test_namespace_omitted_spans_all_namespaces(self, backend: SQLiteBackend) -> None:
+        """Default (no namespace) preserves the historical cross-namespace behavior."""
+        backend.store(self._assertion_entry("ns-c", "alpha"))
+        backend.store(self._assertion_entry("ns-d", "beta"))
+
+        unscoped = backend.entries_with_assertions()
+        assert {e.id for e in unscoped} == {"ns-c", "ns-d"}
+
+    def test_limit_caps_returned_rows(self, backend: SQLiteBackend) -> None:
+        """memory-storage-5: limit bounds the scan instead of an unbounded full table."""
+        for i in range(5):
+            backend.store(self._assertion_entry(f"lim-{i}", "default"))
+
+        capped = backend.entries_with_assertions(limit=3)
+        assert len(capped) == 3
+
 
 class TestIncrementSessionCounts:
     def test_increment_session_counts_updates_existing_rows(self, backend: SQLiteBackend) -> None:
