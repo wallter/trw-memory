@@ -554,6 +554,7 @@ class SQLiteBackend(StorageBackend):
         *,
         status: MemoryStatus | None = None,
         namespace: str | None = None,
+        min_importance: float = 0.0,
         limit: int = 100,
     ) -> list[MemoryEntry]:
         """Return entries with optional filters, ordered by updated_at desc."""
@@ -562,6 +563,7 @@ class SQLiteBackend(StorageBackend):
             _SELECT_COLUMNS_SQL,
             status=status,
             namespace=namespace,
+            min_importance=min_importance,
             limit=limit,
         )
 

@@ -131,6 +131,7 @@ class _InMemoryBackend(StorageBackend):
         *,
         status: MemoryStatus | None = None,
         namespace: str | None = None,
+        min_importance: float = 0.0,
         limit: int = 100,
     ) -> list[MemoryEntry]:
         results = list(self._data.values())
@@ -139,6 +140,8 @@ class _InMemoryBackend(StorageBackend):
             results = [entry for entry in results if str(entry.status) == status_value]
         if namespace is not None:
             results = [entry for entry in results if entry.namespace == namespace]
+        if min_importance > 0.0:
+            results = [entry for entry in results if entry.importance >= min_importance]
         return results[:limit]
 
     def close(self) -> None:

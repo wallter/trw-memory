@@ -240,10 +240,13 @@ def list_entries(
     *,
     status: MemoryStatus | None = None,
     namespace: str | None = None,
+    min_importance: float = 0.0,
     limit: int = 100,
 ) -> list[MemoryEntry]:
     """Return entries with optional filters, ordered by updated_at desc."""
-    where_sql, params = backend._build_filter_clause(status=status, namespace=namespace)
+    where_sql, params = backend._build_filter_clause(
+        status=status, namespace=namespace, min_importance=min_importance
+    )
     order_by = "updated_at DESC"
     sql = (
         f"SELECT {select_columns_sql} FROM memories WHERE {where_sql} "  # noqa: S608

@@ -134,6 +134,7 @@ class StorageBackend(ABC):
         *,
         status: MemoryStatus | None = None,
         namespace: str | None = None,
+        min_importance: float = 0.0,
         limit: int = 100,
     ) -> list[MemoryEntry]:
         """Return entries with optional filters.
@@ -141,6 +142,11 @@ class StorageBackend(ABC):
         Args:
             status: If provided, only return entries with this status.
             namespace: If provided, only return entries in this namespace.
+            min_importance: If > 0.0, only return entries whose importance is
+                >= this value. Pushes the importance threshold into the storage
+                layer so callers that only want high-importance rows do not
+                hydrate the full namespace into memory first. Default 0.0 keeps
+                the legacy behaviour (no importance filter).
             limit: Maximum number of entries to return.
 
         Returns:

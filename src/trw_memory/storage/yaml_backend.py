@@ -435,6 +435,7 @@ class YAMLBackend(StorageBackend):
         *,
         status: MemoryStatus | None = None,
         namespace: str | None = None,
+        min_importance: float = 0.0,
         limit: int = 100,
     ) -> list[MemoryEntry]:
         """Return entries with optional filters.
@@ -442,6 +443,9 @@ class YAMLBackend(StorageBackend):
         Args:
             status: If provided, filter by this status.
             namespace: If provided, filter by this namespace.
+            min_importance: If > 0.0, only return entries whose importance is
+                >= this value (parity with the SQLite backend's storage-layer
+                pre-filter). Default 0.0 disables the importance filter.
             limit: Maximum entries to return.
 
         Returns:
@@ -457,6 +461,8 @@ class YAMLBackend(StorageBackend):
             if status_val is not None and entry_status != status_val:
                 continue
             if namespace is not None and entry.namespace != namespace:
+                continue
+            if min_importance > 0.0 and entry.importance < min_importance:
                 continue
             results.append(entry)
 

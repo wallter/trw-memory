@@ -319,9 +319,17 @@ def list_org_shared_entries(
                 if project_id is None or project_id == current_project:
                     continue
 
+                # Push status + min_importance into the storage layer so we
+                # only hydrate the high-importance rows we can actually keep,
+                # instead of materialising up to 10k full MemoryEntry objects
+                # per sibling namespace and discarding most in Python. The
+                # cross_validated + dedup + final sort still run below; the
+                # limit stays high so the candidate set the sort sees is
+                # unchanged from the pre-filter behaviour.
                 entries = backend.list_entries(
                     status=MemoryStatus.ACTIVE,
                     namespace=candidate_namespace,
+                    min_importance=min_importance,
                     limit=10_000,
                 )
                 for entry in entries:
