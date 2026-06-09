@@ -4,6 +4,12 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Package lock version now matches `pyproject.toml`.** `uv.lock` still recorded `trw-memory`
+  0.8.5 after the package advanced to 0.9.2, breaking `tests/test_package.py::test_uv_lock_version_matches_pyproject`
+  and release lock hygiene. The self package stanza now matches the current project version.
+
 ## [0.9.2] — 2026-06-09
 
 ### Security
