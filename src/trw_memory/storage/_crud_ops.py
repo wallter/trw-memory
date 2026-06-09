@@ -50,6 +50,13 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+# Upper bound for the monotonic recall/session/access counters. These only
+# ever increment (one per recall/session), so an adversary replaying access
+# could otherwise grow them without limit and skew utility/decay scoring. The
+# cap is far above any legitimate usage and keeps the values comfortably within
+# SQLite's signed-64-bit integer range.
+_MAX_COUNTER = 1_000_000_000
+
 # F11: statuses that retire an entry from active recall. When an update
 # transitions an entry into one of these, its dense vector is removed from
 # the KNN index so stale vectors stop polluting dense recall. The entry row
@@ -241,18 +248,22 @@ def increment_session_counts(
     values = [(now.isoformat(), entry_id) for entry_id in entry_ids]
 
     try:
-        sql = """
+        sql = f"""
             UPDATE memories
-            SET session_count = COALESCE(session_count, 0) + 1,
+            SET session_count = MIN(COALESCE(session_count, 0) + 1, {_MAX_COUNTER}),
                 updated_at = ?,
                 sync_seq = COALESCE(sync_seq, 0) + 1,
                 last_synced_at = NULL
             WHERE id = ?
-        """
+        """  # noqa: S608 — _MAX_COUNTER is a module-level int constant, not user input.
         with backend._lock:
             before = backend._conn.total_changes
             backend._conn.executemany(sql, values)
-            backend._conn.commit()
+            # Suppress the commit inside a ``transaction()`` block so this
+            # batches into the caller's outermost COMMIT instead of prematurely
+            # committing their open transaction (matches store()/update()).
+            if backend._skip_commit_depth == 0:
+                backend._conn.commit()
             return int(backend._conn.total_changes - before)
     except sqlite3.Error as exc:
         raise StorageError(
@@ -275,19 +286,22 @@ def increment_access_counts(
     values = [(now.isoformat(), now.isoformat(), entry_id) for entry_id in entry_ids]
 
     try:
-        sql = """
+        sql = f"""
             UPDATE memories
-            SET access_count = COALESCE(access_count, 0) + 1,
+            SET access_count = MIN(COALESCE(access_count, 0) + 1, {_MAX_COUNTER}),
                 last_accessed_at = ?,
                 updated_at = ?,
                 sync_seq = COALESCE(sync_seq, 0) + 1,
                 last_synced_at = NULL
             WHERE id = ?
-        """
+        """  # noqa: S608 — _MAX_COUNTER is a module-level int constant, not user input.
         with backend._lock:
             before = backend._conn.total_changes
             backend._conn.executemany(sql, values)
-            backend._conn.commit()
+            # Defer the commit inside a ``transaction()`` block (see
+            # increment_session_counts) to preserve caller transaction atomicity.
+            if backend._skip_commit_depth == 0:
+                backend._conn.commit()
             return int(backend._conn.total_changes - before)
     except sqlite3.Error as exc:
         raise StorageError(
@@ -321,14 +335,14 @@ def increment_recall_access(
     placeholders = ", ".join(["?"] * len(unique_ids))
     sql = f"""
         UPDATE memories
-        SET access_count = COALESCE(access_count, 0) + 1,
-            recall_count = COALESCE(recall_count, 0) + 1,
+        SET access_count = MIN(COALESCE(access_count, 0) + 1, {_MAX_COUNTER}),
+            recall_count = MIN(COALESCE(recall_count, 0) + 1, {_MAX_COUNTER}),
             last_accessed_at = ?,
             updated_at = ?,
             sync_seq = COALESCE(sync_seq, 0) + 1,
             last_synced_at = NULL
         WHERE id IN ({placeholders})
-    """  # noqa: S608 — placeholders are positional binds, not interpolated values.
+    """  # noqa: S608 — placeholders are positional binds; _MAX_COUNTER is an int constant.
     params: list[object] = [now_iso, now_iso, *unique_ids]
     try:
         with backend._lock:
@@ -352,7 +366,11 @@ def delete(backend: SQLiteBackend, entry_id: str) -> bool:
             deleted = cursor.rowcount > 0
             if deleted and backend._vec_available:
                 backend._delete_vector(entry_id)
-            backend._conn.commit()
+            # Defer the commit inside a ``transaction()`` block so the row +
+            # vector deletes batch into the caller's outermost COMMIT rather
+            # than prematurely committing their open transaction.
+            if backend._skip_commit_depth == 0:
+                backend._conn.commit()
         logger.debug("memory_deleted", entry_id=entry_id, existed=deleted)
         return bool(deleted)
     except sqlite3.Error as exc:

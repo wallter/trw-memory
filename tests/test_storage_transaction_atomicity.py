@@ -161,6 +161,148 @@ def test_store_standalone_commits_immediately(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# increment_*_counts / delete defer commit inside a transaction
+# ---------------------------------------------------------------------------
+
+
+def test_increment_session_counts_inside_transaction_defers_commit(tmp_path: Path) -> None:
+    """increment_session_counts() must not commit prematurely in a transaction."""
+    import sqlite3
+
+    db_path = tmp_path / "inc_sess.db"
+    backend = SQLiteBackend(db_path)
+    try:
+        backend.store(make_entry(entry_id="M-sess"))
+        observer = sqlite3.connect(str(db_path))
+        try:
+            baseline = observer.execute(
+                "SELECT COALESCE(session_count, 0) FROM memories WHERE id = ?", ("M-sess",)
+            ).fetchone()[0]
+            with backend.transaction():
+                backend.increment_session_counts(["M-sess"])
+                seen_mid = observer.execute(
+                    "SELECT COALESCE(session_count, 0) FROM memories WHERE id = ?", ("M-sess",)
+                ).fetchone()[0]
+                assert seen_mid == baseline, "increment committed prematurely inside transaction()"
+            seen_after = observer.execute(
+                "SELECT COALESCE(session_count, 0) FROM memories WHERE id = ?", ("M-sess",)
+            ).fetchone()[0]
+            assert seen_after == baseline + 1
+        finally:
+            observer.close()
+    finally:
+        backend.close()
+
+
+def test_increment_access_counts_inside_transaction_defers_commit(tmp_path: Path) -> None:
+    """increment_access_counts() must not commit prematurely in a transaction."""
+    import sqlite3
+
+    db_path = tmp_path / "inc_acc.db"
+    backend = SQLiteBackend(db_path)
+    try:
+        backend.store(make_entry(entry_id="M-acc"))
+        observer = sqlite3.connect(str(db_path))
+        try:
+            baseline = observer.execute(
+                "SELECT COALESCE(access_count, 0) FROM memories WHERE id = ?", ("M-acc",)
+            ).fetchone()[0]
+            with backend.transaction():
+                backend.increment_access_counts(["M-acc"])
+                seen_mid = observer.execute(
+                    "SELECT COALESCE(access_count, 0) FROM memories WHERE id = ?", ("M-acc",)
+                ).fetchone()[0]
+                assert seen_mid == baseline, "increment committed prematurely inside transaction()"
+            seen_after = observer.execute(
+                "SELECT COALESCE(access_count, 0) FROM memories WHERE id = ?", ("M-acc",)
+            ).fetchone()[0]
+            assert seen_after == baseline + 1
+        finally:
+            observer.close()
+    finally:
+        backend.close()
+
+
+def test_delete_inside_transaction_defers_commit(tmp_path: Path) -> None:
+    """delete() must not commit prematurely in a transaction (and rolls back)."""
+    import sqlite3
+
+    db_path = tmp_path / "del_defer.db"
+    backend = SQLiteBackend(db_path)
+    try:
+        backend.store(make_entry(entry_id="M-del"))
+        observer = sqlite3.connect(str(db_path))
+        try:
+            with backend.transaction():
+                backend.delete("M-del")
+                seen_mid = observer.execute(
+                    "SELECT COUNT(*) FROM memories WHERE id = ?", ("M-del",)
+                ).fetchone()[0]
+                assert seen_mid == 1, "delete() committed prematurely inside transaction()"
+            seen_after = observer.execute(
+                "SELECT COUNT(*) FROM memories WHERE id = ?", ("M-del",)
+            ).fetchone()[0]
+            assert seen_after == 0
+        finally:
+            observer.close()
+    finally:
+        backend.close()
+
+
+def test_delete_rolls_back_with_transaction_on_error(tmp_path: Path) -> None:
+    """A delete() staged in a transaction that later raises is NOT persisted."""
+    import sqlite3
+
+    db_path = tmp_path / "del_rollback.db"
+    backend = SQLiteBackend(db_path)
+    try:
+        backend.store(make_entry(entry_id="M-keep"))
+        observer = sqlite3.connect(str(db_path))
+        try:
+            with pytest.raises(RuntimeError):
+                with backend.transaction():
+                    backend.delete("M-keep")
+                    raise RuntimeError("boom")
+            seen_after = observer.execute(
+                "SELECT COUNT(*) FROM memories WHERE id = ?", ("M-keep",)
+            ).fetchone()[0]
+            assert seen_after == 1, "delete() persisted despite transaction rollback"
+        finally:
+            observer.close()
+    finally:
+        backend.close()
+
+
+def test_increment_counts_are_bounded_at_max(tmp_path: Path) -> None:
+    """Counters saturate at the cap instead of growing without bound."""
+    from trw_memory.storage import _crud_ops
+
+    db_path = tmp_path / "counter_cap.db"
+    backend = SQLiteBackend(db_path)
+    try:
+        backend.store(make_entry(entry_id="M-cap"))
+        # Seed the counters to exactly the cap.
+        with backend._lock:
+            backend._conn.execute(
+                "UPDATE memories SET session_count = ?, access_count = ? WHERE id = ?",
+                (_crud_ops._MAX_COUNTER, _crud_ops._MAX_COUNTER, "M-cap"),
+            )
+            backend._conn.commit()
+
+        backend.increment_session_counts(["M-cap"])
+        backend.increment_access_counts(["M-cap"])
+
+        with backend._lock:
+            session_count, access_count = backend._conn.execute(
+                "SELECT session_count, access_count FROM memories WHERE id = ?", ("M-cap",)
+            ).fetchone()
+        assert session_count == _crud_ops._MAX_COUNTER
+        assert access_count == _crud_ops._MAX_COUNTER
+    finally:
+        backend.close()
+
+
+# ---------------------------------------------------------------------------
 # S1 + S3 — row + vector atomic, exactly one commit
 # ---------------------------------------------------------------------------
 
