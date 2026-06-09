@@ -14,6 +14,9 @@ All notable changes to the TRW Memory package.
   Vulnerable pins with available fixes (`Authlib`, `cryptography`, `idna`,
   `Pygments`, `PyJWT`, `pytest`, `python-dotenv`, `python-multipart`,
   `starlette`) now pin patched versions and have regression guards.
+- **Core runtime dependency declarations no longer rely on transitive
+  `typing_extensions`.** The package now declares the Python 3.10
+  compatibility shim directly, with a metadata regression guard.
 
 ## [0.9.4] — 2026-06-09
 

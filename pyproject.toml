@@ -43,6 +43,7 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "ruamel.yaml>=0.18.0",
     "structlog>=24.0.0",
+    "typing-extensions>=4.6.0",
 ]
 
 [project.optional-dependencies]

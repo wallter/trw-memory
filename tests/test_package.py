@@ -451,6 +451,11 @@ def _version_tuple(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in re.split(r"[.+-]", version) if part.isdigit())
 
 
+def _dependency_names(dependencies: list[str]) -> set[str]:
+    """Return normalized package names from PEP 508 dependency strings."""
+    return {re.split(r"[<>=!~;\\[]", dep, maxsplit=1)[0].strip().lower().replace("_", "-") for dep in dependencies}
+
+
 def _requirements_lock_package_version(name: str) -> str:
     match = re.search(
         rf"^{re.escape(name)}==([^\s]+)$",
@@ -474,6 +479,19 @@ def test_uv_lock_version_matches_pyproject() -> None:
     assert isinstance(pyproject_version, str)
 
     assert _uv_lock_package_version("trw-memory") == pyproject_version
+
+
+def test_pyproject_declares_core_runtime_direct_dependencies() -> None:
+    """Core runtime imports must be declared directly, not through transitive deps."""
+    pyproject = _load_pyproject()
+    project = pyproject["project"]
+    assert isinstance(project, dict)
+    dependencies = project["dependencies"]
+    assert isinstance(dependencies, list)
+
+    # Python 3.10 remains the minimum runtime and core client models import
+    # NotRequired/Self from typing_extensions.
+    assert "typing-extensions" in _dependency_names(dependencies)
 
 
 def test_requirements_lock_fastmcp_pin_is_patched() -> None:
