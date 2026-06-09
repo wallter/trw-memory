@@ -87,6 +87,22 @@ trw-memory-server = "trw_memory.server:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/trw_memory"]
 
+[tool.deptry]
+known_first_party = ["trw_memory"]
+optional_dependencies_dev_groups = ["dev"]
+package_module_name_map = { "llama-index-core" = "llama_index", "langchain-core" = "langchain_core" }
+
+[tool.deptry.per_rule_ignores]
+# Optional probe: text embeddings can hide a broken torchcodec install during
+# sentence-transformers import, but torchcodec itself is not required.
+DEP001 = ["torchcodec"]
+# Optional extras / self-referential aggregate extras are intentionally not
+# imported in the core package scan.
+DEP002 = ["sqlcipher3", "anthropic", "crewai", "trw-memory"]
+# PyNaCl-backed signing is optional; row provenance can still use cryptography
+# and the chain helpers degrade explicitly when nacl is unavailable.
+DEP003 = ["nacl"]
+
 [tool.ruff]
 target-version = "py310"
 line-length = 120

@@ -279,6 +279,26 @@ def test_pyproject_mypy_config_is_strict_python_310() -> None:
     assert mypy["plugins"] == ["pydantic.mypy"]
 
 
+def test_pyproject_deptry_config_keeps_static_audit_signal_focused() -> None:
+    """Deptry should scan src-layout code without optional-extra false positives."""
+    pyproject = _load_pyproject()
+    deptry = pyproject["tool"]["deptry"]
+    assert isinstance(deptry, dict)
+
+    assert deptry["known_first_party"] == ["trw_memory"]
+    assert deptry["optional_dependencies_dev_groups"] == ["dev"]
+    assert deptry["package_module_name_map"] == {
+        "llama-index-core": "llama_index",
+        "langchain-core": "langchain_core",
+    }
+
+    per_rule = deptry["per_rule_ignores"]
+    assert isinstance(per_rule, dict)
+    assert per_rule["DEP001"] == ["torchcodec"]
+    assert per_rule["DEP002"] == ["sqlcipher3", "anthropic", "crewai", "trw-memory"]
+    assert per_rule["DEP003"] == ["nacl"]
+
+
 def test_pyproject_coverage_omits_server_module() -> None:
     """Package coverage excludes the server entry-point module from the denominator."""
     pyproject = _load_pyproject()

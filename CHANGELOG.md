@@ -17,6 +17,11 @@ All notable changes to the TRW Memory package.
 - **Core runtime dependency declarations no longer rely on transitive
   `typing_extensions`.** The package now declares the Python 3.10
   compatibility shim directly, with a metadata regression guard.
+- **Deptry static-analysis configuration now matches the package layout.**
+  The audit treats `src/trw_memory` as first-party, marks `dev` as a
+  development extra, maps LlamaIndex/LangChain package names to their import
+  modules, and documents intentional optional-import seams so `deptry .`
+  reports actionable findings instead of optional-extra noise.
 
 ## [0.9.4] — 2026-06-09
 
