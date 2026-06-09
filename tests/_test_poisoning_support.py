@@ -14,6 +14,7 @@ def make_entry(
     detail: str = "",
     created_at: datetime | None = None,
     metadata: dict[str, str] | None = None,
+    tags: list[str] | None = None,
 ) -> MemoryEntry:
     """Create a MemoryEntry for testing."""
     return MemoryEntry(
@@ -22,6 +23,7 @@ def make_entry(
         detail=detail,
         created_at=created_at or datetime.now(timezone.utc),
         metadata=metadata or {},
+        tags=tags or [],
     )
 
 
