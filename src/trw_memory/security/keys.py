@@ -32,7 +32,7 @@ except ImportError:  # pragma: no cover
     _CRYPTO_ED25519_AVAILABLE = False
     _CryptoEd25519PrivateKey = Any  # type: ignore[misc,assignment]
 
-from trw_memory.exceptions import ConfigError, MasterKeyNotFoundError
+from trw_memory.exceptions import ConfigError, KeyRotationError, MasterKeyNotFoundError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.security.encryption import (
     decrypt_entry_fields,
@@ -56,6 +56,10 @@ _SERVICE_NAME = "trw-memory"
 _KEY_ACCOUNT = "master"
 _LEGACY_KEY_ACCOUNTS = ("master-key",)
 _KEY_LENGTH = 32
+# Extra rows fetched beyond the live count() during key rotation so entries
+# inserted in the count->fetch window are still re-encrypted (coverage is
+# re-verified against count() afterward).
+_ROTATION_FETCH_HEADROOM = 1000
 _ENV_VAR = "MEMORY_MASTER_KEY"
 _CACHED_MASTER_KEY: bytes | None = None
 _CACHED_SOURCE: str | None = None
@@ -305,23 +309,42 @@ def rotate_master_key(
 
     Raises:
         ConfigError: If either key is not 32 bytes.
+        KeyRotationError: If, after paginating, not every entry was
+            re-encrypted (e.g. a concurrent insert outran the rotation).
     """
     if len(old_key) != _KEY_LENGTH:
         raise ConfigError(f"old_key must be {_KEY_LENGTH} bytes, got {len(old_key)}")
     if len(new_key) != _KEY_LENGTH:
         raise ConfigError(f"new_key must be {_KEY_LENGTH} bytes, got {len(new_key)}")
 
-    entries = backend.list_entries(limit=100_000)
-    count = 0
+    # Re-encrypt EVERY entry — never a silent cap. ``store`` preserves the
+    # entry's ``updated_at`` (INSERT OR REPLACE), so the ``ORDER BY updated_at
+    # DESC`` window is stable across re-encryption and a single fetch sized to
+    # the live count covers all rows. The previous hardcoded ``limit=100_000``
+    # silently left any surplus entries encrypted under the OLD key.
+    total = backend.count()
+    # Headroom absorbs entries inserted between count() and the fetch.
+    fetch_limit = total + _ROTATION_FETCH_HEADROOM
+    entries = backend.list_entries(limit=fetch_limit)
 
+    processed_ids: set[str] = set()
     for entry in entries:
+        if entry.id in processed_ids:
+            continue
         ns_key_old = derive_namespace_key_bytes(old_key, entry.namespace)
         ns_key_new = derive_namespace_key_bytes(new_key, entry.namespace)
 
         decrypted = decrypt_entry_fields(entry, ns_key_old)
         re_encrypted = encrypt_entry_fields(decrypted, ns_key_new)
         backend.store(re_encrypted)
-        count += 1
+        processed_ids.add(entry.id)
+
+    count = len(processed_ids)
+    if count < total:
+        raise KeyRotationError(
+            f"key rotation re-encrypted {count} of {total} entries; "
+            "not all data was rotated to the new key",
+        )
 
     logger.info("key_rotation_complete", entries_rotated=count)
     return count

@@ -124,6 +124,63 @@ class TestRotateMasterKey:
                 decrypted = decrypt_entry_fields(stored, ns_key_new)
                 assert decrypted.content == f"content for {stored.namespace}"
 
+    def test_rotate_re_encrypts_all_entries_beyond_legacy_cap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every entry must be re-encrypted with no silent cap.
+
+        The old implementation hardcoded ``list_entries(limit=100_000)``. We
+        prove coverage is now count-driven by forcing a tiny fetch headroom and
+        confirming the rotation still touches a number of entries that would
+        have straddled any fixed cap boundary.
+        """
+        from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+        # Force headroom to 0 so the fetch limit equals exactly count() — if the
+        # code fell back to any smaller fixed cap, entries would be missed.
+        monkeypatch.setattr("trw_memory.security.keys._ROTATION_FETCH_HEADROOM", 0)
+
+        old_key = generate_master_key()
+        new_key = generate_master_key()
+        n_entries = 250
+
+        with SQLiteBackend(tmp_path / "beyond_cap.db") as backend:
+            for i in range(n_entries):
+                entry = _make_entry(f"bulk-{i:04d}", f"content {i}")
+                ns_key = derive_namespace_key_bytes(old_key, entry.namespace)
+                backend.store(encrypt_entry_fields(entry, ns_key))
+
+            count = rotate_master_key(old_key, new_key, backend)
+            assert count == n_entries
+
+            # Spot-check first and last: both decrypt under the NEW key only.
+            for entry_id, expected in (("bulk-0000", "content 0"), (f"bulk-{n_entries - 1:04d}", f"content {n_entries - 1}")):
+                stored = backend.get(entry_id)
+                assert stored is not None
+                ns_key_new = derive_namespace_key_bytes(new_key, stored.namespace)
+                assert decrypt_entry_fields(stored, ns_key_new).content == expected
+
+    def test_rotate_raises_when_coverage_incomplete(self, tmp_path: Path) -> None:
+        """If the backend reports more entries than it returns, rotation must
+        RAISE rather than silently leave data under the old key."""
+        from trw_memory.exceptions import KeyRotationError
+        from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+        old_key = generate_master_key()
+        new_key = generate_master_key()
+
+        with SQLiteBackend(tmp_path / "incomplete.db") as backend:
+            for i in range(3):
+                entry = _make_entry(f"short-{i}", f"content {i}")
+                ns_key = derive_namespace_key_bytes(old_key, entry.namespace)
+                backend.store(encrypt_entry_fields(entry, ns_key))
+
+            # count() reports more than list_entries returns.
+            object.__setattr__(backend, "count", lambda namespace=None: 99)
+
+            with pytest.raises(KeyRotationError, match="not all data was rotated"):
+                rotate_master_key(old_key, new_key, backend)
+
     def test_old_key_cannot_decrypt_after_rotation(self, tmp_path: Path) -> None:
         from cryptography.exceptions import InvalidTag
 
