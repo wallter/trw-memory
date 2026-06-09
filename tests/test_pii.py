@@ -181,6 +181,22 @@ class TestDetectPII:
         path_matches = [m for m in matches if m.pii_type == PIIType.FILE_PATH]
         assert len(path_matches) == 1
 
+    def test_file_path_does_not_match_url_path_components(self) -> None:
+        """URL path components must NOT be flagged as filesystem paths."""
+        for url in (
+            "see https://example.com/api/users for details",
+            "fetch example.com/api/v1/data now",
+        ):
+            matches = detect_pii(url)
+            path_matches = [m for m in matches if m.pii_type == PIIType.FILE_PATH]
+            assert path_matches == [], f"false positive on {url!r}: {path_matches}"
+
+    def test_file_path_still_matches_real_absolute_path_after_url_fix(self) -> None:
+        """A genuine absolute path embedded in text is still detected."""
+        matches = detect_pii("config at /etc/nginx/nginx.conf here")
+        path_matches = [m for m in matches if m.pii_type == PIIType.FILE_PATH]
+        assert [m.value for m in path_matches] == ["/etc/nginx/nginx.conf"]
+
     def test_detect_custom_pattern(self) -> None:
         """Custom regex patterns are surfaced as custom PII."""
         matches = detect_pii("employee id EMP-12345", custom_patterns=[r"EMP-\d+"])

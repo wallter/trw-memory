@@ -114,7 +114,12 @@ _PII_PATTERNS: list[tuple[PIIType, re.Pattern[str], float]] = [
     ),
     (
         PIIType.FILE_PATH,
-        re.compile(r"(?:[A-Za-z]:\\[^\s]+|/(?:[^/\s]+/)+[^/\s]+)"),
+        # A POSIX absolute path must start at a boundary (start-of-string or
+        # whitespace) — NOT mid-token. The negative lookbehind ``(?<![\w:/.])``
+        # stops matching URL path components such as ``example.com/api/users``
+        # or ``https://host/a/b`` (where the leading ``/`` is preceded by a
+        # host char or ``:``/``/``). Windows drive paths are matched separately.
+        re.compile(r"(?:[A-Za-z]:\\[^\s]+|(?<![\w:/.])/(?:[^/\s]+/)+[^/\s]+)"),
         0.8,
     ),
 ]
