@@ -6,6 +6,31 @@ All notable changes to the TRW Memory package.
 
 ### Fixed
 
+- **Concurrency hardening across the lifecycle / tier subsystem (0.9.6).**
+  Five verified data-safety / resource bugs are fixed:
+  - `_sweep_hot_to_warm` no longer iterates and mutates the shared hot
+    `OrderedDict` without the manager's `_hot_lock`. The Hot→Warm sweep now
+    snapshots the stale candidates under the lock, performs the blocking
+    `warm_add` I/O outside it, then re-acquires the lock to evict — re-checking
+    that the same entry instance is still resident so a concurrently-refreshed
+    entry is never silently dropped (no more `dictionary changed size during
+    iteration`).
+  - `consolidate_cycle(namespace=None)` now raises `ValueError` on a
+    multi-namespace store instead of clustering entries across ALL tenants and
+    persisting the merged result into a single namespace (cross-tenant leak).
+    The single-namespace and explicit-namespace paths are unchanged.
+  - `_TIER_MANAGER_CACHE` is now a bounded LRU (default cap 32) that calls
+    `close()` on the evicted manager before dropping it, so it no longer leaks
+    one open SQLite connection per namespace forever.
+  - The warm-tier JSONL sidecar read-modify-write (`_warm_sidecar_upsert` /
+    `purge_sidecar_entry`) is now guarded by the advisory `lock_for_rmw`
+    primitive, preventing concurrent upserts (and upsert-vs-purge) from
+    clobbering each other's rows and corrupting the file.
+  - `_rollback_consolidation` now always restores the originals to ACTIVE
+    before surfacing a failed delete of the consolidated entry, so a partial
+    consolidation on a YAML backend (whose `transaction()` is a no-op) can no
+    longer leave originals archived alongside a surviving consolidated entry.
+
 - **Package lock version now matches the 0.9.5 package bump.** `uv.lock` no
   longer records the previous editable self-package version, restoring the
   package metadata guard.
