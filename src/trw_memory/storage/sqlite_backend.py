@@ -493,7 +493,12 @@ class SQLiteBackend(StorageBackend):
                     self._conn.execute("BEGIN IMMEDIATE")
                     self._skip_commit_depth += 1
             else:
-                self._skip_commit_depth += 1
+                # Mutate the shared depth counter under the lock too: other writers
+                # (store/delete/increment_*) read ``_skip_commit_depth`` under this
+                # same lock to decide whether to commit, so a bare ``+= 1`` here
+                # races their read with no happens-before edge.
+                with self._lock:
+                    self._skip_commit_depth += 1
             try:
                 yield self
                 if is_outer:
@@ -515,7 +520,11 @@ class SQLiteBackend(StorageBackend):
                     with self._lock:
                         self._skip_commit_depth -= 1
                 else:
-                    self._skip_commit_depth -= 1
+                    # Drop the nested gate under the lock too (symmetric to the
+                    # increment) so the decrement is ordered against the lock-held
+                    # reads other writers make on ``_skip_commit_depth``.
+                    with self._lock:
+                        self._skip_commit_depth -= 1
         finally:
             self._txn_serializer.release()
 
@@ -701,8 +710,19 @@ class SQLiteBackend(StorageBackend):
         _vec_ops_delete_vector_internal(self._conn, entry_id)
 
     def delete_vector(self, entry_id: str) -> bool:
-        """Public vector-row deletion."""
-        return _vec_ops_delete_vector(self._conn, self._lock, vec_available=self._vec_available, entry_id=entry_id)
+        """Public vector-row deletion.
+
+        Defers the commit when inside a ``transaction()`` block so the vector
+        delete batches into the caller's outermost COMMIT (atomicity parity with
+        ``delete()``/``store()``).
+        """
+        return _vec_ops_delete_vector(
+            self._conn,
+            self._lock,
+            vec_available=self._vec_available,
+            entry_id=entry_id,
+            skip_commit=self._skip_commit_depth != 0,
+        )
 
     def vector_exists(self, entry_id: str) -> bool:
         """Single-row vec_index probe."""

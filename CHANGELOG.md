@@ -4,6 +4,80 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-06-09
+
+### Security
+
+- **SSN/PHONE/CREDIT_CARD in tags are now redacted (`security/_runtime_pii.py`).** Completes the
+  v0.9.1 tag-scan: those types were detected in tags but absent from `REDACTED_PII_TYPES`, so
+  `replace_pii` fell through and stored the raw value verbatim (surfaced at recall). They now redact
+  to `<ssn>`/`<phone>`/`<credit_card>` (redact-not-block, parity with EMAIL/IP).
+- **Public `check_entry_pii` now scans `entry.tags` (`security/pii.py`).** The PUBLIC API still
+  scanned only `content` + `detail`, so direct callers got a false-clean result for PII hidden in a
+  tag even though the internal runtime path was fixed in v0.9.1. Tags are now blocked/redacted per the
+  selected action, matching the runtime path.
+- **Custom-pattern ReDoS guard now catches quantified alternation (`security/pii.py`).** The v0.9.1
+  guard caught nested quantifiers (`(a+)+`) but missed quantified-alternation backtracking
+  (`(a|a)*`); such patterns are now rejected as `ConfigError`.
+- **`rotate_master_key` converges against the LIVE backend (`security/keys.py`).** v0.9.1 compared
+  coverage against a PRE-rotation `count()` snapshot, so entries inserted concurrently during
+  re-encryption escaped — left on the OLD key — while the count check stayed satisfied. Rotation now
+  sweeps repeatedly, re-reading the live backend and re-encrypting only newly-seen IDs until a pass
+  finds nothing new and the post-pass live count is covered. Bounded by `_ROTATION_MAX_SWEEPS`; a
+  writer inserting faster than rotation raises `KeyRotationError` instead of spinning.
+
+### Fixed
+
+- **Invalid custom PII pattern raises `ConfigError`, not `re.error` (`security/pii.py`).** The v0.9.1
+  ReDoS guard validated length + nested quantifiers but never trial-compiled, so a syntactically
+  invalid pattern (e.g. `[`) raised an uncaught `re.error` from `re.compile` and crashed every store
+  for the session. The pattern is now trial-compiled at validation time and surfaced as a
+  documented `ConfigError`.
+- **Public `delete_vector` defers its commit inside `transaction()` (`storage/_vector_ops.py`).** It
+  committed unconditionally — the same premature-commit bug class fixed in `_crud_ops` for v0.9.1 but
+  missed here — prematurely committing an enclosing caller transaction. It now accepts a `skip_commit`
+  flag (matching `upsert_vector`) so the vector delete batches into the caller's outermost COMMIT and
+  rolls back with the transaction.
+- **Nested `transaction()` depth counter mutated under the lock (`storage/sqlite_backend.py`).** The
+  non-outer increment/decrement of `_skip_commit_depth` ran outside `_lock` while other writers read
+  that counter under `_lock` to decide whether to commit, racing with no happens-before edge. Both
+  nested mutations now run under `_lock`, symmetric with the outer case.
+
+## [0.9.1] — 2026-06-09
+
+### Security
+
+- **Injection scan now covers `entry.tags` (`security/poisoning.py`).** `validate_entry_payload`
+  previously scanned only `content` + `detail`, so an injection command placed in a tag bypassed the
+  write-time poisoning gate while still surfacing at recall. Tags are now included in the scan.
+- **SQLCipher key never leaks through a rekey failure (`security/encryption.py`).** `PRAGMA rekey`
+  must embed the key hex in the SQL text; a driver that echoed the failing statement could surface the
+  key through the raised exception or its `__context__`/`__cause__` chain. Rekey failures now raise a
+  sanitized `KeyRotationError` with the original (key-bearing) exception detached.
+- **`rotate_master_key` re-encrypts ALL entries (`security/keys.py`).** The hardcoded
+  `list_entries(limit=100_000)` silently left surplus rows encrypted under the OLD key. Re-encryption
+  is now count-driven with headroom and raises `KeyRotationError` if coverage is incomplete.
+- **Runtime PII policy scans `entry.tags` (`security/_runtime_pii.py`).** A credential (API key) or
+  PII in a tag previously bypassed both the PII block gate and redaction. Tags are now blocked and
+  redacted alongside `content`/`detail`.
+- **ReDoS guard for caller-supplied custom PII patterns (`security/pii.py`).** `detect_pii` compiled
+  and ran `custom_patterns` with no safety check; Python `re` has no timeout. Pattern count + length
+  are now capped and catastrophic-backtracking (nested-quantifier) constructs are rejected.
+- **Keyring master-key cache keyed on identity (`security/keys.py`).** The in-process cache now
+  validates the `(service, account)` identity on a keyring hit instead of the bare `source` flag.
+
+### Fixed
+
+- **Transaction atomicity in `storage/_crud_ops.py`.** `increment_session_counts`,
+  `increment_access_counts`, and `delete` committed unconditionally, prematurely committing any
+  caller-opened `transaction()`. They now defer the commit inside a transaction like
+  `store`/`update`/`increment_recall_access`. Recall/session/access counters are also bounded.
+- **Tag-filtered search no longer under-delivers (`storage/_query_ops.py`).** `search` applied the
+  SQL `LIMIT` before the in-memory tag filter, returning fewer than `top_k` matching entries (often
+  zero). The required tags are now pushed into SQL so the limit applies after filtering.
+- **`FILE_PATH` PII regex no longer matches URL path components (`security/pii.py`).** A negative
+  lookbehind stops false positives on `example.com/api/...` and `https://host/a/b`.
+
 ## [0.9.0] — 2026-06-08
 
 ### Added

@@ -273,7 +273,10 @@ def validate_entry_payload(entry: MemoryEntry, *, max_chars: int) -> None:
     # injection detection.
     if entry.metadata.get(SYSTEM_CODE_FLAG_KEY) == "true":
         return
-    combined = f"{entry.content}{entry.detail}"
+    # Security audit 2026-06-09: include entry.tags in the injection scan.
+    # A caller-controlled tag (e.g. "ignore previous instructions ...") would
+    # otherwise bypass the gate while still being surfaced at recall time.
+    combined = f"{entry.content}{entry.detail}" + "".join(entry.tags)
     for pattern in _INJECTION_PATTERNS:
         if pattern.search(combined):
             raise PoisoningError(

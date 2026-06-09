@@ -91,6 +91,38 @@ class TestGetMasterKeyEnv:
 
         mock_keyring.get_password.assert_called_once_with("trw-memory", "master")
 
+    def test_keyring_cache_is_keyed_on_identity_not_just_source(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A keyring cache hit must validate the (service, account) identity.
+
+        When the keyring identity changes between two loads, the cache must NOT
+        serve the previously-cached key for a different identity — it must
+        re-read keyring instead.
+        """
+        monkeypatch.delenv("MEMORY_MASTER_KEY", raising=False)
+        key_a = generate_master_key()
+        key_b = generate_master_key()
+        mock_keyring = MagicMock()
+        config = _make_config(key_source="keyring", auto_generate_key=False)
+
+        with (
+            patch("trw_memory.security.keys._keyring", mock_keyring),
+            patch("trw_memory.security.keys._KEYRING_AVAILABLE", True),
+        ):
+            # First identity returns key_a and is cached.
+            mock_keyring.get_password.return_value = key_a.hex()
+            assert get_master_key(config) == key_a
+            calls_after_first = mock_keyring.get_password.call_count
+
+            # Same identity -> cache hit, no new keyring read.
+            assert get_master_key(config) == key_a
+            assert mock_keyring.get_password.call_count == calls_after_first
+
+            # Change the keyring identity; the cache must invalidate and re-read.
+            mock_keyring.get_password.return_value = key_b.hex()
+            with patch("trw_memory.security.keys._SERVICE_NAME", "trw-memory-other"):
+                assert get_master_key(config) == key_b
+            assert mock_keyring.get_password.call_count > calls_after_first
+
     def test_auto_generate_requires_keyring_when_env_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("MEMORY_MASTER_KEY", raising=False)
 

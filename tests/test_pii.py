@@ -181,11 +181,73 @@ class TestDetectPII:
         path_matches = [m for m in matches if m.pii_type == PIIType.FILE_PATH]
         assert len(path_matches) == 1
 
+    def test_file_path_does_not_match_url_path_components(self) -> None:
+        """URL path components must NOT be flagged as filesystem paths."""
+        for url in (
+            "see https://example.com/api/users for details",
+            "fetch example.com/api/v1/data now",
+        ):
+            matches = detect_pii(url)
+            path_matches = [m for m in matches if m.pii_type == PIIType.FILE_PATH]
+            assert path_matches == [], f"false positive on {url!r}: {path_matches}"
+
+    def test_file_path_still_matches_real_absolute_path_after_url_fix(self) -> None:
+        """A genuine absolute path embedded in text is still detected."""
+        matches = detect_pii("config at /etc/nginx/nginx.conf here")
+        path_matches = [m for m in matches if m.pii_type == PIIType.FILE_PATH]
+        assert [m.value for m in path_matches] == ["/etc/nginx/nginx.conf"]
+
     def test_detect_custom_pattern(self) -> None:
         """Custom regex patterns are surfaced as custom PII."""
         matches = detect_pii("employee id EMP-12345", custom_patterns=[r"EMP-\d+"])
         custom_matches = [m for m in matches if m.pii_type == PIIType.CUSTOM]
         assert len(custom_matches) == 1
+
+    def test_detect_pii_rejects_nested_quantifier_custom_pattern(self) -> None:
+        """Catastrophic-backtracking patterns are rejected before compilation."""
+        from trw_memory.exceptions import ConfigError
+
+        with pytest.raises(ConfigError, match="nested quantifier"):
+            detect_pii("aaaaaaaaaaaaaaaaaaaa!", custom_patterns=[r"(a+)+$"])
+
+    def test_detect_pii_rejects_overlong_custom_pattern(self) -> None:
+        """A custom pattern longer than the cap is rejected."""
+        from trw_memory.exceptions import ConfigError
+
+        with pytest.raises(ConfigError, match="exceeds"):
+            detect_pii("x", custom_patterns=["a" * 1001])
+
+    def test_detect_pii_rejects_too_many_custom_patterns(self) -> None:
+        """More custom patterns than the cap are rejected."""
+        from trw_memory.exceptions import ConfigError
+
+        with pytest.raises(ConfigError, match="too many"):
+            detect_pii("x", custom_patterns=[r"EMP-\d+"] * 51)
+
+    def test_detect_pii_accepts_safe_custom_pattern(self) -> None:
+        """A benign custom pattern with a single quantifier still works."""
+        matches = detect_pii("id EMP-99", custom_patterns=[r"EMP-\d+"])
+        assert any(m.pii_type == PIIType.CUSTOM for m in matches)
+
+    def test_detect_pii_rejects_invalid_regex_custom_pattern(self) -> None:
+        """A syntactically-invalid custom pattern raises ConfigError, not re.error.
+
+        Regression (v0.9.2): the v0.9.1 ReDoS guard validated length + nested
+        quantifiers but never trial-compiled, so an invalid pattern like ``[``
+        raised an uncaught re.error from re.compile in detect_pii — crashing
+        every store for the session.
+        """
+        from trw_memory.exceptions import ConfigError
+
+        with pytest.raises(ConfigError, match="not a valid regular expression"):
+            detect_pii("anything", custom_patterns=["["])
+
+    def test_detect_pii_rejects_quantified_alternation_custom_pattern(self) -> None:
+        """Quantified-alternation catastrophic backtracking is rejected (v0.9.2)."""
+        from trw_memory.exceptions import ConfigError
+
+        with pytest.raises(ConfigError, match="quantified alternation"):
+            detect_pii("aaaaaaaaaaaaaaaaaaaa!", custom_patterns=[r"(a|a)*$"])
 
     def test_detect_high_entropy_string(self) -> None:
         """High-entropy tokens (mixed alphanumeric) are flagged."""
@@ -317,6 +379,33 @@ class TestCheckEntryPII:
         result_entry, matches = check_entry_pii(entry, action=PIIAction.BLOCK)
         assert matches == []
         assert result_entry.content == "Clean content, no PII here."
+
+    def test_block_action_flags_api_key_in_tag(self) -> None:
+        """A credential hidden in a tag is detected by the public API (v0.9.2).
+
+        Regression for the incomplete v0.9.1 fix: check_entry_pii scanned only
+        content + detail, so a direct caller got a false-clean result for PII
+        carried in tags even though the internal runtime path was fixed.
+        """
+        entry = MemoryEntry(
+            id="M-tag-key",
+            content="Safe content, no PII in the body.",
+            tags=["auth:sk-abcdefghijklmnopqrstuvwxyz"],
+        )
+        with pytest.raises(MemoryError, match="PII detected"):
+            check_entry_pii(entry, action=PIIAction.BLOCK)
+
+    def test_redact_action_masks_pii_in_tag(self) -> None:
+        """REDACT masks PII carried in a tag (parity with the runtime path)."""
+        entry = MemoryEntry(
+            id="M-tag-email",
+            content="Safe content",
+            tags=["contact:user@example.com"],
+        )
+        result_entry, matches = check_entry_pii(entry, action=PIIAction.REDACT)
+        assert "user@example.com" not in result_entry.tags[0]
+        assert "[REDACTED:email]" in result_entry.tags[0]
+        assert len(matches) >= 1
 
     def test_custom_entropy_threshold(self) -> None:
         """Custom entropy threshold is respected."""

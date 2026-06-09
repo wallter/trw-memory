@@ -61,6 +61,7 @@ class _RotatingSQLCipherConnection:
         integrity_result: str = "ok",
         mutate_on_rekey: bytes | None = None,
         wal_checkpoint_busy: bool = False,
+        raise_on_rekey: bool = False,
     ) -> None:
         object.__setattr__(self, "_conn", conn)
         object.__setattr__(self, "_statements", statements)
@@ -68,6 +69,7 @@ class _RotatingSQLCipherConnection:
         object.__setattr__(self, "_integrity_result", integrity_result)
         object.__setattr__(self, "_mutate_on_rekey", mutate_on_rekey)
         object.__setattr__(self, "_wal_checkpoint_busy", wal_checkpoint_busy)
+        object.__setattr__(self, "_raise_on_rekey", raise_on_rekey)
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._conn, name)
@@ -81,6 +83,10 @@ class _RotatingSQLCipherConnection:
         if normalized.startswith("PRAGMA WAL_CHECKPOINT") and self._wal_checkpoint_busy:
             # Simulate another connection holding the WAL (busy=1).
             return _StaticCursor([(1, 0, 0)])
+        if normalized.startswith("PRAGMA REKEY") and self._raise_on_rekey:
+            # Simulate a SQLCipher driver that echoes the failing SQL — which
+            # for a rekey embeds the new key hex — straight into the exception.
+            raise sqlite3.OperationalError(f"near rekey: syntax error in {sql!r}")
         if normalized.startswith("PRAGMA REKEY") and self._mutate_on_rekey is not None:
             with self._db_path.open("ab") as handle:
                 handle.write(self._mutate_on_rekey)
@@ -101,11 +107,13 @@ class _RotatingSQLCipherDBAPI:
         integrity_result: str = "ok",
         mutate_on_rekey: bytes | None = None,
         wal_checkpoint_busy: bool = False,
+        raise_on_rekey: bool = False,
     ) -> None:
         self._statements = statements
         self._integrity_result = integrity_result
         self._mutate_on_rekey = mutate_on_rekey
         self._wal_checkpoint_busy = wal_checkpoint_busy
+        self._raise_on_rekey = raise_on_rekey
 
     def connect(self, database: str, **kwargs: object) -> _RotatingSQLCipherConnection:
         conn = sqlite3.connect(database, **kwargs)
@@ -116,6 +124,7 @@ class _RotatingSQLCipherDBAPI:
             integrity_result=self._integrity_result,
             mutate_on_rekey=self._mutate_on_rekey,
             wal_checkpoint_busy=self._wal_checkpoint_busy,
+            raise_on_rekey=self._raise_on_rekey,
         )
 
 

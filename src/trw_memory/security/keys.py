@@ -32,7 +32,7 @@ except ImportError:  # pragma: no cover
     _CRYPTO_ED25519_AVAILABLE = False
     _CryptoEd25519PrivateKey = Any  # type: ignore[misc,assignment]
 
-from trw_memory.exceptions import ConfigError, MasterKeyNotFoundError
+from trw_memory.exceptions import ConfigError, KeyRotationError, MasterKeyNotFoundError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.security.encryption import (
     decrypt_entry_fields,
@@ -56,24 +56,45 @@ _SERVICE_NAME = "trw-memory"
 _KEY_ACCOUNT = "master"
 _LEGACY_KEY_ACCOUNTS = ("master-key",)
 _KEY_LENGTH = 32
+# Extra rows fetched beyond the live count() during key rotation so entries
+# inserted in the count->fetch window are still re-encrypted (coverage is
+# re-verified against count() afterward).
+_ROTATION_FETCH_HEADROOM = 1000
+# Bound on the convergence sweep in rotate_master_key. Each sweep re-reads the
+# live backend and re-encrypts only newly-seen rows; a quiet (or quiescing)
+# store converges in 1-2 passes. The cap stops an adversary inserting faster
+# than we rotate from spinning the loop forever.
+_ROTATION_MAX_SWEEPS = 100
 _ENV_VAR = "MEMORY_MASTER_KEY"
 _CACHED_MASTER_KEY: bytes | None = None
 _CACHED_SOURCE: str | None = None
 _CACHED_ENV_HEX: str | None = None
 _CACHED_FILE_PATH: str | None = None
+# Keyring cache identity. Captures the (service, account) the cached key was
+# loaded from so a keyring cache hit is validated against the live identity
+# rather than the bare ``source == "keyring"`` flag — preventing two configs
+# that resolve to different keyring identities from colliding on the cache.
+_CACHED_KEYRING_ID: tuple[str, str] | None = None
 _INSECURE_FILE_SOURCE_MESSAGE = (
     "key_source='file' is unsupported when memory_encryption_enabled=True; "
     "use MEMORY_MASTER_KEY or key_source='keyring'."
 )
 
 
+def _keyring_identity() -> tuple[str, str]:
+    """Return the (service, account) tuple the keyring master key lives under."""
+    return (_SERVICE_NAME, _KEY_ACCOUNT)
+
+
 def clear_key_cache() -> None:
     """Reset the in-process master-key cache."""
     global _CACHED_MASTER_KEY, _CACHED_SOURCE, _CACHED_ENV_HEX, _CACHED_FILE_PATH
+    global _CACHED_KEYRING_ID
     _CACHED_MASTER_KEY = None
     _CACHED_SOURCE = None
     _CACHED_ENV_HEX = None
     _CACHED_FILE_PATH = None
+    _CACHED_KEYRING_ID = None
 
 
 def _cache_master_key(
@@ -84,10 +105,12 @@ def _cache_master_key(
     file_path: str | None = None,
 ) -> bytes:
     global _CACHED_MASTER_KEY, _CACHED_SOURCE, _CACHED_ENV_HEX, _CACHED_FILE_PATH
+    global _CACHED_KEYRING_ID
     _CACHED_MASTER_KEY = key
     _CACHED_SOURCE = source
     _CACHED_ENV_HEX = env_hex
     _CACHED_FILE_PATH = file_path
+    _CACHED_KEYRING_ID = _keyring_identity() if source == "keyring" else None
     return key
 
 
@@ -196,7 +219,12 @@ def get_master_key(config: MemoryConfig) -> bytes:
             return _cache_master_key(env_key, "env", env_hex=raw_env)
 
     key_path = str(_key_file_path(config))
-    if config.key_source == "keyring" and _CACHED_SOURCE == "keyring" and _CACHED_MASTER_KEY is not None:
+    if (
+        config.key_source == "keyring"
+        and _CACHED_SOURCE == "keyring"
+        and _CACHED_MASTER_KEY is not None
+        and _keyring_identity() == _CACHED_KEYRING_ID
+    ):
         logger.debug("master_key_loaded", source="keyring", cached=True)
         return _CACHED_MASTER_KEY
     if (
@@ -305,26 +333,59 @@ def rotate_master_key(
 
     Raises:
         ConfigError: If either key is not 32 bytes.
+        KeyRotationError: If, after the bounded convergence sweep, entries are
+            still being inserted faster than they can be re-encrypted.
     """
     if len(old_key) != _KEY_LENGTH:
         raise ConfigError(f"old_key must be {_KEY_LENGTH} bytes, got {len(old_key)}")
     if len(new_key) != _KEY_LENGTH:
         raise ConfigError(f"new_key must be {_KEY_LENGTH} bytes, got {len(new_key)}")
 
-    entries = backend.list_entries(limit=100_000)
-    count = 0
+    # Re-encrypt EVERY entry — never a silent cap, and never against a stale
+    # PRE-rotation snapshot. The prior implementation fetched once and compared
+    # the processed count against a count() taken BEFORE re-encryption, so any
+    # entry inserted concurrently DURING the loop was never fetched and escaped
+    # re-encryption while leaving the snapshot check satisfied (count == total)
+    # — those rows stayed on the OLD key.
+    #
+    # Fix: sweep repeatedly, each pass re-reading the LIVE backend and processing
+    # only IDs not yet seen, until a pass discovers no new entries. ``store``
+    # preserves ``updated_at`` (INSERT OR REPLACE), so re-encrypted rows do not
+    # churn the ORDER BY window; only genuinely-new concurrent inserts appear in
+    # a later pass. The sweep is bounded so a writer inserting faster than we can
+    # rotate cannot spin forever.
+    processed_ids: set[str] = set()
+    for _ in range(_ROTATION_MAX_SWEEPS):
+        live_count = backend.count()
+        fetch_limit = live_count + _ROTATION_FETCH_HEADROOM
+        entries = backend.list_entries(limit=fetch_limit)
 
-    for entry in entries:
-        ns_key_old = derive_namespace_key_bytes(old_key, entry.namespace)
-        ns_key_new = derive_namespace_key_bytes(new_key, entry.namespace)
+        new_this_pass = 0
+        for entry in entries:
+            if entry.id in processed_ids:
+                continue
+            ns_key_old = derive_namespace_key_bytes(old_key, entry.namespace)
+            ns_key_new = derive_namespace_key_bytes(new_key, entry.namespace)
 
-        decrypted = decrypt_entry_fields(entry, ns_key_old)
-        re_encrypted = encrypt_entry_fields(decrypted, ns_key_new)
-        backend.store(re_encrypted)
-        count += 1
+            decrypted = decrypt_entry_fields(entry, ns_key_old)
+            re_encrypted = encrypt_entry_fields(decrypted, ns_key_new)
+            backend.store(re_encrypted)
+            processed_ids.add(entry.id)
+            new_this_pass += 1
 
-    logger.info("key_rotation_complete", entries_rotated=count)
-    return count
+        # Converged: a full pass over the LIVE backend found nothing new, AND the
+        # live count is fully covered by what we processed. Re-read the count
+        # AFTER the pass so a row inserted mid-pass forces another sweep.
+        if new_this_pass == 0 and backend.count() <= len(processed_ids):
+            count = len(processed_ids)
+            logger.info("key_rotation_complete", entries_rotated=count)
+            return count
+
+    raise KeyRotationError(
+        f"key rotation did not converge after {_ROTATION_MAX_SWEEPS} sweeps "
+        f"({len(processed_ids)} entries re-encrypted); entries are being inserted "
+        "faster than they can be rotated — quiesce writes and retry",
+    )
 
 
 # ---------------------------------------------------------------------------

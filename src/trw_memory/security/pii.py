@@ -18,7 +18,7 @@ from enum import Enum
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
-from trw_memory.exceptions import MemoryError
+from trw_memory.exceptions import ConfigError, MemoryError
 from trw_memory.models.memory import MemoryEntry
 
 logger = structlog.get_logger(__name__)
@@ -114,7 +114,12 @@ _PII_PATTERNS: list[tuple[PIIType, re.Pattern[str], float]] = [
     ),
     (
         PIIType.FILE_PATH,
-        re.compile(r"(?:[A-Za-z]:\\[^\s]+|/(?:[^/\s]+/)+[^/\s]+)"),
+        # A POSIX absolute path must start at a boundary (start-of-string or
+        # whitespace) — NOT mid-token. The negative lookbehind ``(?<![\w:/.])``
+        # stops matching URL path components such as ``example.com/api/users``
+        # or ``https://host/a/b`` (where the leading ``/`` is preceded by a
+        # host char or ``:``/``/``). Windows drive paths are matched separately.
+        re.compile(r"(?:[A-Za-z]:\\[^\s]+|(?<![\w:/.])/(?:[^/\s]+/)+[^/\s]+)"),
         0.8,
     ),
 ]
@@ -122,6 +127,61 @@ _PII_PATTERNS: list[tuple[PIIType, re.Pattern[str], float]] = [
 # Minimum token length and entropy threshold for high-entropy detection
 _MIN_ENTROPY_TOKEN_LEN = 20
 _DEFAULT_ENTROPY_THRESHOLD = 4.5
+
+# ReDoS hardening for caller-supplied custom patterns. Python's ``re`` engine
+# has no execution timeout, so a single pathological pattern could hang the
+# store path on attacker-influenced text. We bound count + length and reject
+# the classic catastrophic-backtracking shapes (a quantifier applied to a group
+# that itself ends in a quantifier, e.g. ``(a+)+`` / ``(a*)*`` / ``(a+)*``).
+_MAX_CUSTOM_PATTERNS = 50
+_MAX_CUSTOM_PATTERN_LEN = 1000
+# Matches a quantifier ( * + {m,n} ) applied to a ``)`` that closes a group
+# whose final atom is itself quantified ( * + {m,n} ) — the nested-quantifier
+# ReDoS trigger. Examples caught: (a+)+ (a*)* (\d+)* (x{1,3}){2,} (ab+)+
+_INNER_QUANTIFIER = r"(?:[*+]|\{\d+(?:,\d*)?\})"
+_OUTER_QUANTIFIER = r"(?:[*+]|\{\d+(?:,\d*)?\})"
+_NESTED_QUANTIFIER = re.compile(r"\([^)]*" + _INNER_QUANTIFIER + r"\)\s*" + _OUTER_QUANTIFIER)
+# Matches a quantifier ( * + {m,n} ) applied to a ``)`` that closes a group
+# containing an alternation ( ``|`` ). Quantified alternation with overlapping
+# branches (the classic ``(a|a)*`` / ``(a|ab)*`` / ``(x|x|y)+``) is a second
+# catastrophic-backtracking family the nested-quantifier heuristic misses, since
+# none of the branches need carry its own quantifier. We can't cheaply prove the
+# branches overlap, so we conservatively reject any quantified group that holds a
+# top-level ``|``. Examples caught: (a|a)* (foo|bar)+ (\d|\d){2,}
+_ALTERNATION_QUANTIFIER = re.compile(r"\([^)|]*\|[^)]*\)\s*" + _OUTER_QUANTIFIER)
+
+
+def _validate_custom_pattern(raw_pattern: str) -> None:
+    """Reject custom patterns that risk catastrophic backtracking (ReDoS).
+
+    Raises:
+        ConfigError: If the pattern is too long or contains a nested-quantifier
+            backtracking trigger.
+    """
+    if len(raw_pattern) > _MAX_CUSTOM_PATTERN_LEN:
+        raise ConfigError(
+            f"custom PII pattern exceeds {_MAX_CUSTOM_PATTERN_LEN} chars "
+            f"(got {len(raw_pattern)}); rejected as a ReDoS safety measure"
+        )
+    if _NESTED_QUANTIFIER.search(raw_pattern):
+        raise ConfigError(
+            "custom PII pattern contains a nested quantifier "
+            "(catastrophic-backtracking risk); rejected as a ReDoS safety measure"
+        )
+    if _ALTERNATION_QUANTIFIER.search(raw_pattern):
+        raise ConfigError(
+            "custom PII pattern contains a quantified alternation group "
+            "(catastrophic-backtracking risk); rejected as a ReDoS safety measure"
+        )
+    # Trial-compile so a syntactically-invalid caller pattern (e.g. ``[``) is
+    # rejected as a documented ConfigError at validation time rather than raising
+    # an uncaught re.error from re.compile in detect_pii — which previously
+    # crashed every store for the session. The length + backtracking guards above
+    # run first so we never trial-compile a known-pathological pattern.
+    try:
+        re.compile(raw_pattern)
+    except re.error as exc:
+        raise ConfigError(f"custom PII pattern is not a valid regular expression: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +245,14 @@ def detect_pii(
             for m in pattern.finditer(text)
         )
 
-    for raw_pattern in custom_patterns or []:
+    patterns = custom_patterns or []
+    if len(patterns) > _MAX_CUSTOM_PATTERNS:
+        raise ConfigError(
+            f"too many custom PII patterns: {len(patterns)} > {_MAX_CUSTOM_PATTERNS} "
+            "(rejected as a ReDoS / resource-exhaustion safety measure)"
+        )
+    for raw_pattern in patterns:
+        _validate_custom_pattern(raw_pattern)
         pattern = re.compile(raw_pattern)
         matches.extend(
             PIIMatch(
@@ -255,7 +322,7 @@ def check_entry_pii(
     action: PIIAction = PIIAction.WARN,
     entropy_threshold: float = _DEFAULT_ENTROPY_THRESHOLD,
 ) -> tuple[MemoryEntry, list[PIIMatch]]:
-    """Check ``content`` and ``detail`` fields for PII and apply *action*.
+    """Check ``content``, ``detail`` and ``tags`` fields for PII and apply *action*.
 
     Args:
         entry: The memory entry to check.
@@ -268,12 +335,17 @@ def check_entry_pii(
     Raises:
         MemoryError: If *action* is ``BLOCK`` and PII is detected.
     """
-    # Scan both content and detail fields
+    # Scan content, detail AND tags. Security audit 2026-06-09 (v0.9.2): the
+    # internal runtime path (apply_runtime_pii_policy) scanned tags in v0.9.1, but
+    # this PUBLIC API still ignored them — so a credential or PII hidden in a tag
+    # returned a false-clean result to direct callers and was surfaced verbatim at
+    # recall time. Scan tags here for parity with the runtime path.
     content_matches = detect_pii(entry.content, entropy_threshold)
     detail_matches = detect_pii(entry.detail, entropy_threshold)
+    tag_matches_by_index: list[list[PIIMatch]] = [detect_pii(tag, entropy_threshold) for tag in entry.tags]
+    tag_matches = [match for matches in tag_matches_by_index for match in matches]
 
-    # Adjust offsets for detail matches to note they come from the detail field
-    all_matches = content_matches + detail_matches
+    all_matches = content_matches + detail_matches + tag_matches
 
     if not all_matches:
         return (entry, [])
@@ -287,8 +359,9 @@ def check_entry_pii(
     if action == PIIAction.REDACT:
         new_content = redact_text(entry.content, content_matches)
         new_detail = redact_text(entry.detail, detail_matches)
+        new_tags = [redact_text(tag, matches) for tag, matches in zip(entry.tags, tag_matches_by_index, strict=True)]
         updated = entry.model_copy(
-            update={"content": new_content, "detail": new_detail},
+            update={"content": new_content, "detail": new_detail, "tags": new_tags},
         )
         return (updated, all_matches)
 
