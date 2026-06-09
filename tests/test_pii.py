@@ -229,6 +229,26 @@ class TestDetectPII:
         matches = detect_pii("id EMP-99", custom_patterns=[r"EMP-\d+"])
         assert any(m.pii_type == PIIType.CUSTOM for m in matches)
 
+    def test_detect_pii_rejects_invalid_regex_custom_pattern(self) -> None:
+        """A syntactically-invalid custom pattern raises ConfigError, not re.error.
+
+        Regression (v0.9.2): the v0.9.1 ReDoS guard validated length + nested
+        quantifiers but never trial-compiled, so an invalid pattern like ``[``
+        raised an uncaught re.error from re.compile in detect_pii — crashing
+        every store for the session.
+        """
+        from trw_memory.exceptions import ConfigError
+
+        with pytest.raises(ConfigError, match="not a valid regular expression"):
+            detect_pii("anything", custom_patterns=["["])
+
+    def test_detect_pii_rejects_quantified_alternation_custom_pattern(self) -> None:
+        """Quantified-alternation catastrophic backtracking is rejected (v0.9.2)."""
+        from trw_memory.exceptions import ConfigError
+
+        with pytest.raises(ConfigError, match="quantified alternation"):
+            detect_pii("aaaaaaaaaaaaaaaaaaaa!", custom_patterns=[r"(a|a)*$"])
+
     def test_detect_high_entropy_string(self) -> None:
         """High-entropy tokens (mixed alphanumeric) are flagged."""
         # 30-char mixed-case+digits token — entropy ~4.9 bits/char
@@ -359,6 +379,33 @@ class TestCheckEntryPII:
         result_entry, matches = check_entry_pii(entry, action=PIIAction.BLOCK)
         assert matches == []
         assert result_entry.content == "Clean content, no PII here."
+
+    def test_block_action_flags_api_key_in_tag(self) -> None:
+        """A credential hidden in a tag is detected by the public API (v0.9.2).
+
+        Regression for the incomplete v0.9.1 fix: check_entry_pii scanned only
+        content + detail, so a direct caller got a false-clean result for PII
+        carried in tags even though the internal runtime path was fixed.
+        """
+        entry = MemoryEntry(
+            id="M-tag-key",
+            content="Safe content, no PII in the body.",
+            tags=["auth:sk-abcdefghijklmnopqrstuvwxyz"],
+        )
+        with pytest.raises(MemoryError, match="PII detected"):
+            check_entry_pii(entry, action=PIIAction.BLOCK)
+
+    def test_redact_action_masks_pii_in_tag(self) -> None:
+        """REDACT masks PII carried in a tag (parity with the runtime path)."""
+        entry = MemoryEntry(
+            id="M-tag-email",
+            content="Safe content",
+            tags=["contact:user@example.com"],
+        )
+        result_entry, matches = check_entry_pii(entry, action=PIIAction.REDACT)
+        assert "user@example.com" not in result_entry.tags[0]
+        assert "[REDACTED:email]" in result_entry.tags[0]
+        assert len(matches) >= 1
 
     def test_custom_entropy_threshold(self) -> None:
         """Custom entropy threshold is respected."""

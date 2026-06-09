@@ -141,6 +141,14 @@ _MAX_CUSTOM_PATTERN_LEN = 1000
 _INNER_QUANTIFIER = r"(?:[*+]|\{\d+(?:,\d*)?\})"
 _OUTER_QUANTIFIER = r"(?:[*+]|\{\d+(?:,\d*)?\})"
 _NESTED_QUANTIFIER = re.compile(r"\([^)]*" + _INNER_QUANTIFIER + r"\)\s*" + _OUTER_QUANTIFIER)
+# Matches a quantifier ( * + {m,n} ) applied to a ``)`` that closes a group
+# containing an alternation ( ``|`` ). Quantified alternation with overlapping
+# branches (the classic ``(a|a)*`` / ``(a|ab)*`` / ``(x|x|y)+``) is a second
+# catastrophic-backtracking family the nested-quantifier heuristic misses, since
+# none of the branches need carry its own quantifier. We can't cheaply prove the
+# branches overlap, so we conservatively reject any quantified group that holds a
+# top-level ``|``. Examples caught: (a|a)* (foo|bar)+ (\d|\d){2,}
+_ALTERNATION_QUANTIFIER = re.compile(r"\([^)|]*\|[^)]*\)\s*" + _OUTER_QUANTIFIER)
 
 
 def _validate_custom_pattern(raw_pattern: str) -> None:
@@ -160,6 +168,20 @@ def _validate_custom_pattern(raw_pattern: str) -> None:
             "custom PII pattern contains a nested quantifier "
             "(catastrophic-backtracking risk); rejected as a ReDoS safety measure"
         )
+    if _ALTERNATION_QUANTIFIER.search(raw_pattern):
+        raise ConfigError(
+            "custom PII pattern contains a quantified alternation group "
+            "(catastrophic-backtracking risk); rejected as a ReDoS safety measure"
+        )
+    # Trial-compile so a syntactically-invalid caller pattern (e.g. ``[``) is
+    # rejected as a documented ConfigError at validation time rather than raising
+    # an uncaught re.error from re.compile in detect_pii — which previously
+    # crashed every store for the session. The length + backtracking guards above
+    # run first so we never trial-compile a known-pathological pattern.
+    try:
+        re.compile(raw_pattern)
+    except re.error as exc:
+        raise ConfigError(f"custom PII pattern is not a valid regular expression: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +322,7 @@ def check_entry_pii(
     action: PIIAction = PIIAction.WARN,
     entropy_threshold: float = _DEFAULT_ENTROPY_THRESHOLD,
 ) -> tuple[MemoryEntry, list[PIIMatch]]:
-    """Check ``content`` and ``detail`` fields for PII and apply *action*.
+    """Check ``content``, ``detail`` and ``tags`` fields for PII and apply *action*.
 
     Args:
         entry: The memory entry to check.
@@ -313,12 +335,17 @@ def check_entry_pii(
     Raises:
         MemoryError: If *action* is ``BLOCK`` and PII is detected.
     """
-    # Scan both content and detail fields
+    # Scan content, detail AND tags. Security audit 2026-06-09 (v0.9.2): the
+    # internal runtime path (apply_runtime_pii_policy) scanned tags in v0.9.1, but
+    # this PUBLIC API still ignored them — so a credential or PII hidden in a tag
+    # returned a false-clean result to direct callers and was surfaced verbatim at
+    # recall time. Scan tags here for parity with the runtime path.
     content_matches = detect_pii(entry.content, entropy_threshold)
     detail_matches = detect_pii(entry.detail, entropy_threshold)
+    tag_matches_by_index: list[list[PIIMatch]] = [detect_pii(tag, entropy_threshold) for tag in entry.tags]
+    tag_matches = [match for matches in tag_matches_by_index for match in matches]
 
-    # Adjust offsets for detail matches to note they come from the detail field
-    all_matches = content_matches + detail_matches
+    all_matches = content_matches + detail_matches + tag_matches
 
     if not all_matches:
         return (entry, [])
@@ -332,8 +359,9 @@ def check_entry_pii(
     if action == PIIAction.REDACT:
         new_content = redact_text(entry.content, content_matches)
         new_detail = redact_text(entry.detail, detail_matches)
+        new_tags = [redact_text(tag, matches) for tag, matches in zip(entry.tags, tag_matches_by_index, strict=True)]
         updated = entry.model_copy(
-            update={"content": new_content, "detail": new_detail},
+            update={"content": new_content, "detail": new_detail, "tags": new_tags},
         )
         return (updated, all_matches)
 
