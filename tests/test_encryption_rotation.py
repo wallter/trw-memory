@@ -150,6 +150,51 @@ class TestRotateKey:
         assert db_path.read_bytes() == original_bytes
         assert any(statement.startswith("PRAGMA rekey = \"x'") for statement in failure_statements)
 
+    def test_rotate_key_never_leaks_key_in_raised_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A driver that echoes the failing rekey SQL (which embeds the new key)
+        into its exception must NOT leak the key material through the
+        KeyRotationError raised by rotate_key — directly or via the chain."""
+        old_key = generate_master_key()
+        new_key = generate_master_key()
+        monkeypatch.setenv("MEMORY_MASTER_KEY", old_key.hex())
+
+        config = MemoryConfig(
+            storage_backend="sqlite",
+            storage_path=str(tmp_path / "storage"),
+            encryption_enabled=True,
+            key_source="env",
+            auto_generate_key=False,
+            rbac_enabled=True,
+        )
+        monkeypatch.setattr(
+            "trw_memory.storage.sqlite_backend._import_sqlcipher_driver",
+            lambda: _RotatingSQLCipherDBAPI([]),
+        )
+        backend = create_backend_from_config(config, "default")
+        backend.store(_make_entry(content="rotation target", detail="keep me"))
+        backend.close()
+
+        monkeypatch.setattr(
+            "trw_memory.storage.sqlite_backend._import_sqlcipher_driver",
+            lambda: _RotatingSQLCipherDBAPI([], raise_on_rekey=True),
+        )
+
+        new_key_hex = derive_namespace_key(new_key, "default")
+        with pytest.raises(KeyRotationError) as excinfo:
+            rotate_key("default", new_key.hex(), config)
+
+        # Walk the full exception chain and stringify every link.
+        chain_text = ""
+        err: BaseException | None = excinfo.value
+        while err is not None:
+            chain_text += str(err) + repr(err)
+            err = err.__cause__ or err.__context__
+
+        assert new_key_hex not in chain_text
+        assert new_key.hex() not in chain_text
+
     def test_rotate_key_writes_keyring_when_configured(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         old_key = generate_master_key()
         new_key = generate_master_key()

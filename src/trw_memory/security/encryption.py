@@ -199,7 +199,29 @@ def rotate_key(namespace: str, new_passphrase: str, config: MemoryConfig | None 
     try:
         rotation_conn.execute("PRAGMA busy_timeout = 30000")
         _apply_sqlcipher_pragmas(rotation_conn)
-        rotation_conn.execute(f"PRAGMA rekey = \"x'{new_sqlcipher_key_hex}'\"")
+        # SQLCipher's PRAGMA rekey does NOT support bound parameters — the key
+        # hex MUST be embedded in the SQL text. To stop the key from ever
+        # leaking through a raised exception or SQL error log, run the rekey in
+        # an isolated try/except and re-raise a sanitized error that drops the
+        # original exception's message (and, via `from None`, its chained
+        # context) — both of which may echo the SQL containing the key.
+        try:
+            rotation_conn.execute(f"PRAGMA rekey = \"x'{new_sqlcipher_key_hex}'\"")
+        except Exception:
+            # Raise OUTSIDE the except handler so the original (key-bearing)
+            # exception is not retained on `__context__`. `from None` alone only
+            # sets __suppress_context__ for display; the object is still
+            # reachable. Building the error here guarantees no key material can
+            # be recovered from the raised exception's chain.
+            rekey_error: KeyRotationError | None = KeyRotationError(
+                "Key rotation failed while applying the new database key "
+                "(error details suppressed to protect key material)",
+                path=str(db_path),
+            )
+        else:
+            rekey_error = None
+        if rekey_error is not None:
+            raise rekey_error
 
         rows = rotation_conn.execute("PRAGMA integrity_check").fetchall()
         if len(rows) != 1 or rows[0][0] != "ok":
@@ -210,6 +232,9 @@ def rotate_key(namespace: str, new_passphrase: str, config: MemoryConfig | None 
         _restore_database_from_backup(db_path, backup_path)
         if isinstance(exc, KeyRotationError):
             raise
+        # The only key-bearing statement (PRAGMA rekey) is sanitized in its own
+        # inner block above, so any exception reaching here cannot carry key
+        # material — it is safe to surface for debugging.
         raise KeyRotationError(f"Key rotation failed: {exc}", path=str(db_path)) from exc
     else:
         rotation_conn.close()
