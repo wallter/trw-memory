@@ -493,7 +493,12 @@ class SQLiteBackend(StorageBackend):
                     self._conn.execute("BEGIN IMMEDIATE")
                     self._skip_commit_depth += 1
             else:
-                self._skip_commit_depth += 1
+                # Mutate the shared depth counter under the lock too: other writers
+                # (store/delete/increment_*) read ``_skip_commit_depth`` under this
+                # same lock to decide whether to commit, so a bare ``+= 1`` here
+                # races their read with no happens-before edge.
+                with self._lock:
+                    self._skip_commit_depth += 1
             try:
                 yield self
                 if is_outer:
@@ -515,7 +520,11 @@ class SQLiteBackend(StorageBackend):
                     with self._lock:
                         self._skip_commit_depth -= 1
                 else:
-                    self._skip_commit_depth -= 1
+                    # Drop the nested gate under the lock too (symmetric to the
+                    # increment) so the decrement is ordered against the lock-held
+                    # reads other writers make on ``_skip_commit_depth``.
+                    with self._lock:
+                        self._skip_commit_depth -= 1
         finally:
             self._txn_serializer.release()
 
