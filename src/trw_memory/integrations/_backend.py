@@ -106,6 +106,7 @@ def resolve_backend(
 def create_backend(
     namespace: str,
     storage_path: str | None = None,
+    db_path_override: Path | str | None = None,
 ) -> StorageBackend:
     """Create a sync :class:`StorageBackend` for the given namespace.
 
@@ -113,6 +114,12 @@ def create_backend(
         namespace: Isolation scope (e.g. ``"default"``, ``"project:my-app"``).
         storage_path: Override for the storage directory.  Falls back to
             :class:`MemoryConfig` defaults if ``None``.
+        db_path_override: Explicit absolute SQLite file path that BYPASSES the
+            ``base / namespace_dir / sqlite_db_name`` join. Use to land rows in
+            a fixed file while keeping ``namespace`` independent of the on-disk
+            directory name (e.g. trw-distill seeding the MCP-read flat store at
+            ``<trw_dir>/memory/memory.db`` under ``namespace="default"``).
+            SQLite backend only.
 
     Returns:
         A ready-to-use :class:`StorageBackend` instance.
@@ -122,23 +129,35 @@ def create_backend(
     else:
         config = MemoryConfig()
 
-    return create_backend_from_config(config, namespace)
+    return create_backend_from_config(config, namespace, db_path_override=db_path_override)
 
 
 def create_backend_from_config(
     config: MemoryConfig,
     namespace: str,
+    db_path_override: Path | str | None = None,
 ) -> StorageBackend:
-    """Create a sync :class:`StorageBackend` from an existing config object."""
+    """Create a sync :class:`StorageBackend` from an existing config object.
+
+    When ``db_path_override`` is provided (SQLite only), the explicit file path
+    is used directly and the ``base / namespace_dir / sqlite_db_name`` join is
+    bypassed. The ``namespace`` argument still governs the row ``namespace``
+    column and the sidecar ``namespace.txt`` metadata, so callers can decouple
+    the on-disk directory layout from the queried namespace.
+    """
     base = Path(config.storage_path)
     ns_dir = namespace.replace(":", "_")
 
     if config.storage_backend == "sqlite":
         from trw_memory.storage.sqlite_backend import SQLiteBackend
 
-        namespace_dir = base / ns_dir
+        if db_path_override is not None:
+            db_path = Path(db_path_override)
+            namespace_dir = db_path.parent
+        else:
+            namespace_dir = base / ns_dir
+            db_path = namespace_dir / config.sqlite_db_name
         _write_namespace_metadata(namespace_dir, namespace)
-        db_path = namespace_dir / config.sqlite_db_name
         sqlcipher_key_hex: str | None = None
         if config.encryption_enabled:
             master_key = get_master_key(config)

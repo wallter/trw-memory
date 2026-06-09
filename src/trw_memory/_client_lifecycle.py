@@ -63,10 +63,14 @@ def _client_logger() -> Any:
     return _c.logger
 
 
-def _create_local_backend(config: MemoryConfig, namespace: str) -> StorageBackend:
+def _create_local_backend(
+    config: MemoryConfig,
+    namespace: str,
+    db_path_override: Path | str | None = None,
+) -> StorageBackend:
     from trw_memory.client import _create_local_backend as _impl
 
-    return _impl(config, namespace)
+    return _impl(config, namespace, db_path_override=db_path_override)
 
 
 # ---------------------------------------------------------------------------
@@ -79,8 +83,15 @@ def init_client(
     namespace: str,
     mode: Literal["local", "mcp", "auto"] = "auto",
     timeout: float = 5.0,
+    db_path: Path | str | None = None,
 ) -> None:
-    """Initialize a MemoryClient instance — extracted ctor body."""
+    """Initialize a MemoryClient instance — extracted ctor body.
+
+    ``db_path`` pins the local SQLite backend to an explicit absolute file,
+    bypassing the ``storage_path / namespace_dir / sqlite_db_name`` join while
+    leaving the row ``namespace`` column governed by ``namespace`` (SQLite
+    local/auto only). See ``MemoryClient.__init__`` for the use case.
+    """
     validate_namespace(namespace)
     client._namespace = namespace
     client._timeout = timeout
@@ -108,7 +119,7 @@ def init_client(
 
     if mode in ("local", "auto"):
         try:
-            client._backend = _create_local_backend(client._config, namespace)
+            client._backend = _create_local_backend(client._config, namespace, db_path_override=db_path)
             verify_defaults(client._config)
             initialize_canaries(client._config, backend=client._backend)
             client._resolved_mode = "local"

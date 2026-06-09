@@ -19,6 +19,7 @@ import threading
 import uuid
 from collections.abc import Callable, Coroutine
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal, Protocol, TypedDict, cast, runtime_checkable
 
 import structlog
@@ -135,19 +136,28 @@ from trw_memory._client_distilled_tiering import (  # noqa: E402
 )
 
 
-def _create_local_backend(config: MemoryConfig, namespace: str) -> StorageBackend:
+def _create_local_backend(
+    config: MemoryConfig,
+    namespace: str,
+    db_path_override: Path | str | None = None,
+) -> StorageBackend:
     """Create a storage backend from config, isolated by namespace.
 
     Args:
         config: Memory configuration.
         namespace: Namespace for path isolation.
+        db_path_override: Explicit absolute SQLite file path that bypasses the
+            ``base / namespace_dir / sqlite_db_name`` join (SQLite only). The
+            ``namespace`` still governs the row ``namespace`` column, so the
+            on-disk directory layout can be decoupled from the queried
+            namespace (e.g. trw-distill seeding the MCP-read flat store).
 
     Returns:
         Configured StorageBackend instance.
     """
     from trw_memory.integrations._backend import create_backend_from_config
 
-    return create_backend_from_config(config, namespace)
+    return create_backend_from_config(config, namespace, db_path_override=db_path_override)
 
 
 class MemoryClient(OrgSharedAliasMixin):
@@ -184,7 +194,14 @@ class MemoryClient(OrgSharedAliasMixin):
     _sse_subscriber_started: bool
     _tier_manager: object | None
 
-    def __init__(self, namespace: str, mode: Literal["local", "mcp", "auto"] = "auto", timeout: float = 5.0) -> None:
+    def __init__(
+        self,
+        namespace: str,
+        mode: Literal["local", "mcp", "auto"] = "auto",
+        timeout: float = 5.0,
+        *,
+        db_path: Path | str | None = None,
+    ) -> None:
         """Initialise a MemoryClient with namespace isolation and mode selection.
 
         Implementation lives in ``_client_lifecycle.init_client``
@@ -192,10 +209,17 @@ class MemoryClient(OrgSharedAliasMixin):
         / ``"auto"``. Sets up state, validates namespace, opens the
         backend, runs security defaults verification, seeds canaries,
         warms the tier manager, and starts the SSE subscription.
+
+        ``db_path`` (local/auto SQLite only) pins the backend to an explicit
+        absolute file, bypassing the ``storage_path / namespace_dir /
+        sqlite_db_name`` join. Rows still carry ``namespace`` in their
+        ``namespace`` column, so the on-disk file location is decoupled from
+        the queried namespace — used by trw-distill to seed the MCP-read flat
+        store at ``<trw_dir>/memory/memory.db`` under ``namespace="default"``.
         """
         from trw_memory._client_lifecycle import init_client as _impl
 
-        _impl(self, namespace, mode=mode, timeout=timeout)
+        _impl(self, namespace, mode=mode, timeout=timeout, db_path=db_path)
 
     def __repr__(self) -> str:
         return f"MemoryClient(namespace={self._namespace!r}, mode={self._resolved_mode!r})"
