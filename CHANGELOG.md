@@ -6,6 +6,10 @@ All notable changes to the TRW Memory package.
 
 ### Fixed
 
+- **Package lock version now matches the 0.9.5 package bump.** `uv.lock` no
+  longer records the previous editable self-package version, restoring the
+  package metadata guard.
+
 - **Tier erasure now deletes the cold YAML archive copy (GDPR completeness).**
   `remove_entry_from_tiers` previously removed an entry only from the hot and
   warm tiers, so a `forget` / `forget actor=...` bulk erasure left any
