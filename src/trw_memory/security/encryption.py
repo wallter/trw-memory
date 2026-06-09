@@ -132,6 +132,7 @@ def rotate_key(namespace: str, new_passphrase: str, config: MemoryConfig | None 
     """Rotate the SQLCipher key for a namespace-local SQLite store."""
     from trw_memory.security.keys import get_master_key
     from trw_memory.security.rbac import Permission, require_namespace_permission
+    from trw_memory.storage import _dbapi as _driver
     from trw_memory.storage.sqlite_backend import (
         SQLiteBackend,
         _apply_sqlcipher_pragmas,
@@ -168,17 +169,29 @@ def rotate_key(namespace: str, new_passphrase: str, config: MemoryConfig | None 
     )
     try:
         checkpoint_conn.execute("PRAGMA busy_timeout = 30000")
-        # TRUNCATE is required to fully flush the WAL before the re-key copy
-        # below. Key rotation must be EXCLUSIVE: on an engine without the
-        # WAL-reset fix, a TRUNCATE racing another connection is the corruption
-        # trigger (sqlite.org/wal.html §walresetbug). Enforce exclusivity
-        # MECHANICALLY — if the checkpoint reports busy=1, another connection
-        # holds the WAL, so abort rather than risk a racing / partial flush.
-        checkpoint_row = checkpoint_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-        if checkpoint_row is not None and checkpoint_row[0] == 1:
+        # The WAL must be fully flushed before the re-key copy below. TRUNCATE
+        # does the most thorough flush, but on an engine WITHOUT the WAL-reset
+        # fix (SQLite < 3.51.3, pre-backport 3.44.x/3.50.x) a TRUNCATE racing
+        # another connection is itself the corruption trigger
+        # (sqlite.org/wal.html §walresetbug — the documented memory.db incident
+        # class). On a WAL-unsafe engine fall back to PASSIVE, which is safe on
+        # any engine: it never resets the WAL, and if it cannot fully flush
+        # (because another connection holds the WAL) it reports busy != 0, which
+        # the exclusivity guard below converts into an abort. Key rotation on a
+        # WAL-unsafe engine therefore requires all other connections closed.
+        checkpoint_mode = "TRUNCATE" if _driver.is_wal_reset_safe() else "PASSIVE"
+        checkpoint_row = checkpoint_conn.execute(f"PRAGMA wal_checkpoint({checkpoint_mode})").fetchone()
+        # Enforce exclusivity MECHANICALLY: busy == 0 means the checkpoint had
+        # exclusive access and fully flushed. ANY other result — busy != 0 (a
+        # writer holds the WAL) OR a None row (an abnormal/empty PRAGMA response)
+        # — must abort. A destructive key rotation cannot proceed on an
+        # ambiguous flush; the safe default for a missing result is failure
+        # (memory-storage-6).
+        if checkpoint_row is None or checkpoint_row[0] != 0:
+            busy = "unknown (no PRAGMA result)" if checkpoint_row is None else checkpoint_row[0]
             raise KeyRotationError(
-                "key rotation requires exclusive database access, but another "
-                "connection holds the WAL (wal_checkpoint busy=1)",
+                "key rotation requires exclusive database access, but the WAL "
+                f"checkpoint did not complete cleanly (wal_checkpoint busy={busy})",
                 path=str(db_path),
             )
     finally:

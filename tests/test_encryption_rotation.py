@@ -61,7 +61,16 @@ class TestRotateKey:
         db_path = Path(config.storage_path) / "default" / config.sqlite_db_name
         assert Path(f"{db_path}.bak").exists()
         mock_keyring.set_password.assert_called_with("trw-memory", "master", new_key.hex())
-        assert "PRAGMA wal_checkpoint(TRUNCATE)" in statements
+        # memory-storage-3: the checkpoint mode is engine-aware — TRUNCATE only
+        # on a WAL-reset-safe engine, PASSIVE (never resets the WAL) otherwise.
+        # Exactly one checkpoint must run, in the mode the active driver allows.
+        from trw_memory.storage import _dbapi as _driver
+
+        expected_mode = "TRUNCATE" if _driver.is_wal_reset_safe() else "PASSIVE"
+        assert f"PRAGMA wal_checkpoint({expected_mode})" in statements
+        assert not any(
+            s.startswith("PRAGMA wal_checkpoint") and f"({expected_mode})" not in s for s in statements
+        )
         assert "PRAGMA integrity_check" in statements
         assert "PRAGMA cipher = 'aes-256-cbc'" in statements
         assert "PRAGMA cipher_page_size = 4096" in statements
@@ -91,6 +100,47 @@ class TestRotateKey:
         monkeypatch.setattr(
             "trw_memory.storage.sqlite_backend._import_sqlcipher_driver",
             lambda: _RotatingSQLCipherDBAPI(statements, wal_checkpoint_busy=True),
+        )
+
+        with (
+            patch("trw_memory.security.keys._keyring", mock_keyring),
+            patch("trw_memory.security.keys._KEYRING_AVAILABLE", True),
+        ):
+            backend = create_backend_from_config(config, "default")
+            backend.store(_make_entry(content="rotation target", detail="keep me"))
+            backend.close()
+
+            with pytest.raises(KeyRotationError, match="exclusive database access"):
+                rotate_key("default", new_key.hex(), config)
+
+        # Aborted before re-key: no PRAGMA rekey should have been issued.
+        assert not any(s.startswith("PRAGMA rekey") for s in statements)
+
+    def test_rotate_key_aborts_when_wal_checkpoint_returns_no_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """memory-storage-6: a None (absent) PRAGMA result must abort.
+
+        A missing checkpoint row is an ambiguous flush; the safe default for a
+        destructive key rotation is failure, not silently proceeding.
+        """
+        old_key = generate_master_key()
+        new_key = generate_master_key()
+        monkeypatch.setenv("MEMORY_MASTER_KEY", old_key.hex())
+        mock_keyring = MagicMock()
+
+        config = MemoryConfig(
+            storage_backend="sqlite",
+            storage_path=str(tmp_path / "storage"),
+            encryption_enabled=True,
+            key_source="keyring",
+            auto_generate_key=False,
+            rbac_enabled=True,
+        )
+        statements: list[str] = []
+        monkeypatch.setattr(
+            "trw_memory.storage.sqlite_backend._import_sqlcipher_driver",
+            lambda: _RotatingSQLCipherDBAPI(statements, wal_checkpoint_none=True),
         )
 
         with (

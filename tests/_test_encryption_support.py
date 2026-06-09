@@ -61,6 +61,7 @@ class _RotatingSQLCipherConnection:
         integrity_result: str = "ok",
         mutate_on_rekey: bytes | None = None,
         wal_checkpoint_busy: bool = False,
+        wal_checkpoint_none: bool = False,
         raise_on_rekey: bool = False,
     ) -> None:
         object.__setattr__(self, "_conn", conn)
@@ -69,6 +70,7 @@ class _RotatingSQLCipherConnection:
         object.__setattr__(self, "_integrity_result", integrity_result)
         object.__setattr__(self, "_mutate_on_rekey", mutate_on_rekey)
         object.__setattr__(self, "_wal_checkpoint_busy", wal_checkpoint_busy)
+        object.__setattr__(self, "_wal_checkpoint_none", wal_checkpoint_none)
         object.__setattr__(self, "_raise_on_rekey", raise_on_rekey)
 
     def __getattr__(self, name: str) -> object:
@@ -80,6 +82,9 @@ class _RotatingSQLCipherConnection:
     def execute(self, sql: str, *args: object) -> sqlite3.Cursor | _StaticCursor:
         self._statements.append(sql)
         normalized = sql.strip().upper()
+        if normalized.startswith("PRAGMA WAL_CHECKPOINT") and self._wal_checkpoint_none:
+            # Simulate an abnormal/empty PRAGMA response (no row at all).
+            return _StaticCursor([])
         if normalized.startswith("PRAGMA WAL_CHECKPOINT") and self._wal_checkpoint_busy:
             # Simulate another connection holding the WAL (busy=1).
             return _StaticCursor([(1, 0, 0)])
@@ -107,12 +112,14 @@ class _RotatingSQLCipherDBAPI:
         integrity_result: str = "ok",
         mutate_on_rekey: bytes | None = None,
         wal_checkpoint_busy: bool = False,
+        wal_checkpoint_none: bool = False,
         raise_on_rekey: bool = False,
     ) -> None:
         self._statements = statements
         self._integrity_result = integrity_result
         self._mutate_on_rekey = mutate_on_rekey
         self._wal_checkpoint_busy = wal_checkpoint_busy
+        self._wal_checkpoint_none = wal_checkpoint_none
         self._raise_on_rekey = raise_on_rekey
 
     def connect(self, database: str, **kwargs: object) -> _RotatingSQLCipherConnection:
@@ -124,6 +131,7 @@ class _RotatingSQLCipherDBAPI:
             integrity_result=self._integrity_result,
             mutate_on_rekey=self._mutate_on_rekey,
             wal_checkpoint_busy=self._wal_checkpoint_busy,
+            wal_checkpoint_none=self._wal_checkpoint_none,
             raise_on_rekey=self._raise_on_rekey,
         )
 
