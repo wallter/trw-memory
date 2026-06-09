@@ -65,19 +65,31 @@ _CACHED_MASTER_KEY: bytes | None = None
 _CACHED_SOURCE: str | None = None
 _CACHED_ENV_HEX: str | None = None
 _CACHED_FILE_PATH: str | None = None
+# Keyring cache identity. Captures the (service, account) the cached key was
+# loaded from so a keyring cache hit is validated against the live identity
+# rather than the bare ``source == "keyring"`` flag — preventing two configs
+# that resolve to different keyring identities from colliding on the cache.
+_CACHED_KEYRING_ID: tuple[str, str] | None = None
 _INSECURE_FILE_SOURCE_MESSAGE = (
     "key_source='file' is unsupported when memory_encryption_enabled=True; "
     "use MEMORY_MASTER_KEY or key_source='keyring'."
 )
 
 
+def _keyring_identity() -> tuple[str, str]:
+    """Return the (service, account) tuple the keyring master key lives under."""
+    return (_SERVICE_NAME, _KEY_ACCOUNT)
+
+
 def clear_key_cache() -> None:
     """Reset the in-process master-key cache."""
     global _CACHED_MASTER_KEY, _CACHED_SOURCE, _CACHED_ENV_HEX, _CACHED_FILE_PATH
+    global _CACHED_KEYRING_ID
     _CACHED_MASTER_KEY = None
     _CACHED_SOURCE = None
     _CACHED_ENV_HEX = None
     _CACHED_FILE_PATH = None
+    _CACHED_KEYRING_ID = None
 
 
 def _cache_master_key(
@@ -88,10 +100,12 @@ def _cache_master_key(
     file_path: str | None = None,
 ) -> bytes:
     global _CACHED_MASTER_KEY, _CACHED_SOURCE, _CACHED_ENV_HEX, _CACHED_FILE_PATH
+    global _CACHED_KEYRING_ID
     _CACHED_MASTER_KEY = key
     _CACHED_SOURCE = source
     _CACHED_ENV_HEX = env_hex
     _CACHED_FILE_PATH = file_path
+    _CACHED_KEYRING_ID = _keyring_identity() if source == "keyring" else None
     return key
 
 
@@ -200,7 +214,12 @@ def get_master_key(config: MemoryConfig) -> bytes:
             return _cache_master_key(env_key, "env", env_hex=raw_env)
 
     key_path = str(_key_file_path(config))
-    if config.key_source == "keyring" and _CACHED_SOURCE == "keyring" and _CACHED_MASTER_KEY is not None:
+    if (
+        config.key_source == "keyring"
+        and _CACHED_SOURCE == "keyring"
+        and _CACHED_MASTER_KEY is not None
+        and _keyring_identity() == _CACHED_KEYRING_ID
+    ):
         logger.debug("master_key_loaded", source="keyring", cached=True)
         return _CACHED_MASTER_KEY
     if (
