@@ -8,6 +8,8 @@ All notable changes to the TRW Memory package.
 
 ### Fixed
 
+- **Package lock version now matches the 0.9.4 package bump.** `uv.lock` no longer records the
+  previous editable self-package version, restoring the package metadata guard.
 - **Tag-filtered hybrid recall no longer silently drops valid hits ranked past
   `top_k` (`_client_recall_hybrid.py`).** The tag filter ran AFTER `hybrid_search`
   truncated the ranking to `top_k` (= `limit * recall_top_k_multiplier`, default
