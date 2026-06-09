@@ -10,6 +10,10 @@ All notable changes to the TRW Memory package.
   The optional MCP extra and `requirements.lock` no longer allow/pin
   vulnerable FastMCP 3.0.x installs, and package tests now guard the
   requirements lock against regressing below 3.2.0.
+- **Requirements-lock security floors were refreshed from the audit backlog.**
+  Vulnerable pins with available fixes (`Authlib`, `cryptography`, `idna`,
+  `Pygments`, `PyJWT`, `pytest`, `python-dotenv`, `python-multipart`,
+  `starlette`) now pin patched versions and have regression guards.
 
 ## [0.9.4] — 2026-06-09
 

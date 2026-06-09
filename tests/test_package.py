@@ -481,6 +481,23 @@ def test_requirements_lock_fastmcp_pin_is_patched() -> None:
     assert _version_tuple(_requirements_lock_package_version("fastmcp")) >= (3, 2, 0)
 
 
+def test_requirements_lock_security_pin_floors_are_patched() -> None:
+    """Known-audited requirements.lock pins stay above patched floors."""
+    floors = {
+        "Authlib": (1, 6, 12),
+        "cryptography": (46, 0, 7),
+        "idna": (3, 15),
+        "Pygments": (2, 20, 0),
+        "PyJWT": (2, 13, 0),
+        "pytest": (9, 0, 3),
+        "python-dotenv": (1, 2, 2),
+        "python-multipart": (0, 0, 27),
+        "starlette": (1, 0, 1),
+    }
+    for package, floor in floors.items():
+        assert _version_tuple(_requirements_lock_package_version(package)) >= floor
+
+
 def test_requirements_lock_has_no_stale_self_pin() -> None:
     """requirements.lock must not pin trw-memory to a frozen git commit.
 
