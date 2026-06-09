@@ -438,11 +438,22 @@ def _rollback_consolidation(
     originals. If archival fails after the new entry is written, leaving both
     sides in place would duplicate knowledge and silently mark only part of the
     cluster as archived. Roll back to the pre-cycle state instead.
+
+    Restoring the originals to ACTIVE is the safety-critical half and must run
+    even if deleting the new consolidated entry fails: on a YAML backend
+    ``_archive_originals``' ``transaction()`` is a no-op, so a mid-loop failure
+    can leave some originals already ``status=archived`` + ``consolidated_into``
+    set while the consolidated entry survives. Restore the originals FIRST
+    (idempotent ``store`` of their pre-cycle snapshots), then surface any
+    new-entry delete failure. This guarantees a partial consolidation never
+    leaves originals archived alongside a surviving consolidated entry.
     """
     deleted = storage.delete(new_entry.id)
+    # Always reinstate the originals, regardless of the delete outcome, so a
+    # failed delete cannot strand them in the archived state.
+    _restore_originals(cluster, storage)
     if not deleted:
         raise StorageError(f"failed to delete partially consolidated entry {new_entry.id!r}")
-    _restore_originals(cluster, storage)
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +494,24 @@ def consolidate_cycle(
     """
     cfg = config or MemoryConfig()
     entry_limit = min(max_entries, cfg.consolidation_max_per_cycle)
+
+    # Cross-tenant safety: with namespace=None, find_clusters loads entries
+    # across ALL namespaces and _create_consolidated_entry would persist the
+    # merged result into a single namespace ("default"), leaking and relocating
+    # other tenants' knowledge. Refuse the ambiguous path on multi-namespace
+    # stores; callers that genuinely want a specific tenant already pass it.
+    if namespace is None:
+        try:
+            existing_namespaces = storage.list_namespaces()
+        except Exception:
+            logger.warning("consolidation_list_namespaces_failed", exc_info=True)
+            existing_namespaces = []
+        if len(existing_namespaces) > 1:
+            raise ValueError(
+                "namespace required for consolidate_cycle on multi-tenant stores: "
+                f"found {len(existing_namespaces)} namespaces; pass an explicit namespace "
+                "to avoid clustering entries across tenants"
+            )
 
     if not cfg.consolidation_enabled and not dry_run:
         return {

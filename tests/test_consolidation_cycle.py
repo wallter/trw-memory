@@ -290,3 +290,122 @@ class TestConsolidateCycle:
         storage = _InMemoryBackend()
         result = consolidate_cycle(storage, None, config=None)
         assert "status" in result or "dry_run" in result or "clusters_found" in result
+
+    def test_namespace_none_on_multitenant_store_raises(self) -> None:
+        """memory-lifecycle-4: refuse the cross-tenant consolidation path.
+
+        With namespace=None on a store that owns >1 namespace, find_clusters
+        would mix entries across tenants and the consolidated entry would land
+        in a single namespace. Guard rejects this before any write.
+        """
+
+        class _MultiTenantBackend(_InMemoryBackend):
+            def list_namespaces(self) -> list[str]:
+                return ["tenant-a", "tenant-b"]
+
+        storage = _MultiTenantBackend()
+        # Seed entries in two tenants so a leak would actually be possible.
+        for i in range(3):
+            storage.store(_make_entry(f"a{i}", namespace="tenant-a"))
+            storage.store(_make_entry(f"b{i}", namespace="tenant-b"))
+        embedder = _make_embedder(vectors=[_V1, _V2, _V3])
+
+        with pytest.raises(ValueError, match="namespace required for consolidate_cycle"):
+            consolidate_cycle(storage, embedder, config=MemoryConfig())
+
+        # Nothing was clustered or relocated.
+        consolidated = [e for e in storage.list_entries() if e.source == "consolidated"]
+        assert consolidated == []
+
+    def test_namespace_none_on_single_tenant_store_allowed(self) -> None:
+        """The guard must NOT block the legitimate single-namespace path."""
+
+        class _SingleTenantBackend(_InMemoryBackend):
+            def list_namespaces(self) -> list[str]:
+                return ["default"]
+
+        storage = _SingleTenantBackend()
+        for i in range(3):
+            storage.store(_make_entry(f"e{i}", content=f"content {i}", detail=f"detail {i}"))
+        embedder = _make_embedder(vectors=[_V1, _V2, _V3])
+
+        result = consolidate_cycle(
+            storage,
+            embedder,
+            config=MemoryConfig(
+                consolidation_similarity_threshold=0.5,
+                consolidation_min_cluster=3,
+            ),
+        )
+        assert result["consolidated_count"] == 1
+
+    def test_partial_archival_failure_restores_originals_when_delete_fails(self) -> None:
+        """memory-lifecycle-7: rollback must restore originals even if the
+
+        consolidated-entry delete itself fails. On a YAML backend the per-entry
+        archival transaction() is a no-op, so when archival fails mid-loop some
+        originals are already archived. The old rollback raised on the failed
+        delete BEFORE reinstating those originals, stranding them in the
+        archived state. The fix restores originals first, then surfaces the
+        delete failure — so the originals are always ACTIVE again.
+        """
+        import contextlib
+        from collections.abc import Iterator
+
+        from trw_memory.storage.interface import StorageBackend
+
+        class _NoOpTxnBackend(_InMemoryBackend):
+            """Models a YAML backend whose transaction() does NOT roll back."""
+
+            @contextlib.contextmanager
+            def transaction(self) -> Iterator[StorageBackend]:
+                yield self
+
+        storage = _NoOpTxnBackend()
+        for i in range(3):
+            storage.store(_make_entry(f"e{i}"))
+        embedder = _make_embedder(vectors=[_V1, _V2, _V3])
+
+        def _real_update(entry_id: str, fields: dict[str, object]) -> MemoryEntry | None:
+            # Apply the update without re-entering update_override (which would
+            # recurse). Mirrors _InMemoryBackend.update's non-override branch.
+            prev, storage.update_override = storage.update_override, None
+            try:
+                return storage.update(entry_id, **fields)
+            finally:
+                storage.update_override = prev
+
+        def _update_then_fail(entry_id: str, fields: dict[str, object]) -> MemoryEntry | None:
+            # e0 archives successfully (no-op transaction => persisted now);
+            # any other original's archival raises mid-loop.
+            if entry_id == "e0":
+                return _real_update(entry_id, fields)
+            raise RuntimeError("archive failed mid-loop")
+
+        def _delete_always_fails(entry_id: str) -> bool:
+            # The consolidated-entry delete during rollback fails (returns
+            # False) — this is the path that used to skip _restore_originals.
+            del entry_id
+            return False
+
+        storage.update_override = _update_then_fail
+        storage.delete_override = _delete_always_fails
+
+        # consolidate_cycle re-raises a failed rollback as a StorageError.
+        with pytest.raises(StorageError, match="rollback failed"):
+            consolidate_cycle(
+                storage,
+                embedder,
+                config=MemoryConfig(
+                    consolidation_similarity_threshold=0.5,
+                    consolidation_min_cluster=3,
+                ),
+            )
+
+        # Despite the failed delete, every original is restored to ACTIVE with
+        # consolidated_into cleared — including the one archived before failure.
+        for i in range(3):
+            entry = storage.get(f"e{i}")
+            assert entry is not None, f"e{i} was lost"
+            assert str(entry.status) == "active", f"e{i} left archived after rollback"
+            assert entry.consolidated_into is None
