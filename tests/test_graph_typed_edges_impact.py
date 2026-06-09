@@ -2,9 +2,38 @@
 
 from __future__ import annotations
 
+import sqlite3
+from typing import Any
+
+import pytest
+
 from trw_memory.graph import propagate_impact
 
 from ._test_graph_typed_edges_support import _insert_edge, _insert_memory_row, _make_conn
+
+
+class _FailOnNthUpdate:
+    """Connection proxy that raises on the Nth ``UPDATE`` execute.
+
+    Delegates everything to a real sqlite3.Connection except that the *nth*
+    statement beginning with ``UPDATE`` raises, simulating a mid-loop failure
+    inside ``propagate_impact``'s BFS write loop.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, fail_on: int) -> None:
+        self._conn = conn
+        self._fail_on = fail_on
+        self._update_count = 0
+
+    def execute(self, sql: str, *args: Any) -> Any:
+        if sql.lstrip().upper().startswith("UPDATE"):
+            self._update_count += 1
+            if self._update_count == self._fail_on:
+                raise sqlite3.OperationalError("simulated mid-loop failure")
+        return self._conn.execute(sql, *args)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
 
 
 class TestImpactPropagation:
@@ -93,6 +122,34 @@ class TestImpactPropagation:
         row = conn.execute("SELECT importance FROM memories WHERE id = ?", ("neighbor",)).fetchone()
         assert row is not None
         assert abs(row[0] - 0.56) < 1e-6
+
+    def test_propagate_impact_rolls_back_partial_writes_on_failure(self) -> None:
+        """A mid-loop failure must roll back EVERY partial node-impact UPDATE.
+
+        Regression for memory-retrieval-graph-2: previously the BFS UPDATEs
+        accumulated uncommitted in the connection with no try/except, so a
+        failure after the first UPDATE left a corrupt importance prefix for a
+        later unrelated commit to flush. The fix wraps the loop and rolls back.
+        """
+        conn = _make_conn()
+        _insert_memory_row(conn, "root", importance=0.5)
+        _insert_memory_row(conn, "n1", importance=0.5)
+        _insert_memory_row(conn, "n2", importance=0.5)
+        _insert_edge(conn, "root", "n1", "evidence_for", 0.9)
+        _insert_edge(conn, "root", "n2", "evidence_for", 0.9)
+
+        # Fail on the SECOND UPDATE: the first neighbor's importance bump is
+        # applied (uncommitted) and must be rolled back when the second fails.
+        proxy = _FailOnNthUpdate(conn, fail_on=2)
+
+        with pytest.raises(sqlite3.OperationalError, match="simulated mid-loop failure"):
+            propagate_impact(proxy, "root", 0.20)  # type: ignore[arg-type]
+
+        # Neither neighbor may carry a partial importance bump after rollback.
+        for nid in ("n1", "n2"):
+            row = conn.execute("SELECT importance FROM memories WHERE id = ?", (nid,)).fetchone()
+            assert row is not None
+            assert abs(row[0] - 0.5) < 1e-6, f"{nid} should be rolled back to 0.5, got {row[0]}"
 
     def test_propagate_impact_clamps_to_bounds(self) -> None:
         conn = _make_conn()

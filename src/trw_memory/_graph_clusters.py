@@ -113,48 +113,59 @@ def propagate_impact(
     queue.append((entry_id, 0, importance_delta))
     now = datetime.now(timezone.utc).isoformat()
 
-    while queue and len(affected) < max_affected:
-        node_id, depth, current_delta = queue.popleft()
-        if depth >= max_depth:
-            continue
-
-        placeholders = ", ".join("?" for _ in _PROPAGATION_RATES)
-        rows = conn.execute(
-            f"SELECT target_id, edge_type FROM memory_graph_edges "  # noqa: S608
-            f"WHERE source_id = ? AND edge_type IN ({placeholders})",
-            (node_id, *_PROPAGATION_RATES.keys()),
-        ).fetchall()
-
-        for target_id, edge_type in rows:
-            if target_id in visited or len(affected) >= max_affected:
+    # Mirror memory_decay_pass: wrap the BFS write loop in try/except so a
+    # mid-loop failure rolls back EVERY partial node-impact UPDATE instead of
+    # leaving them dangling in the connection's transaction for a later
+    # unrelated commit to flush. Without this, a failure after the first few
+    # UPDATEs would silently corrupt importance scores for an arbitrary prefix
+    # of the affected subgraph.
+    try:
+        while queue and len(affected) < max_affected:
+            node_id, depth, current_delta = queue.popleft()
+            if depth >= max_depth:
                 continue
 
-            rate = _PROPAGATION_RATES.get(edge_type, 0.0)
-            if rate == 0.0:
-                continue
+            placeholders = ", ".join("?" for _ in _PROPAGATION_RATES)
+            rows = conn.execute(
+                f"SELECT target_id, edge_type FROM memory_graph_edges "  # noqa: S608
+                f"WHERE source_id = ? AND edge_type IN ({placeholders})",
+                (node_id, *_PROPAGATION_RATES.keys()),
+            ).fetchall()
 
-            propagated = current_delta * rate
-            if importance_delta < 0:
-                propagated *= _NEGATIVE_MULTIPLIER
+            for target_id, edge_type in rows:
+                if target_id in visited or len(affected) >= max_affected:
+                    continue
 
-            conn.execute(
-                "UPDATE memories SET "
-                "importance = MIN(MAX(importance + ?, 0.0), 1.0), "
-                "outcome_history = json_insert(outcome_history, '$[#]', ?) "
-                "WHERE id = ?",
-                (
-                    propagated,
-                    f"impact_propagation:delta={propagated:+.4f}:from={entry_id}:via={edge_type}:timestamp={now}",
-                    target_id,
-                ),
-            )
+                rate = _PROPAGATION_RATES.get(edge_type, 0.0)
+                if rate == 0.0:
+                    continue
 
-            visited.add(target_id)
-            affected.append((target_id, round(propagated, 6)))
-            queue.append((target_id, depth + 1, propagated))
+                propagated = current_delta * rate
+                if importance_delta < 0:
+                    propagated *= _NEGATIVE_MULTIPLIER
 
-    if affected:
-        conn.commit()
+                conn.execute(
+                    "UPDATE memories SET "
+                    "importance = MIN(MAX(importance + ?, 0.0), 1.0), "
+                    "outcome_history = json_insert(outcome_history, '$[#]', ?) "
+                    "WHERE id = ?",
+                    (
+                        propagated,
+                        f"impact_propagation:delta={propagated:+.4f}:from={entry_id}:via={edge_type}:timestamp={now}",
+                        target_id,
+                    ),
+                )
+
+                visited.add(target_id)
+                affected.append((target_id, round(propagated, 6)))
+                queue.append((target_id, depth + 1, propagated))
+
+        if affected:
+            conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception("propagate_impact_failed", entry_id=entry_id)
+        raise
     logger.debug(
         "impact_propagated",
         entry_id=entry_id,
