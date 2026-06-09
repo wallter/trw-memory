@@ -121,9 +121,6 @@ def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
             logger.debug("yaml_anchor_parse_skipped", anchors=anchors_raw)
             anchors = []
 
-    anchor_validity_raw = data.get("anchor_validity")
-    anchor_validity = float(str(anchor_validity_raw)) if anchor_validity_raw else 1.0
-
     return MemoryEntry(
         id=_str("id"),
         content=_str("content"),
@@ -157,7 +154,7 @@ def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
         outcome_history=_str_list("outcome_history"),
         assertions=_parse_assertions(data.get("assertions", [])),
         anchors=anchors,
-        anchor_validity=anchor_validity,
+        anchor_validity=_float("anchor_validity", 1.0),
         type=_str("type", "pattern"),
         nudge_line=_str("nudge_line", ""),
         expires=_str("expires", ""),

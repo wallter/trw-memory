@@ -21,12 +21,7 @@ Extracted as PRD-DIST-245 Phase 1 batch 83.
 from __future__ import annotations
 
 import contextlib
-import json
-import os
 import sqlite3
-import tempfile
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -39,6 +34,22 @@ from trw_memory.storage._connection import (
 from trw_memory.storage._connection import (
     connect as _connection_connect,
 )
+
+# Bounded open-time preflight + advisory state sidecar extracted to
+# _recovery_preflight.py (PRD-DIST-245 effective-LOC ratchet). Re-exported
+# here so importers that resolve these names from ``_recovery`` keep working.
+from trw_memory.storage._recovery_preflight import (
+    RecoveryPreflight as RecoveryPreflight,
+)
+from trw_memory.storage._recovery_preflight import (
+    classify_recovery_preflight as classify_recovery_preflight,
+)
+from trw_memory.storage._recovery_preflight import (
+    recovery_state_path as recovery_state_path,
+)
+from trw_memory.storage._recovery_preflight import (
+    write_recovery_state as write_recovery_state,
+)
 from trw_memory.storage._schema import ensure_schema
 from trw_memory.storage._shared import ENTRY_COLUMNS
 from trw_memory.storage._stale_handle_detector import write_sentinel
@@ -46,101 +57,6 @@ from trw_memory.storage._stale_handle_detector import write_sentinel
 logger = structlog.get_logger(__name__)
 
 _PAGE_SIZE = 4096
-_RECOVERY_STATE_SUFFIX = ".recovery.json"
-
-
-@dataclass(frozen=True)
-class RecoveryPreflight:
-    """Bounded open-time recovery classification."""
-
-    classification: Literal["fast_open", "degraded_open_with_background_recovery", "hard_fail"]
-    reason: str
-    db_size_bytes: int
-    state_path: str
-    persisted_status: str = ""
-
-
-def recovery_state_path(db_path: Path) -> Path:
-    """Return the sidecar path used for persisted recovery state."""
-    return db_path.with_name(f"{db_path.name}{_RECOVERY_STATE_SUFFIX}")
-
-
-def write_recovery_state(db_path: Path, *, status: str, reason: str, db_size_bytes: int) -> None:
-    """Persist additive recovery state for future bounded-open decisions."""
-    state_path = recovery_state_path(db_path)
-    payload = {
-        "status": status,
-        "reason": reason,
-        "db_size_bytes": db_size_bytes,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    with contextlib.suppress(OSError):
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_path_str = tempfile.mkstemp(
-            dir=str(state_path.parent),
-            prefix=f".{state_path.name}.",
-            suffix=".tmp",
-        )
-        tmp_path = Path(tmp_path_str)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, sort_keys=True)
-                handle.flush()
-                os.fsync(handle.fileno())
-            tmp_path.replace(state_path)
-        except OSError:
-            tmp_path.unlink(missing_ok=True)
-            raise
-
-
-def classify_recovery_preflight(db_path: Path, *, inline_max_bytes: int) -> RecoveryPreflight:
-    """Classify whether startup can recover inline or should degrade/fail early."""
-    state_path = recovery_state_path(db_path)
-    db_size_bytes = 0
-    with contextlib.suppress(OSError):
-        db_size_bytes = db_path.stat().st_size
-
-    persisted_status = ""
-    if state_path.exists():
-        with contextlib.suppress(OSError, json.JSONDecodeError):
-            raw_state = json.loads(state_path.read_text(encoding="utf-8"))
-            if isinstance(raw_state, dict):
-                persisted_status = str(raw_state.get("status", ""))
-
-    if persisted_status == "hard_fail":
-        return RecoveryPreflight(
-            classification="hard_fail",
-            reason="previous_recovery_hard_fail",
-            db_size_bytes=db_size_bytes,
-            state_path=str(state_path),
-            persisted_status=persisted_status,
-        )
-
-    if inline_max_bytes > 0 and db_size_bytes > inline_max_bytes:
-        return RecoveryPreflight(
-            classification="degraded_open_with_background_recovery",
-            reason="db_exceeds_inline_recovery_budget",
-            db_size_bytes=db_size_bytes,
-            state_path=str(state_path),
-            persisted_status=persisted_status,
-        )
-
-    if persisted_status in {"pending", "running", "degraded_open_with_background_recovery"}:
-        return RecoveryPreflight(
-            classification="degraded_open_with_background_recovery",
-            reason="recovery_already_pending",
-            db_size_bytes=db_size_bytes,
-            state_path=str(state_path),
-            persisted_status=persisted_status,
-        )
-
-    return RecoveryPreflight(
-        classification="fast_open",
-        reason="within_inline_recovery_budget",
-        db_size_bytes=db_size_bytes,
-        state_path=str(state_path),
-        persisted_status=persisted_status,
-    )
 
 
 def _resolve_cold_rebuild_base_safe(db_path: Path) -> Path:

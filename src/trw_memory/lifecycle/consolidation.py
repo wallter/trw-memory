@@ -280,22 +280,33 @@ def _create_consolidated_entry(
         updated_at=now,
     )
 
-    storage.store(entry)
+    # Compute the embedding before opening the write transaction — pure CPU work
+    # with no DB state, so a failure here must leave nothing written. The only
+    # sinks for a consolidated entry's vector are the backend vector store and
+    # graph similarity (which reads candidate vectors back from that store), so
+    # both collapse to ``supports_vectors``; skip the embed when it is False.
     embedding: list[float] | None = None
-    if embedder is not None and embedder.available():
+    if embedder is not None and embedder.available() and storage.supports_vectors():
         try:
             embedding = embedder.embed(f"{entry.content} {entry.detail}")
+        except Exception as exc:
+            raise StorageError(
+                f"failed to compute embedding for {entry.id!r}; entry was not written"
+            ) from exc
+    # S1-parity fix: commit the row + its vector in ONE transaction so a crash
+    # between the two writes can no longer leave a row with no vector, and a
+    # vector failure rolls the row back automatically. This matches
+    # MemoryClient.store() / memory_store_impl instead of the older
+    # compensating-delete path, giving every store seam one atomicity model.
+    try:
+        with storage.transaction():
+            storage.store(entry)
             if embedding is not None:
                 storage.upsert_vector(entry.id, embedding)
-        except Exception as exc:
-            try:
-                storage.delete(entry.id)
-            except Exception:
-                logger.exception("consolidation_vector_rollback_failed", entry_id=entry.id)
-                raise StorageError(
-                    f"failed to persist vector for {entry.id!r}; rollback did not complete cleanly"
-                ) from exc
-            raise StorageError(f"failed to persist vector for {entry.id!r}; entry write was rolled back") from exc
+    except Exception as exc:
+        raise StorageError(
+            f"failed to persist entry+vector for {entry.id!r}; transaction rolled back"
+        ) from exc
     try:
         # Consolidation lineage edges are secondary structure and should not keep
         # the consolidated entry itself on the write path.

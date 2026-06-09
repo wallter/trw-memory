@@ -47,6 +47,11 @@ from trw_memory.sync.remote import (
 from trw_memory.sync.retry_queue import RetryQueue
 from trw_memory.sync.subscriber import SSESubscriber as SSESubscriber  # noqa: F401 — test-patched
 
+# Org-shared recall alias seam extracted to _client_org_shared_aliases.py
+# (PRD-DIST-246 effective-LOC ratchet). MemoryClient mixes it in so the
+# `self._X` / `MemoryClient._X` monkeypatch seam resolves via the MRO.
+from trw_memory._client_org_shared_aliases import OrgSharedAliasMixin
+
 logger = structlog.get_logger(__name__)
 
 __all__ = [
@@ -145,7 +150,7 @@ def _create_local_backend(config: MemoryConfig, namespace: str) -> StorageBacken
     return create_backend_from_config(config, namespace)
 
 
-class MemoryClient:
+class MemoryClient(OrgSharedAliasMixin):
     """High-level async client for the trw-memory system.
 
     Args:
@@ -360,10 +365,16 @@ class MemoryClient:
 
         return await _impl(self, query, local_results, limit, tags, min_score)
 
-    async def _try_hybrid_recall(self, query: str, limit: int, tags: list[str] | None) -> list[MemoryResultDict] | None:
+    async def _try_hybrid_recall(
+        self,
+        query: str,
+        limit: int,
+        tags: list[str] | None,
+        query_embedding: list[float] | None = None,
+    ) -> list[MemoryResultDict] | None:
         from trw_memory._client_recall import try_hybrid_recall as _impl
 
-        return await _impl(self, query, limit, tags)
+        return await _impl(self, query, limit, tags, query_embedding=query_embedding)
 
     async def _fallback_recall(
         self, query: str, limit: int, tags: list[str] | None, min_score: float
@@ -430,83 +441,8 @@ class MemoryClient:
 
         await _impl(self, entry, embedding)
 
-    # ---- Org-shared helper aliases (PRD-DIST-246 batch 107) ---------------
-    # Implementations live in `_client_org_shared.py`; thin wrappers here
-    # preserve `monkeypatch.setattr(client, "_X", ...)` test patches and
-    # `MemoryClient._coerce_float(...)` static-call sites.
-
-    async def _merge_shared_results(
-        self, query: str, local_results: list[MemoryResultDict], limit: int
-    ) -> list[MemoryResultDict]:
-        from trw_memory._client_org_shared import merge_shared_results as _impl
-
-        return await _impl(self, query, local_results, limit)
-
-    async def _load_entries_for_results(self, results: list[MemoryResultDict]) -> list[MemoryEntry]:
-        from trw_memory._client_org_shared import load_entries_for_results as _impl
-
-        return await _impl(self, results)
-
-    @staticmethod
-    def _shared_result_to_result(result: dict[str, object]) -> MemoryResultDict:
-        from trw_memory._client_org_shared import shared_result_to_result as _impl
-
-        return _impl(result)
-
-    @staticmethod
-    def _coerce_float(value: object) -> float:
-        from trw_memory._client_org_shared import coerce_float as _impl
-
-        return _impl(value)
-
-    @staticmethod
-    def _is_retired_shared_result(result: dict[str, object]) -> bool:
-        from trw_memory._client_org_shared import is_retired_shared_result as _impl
-
-        return _impl(result)
-
-    def _merge_shared_candidates(
-        self, local_results: list[MemoryResultDict], shared_results: list[MemoryResultDict]
-    ) -> list[MemoryResultDict]:
-        from trw_memory._client_org_shared import merge_shared_candidates as _impl
-
-        return _impl(local_results, shared_results)
-
-    def _snapshot_cached_shared_results(self, query: str) -> list[MemoryResultDict]:
-        from trw_memory._client_org_shared import snapshot_cached_shared_results as _impl
-
-        return _impl(self, query)
-
-    @staticmethod
-    def _matches_query(result: MemoryResultDict, query: str) -> bool:
-        from trw_memory._client_org_shared import matches_query as _impl
-
-        return _impl(result, query)
-
-    async def _dedupe_cached_shared_results(
-        self,
-        cached_results: list[MemoryResultDict],
-        *,
-        local_entries: list[MemoryEntry],
-        embedder: EmbeddingProvider | None,
-        dedup_threshold: float = 0.92,
-    ) -> list[MemoryResultDict]:
-        from trw_memory._client_org_shared import dedupe_cached_shared_results as _impl
-
-        return await _impl(
-            self, cached_results, local_entries=local_entries, embedder=embedder, dedup_threshold=dedup_threshold
-        )
-
-    @staticmethod
-    def _strip_shared_prefix(content: str) -> str:
-        from trw_memory._client_org_shared import strip_shared_prefix as _impl
-
-        return _impl(content)
-
-    async def _mark_fetch_retirements(self, shared_results: list[dict[str, object]]) -> None:
-        from trw_memory._client_org_shared import mark_fetch_retirements as _impl
-
-        await _impl(self, shared_results)
+    # Org-shared helper aliases (PRD-DIST-246 batch 107) moved to the
+    # ``OrgSharedAliasMixin`` base (`_client_org_shared_aliases.py`).
 
     async def forget(self, memory_id: str | None = None, *, actor: str | None = None) -> ForgetResultDict:
         """Delete a memory entry.

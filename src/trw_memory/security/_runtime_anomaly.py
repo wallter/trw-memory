@@ -29,7 +29,7 @@ from pathlib import Path
 import structlog
 
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import MemoryEntry
+from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.security.poisoning import score_entry_anomaly
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.persistence import write_yaml
@@ -51,7 +51,13 @@ def score_anomaly(
     *,
     config: MemoryConfig,
 ) -> tuple[tuple[str, float] | None, AnomalyStats]:
-    reference_entries = backend.list_entries(namespace=entry.namespace, limit=1_000)
+    # ACTIVE-only: retire/obsolete/archived entries no longer represent normal
+    # write behaviour — including them skews mean/std and corrupts z-scores.
+    reference_entries = backend.list_entries(
+        namespace=entry.namespace,
+        status=MemoryStatus.ACTIVE,
+        limit=1_000,
+    )
     clean_reference = [
         candidate
         for candidate in reference_entries

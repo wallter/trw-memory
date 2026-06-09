@@ -209,14 +209,28 @@ def fetch_rows_resilient(
             results.append(entry)
         except (UnicodeDecodeError, UnicodeEncodeError) as exc:
             quarantine_delta += 1
-            row_id: str | None = None
-            with contextlib.suppress(IndexError, ValueError, TypeError):
-                row_id = str(raw_row[0])
             _quarantine_log(
                 db_path=db_path,
                 table=query.table,
-                row_id=row_id,
+                row_id=_safe_row_id(raw_row),
                 column="detail",
+                row_index=idx,
+                error=str(exc),
+            )
+        except (ValueError, TypeError, KeyError) as exc:
+            # Columns decoded cleanly but model construction failed (bad enum
+            # value, malformed JSON, schema drift). The slow bytes-mode path
+            # already quarantines these; the fast path must too, or a single
+            # forward-version / corrupt row collapses the whole listing. The
+            # narrow exception set mirrors row_to_entry's failure modes —
+            # enum/int/float coercion raise ValueError, shape errors raise
+            # TypeError, and dict-keyed lookups raise KeyError.
+            quarantine_delta += 1
+            _quarantine_log(
+                db_path=db_path,
+                table=query.table,
+                row_id=_safe_row_id(raw_row),
+                column="row_to_entry",
                 row_index=idx,
                 error=str(exc),
             )
@@ -344,6 +358,18 @@ def _column_names(cursor: _CursorLike) -> tuple[str, ...]:
     if not description:
         return ()
     return tuple(str(col[0]) for col in description)
+
+
+def _safe_row_id(raw_row: tuple[object, ...]) -> str | None:
+    """Best-effort id extraction from a fast-path (already-decoded) row.
+
+    Column 0 holds the entry id; coercion is wrapped so quarantine logging
+    never raises while reporting a row that already failed to map.
+    """
+    row_id: str | None = None
+    with contextlib.suppress(IndexError, ValueError, TypeError):
+        row_id = str(raw_row[0])
+    return row_id
 
 
 def _row_id_from_bytes(raw_row: tuple[object, ...]) -> str | None:

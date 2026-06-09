@@ -142,7 +142,16 @@ def test_memory_store_impl_upserts_vector_when_embedder_available() -> None:
 
 
 def test_memory_store_impl_rolls_back_when_vector_upsert_fails() -> None:
-    """Tool store reports an error and deletes the row on vector failure."""
+    """Tool store reports a transaction rollback on vector failure.
+
+    Post S1/S3/S9: ``memory_store_impl`` wraps ``backend.store()`` +
+    ``backend.upsert_vector()`` in a single ``backend.transaction()`` that
+    rolls back on any exception — replacing the old compensating
+    ``backend.delete()`` path so the tool seam shares one atomicity model
+    with ``MemoryClient.store()``. We assert the store + upsert run inside
+    the transaction and that the failure surfaces as a rolled-back error
+    rather than a manual delete.
+    """
     backend = MagicMock()
     backend.upsert_vector.side_effect = RuntimeError("dimension mismatch")
 
@@ -150,8 +159,12 @@ def test_memory_store_impl_rolls_back_when_vector_upsert_fails() -> None:
         result = memory_store_impl("stored through tool", "project:default", backend=backend)
 
     assert result["status"] == "error"
+    assert "rolled back" in cast("str", result["error"])
     backend.store.assert_called_once()
-    backend.delete.assert_called_once()
+    backend.upsert_vector.assert_called_once()
+    # Atomicity is now provided by the transaction context, not a manual delete.
+    backend.transaction.assert_called_once()
+    backend.delete.assert_not_called()
 
 
 def test_memory_store_impl_uses_configured_embedder_settings() -> None:

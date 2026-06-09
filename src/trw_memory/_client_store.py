@@ -26,7 +26,7 @@ import structlog
 
 from trw_memory.exceptions import SchemaValidationError, StorageError
 from trw_memory.graph import schedule_graph_update
-from trw_memory.lifecycle.tiers._runtime import remember_entry_in_tiers
+from trw_memory.lifecycle.tiers._runtime import embedding_has_consumer, remember_entry_in_tiers
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.security.poisoning import validate_store_inputs
@@ -171,7 +171,9 @@ async def store_impl(
             return quarantined_result
 
         entry = decision.entry
-        embedder = client._get_embedder()
+        # Only pay for the embedding model when a vector sink can actually
+        # consume the result; otherwise every downstream upsert_vector no-ops.
+        embedder = client._get_embedder() if embedding_has_consumer(client._config, backend) else None
         embedding = embedder.embed(f"{entry.content} {entry.detail}") if embedder is not None else None
         if client._namespace.startswith("team:"):
             NamespaceManager(backend).ensure_team_namespace(client._namespace, created_at=now)

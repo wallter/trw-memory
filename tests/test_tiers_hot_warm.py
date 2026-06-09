@@ -277,6 +277,109 @@ class TestWarmTier:
         assert results[0]["_tier_relevance"] == pytest.approx(expected)
         assert results[0]["_tier_relevance"] != pytest.approx(1.0 - dist)
 
+    def test_warm_sidecar_corrupt_line_skipped_with_structured_event(self, mgr: TierManager) -> None:
+        """A corrupt sidecar row must not raise: the valid entry still searches
+        and lists, and a structured ``warm_tier_sidecar_corrupt_record_skipped``
+        event is emitted with locality (path, line_number, error_class) but
+        without the raw line contents."""
+        from structlog.testing import capture_logs
+
+        # Seed one valid record through the normal write path.
+        mgr.warm_add("good", {"id": "good", "content": "python programming", "tags": ["code"]}, None)
+
+        # Inject a corrupt JSON line *before* the valid one so the valid record
+        # is on line 2 — exercises line-number locality, not just line 1.
+        sidecar = mgr._warm_sidecar_path()
+        valid_line = sidecar.read_text(encoding="utf-8").strip()
+        sidecar.write_text("{not valid json,,,\n" + valid_line + "\n", encoding="utf-8")
+
+        with capture_logs() as logs:
+            search_results = mgr.warm_search(["python"], None)
+            listed = mgr._warm_store.warm_entries()
+
+        # Acceptance 1 + 3: valid entry still returned by search and list.
+        assert "good" in [str(r["id"]) for r in search_results]
+        assert "good" in [str(e.get("id")) for e in listed]
+
+        # Acceptance 2 + 3: structured event emitted with locality, no payload.
+        corrupt_events = [
+            log for log in logs if log.get("event") == "warm_tier_sidecar_corrupt_record_skipped"
+        ]
+        assert corrupt_events, "expected a structured corrupt-record event"
+        event = corrupt_events[0]
+        assert event["path"] == str(sidecar)
+        assert event["line_number"] == 1
+        assert event["error_class"] == "JSONDecodeError"
+        # The raw corrupt line must never be logged.
+        assert "not valid json" not in json.dumps(event)
+
+    def test_warm_sidecar_non_utf8_row_between_valid_rows_does_not_abort(
+        self, mgr: TierManager
+    ) -> None:
+        """A non-UTF-8 byte row sandwiched between two valid records must not
+        abort search/list/remove: both adjacent valid records survive, and the
+        skip is logged content-free with a stable ``UnicodeDecodeError`` class
+        and correct line-number locality (the bad row is line 2)."""
+        from structlog.testing import capture_logs
+
+        # Seed two valid records through the normal write path.
+        mgr.warm_add("before", {"id": "before", "content": "python alpha", "tags": ["code"]}, None)
+        mgr.warm_add("after", {"id": "after", "content": "python omega", "tags": ["code"]}, None)
+
+        sidecar = mgr._warm_sidecar_path()
+        valid_lines = sidecar.read_text(encoding="utf-8").strip().splitlines()
+        assert len(valid_lines) == 2
+        # Inject a lone continuation byte (0xff) that is not valid UTF-8 *between*
+        # the two valid rows so the bad row is line 2 and a valid row follows it.
+        bad_row = b"\xff\xfe not text \x80\x81"
+        sidecar.write_bytes(
+            valid_lines[0].encode("utf-8")
+            + b"\n"
+            + bad_row
+            + b"\n"
+            + valid_lines[1].encode("utf-8")
+            + b"\n"
+        )
+
+        with capture_logs() as logs:
+            search_results = mgr.warm_search(["python"], None)
+            listed = mgr._warm_store.warm_entries()
+
+        # Both adjacent valid records survive search and list.
+        searched_ids = {str(r["id"]) for r in search_results}
+        assert {"before", "after"} <= searched_ids
+        listed_ids = {str(e.get("id")) for e in listed}
+        assert {"before", "after"} <= listed_ids
+
+        # The non-UTF-8 row is skipped with a content-free structured event.
+        corrupt_events = [
+            log for log in logs if log.get("event") == "warm_tier_sidecar_corrupt_record_skipped"
+        ]
+        assert corrupt_events, "expected a structured corrupt-record event for the non-UTF-8 row"
+        event = corrupt_events[0]
+        assert event["path"] == str(sidecar)
+        assert event["line_number"] == 2
+        assert event["error_class"] == "UnicodeDecodeError"
+        # No raw byte content may leak into the log payload.
+        assert "not text" not in json.dumps(event)
+
+        # remove() must still operate across the corrupt row.
+        assert mgr._warm_store.warm_remove("before") is True
+        remaining = {str(e.get("id")) for e in mgr._warm_store.warm_entries()}
+        assert remaining == {"after"}
+
+    def test_warm_sidecar_non_utf8_first_row_preserves_following_record(
+        self, mgr: TierManager
+    ) -> None:
+        """A non-UTF-8 row on line 1 must not hide a valid record on line 2."""
+        mgr.warm_add("good", {"id": "good", "content": "python programming", "tags": ["x"]}, None)
+        sidecar = mgr._warm_sidecar_path()
+        valid_line = sidecar.read_text(encoding="utf-8").strip()
+        sidecar.write_bytes(b"\xff\xff\xff\n" + valid_line.encode("utf-8") + b"\n")
+
+        results = mgr.warm_search(["python"], None)
+        assert "good" in {str(r["id"]) for r in results}
+
     def test_warm_remove_deletes_vector_rows(self, mgr: TierManager, monkeypatch: pytest.MonkeyPatch) -> None:
         class _FakeBackend:
             def __init__(self) -> None:

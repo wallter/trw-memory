@@ -92,6 +92,95 @@ class TestMalformedAssertions:
 
 
 @pytest.mark.unit
+class TestMalformedVectorClock:
+    def test_vector_clock_with_non_int_value_degrades(self, backend: YAMLBackend) -> None:
+        # A corrupt secondary store can hand back an already-parsed dict whose
+        # value is not int-coercible. The load must fail open to an empty clock
+        # rather than crashing the whole entry read with a ValueError.
+        data: dict[str, object] = {
+            "id": "M-bad-vc",
+            "content": "bad vector clock",
+            "created_at": "2026-01-15T10:00:00+00:00",
+            "updated_at": "2026-01-15T10:00:00+00:00",
+            "vector_clock": {"node1": "not-an-int"},
+        }
+        write_entry_yaml(backend, "M-bad-vc", data)
+        loaded = backend.get("M-bad-vc")
+        assert loaded is not None
+        assert loaded.vector_clock == {}
+
+    def test_vector_clock_with_null_value_degrades(self, backend: YAMLBackend) -> None:
+        data: dict[str, object] = {
+            "id": "M-null-vc",
+            "content": "null vector clock value",
+            "created_at": "2026-01-15T10:00:00+00:00",
+            "updated_at": "2026-01-15T10:00:00+00:00",
+            "vector_clock": {"node1": None},
+        }
+        write_entry_yaml(backend, "M-null-vc", data)
+        loaded = backend.get("M-null-vc")
+        assert loaded is not None
+        assert loaded.vector_clock == {}
+
+    def test_valid_vector_clock_still_loads(self, backend: YAMLBackend) -> None:
+        data: dict[str, object] = {
+            "id": "M-good-vc",
+            "content": "valid vector clock",
+            "created_at": "2026-01-15T10:00:00+00:00",
+            "updated_at": "2026-01-15T10:00:00+00:00",
+            "vector_clock": {"node1": 7},
+        }
+        write_entry_yaml(backend, "M-good-vc", data)
+        loaded = backend.get("M-good-vc")
+        assert loaded is not None
+        assert loaded.vector_clock == {"node1": 7}
+
+
+@pytest.mark.unit
+class TestAnchorValidity:
+    def test_zero_validity_survives_round_trip(self, backend: YAMLBackend) -> None:
+        # anchor_validity=0.0 means "all code anchors stale" — a real signal.
+        # The old ``float(raw) if raw else 1.0`` falsy-check resurrected it to
+        # 1.0 (fresh), inverting staleness. It must round-trip as 0.0.
+        data: dict[str, object] = {
+            "id": "M-anc-zero",
+            "content": "all anchors stale",
+            "created_at": "2026-01-15T10:00:00+00:00",
+            "updated_at": "2026-01-15T10:00:00+00:00",
+            "anchor_validity": 0.0,
+        }
+        write_entry_yaml(backend, "M-anc-zero", data)
+        loaded = backend.get("M-anc-zero")
+        assert loaded is not None
+        assert loaded.anchor_validity == 0.0
+
+    def test_corrupt_validity_degrades_to_default(self, backend: YAMLBackend) -> None:
+        data: dict[str, object] = {
+            "id": "M-anc-bad",
+            "content": "corrupt validity",
+            "created_at": "2026-01-15T10:00:00+00:00",
+            "updated_at": "2026-01-15T10:00:00+00:00",
+            "anchor_validity": "not-a-number",
+        }
+        write_entry_yaml(backend, "M-anc-bad", data)
+        loaded = backend.get("M-anc-bad")
+        assert loaded is not None
+        assert loaded.anchor_validity == 1.0
+
+    def test_missing_validity_uses_default(self, backend: YAMLBackend) -> None:
+        data: dict[str, object] = {
+            "id": "M-anc-missing",
+            "content": "no validity field",
+            "created_at": "2026-01-15T10:00:00+00:00",
+            "updated_at": "2026-01-15T10:00:00+00:00",
+        }
+        write_entry_yaml(backend, "M-anc-missing", data)
+        loaded = backend.get("M-anc-missing")
+        assert loaded is not None
+        assert loaded.anchor_validity == 1.0
+
+
+@pytest.mark.unit
 class TestSQLiteAssertionsUpdate:
     def test_sqlite_update_assertions_directly(self, tmp_path: Path) -> None:
         db = SQLiteBackend(tmp_path / "test.db")

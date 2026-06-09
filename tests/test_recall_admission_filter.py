@@ -127,6 +127,37 @@ class TestRecallFilterIntegration:
         assert any("current" in c for c in contents), f"expected current present, got {contents}"
 
 
+class TestAdmissionFilterSharedImplementation:
+    """The recall-policy seam must resolve to a SINGLE shared Implementation —
+    both recall Interfaces (SDK + MCP tool) and the back-compat re-export point
+    at the same object so the policy cannot drift between them.
+    """
+
+    def test_client_helper_reexports_canonical(self) -> None:
+        from trw_memory._client_recall_helpers import apply_admission_filter as client_side
+        from trw_memory.retrieval.admission_policy import apply_admission_filter as canonical
+
+        assert client_side is canonical
+
+    def test_tool_path_uses_canonical(self) -> None:
+        from trw_memory.retrieval.admission_policy import apply_admission_filter as canonical
+        from trw_memory.tools import recall as recall_module
+
+        assert recall_module.apply_admission_filter is canonical
+
+    def test_canonical_accepts_plain_dicts(self) -> None:
+        # The tool path passes plain dict[str, object] rows, not MemoryResultDict.
+        from trw_memory.retrieval.admission_policy import apply_admission_filter
+
+        rows: list[dict[str, object]] = [
+            {"id": "keep", "metadata": {"confidence": 0.9}},
+            {"id": "drop", "metadata": {"confidence": 0.4}},
+            {"id": "fallback", "importance": 0.95},  # no metadata.confidence -> importance fallback
+        ]
+        out = apply_admission_filter(rows, confidence_floor=0.7, exclude_historical_only=False)
+        assert [r["id"] for r in out] == ["keep", "fallback"]
+
+
 @pytest.mark.parametrize(
     "confidence_floor,exclude_historical,expected_ids",
     [

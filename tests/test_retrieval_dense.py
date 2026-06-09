@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from unittest.mock import MagicMock
 
 import pytest
+import structlog
 
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.retrieval.dense import cosine_similarity, dense_search
 
 from ._test_retrieval_support import StubEmbedder, stored_embeddings_for
+
+# Distinctive marker that must never surface in any log event — stands in for
+# secrets / proprietary memory contents that real recall queries may carry.
+SENSITIVE_QUERY = "SENSITIVE-sk_live_DEADBEEF-customer-pii-marker"
+
+
+def _captured_text(events: Sequence[Mapping[str, object]]) -> str:
+    """Flatten captured structlog events into a single searchable string."""
+    return " ".join(f"{key}={value!r}" for event in events for key, value in event.items())
 
 
 class TestCosineSimilarity:
@@ -109,3 +120,54 @@ class TestDenseSearch:
         embedder.embed.side_effect = RuntimeError("embedding failed")
         results = dense_search("query", ["x"], embedder=embedder, stored_embeddings={"x": [1.0, 0.0, 0.0]})
         assert results == []
+
+
+class TestDenseSearchTelemetryPrivacy:
+    """Recall query text must never reach the logs (it may carry secrets)."""
+
+    def test_embed_failed_logs_structure_not_query(self) -> None:
+        embedder = MagicMock(spec=EmbeddingProvider)
+        embedder.available.return_value = True
+        embedder.embed.side_effect = RuntimeError("provider unavailable")
+
+        with structlog.testing.capture_logs() as events:
+            results = dense_search(
+                SENSITIVE_QUERY,
+                ["x"],
+                embedder=embedder,
+                stored_embeddings={"x": [1.0, 0.0, 0.0]},
+            )
+
+        assert results == []
+        failures = [e for e in events if e.get("event") == "dense_search_embed_failed"]
+        assert len(failures) == 1
+        failure = failures[0]
+        # Structural telemetry retained...
+        assert failure["query_chars"] == len(SENSITIVE_QUERY)
+        assert failure["candidates"] == 1
+        assert failure["error_class"] == "RuntimeError"
+        # ...but the raw query (or any substring of it) never leaks.
+        assert SENSITIVE_QUERY not in _captured_text(events)
+        assert "query" not in failure
+
+    def test_complete_logs_structure_not_query(self) -> None:
+        embedder = StubEmbedder()
+        ids = ["aaa", "bbb"]
+        stored = stored_embeddings_for(ids, embedder)
+
+        with structlog.testing.capture_logs() as events:
+            results = dense_search(
+                SENSITIVE_QUERY,
+                ids,
+                embedder=embedder,
+                stored_embeddings=stored,
+            )
+
+        assert results  # behaviour unchanged: real results still returned
+        completes = [e for e in events if e.get("event") == "dense_search_complete"]
+        assert len(completes) == 1
+        complete = completes[0]
+        assert complete["query_chars"] == len(SENSITIVE_QUERY)
+        assert complete["candidates"] == len(ids)
+        assert SENSITIVE_QUERY not in _captured_text(events)
+        assert "query" not in complete

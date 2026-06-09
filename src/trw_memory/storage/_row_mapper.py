@@ -7,7 +7,9 @@ The column order is defined by :data:`trw_memory.storage._shared.ENTRY_COLUMNS`.
 from __future__ import annotations
 
 import json
-from typing import Literal, cast
+from typing import Literal, TypeVar, cast
+
+from pydantic import BaseModel, ValidationError
 
 from trw_memory.models.memory import (
     Anchor,
@@ -20,6 +22,7 @@ from trw_memory.models.memory import (
 )
 from trw_memory.storage._parsing import (
     parse_dt,
+    parse_float,
     parse_json_dict_int,
     parse_json_dict_str,
     parse_json_list,
@@ -27,6 +30,28 @@ from trw_memory.storage._parsing import (
 
 # Source provenance values accepted by MemoryEntry.
 _SourceType = Literal["human", "agent", "tool", "consolidated"]
+
+_ModelT = TypeVar("_ModelT", bound=BaseModel)
+
+
+def parse_model_list(raw: object, model: type[_ModelT], *, strict: bool) -> list[_ModelT]:
+    """Deserialise a JSON-encoded list of pydantic models, degrading to ``[]``.
+
+    A single corrupted JSON column must never crash row mapping for an entire
+    query, so malformed payloads (invalid JSON, a non-list root, or items that
+    fail model validation) fall back to an empty list rather than propagating.
+
+    ``strict`` is forwarded to :meth:`model_validate`; persisted enum values are
+    stored as strings, so caller-controlled strictness keeps the round-trip
+    consistent with each model's ``model_config``.
+    """
+    if not raw or raw == "[]":
+        return []
+    try:
+        items = json.loads(str(raw))
+        return [model.model_validate(item, strict=strict) for item in items]
+    except (json.JSONDecodeError, ValidationError, ValueError, TypeError):
+        return []
 
 
 def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
@@ -90,15 +115,10 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         unhelpful_count_raw,
     ) = row
 
-    # Deserialise assertions from JSON (PRD-CORE-086)
+    # Deserialise assertions from JSON (PRD-CORE-086).
     # strict=False is required because the JSON round-trip stores enum values
     # as strings, and Assertion has strict=True on the model.
-    assertions: list[Assertion] = []
-    if assertions_json and assertions_json != "[]":
-        try:
-            assertions = [Assertion.model_validate(a, strict=False) for a in json.loads(str(assertions_json))]
-        except (json.JSONDecodeError, ValueError):
-            assertions = []
+    assertions = parse_model_list(assertions_json, Assertion, strict=False)
 
     return MemoryEntry(
         id=str(id_),
@@ -132,10 +152,8 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         cross_validated=bool(cross_val_raw),
         outcome_history=parse_json_list(outcome_json),
         assertions=assertions,
-        anchors=[Anchor.model_validate(a) for a in json.loads(str(anchors_json))]
-        if anchors_json and anchors_json != "[]"
-        else [],
-        anchor_validity=float(str(anchor_validity)) if anchor_validity else 1.0,
+        anchors=parse_model_list(anchors_json, Anchor, strict=True),
+        anchor_validity=parse_float(anchor_validity, default=1.0),
         type=MemoryType(type_),
         nudge_line=str(nudge_line) if nudge_line else "",
         expires=str(expires) if expires else "",

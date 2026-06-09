@@ -347,3 +347,182 @@ class TestAnomalyBypassSourcePrefixes:
 
         # No metadata['source'] → bypass cannot match → quarantined as usual.
         assert prepared.quarantined is True
+
+
+class TestQuarantineNamespaceMetadata:
+    """``read_namespace_metadata`` must fail open on a corrupt sidecar.
+
+    Mirrors the storage-side seam: a single unreadable / non-UTF-8
+    ``namespace.txt`` in the quarantine tree yields ``None`` rather than
+    raising into the review/discovery path.
+    """
+
+    def test_missing_returns_none(self, tmp_path: Path) -> None:
+        from trw_memory.security._runtime_quarantine import read_namespace_metadata
+
+        assert read_namespace_metadata(tmp_path) is None
+
+    def test_roundtrip_returns_namespace(self, tmp_path: Path) -> None:
+        from trw_memory.security._runtime_quarantine import (
+            NAMESPACE_METADATA_FILE,
+            read_namespace_metadata,
+        )
+
+        (tmp_path / NAMESPACE_METADATA_FILE).write_text("project:default", encoding="utf-8")
+        assert read_namespace_metadata(tmp_path) == "project:default"
+
+    def test_non_utf8_fails_open(self, tmp_path: Path) -> None:
+        import structlog
+
+        from trw_memory.security._runtime_quarantine import (
+            NAMESPACE_METADATA_FILE,
+            read_namespace_metadata,
+        )
+
+        (tmp_path / NAMESPACE_METADATA_FILE).write_bytes(b"project:\x80\xffbad")
+        with structlog.testing.capture_logs() as logs:
+            assert read_namespace_metadata(tmp_path) is None
+        dropped = [r for r in logs if r["event"] == "namespace_metadata_read_failed"]
+        assert len(dropped) == 1
+        assert dropped[0]["error"] == "UnicodeDecodeError"
+        assert "project" not in repr(dropped[0])
+
+    def test_unreadable_sidecar_fails_open(self, tmp_path: Path) -> None:
+        from trw_memory.security._runtime_quarantine import (
+            NAMESPACE_METADATA_FILE,
+            read_namespace_metadata,
+        )
+
+        (tmp_path / NAMESPACE_METADATA_FILE).mkdir()
+        assert read_namespace_metadata(tmp_path) is None
+
+
+class TestScoreAnomalyActiveFilter:
+    """P1 regression: score_anomaly must exclude non-ACTIVE entries from the reference set.
+
+    An entry with status=OBSOLETE or ARCHIVED is retired and no longer represents
+    normal write behaviour. Including it in the rolling window skews the mean/std
+    and corrupts z-scores: a genuine anomaly can score low (baseline widened by
+    old large entries) and pass through undetected.
+    """
+
+    def test_score_anomaly_ignores_obsolete_entries_in_baseline(self, tmp_path: Path) -> None:
+        """Obsolete entries must not appear in the reference window used to build stats."""
+        from unittest.mock import patch
+
+        from trw_memory.models.memory import MemoryStatus
+        from trw_memory.security._runtime_anomaly import score_anomaly
+        from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
+        backend = SQLiteBackend(tmp_path / "mem" / "memory.db")
+
+        # Seed 15 normal active entries
+        for index in range(15):
+            backend.store(
+                MemoryEntry(
+                    id=f"M-active-{index}",
+                    content="short",
+                    namespace="default",
+                    importance=0.5,
+                    status=MemoryStatus.ACTIVE,
+                )
+            )
+
+        # Add one OBSOLETE entry with enormous content to shift the baseline.
+        # If score_anomaly fetches ALL statuses, this inflates mean entry_length
+        # and hides a real size anomaly in the new candidate.
+        backend.store(
+            MemoryEntry(
+                id="M-retired",
+                content="X" * 50_000,
+                namespace="default",
+                importance=0.5,
+                status=MemoryStatus.ACTIVE,  # store active first
+            )
+        )
+        # Retire it so it should be excluded from the baseline
+        backend.update("M-retired", status=MemoryStatus.OBSOLETE)
+
+        # Verify the backend actually stores the obsolete entry
+        retired = backend.get("M-retired")
+        assert retired is not None and retired.status == MemoryStatus.OBSOLETE
+
+        # Track what list_entries was called with
+        original_list = backend.list_entries
+
+        calls: list[MemoryStatus | None] = []
+
+        def tracked_list_entries(
+            *,
+            status: MemoryStatus | None = None,
+            namespace: str | None = None,
+            limit: int = 100,
+        ) -> list[MemoryEntry]:
+            calls.append(status)
+            return original_list(status=status, namespace=namespace, limit=limit)
+
+        candidate = MemoryEntry(
+            id="M-candidate",
+            content="normal size entry",
+            namespace="default",
+            importance=0.5,
+        )
+        with patch.object(backend, "list_entries", side_effect=tracked_list_entries):
+            score_anomaly(candidate, backend, config=cfg)
+
+        # score_anomaly must pass status=MemoryStatus.ACTIVE
+        assert calls, "list_entries was never called"
+        assert all(
+            status == MemoryStatus.ACTIVE for status in calls
+        ), f"Expected ACTIVE-only calls; got: {calls}"
+
+        backend.close()
+
+    def test_score_anomaly_excludes_obsolete_from_stats_count(self, tmp_path: Path) -> None:
+        """AnomalyStats.sample_count must reflect only active entries."""
+        from trw_memory.models.memory import MemoryStatus
+        from trw_memory.security._runtime_anomaly import score_anomaly
+        from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
+        backend = SQLiteBackend(tmp_path / "mem" / "memory.db")
+
+        # Seed 20 active + 5 obsolete
+        for index in range(20):
+            backend.store(
+                MemoryEntry(
+                    id=f"M-active-{index}",
+                    content="normal content",
+                    namespace="default",
+                    status=MemoryStatus.ACTIVE,
+                )
+            )
+        for index in range(5):
+            entry_id = f"M-obs-{index}"
+            backend.store(
+                MemoryEntry(
+                    id=entry_id,
+                    content="retired content",
+                    namespace="default",
+                    status=MemoryStatus.ACTIVE,
+                )
+            )
+            backend.update(entry_id, status=MemoryStatus.OBSOLETE)
+
+        candidate = MemoryEntry(
+            id="M-new",
+            content="new entry",
+            namespace="default",
+        )
+        _, stats = score_anomaly(candidate, backend, config=cfg)
+
+        # Rolling window is the 100 most recent active entries; here all
+        # 20 active entries should appear — none of the 5 obsolete ones.
+        # (clean_reference filters quarantined+canary; stats count = len(rolling))
+        assert stats.sample_count == 20, (
+            f"Expected 20 active entries in baseline; got {stats.sample_count} "
+            "(obsolete entries may be leaking into the reference set)"
+        )
+
+        backend.close()

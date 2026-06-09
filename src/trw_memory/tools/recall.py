@@ -25,6 +25,7 @@ from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.retrieval import hybrid_search
+from trw_memory.retrieval.admission_policy import apply_admission_filter
 from trw_memory.retrieval.source_policy import apply_source_policy
 from trw_memory.security.rbac import Permission, require_namespace_permission
 from trw_memory.security.runtime import append_audit_event, initialize_canaries, probe_canaries, should_halt_recalls
@@ -173,10 +174,13 @@ def memory_recall_impl(
         query_embedding = embedder.embed(query) if embedder is not None else None
         # dense_search() needs the stored vector map, not just the entry IDs, so
         # tool recall must hydrate the embeddings before calling hybrid_search().
+        # Forward the already-computed query_embedding (also used below for tier
+        # scoring) so the dense step reuses it instead of re-embedding the query.
         ranked = hybrid_search(
             query=query,
             entries=all_entries,
             embedder=embedder,
+            query_embedding=query_embedding,
             stored_embeddings=stored_embeddings or None,
             top_k=limit * 4,  # over-fetch before score filtering
         )
@@ -208,6 +212,21 @@ def memory_recall_impl(
     # Apply min_score filter
     if min_score > 0.0:
         ranked_dicts = [d for d in ranked_dicts if float(str(d.get("score", entry_utility(d)))) >= min_score]
+
+    # Recall-policy parity (PRD-DIST-2049 recall-policy seam unification): apply
+    # the SAME confidence / currentness admission filter the SDK recall path
+    # (MemoryClient.recall) enforces, instead of silently bypassing it on the
+    # tool surface. Mirrors the SDK ordering — admission filter runs on the
+    # local candidate pool BEFORE the org-memory merge, so org results stay
+    # additive. Default config (recall_confidence_filter=None /
+    # recall_filter_historical_only=False) returns the list unchanged,
+    # preserving prior tool-path behavior bit-for-bit.
+    ranked_dicts = apply_admission_filter(
+        ranked_dicts,
+        confidence_floor=cfg.recall_confidence_filter,
+        exclude_historical_only=cfg.recall_filter_historical_only,
+        namespace=namespace,
+    )
 
     # Token budget fitting BEFORE limit cap (PRD-CORE-123 FR03)
     from trw_memory.retrieval.token_budget import (

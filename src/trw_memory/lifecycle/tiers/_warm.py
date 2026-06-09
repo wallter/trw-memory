@@ -7,6 +7,7 @@ for keyword search.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -73,6 +74,65 @@ class WarmTierStore:
         """Path to the warm tier keyword-search sidecar (JSONL)."""
         return self._warm_db_path().with_suffix(".jsonl")
 
+    def _iter_sidecar_records(self, sidecar: Path) -> Iterator[tuple[int, dict[str, object]]]:
+        """Yield ``(line_number, record)`` for each well-formed row in the sidecar.
+
+        This is the single parsing Seam for the warm JSONL sidecar: every
+        ``warm_add`` / ``warm_search`` / ``warm_entries`` / ``warm_remove`` path
+        reads rows through here instead of re-deriving how corruption is handled.
+
+        Fail-open is preserved -- blank lines are ignored, and a row that is not
+        valid JSON, is not a JSON object, or is not valid UTF-8 is skipped rather
+        than raised. Each skip emits a structured
+        ``warm_tier_sidecar_corrupt_record_skipped`` event carrying the sidecar
+        path, the 1-based line number, and the error class so operators get
+        locality when warm recall misses because rows were dropped. The raw line
+        and any memory payload are deliberately never logged.
+
+        Rows are read as raw bytes and decoded per line so a single non-UTF-8
+        row cannot abort the whole read: adjacent valid records (and their
+        line-number locality) survive a corrupt byte sequence anywhere in the
+        file. ``\r`` from CRLF-terminated rows is stripped, matching the prior
+        ``str.splitlines`` behaviour.
+        """
+        for line_number, byte_line in enumerate(sidecar.read_bytes().split(b"\n"), start=1):
+            if not byte_line.strip():
+                continue
+            try:
+                line_s = byte_line.decode("utf-8").strip()
+            except UnicodeDecodeError as exc:
+                logger.warning(
+                    "warm_tier_sidecar_corrupt_record_skipped",
+                    path=str(sidecar),
+                    line_number=line_number,
+                    error_class=type(exc).__name__,
+                )
+                continue
+            if not line_s:
+                continue
+            try:
+                rec = json.loads(line_s)
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    "warm_tier_sidecar_corrupt_record_skipped",
+                    path=str(sidecar),
+                    line_number=line_number,
+                    error_class=type(exc).__name__,
+                )
+                continue
+            if not isinstance(rec, dict):
+                # Structurally valid JSON that is not a record object (e.g. a
+                # bare list or scalar) cannot satisfy the row schema; treat it
+                # as corrupt so callers never have to guard ``rec.get(...)``.
+                logger.warning(
+                    "warm_tier_sidecar_corrupt_record_skipped",
+                    path=str(sidecar),
+                    line_number=line_number,
+                    error_class="NotAnObject",
+                )
+                continue
+            yield line_number, cast("dict[str, object]", rec)
+
     def get_embedding(self, entry_id: str) -> list[float] | None:
         """Return the stored warm-tier embedding for *entry_id*, if present."""
         backend = self._get_warm_backend()
@@ -132,42 +192,28 @@ class WarmTierStore:
             sidecar.write_text(json.dumps(record) + "\n", encoding="utf-8")
             return
 
-        # Check if entry already exists (scan once)
-        existing_lines = sidecar.read_text(encoding="utf-8").splitlines()
+        # Single pass through the parsing Seam: collect surviving records while
+        # detecting whether this entry is already present.
+        survivors: list[dict[str, object]] = []
         entry_exists = False
-        for line in existing_lines:
-            line_s = line.strip()
-            if not line_s:
-                continue
-            try:
-                rec = json.loads(line_s)
-                if str(rec.get("id", "")) == entry_id:
-                    entry_exists = True
-                    break
-            except json.JSONDecodeError:
-                continue
+        for _line_number, rec in self._iter_sidecar_records(sidecar):
+            if str(rec.get("id", "")) == entry_id:
+                entry_exists = True
+            else:
+                survivors.append(rec)
 
         if not entry_exists:
-            # Append-only: O(1) write for new entries
+            # Append-only: O(1) write for new entries (leaves existing rows,
+            # including any corrupt ones, untouched on disk).
             with sidecar.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(record) + "\n")
             return
 
-        # Update path: filter out old record and rewrite (O(N) — infrequent)
-        records: list[dict[str, object]] = []
-        for line in existing_lines:
-            line_s = line.strip()
-            if not line_s:
-                continue
-            try:
-                rec = json.loads(line_s)
-                if str(rec.get("id", "")) != entry_id:
-                    records.append(rec)
-            except json.JSONDecodeError:
-                continue
-        records.append(record)
+        # Update path: rewrite surviving records plus the new one (O(N) —
+        # infrequent). Corrupt rows are dropped by the Seam, as before.
+        survivors.append(record)
         sidecar.write_text(
-            "\n".join(json.dumps(r) for r in records) + "\n",
+            "\n".join(json.dumps(r) for r in survivors) + "\n",
             encoding="utf-8",
         )
 
@@ -211,21 +257,14 @@ class WarmTierStore:
         sidecar = self._warm_sidecar_path()
         sidecar_removed = False
         if sidecar.exists():
-            lines = []
-            for line in sidecar.read_text(encoding="utf-8").splitlines():
-                line_s = line.strip()
-                if not line_s:
-                    continue
-                try:
-                    rec = json.loads(line_s)
-                    if str(rec.get("id", "")) != entry_id:
-                        lines.append(line_s)
-                    else:
-                        sidecar_removed = True
-                except json.JSONDecodeError:
-                    continue
+            survivors: list[dict[str, object]] = []
+            for _line_number, rec in self._iter_sidecar_records(sidecar):
+                if str(rec.get("id", "")) != entry_id:
+                    survivors.append(rec)
+                else:
+                    sidecar_removed = True
             sidecar.write_text(
-                "\n".join(lines) + "\n" if lines else "",
+                "\n".join(json.dumps(r) for r in survivors) + "\n" if survivors else "",
                 encoding="utf-8",
             )
         return sidecar_removed
@@ -298,14 +337,7 @@ class WarmTierStore:
         results: list[dict[str, object]] = []
         entry_map = self._warm_sidecar_entries_by_id()
         lower_tokens = {t.lower() for t in query_tokens}
-        for line in sidecar.read_text(encoding="utf-8").splitlines():
-            line_s = line.strip()
-            if not line_s:
-                continue
-            try:
-                rec = json.loads(line_s)
-            except json.JSONDecodeError:
-                continue
+        for _line_number, rec in self._iter_sidecar_records(sidecar):
             entry_id = str(rec.get("id", ""))
             entry_payload = entry_map.get(entry_id, {})
             text = str(rec.get("summary", "")).lower()
@@ -335,17 +367,7 @@ class WarmTierStore:
         if not sidecar.exists():
             return entries
 
-        for line in sidecar.read_text(encoding="utf-8").splitlines():
-            line_s = line.strip()
-            if not line_s:
-                continue
-            try:
-                rec = json.loads(line_s)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(rec, dict):
-                continue
-
+        for _line_number, rec in self._iter_sidecar_records(sidecar):
             entry_id = str(rec.get("id", ""))
             if not entry_id:
                 continue

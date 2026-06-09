@@ -101,8 +101,15 @@ def dense_search(
         assert embedder is not None  # noqa: S101 — mypy narrowing guard; embedder is not None here: the early-return guard above (line ~89) exits when embedder is None and query_embedding is also None
         try:
             q_vec = embedder.embed(query)
-        except (RuntimeError, ValueError, TypeError):
-            logger.warning("dense_search_embed_failed", query=query[:80])
+        except (RuntimeError, ValueError, TypeError) as exc:
+            # Structural telemetry only — query text may carry secrets or
+            # proprietary memory contents, so never log it (raw or preview).
+            logger.warning(
+                "dense_search_embed_failed",
+                query_chars=len(query),
+                candidates=len(entry_ids),
+                error_class=type(exc).__name__,
+            )
             return []
 
     if q_vec is None:
@@ -126,7 +133,7 @@ def dense_search(
     top = results[:top_k]
     logger.debug(
         "dense_search_complete",
-        query=query[:80],
+        query_chars=len(query),
         candidates=len(entry_ids),
         scored=len(results),
         returned=len(top),

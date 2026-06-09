@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from trw_memory.exceptions import StorageError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.security import runtime as security_runtime
 from trw_memory.security.audit import AuditLog, AuditRecord, audit_verify
@@ -216,6 +217,65 @@ class TestAuditLogVerify:
         audit_path.write_text("", encoding="utf-8")
         result = AuditLog(audit_path).verify_chain()
         assert result == {"valid": True, "entries_checked": 0, "first_broken_at": None, "broken_hash": None}
+
+
+class TestAuditLogTailCorruption:
+    """Write-path fail-closed contract for ``_read_last_hash_unlocked``.
+
+    A tamper-evident hash chain must never link a new append to a
+    silently re-rooted genesis nor crash the writer with a raw
+    decode/attribute error when the tail is corrupt.
+    """
+
+    def test_append_fails_closed_on_non_object_tail(self, audit_log: AuditLog, audit_path: Path) -> None:
+        # Valid JSON, but not an object — previously raised AttributeError
+        # from data.get(...) instead of a typed StorageError.
+        audit_path.write_text('["SENSITIVE_ARRAY_PAYLOAD"]\n', encoding="utf-8")
+        with pytest.raises(StorageError) as excinfo:
+            audit_log.append("store", entry_id="M-001")
+        assert "SENSITIVE_ARRAY_PAYLOAD" not in str(excinfo.value)
+
+    def test_append_fails_closed_on_truncated_json_tail(self, audit_log: AuditLog, audit_path: Path) -> None:
+        audit_path.write_text('{"hash": "abc", "op": "st', encoding="utf-8")
+        with pytest.raises(StorageError):
+            audit_log.append("store", entry_id="M-001")
+
+    def test_append_fails_closed_on_non_utf8_tail(self, audit_log: AuditLog, audit_path: Path) -> None:
+        audit_path.write_bytes(b'{"hash": "ab"}\n\xff\xfe not utf-8\n')
+        with pytest.raises(StorageError) as excinfo:
+            audit_log.append("store", entry_id="M-001")
+        # Content-free: only the exception type, never the raw bytes.
+        assert "UnicodeDecodeError" in str(excinfo.value)
+
+    def test_append_does_not_silently_reroot_on_missing_hash_tail(
+        self, audit_log: AuditLog, audit_path: Path
+    ) -> None:
+        # A record dict without a usable hash must fail closed, not link the
+        # next append to the genesis hash and silently re-root the chain.
+        audit_path.write_text('{"op": "store", "id": "M-001"}\n', encoding="utf-8")
+        with pytest.raises(StorageError):
+            audit_log.append("forget", entry_id="M-001")
+
+    def test_append_after_valid_records_still_chains(self, audit_log: AuditLog) -> None:
+        # Regression: hardening must not disturb the valid-input write path.
+        first = audit_log.append("store", entry_id="M-001")
+        second = audit_log.append("forget", entry_id="M-001")
+        assert second.prev_hash == first.hash
+        assert audit_log.verify_chain()["valid"] is True
+
+    def test_read_all_fails_closed_on_non_utf8(self, audit_log: AuditLog, audit_path: Path) -> None:
+        audit_path.write_bytes(b'\xff\xfe binary garbage\n')
+        with pytest.raises(StorageError):
+            audit_log.read_all()
+
+    def test_read_all_corruption_message_is_content_free(self, audit_log: AuditLog, audit_path: Path) -> None:
+        # Valid JSON object that fails AuditRecord validation (op must be a
+        # string). The raw payload must not leak into the error message.
+        audit_path.write_text('{"op": 123, "leak": "TOP_SECRET_VALUE"}\n', encoding="utf-8")
+        with pytest.raises(StorageError) as excinfo:
+            audit_log.read_all()
+        assert "TOP_SECRET_VALUE" not in str(excinfo.value)
+        assert "line 1" in str(excinfo.value)
 
 
 class TestAuditPaths:

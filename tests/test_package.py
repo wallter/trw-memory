@@ -17,6 +17,8 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT_PATH = PACKAGE_ROOT / "pyproject.toml"
+UV_LOCK_PATH = PACKAGE_ROOT / "uv.lock"
+REQUIREMENTS_LOCK_PATH = PACKAGE_ROOT / "requirements.lock"
 MEMORY_CI_PATH = REPO_ROOT / ".github" / "workflows" / "memory-ci.yml"
 MEMORY_CD_PATH = REPO_ROOT / ".github" / "workflows" / "memory-cd.yml"
 
@@ -428,3 +430,51 @@ def test_package_version_is_semver_like() -> None:
     from trw_memory import __version__
 
     assert re.match(r"^\d+\.\d+\.\d+$", __version__)
+
+
+def _uv_lock_package_version(name: str) -> str:
+    """Return the version recorded for ``name`` in ``uv.lock``."""
+    with UV_LOCK_PATH.open("rb") as handle:
+        lock = tomllib.load(handle)
+    packages = lock["package"]
+    assert isinstance(packages, list)
+    matches = [pkg for pkg in packages if isinstance(pkg, dict) and pkg.get("name") == name]
+    assert matches, f"{name!r} not found in uv.lock"
+    assert len(matches) == 1, f"{name!r} appears {len(matches)} times in uv.lock"
+    version = matches[0]["version"]
+    assert isinstance(version, str)
+    return version
+
+
+def test_uv_lock_version_matches_pyproject() -> None:
+    """The trw-memory package version in uv.lock tracks pyproject.toml.
+
+    Guards the PRD lock-hygiene regression where pyproject was bumped to
+    0.8.5 while uv.lock still recorded 0.8.1, so `uv lock --check` failed.
+    """
+    pyproject = _load_pyproject()
+    project = pyproject["project"]
+    assert isinstance(project, dict)
+    pyproject_version = project["version"]
+    assert isinstance(pyproject_version, str)
+
+    assert _uv_lock_package_version("trw-memory") == pyproject_version
+
+
+def test_requirements_lock_has_no_stale_self_pin() -> None:
+    """requirements.lock must not pin trw-memory to a frozen git commit.
+
+    A `-e git+...trw-framework.git@<sha>#egg=trw_memory` self-pin drifts the
+    moment main advances past <sha>; the editable self-reference is normalised
+    to a path install (`-e .`) so it never goes stale.
+    """
+    text = REQUIREMENTS_LOCK_PATH.read_text(encoding="utf-8")
+
+    stale_self_pin = re.compile(
+        r"^-e\s+git\+.*trw-framework\.git@[0-9a-f]{7,40}.*egg=trw_memory",
+        re.MULTILINE,
+    )
+    assert not stale_self_pin.search(text), (
+        "requirements.lock pins trw-memory to a frozen git commit; "
+        "use an editable path reference (`-e .`) instead so it does not drift."
+    )

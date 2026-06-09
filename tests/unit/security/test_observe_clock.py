@@ -85,6 +85,53 @@ def test_score_intake_without_trw_dir_does_not_start_clock(tmp_path: Path) -> No
     assert not any(tmp_path.rglob("observe_start.yaml"))
 
 
+def _write_sidecar(trw_dir: Path, data: bytes) -> Path:
+    sidecar = trw_dir / "memory" / "security" / "observe_start.yaml"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_bytes(data)
+    return sidecar
+
+
+def test_read_fails_open_on_non_utf8_sidecar(tmp_path: Path) -> None:
+    # A torn/partial write can leave non-UTF-8 bytes on disk. read_text(utf-8)
+    # raises UnicodeDecodeError (a ValueError, NOT an OSError), so the seam must
+    # list it explicitly or the security intake path crashes.
+    _write_sidecar(tmp_path, b"\xff\xfe started_at: not-utf8")
+    assert read_observe_clock(tmp_path) is None
+
+
+def test_read_fails_open_on_malformed_yaml_sidecar(tmp_path: Path) -> None:
+    _write_sidecar(tmp_path, b"started_at: [unclosed\nphase: observe")
+    assert read_observe_clock(tmp_path) is None
+
+
+def test_read_returns_none_on_non_mapping_sidecar(tmp_path: Path) -> None:
+    # A scalar/list root (not a mapping) must not be coerced into a state model.
+    _write_sidecar(tmp_path, b"- just\n- a\n- list\n")
+    assert read_observe_clock(tmp_path) is None
+
+
+def test_start_recovers_from_corrupt_sidecar(tmp_path: Path) -> None:
+    # start_observe_clock reads first; a non-UTF-8 sidecar must not crash it --
+    # it fails open to None and writes a fresh, valid clock.
+    _write_sidecar(tmp_path, b"\xff\xfe\x00 garbage")
+    state = start_observe_clock(tmp_path)
+    assert state.phase == "observe"
+    # The freshly written sidecar is now readable.
+    reread = read_observe_clock(tmp_path)
+    assert reread is not None
+    assert reread.started_at == state.started_at
+
+
+def test_score_intake_survives_corrupt_sidecar(tmp_path: Path) -> None:
+    # The intake path (score_intake -> start_observe_clock -> read_observe_clock)
+    # must not raise when a corrupt sidecar is present on disk.
+    _write_sidecar(tmp_path, b"\xff\xfe non-utf8 clock")
+    # Should not raise.
+    score_intake("hello", {}, trw_dir=tmp_path)
+    assert read_observe_clock(tmp_path) is not None
+
+
 def test_clock_started_at_is_utc(tmp_path: Path) -> None:
     state = start_observe_clock(tmp_path)
     dt = datetime.fromisoformat(state.started_at)

@@ -306,6 +306,64 @@ def test_from_dict_bad_arms_type_returns_fresh() -> None:
     assert len(result._arms) == 0
 
 
+def test_from_dict_one_malformed_arm_skips_only_that_arm() -> None:
+    """A single corrupt arm is skipped (per-arm fail-open); valid arms survive.
+
+    Regression: the old implementation aborted the whole restore on one bad
+    arm and reset to feature_dim=2, discarding correctly-parsed
+    hyperparameters and every other valid arm. Mirrors the per-arm fail-open
+    in BanditSelector.from_json and from_compact_dict.
+    """
+    selector = ContextualBanditSelector(feature_dim=2, alpha=1.5)
+    selector.update("good_a", reward=0.9, context_vector=[1.0, 0.0])
+    selector.update("good_b", reward=0.3, context_vector=[0.0, 1.0])
+
+    data = selector.to_dict()
+    # Corrupt one arm with a non-numeric A_inv cell.
+    data["arms"]["bad"] = {"A_inv": [["not_a_number", 0.0], [0.0, 1.0]], "b": [0.0, 0.0], "n_obs": 1}
+
+    restored = ContextualBanditSelector.from_dict(data)
+
+    # Hyperparameters preserved (NOT reset to the feature_dim=2 fallback default alpha).
+    assert restored._feature_dim == 2
+    assert restored._alpha == pytest.approx(1.5)
+    # The two valid arms survive; only the corrupt one is dropped.
+    assert set(restored._arms.keys()) == {"good_a", "good_b"}
+
+
+def test_from_dict_non_dict_arm_value_is_skipped() -> None:
+    """An arm whose value is not a dict is skipped without aborting the restore."""
+    selector = ContextualBanditSelector(feature_dim=2, alpha=0.75)
+    selector.update("good", reward=1.0, context_vector=[1.0, 0.0])
+
+    data = selector.to_dict()
+    data["arms"]["junk"] = "not_a_dict"
+
+    restored = ContextualBanditSelector.from_dict(data)
+    assert restored._feature_dim == 2
+    assert restored._alpha == pytest.approx(0.75)
+    assert set(restored._arms.keys()) == {"good"}
+
+
+def test_from_dict_malformed_arm_preserves_feature_dim_for_select() -> None:
+    """After a malformed arm, restored selector still accepts the real feature_dim.
+
+    The old fallback reset feature_dim to 2, so a wider real dimension would
+    raise ValueError on every contextual select(); this guards that path.
+    """
+    selector = ContextualBanditSelector(feature_dim=3, alpha=1.0)
+    selector.update("good", reward=0.8, context_vector=[1.0, 0.0, 0.0])
+
+    data = selector.to_dict()
+    data["arms"]["bad"] = {"A_inv": "garbage", "b": [0.0, 0.0, 0.0], "n_obs": 0}
+
+    restored = ContextualBanditSelector.from_dict(data)
+    assert restored._feature_dim == 3
+    # A 3-dim context must not raise a dimension-mismatch ValueError.
+    selected, _ = restored.select(["good"], context_vector=[1.0, 0.0, 0.0])
+    assert selected == "good"
+
+
 # ---------------------------------------------------------------------------
 # test_select_empty_raises
 # ---------------------------------------------------------------------------

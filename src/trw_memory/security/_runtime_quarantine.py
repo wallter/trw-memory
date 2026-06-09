@@ -75,7 +75,22 @@ def read_namespace_metadata(namespace_dir: Path) -> str | None:
     metadata_path = namespace_dir / NAMESPACE_METADATA_FILE
     if not metadata_path.exists():
         return None
-    namespace = metadata_path.read_text(encoding="utf-8").strip()
+    # Fail open: a quarantine namespace whose ``namespace.txt`` is unreadable
+    # (OSError) or non-UTF-8 (UnicodeDecodeError from a torn/partial write)
+    # yields ``None`` ("metadata absent") rather than raising into the
+    # quarantine review/discovery path. Mirrors the storage-side seam in
+    # ``integrations/_backend._read_namespace_metadata``. Never log the decoded
+    # text or raw bytes — the namespace string can carry sensitive project
+    # identifiers; only the path + error class.
+    try:
+        namespace = metadata_path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning(
+            "namespace_metadata_read_failed",
+            path=str(metadata_path),
+            error=type(exc).__name__,
+        )
+        return None
     return namespace or None
 
 

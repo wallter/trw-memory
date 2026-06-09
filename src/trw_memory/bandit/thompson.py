@@ -254,7 +254,10 @@ class BanditSelector:
         """Deserialize a selector from JSON.
 
         Returns a fresh instance if the JSON is corrupt or has an
-        unexpected structure.
+        unexpected top-level structure. A single malformed arm entry is
+        skipped (per-row fail-open) rather than discarding every valid arm,
+        matching :meth:`ContextualBanditSelector.from_compact_dict` and the
+        warm/retry sidecar readers; the deserialize never raises.
         """
         try:
             parsed = json.loads(data)
@@ -272,13 +275,25 @@ class BanditSelector:
                 logger.warning("bandit_deserialize_bad_arms_type")
                 return cls()
 
+            skipped = 0
             for arm_id, arm_dict in arms_data.items():
-                selector._arms[arm_id] = ArmState(
-                    alpha=float(arm_dict.get("alpha", cls._PRIOR_ALPHA)),
-                    beta=float(arm_dict.get("beta", cls._PRIOR_BETA)),
-                    window=[float(v) for v in arm_dict.get("window", [])],
-                    exposure_count=int(arm_dict.get("exposure_count", 0)),
-                )
+                if not isinstance(arm_dict, dict):
+                    skipped += 1
+                    continue
+                try:
+                    selector._arms[str(arm_id)] = ArmState(
+                        alpha=float(arm_dict.get("alpha", cls._PRIOR_ALPHA)),
+                        beta=float(arm_dict.get("beta", cls._PRIOR_BETA)),
+                        window=[float(v) for v in arm_dict.get("window", [])],
+                        exposure_count=int(arm_dict.get("exposure_count", 0)),
+                    )
+                except (TypeError, ValueError):
+                    # Content-free per-arm fail-open: one arm with non-numeric
+                    # fields (or a non-iterable window) must not abort the
+                    # restore of the remaining valid arms.
+                    skipped += 1
+            if skipped:
+                logger.warning("bandit_deserialize_skipped_arms", skipped=skipped)
             return selector
         except (json.JSONDecodeError, TypeError, KeyError, ValueError):
             logger.warning("bandit_deserialize_corrupt", exc_info=True)
