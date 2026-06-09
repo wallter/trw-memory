@@ -4,6 +4,45 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-06-09
+
+### Security
+
+- **SSN/PHONE/CREDIT_CARD in tags are now redacted (`security/_runtime_pii.py`).** Completes the
+  v0.9.1 tag-scan: those types were detected in tags but absent from `REDACTED_PII_TYPES`, so
+  `replace_pii` fell through and stored the raw value verbatim (surfaced at recall). They now redact
+  to `<ssn>`/`<phone>`/`<credit_card>` (redact-not-block, parity with EMAIL/IP).
+- **Public `check_entry_pii` now scans `entry.tags` (`security/pii.py`).** The PUBLIC API still
+  scanned only `content` + `detail`, so direct callers got a false-clean result for PII hidden in a
+  tag even though the internal runtime path was fixed in v0.9.1. Tags are now blocked/redacted per the
+  selected action, matching the runtime path.
+- **Custom-pattern ReDoS guard now catches quantified alternation (`security/pii.py`).** The v0.9.1
+  guard caught nested quantifiers (`(a+)+`) but missed quantified-alternation backtracking
+  (`(a|a)*`); such patterns are now rejected as `ConfigError`.
+- **`rotate_master_key` converges against the LIVE backend (`security/keys.py`).** v0.9.1 compared
+  coverage against a PRE-rotation `count()` snapshot, so entries inserted concurrently during
+  re-encryption escaped — left on the OLD key — while the count check stayed satisfied. Rotation now
+  sweeps repeatedly, re-reading the live backend and re-encrypting only newly-seen IDs until a pass
+  finds nothing new and the post-pass live count is covered. Bounded by `_ROTATION_MAX_SWEEPS`; a
+  writer inserting faster than rotation raises `KeyRotationError` instead of spinning.
+
+### Fixed
+
+- **Invalid custom PII pattern raises `ConfigError`, not `re.error` (`security/pii.py`).** The v0.9.1
+  ReDoS guard validated length + nested quantifiers but never trial-compiled, so a syntactically
+  invalid pattern (e.g. `[`) raised an uncaught `re.error` from `re.compile` and crashed every store
+  for the session. The pattern is now trial-compiled at validation time and surfaced as a
+  documented `ConfigError`.
+- **Public `delete_vector` defers its commit inside `transaction()` (`storage/_vector_ops.py`).** It
+  committed unconditionally — the same premature-commit bug class fixed in `_crud_ops` for v0.9.1 but
+  missed here — prematurely committing an enclosing caller transaction. It now accepts a `skip_commit`
+  flag (matching `upsert_vector`) so the vector delete batches into the caller's outermost COMMIT and
+  rolls back with the transaction.
+- **Nested `transaction()` depth counter mutated under the lock (`storage/sqlite_backend.py`).** The
+  non-outer increment/decrement of `_skip_commit_depth` ran outside `_lock` while other writers read
+  that counter under `_lock` to decide whether to commit, racing with no happens-before edge. Both
+  nested mutations now run under `_lock`, symmetric with the outer case.
+
 ## [0.9.1] — 2026-06-09
 
 ### Security
