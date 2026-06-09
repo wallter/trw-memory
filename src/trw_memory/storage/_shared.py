@@ -94,6 +94,18 @@ LIST_FIELDS: frozenset[str] = frozenset(
 #: Fields whose values are JSON-encoded dicts.
 DICT_FIELDS: frozenset[str] = frozenset({"metadata", "vector_clock"})
 
+#: Enum-typed string fields -> their validating enum constructor. A raw string
+#: assigned to one of these must round-trip through the enum so an invalid value
+#: cannot persist and permanently quarantine the row on the next deserialize
+#: (row_to_entry raises ValueError on an unknown enum member). The constructor is
+#: called only as a validation gate — the original ``.value`` string is stored.
+ENUM_STRING_FIELDS: dict[str, type[MemoryStatus | Confidence | ProtectionTier | MemoryType]] = {
+    "status": MemoryStatus,
+    "confidence": Confidence,
+    "protection_tier": ProtectionTier,
+    "type": MemoryType,
+}
+
 
 # ---------------------------------------------------------------------------
 # Update helpers
@@ -150,4 +162,12 @@ def serialize_update_value(key: str, val: object) -> list[object] | dict[str, st
         return val.value
     if isinstance(val, (MemoryType, Confidence, ProtectionTier)):
         return cast("str", val.value)
+    # Validate raw strings assigned to enum-typed fields. Without this an invalid
+    # value (e.g. status="acttive") persists verbatim and then makes the row
+    # un-deserializable on the next read (row_to_entry raises ValueError, and the
+    # resilient path quarantines the row permanently). Constructing the enum here
+    # surfaces a ValueError that update() wraps into a StorageError, rejecting the
+    # bad write up front. The stored value remains the canonical ``.value`` string.
+    if key in ENUM_STRING_FIELDS and isinstance(val, str):
+        return cast("str", ENUM_STRING_FIELDS[key](val).value)
     return cast("list[object] | dict[str, str] | str", val)

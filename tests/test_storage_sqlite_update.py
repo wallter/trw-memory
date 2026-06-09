@@ -108,3 +108,42 @@ class TestUpdateBranchCoverage:
         result = backend.update("u-auto", importance=0.9)
         assert result is not None
         assert result.updated_at >= original_updated
+
+
+class TestUpdateEnumStringValidation:
+    """memory-storage-4: raw strings for enum-typed fields are validated.
+
+    An invalid raw string must be rejected at write time rather than persisting
+    and making the row un-deserializable (permanent quarantine) on next read.
+    """
+
+    def test_update_invalid_status_string_rejected(self, backend: SQLiteBackend) -> None:
+        backend.store(make_entry("u-bad-status", status=MemoryStatus.ACTIVE))
+        with pytest.raises(StorageError, match="acttive"):
+            backend.update("u-bad-status", status="acttive")
+        # The bad write must not have landed — the row still reads back cleanly.
+        reread = backend.get("u-bad-status")
+        assert reread is not None
+        assert reread.status == MemoryStatus.ACTIVE
+
+    def test_update_valid_status_string_persists_as_value(self, backend: SQLiteBackend) -> None:
+        backend.store(make_entry("u-good-status", status=MemoryStatus.ACTIVE))
+        result = backend.update("u-good-status", status="resolved")
+        assert result is not None
+        assert result.status == MemoryStatus.RESOLVED
+
+    def test_update_invalid_confidence_string_rejected(self, backend: SQLiteBackend) -> None:
+        backend.store(make_entry("u-bad-conf"))
+        with pytest.raises(StorageError, match="not-a-confidence"):
+            backend.update("u-bad-conf", confidence="not-a-confidence")
+        assert backend.get("u-bad-conf") is not None
+
+    def test_update_invalid_protection_tier_string_rejected(self, backend: SQLiteBackend) -> None:
+        backend.store(make_entry("u-bad-tier"))
+        with pytest.raises(StorageError, match="not-a-tier"):
+            backend.update("u-bad-tier", protection_tier="not-a-tier")
+
+    def test_update_invalid_type_string_rejected(self, backend: SQLiteBackend) -> None:
+        backend.store(make_entry("u-bad-type"))
+        with pytest.raises(StorageError, match="not-a-type"):
+            backend.update("u-bad-type", type="not-a-type")
