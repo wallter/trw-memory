@@ -90,7 +90,7 @@ packages = ["src/trw_memory"]
 [tool.deptry]
 known_first_party = ["trw_memory"]
 optional_dependencies_dev_groups = ["dev"]
-package_module_name_map = { "llama-index-core" = "llama_index", "langchain-core" = "langchain_core" }
+package_module_name_map = { "llama-index-core" = "llama_index", "langchain-core" = "langchain_core", "sqlcipher3" = "sqlcipher3", "crewai" = "crewai" }
 
 [tool.deptry.per_rule_ignores]
 # Optional probe: text embeddings can hide a broken torchcodec install during

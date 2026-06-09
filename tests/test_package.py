@@ -290,6 +290,8 @@ def test_pyproject_deptry_config_keeps_static_audit_signal_focused() -> None:
     assert deptry["package_module_name_map"] == {
         "llama-index-core": "llama_index",
         "langchain-core": "langchain_core",
+        "sqlcipher3": "sqlcipher3",
+        "crewai": "crewai",
     }
 
     per_rule = deptry["per_rule_ignores"]
