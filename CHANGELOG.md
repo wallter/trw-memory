@@ -53,6 +53,11 @@ All notable changes to the TRW Memory package.
 
 ### Fixed
 
+- **Resolved `_client_recall.py` effective-LOC debt was removed from the root baseline.**
+  The module was already split below the 350 effective-LOC gate; the stale grandfathered
+  allowance is now gone so future growth above the gate fails instead of passing under an
+  obsolete baseline entry.
+
 - **Focused Ruff validation for sync tests is green again.** Removed a stale unused `time` import
   from `tests/test_sync_retry_queue.py` and normalized the `InstrumentedLock` return annotation in
   `tests/test_sync_delta.py` now that `from __future__ import annotations` is active.
