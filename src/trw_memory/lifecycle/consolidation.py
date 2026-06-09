@@ -245,17 +245,6 @@ def _create_consolidated_entry(
     """
     entry_id = "M-" + uuid4().hex
 
-    importance = max(e.importance for e in cluster)
-
-    tags = sorted({t for e in cluster for t in e.tags})
-
-    all_evidence: list[str] = list(dict.fromkeys(ev for e in cluster for ev in e.evidence))
-
-    recurrence = sum(e.recurrence for e in cluster)
-    q_value = max(e.q_value for e in cluster)
-
-    consolidated_from = [e.id for e in cluster]
-
     # Inherit provenance from highest-importance source (PRD-CORE-099)
     best_source = max(cluster, key=lambda e: e.importance)
 
@@ -268,12 +257,12 @@ def _create_consolidated_entry(
         source_identity=best_source.source_identity,
         client_profile=best_source.client_profile,
         model_id=best_source.model_id,
-        consolidated_from=consolidated_from,
-        importance=importance,
-        tags=tags,
-        evidence=all_evidence,
-        recurrence=recurrence,
-        q_value=q_value,
+        consolidated_from=[e.id for e in cluster],
+        importance=max(e.importance for e in cluster),
+        tags=sorted({t for e in cluster for t in e.tags}),
+        evidence=list(dict.fromkeys(ev for e in cluster for ev in e.evidence)),
+        recurrence=sum(e.recurrence for e in cluster),
+        q_value=max(e.q_value for e in cluster),
         status=MemoryStatus.ACTIVE,
         namespace=namespace,
         created_at=now,
@@ -323,7 +312,7 @@ def _create_consolidated_entry(
         "consolidation_entry_created",
         entry_id=entry_id,
         cluster_size=len(cluster),
-        consolidated_from=consolidated_from,
+        consolidated_from=entry.consolidated_from,
     )
     return entry
 

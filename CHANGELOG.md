@@ -34,6 +34,10 @@ All notable changes to the TRW Memory package.
 - **Package lock version now matches the 0.9.6 package bump.** `uv.lock` no
   longer records the previous editable self-package version, restoring the
   package metadata guard.
+- **Consolidation lifecycle stays under the effective-LOC ratchet.** The
+  consolidated-entry field derivation now stays local to the `MemoryEntry`
+  construction path without changing archive/rollback semantics, restoring the
+  package maintainability gate.
 
 - **Tier erasure now deletes the cold YAML archive copy (GDPR completeness).**
   `remove_entry_from_tiers` previously removed an entry only from the hot and
