@@ -329,6 +329,7 @@ class TierManager:
             warm_add_fn=self.warm_add,
             cold_archive_entry_fn=self.cold_archive_entry,
             cold_dir=self._cold_dir(),
+            hot_lock=self._hot_lock,
         )
         if preload_errors == 0:
             return result

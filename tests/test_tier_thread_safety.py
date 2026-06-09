@@ -9,14 +9,17 @@ under all possible thread interleavings.
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timezone
+from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from trw_memory.lifecycle.tiers._manager import TierManager
+from trw_memory.lifecycle.tiers._sweep import _sweep_hot_to_warm
+from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 
 
-def _make_entry(entry_id: str, content: str = "test") -> MemoryEntry:
+def _make_entry(entry_id: str, content: str = "test", last_accessed_at: datetime | None = None) -> MemoryEntry:
     """Create a minimal MemoryEntry for testing."""
     now = datetime.now(timezone.utc)
     return MemoryEntry(
@@ -28,6 +31,7 @@ def _make_entry(entry_id: str, content: str = "test") -> MemoryEntry:
         status=MemoryStatus.ACTIVE,
         created_at=now,
         updated_at=now,
+        last_accessed_at=last_accessed_at or now,
     )
 
 
@@ -142,3 +146,94 @@ class TestHotTierThreadSafety:
         assert result is not None
         assert result.content.startswith("content-")
         mgr.close()
+
+
+class TestSweepHotTierRace:
+    """memory-lifecycle-3: hot-tier sweep must not race concurrent hot writers."""
+
+    def test_concurrent_sweep_and_put_no_exceptions(self, tmp_path: Path) -> None:
+        """Sweeping (which iterates+mutates hot) while threads hot_put must not
+
+        raise ``RuntimeError: dictionary changed size during iteration`` or any
+        other concurrency error. Hot is pre-seeded with stale entries so the
+        sweep actually iterates and evicts while writers mutate the dict.
+        """
+        mgr = TierManager(base_dir=tmp_path)
+        stale_day = datetime.now(timezone.utc) - timedelta(days=999)
+        for i in range(40):
+            mgr.hot_put(f"stale-{i}", _make_entry(f"stale-{i}", last_accessed_at=stale_day))
+
+        errors: list[Exception] = []
+
+        def sweeper() -> None:
+            try:
+                for _ in range(20):
+                    mgr.sweep(MemoryConfig(hot_ttl_days=1))
+            except Exception as exc:
+                errors.append(exc)
+
+        def putter(i: int) -> None:
+            try:
+                for j in range(20):
+                    mgr.hot_put(f"live-{i}-{j}", _make_entry(f"live-{i}-{j}"))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=sweeper) for _ in range(3)]
+        threads += [threading.Thread(target=putter, args=(i,)) for i in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=20)
+
+        assert not errors, f"Concurrency errors during sweep+put: {errors}"
+        mgr.close()
+
+    def test_entry_refreshed_during_warm_add_is_not_evicted(self) -> None:
+        """The snapshot-then-recheck guard must keep an entry that was refreshed
+
+        (replaced by a newer instance) while its stale snapshot was being
+        flushed to warm. Without the ``current is entry`` recheck the freshly
+        re-put entry would be silently dropped from hot.
+        """
+        stale_day = datetime.now(timezone.utc) - timedelta(days=999)
+        old = _make_entry("e1", content="old", last_accessed_at=stale_day)
+        fresh = _make_entry("e1", content="fresh")  # same id, new instance, current
+        hot: OrderedDict[str, MemoryEntry] = OrderedDict()
+        hot["e1"] = old
+        lock = threading.Lock()
+
+        def warm_add_fn(entry_id: str, data: dict[str, object], emb: list[float] | None) -> None:
+            # Simulate a concurrent hot_put refreshing the entry while the
+            # (blocking) warm flush is in progress.
+            del entry_id, data, emb
+            hot["e1"] = fresh
+
+        today = datetime.now(timezone.utc).date()
+        demoted, errors = _sweep_hot_to_warm(hot, MemoryConfig(hot_ttl_days=1), today, warm_add_fn, lock)
+
+        # warm_add ran for the stale snapshot, but the refreshed instance must
+        # remain in hot (not evicted).
+        assert errors == 0
+        assert demoted == 0
+        assert hot["e1"] is fresh
+
+    def test_stale_entry_is_evicted_when_not_refreshed(self) -> None:
+        """Baseline: a genuinely stale entry that is not touched is evicted."""
+        stale_day = datetime.now(timezone.utc) - timedelta(days=999)
+        old = _make_entry("e1", content="old", last_accessed_at=stale_day)
+        hot: OrderedDict[str, MemoryEntry] = OrderedDict()
+        hot["e1"] = old
+        added: list[str] = []
+
+        def warm_add_fn(entry_id: str, data: dict[str, object], emb: list[float] | None) -> None:
+            del data, emb
+            added.append(entry_id)
+
+        today = datetime.now(timezone.utc).date()
+        demoted, errors = _sweep_hot_to_warm(hot, MemoryConfig(hot_ttl_days=1), today, warm_add_fn)
+
+        assert errors == 0
+        assert demoted == 1
+        assert added == ["e1"]
+        assert "e1" not in hot

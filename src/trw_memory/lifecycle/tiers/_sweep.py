@@ -7,6 +7,7 @@ Called by TierManager.sweep() with the manager's internal state.
 from __future__ import annotations
 
 import json
+import threading
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from datetime import date, datetime, timezone
@@ -32,30 +33,55 @@ def _sweep_hot_to_warm(
     config: MemoryConfig,
     today: date,
     warm_add_fn: Callable[[str, dict[str, object], list[float] | None], None],
+    hot_lock: threading.Lock | None = None,
 ) -> tuple[int, int]:
     """Evict stale hot entries and promote to warm tier.
+
+    The hot tier OrderedDict is shared with live ``hot_put``/``hot_remove``
+    callers, so iterating and mutating it unlocked races with concurrent
+    writers (``RuntimeError: dictionary changed size during iteration`` or a
+    lost/duplicated eviction). We therefore snapshot the stale candidates under
+    *hot_lock*, perform the (potentially blocking) ``warm_add`` I/O outside the
+    lock, then re-acquire the lock to pop each evicted id — re-checking that the
+    same entry instance is still present so a concurrently-refreshed entry is
+    not silently dropped from hot.
+
+    Args:
+        hot_lock: The TierManager's hot-tier lock. When ``None`` (legacy /
+            single-threaded callers) a private lock is used so the code path is
+            identical; only the cross-thread guarantee is absent.
 
     Returns (demoted_count, error_count).
     """
     demoted = 0
     errors = 0
+    lock = hot_lock if hot_lock is not None else threading.Lock()
 
-    stale_hot_ids = [
-        entry_id
-        for entry_id, entry in list(hot.items())
-        if _days_since_access(entry.model_dump(mode="json"), today) > config.hot_ttl_days
-    ]
+    # Snapshot stale candidates under the lock: capture both the id and the
+    # exact entry instance so the eviction can verify it has not been replaced.
+    with lock:
+        stale: list[tuple[str, MemoryEntry]] = [
+            (entry_id, entry)
+            for entry_id, entry in hot.items()
+            if _days_since_access(entry.model_dump(mode="json"), today) > config.hot_ttl_days
+        ]
 
-    for entry_id in stale_hot_ids:
+    for entry_id, entry in stale:
         try:
-            evicted = hot[entry_id]
-            warm_add_fn(entry_id, evicted.model_dump(mode="json"), None)
-            hot.pop(entry_id, None)
-            demoted += 1
-            logger.debug("sweep_hot_to_warm", entry_id=entry_id)
+            warm_add_fn(entry_id, entry.model_dump(mode="json"), None)
         except (OSError, StorageError, ValueError):
             logger.warning("sweep_hot_to_warm_failed", entry_id=entry_id, exc_info=True)
             errors += 1
+            continue
+        with lock:
+            # Only evict if the same entry instance is still resident; a
+            # concurrent hot_put may have refreshed it (newer last_accessed_at),
+            # in which case it is no longer stale and must stay hot.
+            current = hot.get(entry_id)
+            if current is entry:
+                hot.pop(entry_id, None)
+                demoted += 1
+                logger.debug("sweep_hot_to_warm", entry_id=entry_id)
 
     return demoted, errors
 
@@ -164,6 +190,7 @@ def execute_sweep(
     warm_add_fn: Callable[[str, dict[str, object], list[float] | None], None],
     cold_archive_entry_fn: Callable[[str, dict[str, object]], None],
     cold_dir: Path,
+    hot_lock: threading.Lock | None = None,
 ) -> TierSweepResult:
     """Execute lifecycle sweep across all tiers.
 
@@ -180,6 +207,9 @@ def execute_sweep(
         warm_add_fn: Callable(entry_id, entry_data, embedding) for warm add.
         cold_archive_entry_fn: Callable(entry_id, entry_data) for cold archive.
         cold_dir: Base cold archive directory path.
+        hot_lock: Lock guarding the shared hot OrderedDict; when provided the
+            Hot->Warm sweep snapshots and mutates the dict under it so it no
+            longer races concurrent hot_put/hot_remove callers.
 
     Returns:
         TierSweepResult with counts of promoted, demoted, purged, and errors.
@@ -187,7 +217,7 @@ def execute_sweep(
     today = datetime.now(tz=timezone.utc).date()
     purge_audit_path = base_dir / "memory" / "purge_audit.jsonl"
 
-    demoted_hot, errors_hot = _sweep_hot_to_warm(hot, config, today, warm_add_fn)
+    demoted_hot, errors_hot = _sweep_hot_to_warm(hot, config, today, warm_add_fn, hot_lock)
     demoted_warm, errors_warm = _sweep_warm_to_cold(warm_entries, config, today, cold_archive_entry_fn)
     purged, errors_cold = _sweep_cold_to_purge(cold_dir, config, today, purge_audit_path)
 
