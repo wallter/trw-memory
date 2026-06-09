@@ -4,6 +4,41 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-06-09
+
+### Security
+
+- **Injection scan now covers `entry.tags` (`security/poisoning.py`).** `validate_entry_payload`
+  previously scanned only `content` + `detail`, so an injection command placed in a tag bypassed the
+  write-time poisoning gate while still surfacing at recall. Tags are now included in the scan.
+- **SQLCipher key never leaks through a rekey failure (`security/encryption.py`).** `PRAGMA rekey`
+  must embed the key hex in the SQL text; a driver that echoed the failing statement could surface the
+  key through the raised exception or its `__context__`/`__cause__` chain. Rekey failures now raise a
+  sanitized `KeyRotationError` with the original (key-bearing) exception detached.
+- **`rotate_master_key` re-encrypts ALL entries (`security/keys.py`).** The hardcoded
+  `list_entries(limit=100_000)` silently left surplus rows encrypted under the OLD key. Re-encryption
+  is now count-driven with headroom and raises `KeyRotationError` if coverage is incomplete.
+- **Runtime PII policy scans `entry.tags` (`security/_runtime_pii.py`).** A credential (API key) or
+  PII in a tag previously bypassed both the PII block gate and redaction. Tags are now blocked and
+  redacted alongside `content`/`detail`.
+- **ReDoS guard for caller-supplied custom PII patterns (`security/pii.py`).** `detect_pii` compiled
+  and ran `custom_patterns` with no safety check; Python `re` has no timeout. Pattern count + length
+  are now capped and catastrophic-backtracking (nested-quantifier) constructs are rejected.
+- **Keyring master-key cache keyed on identity (`security/keys.py`).** The in-process cache now
+  validates the `(service, account)` identity on a keyring hit instead of the bare `source` flag.
+
+### Fixed
+
+- **Transaction atomicity in `storage/_crud_ops.py`.** `increment_session_counts`,
+  `increment_access_counts`, and `delete` committed unconditionally, prematurely committing any
+  caller-opened `transaction()`. They now defer the commit inside a transaction like
+  `store`/`update`/`increment_recall_access`. Recall/session/access counters are also bounded.
+- **Tag-filtered search no longer under-delivers (`storage/_query_ops.py`).** `search` applied the
+  SQL `LIMIT` before the in-memory tag filter, returning fewer than `top_k` matching entries (often
+  zero). The required tags are now pushed into SQL so the limit applies after filtering.
+- **`FILE_PATH` PII regex no longer matches URL path components (`security/pii.py`).** A negative
+  lookbehind stops false positives on `example.com/api/...` and `https://host/a/b`.
+
 ## [0.9.0] — 2026-06-08
 
 ### Added
