@@ -263,6 +263,7 @@ def test_pyproject_declares_current_optional_extras_and_scripts() -> None:
     }
     assert optional["all"] == ["trw-memory[mcp,embeddings,vectors,bm25,llm]"]
     assert optional["all-integrations"] == ["trw-memory[langchain,llamaindex,crewai]"]
+    assert optional["mcp"] == ["fastmcp>=3.2.0,<4.0.0"]
     assert scripts["trw-memory"] == "trw_memory.cli:main"
     assert scripts["trw-memory-server"] == "trw_memory.server:main"
 
@@ -446,6 +447,20 @@ def _uv_lock_package_version(name: str) -> str:
     return version
 
 
+def _version_tuple(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.split(r"[.+-]", version) if part.isdigit())
+
+
+def _requirements_lock_package_version(name: str) -> str:
+    match = re.search(
+        rf"^{re.escape(name)}==([^\s]+)$",
+        REQUIREMENTS_LOCK_PATH.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    assert match is not None, f"{name!r} not found in requirements.lock"
+    return match.group(1)
+
+
 def test_uv_lock_version_matches_pyproject() -> None:
     """The trw-memory package version in uv.lock tracks pyproject.toml.
 
@@ -459,6 +474,11 @@ def test_uv_lock_version_matches_pyproject() -> None:
     assert isinstance(pyproject_version, str)
 
     assert _uv_lock_package_version("trw-memory") == pyproject_version
+
+
+def test_requirements_lock_fastmcp_pin_is_patched() -> None:
+    """requirements.lock must not pin vulnerable FastMCP releases."""
+    assert _version_tuple(_requirements_lock_package_version("fastmcp")) >= (3, 2, 0)
 
 
 def test_requirements_lock_has_no_stale_self_pin() -> None:

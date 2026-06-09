@@ -4,6 +4,13 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+### Fixed
+
+- **FastMCP lock surfaces now require the patched 3.2.x floor.**
+  The optional MCP extra and `requirements.lock` no longer allow/pin
+  vulnerable FastMCP 3.0.x installs, and package tests now guard the
+  requirements lock against regressing below 3.2.0.
+
 ## [0.9.4] — 2026-06-09
 
 ### Fixed
