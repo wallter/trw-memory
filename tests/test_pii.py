@@ -187,6 +187,32 @@ class TestDetectPII:
         custom_matches = [m for m in matches if m.pii_type == PIIType.CUSTOM]
         assert len(custom_matches) == 1
 
+    def test_detect_pii_rejects_nested_quantifier_custom_pattern(self) -> None:
+        """Catastrophic-backtracking patterns are rejected before compilation."""
+        from trw_memory.exceptions import ConfigError
+
+        with pytest.raises(ConfigError, match="nested quantifier"):
+            detect_pii("aaaaaaaaaaaaaaaaaaaa!", custom_patterns=[r"(a+)+$"])
+
+    def test_detect_pii_rejects_overlong_custom_pattern(self) -> None:
+        """A custom pattern longer than the cap is rejected."""
+        from trw_memory.exceptions import ConfigError
+
+        with pytest.raises(ConfigError, match="exceeds"):
+            detect_pii("x", custom_patterns=["a" * 1001])
+
+    def test_detect_pii_rejects_too_many_custom_patterns(self) -> None:
+        """More custom patterns than the cap are rejected."""
+        from trw_memory.exceptions import ConfigError
+
+        with pytest.raises(ConfigError, match="too many"):
+            detect_pii("x", custom_patterns=[r"EMP-\d+"] * 51)
+
+    def test_detect_pii_accepts_safe_custom_pattern(self) -> None:
+        """A benign custom pattern with a single quantifier still works."""
+        matches = detect_pii("id EMP-99", custom_patterns=[r"EMP-\d+"])
+        assert any(m.pii_type == PIIType.CUSTOM for m in matches)
+
     def test_detect_high_entropy_string(self) -> None:
         """High-entropy tokens (mixed alphanumeric) are flagged."""
         # 30-char mixed-case+digits token — entropy ~4.9 bits/char

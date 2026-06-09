@@ -18,7 +18,7 @@ from enum import Enum
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
-from trw_memory.exceptions import MemoryError
+from trw_memory.exceptions import ConfigError, MemoryError
 from trw_memory.models.memory import MemoryEntry
 
 logger = structlog.get_logger(__name__)
@@ -123,6 +123,39 @@ _PII_PATTERNS: list[tuple[PIIType, re.Pattern[str], float]] = [
 _MIN_ENTROPY_TOKEN_LEN = 20
 _DEFAULT_ENTROPY_THRESHOLD = 4.5
 
+# ReDoS hardening for caller-supplied custom patterns. Python's ``re`` engine
+# has no execution timeout, so a single pathological pattern could hang the
+# store path on attacker-influenced text. We bound count + length and reject
+# the classic catastrophic-backtracking shapes (a quantifier applied to a group
+# that itself ends in a quantifier, e.g. ``(a+)+`` / ``(a*)*`` / ``(a+)*``).
+_MAX_CUSTOM_PATTERNS = 50
+_MAX_CUSTOM_PATTERN_LEN = 1000
+# Matches a quantifier ( * + {m,n} ) applied to a ``)`` that closes a group
+# whose final atom is itself quantified ( * + {m,n} ) — the nested-quantifier
+# ReDoS trigger. Examples caught: (a+)+ (a*)* (\d+)* (x{1,3}){2,} (ab+)+
+_INNER_QUANTIFIER = r"(?:[*+]|\{\d+(?:,\d*)?\})"
+_OUTER_QUANTIFIER = r"(?:[*+]|\{\d+(?:,\d*)?\})"
+_NESTED_QUANTIFIER = re.compile(r"\([^)]*" + _INNER_QUANTIFIER + r"\)\s*" + _OUTER_QUANTIFIER)
+
+
+def _validate_custom_pattern(raw_pattern: str) -> None:
+    """Reject custom patterns that risk catastrophic backtracking (ReDoS).
+
+    Raises:
+        ConfigError: If the pattern is too long or contains a nested-quantifier
+            backtracking trigger.
+    """
+    if len(raw_pattern) > _MAX_CUSTOM_PATTERN_LEN:
+        raise ConfigError(
+            f"custom PII pattern exceeds {_MAX_CUSTOM_PATTERN_LEN} chars "
+            f"(got {len(raw_pattern)}); rejected as a ReDoS safety measure"
+        )
+    if _NESTED_QUANTIFIER.search(raw_pattern):
+        raise ConfigError(
+            "custom PII pattern contains a nested quantifier "
+            "(catastrophic-backtracking risk); rejected as a ReDoS safety measure"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Core functions
@@ -185,7 +218,14 @@ def detect_pii(
             for m in pattern.finditer(text)
         )
 
-    for raw_pattern in custom_patterns or []:
+    patterns = custom_patterns or []
+    if len(patterns) > _MAX_CUSTOM_PATTERNS:
+        raise ConfigError(
+            f"too many custom PII patterns: {len(patterns)} > {_MAX_CUSTOM_PATTERNS} "
+            "(rejected as a ReDoS / resource-exhaustion safety measure)"
+        )
+    for raw_pattern in patterns:
+        _validate_custom_pattern(raw_pattern)
         pattern = re.compile(raw_pattern)
         matches.extend(
             PIIMatch(
