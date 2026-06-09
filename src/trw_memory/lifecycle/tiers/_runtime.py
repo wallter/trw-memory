@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from collections import OrderedDict
 from pathlib import Path
 
 import structlog
@@ -15,7 +16,13 @@ from trw_memory.storage.interface import StorageBackend
 
 logger = structlog.get_logger(__name__)
 
-_TIER_MANAGER_CACHE: dict[tuple[str, str, str], TierManager] = {}
+# Bounded LRU of process-local TierManagers. Each manager holds an open
+# SQLite connection (its warm-tier backend), so an unbounded cache leaks one
+# connection per distinct (storage_path, backend, namespace) key forever. On
+# overflow we close() the evicted (least-recently-used) manager before dropping
+# it so the connection is released.
+_TIER_MANAGER_CACHE_MAX = 32
+_TIER_MANAGER_CACHE: OrderedDict[tuple[str, str, str], TierManager] = OrderedDict()
 _TIER_MANAGER_CACHE_LOCK = threading.Lock()
 
 
@@ -76,8 +83,18 @@ def get_tier_manager(config: MemoryConfig, namespace: str) -> TierManager:
         if manager is None:
             manager = TierManager(base_dir=namespace_storage_dir(config, namespace), config=config, namespace=namespace)
             _TIER_MANAGER_CACHE[key] = manager
+            # Evict the least-recently-used managers if we're over the cap,
+            # closing each one first so its SQLite connection is released.
+            while len(_TIER_MANAGER_CACHE) > _TIER_MANAGER_CACHE_MAX:
+                evicted_key, evicted_manager = _TIER_MANAGER_CACHE.popitem(last=False)
+                try:
+                    evicted_manager.close()
+                except Exception:
+                    logger.warning("tier_manager_cache_evict_close_failed", cache_key=evicted_key, exc_info=True)
         else:
             manager.update_config(config)
+            # Mark as most-recently-used.
+            _TIER_MANAGER_CACHE.move_to_end(key)
         return manager
 
 
