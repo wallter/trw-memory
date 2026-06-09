@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import pytest
 from trw_memory.storage._snapshot import (
     SnapshotError,
     create_snapshot,
+    latest_snapshot,
     list_snapshots,
     restore_from_snapshot,
     rotate_snapshots,
@@ -341,3 +343,150 @@ def test_restore_raises_when_snapshot_missing(tmp_path: Path) -> None:
     dest = tmp_path / "memory.db"
     with pytest.raises(SnapshotError, match="snapshot not found"):
         restore_from_snapshot(base, ghost, dest)
+
+
+# ---------------------------------------------------------------------------
+# latest_snapshot — newest across BOTH tiers (P2 restore semantics fix)
+# ---------------------------------------------------------------------------
+
+
+def _seed(tmp_path: Path, *, daily: Sequence[str] = (), weekly: Sequence[str] = ()) -> None:
+    daily_dir = snapshots_base_dir(tmp_path) / "daily"
+    weekly_dir = snapshots_base_dir(tmp_path) / "weekly"
+    daily_dir.mkdir(parents=True, exist_ok=True)
+    weekly_dir.mkdir(parents=True, exist_ok=True)
+    for name in daily:
+        (daily_dir / name).write_bytes(b"x")
+    for name in weekly:
+        (weekly_dir / name).write_bytes(b"x")
+
+
+def test_latest_snapshot_none_when_empty(tmp_path: Path) -> None:
+    assert latest_snapshot(tmp_path) is None
+
+
+def test_latest_snapshot_prefers_newer_weekly_over_older_daily(tmp_path: Path) -> None:
+    """The core P2 fix: a newer weekly must beat an older daily.
+
+    2026-W15 spans Apr 6-12; its snapshot date (Sunday) is 2026-04-12, which
+    is newer than the 2026-04-05 daily. The old ``daily or weekly`` logic
+    wrongly returned the stale daily.
+    """
+    _seed(tmp_path, daily=["2026-04-05.db"], weekly=["2026-W15.db"])
+    chosen = latest_snapshot(tmp_path)
+    assert chosen is not None
+    assert chosen.name == "2026-W15.db"
+
+
+def test_latest_snapshot_prefers_newer_daily_over_older_weekly(tmp_path: Path) -> None:
+    _seed(tmp_path, daily=["2026-04-20.db"], weekly=["2026-W15.db"])
+    chosen = latest_snapshot(tmp_path)
+    assert chosen is not None
+    assert chosen.name == "2026-04-20.db"
+
+
+def test_latest_snapshot_daily_only(tmp_path: Path) -> None:
+    _seed(tmp_path, daily=["2026-04-10.db", "2026-04-12.db"])
+    chosen = latest_snapshot(tmp_path)
+    assert chosen is not None
+    assert chosen.name == "2026-04-12.db"
+
+
+def test_latest_snapshot_weekly_only(tmp_path: Path) -> None:
+    _seed(tmp_path, weekly=["2026-W12.db", "2026-W15.db"])
+    chosen = latest_snapshot(tmp_path)
+    assert chosen is not None
+    assert chosen.name == "2026-W15.db"
+
+
+def test_latest_snapshot_prefers_daily_on_same_date_tie(tmp_path: Path) -> None:
+    """2026-W15's Sunday is 2026-04-12. A same-date daily must win the tie."""
+    _seed(tmp_path, daily=["2026-04-12.db"], weekly=["2026-W15.db"])
+    chosen = latest_snapshot(tmp_path)
+    assert chosen is not None
+    assert chosen.name == "2026-04-12.db"
+
+
+def test_latest_snapshot_ignores_unparseable_names(tmp_path: Path) -> None:
+    _seed(tmp_path, daily=["junk.db", "2026-04-10.db"], weekly=["not-a-week.db"])
+    chosen = latest_snapshot(tmp_path)
+    assert chosen is not None
+    assert chosen.name == "2026-04-10.db"
+
+
+# ---------------------------------------------------------------------------
+# handle_restore --from-snapshot latest — integrated CLI path
+# ---------------------------------------------------------------------------
+
+
+def test_handle_restore_latest_picks_newer_weekly(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """End-to-end: restore 'latest' must recover the newer weekly snapshot."""
+    import argparse
+
+    from trw_memory.cli_storage import handle_restore
+    from trw_memory.models.config import MemoryConfig
+
+    base = tmp_path
+    src = base / "memory.db"
+    # Newer weekly (2 rows) and older daily (5 rows) — newer weekly must win.
+    _make_db(src, rows=5)
+    take_daily_snapshot(base, src, keep_daily=7, now=datetime(2026, 4, 5, tzinfo=timezone.utc))
+    _make_db(src, rows=2)  # rewrite source so the weekly has distinct content
+    src.unlink()
+    _make_db(src, rows=2)
+    take_weekly_snapshot(base, src, keep_weekly=4, now=datetime(2026, 4, 12, tzinfo=timezone.utc))
+
+    args = argparse.Namespace(
+        namespace="default",
+        db=str(src),
+        from_cold=False,
+        from_snapshot="latest",
+    )
+    rc = handle_restore(args, config_cls=MemoryConfig)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "2026-W15.db" in out
+    # Restored content is the newer weekly (2 rows), not the stale daily (5).
+    assert _row_count(src) == 2
+
+
+def test_handle_restore_latest_no_snapshots_returns_1(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    import argparse
+
+    from trw_memory.cli_storage import handle_restore
+    from trw_memory.models.config import MemoryConfig
+
+    args = argparse.Namespace(
+        namespace="default",
+        db=str(tmp_path / "memory.db"),
+        from_cold=False,
+        from_snapshot="latest",
+    )
+    rc = handle_restore(args, config_cls=MemoryConfig)
+    assert rc == 1
+    assert "No snapshots found" in capsys.readouterr().err
+
+
+def test_handle_restore_explicit_filename_still_works(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Explicit snapshot path behavior must be preserved (scope constraint)."""
+    import argparse
+
+    from trw_memory.cli_storage import handle_restore
+    from trw_memory.models.config import MemoryConfig
+
+    base = tmp_path
+    src = base / "memory.db"
+    _make_db(src, rows=3)
+    take_daily_snapshot(base, src, keep_daily=7, now=datetime(2026, 4, 13, tzinfo=timezone.utc))
+    src.unlink()
+
+    args = argparse.Namespace(
+        namespace="default",
+        db=str(src),
+        from_cold=False,
+        from_snapshot="2026-04-13.db",
+    )
+    rc = handle_restore(args, config_cls=MemoryConfig)
+    assert rc == 0
+    assert "2026-04-13.db" in capsys.readouterr().out
+    assert _row_count(src) == 3

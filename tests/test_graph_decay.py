@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import tracemalloc
 from datetime import datetime, timezone
 
@@ -176,3 +177,49 @@ class TestMemoryDecayPassBatch:
         assert result["remaining"] == 49_000
         assert result["total_decayed"] == 1000
         assert peak < 512 * 1024 * 1024
+
+
+class TestMemoryDecayPassLockDiscipline:
+    """Verify SELECT and COUNT run inside the caller-supplied lock scope.
+
+    The fix moves both READ operations (SELECT batch + COUNT) inside the
+    with _optional_lock_safe(lock) block so they are serialised with respect
+    to concurrent backend writes that hold the same lock. Tests verify the
+    observable side-effects of that guarantee.
+    """
+
+    def test_remaining_count_is_consistent_with_processed(self) -> None:
+        """SELECT (batch rows) and COUNT (total qualifying) must execute
+        under the same lock so 'remaining = total - processed' is always
+        non-negative and consistent. Previously the two queries ran outside
+        the lock, allowing a concurrent delete to make remaining go negative.
+        """
+        conn = _make_conn()
+        old_date = "2020-01-01T00:00:00+00:00"
+        for i in range(5):
+            _insert_memory_row(conn, f"e{i}", cross_validated=1, last_accessed_at=old_date, importance=0.6)
+
+        lock = threading.Lock()
+        result = memory_decay_pass(conn, cutoff_days=90, batch_size=3, lock=lock)
+
+        assert result["processed"] == 3
+        assert result["remaining"] == 2
+        assert result["remaining"] >= 0, "remaining must never be negative"
+
+    def test_lock_passed_does_not_block_single_threaded_caller(self) -> None:
+        """Passing a Lock should not cause a deadlock when called from a
+        single thread (the lock is not already held by the caller). The
+        function must acquire + release it correctly.
+        """
+        conn = _make_conn()
+        old_date = "2020-01-01T00:00:00+00:00"
+        _insert_memory_row(conn, "e1", cross_validated=1, last_accessed_at=old_date, importance=0.5)
+
+        lock = threading.Lock()
+        result = memory_decay_pass(conn, cutoff_days=90, lock=lock)
+
+        assert result["processed"] == 1
+        # Lock must be released after the call completes.
+        acquired = lock.acquire(blocking=False)
+        assert acquired, "Lock was not released after memory_decay_pass returned"
+        lock.release()

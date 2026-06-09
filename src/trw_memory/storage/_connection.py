@@ -160,6 +160,35 @@ def open_without_integrity_check(
     return conn
 
 
+def check_integrity(
+    db_path: Path,
+    *,
+    dbapi: Any = sqlite3,
+    sqlcipher_key_hex: str | None = None,
+) -> dict[str, object]:
+    """Check database integrity without opening a full backend.
+
+    Re-exported as ``SQLiteBackend.check_integrity`` for back-compat.
+
+    Returns:
+        Dict with ``ok`` (bool), ``detail`` (str), and ``db_path``.
+    """
+    try:
+        conn = connect(
+            db_path,
+            dbapi=dbapi,
+            timeout=5.0,
+            check_same_thread=True,
+            sqlcipher_key_hex=sqlcipher_key_hex,
+        )
+        rows = conn.execute("PRAGMA quick_check").fetchall()
+        conn.close()
+        healthy = len(rows) == 1 and rows[0][0] == "ok"
+        return {"ok": healthy, "detail": rows[0][0] if rows else "empty", "db_path": str(db_path)}
+    except sqlite3.DatabaseError as exc:
+        return {"ok": False, "detail": str(exc), "db_path": str(db_path)}
+
+
 def db_has_data(
     db_path: Path,
     *,

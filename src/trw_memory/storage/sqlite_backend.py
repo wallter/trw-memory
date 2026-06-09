@@ -86,6 +86,7 @@ from trw_memory.storage._corrupt_backup import (
 # Connection-management helpers extracted to _connection.py (PRD-DIST-245
 # batch 82). Re-exports preserve the public API surface.
 from trw_memory.storage._connection import (
+    check_integrity as _connection_check_integrity,
     connect as _connection_connect,
     db_has_data as _connection_db_has_data,
     open_and_configure as _connection_open_and_configure,
@@ -299,32 +300,10 @@ class SQLiteBackend(StorageBackend):
         """Delegate to ``_stale_handle.run_integrity_check``."""
         return _stale_handle_run_integrity_check(self)
 
-    @staticmethod
-    def check_integrity(
-        db_path: Path,
-        *,
-        dbapi: Any = sqlite3,
-        sqlcipher_key_hex: str | None = None,
-    ) -> dict[str, object]:
-        """Public utility: check database integrity without opening a full backend.
-
-        Returns:
-            Dict with ``ok`` (bool), ``detail`` (str), and ``db_path``.
-        """
-        try:
-            conn = SQLiteBackend._connect(
-                db_path,
-                dbapi=dbapi,
-                timeout=5.0,
-                check_same_thread=True,
-                sqlcipher_key_hex=sqlcipher_key_hex,
-            )
-            rows = conn.execute("PRAGMA quick_check").fetchall()
-            conn.close()
-            healthy = len(rows) == 1 and rows[0][0] == "ok"
-            return {"ok": healthy, "detail": rows[0][0] if rows else "empty", "db_path": str(db_path)}
-        except sqlite3.DatabaseError as exc:
-            return {"ok": False, "detail": str(exc), "db_path": str(db_path)}
+    # Public integrity probe delegated to ``_connection.check_integrity``;
+    # kept as a staticmethod alias so ``SQLiteBackend.check_integrity`` callers
+    # and test patches resolve unchanged.
+    check_integrity = staticmethod(_connection_check_integrity)
 
     # ------------------------------------------------------------------
     # Public property

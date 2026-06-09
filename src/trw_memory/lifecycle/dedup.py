@@ -315,17 +315,25 @@ def batch_dedup(
         skip_threshold = 0.95
         merge_threshold = 0.85
 
-    # Load all active entries with their embeddings
-    active_entries: list[tuple[MemoryEntry, list[float] | None]] = []
-    for entry in entries:
-        if entry.status != MemoryStatus.ACTIVE:
-            continue
-        text = entry.content + " " + entry.detail
-        vec = embedder.embed(text)
-        active_entries.append((entry, vec))
+    # Collect active entries then batch-embed in a single model call so the
+    # embedding provider (sentence-transformers, etc.) can process all texts
+    # together instead of N individual round-trips. This is the documented
+    # "dedup batch embed" optimisation (MEMORY.md). The previous loop called
+    # embedder.embed() per entry, defeating batching entirely.
+    only_active = [e for e in entries if e.status == MemoryStatus.ACTIVE]
+    texts = [e.content + " " + e.detail for e in only_active]
+    vectors = embedder.embed_batch(texts) if texts else []
+    active_entries: list[tuple[MemoryEntry, list[float] | None]] = [
+        (entry, vec) for entry, vec in zip(only_active, vectors, strict=True)
+    ]
 
     merged_count = 0
     skipped_ids: set[str] = set()
+    # Snapshot originals BEFORE the mutation loop so the survivor-changed check
+    # at the end compares against pre-merge state, not post-merge state.
+    # (Bug: building original_map after the loop means merged_i == orig → always
+    # False → merged survivor silently dropped from updated_entries.)
+    original_map: dict[str, MemoryEntry] = {e.id: e for e, _ in active_entries}
     # Track updated entries by id
     updated_map: dict[str, MemoryEntry] = {e.id: e for e, _ in active_entries}
 
@@ -375,8 +383,7 @@ def batch_dedup(
                 skipped_ids.add(id_j)
                 merged_count += 1
 
-    # Collect all modified entries (only those that changed)
-    original_map = {e.id: e for e, _ in active_entries}
+    # Collect all modified entries (only those that changed vs the pre-loop snapshot)
     updated_entries: list[MemoryEntry] = []
     for entry_id, current in updated_map.items():
         orig = original_map.get(entry_id)

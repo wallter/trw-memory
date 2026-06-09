@@ -20,9 +20,79 @@ All notable changes to the TRW Memory package.
   surface live in the trw-mcp layer (see trw-mcp 0.55.0). Additive and backward-compatible: existing
   single-namespace projects are unaffected, and the opt-in backfill is non-destructive.
 
+- **Explicit code index — MCP tools + CLI.** `memory_code_index`, `memory_code_search`, and
+  `memory_code_symbol` MCP tools (registered by `tools/code_index.py`) and the matching
+  `trw-memory code-index` / `code-search` / `code-symbol` CLI subcommands expose the
+  `code_index/` chunker/indexer/symbol/search engine for lexical code search and symbol lookup.
+- **Wiki lint — MCP tool + CLI.** `memory_wiki_lint` MCP tool and the `trw-memory wiki-lint`
+  CLI subcommand lint wiki page JSON for missing targets, backlinks, and provenance gaps,
+  backed by the `wiki/` indexer/lint package.
+
+### Changed
+
+- **Effective-LOC ratchet brought back to green (PRD-DIST-245).** Three modules had grown
+  past the 350-effective-LOC module gate; each was split along an existing cohesive seam,
+  preserving every public API and the documented monkeypatch seams via re-exports / a mixin:
+  - `storage/_recovery.py` (370 → 279): the bounded open-time preflight + advisory
+    recovery-state sidecar (`RecoveryPreflight`, `classify_recovery_preflight`,
+    `write_recovery_state`, `recovery_state_path`, `_read_persisted_recovery_status`) moved
+    to the new `storage/_recovery_preflight.py`; `_recovery.py` re-exports the four public
+    names so `_init_helpers` and tests resolve them unchanged.
+  - `storage/sqlite_backend.py` (465 → 446, baseline lowered 463 → 446): the standalone
+    `check_integrity` probe moved to `storage/_connection.py` (`check_integrity`); the
+    backend keeps a `staticmethod` alias so `SQLiteBackend.check_integrity` callers and
+    patches are unaffected.
+  - `client.py` (388 → 338, removed from the baseline): the org-shared recall alias group
+    (`_merge_shared_results`, `_coerce_float`, `_dedupe_cached_shared_results`, …) moved to
+    the new `OrgSharedAliasMixin` (`_client_org_shared_aliases.py`), mixed into
+    `MemoryClient` so `self._X` / `MemoryClient._X` resolution is unchanged via the MRO.
+- **Documentation accuracy pass.** README, `tests/CLAUDE.md`, and this changelog were
+  reconciled against the source tree — the MCP tool list (now store/recall/search/forget/
+  consolidate/status/audit/review/wiki-lint/code-index/search/symbol), the CLI command set
+  (restore/snapshot/wiki-lint/code-*), the `MemoryClient` public surface
+  (`bulk_store`/`audit_learning`/`review_quarantined`), optional-dependency extras
+  (`[encryption]`, `[all-integrations]`), and the architecture overview were corrected, and
+  drift-prone hardcoded file/test/LOC counts were de-quantified.
+- **Hybrid recall pipeline extracted to its own deep module.** `_client_recall.py` (482
+  effective LOC, over the 350-LOC module gate) had the BM25 + dense + RRF pipeline
+  (`try_hybrid_recall`) and its private latency-telemetry helper
+  (`_emit_hybrid_recall_telemetry`) split into a new `_client_recall_hybrid.py` (154
+  effective LOC). The new module presents one narrow interface —
+  `try_hybrid_recall(...) -> list[MemoryResultDict] | None`, where `None` signals
+  fall-back — over a deep implementation (candidate-pool sizing, namespace-aware
+  BM25/vector candidate auto-scaling, RRF top-K depth, per-recall telemetry).
+  `_client_recall.py` re-exports `try_hybrid_recall`, so `MemoryClient._try_hybrid_recall`
+  and all public/back-compat imports are unchanged. Brings `_client_recall.py` to 341
+  effective LOC; behavior-preserving (no public API or recall-result change).
+
 ### Fixed
 
+- **Resolved `_client_recall.py` effective-LOC debt was removed from the root baseline.**
+  The module was already split below the 350 effective-LOC gate; the stale grandfathered
+  allowance is now gone so future growth above the gate fails instead of passing under an
+  obsolete baseline entry.
 
+- **Focused Ruff validation for sync tests is green again.** Removed a stale unused `time` import
+  from `tests/test_sync_retry_queue.py` and normalized the `InstrumentedLock` return annotation in
+  `tests/test_sync_delta.py` now that `from __future__ import annotations` is active.
+
+- **Lock/version hygiene: uv.lock, requirements.lock, and pyproject realigned.** `pyproject.toml`
+  had been bumped to `0.8.5` while `uv.lock` still recorded the package at `0.8.1` (and was missing
+  the `pysqlite3-binary` Linux dependency), so `uv lock --check` failed. Regenerated `uv.lock` with
+  `uv lock` (no dependency upgrades — only the version bump and the already-declared
+  `pysqlite3-binary` pin). `requirements.lock` pinned the editable self-reference to a frozen git
+  commit (`...trw-framework.git@0c7d4263...#egg=trw_memory`) that drifts the moment `main` advances;
+  normalised it to a path install (`-e .`) so it never goes stale. Added two `tests/test_package.py`
+  guards: `test_uv_lock_version_matches_pyproject` and `test_requirements_lock_has_no_stale_self_pin`.
+- **`restore --from-snapshot latest` now picks the newest snapshot across BOTH tiers.**
+  `handle_restore` resolved `latest` with `listing["daily"] or listing["weekly"]`, so any
+  daily snapshot beat every weekly snapshot even when a weekly was strictly newer —
+  recovery-hostile, since `latest` could silently restore a stale daily over a fresher
+  weekly backup. A new `_snapshot.latest_snapshot(base_dir)` helper compares snapshots
+  across the daily and weekly tiers by the calendar date their filename encodes (weekly
+  `YYYY-Www` maps to its Sunday, ISO weekday 7), returning the newest; on a same-date tie the
+  finer-grained daily is preferred. Explicit-filename restore is unchanged. The `--from-snapshot`
+  help text now states `latest` means newest across tiers. (Reviewer P2.)
 - **Resilient fetch fast path now quarantines unmappable rows, not just bad-UTF-8 rows.**
   The common (non-fallback) row-materialisation loop in `fetch_rows_resilient` only caught
   `UnicodeDecodeError`/`UnicodeEncodeError`, so a single row whose columns decoded cleanly but

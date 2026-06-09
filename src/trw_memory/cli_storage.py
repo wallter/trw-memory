@@ -214,6 +214,7 @@ def handle_restore(
     from trw_memory.storage._schema import ensure_schema
     from trw_memory.storage._snapshot import (
         SnapshotError,
+        latest_snapshot,
         list_snapshots,
         restore_from_snapshot,
         snapshots_base_dir,
@@ -222,14 +223,14 @@ def handle_restore(
     base_dir, db_path = resolve_base_and_db(args, config_cls=config_cls)
     if getattr(args, "from_snapshot", None) is not None:
         target = str(args.from_snapshot).strip()
-        listing = list_snapshots(base_dir)
         if target == "latest":
-            candidates = listing["daily"] or listing["weekly"]
-            if not candidates:
+            snapshot_latest = latest_snapshot(base_dir)
+            if snapshot_latest is None:
                 print("No snapshots found to restore from.", file=sys.stderr)
                 return 1
-            snapshot = candidates[0]
+            snapshot = snapshot_latest
         else:
+            listing = list_snapshots(base_dir)
             snapshot_match = next((p for tier in listing.values() for p in tier if p.name == target), None)
             if snapshot_match is None:
                 candidate = snapshots_base_dir(base_dir) / target

@@ -186,8 +186,12 @@ def entries_with_assertions(
     if status is not None:
         where_sql = f"{where_sql} AND status = ?"
         params = (status.value,)
-    sql = f"SELECT {select_columns_sql} FROM memories WHERE {where_sql}"  # noqa: S608
-    fetch_query = backend._fetch_query(where_sql=where_sql, params=params, order_by="updated_at DESC")
+    order_by = "updated_at DESC"
+    sql = (
+        f"SELECT {select_columns_sql} FROM memories WHERE {where_sql} "  # noqa: S608
+        f"ORDER BY {order_by}"
+    )
+    fetch_query = backend._fetch_query(where_sql=where_sql, params=params, order_by=order_by)
     backend._ensure_connection_fresh()
     try:
         with backend._lock:

@@ -8,10 +8,10 @@
 
 ## Part of TRW Framework
 
-trw-memory is the standalone memory engine for [TRW (The Real Work)](https://trwframework.com) — a methodology layer for AI-assisted development that provides stateless agents with a persistent memory layer **designed to enable self-improvement across sessions** via [knowledge compounding](https://trwframework.com/docs). *The outcome effect of cross-session memory on coding tasks is an open empirical question; iter-9/10 produced null on SWE-bench-single-shot at n≥40. See [docs/eval/iter-notes/iter-11-prospector-analysis.md](https://github.com/wallter/trw-framework/blob/main/docs/eval/iter-notes/iter-11-prospector-analysis.md).* It works alongside [trw-mcp](https://github.com/wallter/trw-mcp), the MCP server that provides 24 tools built on this engine.
+trw-memory is the standalone memory engine for [TRW (The Real Work)](https://trwframework.com) — a methodology layer for AI-assisted development that provides stateless agents with a persistent memory layer **designed to enable self-improvement across sessions** via [knowledge compounding](https://trwframework.com/docs). *The outcome effect of cross-session memory on coding tasks is an open empirical question; iter-9/10 produced null on SWE-bench-single-shot at n≥40. See [docs/eval/iter-notes/iter-11-prospector-analysis.md](https://github.com/wallter/trw-framework/blob/main/docs/eval/iter-notes/iter-11-prospector-analysis.md).* It works alongside [trw-mcp](https://github.com/wallter/trw-mcp), the MCP server that builds its tooling on this engine.
 
 - **trw-memory** (this repo): Standalone AI agent memory engine with hybrid retrieval, scoring, and lifecycle
-- **trw-mcp**: MCP server with 25 tools, 24 skills, 12 agents — uses trw-memory as its backend
+- **trw-mcp**: MCP server for AI coding agents — uses trw-memory as its backend
 
 ## What It Does
 
@@ -21,7 +21,7 @@ Designed as the storage backend for [trw-mcp](https://github.com/wallter/trw-mcp
 
 ## Features
 
-- **MemoryClient SDK** -- High-level async Python client with store/recall/forget/search
+- **MemoryClient SDK** -- High-level async Python client with store/bulk_store/recall/forget/search plus audit_learning and review_quarantined
 - **Hybrid Search (BM25 + vector)** -- BM25 keyword matching + dense vector similarity via sqlite-vec, combined with Reciprocal Rank Fusion (RRF). [Learn more](https://trwframework.com/docs)
 - **Hybrid order preservation by default** -- recall preserves the hybrid BM25+dense+RRF order when enough local candidates are already available, avoiding a legacy score-scale mismatch in tier merging. To restore the legacy tier rescore for a workload, set `MEMORY_RECALL_PRESERVE_HYBRID_ORDER=false`.
 - **Tiered Storage** -- Hot/warm/cold tiers for fast recall, warm-sidecar persistence, recall-time cold promotion, and explicit sweep-based archiving/purging. [Architecture details](https://trwframework.com/docs)
@@ -34,7 +34,7 @@ Designed as the storage backend for [trw-mcp](https://github.com/wallter/trw-mcp
 - **Agent Integration** -- `register_tools()` for any agent framework, `@auto_recall` decorator
 - **Framework Integrations** -- LangChain memory, LlamaIndex reader/writer, CrewAI component, OpenAI-compatible adapter
 - **CLI** -- Full command-line interface for store, recall, search, forget, consolidate, export/import
-- **MCP Tools** -- 6 tools for store, recall, search, consolidate, forget, and status
+- **MCP Tools** -- store, recall, search, consolidate, forget, status, audit, review, wiki-lint, and an explicit code index (index/search/symbol) — exposed via the optional `[mcp]` extra
 - **Dual Storage Backends** -- SQLite with keyword search (primary) + YAML (backup) with one-time migration
 
 ## Quick Start
@@ -54,6 +54,11 @@ pip install -e ".[all]"
 ```
 
 By default, memories are stored in `.memory/` relative to the current directory. Override with `MEMORY_STORAGE_PATH` env var.
+
+### Platform notes
+
+- **SQLite driver** — On Linux, `trw-memory` depends on `pysqlite3-binary`, which bundles a recent SQLite (≥3.51) wheel that includes the WAL-reset corruption fix. `pysqlite3-binary` publishes manylinux wheels only, so **macOS and Windows fall back to the interpreter's stdlib `sqlite3`** via the `storage/_dbapi.py` driver shim. Where the bundled SQLite predates the fix, a single-connection WAL-checkpoint window mitigates the concurrent-writer corruption path.
+- **Vector search is optional** — `[vectors]` (sqlite-vec) and `[embeddings]` (sentence-transformers) are optional extras. When they are unavailable the retrieval pipeline degrades gracefully to BM25 and/or the backend's built-in keyword search rather than failing.
 
 ### MemoryClient (recommended)
 
@@ -76,6 +81,18 @@ async with MemoryClient(namespace="project:my-app") as client:
 
     # Forget an entry
     await client.forget(results[0]["memory_id"])
+
+    # Store many entries in one call
+    await client.bulk_store([
+        {"content": "Use BEGIN IMMEDIATE for write transactions", "tags": ["sqlite"]},
+        {"content": "RRF k=60 is the default fusion constant", "tags": ["retrieval"]},
+    ])
+
+    # Inspect provenance/lifecycle for one entry
+    audit = await client.audit_learning(results[0]["memory_id"])
+
+    # Review entries quarantined by the poisoning/PII defenses
+    quarantined = await client.review_quarantined()
 ```
 
 ### Agent Framework Integration
@@ -115,6 +132,26 @@ trw-memory consolidate --namespace project:my-app --dry-run
 trw-memory export --format json > memories.json
 trw-memory import memories.json --namespace project:new-app
 
+# Forget an entry by ID
+trw-memory forget M-abc12345 --namespace project:my-app
+
+# Rebuild the SQLite DB from the cold YAML tier or a snapshot
+trw-memory restore --from-cold
+trw-memory restore --from-snapshot latest
+
+# Snapshot management (VACUUM INTO rotation)
+trw-memory snapshot create --tier daily
+trw-memory snapshot list
+trw-memory snapshot rotate
+
+# Lint wiki page JSON for missing targets/backlinks/provenance
+trw-memory wiki-lint pages.json
+
+# Explicit code index: index, lexical search, and symbol lookup
+trw-memory code-index ./src
+trw-memory code-search ./src "hybrid_search" --language python --limit 5
+trw-memory code-symbol ./src MemoryClient
+
 # Status overview
 trw-memory status
 ```
@@ -133,86 +170,26 @@ results = backend.search("query", top_k=10, namespace="default")
 
 ## Architecture
 
-```
-src/trw_memory/
-  client.py              # MemoryClient SDK (recommended entry point)
-  cli.py                 # CLI entry point (trw-memory command)
-  cli_parser.py          # Argument parsing for CLI
-  cli_formatters.py      # Output formatting for CLI
-  decorators.py          # @auto_recall decorator
-  exceptions.py          # Custom exception hierarchy
-  graph.py               # Knowledge graph (similarity/tag/consolidation edges, BFS)
-  namespace.py           # Namespace validation
-  server.py              # FastMCP MCP server entry point
-  storage/
-    sqlite_backend.py    # Primary: SQLite with keyword search, WAL mode, sqlite-vec vectors
-    yaml_backend.py      # Legacy: per-entry YAML files (backup/migration)
-    interface.py         # Abstract StorageBackend protocol
-    persistence.py       # Atomic read/write helpers
-    _schema.py           # DDL schema definitions
-    _row_mapper.py       # Row-to-model mapping
-    _shared.py           # Shared storage utilities
-    _parsing.py          # Query/filter parsing helpers
-  retrieval/
-    bm25.py              # BM25Okapi sparse retrieval (rank-bm25)
-    dense.py             # Cosine similarity dense vector search
-    fusion.py            # Reciprocal Rank Fusion (RRF, k=60)
-    pipeline.py          # hybrid_search() orchestrator (BM25 + dense + RRF)
-  embeddings/
-    interface.py         # Embedding provider protocol
-    local.py             # Local sentence-transformers provider
-  lifecycle/
-    scoring.py           # Q-learning, Ebbinghaus decay, Bayesian calibration
-    dedup.py             # Semantic dedup (cosine threshold, merge/skip logic)
-    consolidation.py     # Consolidation clustering with fallback summarization
-    verification.py      # Entry verification utilities
-    _utils.py            # Shared lifecycle helpers
-    tiers/               # Hot/warm/cold tier management
-      _manager.py        # Tier assignment and transitions
-      _sweep.py          # Periodic sweep logic (promote/demote/purge)
-      _scoring.py        # Tier-specific scoring
-      _warm.py           # Warm tier operations
-      _cold.py           # Cold tier archival
-  sync/
-    remote.py            # Publish/fetch to platform backend
-    conflict.py          # Vector clock comparison + three-way merge
-    retry_queue.py       # Persistent JSONL retry queue
-    subscriber.py        # SSE subscriber for live updates
-  security/
-    encryption.py        # AES-256-GCM with HKDF per-namespace keys
-    pii.py               # PII detection (email, phone, SSN, API keys, entropy)
-    poisoning.py         # Anomaly detection (z-score frequency/size/pattern)
-    audit.py             # Append-only security event audit trail
-    rbac.py              # Role-based access control for namespaces
-    keys.py              # Master key derivation and rotation
-  tools/                 # 6 MCP tool implementations
-    store.py             # memory_store (validate + write + optional vector persistence)
-    recall.py            # memory_recall (hybrid search + graph traversal)
-    search.py            # memory_search (filter-based listing)
-    forget.py            # memory_forget (namespace-scoped deletion)
-    consolidate.py       # memory_consolidate (trigger consolidation)
-    status.py            # memory_status (backend stats + tier info)
-  integrations/
-    langchain.py         # LangChain memory class
-    llamaindex.py        # LlamaIndex reader/writer
-    crewai.py            # CrewAI memory component
-    factory.py           # Auto-detect framework and create adapter
-    vscode.py            # VS Code extension adapter
-  adapters/
-    openai_compat.py     # OpenAI Memory API compatible endpoint
-  models/
-    config.py            # MemoryConfig (pydantic-settings)
-    memory.py            # MemoryEntry, MemoryStatus
-    events.py            # Audit event models
-  namespaces/
-    manager.py           # Namespace lifecycle (create, expire, list)
-    validation.py        # Namespace format validation
-    path_mapping.py      # Namespace-to-path resolution
-  migration/
-    from_trw.py          # YAML-to-SQLite migration from trw-mcp format
-```
+The engine is organized as a set of focused subpackages under `src/trw_memory/`. (For the
+authoritative, always-current layout, browse the source tree directly — file-level listings
+drift quickly.)
 
-**92 source files, ~19,900 lines of code**
+| Path | Responsibility |
+|------|---------------|
+| `client.py` (+ `_client_*.py`) | `MemoryClient` SDK — the recommended entry point; store/recall/search/forget/bulk + lifecycle/tiering/org-shared helpers |
+| `cli.py`, `cli_parser.py`, `cli_*.py` | `trw-memory` command-line interface and its formatters/storage helpers |
+| `server.py`, `tools/` | FastMCP server entry point and the MCP tool implementations (optional `[mcp]` extra) |
+| `storage/` | SQLite primary backend (WAL, sqlite-vec vectors, snapshots, recovery, resilient fetch) + YAML backend, behind a shared `StorageBackend` interface; `_dbapi.py` driver shim |
+| `retrieval/` | BM25 sparse, dense vector, RRF fusion, and the `hybrid_search()` pipeline + admission/source policies and token budgeting |
+| `lifecycle/` | Utility scoring (Q-learning, Ebbinghaus decay, Bayesian calibration), semantic dedup, consolidation, anchor validation, and `tiers/` hot/warm/cold management |
+| `graph.py` (+ `_graph_*.py`) | Knowledge graph — similarity/tag edges, BFS traversal, clusters, conflicts, cross-project, decay |
+| `bandit/` | Bandit selectors (Thompson, contextual, change-detection) for adaptive ranking |
+| `code_index/`, `wiki/` | Explicit code index (chunker/indexer/symbols/search) and wiki page indexing + lint |
+| `embeddings/` | Embedding provider protocol + local sentence-transformers provider |
+| `sync/` | Remote publish/fetch with vector clocks, three-way merge, retry queue, SSE subscriber |
+| `security/` | AES-256-GCM field encryption, PII detection/redaction, poisoning/anomaly defense, RBAC, provenance, audit, trust scoring, quarantine |
+| `integrations/`, `adapters/` | LangChain / LlamaIndex / CrewAI / VS Code integrations and an OpenAI-compatible adapter |
+| `models/`, `namespaces/`, `migration/`, `utils/` | Pydantic models/config, namespace lifecycle + validation + path mapping, YAML→SQLite migration, and shared utilities |
 
 ## API Reference
 
@@ -220,7 +197,7 @@ src/trw_memory/
 
 | Name | Module | Description |
 |------|--------|-------------|
-| `MemoryClient` | `client` | High-level async SDK (store/recall/forget/search) |
+| `MemoryClient` | `client` | High-level async SDK — `store`, `bulk_store`, `recall`, `search`, `forget`, `audit_learning`, `review_quarantined`, `register_tools`, `auto_recall` |
 | `SQLiteBackend` | `storage.sqlite_backend` | Primary storage with keyword search, WAL, and sqlite-vec vectors |
 | `YAMLBackend` | `storage.yaml_backend` | File-based storage (backup/migration) |
 | `hybrid_search()` | `retrieval.pipeline` | BM25 + dense vector search with RRF fusion |
@@ -312,13 +289,19 @@ trw-memory-server  # Starts MCP server (stdio transport)
 | `memory_store` | Store entry with optional embedding/vector persistence |
 | `memory_recall` | Hybrid retrieval with optional graph traversal |
 | `memory_search` | Filter-based listing (tags, importance, date range) |
-| `memory_forget` | Namespace-scoped deletion |
+| `memory_forget` | Delete entries by ID or bulk search query |
 | `memory_consolidate` | Trigger episodic-to-semantic consolidation |
 | `memory_status` | Backend stats, entry counts, tier distribution |
+| `memory_audit` | Provenance + lifecycle audit data for one entry |
+| `memory_review` | Approve/reject a quarantined entry |
+| `memory_wiki_lint` | Lint wiki pages for missing targets, backlinks, provenance gaps |
+| `memory_code_index` | Index source code into the explicit code index |
+| `memory_code_search` | Lexical search over indexed code chunks |
+| `memory_code_symbol` | Look up symbols in the explicit code index |
 
 ## Integration with trw-mcp
 
-[trw-mcp](https://github.com/wallter/trw-mcp) is the MCP server layer of [TRW Framework](https://trwframework.com) — it exposes 24 tools, 24 skills, and 18 agents to Claude Code and other AI coding tools. trw-memory serves as its memory backend:
+[trw-mcp](https://github.com/wallter/trw-mcp) is the MCP server layer of [TRW Framework](https://trwframework.com) — it exposes a suite of tools, skills, and agents to Claude Code and other AI coding tools (see the [trw-mcp README](https://github.com/wallter/trw-mcp) for current counts). trw-memory serves as its memory backend:
 
 - `trw_learn` delegates to `SQLiteBackend.store()` via `memory_adapter.py` (YAML dual-write as backup)
 - `trw_recall` delegates to `SQLiteBackend.search()` / `list_entries()` as the sole query path
@@ -334,10 +317,10 @@ trw-memory-server  # Starts MCP server (stdio transport)
 # Install dev dependencies
 pip install -e ".[dev]"
 
-# Run full test suite (2,050+ tests, >=85% coverage required)
+# Run full test suite (>=85% coverage required — see fail_under in pyproject.toml)
 ../.venv/bin/python -m pytest tests/ -v --cov=trw_memory --cov-report=term-missing
 
-# Type checking (strict mode, 81 files)
+# Type checking (mypy --strict across the package)
 ../.venv/bin/python -m mypy --strict src/trw_memory/
 
 # Targeted testing
@@ -346,13 +329,14 @@ pip install -e ".[dev]"
 ../.venv/bin/python -m pytest tests/test_storage_sqlite.py -v
 ```
 
-**Current metrics**: 2,050+ tests, ~90% coverage, mypy strict clean.
+**Quality bar**: a broad pytest suite, mypy `--strict` clean, and a coverage floor of 85% (`fail_under` in `pyproject.toml`).
 
 ### Optional Dependencies
 
 | Extra | Packages | Purpose |
 |-------|----------|---------|
 | `[mcp]` | fastmcp | MCP server tools |
+| `[encryption]` | sqlcipher3, keyring, cryptography | Encrypted-at-rest DB (SQLCipher) + key storage |
 | `[embeddings]` | sentence-transformers | Dense vector embeddings (all-MiniLM-L6-v2, 384-dim) |
 | `[vectors]` | sqlite-vec | Vector similarity search in SQLite |
 | `[bm25]` | rank-bm25 | BM25 keyword search |
@@ -360,14 +344,15 @@ pip install -e ".[dev]"
 | `[langchain]` | langchain-core | LangChain memory integration |
 | `[llamaindex]` | llama-index-core | LlamaIndex reader/writer |
 | `[crewai]` | crewai | CrewAI memory component |
+| `[all-integrations]` | langchain + llamaindex + crewai | All framework integrations |
 | `[all]` | mcp + embeddings + vectors + bm25 + llm | Full feature set |
-| `[dev]` | pytest, mypy, ruff, coverage, etc. | Testing and linting |
+| `[dev]` | pytest, mypy, ruff, coverage, pip-audit, vulture, deptry | Testing and linting |
 
 ### Entry Points
 
 | Command | Purpose |
 |---------|---------|
-| `trw-memory` | CLI for store/recall/search/forget/consolidate/export/import |
+| `trw-memory` | CLI for store/recall/search/forget/consolidate/export/import, plus restore, snapshot (create/list/rotate), wiki-lint, and code-index/code-search/code-symbol |
 | `trw-memory-server` | MCP server (stdio transport) |
 
 ## License

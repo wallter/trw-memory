@@ -91,46 +91,54 @@ class RetryQueue:
         Returns:
             ``{"drained": int, "failed": int, "skipped": int}``
         """
+        # Collect work under lock, then release before sleeping/publishing so
+        # enqueue/depth/snapshot are not starved for up to ~30s per drain cycle.
+        # (Bug: original held self._lock across time.sleep(backoff_seconds) inside
+        # the loop — up to 30s of lock contention per retry.)
         with self._lock:
             entries = self._read_all()
-            if not entries:
-                return {"drained": 0, "failed": 0, "skipped": 0}
+        if not entries:
+            return {"drained": 0, "failed": 0, "skipped": 0}
 
-            remaining: list[QueueRecord] = []
-            drained = 0
-            failed = 0
-            skipped = 0
+        remaining: list[QueueRecord] = []
+        drained = 0
+        failed = 0
+        skipped = 0
 
-            for record in entries:
-                if record["retry_count"] >= MAX_RETRIES:
-                    remaining.append(record)
-                    skipped += 1
-                    continue
+        for record in entries:
+            if record["retry_count"] >= MAX_RETRIES:
+                remaining.append(record)
+                skipped += 1
+                continue
 
-                retry_count = int(record["retry_count"])
-                if retry_count > 0:
-                    backoff_seconds = min(1.0 * (2 ** (retry_count - 1)), 30.0)
-                    time.sleep(backoff_seconds)
+            retry_count = int(record["retry_count"])
+            if retry_count > 0:
+                backoff_seconds = min(1.0 * (2 ** (retry_count - 1)), 30.0)
+                # Sleep OUTSIDE the lock so concurrent enqueue/depth/snapshot
+                # are not blocked during backoff.
+                time.sleep(backoff_seconds)
 
-                try:
-                    success = publish_fn(record["payload"])
-                except (OSError, ConnectionError, ValueError) as exc:
-                    record["retry_count"] += 1
-                    record["last_error"] = str(exc)
-                    remaining.append(record)
-                    failed += 1
-                    continue
+            try:
+                success = publish_fn(record["payload"])
+            except (OSError, ConnectionError, ValueError) as exc:
+                record["retry_count"] += 1
+                record["last_error"] = str(exc)
+                remaining.append(record)
+                failed += 1
+                continue
 
-                if success:
-                    drained += 1
-                else:
-                    record["retry_count"] += 1
-                    record["last_error"] = "publish returned False"
-                    remaining.append(record)
-                    failed += 1
+            if success:
+                drained += 1
+            else:
+                record["retry_count"] += 1
+                record["last_error"] = "publish returned False"
+                remaining.append(record)
+                failed += 1
 
+        # Write results back under lock.
+        with self._lock:
             self._write_all(remaining)
-            return {"drained": drained, "failed": failed, "skipped": skipped}
+        return {"drained": drained, "failed": failed, "skipped": skipped}
 
     def clear(self) -> None:
         """Clear the entire retry queue."""

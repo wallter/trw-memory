@@ -36,6 +36,7 @@ __all__ = [
     "SnapshotError",
     "SnapshotRotationResult",
     "create_snapshot",
+    "latest_snapshot",
     "list_snapshots",
     "restore_from_snapshot",
     "rotate_snapshots",
@@ -295,6 +296,57 @@ def list_snapshots(base_dir: Path) -> dict[str, list[Path]]:
         "daily": _sorted_parseable(_daily_dir(base_dir), _DAILY_RE, reverse=True),
         "weekly": _sorted_parseable(_weekly_dir(base_dir), _WEEKLY_RE, reverse=True),
     }
+
+
+def _parse_snapshot_date(name: str) -> date | None:
+    """Map a snapshot filename to the calendar date it encodes.
+
+    Daily snapshots (``YYYY-MM-DD.db``) map to that exact date. Weekly
+    snapshots (``YYYY-Www.db``) map to the Sunday (ISO weekday 7) of that
+    ISO week — the day :func:`take_weekly_snapshot` writes them. This gives a
+    single, comparable timeline across both tiers. Returns ``None`` for names
+    that don't match either tier's pattern.
+    """
+    daily_match = _DAILY_RE.fullmatch(name)
+    if daily_match is not None:
+        try:
+            return date.fromisoformat(daily_match.group(1))
+        except ValueError:
+            return None
+    weekly_match = _WEEKLY_RE.fullmatch(name)
+    if weekly_match is not None:
+        iso_year_str, iso_week_str = weekly_match.group(1).split("-W")
+        try:
+            return date.fromisocalendar(int(iso_year_str), int(iso_week_str), 7)
+        except ValueError:
+            return None
+    return None
+
+
+def latest_snapshot(base_dir: Path) -> Path | None:
+    """Return the single newest snapshot across the daily AND weekly tiers.
+
+    Snapshots are compared by the calendar date their filename encodes
+    (see :func:`_parse_snapshot_date`), NOT by tier. This is what ``restore
+    --from-snapshot latest`` needs: a newer weekly snapshot must win over an
+    older daily one (recovering to the freshest available state), rather than
+    blindly preferring any daily over any weekly. On a same-date tie the daily
+    snapshot is preferred — it is finer-grained and matches the same-day
+    overwrite semantics of :func:`take_daily_snapshot`.
+
+    Returns ``None`` when no parseable snapshots exist in either tier.
+    """
+    listing = list_snapshots(base_dir)
+    best: tuple[date, int, Path] | None = None
+    # Higher tier rank wins ties; daily (1) beats weekly (0) on the same date.
+    for tier_name, tier_rank in (("daily", 1), ("weekly", 0)):
+        for path in listing[tier_name]:
+            parsed = _parse_snapshot_date(path.name)
+            if parsed is None:
+                continue
+            if best is None or (parsed, tier_rank) > (best[0], best[1]):
+                best = (parsed, tier_rank, path)
+    return best[2] if best is not None else None
 
 
 def restore_from_snapshot(base_dir: Path, snapshot: Path, db_path: Path) -> None:
