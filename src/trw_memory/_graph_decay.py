@@ -104,22 +104,26 @@ def memory_decay_pass(
     effective_batch_size = min(batch_size, 1000)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=cutoff_days)).isoformat()
 
-    rows = conn.execute(
-        "SELECT id, importance FROM memories WHERE cross_validated = 1 "
-        "AND COALESCE(last_accessed_at, created_at) < ? "
-        "LIMIT ?",
-        (cutoff, effective_batch_size),
-    ).fetchall()
-
-    total = conn.execute(
-        "SELECT COUNT(*) FROM memories WHERE cross_validated = 1 AND COALESCE(last_accessed_at, created_at) < ?",
-        (cutoff,),
-    ).fetchone()
-    total_qualifying = total[0] if total else 0
-
+    # Acquire the lock BEFORE both SELECT statements so concurrent backend
+    # writes that hold the same lock cannot interleave on the shared connection
+    # between the read and the subsequent updates. Without the lock the SELECTs
+    # and UPDATEs could race on the single sqlite3.Connection object, which is
+    # not thread-safe for concurrent use without external serialisation.
     decayed = 0
     batch_now = datetime.now(timezone.utc).isoformat()
     with _optional_lock_safe(lock):
+        rows = conn.execute(
+            "SELECT id, importance FROM memories WHERE cross_validated = 1 "
+            "AND COALESCE(last_accessed_at, created_at) < ? "
+            "LIMIT ?",
+            (cutoff, effective_batch_size),
+        ).fetchall()
+
+        total = conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE cross_validated = 1 AND COALESCE(last_accessed_at, created_at) < ?",
+            (cutoff,),
+        ).fetchone()
+        total_qualifying = total[0] if total else 0
         try:
             for entry_id, raw_importance in rows:
                 new_value = max(round(float(raw_importance) - DECAY_DELTA, 4), 0.0)
