@@ -4,6 +4,22 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-06-08
+
+### Added
+
+- **User-space (machine-local) memory tier — knowledge-fabric foundation (PRD-CORE-185).**
+  trw-memory's latent namespace federation is now driven end-to-end to back a `user:` tier that
+  lives outside any single project. A new user store resolves to `~/.trw` (or the XDG base dir when
+  set) and is selectable alongside the project-local `default` namespace; the scope resolver and
+  config cascade let a caller route a write to the project tier or the machine-local user tier, and
+  recall federates across the project ∪ user namespaces in one ranked result set. This unlocks the
+  portable, cross-project memory the higher tiers (company knowledge tier, bulk distill) build on.
+  The engine-level primitives (namespace-scoped stores, scope resolution, federated recall) are the
+  load-bearing half; write routing, the portability classifier, and the `scope=`/`include_tiers=`
+  surface live in the trw-mcp layer (see trw-mcp 0.55.0). Additive and backward-compatible: existing
+  single-namespace projects are unaffected, and the opt-in backfill is non-destructive.
+
 ### Fixed
 
 
