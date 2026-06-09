@@ -72,7 +72,19 @@ def apply_runtime_pii_policy(
         entropy_threshold=config.pii_entropy_threshold,
         custom_patterns=config.pii_custom_patterns,
     )
-    all_matches = content_matches + detail_matches
+    # Security audit 2026-06-09: scan tags too. A credential (API key) or other
+    # PII placed in a tag previously bypassed BOTH the block gate and redaction
+    # while still being surfaced at recall time.
+    tag_matches_by_index: list[list[PIIMatch]] = [
+        detect_pii(
+            tag,
+            entropy_threshold=config.pii_entropy_threshold,
+            custom_patterns=config.pii_custom_patterns,
+        )
+        for tag in entry.tags
+    ]
+    tag_matches = [match for matches in tag_matches_by_index for match in matches]
+    all_matches = content_matches + detail_matches + tag_matches
     if not all_matches:
         return entry, []
 
@@ -92,12 +104,13 @@ def apply_runtime_pii_policy(
 
     new_content = replace_pii(entry.content, content_matches)
     new_detail = replace_pii(entry.detail, detail_matches)
+    new_tags = [replace_pii(tag, matches) for tag, matches in zip(entry.tags, tag_matches_by_index, strict=True)]
     metadata = dict(entry.metadata)
     metadata["pii_types"] = ",".join(sorted({match.pii_type for match in all_matches}))
     if any(match.pii_type == PIIType.HIGH_ENTROPY for match in all_matches):
         metadata["contains_high_entropy_token"] = "true"  # noqa: S105 — flag value, not a credential
     return (
-        entry.model_copy(update={"content": new_content, "detail": new_detail, "metadata": metadata}),
+        entry.model_copy(update={"content": new_content, "detail": new_detail, "tags": new_tags, "metadata": metadata}),
         all_matches,
     )
 
