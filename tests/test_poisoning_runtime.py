@@ -223,6 +223,28 @@ class TestRuntimePoisoningPolicy:
         assert "<email>" in secured.tags[0]
         assert matches
 
+    def test_pii_policy_redacts_ssn_in_tag(self, tmp_path: Path) -> None:
+        """An SSN in a tag must be redacted, not stored verbatim (v0.9.2).
+
+        Regression for the incomplete v0.9.1 tag-scan: SSN/PHONE/CREDIT_CARD
+        were detected but absent from REDACTED_PII_TYPES, so replace_pii() fell
+        through its ``else: continue`` and stored the raw value at recall time.
+        """
+        from trw_memory.security._runtime_pii import apply_runtime_pii_policy
+
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
+        entry = MemoryEntry(
+            id="M-tag-ssn",
+            content="benign content",
+            namespace="project:default",
+            tags=["customer-ssn:123-45-6789"],
+        )
+
+        secured, matches = apply_runtime_pii_policy(entry, cfg)
+        assert "123-45-6789" not in secured.tags[0]
+        assert "<ssn>" in secured.tags[0]
+        assert matches
+
 
 class TestAnomalyBypassSourcePrefixes:
     """PRD-DIST-2045 — per-source carve-out for anomaly quarantine.

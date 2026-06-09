@@ -45,6 +45,15 @@ REDACTED_PII_TYPES = frozenset(
         PIIType.EMAIL,
         PIIType.IP_ADDRESS,
         PIIType.CUSTOM,
+        # Security audit 2026-06-09 (v0.9.2): the v0.9.1 tag-scan added detection
+        # of SSN/PHONE/CREDIT_CARD in tags, but redaction was never wired up — so
+        # these were detected-but-stored-verbatim (matched neither BLOCKING_PII_TYPES
+        # nor REDACTED_PII_TYPES, so replace_pii() fell through its else: continue).
+        # Policy is redact-not-block (parity with EMAIL/IP): preserve the entry while
+        # masking the value rather than rejecting the whole store like a credential.
+        PIIType.PHONE,
+        PIIType.SSN,
+        PIIType.CREDIT_CARD,
     }
 )
 CODE_SNIPPET_PATTERNS = (
@@ -146,6 +155,12 @@ def redaction_marker(pii_type: PIIType) -> str:
         return "<ip>"
     if pii_type == PIIType.CUSTOM:
         return "<custom_pii>"
+    if pii_type == PIIType.PHONE:
+        return "<phone>"
+    if pii_type == PIIType.SSN:
+        return "<ssn>"
+    if pii_type == PIIType.CREDIT_CARD:
+        return "<credit_card>"
     return f"<{pii_type}>"
 
 
