@@ -156,6 +156,39 @@ class TestF7AssertionStatusFilter:
         finally:
             backend.close()
 
+    def test_entries_ordered_by_updated_at_desc(self) -> None:
+        """entries_with_assertions must return rows in updated_at DESC order.
+
+        The primary SQL path previously had no ORDER BY clause, giving
+        non-deterministic ordering while the resilient fallback path DID
+        order by updated_at DESC. This verifies the primary path is now
+        consistent with the documented ordering contract.
+        """
+        from datetime import timedelta
+
+        backend = SQLiteBackend(Path(":memory:"))
+        try:
+            now = datetime.now(timezone.utc)
+            older = now - timedelta(seconds=10)
+
+            old_entry = _entry_with_assertion("e-old", MemoryStatus.ACTIVE)
+            old_entry = old_entry.model_copy(update={"updated_at": older})
+            backend.store(old_entry)
+
+            new_entry = _entry_with_assertion("e-new", MemoryStatus.ACTIVE)
+            new_entry = new_entry.model_copy(update={"updated_at": now})
+            backend.store(new_entry)
+
+            results = backend.entries_with_assertions()
+            assert len(results) == 2
+            # Most recently updated must come first.
+            assert results[0].id == "e-new", (
+                f"Expected 'e-new' first (newer updated_at) but got {results[0].id!r}"
+            )
+            assert results[1].id == "e-old"
+        finally:
+            backend.close()
+
 
 # ---------------------------------------------------------------------------
 # F11 — stale vector removed on terminal-status update
