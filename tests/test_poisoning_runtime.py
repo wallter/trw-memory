@@ -47,6 +47,86 @@ class TestRuntimePoisoningPolicy:
         assert stats["sample_count"] == 100
         assert set(stats["dimensions"]) == {"entry_length", "tag_count", "importance"}
 
+    def test_size_anomaly_observe_mode_default_does_not_quarantine_long_entry(self, tmp_path: Path) -> None:
+        """SEC-001 default: a long, well-formed learning is observed, NOT quarantined.
+
+        Regression for the PRD-DIST-254 MCP-vs-MemoryClient recall divergence:
+        the per-entry MCP write path accumulates a short-entry reference
+        distribution, so an 11th long entry scored as a >3-sigma length outlier
+        was silently quarantined out of recall. Observe-mode (the documented
+        default rollout) must store it normally while still recording the anomaly.
+        """
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"), poisoning_z_threshold=3.0)
+        assert cfg.poisoning_detection_mode == "observe"
+
+        long_detail = "Lambda cold-start contention requires NullPool. " * 40
+
+        with create_backend_from_config(cfg, "project:default") as backend:
+            for index in range(12):
+                backend.store(
+                    MemoryEntry(
+                        id=f"M-short-{index}",
+                        content="short",
+                        detail="x",
+                        namespace="project:default",
+                        importance=0.6,
+                    )
+                )
+
+            prepared = prepare_entry_for_store(
+                MemoryEntry(
+                    id="M-long-decision",
+                    content="switched SQLAlchemy engine to NullPool",
+                    detail=long_detail,
+                    namespace="project:default",
+                    importance=0.6,
+                ),
+                backend=backend,
+                config=cfg,
+            )
+
+        # Observed as an anomaly (diagnostics populated) but NOT held back.
+        assert prepared.quarantined is False
+        assert prepared.anomaly_dimension == "entry_length"
+        assert prepared.anomaly_z_score >= 3.0
+
+    def test_size_anomaly_enforce_mode_quarantines_long_entry(self, tmp_path: Path) -> None:
+        """Explicit enforce-mode still quarantines the statistical size outlier."""
+        cfg = MemoryConfig(
+            storage_path=str(tmp_path / "mem"),
+            poisoning_z_threshold=3.0,
+            poisoning_detection_mode="enforce",
+        )
+
+        long_detail = "Lambda cold-start contention requires NullPool. " * 40
+
+        with create_backend_from_config(cfg, "project:default") as backend:
+            for index in range(12):
+                backend.store(
+                    MemoryEntry(
+                        id=f"M-short-{index}",
+                        content="short",
+                        detail="x",
+                        namespace="project:default",
+                        importance=0.6,
+                    )
+                )
+
+            prepared = prepare_entry_for_store(
+                MemoryEntry(
+                    id="M-long-decision",
+                    content="switched SQLAlchemy engine to NullPool",
+                    detail=long_detail,
+                    namespace="project:default",
+                    importance=0.6,
+                ),
+                backend=backend,
+                config=cfg,
+            )
+
+        assert prepared.quarantined is True
+        assert prepared.anomaly_dimension == "entry_length"
+
     def test_runtime_rate_limit_raises_retry_after(self, tmp_path: Path) -> None:
         cfg = MemoryConfig(storage_path=str(tmp_path / "mem"), max_memory_writes_per_minute=1)
 
@@ -289,7 +369,13 @@ class TestAnomalyBypassSourcePrefixes:
         assert prepared.entry.id == "M-distill"
 
     def test_bypass_does_not_skip_for_agent_source(self, tmp_path: Path) -> None:
-        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"), poisoning_z_threshold=1.0)
+        # enforce-mode: the bypass must NOT carve out a non-distilled source even
+        # when quarantine is actively enforced.
+        cfg = MemoryConfig(
+            storage_path=str(tmp_path / "mem"),
+            poisoning_z_threshold=1.0,
+            poisoning_detection_mode="enforce",
+        )
         outlier = MemoryEntry(
             id="M-agent",
             content="outlier-content",
@@ -310,6 +396,7 @@ class TestAnomalyBypassSourcePrefixes:
             storage_path=str(tmp_path / "mem"),
             poisoning_z_threshold=1.0,
             anomaly_bypass_source_prefixes=[],
+            poisoning_detection_mode="enforce",
         )
         outlier = MemoryEntry(
             id="M-distill",
@@ -387,7 +474,11 @@ class TestAnomalyBypassSourcePrefixes:
         )
 
     def test_bypass_does_not_skip_when_metadata_source_missing(self, tmp_path: Path) -> None:
-        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"), poisoning_z_threshold=1.0)
+        cfg = MemoryConfig(
+            storage_path=str(tmp_path / "mem"),
+            poisoning_z_threshold=1.0,
+            poisoning_detection_mode="enforce",
+        )
         outlier = MemoryEntry(
             id="M-no-source",
             content="outlier-content",

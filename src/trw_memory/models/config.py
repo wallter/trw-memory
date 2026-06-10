@@ -276,6 +276,23 @@ class MemoryConfig(BaseSettings):
 
     # Poisoning defense
     poisoning_detection_enabled: bool = Field(default=True, description="Enable statistical poisoning detection")
+    poisoning_detection_mode: Literal["observe", "enforce"] = Field(
+        default="observe",
+        description=(
+            "SEC-001 statistical-anomaly (size/tag-count) intake mode. 'observe' "
+            "(default) records rolling anomaly stats + emits telemetry but does NOT "
+            "quarantine — matching the documented SEC-001 observe-only rollout "
+            "(enforce-mode promotion was never signed off). 'enforce' quarantines "
+            "anomalous writes. This gates ONLY the statistical size/tag-count "
+            "detector; PII redaction, schema validation, write-rate limits, the "
+            "trust scorer (own trust_scoring_mode), and canary tamper halts are "
+            "unaffected. The per-entry MCP write path accumulates a reference "
+            "distribution as it stores, so a single long, well-formed learning can "
+            "score as a >3-sigma length outlier against a corpus of short entries "
+            "and be silently quarantined — observe-mode prevents that false-positive "
+            "from dropping high-value learnings out of recall."
+        ),
+    )
     poisoning_z_threshold: float = Field(default=3.0, gt=0.0, description="Z-score threshold for anomaly detection")
     anomaly_bypass_source_prefixes: list[str] = Field(
         default_factory=lambda: ["distilled:", "distilled-git:"],

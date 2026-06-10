@@ -200,6 +200,46 @@ def prepare_entry_for_store(
         return PreparedStoreEntry(entry=secured_entry, op=op, pii_matches=tuple(pii_matches))
 
     dimension, z_score = anomaly
+
+    # SEC-001 observe-mode (the documented default rollout): an anomaly was
+    # detected but the statistical size/tag detector is NOT promoted to enforce.
+    # Record + audit the would-be quarantine and store the entry normally. This
+    # prevents the per-entry MCP write path from silently quarantining a single
+    # long, well-formed, high-value learning that scores as a >3-sigma length
+    # outlier against a corpus of short entries (the PRD-DIST-254 MCP-vs-client
+    # recall divergence). Quarantine only fires under explicit enforce-mode.
+    if config.poisoning_detection_mode != "enforce":
+        logger.info(
+            "anomaly_observed_not_quarantined",
+            op="store",
+            outcome="observe_mode",
+            entry_id=secured_entry.id,
+            namespace=secured_entry.namespace,
+            anomaly_dimension=dimension,
+            z_score=z_score,
+        )
+        append_audit_event(
+            config,
+            "anomaly_observed",
+            entry_id=secured_entry.id,
+            actor=actor,
+            namespace=secured_entry.namespace,
+            data={
+                "anomaly_dimension": dimension,
+                "z_score": z_score,
+                "mode": "observe",
+                "would_quarantine": True,
+            },
+        )
+        return PreparedStoreEntry(
+            entry=secured_entry,
+            op=op,
+            pii_matches=tuple(pii_matches),
+            quarantined=False,
+            anomaly_dimension=dimension,
+            anomaly_z_score=z_score,
+        )
+
     quarantined = quarantine_entry(
         secured_entry.model_copy(
             update={
