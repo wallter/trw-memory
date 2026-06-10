@@ -181,6 +181,86 @@ class TestAnchorValidity:
 
 
 @pytest.mark.unit
+class TestCorruptTimestampDegrades:
+    """A byte-shifted / unparseable timestamp must NOT crash entry load.
+
+    Regression for the 2026-06-10 corruption class: a single row carried a
+    mangled ISO timestamp ``'026-04-13T00:00:00+00:002'`` (leading '2' lost,
+    stray trailing '2' — a SQLite 3.51.1 WAL-reset byte-shift). The unguarded
+    ``parse_dt`` in ``_dict_to_entry`` raised ``Invalid isoformat string`` and
+    took down the whole listing. Loading one corrupt entry must degrade the
+    bad field to a sentinel + WARN, consistent with how the same mapper
+    already fail-opens status / anchors / ints / floats.
+    """
+
+    _BAD_TS = "026-04-13T00:00:00+00:002"
+
+    def test_corrupt_created_at_degrades_to_now(self, backend: YAMLBackend) -> None:
+        data: dict[str, object] = {
+            "id": "M-ts-bad-created",
+            "content": "byte-shifted created_at",
+            "created_at": self._BAD_TS,
+            "updated_at": "2026-04-13T00:00:00+00:00",
+        }
+        write_entry_yaml(backend, "M-ts-bad-created", data)
+        loaded = backend.get("M-ts-bad-created")
+        # Entry survives (no crash); the corrupt field degrades to a usable
+        # tz-aware datetime rather than raising.
+        assert loaded is not None
+        assert loaded.created_at.tzinfo is not None
+        # The valid sibling field is preserved untouched.
+        assert loaded.updated_at.year == 2026
+
+    def test_corrupt_updated_at_degrades(self, backend: YAMLBackend) -> None:
+        data: dict[str, object] = {
+            "id": "M-ts-bad-updated",
+            "content": "byte-shifted updated_at",
+            "created_at": "2026-04-13T00:00:00+00:00",
+            "updated_at": self._BAD_TS,
+        }
+        write_entry_yaml(backend, "M-ts-bad-updated", data)
+        loaded = backend.get("M-ts-bad-updated")
+        assert loaded is not None
+        assert loaded.updated_at.tzinfo is not None
+
+    def test_corrupt_last_accessed_degrades_to_none(self, backend: YAMLBackend) -> None:
+        data: dict[str, object] = {
+            "id": "M-ts-bad-accessed",
+            "content": "byte-shifted last_accessed_at",
+            "created_at": "2026-04-13T00:00:00+00:00",
+            "updated_at": "2026-04-13T00:00:00+00:00",
+            "last_accessed_at": self._BAD_TS,
+        }
+        write_entry_yaml(backend, "M-ts-bad-accessed", data)
+        loaded = backend.get("M-ts-bad-accessed")
+        assert loaded is not None
+        # An unparseable optional timestamp degrades to None, not a crash.
+        assert loaded.last_accessed_at is None
+
+    def test_one_corrupt_entry_does_not_collapse_listing(self, backend: YAMLBackend) -> None:
+        good: dict[str, object] = {
+            "id": "M-ts-good",
+            "content": "valid entry",
+            "created_at": "2026-04-13T00:00:00+00:00",
+            "updated_at": "2026-04-13T00:00:00+00:00",
+        }
+        bad: dict[str, object] = {
+            "id": "M-ts-bad",
+            "content": "corrupt entry",
+            "created_at": self._BAD_TS,
+            "updated_at": "2026-04-13T00:00:00+00:00",
+        }
+        write_entry_yaml(backend, "M-ts-good", good)
+        write_entry_yaml(backend, "M-ts-bad", bad)
+        entries = backend.list_entries()
+        # Both load — the good one always, and the corrupt one now degrades
+        # in-place instead of being silently dropped by the catch-all skip.
+        ids = {e.id for e in entries}
+        assert "M-ts-good" in ids
+        assert "M-ts-bad" in ids
+
+
+@pytest.mark.unit
 class TestSQLiteAssertionsUpdate:
     def test_sqlite_update_assertions_directly(self, tmp_path: Path) -> None:
         db = SQLiteBackend(tmp_path / "test.db")

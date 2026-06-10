@@ -20,7 +20,12 @@ import structlog
 
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import Anchor, Assertion, MemoryEntry, MemoryStatus
-from trw_memory.storage._parsing import parse_dt, parse_json_dict_int, parse_json_dict_str, parse_json_list
+from trw_memory.storage._parsing import (
+    parse_dt_safe,
+    parse_json_dict_int,
+    parse_json_dict_str,
+    parse_json_list,
+)
 from trw_memory.storage._shared import (
     ENTRY_COLUMNS,
     IMMUTABLE_FIELDS,
@@ -95,13 +100,18 @@ def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
     def _str_dict(key: str) -> dict[str, str]:
         return parse_json_dict_str(data.get(key, {}))
 
+    # Timestamps are parsed fail-open: a malformed value (e.g. the WAL-reset
+    # byte-shift '026-04-13T00:00:00+00:002') degrades the single field to a
+    # usable default instead of raising and collapsing the whole listing —
+    # matching how this mapper already fail-opens status / anchors / floats.
+    now = datetime.now(timezone.utc)
     created_at_raw = data.get("created_at")
     updated_at_raw = data.get("updated_at")
-    created_at = parse_dt(created_at_raw) if created_at_raw else datetime.now(timezone.utc)
-    updated_at = parse_dt(updated_at_raw) if updated_at_raw else datetime.now(timezone.utc)
+    created_at = parse_dt_safe(created_at_raw, default=now) or now if created_at_raw else now
+    updated_at = parse_dt_safe(updated_at_raw, default=now) or now if updated_at_raw else now
 
     last_accessed_raw = data.get("last_accessed_at")
-    last_accessed_at: datetime | None = parse_dt(last_accessed_raw) if last_accessed_raw else None
+    last_accessed_at: datetime | None = parse_dt_safe(last_accessed_raw, default=None) if last_accessed_raw else None
 
     status_raw = _str("status", "active")
     try:
@@ -167,7 +177,7 @@ def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
         protection_tier=_str("protection_tier", "normal"),
         sync_hash=_str("sync_hash", ""),
         sync_seq=_int("sync_seq", 0),
-        last_synced_at=parse_dt(data.get("last_synced_at")) if data.get("last_synced_at") else None,
+        last_synced_at=parse_dt_safe(data.get("last_synced_at"), default=None) if data.get("last_synced_at") else None,
     )
 
 

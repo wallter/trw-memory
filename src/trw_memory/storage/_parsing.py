@@ -29,6 +29,32 @@ def parse_dt(val: object) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def parse_dt_safe(val: object, *, default: datetime | None) -> datetime | None:
+    """Fail-open variant of :func:`parse_dt` for read paths.
+
+    Returns *default* (rather than raising ``ValueError``) when *val* is a
+    malformed ISO string. Used by row/dict mappers so a single corrupt
+    timestamp degrades one field instead of crashing the whole listing.
+
+    The 2026-06-10 corruption class motivated this: a SQLite 3.51.1 WAL-reset
+    byte-shift produced ``'026-04-13T00:00:00+00:002'`` (leading ``2`` lost,
+    stray trailing ``2``), and the unguarded ``parse_dt`` in the mappers
+    raised ``Invalid isoformat string``, taking down ``list_entries`` for the
+    whole store. Degrading the bad field is consistent with the fail-open
+    contract the same mappers already apply to status / anchors / ints /
+    floats / JSON.
+
+    >>> parse_dt_safe("2024-01-15T10:30:00", default=None) is not None
+    True
+    >>> parse_dt_safe("026-04-13T00:00:00+00:002", default=None) is None
+    True
+    """
+    try:
+        return parse_dt(val)
+    except (ValueError, TypeError):
+        return default
+
+
 def parse_float(raw: object, *, default: float) -> float:
     """Coerce a persisted value to ``float``, falling back to *default*.
 
