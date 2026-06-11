@@ -18,7 +18,7 @@ from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.bm25 import bm25_search
 from trw_memory.retrieval.dense import dense_search
-from trw_memory.retrieval.fusion import rrf_fuse
+from trw_memory.retrieval.fusion import combmax_fuse, rrf_fuse
 
 logger = structlog.get_logger(__name__)
 
@@ -35,11 +35,12 @@ def hybrid_search(
     rrf_k: int = 60,
     importance_alpha: float = 1.0,
     top_k: int = 25,
+    fusion_mode: str = "rrf",
 ) -> list[MemoryEntry]:
-    """Hybrid BM25 + vector search with RRF fusion.
+    """Hybrid BM25 + vector search with configurable rank fusion.
 
     Runs BM25 and dense retrieval in sequence then fuses their rankings using
-    Reciprocal Rank Fusion.  Either retrieval path is skipped when its
+    the selected fusion strategy.  Either retrieval path is skipped when its
     dependency is unavailable, allowing the pipeline to degrade to single-
     source search without raising.
 
@@ -48,7 +49,7 @@ def hybrid_search(
     - *embedder* is ``None`` or ``embedder.available()`` is ``False`` →
       dense search skipped
     - Both skipped → returns ``[]``
-    - Only one source produces results → RRF fusion is a no-op (passthrough)
+    - Only one source produces results → fusion is a no-op (passthrough)
 
     Args:
         query: Free-text search query.
@@ -73,12 +74,20 @@ def hybrid_search(
         vector_candidates: Maximum dense candidates passed to
             :func:`~trw_memory.retrieval.dense.dense_search`.
         rrf_k: RRF smoothing constant forwarded to
-            :func:`~trw_memory.retrieval.fusion.rrf_fuse`.
+            :func:`~trw_memory.retrieval.fusion.rrf_fuse` (ignored when
+            *fusion_mode* is ``"combmax"``).
         importance_alpha: R-FUSION-001 blend weight on the normalised RRF
             position score vs. the candidate's ``importance``. ``1.0`` (the
             default) preserves pure position-only fusion; lower values let a
             high-impact entry edge out an equally-ranked low-impact one.
+            Ignored when *fusion_mode* is ``"combmax"``.
         top_k: Final number of entries to return after fusion.
+        fusion_mode: Fusion algorithm to use.  ``"rrf"`` (the default) uses
+            Reciprocal Rank Fusion (sum of reciprocal ranks).  ``"combmax"``
+            uses CombMAX (max reciprocal rank per document), which lifts
+            hard-tail recall@12 by ~28% (0.583→0.750, McNemar p=0.0074) at
+            the cost of weaker cross-list boosting.  Unknown values fall back
+            to ``"rrf"`` with a warning.
 
     Returns:
         Up to *top_k* :class:`~trw_memory.models.memory.MemoryEntry` objects
@@ -119,12 +128,19 @@ def hybrid_search(
         )
         return []
 
-    # --------------------------------------------------------------- RRF
+    # --------------------------------------------------------------- Fusion
     # R-FUSION-001: blend the entry's importance into the position-only RRF
     # score so two equally-ranked candidates are broken by impact. alpha=1.0
     # (default) keeps the legacy pure-position behaviour bit-for-bit.
-    importances = {e.id: e.importance for e in entries} if importance_alpha < 1.0 else None
-    fused = rrf_fuse(rankings, k=rrf_k, importances=importances, alpha=importance_alpha)
+    # combmax_fuse is a configurable alternative that lifts hard-tail recall
+    # (MEMORY.md rca_rank_fusion_combiner); default unchanged.
+    if fusion_mode == "combmax":
+        fused = combmax_fuse(rankings)
+    else:
+        if fusion_mode != "rrf":
+            logger.warning("hybrid_search_unknown_fusion_mode", fusion_mode=fusion_mode, fallback="rrf")
+        importances = {e.id: e.importance for e in entries} if importance_alpha < 1.0 else None
+        fused = rrf_fuse(rankings, k=rrf_k, importances=importances, alpha=importance_alpha)
 
     # Map fused ids back to MemoryEntry objects, preserving fusion order
     results: list[MemoryEntry] = []
@@ -140,5 +156,6 @@ def hybrid_search(
         bm25_hits=len(bm25_results) if bm25_results else 0,
         fused_total=len(fused),
         returned=len(results),
+        fusion_mode=fusion_mode,
     )
     return results

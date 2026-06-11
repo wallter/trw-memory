@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import structlog
 
-__all__ = ["rrf_fuse"]
+__all__ = ["combmax_fuse", "rrf_fuse"]
 
 logger = structlog.get_logger(__name__)
 
@@ -100,5 +100,54 @@ def rrf_fuse(
         ranking_count=len(rankings),
         unique_docs=len(result),
         importance_blended=importances is not None and blend_alpha < 1.0,
+    )
+    return result
+
+
+def combmax_fuse(
+    rankings: list[list[tuple[str, float]]],
+) -> list[tuple[str, float]]:
+    """CombMAX rank fusion for hard-tail recall improvement.
+
+    Assigns each document the MAXIMUM reciprocal-rank score it achieves across
+    any single input ranking, rather than the sum used by RRF.  When two
+    retrievers each have a strong individual champion that the other misses,
+    CombMAX preserves both at their individual peak; RRF-sum dilutes them.
+
+    Regime note (MEMORY.md rca_rank_fusion_combiner): CombMAX lifts
+    hard-tail recall significantly (n=12: recall@12 0.583→0.750,
+    McNemar p=0.0074) versus RRF-sum.  In easy regimes where content
+    dominates both lists the difference is negligible, so this function is
+    offered as a configurable alternative — the pipeline default remains
+    ``rrf_fuse``.
+
+    Args:
+        rankings: List of ranked result lists.  Each inner list is a sequence
+            of ``(entry_id, score)`` pairs ordered by relevance descending.
+            Scores are ignored — only 1-based rank position matters.
+
+    Returns:
+        Fused list of ``(entry_id, score)`` pairs sorted by score descending,
+        where ``score(d) = max_i 1 / (60 + rank_i(d))`` with the standard
+        k=60 smoothing constant.
+    """
+    if not rankings:
+        return []
+
+    k = 60
+    best_scores: dict[str, float] = {}
+    for ranking in rankings:
+        for rank, (entry_id, _) in enumerate(ranking):
+            rr = 1.0 / (k + rank + 1)
+            if rr > best_scores.get(entry_id, 0.0):
+                best_scores[entry_id] = rr
+
+    result = list(best_scores.items())
+    result.sort(key=lambda x: x[1], reverse=True)
+
+    logger.debug(
+        "combmax_fuse_complete",
+        ranking_count=len(rankings),
+        unique_docs=len(result),
     )
     return result
