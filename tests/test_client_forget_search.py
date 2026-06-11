@@ -91,7 +91,19 @@ class TestSearch:
         results = await client.search(tags=["python"])
         assert all("python" in r["tags"] for r in results)
 
-    async def test_search_actor_and_quarantined_filters(self, client: MemoryClient) -> None:
+    async def test_search_actor_and_quarantined_filters(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Quarantine only fires under enforce mode (observe mode, the default,
+        # records the anomaly but stores the entry normally — by design).
+        # This test exercises the full quarantine path so it must opt in to
+        # enforce mode explicitly, matching the pattern used in
+        # test_sec001_live_paths.py::secure_client.
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        monkeypatch.setenv("MEMORY_POISONING_DETECTION_MODE", "enforce")
+        client = MemoryClient(namespace="default", mode="local")
+
         for index in range(20):
             await client.store(f"baseline {index}", source_identity="seed")
 
@@ -106,6 +118,8 @@ class TestSearch:
         assert quarantined[0]["z_score"] == result["z_score"]
         assert audit_records[-1].op == "access"
         assert audit_records[-1].actor == "alice"
+
+        await client.close()
 
     async def test_search_since_filter(self, client: MemoryClient) -> None:
         await client.store("old entry", importance=0.5)
