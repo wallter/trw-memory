@@ -37,6 +37,17 @@ pip install -e ".[dev,vectors,bm25]"                         # With optional dep
 - **Shared fixtures**: `tests/conftest.py` provides `sqlite_backend`, `sqlite_memory_backend`, `memory_client`, `make_entry()`, `make_entry_dict()`
 - `asyncio_mode = "auto"` — write `async def test_foo():` without `@pytest.mark.asyncio`
 
+## Package Info
+
+- Version: `0.9.6` (see `pyproject.toml` — do not hardcode elsewhere)
+- ~170 source modules; 240 test files, 214 with test functions; coverage gate 85%
+- Valid namespace prefixes: `project:`, `global`, `default`, `team:`, `org:`, `user:` — the `user:` scope was added by PRD-CORE-185 and is live in `namespaces/validation.py`
+
+## Compatibility Notes
+
+- Concurrent-writer fixes (warm-tier sidecar lock, hot-tier sweep race) shipped in **0.9.5**. Operators running concurrent agents against the same memory store should require `trw-memory >= 0.9.5`.
+- SQLite WAL-reset corruption guard requires SQLite >= 3.51.3 or the single-connection window mitigation (active by default); see `reference_memory_db_walreset_fix.md`.
+
 ## Key Gotchas
 
 - `sqlite-vec` is an optional dep (`[vectors]`) — skip dense vector tests with `pytest.importorskip("sqlite_vec")`
@@ -44,6 +55,7 @@ pip install -e ".[dev,vectors,bm25]"                         # With optional dep
 - Pydantic v2: `use_enum_values=True` required for YAML round-trip; `populate_by_name=True` when using `Field(alias=...)`
 - structlog: never use `event=` as a kwarg — it's reserved; use `action=` or `operation=`
 - Coverage threshold: 85% (fail_under in pyproject.toml)
+- MCP recall path uses `_keyword_search`/`_search_entries` directly (not `MemoryClient.recall`); user-tier federation is handled separately in `_memory_recall.py`
 
 ## Releasing
 
