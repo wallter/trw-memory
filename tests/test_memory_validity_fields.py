@@ -13,9 +13,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
-from trw_memory.models.memory import MemoryEntry
-
 from tests.conftest import make_entry_dict
+from trw_memory.models.memory import MemoryEntry
 
 
 def _fixed_created() -> datetime:

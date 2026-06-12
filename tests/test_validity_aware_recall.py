@@ -11,7 +11,7 @@ advantage without disturbing fusion order.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from trw_memory._graph_decay import apply_importance_decay
