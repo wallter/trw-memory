@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS memories (
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL,
     last_accessed_at  TEXT,
+    valid_from        TEXT,
+    invalid_from      TEXT,
+    invalidated_by    TEXT,
     access_count      INTEGER DEFAULT 0,
     session_count     INTEGER DEFAULT 0,
     q_value           REAL DEFAULT 0.5,
@@ -233,6 +236,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             ("recall_count", "INTEGER DEFAULT 0"),
             ("helpful_count", "INTEGER DEFAULT 0"),
             ("unhelpful_count", "INTEGER DEFAULT 0"),
+        ]
+        # Migration: add PRD-CORE-194 bi-temporal validity fields. Additive-only,
+        # nullable; absent valid_from = open validity (back-filled to created_at
+        # on read by the row mapper / model validator, never by a rewrite). No
+        # destructive ALTER, zero existing rows mutated on read (NFR01).
+        _migrate_cols += [
+            ("valid_from", "TEXT"),
+            ("invalid_from", "TEXT"),
+            ("invalidated_by", "TEXT"),
         ]
         for col_name, col_def in _migrate_cols:
             with contextlib.suppress(sqlite3.OperationalError):

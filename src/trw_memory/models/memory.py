@@ -250,6 +250,28 @@ class MemoryEntry(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_accessed_at: datetime | None = None
+
+    # Bi-temporal validity (PRD-CORE-194). ``created_at`` is INGEST time; these
+    # three fields express EVENT-time validity. The window is half-open
+    # ``[valid_from, invalid_from)``: ``invalid_from`` is exclusive, so a record
+    # is OPEN at instant T iff ``valid_from <= T`` AND (``invalid_from is None``
+    # OR ``T < invalid_from``). Supersession CLOSES the window (sets invalid_from
+    # + invalidated_by) and retains the row — it never deletes.
+    valid_from: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Event time: when the fact became true in the world. Defaults to created_at.",
+    )
+    invalid_from: datetime | None = Field(
+        default=None,
+        description=(
+            "When this record's validity window closed (superseded). None = open. "
+            "Set only by a supersession write, never by a clock."
+        ),
+    )
+    invalidated_by: str | None = Field(
+        default=None,
+        description="id of the superseding record. Non-null iff invalid_from is non-null.",
+    )
     access_count: int = Field(ge=0, default=0)
     session_count: int = Field(ge=0, default=0)
 
@@ -285,6 +307,44 @@ class MemoryEntry(BaseModel):
             _logger.warning("unknown source value %r coerced to 'agent'", v)
             return "agent"
         return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_valid_from_to_created_at(cls, data: object) -> object:
+        """PRD-CORE-194 FR01/NFR02: default valid_from to the incoming created_at.
+
+        A pre-migration row (no ``valid_from`` key) must get
+        ``valid_from = created_at`` — NOT ``now()`` — so a fact's event time
+        matches when it was learned. This runs ``mode="before"`` so it wins over
+        the field default_factory. Only acts when ``created_at`` is supplied and
+        ``valid_from`` is absent; all other shapes pass through untouched.
+        """
+        if isinstance(data, dict) and data.get("valid_from") is None and data.get("created_at") is not None:
+            # created_at is present and no explicit valid_from supplied (or it is
+            # None) — adopt created_at as the event time instead of now().
+            data = {**data, "valid_from": data["created_at"]}
+        return data
+
+    @model_validator(mode="after")
+    def _validate_validity_window(self) -> MemoryEntry:
+        """PRD-CORE-194 FR01: enforce the bi-temporal window invariants.
+
+        - A closed window must name its closer: ``invalid_from`` is non-null
+          iff ``invalidated_by`` is non-null.
+        - A window cannot close before it opens: ``invalid_from >= valid_from``.
+        """
+        has_close = self.invalid_from is not None
+        has_closer = self.invalidated_by is not None
+        if has_close != has_closer:
+            raise ValueError(
+                "invalid_from and invalidated_by must both be set or both be None "
+                "(a closed validity window must name its superseding record)"
+            )
+        if self.invalid_from is not None and self.invalid_from < self.valid_from:
+            raise ValueError(
+                "invalid_from must not precede valid_from (a window cannot close before it opens)"
+            )
+        return self
 
     @field_validator("nudge_line", mode="before")
     @classmethod
@@ -434,6 +494,18 @@ class MemoryEntry(BaseModel):
         from trw_memory.models._memory_entry_serialization import memory_entry_to_dict
 
         return memory_entry_to_dict(self, fields=fields)
+
+    def validity_state(self) -> Literal["open", "superseded"]:
+        """PRD-CORE-194 FR02: derived validity state from the truth signal.
+
+        ``"superseded"`` iff the window is closed (``invalid_from`` set) — a
+        truth statement. ``"open"`` otherwise. This is ORTHOGONAL to the
+        confidence/decay-driven ``unverified-stale`` signal: TTL/decay downgrades
+        ``confidence`` and never sets ``invalid_from``, so the two states are
+        produced by different causes and surfaced distinctly (FR03).
+        """
+        return "superseded" if self.invalid_from is not None else "open"
+
 
 class MemoryIndex(BaseModel):
     """Index tracking all memory entries."""

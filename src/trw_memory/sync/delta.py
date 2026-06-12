@@ -29,6 +29,16 @@ _HASH_FIELDS = (
     "domain",
     "phase_affinity",
     "metadata",
+    # PRD-CORE-194 FR04: a supersession write closes the validity window
+    # (sets invalid_from + invalidated_by) without touching content, so it must
+    # mark the entry dirty for sync. ``valid_from`` is deliberately EXCLUDED: it
+    # defaults to per-construction ``now()`` for an entry built without an
+    # explicit created_at, so hashing it would make two otherwise-identical
+    # entries diverge purely on construction instant (breaks the content-hash
+    # contract). For a persisted row valid_from is stable; the supersession
+    # signal we need to propagate is the close pair below.
+    "invalid_from",
+    "invalidated_by",
 )
 
 

@@ -27,6 +27,11 @@ def memory_entry_to_dict(entry: MemoryEntry, *, fields: set[str] | None = None) 
         "created_at": entry.created_at.isoformat(),
         "updated_at": entry.updated_at.isoformat(),
         "last_accessed_at": entry.last_accessed_at.isoformat() if entry.last_accessed_at else None,
+        # Bi-temporal validity (PRD-CORE-194). invalid_from/invalidated_by are
+        # None for an open record (the common case); valid_from always present.
+        "valid_from": entry.valid_from.isoformat(),
+        "invalid_from": entry.invalid_from.isoformat() if entry.invalid_from else None,
+        "invalidated_by": entry.invalidated_by,
         "access_count": entry.access_count,
         "session_count": entry.session_count,
         "q_value": entry.q_value,
