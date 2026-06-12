@@ -326,13 +326,21 @@ def _archive_originals(
     cluster: list[MemoryEntry],
     consolidated_id: str,
     storage: StorageBackend,
+    *,
+    invalid_from: datetime | None = None,
 ) -> None:
     """Archive original cluster entries after consolidation.
 
     For each entry in *cluster*:
     1. Sets ``consolidated_into`` to the consolidated entry's ID.
     2. Sets ``status`` to ``"archived"``.
-    3. Updates via storage.update().
+    3. PRD-CORE-194 FR04: CLOSES the validity window — sets ``invalid_from`` (the
+       consolidation instant) + ``invalidated_by`` = the consolidated id. This is
+       complementary to ``consolidated_into`` (the structural merge target): the
+       same id names both the merge target and the window closer in the
+       consolidation case. The row is RETAINED (status archived), never deleted —
+       the findings-ledger retained-for-audit discipline.
+    4. Updates via storage.update().
 
     On failure, logs ERROR and raises the exception (caller handles rollback).
 
@@ -346,18 +354,32 @@ def _archive_originals(
         cluster: Original MemoryEntry objects being archived.
         consolidated_id: ID of the newly created consolidated entry.
         storage: StorageBackend for updating entries.
+        invalid_from: The consolidation instant to close each original's validity
+            window at. Defaults to ``now()`` when not supplied; callers thread the
+            consolidated entry's ``valid_from`` so the close is gap-free (FR01
+            half-open boundary: the superseding record opens exactly when the
+            prior window closes).
     """
     processed: list[str] = []
+    # The window-close instant. One shared instant for the whole cluster so all
+    # originals close at the same moment the consolidated entry opens (gap-free).
+    close_at = invalid_from if invalid_from is not None else datetime.now(timezone.utc)
 
     with storage.transaction():
         for entry in cluster:
             try:
-                updated = storage.update(
-                    entry.id,
-                    consolidated_into=consolidated_id,
-                    status=MemoryStatus.ARCHIVED,
-                    updated_at=datetime.now(timezone.utc),
-                )
+                # FR04: close the prior window without ever clobbering a window
+                # already closed by an earlier supersession (idempotent guard) —
+                # an original that was already superseded keeps its first closer.
+                close_fields: dict[str, object] = {
+                    "consolidated_into": consolidated_id,
+                    "status": MemoryStatus.ARCHIVED,
+                    "updated_at": datetime.now(timezone.utc),
+                }
+                if entry.invalid_from is None:
+                    close_fields["invalid_from"] = close_at
+                    close_fields["invalidated_by"] = consolidated_id
+                updated = storage.update(entry.id, **close_fields)
                 if updated is None:
                     raise StorageError(f"failed to archive original entry {entry.id!r}")
                 processed.append(entry.id)
@@ -572,8 +594,14 @@ def consolidate_cycle(
             )
             consolidated_id = new_entry.id
 
-            # FR04: Archive originals
-            _archive_originals(cluster, consolidated_id, storage)
+            # FR04: Archive originals + close their validity windows at the
+            # consolidated entry's valid_from (gap-free; OQ3 consolidation instant).
+            _archive_originals(
+                cluster,
+                consolidated_id,
+                storage,
+                invalid_from=new_entry.valid_from,
+            )
             consolidated_count += 1
 
         except Exception as exc:  # broad catch: per-cluster error boundary
