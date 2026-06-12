@@ -3,7 +3,7 @@
 Covers:
 - ensure_schema adds 10 new typed-learning columns
 - Migration is idempotent (safe to call twice)
-- ENTRY_COLUMNS count is 40
+- ENTRY_COLUMNS count matches the current schema
 - Migration on pre-existing DB with old schema preserves old data
 """
 
@@ -63,9 +63,13 @@ def test_migration_idempotent() -> None:
     assert "type" in cols
 
 
-def test_entry_columns_count_49() -> None:
-    """ENTRY_COLUMNS must contain exactly 49 entries after adding session_count."""
-    assert len(ENTRY_COLUMNS) == 52, f"Expected 52, got {len(ENTRY_COLUMNS)}: {ENTRY_COLUMNS}"  # +3 for PRD-CORE-132
+def test_entry_columns_count_matches_schema() -> None:
+    """ENTRY_COLUMNS must contain exactly 55 entries.
+
+    55 = 52 prior columns + 3 bi-temporal validity columns (valid_from,
+    invalid_from, invalidated_by) added by PRD-CORE-194 (commit 59439beb6).
+    """
+    assert len(ENTRY_COLUMNS) == 55, f"Expected 55, got {len(ENTRY_COLUMNS)}: {ENTRY_COLUMNS}"
 
 
 def test_entry_columns_contains_new_fields() -> None:

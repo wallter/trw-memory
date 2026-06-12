@@ -34,8 +34,10 @@ def _make_entry(
 class TestEntryColumnsCount:
     """Verify ENTRY_COLUMNS tuple size matches expectations."""
 
-    def test_entry_columns_count(self) -> None:
-        assert len(ENTRY_COLUMNS) == 52  # +3 for recall_count, helpful_count, unhelpful_count (PRD-CORE-132)
+    def test_entry_columns_count_matches_schema(self) -> None:
+        # 55 = 52 prior + 3 bi-temporal validity columns (valid_from,
+        # invalid_from, invalidated_by) from PRD-CORE-194 (commit 59439beb6).
+        assert len(ENTRY_COLUMNS) == 55
         assert ENTRY_COLUMNS[-1] == "unhelpful_count"
 
 

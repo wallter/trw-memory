@@ -48,7 +48,15 @@ class TestMemoryStoreImpl:
         assert audit_records[-1].data["reason"] == "pii_detected"
 
     def test_store_quarantines_anomalous_entries(self, tmp_path: Path) -> None:
-        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"), poisoning_z_threshold=1.0)
+        # poisoning_detection_mode defaults to "observe" (the documented SEC-001
+        # rollout default — security/CLAUDE.md forbids changing the package
+        # default). Quarantine only fires under explicit enforce-mode, so this
+        # behavioral test must opt into it.
+        cfg = MemoryConfig(
+            storage_path=str(tmp_path / "mem"),
+            poisoning_z_threshold=1.0,
+            poisoning_detection_mode="enforce",
+        )
 
         with create_backend_from_config(cfg, "project:default") as backend:
             for index in range(20):
@@ -80,6 +88,49 @@ class TestMemoryStoreImpl:
         assert quarantined["total"] == 1
         entries = cast("list[dict[str, object]]", quarantined["entries"])
         assert entries[0]["metadata"]["quarantined"] == "true"
+
+    def test_store_observe_mode_does_not_quarantine_but_audits(self, tmp_path: Path) -> None:
+        """Companion to the enforce-mode test: the default observe-mode detects the
+        same anomaly but stores the entry normally and emits an audit event rather
+        than quarantining it (SEC-001 documented-default rollout behavior)."""
+        # No poisoning_detection_mode override → defaults to "observe".
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"), poisoning_z_threshold=1.0)
+
+        with create_backend_from_config(cfg, "project:default") as backend:
+            for index in range(20):
+                backend.store(
+                    MemoryEntry(
+                        id=f"M-seed-{index}",
+                        content="normal content",
+                        namespace="project:default",
+                        source_identity="seed",
+                    )
+                )
+
+            result = memory_store_impl(
+                "A" * 5000,
+                "project:default",
+                backend=backend,
+                config=cfg,
+                source_identity="alice",
+            )
+            quarantined = memory_search_impl(
+                "project:default",
+                backend=backend,
+                config=cfg,
+                status="quarantined",
+                actor="alice",
+            )
+
+        # Observe-mode stores normally — NOT quarantined.
+        assert result["status"] == "stored"
+        assert quarantined["total"] == 0
+        # ...but the would-be quarantine is recorded in the audit log.
+        audit_records = AuditLog(Path(cfg.audit_log_path)).read_all()
+        observed = [r for r in audit_records if r.op == "anomaly_observed"]
+        assert observed, "observe-mode must emit an 'anomaly_observed' audit event"
+        assert observed[-1].data["mode"] == "observe"
+        assert observed[-1].data["would_quarantine"] is True
 
     def test_forget_actor_deletes_matching_entries_and_audits(self, tmp_path: Path) -> None:
         cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
