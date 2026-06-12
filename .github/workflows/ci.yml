@@ -30,5 +30,26 @@ jobs:
         run: ruff check src/
       - name: Type check
         run: mypy --strict src/trw_memory/
-      - name: Test
-        run: pytest tests/ -x -q
+      - name: Test with coverage (85% fail_under)
+        run: >-
+          pytest tests/ -q
+          --cov=trw_memory
+          --cov-report=term-missing
+          --cov-report=xml:coverage.xml
+          --cov-fail-under=85
+      - name: Upload coverage XML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+      # INFRA-020 security coverage gate. The security package is exercised by
+      # the broad client/tools/e2e tiers as well as the security-named tests, so
+      # the gate runs over the full suite (a curated subset under-covers it).
+      - name: INFRA-020 security coverage gate (90% branch)
+        run: >-
+          pytest tests/ -q
+          --cov=trw_memory.security
+          --cov-branch
+          --cov-report=term-missing
+          --cov-fail-under=90
