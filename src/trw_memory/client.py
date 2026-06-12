@@ -318,6 +318,8 @@ class MemoryClient(OrgSharedAliasMixin):
         exclude_expired: bool = True,
         confidence_floor: float | None = None,
         exclude_historical_only: bool | None = None,
+        as_of: datetime | None = None,
+        include_superseded: bool = False,
     ) -> list[MemoryResultDict]:
         """Search memories by keyword query using hybrid retrieval.
 
@@ -347,6 +349,8 @@ class MemoryClient(OrgSharedAliasMixin):
             exclude_expired=exclude_expired,
             confidence_floor=confidence_floor,
             exclude_historical_only=exclude_historical_only,
+            as_of=as_of,
+            include_superseded=include_superseded,
         )
 
     def _get_embedder(self) -> EmbeddingProvider | None:
@@ -395,10 +399,21 @@ class MemoryClient(OrgSharedAliasMixin):
         limit: int,
         tags: list[str] | None,
         query_embedding: list[float] | None = None,
+        *,
+        as_of: datetime | None = None,
+        include_superseded: bool = False,
     ) -> list[MemoryResultDict] | None:
         from trw_memory._client_recall import try_hybrid_recall as _impl
 
-        return await _impl(self, query, limit, tags, query_embedding=query_embedding)
+        return await _impl(
+            self,
+            query,
+            limit,
+            tags,
+            query_embedding=query_embedding,
+            as_of=as_of,
+            include_superseded=include_superseded,
+        )
 
     async def _fallback_recall(
         self, query: str, limit: int, tags: list[str] | None, min_score: float

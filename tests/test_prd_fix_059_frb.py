@@ -42,7 +42,9 @@ def _force_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setattr(
         "trw_memory.client.MemoryClient._try_hybrid_recall",
-        lambda self, query, limit, tags, query_embedding=None: _coro_none(),
+        # PRD-CORE-194 added as_of/include_superseded kwargs to the delegator;
+        # the mock must absorb them (and any future kwargs) to return None cleanly.
+        lambda self, query, limit, tags, query_embedding=None, **_kw: _coro_none(),
     )
 
 

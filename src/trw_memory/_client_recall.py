@@ -99,6 +99,8 @@ async def recall_impl(
     exclude_expired: bool = True,
     confidence_floor: float | None = None,
     exclude_historical_only: bool | None = None,
+    as_of: datetime | None = None,
+    include_superseded: bool = False,
 ) -> list[MemoryResultDict]:
     """Async impl for :meth:`MemoryClient.recall`.
 
@@ -147,7 +149,14 @@ async def recall_impl(
         exclude_historical_only if exclude_historical_only is not None else client._config.recall_filter_historical_only
     )
 
-    hybrid_results = await client._try_hybrid_recall(query, limit, tags, query_embedding=query_embedding)
+    hybrid_results = await client._try_hybrid_recall(
+        query,
+        limit,
+        tags,
+        query_embedding=query_embedding,
+        as_of=as_of,
+        include_superseded=include_superseded,
+    )
     if hybrid_results is not None:
         filtered = [r for r in hybrid_results if r["score"] >= min_score]
         # PRD-DIST-2049 c802: apply admission filter on the FULL hybrid candidate

@@ -12,6 +12,8 @@ Graceful degradation matrix:
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import structlog
 
 from trw_memory.embeddings.interface import EmbeddingProvider
@@ -19,6 +21,7 @@ from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.bm25 import bm25_search
 from trw_memory.retrieval.dense import dense_search
 from trw_memory.retrieval.fusion import combmax_fuse, rrf_fuse
+from trw_memory.retrieval.validity_prior import apply_validity_prior
 
 logger = structlog.get_logger(__name__)
 
@@ -36,6 +39,9 @@ def hybrid_search(
     importance_alpha: float = 1.0,
     top_k: int = 25,
     fusion_mode: str = "rrf",
+    as_of: datetime | None = None,
+    include_superseded: bool = False,
+    validity_age_decay: bool = False,
 ) -> list[MemoryEntry]:
     """Hybrid BM25 + vector search with configurable rank fusion.
 
@@ -142,12 +148,26 @@ def hybrid_search(
         importances = {e.id: e.importance for e in entries} if importance_alpha < 1.0 else None
         fused = rrf_fuse(rankings, k=rrf_k, importances=importances, alpha=importance_alpha)
 
-    # Map fused ids back to MemoryEntry objects, preserving fusion order
-    results: list[MemoryEntry] = []
-    for entry_id, _ in fused[:top_k]:
+    # Map fused ids back to MemoryEntry objects, preserving fusion order.
+    fused_entries: list[MemoryEntry] = []
+    for entry_id, _ in fused:
         entry = entry_map.get(entry_id)
         if entry is not None:
-            results.append(entry)
+            fused_entries.append(entry)
+
+    # PRD-CORE-194 FR03: apply the validity prior as a POST-FUSION pass (in-memory
+    # field compare, no extra query; NFR04). It excludes superseded records by
+    # default, re-scopes by ``as_of``, positionally appends superseded ones when
+    # ``include_superseded`` (so they never outrank an open record), and applies a
+    # bounded age advantage. Fusion order is otherwise preserved. ``top_k`` is
+    # applied AFTER the prior so excluded records do not consume result slots.
+    fused_entries = apply_validity_prior(
+        fused_entries,
+        as_of=as_of,
+        include_superseded=include_superseded,
+        age_decay=validity_age_decay,
+    )
+    results: list[MemoryEntry] = fused_entries[:top_k]
 
     logger.debug(
         "hybrid_search_complete",

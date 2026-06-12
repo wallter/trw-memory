@@ -22,6 +22,7 @@ Public surface (delegated from ``MemoryClient._try_hybrid_recall``):
 
 from __future__ import annotations
 
+from datetime import datetime
 from time import perf_counter
 from typing import TYPE_CHECKING
 
@@ -46,6 +47,9 @@ async def try_hybrid_recall(
     limit: int,
     tags: list[str] | None,
     query_embedding: list[float] | None = None,
+    *,
+    as_of: datetime | None = None,
+    include_superseded: bool = False,
 ) -> list[MemoryResultDict] | None:
     """Hybrid pipeline (BM25 + dense + RRF). Returns None to signal fallback.
 
@@ -134,6 +138,8 @@ async def try_hybrid_recall(
             vector_candidates=effective_vector_candidates,
             importance_alpha=client._config.rrf_importance_alpha,
             top_k=effective_top_k,
+            as_of=as_of,
+            include_superseded=include_superseded,
         )
     except Exception:
         hybrid_search_ms = (perf_counter() - hybrid_search_start) * 1000.0
