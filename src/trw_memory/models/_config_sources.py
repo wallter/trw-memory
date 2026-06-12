@@ -44,7 +44,12 @@ def _first_truthy_item(values: object) -> object | None:
 def _map_trw_config_yaml_to_memory_settings(raw: dict[str, object]) -> dict[str, Any]:
     mapped: dict[str, Any] = {}
 
-    if (sync_enabled := _first_non_none(raw, "sync_enabled", "platform_telemetry_enabled")) is not None:
+    # PRD-SEC-004-FR06: derive sync_enabled (learning-content sync) from the
+    # NEW learning_sharing_enabled consent flag, NOT from platform_telemetry_enabled
+    # (anonymous usage telemetry). The explicit ``sync_enabled`` alias is retained
+    # and takes precedence. The legacy platform_telemetry_enabled key MUST NOT gate
+    # learning-content sync — that conflated two independent consents.
+    if (sync_enabled := _first_non_none(raw, "sync_enabled", "learning_sharing_enabled")) is not None:
         mapped["sync_enabled"] = sync_enabled
     for target, aliases in (
         ("sync_min_importance", ("sync_min_importance",)),

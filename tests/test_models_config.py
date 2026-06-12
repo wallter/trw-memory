@@ -67,7 +67,9 @@ def test_memory_config_reads_trw_config_yaml(tmp_path: Path, monkeypatch: pytest
     _write_trw_config(
         tmp_path,
         [
-            "platform_telemetry_enabled: true",
+            # PRD-SEC-004-FR06: sync_enabled now derives from learning_sharing_enabled
+            # (learning-content consent), not platform_telemetry_enabled.
+            "learning_sharing_enabled: true",
             "platform_urls:",
             "  - https://platform.example.com",
             'platform_api_key: "yaml-key"',
@@ -82,6 +84,53 @@ def test_memory_config_reads_trw_config_yaml(tmp_path: Path, monkeypatch: pytest
     assert cfg.platform_url == "https://platform.example.com"
     assert cfg.platform_api_key == "yaml-key"
     assert cfg.sync_namespace == "org:test"
+
+
+def test_memory_config_sync_from_sharing_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PRD-SEC-004-FR06: learning_sharing_enabled gates sync_enabled."""
+    _write_trw_config(tmp_path, ["learning_sharing_enabled: true"])
+    monkeypatch.chdir(tmp_path)
+
+    cfg = MemoryConfig()
+
+    assert cfg.sync_enabled is True
+
+
+def test_memory_config_platform_telemetry_no_longer_enables_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRD-SEC-004-FR06: platform_telemetry_enabled (anonymous usage) alone must
+    NOT enable learning-content sync. Only learning_sharing_enabled does."""
+    _write_trw_config(
+        tmp_path,
+        [
+            "platform_telemetry_enabled: true",
+            # learning_sharing_enabled intentionally absent → default-off sync
+        ],
+    )
+    monkeypatch.chdir(tmp_path)
+
+    cfg = MemoryConfig()
+
+    assert cfg.sync_enabled is False
+
+
+def test_memory_config_explicit_sync_enabled_takes_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRD-SEC-004-FR06: explicit sync_enabled alias still wins over the sharing flag."""
+    _write_trw_config(
+        tmp_path,
+        [
+            "sync_enabled: true",
+            "learning_sharing_enabled: false",
+        ],
+    )
+    monkeypatch.chdir(tmp_path)
+
+    cfg = MemoryConfig()
+
+    assert cfg.sync_enabled is True
 
 
 def test_memory_config_reads_tier_fields_from_trw_config_yaml(
@@ -166,7 +215,7 @@ def test_memory_config_env_overrides_yaml(tmp_path: Path, monkeypatch: pytest.Mo
     _write_trw_config(
         tmp_path,
         [
-            "platform_telemetry_enabled: false",
+            "learning_sharing_enabled: false",
             "platform_api_key: yaml-key",
         ],
     )
