@@ -13,6 +13,7 @@ no-ops.
 from __future__ import annotations
 
 import contextlib
+import os
 import sqlite3
 import threading
 from collections.abc import Iterator, Sequence
@@ -51,6 +52,33 @@ if TYPE_CHECKING:
     from trw_memory.wiki.storage import StoredWikiReference
 
 logger = structlog.get_logger(__name__)
+
+# PRD-QUAL-110-FR02: mode for the secret-bearing on-disk SQLite store.
+_DB_FILE_MODE = 0o600
+
+
+def _harden_db_file_mode(db_path: Path) -> None:
+    """chmod a file-backed db to 0600, best-effort (PRD-QUAL-110-FR02).
+
+    Skips the in-memory (``:memory:``) and shared-cache URI cases (no file on
+    disk). A chmod failure (non-POSIX platform) logs ``db_chmod_failed`` at
+    WARNING and returns without raising, so backend construction is never
+    blocked by permission tightening.
+    """
+    name = str(db_path)
+    if name == ":memory:" or name.startswith("file::memory:") or not db_path.exists():
+        return
+    try:
+        os.chmod(db_path, _DB_FILE_MODE)
+    except OSError as exc:
+        logger.warning(
+            "db_chmod_failed",
+            path=name,
+            mode=oct(_DB_FILE_MODE),
+            error=type(exc).__name__,
+        )
+
+
 __all__ = [
     "CheckpointMode",
     "CheckpointResult",
@@ -229,6 +257,13 @@ class SQLiteBackend(StorageBackend):
             rebuild_from_cold=self._rebuild_from_cold,
             recovery_inline_max_bytes=recovery_inline_max_bytes,
         )
+
+        # PRD-QUAL-110-FR02: the on-disk SQLite store is secret-bearing
+        # (learning content, provenance) — chmod it 0600, mirroring the
+        # trw-mcp pins.json 0600 hardening. In-memory (":memory:") backends
+        # have no file to harden; a chmod failure on a non-POSIX platform
+        # degrades to a WARNING rather than blocking construction.
+        _harden_db_file_mode(db_path)
 
         # WAL-reset-bug safety gate. The active SQLite engine carries the
         # WAL-reset corruption bug (sqlite.org/wal.html §walresetbug) unless it

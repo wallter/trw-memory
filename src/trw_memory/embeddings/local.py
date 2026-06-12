@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import os
 import sys
 from collections.abc import Iterator
 
@@ -30,6 +31,18 @@ _DEFAULT_MODEL = "all-MiniLM-L6-v2"
 _DEFAULT_DIM = 384
 _TORCHCODEC_MODULE_PREFIX = "torchcodec"
 _MISSING = object()
+
+# PRD-QUAL-110-FR04: offline switches that block the huggingface.co model
+# download. ``TRW_OFFLINE`` is the TRW master switch; ``HF_HUB_OFFLINE`` is the
+# upstream huggingface_hub convention. Any truthy value forces
+# ``local_files_only=True`` even when the ``local_only`` config field is False.
+_OFFLINE_ENV_VARS = ("TRW_OFFLINE", "HF_HUB_OFFLINE")
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+def _offline_download_blocked() -> bool:
+    """Return True when an env offline switch blocks the model download (FR04)."""
+    return any(os.environ.get(name, "").strip().lower() in _TRUTHY for name in _OFFLINE_ENV_VARS)
 
 
 def _torchcodec_installed() -> bool:
@@ -138,11 +151,28 @@ class LocalEmbeddingProvider:
 
         self._load_attempted = True
         config = MemoryConfig()
+        # PRD-QUAL-110-FR04: an env offline switch forces local-files-only even
+        # when the config field is False, so an air-gapped deployer can prove
+        # zero huggingface.co egress without editing config.
+        offline = _offline_download_blocked()
+        local_files_only = bool(config.local_only) or offline
+        if not local_files_only:
+            # A network-capable load may fetch the model from huggingface.co —
+            # disclose the potential egress before it happens (FR04).
+            logger.info(
+                "embedding_model_download_disclosure",
+                model=self._model_name,
+                source="huggingface.co",
+                detail=(
+                    "Embedding model may be downloaded from huggingface.co on "
+                    "first use. Set TRW_OFFLINE=1 (or HF_HUB_OFFLINE=1) to block."
+                ),
+            )
         try:
             with _hide_broken_torchcodec_for_sentence_transformers():
                 from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(self._model_name, local_files_only=config.local_only)
+            self._model = SentenceTransformer(self._model_name, local_files_only=local_files_only)
             logger.debug(
                 "embedding_model_loaded",
                 model=self._model_name,
@@ -155,10 +185,11 @@ class LocalEmbeddingProvider:
                 hint="pip install trw-memory[embeddings]",
             )
         except OSError as exc:
-            if config.local_only:
+            if local_files_only:
+                blocked_by = "memory_local_only=True" if config.local_only else "TRW_OFFLINE/HF_HUB_OFFLINE"
                 raise LocalOnlyViolationError(
                     f"Model '{self._model_name}' not found in local cache. Download is blocked "
-                    "(memory_local_only=True). Pre-download the model: "
+                    f"({blocked_by}). Pre-download the model: "
                     f"python -m sentence_transformers download {self._model_name}"
                 ) from exc
             self._last_load_error = f"sentence-transformers installed but model load failed: {exc}"

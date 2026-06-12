@@ -276,6 +276,50 @@ Store/recall operations keep Hot/Warm in sync, Cold-tier hits are promoted back 
 | Audit trail | Append-only security event log |
 | Key management | Master key derivation, per-namespace keys, rotation support |
 
+## Telemetry & network behavior
+
+trw-memory is **local-first**: with the default configuration all data lives in a local SQLite store (and an optional YAML sidecar). It makes **no outbound network calls** except the optional embedding-model download below. There is no usage tracking or content phone-home.
+
+### What can touch the network, when, and how to turn it off
+
+| Surface | When | Default | Opt-out / control |
+|---------|------|---------|-------------------|
+| **Embedding model download** | First embedding operation downloads `all-MiniLM-L6-v2` from huggingface.co (only with the `[embeddings]` extra installed) | enabled when the extra is present | `TRW_OFFLINE=1` / `HF_HUB_OFFLINE=1`, or `local_only: true` (alias `memory_local_only`) — forces `local_files_only` so no download is attempted; a disclosure log line precedes any network-capable load |
+| **Remote sync / publish** | Only when `sync_enabled=true` AND `local_only=false` | **off** (`local_only` defaults on for the local engine) | leave sync disabled, or set `local_only: true` to hard-block all egress |
+
+With an offline switch engaged, a missing cached model degrades to keyword-only recall (no crash) and, under `local_only`, raises a clear `LocalOnlyViolationError` telling you how to pre-download.
+
+### Environment-variable inventory
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `TRW_OFFLINE` | Master offline switch — blocks the huggingface.co embedding-model download | unset |
+| `HF_HUB_OFFLINE` | Upstream huggingface_hub offline switch — also honored | unset |
+| `MEMORY_*` | Engine knobs validated by `MemoryConfig` (e.g. `MEMORY_LOCAL_ONLY`, retrieval + lifecycle tuning) | per-field |
+
+### Security defaults
+
+| Capability | Default | Notes |
+|-----------|---------|-------|
+| Field-level encryption | **off** | opt-in (AES-256-GCM per-namespace keys) |
+| PII redaction | **on** | sensitive values redacted in logs |
+| Poisoning detection | **observe** | detects, does not block, by default |
+| Remote sync / publishing | **off** | `local_only` defaults on for the local engine |
+| `memory.db` permissions | `0600` | the on-disk store is chmod-ed owner-only on creation (non-POSIX degrades to a warning) |
+
+### Enterprise hardening recipe
+
+```bash
+export TRW_OFFLINE=1   # no huggingface.co egress; keyword-only recall
+```
+
+```yaml
+# MemoryConfig
+local_only: true       # hard-block all remote sync + model download
+```
+
+Verify the on-disk `memory.db` is mode `0600` and no outbound connection is attempted on first use.
+
 ### MCP Tools
 
 When installed with `[mcp]` extra:
