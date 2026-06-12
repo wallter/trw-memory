@@ -8,7 +8,7 @@
 
 ## Part of TRW Framework
 
-trw-memory is the standalone memory engine for [TRW (The Real Work)](https://trwframework.com) — a methodology layer for AI-assisted development that provides stateless agents with a persistent memory layer **designed to enable self-improvement across sessions** via [knowledge compounding](https://trwframework.com/docs). *The outcome effect of cross-session memory on coding tasks is an open empirical question; iter-9/10 produced null on SWE-bench-single-shot at n≥40. See [docs/eval/iter-notes/iter-11-prospector-analysis.md](https://github.com/wallter/trw-framework/blob/main/docs/eval/iter-notes/iter-11-prospector-analysis.md).* It works alongside [trw-mcp](https://github.com/wallter/trw-mcp), the MCP server that builds its tooling on this engine.
+trw-memory is the standalone memory engine for [TRW (The Real Work)](https://trwframework.com) — a methodology layer for AI-assisted development that provides stateless agents with a persistent memory layer **designed to enable self-improvement across sessions** via [knowledge compounding](https://trwframework.com/docs). *The outcome effect of cross-session memory on coding tasks is an open empirical question; early SWE-bench single-shot runs (n≥40) produced null. See the [verification docs](https://trwframework.com/docs/verification) for the current methodology and evidence posture.* It works alongside [trw-mcp](https://github.com/wallter/trw-mcp), the MCP server that builds its tooling on this engine.
 
 - **trw-memory** (this repo): Standalone AI agent memory engine with hybrid retrieval, scoring, and lifecycle
 - **trw-mcp**: MCP server for AI coding agents — uses trw-memory as its backend
@@ -46,7 +46,7 @@ pip install trw-memory
 # Or install from source
 git clone https://github.com/wallter/trw-memory.git
 cd trw-memory
-python -m venv .venv && source ../.venv/bin/activate
+python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 # With all optional features (embeddings, vectors, BM25, LLM)
@@ -318,15 +318,15 @@ trw-memory-server  # Starts MCP server (stdio transport)
 pip install -e ".[dev]"
 
 # Run full test suite (>=85% coverage required — see fail_under in pyproject.toml)
-../.venv/bin/python -m pytest tests/ -v --cov=trw_memory --cov-report=term-missing
+python -m pytest tests/ -v --cov=trw_memory --cov-report=term-missing
 
 # Type checking (mypy --strict across the package)
-../.venv/bin/python -m mypy --strict src/trw_memory/
+python -m mypy --strict src/trw_memory/
 
 # Targeted testing
-../.venv/bin/python -m pytest tests/test_client.py -v
-../.venv/bin/python -m pytest tests/test_retrieval_*.py -v
-../.venv/bin/python -m pytest tests/test_storage_sqlite.py -v
+python -m pytest tests/test_client.py -v
+python -m pytest tests/test_retrieval_*.py -v
+python -m pytest tests/test_storage_sqlite.py -v
 ```
 
 **Quality bar**: a broad pytest suite, mypy `--strict` clean, and a coverage floor of 85% (`fail_under` in `pyproject.toml`).

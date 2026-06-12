@@ -4,9 +4,33 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+### Added
+
+- **Bi-temporal validity fields on `MemoryEntry`.** Entries now carry explicit
+  validity-interval metadata so callers can distinguish when a fact was recorded
+  from the time window over which it is asserted to hold.
+- **CombMAX fusion as a configurable retrieval combiner.** A max-reciprocal-rank
+  fusion strategy is selectable alongside the default RRF, preserving
+  single-ranker champions on hard-tail queries instead of diluting them.
+
+### Changed
+
+- **SEC-001 size-anomaly detector now defaults to `observe` mode.** The
+  poisoning size-anomaly path no longer quarantines against a cold/empty
+  reference distribution by default, so legitimate longer learnings are not
+  dropped on the first batch; `strict` remains opt-in.
+
 ### Fixed
 
-- **Concurrency hardening across the lifecycle / tier subsystem (0.9.6).**
+- **YAML entry mapper fails open on malformed timestamps.** A single
+  unparseable timestamp in a YAML-backed entry no longer aborts the read; the
+  field degrades gracefully instead of dropping the row.
+
+## [0.9.6] — 2026-06-09
+
+### Fixed
+
+- **Concurrency hardening across the lifecycle / tier subsystem.**
   Five verified data-safety / resource bugs are fixed:
   - `_sweep_hot_to_warm` no longer iterates and mutates the shared hot
     `OrderedDict` without the manager's `_hot_lock`. The Hot→Warm sweep now
@@ -38,6 +62,10 @@ All notable changes to the TRW Memory package.
   consolidated-entry field derivation now stays local to the `MemoryEntry`
   construction path without changing archive/rollback semantics, restoring the
   package maintainability gate.
+
+## [0.9.5] — 2026-06-09
+
+### Fixed
 
 - **Tier erasure now deletes the cold YAML archive copy (GDPR completeness).**
   `remove_entry_from_tiers` previously removed an entry only from the hot and
