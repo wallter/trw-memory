@@ -172,7 +172,14 @@ class LocalEmbeddingProvider:
             with _hide_broken_torchcodec_for_sentence_transformers():
                 from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(self._model_name, local_files_only=local_files_only)
+            # nomic-ai/nomic-embed-text-v1.5 and similar models with custom
+            # pooling modules require trust_remote_code=True to load.
+            trust_rc = "nomic-ai/" in self._model_name
+            self._model = SentenceTransformer(
+                self._model_name,
+                local_files_only=local_files_only,
+                trust_remote_code=trust_rc,
+            )
             logger.debug(
                 "embedding_model_loaded",
                 model=self._model_name,

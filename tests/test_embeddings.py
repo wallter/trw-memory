@@ -185,9 +185,10 @@ class TestLocalOnlyModelLoading:
         captured: dict[str, object] = {}
 
         class FakeSentenceTransformer:
-            def __init__(self, model_name: str, *, local_files_only: bool) -> None:
+            def __init__(self, model_name: str, *, local_files_only: bool, trust_remote_code: bool = False) -> None:
                 captured["model_name"] = model_name
                 captured["local_files_only"] = local_files_only
+                captured["trust_remote_code"] = trust_remote_code
 
         fake_module = MagicMock(SentenceTransformer=FakeSentenceTransformer)
 
@@ -199,6 +200,7 @@ class TestLocalOnlyModelLoading:
         assert captured == {
             "model_name": "all-MiniLM-L6-v2",
             "local_files_only": True,
+            "trust_remote_code": False,
         }
 
     def test_load_model_raises_local_only_violation_when_uncached_model_requires_download(
@@ -208,7 +210,7 @@ class TestLocalOnlyModelLoading:
         monkeypatch.setenv("MEMORY_LOCAL_ONLY", "true")
 
         class FakeSentenceTransformer:
-            def __init__(self, model_name: str, *, local_files_only: bool) -> None:
+            def __init__(self, model_name: str, *, local_files_only: bool, trust_remote_code: bool = False) -> None:
                 assert model_name == "all-MiniLM-L6-v2"
                 assert local_files_only is True
                 raise OSError("model not cached")
