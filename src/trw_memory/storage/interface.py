@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import contextlib
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from datetime import datetime
 
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
@@ -257,6 +257,28 @@ class StorageBackend(ABC):
         commits, which is correct (just slower).
         """
         yield self
+
+    def checkpoint_wal(self, mode: str = "PASSIVE") -> Mapping[str, object]:  # noqa: B027
+        """Checkpoint a write-ahead log, if the backend keeps one.
+
+        This is an optional maintenance seam mirroring the :meth:`supports_vectors`
+        capability pattern: backends that maintain a WAL (e.g.
+        :class:`~trw_memory.storage.sqlite_backend.SQLiteBackend`) override this to
+        run ``PRAGMA wal_checkpoint`` and report frame counts. Backends without a
+        WAL (e.g. :class:`~trw_memory.storage.yaml_backend.YAMLBackend`) inherit
+        this safe no-op so callers can invoke maintenance uniformly across the
+        backend seam without a capability guard.
+
+        Args:
+            mode: Requested checkpoint mode (``PASSIVE``/``FULL``/``RESTART``/
+                ``TRUNCATE``). Ignored by the no-op default.
+
+        Returns:
+            An empty mapping for the no-op default; overriding backends return a
+            structured result describing the checkpoint outcome (e.g.
+            :class:`~trw_memory.storage._wal_checkpoint.CheckpointResult`).
+        """
+        return {}
 
     def supports_vectors(self) -> bool:
         """Return whether this backend can persist and search dense vectors.
