@@ -106,6 +106,41 @@ class TestClassifyTemporal:
         result = classify_temporal("latest upcoming sprint tasks this week")
         assert result.is_temporal is True
 
+    def test_temporal_arithmetic_n_days_ago(self) -> None:
+        result = classify_temporal("What kitchen appliance did I buy 10 days ago?")
+        assert result.is_temporal is True
+        assert "temporal_arithmetic" in result.matched_patterns
+
+    def test_temporal_arithmetic_n_weeks_ago(self) -> None:
+        result = classify_temporal("What did I do two weeks ago?")
+        assert result.is_temporal is True
+
+    def test_temporal_arithmetic_last_weekday(self) -> None:
+        result = classify_temporal("Who did I meet with last Tuesday?")
+        assert result.is_temporal is True
+        assert "temporal_arithmetic" in result.matched_patterns
+
+    def test_temporal_arithmetic_months_ago(self) -> None:
+        result = classify_temporal("What did I do on the Wednesday two months ago?")
+        assert result.is_temporal is True
+
+    def test_prior_context_previous_conversation(self) -> None:
+        result = classify_temporal("In our previous conversation, you mentioned something")
+        assert result.is_temporal is True
+        assert "prior_context" in result.matched_patterns
+
+    def test_prior_context_previous_chat(self) -> None:
+        result = classify_temporal("I was looking back at our previous chat and wanted to confirm")
+        assert result.is_temporal is True
+
+    def test_prior_context_low_recency_weight(self) -> None:
+        # Prior context and temporal arithmetic shouldn't get huge recency boosts;
+        # they're not "give me recent stuff" queries. Confidence=0.6 which maps to
+        # a moderate recency_weight — still less than superlative recency (0.9).
+        result = classify_temporal("In our previous chat, you said something")
+        result2 = classify_temporal("latest auth middleware guidance")
+        assert result.recency_weight <= result2.recency_weight
+
 
 class TestPrepareTemporalQuery:
     def test_strips_prefix_and_auto_fills_zero_recency_weight(self) -> None:
@@ -199,3 +234,43 @@ class TestStripTemporalPrefix:
     def test_latest_without_guidance_stripped(self) -> None:
         result = self._fn("latest on deployment")
         assert result == "deployment"
+
+    def test_previous_conversation_about_stripped(self) -> None:
+        result = self._fn(
+            "I was looking back at our previous conversation about Native American powwows and I was wondering"
+        )
+        assert "powwows" in result
+        assert "looking back" not in result.lower()
+
+    def test_going_back_to_previous_conversation_stripped(self) -> None:
+        result = self._fn(
+            "I'm going back to our previous conversation about the children's book on dinosaurs. Can you remind me"
+        )
+        assert "dinosaurs" in result
+
+    def test_wanted_to_follow_up_stripped(self) -> None:
+        result = self._fn(
+            "I wanted to follow up on our previous conversation about binaural beats"
+        )
+        assert "binaural beats" in result
+        assert "follow up" not in result.lower()
+
+    def test_remember_you_told_stripped(self) -> None:
+        result = self._fn(
+            "I remember you told me about the refining processes at CITGO"
+        )
+        assert "refining processes" in result or "CITGO" in result
+
+    def test_we_discussed_stripped(self) -> None:
+        result = self._fn("I think we discussed work from home jobs for seniors earlier")
+        assert "work from home" in result or "seniors" in result
+
+    def test_previous_conversation_empty_remainder_is_safe(self) -> None:
+        result = self._fn("I was looking back at our previous conversation about")
+        assert result  # must not be empty
+
+    def test_previous_conversation_strip_case_insensitive(self) -> None:
+        result = self._fn(
+            "I WAS LOOKING BACK AT OUR PREVIOUS CONVERSATION ABOUT deployment practices"
+        )
+        assert "deployment practices" in result

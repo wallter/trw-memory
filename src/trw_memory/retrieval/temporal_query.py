@@ -13,12 +13,18 @@ Patterns captured:
 - Superlative recency: newest, most recent, latest, current
 - Present-state anchors: today, this week/month/year
 - Temporal verbs: was updated, has changed, is now
+- Temporal arithmetic: N days/weeks/months ago, last Tuesday
+- Prior context: previous conversation/chat references
 
 Temporal queries often start with boilerplate prefixes like
 "latest guidance on X" or "what is the current state of X".  These
 prefixes are high-df noise for BM25 (common across many queries) and
 add semantic drift for dense embedders.  ``strip_temporal_prefix``
 removes them, leaving just the meaningful topic tokens (X).
+
+"Previous conversation" boilerplate ("I was looking back at our previous chat
+about X, can you remind me Y?") is similarly stripped — the meaningful topic
+is X, not the conversational framing.
 
 Returns a dataclass with the detected ``is_temporal`` flag plus a suggested
 ``recency_weight`` scaled by detection confidence.
@@ -63,6 +69,39 @@ _PATTERNS: list[tuple[re.Pattern[str], float, str]] = [
     (re.compile(r"\b(was updated|has changed|is now|have changed|were updated)\b", re.IGNORECASE), 0.65, "state_verb"),
     # Future anchors (lower weight — user wants upcoming, not past recency)
     (re.compile(r"\b(upcoming|next (week|month|quarter|sprint))\b", re.IGNORECASE), 0.4, "future_anchor"),
+    # Temporal arithmetic — pinpoints a specific past moment (is_temporal=True;
+    # recency_weight stays low: the caller wants the entry FROM that moment, not
+    # the most-recent entries). Future code can branch on "temporal_arithmetic"
+    # to apply date-range filtering instead of recency blending.
+    (
+        re.compile(
+            r"\b(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|"
+            r"eleven|twelve|twenty|thirty|forty|fifty|sixty|ninety|hundred)\s+"
+            r"(day|days|week|weeks|month|months|year|years)\s+ago\b",
+            re.IGNORECASE,
+        ),
+        0.75,
+        "temporal_arithmetic",
+    ),
+    # Named weekday anchors ("last Tuesday", "last Monday") — specific day
+    (
+        re.compile(
+            r"\blast\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+            re.IGNORECASE,
+        ),
+        0.75,
+        "temporal_arithmetic",
+    ),
+    # Prior-context references — "previous conversation/chat/session" without a
+    # named window (no recency boost needed; the memory IS the prior context).
+    (
+        re.compile(
+            r"\b(previous|prior|earlier|last)\s+(conversation|chat|session|discussion|talk)\b",
+            re.IGNORECASE,
+        ),
+        0.6,
+        "prior_context",
+    ),
 ]
 
 # Combined confidence ceiling — multiple weak signals can stack but are capped
@@ -94,6 +133,34 @@ _TEMPORAL_PREFIXES: list[re.Pattern[str]] = [
     ),
     re.compile(r"^(latest|most recent|current|newest) (on|for|about|regarding) ", re.IGNORECASE),
     re.compile(r"^(what('s| is| are) (the )?)?(latest|current|most recent) ", re.IGNORECASE),
+    # Prior-context boilerplate: "I was looking back at our previous conversation about X"
+    # → strip conversational frame, leave topic X.
+    re.compile(
+        r"^(I('m| am| was| have been))?\s*(looking back at|going back to|thinking about|"
+        r"checking)\s+(our\s+)?(previous|prior|earlier|last)\s+"
+        r"(conversation|chat|session|discussion|talk)\s+(about|on|regarding|re:)\s+",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(I\s+)?(wanted to follow up on|wanted to check back on|"
+        r"was thinking about)\s+(our\s+)?(previous|prior|last)\s+"
+        r"(conversation|chat|discussion)\s+(about|on|regarding)\s+",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(I\s+)?(remember|recall)\s+(you\s+)?(told|mentioned|said|suggested|recommended)\s+"
+        r"(me\s+)?(about\s+)?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(I\s+)?(think|thought)\s+we\s+discussed\s+",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^in (our\s+)?(previous|prior|earlier|last)\s+(conversation|chat|session|discussion),?\s*"
+        r"(you\s+)?(mentioned|said|suggested|told me|recommended)?\s*",
+        re.IGNORECASE,
+    ),
 ]
 
 
