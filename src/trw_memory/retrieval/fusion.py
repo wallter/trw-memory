@@ -16,8 +16,6 @@ from __future__ import annotations
 
 import structlog
 
-__all__ = ["blend_recency", "combmax_fuse", "rrf_fuse"]
-
 logger = structlog.get_logger(__name__)
 
 
@@ -229,3 +227,6 @@ def blend_recency(
         unique_docs=len(blended),
     )
     return blended
+
+
+__all__ = ["blend_recency", "combmax_fuse", "rrf_fuse"]
