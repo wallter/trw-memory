@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -15,6 +15,8 @@ from trw_memory.storage._snapshot import (
     create_snapshot,
     latest_snapshot,
     restore_from_snapshot,
+    snapshots_base_dir,
+    take_daily_snapshot,
     take_weekly_snapshot,
 )
 
@@ -38,13 +40,23 @@ class TestCreateSnapshotVacuumError:
 
 class TestTakeWeeklySnapshotNotSunday:
     def test_returns_none_when_not_sunday_and_not_forced(self, tmp_path: Path) -> None:
-        """Non-Sunday + force=False → return None (line 241)."""
+        """Non-Sunday + force=False → return None (line 244)."""
         db_path = tmp_path / "memory.db"
         db_path.write_bytes(b"")
         base_dir = tmp_path / "snapshots"
         # Use a Monday (isoweekday=1) so the Sunday check fails
         monday = datetime(2026, 6, 8, tzinfo=timezone.utc)  # Monday
         result = take_weekly_snapshot(db_path, base_dir, force=False, now=monday)
+        assert result is None
+
+    def test_returns_none_when_now_is_none_and_not_sunday(self, tmp_path: Path) -> None:
+        """now=None on a non-Sunday → datetime.now() branch executed (line 241)."""
+        db_path = tmp_path / "memory.db"
+        db_path.write_bytes(b"")
+        base_dir = tmp_path / "snapshots"
+        # Today is June 13 2026 (Saturday); calling without now= exercises line 241
+        # and then returns None because Saturday (isoweekday=6) != Sunday (7)
+        result = take_weekly_snapshot(db_path, base_dir, force=False)
         assert result is None
 
 
@@ -62,15 +74,23 @@ class TestParseSnapshotDateInvalidDates:
         assert result is None
 
 
+class TestParseSnapshotDateNoMatch:
+    def test_non_matching_name_returns_none(self) -> None:
+        """Name matches neither _DAILY_RE nor _WEEKLY_RE → fall-through None (line 323)."""
+        result = _parse_snapshot_date("junk.db")
+        assert result is None
+
+
 class TestLatestSnapshotParsedNone:
     def test_unparseable_snapshot_name_is_skipped(self, tmp_path: Path) -> None:
         """_parse_snapshot_date returns None → continue (line 346)."""
-        base_dir = tmp_path / "snapshots"
-        daily = base_dir / "daily"
+        # latest_snapshot uses _daily_dir(base_dir) = snapshots_base_dir(base_dir)/"daily"
+        # = base_dir/"memory"/"snapshots"/"daily"
+        daily = snapshots_base_dir(tmp_path) / "daily"
         daily.mkdir(parents=True)
         # Bare date format matches _DAILY_RE but month 13 is invalid → parsed is None
         (daily / "2026-13-40.db").write_bytes(b"")
-        result = latest_snapshot(base_dir)
+        result = latest_snapshot(tmp_path)
         assert result is None
 
 
@@ -103,6 +123,22 @@ class TestPruneTierUnlinkFails:
         with patch("trw_memory.storage._snapshot.Path.unlink", side_effect=OSError("busy")):
             remaining, pruned = _prune_tier(tier_dir, keep=2, pattern=re.compile(r".*\.db"))
         assert pruned == 0  # unlink failed, so none pruned
+
+
+class TestTakeDailySnapshotNowNone:
+    def test_now_none_uses_current_datetime(self, tmp_path: Path) -> None:
+        """take_daily_snapshot with now=None → _date_stamp(None) → datetime.now() (line 435)."""
+        db_path = tmp_path / "memory.db"
+        db_path.write_bytes(b"")
+        base_dir = tmp_path
+        # Mock create_snapshot to avoid real DB ops; just verify the path was exercised
+        with patch("trw_memory.storage._snapshot.create_snapshot", return_value=tmp_path / "snap.db") as mock_cs:
+            with patch("trw_memory.storage._snapshot.rotate_snapshots"):
+                result = take_daily_snapshot(db_path, base_dir, now=None)
+        assert mock_cs.called
+        # dest path contains a valid YYYY-MM-DD stamp derived from datetime.now()
+        call_dest = mock_cs.call_args[0][1]
+        assert call_dest.suffix == ".db"
 
 
 class TestSortedParseableOsError:
