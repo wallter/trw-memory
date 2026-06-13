@@ -71,10 +71,10 @@ def _install_pysqlite3_if_available() -> tuple[str, str]:
     except ImportError:
         # Fallback path: stdlib sqlite3 (may carry the WAL-reset bug on older
         # interpreter builds). We do not warn — this is a soft preference.
-        if stdlib_sqlite is None:
-            import sqlite3 as _sqlite3
+        if stdlib_sqlite is None:  # pragma: no cover
+            import sqlite3 as _sqlite3  # pragma: no cover
 
-            stdlib_sqlite = _sqlite3
+            stdlib_sqlite = _sqlite3  # pragma: no cover
         return ("sqlite3", stdlib_sqlite.sqlite_version)
 
     sys.modules["sqlite3"] = pysqlite3
