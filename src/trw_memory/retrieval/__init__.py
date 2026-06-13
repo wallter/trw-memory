@@ -7,6 +7,7 @@ Public API:
 - :func:`~trw_memory.retrieval.dense.cosine_similarity` — vector similarity helper
 - :func:`~trw_memory.retrieval.fusion.rrf_fuse` — Reciprocal Rank Fusion (sum)
 - :func:`~trw_memory.retrieval.fusion.combmax_fuse` — CombMAX fusion (max reciprocal rank)
+- :func:`~trw_memory.retrieval.fusion.blend_recency` — linear recency/relevance blend
 - :func:`~trw_memory.retrieval.pipeline.hybrid_search` — combined pipeline
 - :func:`~trw_memory.retrieval.recency.recency_rank` — recency-based ranking
 - :func:`~trw_memory.retrieval.recency.recency_score` — per-entry recency score
@@ -23,7 +24,7 @@ from __future__ import annotations
 
 from trw_memory.retrieval.bm25 import bm25_search
 from trw_memory.retrieval.dense import cosine_similarity, dense_search
-from trw_memory.retrieval.fusion import combmax_fuse, rrf_fuse
+from trw_memory.retrieval.fusion import blend_recency, combmax_fuse, rrf_fuse
 from trw_memory.retrieval.pipeline import hybrid_search
 from trw_memory.retrieval.recency import recency_rank, recency_score
 from trw_memory.retrieval.reranker import cross_encode_rerank
@@ -54,7 +55,9 @@ __all__ = [
     "METADATA_OVERHEAD",
     "TOKEN_MULTIPLIER",
     "apply_token_budget",
+    "blend_recency",
     "bm25_search",
+    "classify_temporal",
     "combmax_fuse",
     "cosine_similarity",
     "cross_encode_rerank",
@@ -62,12 +65,11 @@ __all__ = [
     "estimate_entry_tokens",
     "estimate_tokens",
     "hybrid_search",
+    "prepare_temporal_query",
     "recency_rank",
     "recency_score",
-    "rrf_fuse",
-    "classify_temporal",
-    "prepare_temporal_query",
     "resolve_temporal_arithmetic_offset",
+    "rrf_fuse",
     "strip_temporal_arithmetic",
     "strip_temporal_prefix",
 ]
