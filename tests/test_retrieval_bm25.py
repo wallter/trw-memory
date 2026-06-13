@@ -77,3 +77,16 @@ class TestBM25Search:
         ]
         results = bm25_search("pydantic", entries)
         assert "detail_match" in [entry_id for entry_id, _ in results]
+
+    def test_query_hyphen_expansion_matches_split_tag_tokens(self) -> None:
+        # Document: tagged "pydantic-v2" → indexed as ["pydantic-v2", "pydantic", "v2"]
+        # Query: "pydantic-v2" → must expand to ["pydantic-v2", "pydantic", "v2"]
+        # so it matches on the expanded tag tokens too.
+        entries = [
+            make_entry("tagged", "model configuration", tags=["pydantic-v2"]),
+            make_entry("unrelated", "something about javascript and npm"),
+        ]
+        results = bm25_search("pydantic-v2 schema", entries)
+        ids = [entry_id for entry_id, _ in results]
+        assert "tagged" in ids
+        assert ids[0] == "tagged"  # tagged entry should rank first

@@ -104,7 +104,14 @@ def bm25_search(
         return []
 
     corpus: list[list[str]] = [_tokenize_entry(e) for e in entries]
-    tokenized_query = [t for t in _normalize_text(query).split() if t]
+    # Mirror the document tokenizer's hyphen-expansion so "pydantic-v2" in a
+    # query matches both the composite token and the split tokens indexed from tags.
+    _raw_q = [t for t in _normalize_text(query).split() if t]
+    tokenized_query: list[str] = []
+    for _t in _raw_q:
+        tokenized_query.append(_t)
+        if "-" in _t:
+            tokenized_query.extend(_t.split("-"))
 
     bm25 = BM25Okapi(corpus)
     scores = bm25.get_scores(tokenized_query)
