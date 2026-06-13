@@ -312,3 +312,34 @@ class TestFtsScaleGuard:
         assert fts_ms < like_ms, (
             f"FTS5 ({fts_ms:.2f}ms) should be faster than LIKE ({like_ms:.2f}ms) at 10K entries"
         )
+
+
+# ---------------------------------------------------------------------------
+# Query sanitization (empty guard, length cap, operator literalization)
+# ---------------------------------------------------------------------------
+
+
+class TestFtsQuerySanitization:
+    def test_whitespace_only_query_returns_empty(self, backend: SQLiteBackend) -> None:
+        if not backend.fts_available:
+            pytest.skip("FTS5 not available")
+        backend.store_many([_entry(content="some content")])
+        assert backend.search_fts("   ") == []
+        assert backend.search_fts("\t\n") == []
+
+    def test_very_long_query_truncated_safely(self, backend: SQLiteBackend) -> None:
+        if not backend.fts_available:
+            pytest.skip("FTS5 not available")
+        long_query = "a" * 2000
+        # Should not raise; returns empty or results without error
+        result = backend.search_fts(long_query)
+        assert isinstance(result, list)
+
+    def test_fts_boolean_operators_treated_as_literal(self, backend: SQLiteBackend) -> None:
+        if not backend.fts_available:
+            pytest.skip("FTS5 not available")
+        e = _entry(content="this AND that OR something NOT related")
+        backend.store_many([e])
+        # phrase quoting means AND/OR/NOT are treated as literals, not operators
+        results = backend.search_fts("AND")
+        assert any(r.id == e.id for r in results)

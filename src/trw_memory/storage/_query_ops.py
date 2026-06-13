@@ -150,6 +150,15 @@ def search_fts(
     BM25 for candidate retrieval; the caller's hybrid pipeline may re-rank.
     Falls back to an empty list when no FTS candidates match.
     """
+    # Sanitize: strip whitespace, enforce max length, escape for FTS5 phrase query.
+    # Phrase-quoting (wrapping in "...") makes FTS5 operators (AND, OR, NOT, NEAR)
+    # and colon prefix operators literal; the empty guard and length cap add
+    # DoS protection (empty/whitespace-only or pathologically long queries).
+    query = query.strip()
+    if not query:
+        return []
+    if len(query) > 1000:
+        query = query[:1000]
     sanitized = query.replace('"', '""')
     fts_query = f'"{sanitized}"'
     filter_sql, filter_params = backend._build_filter_clause(
