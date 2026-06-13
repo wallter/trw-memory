@@ -27,7 +27,11 @@ from trw_memory.retrieval.fusion import combmax_fuse, rrf_fuse
 from trw_memory.retrieval.pipeline import hybrid_search
 from trw_memory.retrieval.recency import recency_rank, recency_score
 from trw_memory.retrieval.reranker import cross_encode_rerank
-from trw_memory.retrieval.temporal_query import classify_temporal, strip_temporal_prefix
+from trw_memory.retrieval.temporal_query import (
+    classify_temporal,
+    prepare_temporal_query,
+    strip_temporal_prefix,
+)
 from trw_memory.retrieval.token_budget import (
     METADATA_OVERHEAD as METADATA_OVERHEAD,
 )
@@ -60,5 +64,6 @@ __all__ = [
     "recency_score",
     "rrf_fuse",
     "classify_temporal",
+    "prepare_temporal_query",
     "strip_temporal_prefix",
 ]

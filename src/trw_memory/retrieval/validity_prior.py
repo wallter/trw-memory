@@ -17,6 +17,7 @@ an in-memory field compare, no extra DB query). It:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 
 from trw_memory.models.memory import MemoryEntry
@@ -43,6 +44,7 @@ def apply_validity_prior(
     as_of: datetime | None = None,
     include_superseded: bool = False,
     age_decay: bool = False,
+    fusion_scores: Mapping[str, float] | None = None,
 ) -> list[MemoryEntry]:
     """Apply the validity prior to an already-fused, ordered candidate list.
 
@@ -55,6 +57,9 @@ def apply_validity_prior(
         age_decay: When True, apply a tie-only age advantage so the newer
             ``valid_from`` floats above an older one when fusion ranked them
             equal — fusion order is otherwise preserved.
+        fusion_scores: Optional fused score by entry id. Required for age decay
+            to prove a true score tie; when absent, age_decay preserves input
+            order rather than guessing and globally sorting by recency.
 
     Returns:
         The reordered/filtered list of entries.
@@ -68,7 +73,7 @@ def apply_validity_prior(
             ineligible.append(entry)
 
     if age_decay:
-        eligible = _apply_age_decay(eligible)
+        eligible = _apply_age_decay(eligible, fusion_scores=fusion_scores)
 
     if include_superseded:
         # Positional penalty: superseded/out-of-window records always trail the
@@ -77,20 +82,50 @@ def apply_validity_prior(
     return eligible
 
 
-def _apply_age_decay(eligible: list[MemoryEntry]) -> list[MemoryEntry]:
+def _apply_age_decay(
+    eligible: list[MemoryEntry],
+    *,
+    fusion_scores: Mapping[str, float] | None,
+    tie_epsilon: float = 1e-12,
+) -> list[MemoryEntry]:
     """Tie-aware age preference: newer ``valid_from`` floats up within a tie group.
 
-    The decay term is intentionally minimal (OQ1 non-blocking) and BOUNDED: it is
-    a STABLE sort that prefers the newer ``valid_from``. Because the caller hands
-    this helper a candidate list it considers relevance-tied for age purposes
-    (``hybrid_search`` passes its fused candidates so the term layers onto the
-    ``importance_alpha`` blend, never replacing fusion), the newer record always
-    receives a NON-NEGATIVE advantage and is never ranked below an older one.
-    Records that compare equal on ``valid_from`` keep their original fused order
-    (stable sort), so the adjustment is monotone and order-preserving on ties.
+    The decay term is intentionally minimal (OQ1 non-blocking) and BOUNDED: it
+    may reorder records only inside consecutive fused-score tie buckets. An older
+    record that earned a higher fused score stays above a newer lower-scored
+    record, preserving the post-fusion relevance order except for true ties.
     """
-    # Stable sort: newer valid_from first. Equal valid_from keeps fused order.
-    return sorted(eligible, key=lambda e: _neg_epoch(e.valid_from))
+    if not fusion_scores:
+        return eligible
+
+    ordered: list[MemoryEntry] = []
+    bucket: list[MemoryEntry] = []
+    bucket_score: float | None = None
+
+    def flush_bucket() -> None:
+        if not bucket:
+            return
+        # Stable sort: newer valid_from first. Equal valid_from keeps fused order.
+        ordered.extend(sorted(bucket, key=lambda e: _neg_epoch(e.valid_from)))
+        bucket.clear()
+
+    for entry in eligible:
+        score = fusion_scores.get(str(entry.id))
+        if score is None:
+            flush_bucket()
+            ordered.append(entry)
+            bucket_score = None
+            continue
+        if bucket_score is None or abs(score - bucket_score) <= tie_epsilon:
+            bucket.append(entry)
+            bucket_score = score if bucket_score is None else bucket_score
+            continue
+        flush_bucket()
+        bucket.append(entry)
+        bucket_score = score
+
+    flush_bucket()
+    return ordered
 
 
 def _neg_epoch(when: datetime) -> float:

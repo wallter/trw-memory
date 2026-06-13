@@ -22,6 +22,7 @@ Public surface (delegated from ``MemoryClient._try_hybrid_recall``):
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from time import perf_counter
 from typing import TYPE_CHECKING
@@ -62,8 +63,10 @@ async def try_hybrid_recall(
 
     *query_embedding* is the query vector the caller already computed (for tier
     scoring); when supplied it is forwarded to ``hybrid_search`` so the dense
-    step reuses it instead of re-embedding the query. ``None`` preserves the
-    legacy behaviour of embedding the query inside the dense step.
+    step reuses it instead of re-embedding the query. If temporal prefix
+    stripping rewrites the retrieval query, the embedding is recomputed for the
+    stripped query so BM25, dense, and rerank all share the same search text.
+    ``None`` preserves the legacy behaviour of embedding inside the dense step.
     """
     try:
         from trw_memory.retrieval.pipeline import hybrid_search
@@ -131,19 +134,19 @@ async def try_hybrid_recall(
     # prefixes when the config hasn't explicitly enabled either.  Preserves
     # explicit config — if the operator set recall_recency_weight > 0 we use
     # that value; only the zero-default case gets the auto-detected weight.
-    effective_recency_weight = client._config.recall_recency_weight
-    retrieval_query = query  # may be rewritten for BM25/dense; original used for reranking
     if client._config.recall_auto_temporal:
-        from trw_memory.retrieval.temporal_query import classify_temporal, strip_temporal_prefix
+        from trw_memory.retrieval.temporal_query import prepare_temporal_query
 
-        tc = classify_temporal(query)
-        if tc.is_temporal:
-            if effective_recency_weight == 0.0:
-                effective_recency_weight = tc.recency_weight
-            if client._config.recall_strip_temporal_prefix:
-                stripped = strip_temporal_prefix(query)
-                if stripped != query:
-                    retrieval_query = stripped
+        rewrite = prepare_temporal_query(
+            query,
+            current_recency_weight=client._config.recall_recency_weight,
+            auto_temporal=True,
+            strip_prefix=client._config.recall_strip_temporal_prefix,
+        )
+        retrieval_query = rewrite.retrieval_query
+        effective_recency_weight = rewrite.recency_weight
+        tc = rewrite.classification
+        if tc is not None and tc.is_temporal:
             logger.debug(
                 "temporal_query_detected",
                 query=query[:80],
@@ -151,8 +154,29 @@ async def try_hybrid_recall(
                 confidence=tc.confidence,
                 recency_weight=effective_recency_weight,
                 patterns=tc.matched_patterns,
-                prefix_stripped=retrieval_query != query,
+                prefix_stripped=rewrite.prefix_stripped,
             )
+    else:
+        effective_recency_weight = client._config.recall_recency_weight
+        retrieval_query = query
+        rewrite = None
+
+    effective_query_embedding = query_embedding
+    if rewrite is not None and rewrite.prefix_stripped and embedder is not None:
+        # The caller's precomputed vector represents the original query
+        # ("latest guidance on X"). Once the retrieval query is stripped to
+        # "X", dense search must use the stripped vector too; otherwise prefix
+        # stripping only affects BM25 while dense similarity keeps the semantic
+        # drift the rewrite was meant to remove.
+        try:
+            effective_query_embedding = await asyncio.to_thread(embedder.embed, retrieval_query)
+        except (RuntimeError, ValueError, TypeError):
+            logger.warning(
+                "hybrid_recall_temporal_embedding_failed",
+                query_chars=len(retrieval_query),
+                exc_info=True,
+            )
+            effective_query_embedding = None
 
     hybrid_search_start = perf_counter()
     try:
@@ -160,7 +184,7 @@ async def try_hybrid_recall(
             query=retrieval_query,
             entries=all_entries,
             embedder=embedder,
-            query_embedding=query_embedding,
+            query_embedding=effective_query_embedding,
             stored_embeddings=stored_embeddings or None,
             bm25_candidates=effective_bm25_candidates,
             vector_candidates=effective_vector_candidates,

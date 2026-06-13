@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import MutableMapping, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -107,6 +108,38 @@ async def test_client_recall_passes_stored_embeddings_to_hybrid_search(client: M
 
     assert hybrid_search_mock.called
     assert hybrid_search_mock.call_args.kwargs["stored_embeddings"] == {"M-001": [0.9, 0.1, 0.0]}
+
+
+async def test_client_recall_temporal_prefix_uses_stripped_dense_query(client: MemoryClient) -> None:
+    """Temporal prefix stripping must apply to BM25, dense, and rerank text."""
+    real_backend = client._backend
+    assert real_backend is not None
+    real_backend.close()
+
+    entry = MemoryEntry(id="M-001", content="pydantic", namespace="default")
+    backend = MagicMock()
+    backend.list_entries.return_value = [entry]
+    backend.get_stored_embeddings.return_value = {"M-001": [0.8, 0.2, 0.0]}
+    client._backend = backend
+    temporal = SimpleNamespace(
+        is_temporal=True,
+        recency_weight=0.42,
+        confidence=0.9,
+        matched_patterns=["latest"],
+    )
+
+    with (
+        patch.object(MemoryClient, "_get_embedder", return_value=_StubEmbedder()),
+        patch("trw_memory.retrieval.temporal_query.classify_temporal", return_value=temporal),
+        patch("trw_memory.retrieval.temporal_query.strip_temporal_prefix", return_value="pydantic"),
+        patch("trw_memory.retrieval.pipeline.hybrid_search", return_value=[entry]) as hybrid_search_mock,
+    ):
+        await client.recall("latest guidance on pydantic")
+
+    kwargs = hybrid_search_mock.call_args.kwargs
+    assert kwargs["query"] == "pydantic"
+    assert kwargs["query_embedding"] == [8.0, 1.0, 0.5]
+    assert "rerank_query" not in kwargs
 
 
 async def test_client_recall_updates_access_metadata_only_for_returned_entries(client: MemoryClient) -> None:
@@ -224,6 +257,73 @@ def test_memory_recall_impl_uses_configured_embedder_settings() -> None:
         memory_recall_impl("pydantic", "project:default", backend=backend, config=config)
 
     embedder_mock.assert_called_once_with(model_name="custom-model", dim=768)
+
+
+def test_memory_recall_impl_forwards_retrieval_config_to_hybrid_search() -> None:
+    """Tool recall must use the same retrieval knobs as client recall."""
+    entry = MemoryEntry(id="M-001", content="pydantic", namespace="project:default")
+    backend = MagicMock()
+    backend.list_entries.return_value = [entry]
+    backend.get_stored_embeddings.return_value = {"M-001": [0.8, 0.2, 0.0]}
+    config = MemoryConfig(
+        rrf_k=22,
+        rrf_importance_alpha=0.4,
+        recall_recency_weight=0.6,
+        recall_recency_halflife_days=9.0,
+        recall_fusion_mode="combmax",
+        recall_validity_age_decay=True,
+        recall_rerank=True,
+        recall_rerank_model="cross-encoder/custom",
+        recall_rerank_candidates=12,
+    )
+
+    with (
+        patch("trw_memory.tools.recall.get_local_embedder", return_value=_StubEmbedder()),
+        patch("trw_memory.tools.recall.hybrid_search", return_value=[entry]) as hybrid_search_mock,
+    ):
+        memory_recall_impl("pydantic", "project:default", backend=backend, config=config)
+
+    kwargs = hybrid_search_mock.call_args.kwargs
+    assert kwargs["rrf_k"] == 22
+    assert kwargs["importance_alpha"] == 0.4
+    assert kwargs["recency_weight"] == 0.6
+    assert kwargs["recency_halflife_days"] == 9.0
+    assert kwargs["fusion_mode"] == "combmax"
+    assert kwargs["validity_age_decay"] is True
+    assert kwargs["rerank"] is True
+    assert kwargs["rerank_model"] == "cross-encoder/custom"
+    assert kwargs["rerank_candidates"] == 12
+    assert kwargs["bm25_candidates"] >= 1
+    assert kwargs["vector_candidates"] >= 1
+
+
+def test_memory_recall_impl_applies_temporal_query_wiring() -> None:
+    """Tool recall auto-recency and prefix stripping should match client recall."""
+    entry = MemoryEntry(id="M-001", content="pydantic", namespace="project:default")
+    backend = MagicMock()
+    backend.list_entries.return_value = [entry]
+    backend.get_stored_embeddings.return_value = {"M-001": [0.8, 0.2, 0.0]}
+    config = MemoryConfig(recall_recency_weight=0.0, recall_auto_temporal=True)
+    temporal = SimpleNamespace(
+        is_temporal=True,
+        recency_weight=0.42,
+        confidence=0.9,
+        matched_patterns=["latest"],
+    )
+
+    with (
+        patch("trw_memory.tools.recall.get_local_embedder", return_value=_StubEmbedder()),
+        patch("trw_memory.retrieval.temporal_query.classify_temporal", return_value=temporal),
+        patch("trw_memory.retrieval.temporal_query.strip_temporal_prefix", return_value="pydantic"),
+        patch("trw_memory.tools.recall.hybrid_search", return_value=[entry]) as hybrid_search_mock,
+    ):
+        memory_recall_impl("latest guidance on pydantic", "project:default", backend=backend, config=config)
+
+    kwargs = hybrid_search_mock.call_args.kwargs
+    assert kwargs["query"] == "pydantic"
+    assert kwargs["query_embedding"] == [8.0, 1.0, 0.5]
+    assert kwargs["recency_weight"] == 0.42
+    assert "rerank_query" not in kwargs
 
 
 def test_memory_recall_impl_updates_access_metadata_only_for_returned_entries(tmp_path: Path) -> None:

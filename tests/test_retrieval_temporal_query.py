@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
-
 from trw_memory.retrieval.temporal_query import (
     TemporalClassification,
     classify_temporal,
+    prepare_temporal_query,
 )
 
 
@@ -106,6 +105,45 @@ class TestClassifyTemporal:
     def test_future_anchor_combined_with_recency_is_temporal(self) -> None:
         result = classify_temporal("latest upcoming sprint tasks this week")
         assert result.is_temporal is True
+
+
+class TestPrepareTemporalQuery:
+    def test_strips_prefix_and_auto_fills_zero_recency_weight(self) -> None:
+        result = prepare_temporal_query(
+            "latest guidance on auth middleware",
+            current_recency_weight=0.0,
+            auto_temporal=True,
+            strip_prefix=True,
+        )
+
+        assert result.retrieval_query == "auth middleware"
+        assert result.recency_weight > 0.0
+        assert result.prefix_stripped is True
+        assert result.classification is not None
+        assert result.classification.is_temporal is True
+
+    def test_preserves_explicit_recency_weight(self) -> None:
+        result = prepare_temporal_query(
+            "latest guidance on auth middleware",
+            current_recency_weight=0.25,
+            auto_temporal=True,
+            strip_prefix=True,
+        )
+
+        assert result.retrieval_query == "auth middleware"
+        assert result.recency_weight == 0.25
+
+    def test_disabled_auto_temporal_is_passthrough(self) -> None:
+        result = prepare_temporal_query(
+            "latest guidance on auth middleware",
+            current_recency_weight=0.0,
+            auto_temporal=False,
+            strip_prefix=True,
+        )
+
+        assert result.retrieval_query == "latest guidance on auth middleware"
+        assert result.recency_weight == 0.0
+        assert result.classification is None
 
 
 class TestStripTemporalPrefix:

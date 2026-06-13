@@ -210,17 +210,31 @@ def hybrid_search(
             rel_max = max(s for _, s in relevance_fused) if relevance_fused else 1.0
             rel_norm = {eid: s / rel_max for eid, s in relevance_fused} if rel_max > 0 else {}
 
-            # Recency scores are already in (0, 1] from the half-life formula
+            # Recency scores are already in (0, 1] from the half-life formula.
             rec_map = dict(recency_results)
+            rel_rank = {eid: rank for rank, (eid, _) in enumerate(relevance_fused)}
+            rec_rank = {eid: rank for rank, (eid, _) in enumerate(recency_results)}
 
-            # Blend: cover all entries from either source
-            all_ids = set(rel_norm) | set(rec_map)
+            # Blend: cover all entries from either source while preserving a
+            # deterministic pre-sort order. Building this from a set made equal
+            # final scores depend on PYTHONHASHSEED, which perturbed downstream
+            # validity-prior tie buckets.
+            all_ids = [eid for eid, _ in relevance_fused]
+            all_ids.extend(eid for eid, _ in recency_results if eid not in rel_rank)
             blended: list[tuple[str, float]] = []
             for eid in all_ids:
                 rel_s = rel_norm.get(eid, 0.0)
                 rec_s = rec_map.get(eid, 0.0)
                 blended.append((eid, (1.0 - recency_weight) * rel_s + recency_weight * rec_s))
-            blended.sort(key=lambda x: x[1], reverse=True)
+            rank_sentinel = len(all_ids) + 1
+            blended.sort(
+                key=lambda x: (
+                    -x[1],
+                    rel_rank.get(x[0], rank_sentinel),
+                    rec_rank.get(x[0], rank_sentinel),
+                    x[0],
+                )
+            )
             fused = blended
         else:
             fused = relevance_fused

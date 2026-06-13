@@ -107,21 +107,42 @@ def test_superseded_ranks_below_open() -> None:
     assert [e.id for e in result] == ["B", "A"]
 
 
-def test_age_decay_monotone() -> None:
-    """Among open records the newer valid_from gets a non-negative advantage and
-    fusion order is otherwise preserved."""
-    # Two open records, equal fused position (input order = fused order).
+def test_age_decay_without_scores_preserves_fusion_order() -> None:
+    """Without fused scores, age decay cannot prove ties and preserves order."""
+    older = _open("OLD", valid_from=T0)
+    newer = _open("NEW", valid_from=T2)
+
+    result = apply_validity_prior([older, newer], age_decay=True)
+
+    assert [e.id for e in result] == ["OLD", "NEW"]
+
+
+def test_age_decay_breaks_fused_score_ties_only() -> None:
+    """Among score-tied open records the newer valid_from gets the advantage."""
     newer = _open("NEW", valid_from=T2)
     older = _open("OLD", valid_from=T0)
 
-    # Input fused order [older, newer]: age-decay must not demote a record that
-    # fusion ranked higher (order otherwise preserved), but when the relevance is
-    # equal the newer one earns the advantage. Provide them as a tie (same score).
-    result = apply_validity_prior([older, newer], age_decay=True)
-    # Both still present, both open.
-    assert {e.id for e in result} == {"NEW", "OLD"}
-    # The newer record is never ranked below the older when fusion tied them.
-    assert result.index(newer) <= result.index(older)
+    result = apply_validity_prior(
+        [older, newer],
+        age_decay=True,
+        fusion_scores={"OLD": 1.0, "NEW": 1.0},
+    )
+
+    assert [e.id for e in result] == ["NEW", "OLD"]
+
+
+def test_age_decay_does_not_reorder_non_ties() -> None:
+    """An older higher-scored result stays above a newer lower-scored result."""
+    older = _open("OLD", valid_from=T0)
+    newer = _open("NEW", valid_from=T2)
+
+    result = apply_validity_prior(
+        [older, newer],
+        age_decay=True,
+        fusion_scores={"OLD": 2.0, "NEW": 1.0},
+    )
+
+    assert [e.id for e in result] == ["OLD", "NEW"]
 
 
 def test_as_of_open_outranks_closed_at_as_of() -> None:

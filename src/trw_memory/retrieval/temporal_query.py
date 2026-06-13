@@ -38,6 +38,14 @@ class TemporalClassification:
     matched_patterns: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class TemporalQueryRewrite:
+    retrieval_query: str
+    recency_weight: float
+    classification: TemporalClassification | None = None
+    prefix_stripped: bool = False
+
+
 # Pattern groups ordered from most specific (high confidence) to broadest.
 # Each tuple is (regex, confidence_contribution, label).
 _PATTERNS: list[tuple[re.Pattern[str], float, str]] = [
@@ -111,6 +119,46 @@ def strip_temporal_prefix(query: str) -> str:
             if remainder:
                 return remainder
     return query
+
+
+def prepare_temporal_query(
+    query: str,
+    *,
+    current_recency_weight: float,
+    auto_temporal: bool,
+    strip_prefix: bool,
+) -> TemporalQueryRewrite:
+    """Return the retrieval query and effective recency weight for *query*.
+
+    This keeps SDK recall and MCP-tool recall on the same temporal-query
+    contract: auto-recency only fills the zero/default weight, prefix stripping
+    is opt-in by config, and non-temporal queries pass through unchanged.
+    """
+    if not auto_temporal:
+        return TemporalQueryRewrite(retrieval_query=query, recency_weight=current_recency_weight)
+
+    temporal = classify_temporal(query)
+    if not temporal.is_temporal:
+        return TemporalQueryRewrite(
+            retrieval_query=query,
+            recency_weight=current_recency_weight,
+            classification=temporal,
+        )
+
+    effective_recency_weight = current_recency_weight
+    if effective_recency_weight == 0.0:
+        effective_recency_weight = temporal.recency_weight
+
+    retrieval_query = query
+    if strip_prefix:
+        retrieval_query = strip_temporal_prefix(query)
+
+    return TemporalQueryRewrite(
+        retrieval_query=retrieval_query,
+        recency_weight=effective_recency_weight,
+        classification=temporal,
+        prefix_stripped=retrieval_query != query,
+    )
 
 
 def classify_temporal(query: str) -> TemporalClassification:

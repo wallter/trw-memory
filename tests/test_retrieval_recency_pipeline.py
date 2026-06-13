@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.pipeline import hybrid_search
@@ -66,6 +67,21 @@ class TestRecencyWeightInPipeline:
     def test_empty_entries_returns_empty_with_recency(self) -> None:
         result = hybrid_search("query", [], recency_weight=0.5)
         assert result == []
+
+    def test_recency_blend_ties_use_deterministic_relevance_order(self) -> None:
+        entries = [
+            _entry("a", "same topic", days_ago=1.0),
+            _entry("b", "same topic", days_ago=1.0),
+        ]
+        with (
+            patch("trw_memory.retrieval.pipeline.bm25_search", return_value=[("b", 1.0), ("a", 1.0)]),
+            patch("trw_memory.retrieval.pipeline.dense_search", return_value=[]),
+            patch("trw_memory.retrieval.pipeline.rrf_fuse", return_value=[("b", 1.0), ("a", 1.0)]),
+            patch("trw_memory.retrieval.pipeline.recency_rank", return_value=[("a", 1.0), ("b", 1.0)]),
+        ):
+            result = hybrid_search("same topic", entries, recency_weight=0.5)
+
+        assert [entry.id for entry in result] == ["b", "a"]
 
 
 class TestRerankInPipeline:

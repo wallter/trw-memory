@@ -171,18 +171,62 @@ def memory_recall_impl(
     # Retrieve via hybrid search (gracefully degrades to BM25-only or empty)
     if query and all_entries:
         embedder = get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim)
-        query_embedding = embedder.embed(query) if embedder is not None else None
+        namespace_size = len(all_entries)
+        effective_bm25_candidates = max(cfg.bm25_candidates, namespace_size)
+        effective_vector_candidates = max(cfg.vector_candidates, namespace_size)
+        effective_top_k = limit * cfg.recall_top_k_multiplier
+        if tags:
+            effective_top_k = max(effective_top_k, namespace_size)
+
+        from trw_memory.retrieval.temporal_query import prepare_temporal_query
+
+        rewrite = prepare_temporal_query(
+            query,
+            current_recency_weight=cfg.recall_recency_weight,
+            auto_temporal=cfg.recall_auto_temporal,
+            strip_prefix=cfg.recall_strip_temporal_prefix,
+        )
+        retrieval_query = rewrite.retrieval_query
+        effective_recency_weight = rewrite.recency_weight
+        temporal = rewrite.classification
+        if temporal is not None and temporal.is_temporal:
+            logger.debug(
+                "temporal_query_detected",
+                query=query[:80],
+                retrieval_query=retrieval_query[:80],
+                confidence=temporal.confidence,
+                recency_weight=effective_recency_weight,
+                patterns=temporal.matched_patterns,
+                prefix_stripped=rewrite.prefix_stripped,
+                surface="memory_recall_tool",
+            )
+        query_embedding = embedder.embed(retrieval_query) if embedder is not None else None
         # dense_search() needs the stored vector map, not just the entry IDs, so
         # tool recall must hydrate the embeddings before calling hybrid_search().
-        # Forward the already-computed query_embedding (also used below for tier
-        # scoring) so the dense step reuses it instead of re-embedding the query.
+        # Forward the stripped-query embedding so dense search uses the same
+        # search text as BM25 and rerank.  Tier scoring below receives the same
+        # embedding, keeping the tool path internally consistent.
         ranked = hybrid_search(
-            query=query,
+            query=retrieval_query,
             entries=all_entries,
             embedder=embedder,
             query_embedding=query_embedding,
             stored_embeddings=stored_embeddings or None,
-            top_k=limit * 4,  # over-fetch before score filtering
+            bm25_candidates=effective_bm25_candidates,
+            vector_candidates=effective_vector_candidates,
+            rrf_k=cfg.rrf_k,
+            importance_alpha=cfg.rrf_importance_alpha,
+            top_k=effective_top_k,
+            recency_weight=effective_recency_weight,
+            recency_halflife_days=cfg.recall_recency_halflife_days,
+            fusion_mode=cfg.recall_fusion_mode,
+            validity_age_decay=cfg.recall_validity_age_decay,
+            rerank=cfg.recall_rerank,
+            rerank_model=cfg.recall_rerank_model,
+            rerank_candidates=cfg.recall_rerank_candidates,
+            # rerank_query omitted intentionally: when temporal boilerplate is
+            # stripped, the cross-encoder inherits retrieval_query so it scores
+            # against the same topical text as BM25 and dense search.
         )
     else:
         query_embedding = None

@@ -192,17 +192,17 @@ class MemoryConfig(BaseSettings):
         ),
     )
 
-    # Recency ranking — inject valid_from-based exponential decay as a 3rd RRF source
+    # Recency ranking — blend valid_from-based exponential decay into relevance
     recall_recency_weight: float = Field(
         default=0.0,
         ge=0.0,
         le=1.0,
         validation_alias=AliasChoices("recall_recency_weight", "memory_recall_recency_weight"),
         description=(
-            "When > 0, inject recency ranking (exponential decay on valid_from) as "
-            "a third RRF source alongside BM25 and dense retrieval. Targets the "
-            "temporal discrimination band (recall 0.853). Recommended starting "
-            "point: 0.3. Default 0.0 = disabled (pure text-relevance behaviour)."
+            "When > 0, blend valid_from recency decay into the BM25+dense fused "
+            "relevance score. Targets the temporal discrimination band "
+            "(recall 0.853). Recommended starting point: 0.3. Default 0.0 = "
+            "disabled (pure text-relevance behaviour)."
         ),
     )
     recall_recency_halflife_days: float = Field(
@@ -286,10 +286,9 @@ class MemoryConfig(BaseSettings):
         description=(
             "When True (default) and the query is classified as temporal, "
             "strip common boilerplate prefixes ('latest guidance on X' → 'X') "
-            "before running BM25 and dense retrieval.  The cross-encoder "
-            "reranker (when enabled) still receives the original query so "
-            "relevance scoring is unaffected.  Set False to disable prefix "
-            "stripping and pass the raw query to all retrieval stages."
+            "before running BM25, dense retrieval, and optional cross-encoder "
+            "reranking. Set False to disable prefix stripping and pass the raw "
+            "query to all retrieval stages."
         ),
     )
 
