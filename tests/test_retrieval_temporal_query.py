@@ -289,3 +289,66 @@ class TestStripTemporalPrefix:
             "what was the deployment command?"
         )
         assert "deployment command" in result
+
+    def test_how_many_days_ago_stripped(self) -> None:
+        result = self._fn("How many days ago did I meet Emma?")
+        assert "meet Emma" in result
+        assert "days ago" not in result.lower()
+
+    def test_how_many_weeks_ago_stripped(self) -> None:
+        result = self._fn("How many weeks ago did I attend the friends and family sale at Nordstrom?")
+        assert "Nordstrom" in result
+        assert "weeks ago" not in result.lower()
+
+
+class TestStripTemporalArithmetic:
+    """Tests for strip_temporal_arithmetic — removes embedded relative-time phrases."""
+
+    def setup_method(self) -> None:
+        from trw_memory.retrieval.temporal_query import strip_temporal_arithmetic
+        self._fn = strip_temporal_arithmetic
+
+    def test_n_days_ago_stripped(self) -> None:
+        result = self._fn("What kitchen appliance did I buy 10 days ago?")
+        assert "kitchen appliance" in result
+        assert "10 days ago" not in result
+
+    def test_cardinal_weeks_ago_stripped(self) -> None:
+        result = self._fn("What gardening activity did I do two weeks ago?")
+        assert "gardening activity" in result
+        assert "two weeks ago" not in result
+
+    def test_last_weekday_stripped(self) -> None:
+        result = self._fn("Who did I meet with during the lunch last Tuesday?")
+        assert "meet" in result
+        assert "last Tuesday" not in result.lower()
+
+    def test_on_the_weekday_months_ago_stripped(self) -> None:
+        result = self._fn("What did I do with Rachel on the Wednesday two months ago?")
+        assert "Rachel" in result
+        assert "two months ago" not in result.lower()
+
+    def test_plain_query_unchanged(self) -> None:
+        q = "What is the auth middleware pattern?"
+        assert self._fn(q) == q
+
+    def test_empty_result_falls_back_to_original(self) -> None:
+        # A query consisting entirely of a temporal phrase should return original.
+        result = self._fn("10 days ago")
+        assert result  # must not return empty string
+
+    def test_multiple_phrases_stripped(self) -> None:
+        result = self._fn("What did I buy 10 days ago and two weeks ago?")
+        assert "What did I buy" in result
+        assert "10 days ago" not in result
+        assert "two weeks ago" not in result
+
+    def test_a_month_ago_stripped(self) -> None:
+        result = self._fn("What meeting did I have a month ago?")
+        assert "meeting" in result
+        assert "a month ago" not in result.lower()
+
+    def test_whitespace_normalised(self) -> None:
+        result = self._fn("What did I buy 10 days ago ?")
+        # Double spaces from substitution should be collapsed
+        assert "  " not in result

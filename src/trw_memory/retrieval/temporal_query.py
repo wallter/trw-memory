@@ -170,6 +170,11 @@ _TEMPORAL_PREFIXES: list[re.Pattern[str]] = [
         r"(you\s+)?(mentioned|said|suggested|told me|recommended)?\s*",
         re.IGNORECASE,
     ),
+    # "How many days/weeks/months ago did I X?" → "X"
+    re.compile(
+        r"^how many\s+(day|days|week|weeks|month|months|year|years)\s+ago\s+(did|have|has)\s+I\s+",
+        re.IGNORECASE,
+    ),
 ]
 
 
@@ -195,6 +200,68 @@ def strip_temporal_prefix(query: str) -> str:
             if remainder:
                 return remainder
     return query
+
+
+# Inline temporal arithmetic phrases: these appear anywhere in a query and
+# add no lexical value (sessions store absolute dates, not relative ones).
+# Ordered longest-first to avoid partial matches.
+_TEMPORAL_ARITHMETIC_INLINE: list[re.Pattern[str]] = [
+    # "on the Wednesday two months ago" — named-weekday + time-ago compound
+    re.compile(
+        r"\bon the\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+"
+        r"(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|"
+        r"eleven|twelve|twenty|thirty|forty|fifty|sixty|ninety|hundred)\s+"
+        r"(day|days|week|weeks|month|months|year|years)\s+ago\b",
+        re.IGNORECASE,
+    ),
+    # "N days/weeks/months/years ago"
+    re.compile(
+        r"\b(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|"
+        r"eleven|twelve|twenty|thirty|forty|fifty|sixty|ninety|hundred)\s+"
+        r"(day|days|week|weeks|month|months|year|years)\s+ago\b",
+        re.IGNORECASE,
+    ),
+    # "last Tuesday / last Monday" etc.
+    re.compile(
+        r"\blast\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+        re.IGNORECASE,
+    ),
+    # "during the lunch last Tuesday" — preposition phrase before named weekday
+    re.compile(
+        r"\bduring\s+the\s+\w+\s+last\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+        re.IGNORECASE,
+    ),
+]
+
+
+def strip_temporal_arithmetic(query: str) -> str:
+    """Remove embedded temporal arithmetic phrases from *query*.
+
+    Strips relative-time expressions like "10 days ago", "last Tuesday", or
+    "on the Wednesday two months ago" from ANYWHERE in the query (not just
+    the prefix), leaving the topical content for BM25 / dense retrieval.
+
+    Sessions store absolute dates ("session_date: 2023/05/20") so relative
+    phrases ("10 days ago") never produce lexical matches; removing them lets
+    the retriever focus on what actually appears in session content.
+
+    Returns the query with temporal arithmetic phrases removed, whitespace
+    normalised, and leading/trailing whitespace stripped.  Returns the original
+    query unchanged when no phrase matches.
+
+    Args:
+        query: Raw recall query string.
+
+    Returns:
+        Query with embedded temporal arithmetic phrases removed, or the
+        original query if no phrase pattern matches.
+    """
+    result = query
+    for pattern in _TEMPORAL_ARITHMETIC_INLINE:
+        result = pattern.sub(" ", result)
+    # Collapse runs of whitespace and strip
+    result = " ".join(result.split())
+    return result if result else query
 
 
 def prepare_temporal_query(
@@ -228,6 +295,9 @@ def prepare_temporal_query(
     retrieval_query = query
     if strip_prefix:
         retrieval_query = strip_temporal_prefix(query)
+        # Also strip embedded temporal arithmetic so BM25 / dense focus on topic
+        # tokens rather than relative-time phrases ("10 days ago", "last Tuesday").
+        retrieval_query = strip_temporal_arithmetic(retrieval_query)
 
     return TemporalQueryRewrite(
         retrieval_query=retrieval_query,

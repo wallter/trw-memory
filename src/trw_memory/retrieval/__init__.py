@@ -30,6 +30,7 @@ from trw_memory.retrieval.reranker import cross_encode_rerank
 from trw_memory.retrieval.temporal_query import (
     classify_temporal,
     prepare_temporal_query,
+    strip_temporal_arithmetic,
     strip_temporal_prefix,
 )
 from trw_memory.retrieval.token_budget import (
@@ -65,5 +66,6 @@ __all__ = [
     "rrf_fuse",
     "classify_temporal",
     "prepare_temporal_query",
+    "strip_temporal_arithmetic",
     "strip_temporal_prefix",
 ]
