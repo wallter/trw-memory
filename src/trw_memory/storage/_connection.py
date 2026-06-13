@@ -40,6 +40,22 @@ WAL_JOURNAL_SIZE_LIMIT_BYTES = 67108864
 _BUSY_TIMEOUT_MS = 30000
 
 
+# 64 MiB shared page cache — trades memory for fewer disk reads on hot pages.
+# Negative value = KiB (SQLite convention); 65536 KiB = 64 MiB.
+_CACHE_SIZE_KB = -65536
+# 1 GiB memory-map for read I/O — OS maps the file into virtual address space
+# so reads bypass the kernel page-cache round-trip. Only benefits file-backed
+# databases; effectively a no-op on `:memory:` connections.
+_MMAP_SIZE_BYTES = 1073741824  # 1 GiB
+# Raise WAL auto-checkpoint threshold from the default 1000 pages (4 MiB) to
+# 4000 pages (16 MiB). Reduces checkpoint pressure during bulk writes without
+# risking runaway WAL growth (cap is still enforced by journal_size_limit=64MiB).
+# NOTE: keep this below journal_size_limit so the WAL cap never fires mid-write.
+# The existing single-connection checkpoint serialiser (_wal_checkpoint.py) is
+# unchanged — this PRAGMA only adjusts the automatic background trigger point.
+_WAL_AUTOCHECKPOINT_PAGES = 4000
+
+
 def apply_open_pragmas(conn: Any, *, verify: bool = False) -> None:
     """Apply the standard durable-open PRAGMA profile to *conn*.
 
@@ -59,6 +75,12 @@ def apply_open_pragmas(conn: Any, *, verify: bool = False) -> None:
     if verify and sync_result and sync_result[0] not in ("1", 1):
         logger.warning("synchronous_normal_not_set", got=sync_result[0] if sync_result else None)
     conn.execute(f"PRAGMA journal_size_limit = {WAL_JOURNAL_SIZE_LIMIT_BYTES}")
+    # Performance tuning: cache + mmap + checkpoint threshold.
+    # safe for all connection types; mmap_size is effectively a no-op on :memory:.
+    conn.execute(f"PRAGMA cache_size = {_CACHE_SIZE_KB}")
+    conn.execute(f"PRAGMA mmap_size = {_MMAP_SIZE_BYTES}")
+    conn.execute(f"PRAGMA wal_autocheckpoint = {_WAL_AUTOCHECKPOINT_PAGES}")
+    conn.execute("PRAGMA temp_store = MEMORY")
 
 
 def _apply_sqlcipher_pragmas_safe(conn: Any) -> None:
