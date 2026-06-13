@@ -88,6 +88,36 @@ async def try_hybrid_recall(
             limit=candidate_pool_size,
         )
         list_entries_ms = (perf_counter() - list_entries_start) * 1000.0
+
+        # FTS5 augmentation: inject text-matching entries that rank past the
+        # recency-ordered list_entries pool. At enterprise scale (100K+ entries),
+        # list_entries returns the most recently updated records, missing old but
+        # still-relevant entries. FTS5 (O(log N)) finds those in <5ms regardless
+        # of corpus size. Dedup by id preserves the pool-size invariant without
+        # double-counting. Skipped when FTS5 is unavailable or query is empty.
+        if query and getattr(backend, "_fts_available", False):
+            fts_top_k = min(candidate_pool_size, max(client._config.bm25_candidates * 2, 100))
+            try:
+                fts_entries = backend.search_fts(
+                    query,
+                    top_k=fts_top_k,
+                    namespace=client._namespace,
+                )
+                if fts_entries:
+                    existing_ids = {e.id for e in all_entries}
+                    new_from_fts = [e for e in fts_entries if e.id not in existing_ids]
+                    if new_from_fts:
+                        all_entries = list(all_entries) + new_from_fts
+                        logger.debug(
+                            "fts5_pool_augmentation",
+                            query=query[:80],
+                            fts_candidates=len(fts_entries),
+                            new_entries=len(new_from_fts),
+                            total_pool=len(all_entries),
+                        )
+            except Exception:
+                logger.debug("fts5_augmentation_failed", exc_info=True)
+
         stored_embeddings = backend.get_stored_embeddings([entry.id for entry in all_entries])
 
     namespace_size = len(all_entries)
