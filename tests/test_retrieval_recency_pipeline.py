@@ -113,3 +113,39 @@ class TestRerankInPipeline:
             top_k=3,
         )
         assert len(result) <= 3
+
+
+class TestRecencyNowParameter:
+    """Tests for recency_now — explicit reference instant for recency scoring."""
+
+    def test_recency_now_boosts_entry_fresh_at_reference_time(self) -> None:
+        # "past_now" is 2 years ago; entry_old is fresh relative to it, entry_new is stale.
+        base = datetime(2023, 6, 1, tzinfo=timezone.utc)
+        entry_old = MemoryEntry(
+            id="old", content="kitchen appliance purchase", valid_from=base - timedelta(days=3)
+        )
+        entry_new = MemoryEntry(
+            id="new", content="kitchen appliance purchase", valid_from=base - timedelta(days=400)
+        )
+        # With recency_now=base: entry_old (3 days before base) should outrank entry_new (400 days before base)
+        result = hybrid_search(
+            "kitchen appliance",
+            [entry_old, entry_new],
+            recency_weight=0.9,
+            recency_now=base,
+        )
+        ids = [e.id for e in result]
+        assert ids[0] == "old", f"Expected 'old' first but got {ids}"
+
+    def test_recency_now_none_defaults_to_wall_clock(self) -> None:
+        entries = [_entry(f"e{i}", f"content {i}", days_ago=i * 10) for i in range(5)]
+        result_default = hybrid_search("content", entries, recency_weight=0.3, recency_now=None)
+        result_explicit = hybrid_search("content", entries, recency_weight=0.3)
+        assert len(result_default) == len(result_explicit)
+
+    def test_recency_now_ignored_when_recency_weight_zero(self) -> None:
+        base = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        entries = [_entry(f"e{i}", f"content {i}") for i in range(5)]
+        result_now = hybrid_search("content", entries, recency_weight=0.0, recency_now=base)
+        result_no_now = hybrid_search("content", entries, recency_weight=0.0)
+        assert len(result_now) == len(result_no_now)

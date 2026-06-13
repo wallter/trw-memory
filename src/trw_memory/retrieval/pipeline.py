@@ -55,6 +55,7 @@ def hybrid_search(
     validity_age_decay: bool = False,
     recency_weight: float = 0.0,
     recency_halflife_days: float = 30.0,
+    recency_now: datetime | None = None,
     rerank: bool = False,
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
     rerank_candidates: int = 50,
@@ -121,6 +122,13 @@ def hybrid_search(
             An entry ``halflife_days`` old receives score 0.5 relative to a
             brand-new entry.  Default ``30.0`` days.  Ignored when
             ``recency_weight == 0``.
+        recency_now: Reference instant for age computation.  ``None`` (the
+            default) resolves to ``datetime.now(timezone.utc)`` inside
+            :func:`~trw_memory.retrieval.recency.recency_rank`.  Pass an
+            explicit value when the "now" of the query differs from wall-clock
+            time — e.g. when replaying historical queries or when entries were
+            recorded in the past and the caller knows the evaluation reference
+            point.  Ignored when ``recency_weight == 0``.
         rerank: When ``True``, apply cross-encoder re-ranking after fusion
             to re-score the top ``rerank_candidates`` entries jointly on
             (query, passage).  Requires ``sentence-transformers``; silently
@@ -204,6 +212,7 @@ def hybrid_search(
         recency_results = recency_rank(
             entries,
             halflife_days=recency_halflife_days,
+            now=recency_now,
         )
         if recency_results:
             # Normalise relevance scores to [0, 1]
