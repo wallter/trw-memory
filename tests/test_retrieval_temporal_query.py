@@ -180,6 +180,29 @@ class TestPrepareTemporalQuery:
         assert result.recency_weight == 0.0
         assert result.classification is None
 
+    def test_temporal_arithmetic_stripped_when_strip_prefix_true(self) -> None:
+        # "10 days ago" is temporal arithmetic — should be stripped by
+        # strip_temporal_arithmetic inside prepare_temporal_query when strip_prefix=True.
+        result = prepare_temporal_query(
+            "What kitchen appliance did I buy 10 days ago?",
+            current_recency_weight=0.0,
+            auto_temporal=True,
+            strip_prefix=True,
+        )
+        assert "10 days ago" not in result.retrieval_query
+        assert "kitchen appliance" in result.retrieval_query
+        assert result.classification is not None
+        assert result.classification.is_temporal is True
+
+    def test_temporal_arithmetic_not_stripped_when_strip_prefix_false(self) -> None:
+        result = prepare_temporal_query(
+            "What kitchen appliance did I buy 10 days ago?",
+            current_recency_weight=0.0,
+            auto_temporal=True,
+            strip_prefix=False,
+        )
+        assert result.retrieval_query == "What kitchen appliance did I buy 10 days ago?"
+
 
 class TestStripTemporalPrefix:
     """Tests for strip_temporal_prefix — removes boilerplate from temporal queries."""
