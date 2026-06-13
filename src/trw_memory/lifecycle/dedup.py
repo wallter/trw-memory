@@ -58,9 +58,7 @@ def _stronger_protection_tier(
 def _union_assertions(existing: list[Assertion], incoming: list[Assertion]) -> list[Assertion]:
     """Union two assertion lists, de-duplicating by (type, pattern, target)."""
     merged: list[Assertion] = list(existing)
-    seen: set[tuple[str, str, str]] = {
-        (_tier_value(a.type), a.pattern, a.target) for a in existing
-    }
+    seen: set[tuple[str, str, str]] = {(_tier_value(a.type), a.pattern, a.target) for a in existing}
     for a in incoming:
         key = (_tier_value(a.type), a.pattern, a.target)
         if key not in seen:

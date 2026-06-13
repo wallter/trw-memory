@@ -18,7 +18,7 @@ separate post-processing step.
 The decay function is:
     recency_score(entry) = exp(-ln(2) * days_since_valid_from / halflife_days)
 
-A ``halflife_days`` of 30 means an entry from 30 days ago gets score 0.5; one
+A ``halflife_days`` of 14 means an entry from 14 days ago gets score 0.5; one
 from today gets score ~1.0; one from 90 days ago gets ~0.125.  The halflife is
 configurable to match different deployment profiles (short-lived session memory
 vs. long-lived institutional knowledge).
@@ -35,8 +35,10 @@ from trw_memory.models.memory import MemoryEntry
 
 logger = structlog.get_logger(__name__)
 
-# Default half-life: entries lose half their recency score after 30 days.
-DEFAULT_HALFLIFE_DAYS: float = 30.0
+# Default half-life: entries lose half their recency score after 14 days.
+# Keep aligned with MemoryConfig.recall_recency_halflife_days so direct
+# recency_rank() callers and MemoryClient.recall() use the same policy.
+DEFAULT_HALFLIFE_DAYS: float = 14.0
 
 # Minimum recency score floor — prevents ancient entries from getting score 0
 # and being permanently excluded from recency-weighted fusions.

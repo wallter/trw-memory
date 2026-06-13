@@ -521,9 +521,7 @@ def converge_tier_distribution(
             break
         working.update(dict(step))
 
-    changed: list[tuple[str, float]] = [
-        (mid, working[mid]) for mid in order if working[mid] != original[mid]
-    ]
+    changed: list[tuple[str, float]] = [(mid, working[mid]) for mid in order if working[mid] != original[mid]]
 
     if changed:
         logger.info(

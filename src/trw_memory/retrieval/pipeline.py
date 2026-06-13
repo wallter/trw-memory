@@ -40,13 +40,12 @@ def hybrid_search(
     stored_embeddings: dict[str, list[float]] | None = None,
     bm25_candidates: int = 50,
     vector_candidates: int = 50,
-    # rrf_k=15 (was 60): promoted 2026-06-12 by the memory meta-harness loop —
-    # sharper rank decay improved nDCG@10/recall@10 on two independent evals
-    # (real-learnings gold set, paired held-out t=2.48 n=294; LongMemEval_S
-    # full-500 recall@5 0.904→0.914) with the temporal slice preserved. Tuned
-    # with all-MiniLM-L6-v2 on note/session corpora; the rrf_fuse primitive
-    # keeps the paper-canonical k=60 default.
-    rrf_k: int = 15,
+    # rrf_k=5 (was 60→15→5): promoted 2026-06-13 by the memory meta-harness
+    # loop after sibling expansion + adaptive temporal windows were in place.
+    # MemoryConfig is the runtime source of truth; keep this direct helper
+    # default aligned so tests and ad-hoc callers do not silently grade a
+    # different retrieval policy than MemoryClient.recall().
+    rrf_k: int = 5,
     importance_alpha: float = 1.0,
     top_k: int = 25,
     fusion_mode: str = "rrf",
@@ -55,7 +54,7 @@ def hybrid_search(
     include_superseded: bool = False,
     validity_age_decay: bool = False,
     recency_weight: float = 0.0,
-    recency_halflife_days: float = 30.0,
+    recency_halflife_days: float = 14.0,
     recency_now: datetime | None = None,
     rerank: bool = False,
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
@@ -121,7 +120,8 @@ def hybrid_search(
             temporal query workloads.
         recency_halflife_days: Decay half-life used by the recency ranker.
             An entry ``halflife_days`` old receives score 0.5 relative to a
-            brand-new entry.  Default ``30.0`` days.  Ignored when
+            brand-new entry.  Default ``14.0`` days, matching
+            ``MemoryConfig.recall_recency_halflife_days``.  Ignored when
             ``recency_weight == 0``.
         valid_from_min: When set, only include entries whose ``valid_from`` is
             at or after this datetime.  Useful for narrowing results to a

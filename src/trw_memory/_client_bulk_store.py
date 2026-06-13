@@ -280,9 +280,7 @@ async def bulk_store_impl(
                     if embedding is not None:
                         backend.upsert_vector(entry.id, embedding)
             except Exception as exc:
-                raise StorageError(
-                    f"failed to persist entry+vector for {entry.id!r}; transaction rolled back"
-                ) from exc
+                raise StorageError(f"failed to persist entry+vector for {entry.id!r}; transaction rolled back") from exc
 
             try:
                 schedule_graph_update(entry, backend, embedding=embedding, config=client._config)

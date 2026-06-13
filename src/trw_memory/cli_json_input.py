@@ -61,9 +61,7 @@ def load_json_document(path: Path, *, source: str) -> Any:
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
-        raise JsonInputError(
-            f"{source} is not valid JSON ({exc.msg} at line {exc.lineno} column {exc.colno})"
-        ) from exc
+        raise JsonInputError(f"{source} is not valid JSON ({exc.msg} at line {exc.lineno} column {exc.colno})") from exc
 
 
 def load_json_array(path: Path, *, source: str) -> list[Any]:

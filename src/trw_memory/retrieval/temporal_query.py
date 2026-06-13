@@ -61,7 +61,11 @@ _PATTERNS: list[tuple[re.Pattern[str], float, str]] = [
     # Explicit relative window — strong
     (re.compile(r"\blast\s+\d+\s+(day|week|month|year)s?\b", re.IGNORECASE), 0.85, "relative_window_n"),
     # Named recent windows — strong
-    (re.compile(r"\b(last|past|previous)\s+(week|month|year|quarter|sprint|cycle|session)\b", re.IGNORECASE), 0.8, "relative_window"),
+    (
+        re.compile(r"\b(last|past|previous)\s+(week|month|year|quarter|sprint|cycle|session)\b", re.IGNORECASE),
+        0.8,
+        "relative_window",
+    ),
     # Today / this-period anchors — moderate
     (re.compile(r"\b(today|this (week|month|year|quarter|sprint|session))\b", re.IGNORECASE), 0.7, "present_anchor"),
     # Recency adverbs — moderate
@@ -127,7 +131,9 @@ _PATTERNS: list[tuple[re.Pattern[str], float, str]] = [
     ),
     # Memory-recall opener — "do you remember when I X" / "remember that time"
     (
-        re.compile(r"\b(do you |you )?(remember|recall)\s+(when|that time|me (saying|telling|mentioning))\b", re.IGNORECASE),
+        re.compile(
+            r"\b(do you |you )?(remember|recall)\s+(when|that time|me (saying|telling|mentioning))\b", re.IGNORECASE
+        ),
         0.6,
         "prior_context",
     ),
@@ -240,7 +246,7 @@ def strip_temporal_prefix(query: str) -> str:
     for pattern in _TEMPORAL_PREFIXES:
         m = pattern.match(query)
         if m:
-            remainder = query[m.end():].strip()
+            remainder = query[m.end() :].strip()
             if remainder:
                 return remainder
     return query
@@ -309,7 +315,7 @@ def strip_temporal_arithmetic(query: str) -> str:
         result = pattern.sub(" ", result)
     # Collapse runs of whitespace and strip
     result = " ".join(result.split())
-    return result if result else query
+    return result or query
 
 
 def prepare_temporal_query(
@@ -409,10 +415,27 @@ def classify_temporal(query: str) -> TemporalClassification:
 
 # Maps written-out number words to integer values.
 _WORD_TO_INT: dict[str, int] = {
-    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
-    "eleven": 11, "twelve": 12, "twenty": 20, "thirty": 30, "forty": 40,
-    "fifty": 50, "sixty": 60, "ninety": 90, "hundred": 100,
+    "a": 1,
+    "an": 1,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "ninety": 90,
+    "hundred": 100,
 }
 
 _ARITHMETIC_OFFSET_RE = re.compile(
@@ -423,8 +446,13 @@ _ARITHMETIC_OFFSET_RE = re.compile(
 )
 
 _WEEKDAY_NAMES: dict[str, int] = {
-    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
-    "friday": 4, "saturday": 5, "sunday": 6,
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
 }
 
 _LAST_WEEKDAY_RE = re.compile(

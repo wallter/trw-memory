@@ -174,9 +174,7 @@ def memory_store_impl(
             try:
                 embedding = embedder.embed(f"{entry.content} {entry.detail}")
             except Exception as exc:
-                raise StorageError(
-                    f"failed to compute embedding for {entry_id!r}; entry was not written"
-                ) from exc
+                raise StorageError(f"failed to compute embedding for {entry_id!r}; entry was not written") from exc
         # S1-parity fix: commit the row + its vector in ONE transaction so a crash
         # between the two writes can no longer leave a row with no vector, and a
         # vector failure rolls the row back automatically. This matches
@@ -188,9 +186,7 @@ def memory_store_impl(
                 if embedding is not None:
                     backend.upsert_vector(entry.id, embedding)
         except Exception as exc:
-            raise StorageError(
-                f"failed to persist entry+vector for {entry_id!r}; transaction rolled back"
-            ) from exc
+            raise StorageError(f"failed to persist entry+vector for {entry_id!r}; transaction rolled back") from exc
         try:
             # Graph enrichment is a secondary index over the stored entry, so we
             # dispatch it after the canonical row/vector write succeeds.

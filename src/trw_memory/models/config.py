@@ -280,9 +280,7 @@ class MemoryConfig(BaseSettings):
     )
     recall_strip_temporal_prefix: bool = Field(
         default=True,
-        validation_alias=AliasChoices(
-            "recall_strip_temporal_prefix", "memory_recall_strip_temporal_prefix"
-        ),
+        validation_alias=AliasChoices("recall_strip_temporal_prefix", "memory_recall_strip_temporal_prefix"),
         description=(
             "When True (default) and the query is classified as temporal, "
             "strip common boilerplate prefixes ('latest guidance on X' → 'X') "

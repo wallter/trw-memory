@@ -279,9 +279,7 @@ def _create_consolidated_entry(
         try:
             embedding = embedder.embed(f"{entry.content} {entry.detail}")
         except Exception as exc:
-            raise StorageError(
-                f"failed to compute embedding for {entry.id!r}; entry was not written"
-            ) from exc
+            raise StorageError(f"failed to compute embedding for {entry.id!r}; entry was not written") from exc
     # S1-parity fix: commit the row + its vector in ONE transaction so a crash
     # between the two writes can no longer leave a row with no vector, and a
     # vector failure rolls the row back automatically. This matches
@@ -293,9 +291,7 @@ def _create_consolidated_entry(
             if embedding is not None:
                 storage.upsert_vector(entry.id, embedding)
     except Exception as exc:
-        raise StorageError(
-            f"failed to persist entry+vector for {entry.id!r}; transaction rolled back"
-        ) from exc
+        raise StorageError(f"failed to persist entry+vector for {entry.id!r}; transaction rolled back") from exc
     try:
         # Consolidation lineage edges are secondary structure and should not keep
         # the consolidated entry itself on the write path.

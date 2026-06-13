@@ -341,9 +341,7 @@ class MemoryEntry(BaseModel):
                 "(a closed validity window must name its superseding record)"
             )
         if self.invalid_from is not None and self.invalid_from < self.valid_from:
-            raise ValueError(
-                "invalid_from must not precede valid_from (a window cannot close before it opens)"
-            )
+            raise ValueError("invalid_from must not precede valid_from (a window cannot close before it opens)")
         return self
 
     @field_validator("nudge_line", mode="before")
