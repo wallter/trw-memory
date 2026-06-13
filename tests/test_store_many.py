@@ -152,6 +152,19 @@ class TestStoreManyFts:
         assert backend.search_fts("original_term_xyz") == []
         assert any(r.id == eid for r in backend.search_fts("replacement_term_abc"))
 
+    def test_fts5_optimize_runs_after_large_batch(self, tmp_path: Path) -> None:
+        """optimize() runs without error after a 100+ entry batch."""
+        if not SQLiteBackend(Path(":memory:")).fts_available:
+            pytest.skip("FTS5 not available")
+        backend = SQLiteBackend(tmp_path / "opt.db")
+        entries = [_entry(content=f"bulk entry {i}") for i in range(100)]
+        # Should not raise; implicitly tests optimize() call
+        count = backend.store_many(entries)
+        assert count == 100
+        # Verify entries still searchable after optimize
+        results = backend.search_fts("bulk", top_k=10)
+        assert len(results) == 10
+
 
 class TestStoreManyThroughput:
     def test_store_many_faster_than_per_row_at_1k(self, tmp_path: Path) -> None:

@@ -181,7 +181,8 @@ def store_many(
         with backend._lock:
             backend._conn.execute("BEGIN IMMEDIATE")
             backend._conn.executemany(sql, rows)
-            if getattr(backend, "_fts_available", False):
+            fts_batch = getattr(backend, "_fts_available", False)
+            if fts_batch:
                 backend._conn.executemany(
                     "DELETE FROM memories_fts WHERE id = ?",
                     [(e.id,) for e in entries],
@@ -193,6 +194,11 @@ def store_many(
                         for e in entries
                     ],
                 )
+            # Merge FTS5 index segments after bulk load to prevent fragmentation.
+            # Only worthwhile for large batches — optimize() walks the whole index,
+            # so the merge cost only pays off when many segments were just appended.
+            if fts_batch and len(entries) >= 100:
+                backend._conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('optimize')")
             backend._conn.commit()
         logger.debug("memory_batch_stored", count=len(entries))
         return len(entries)
