@@ -195,12 +195,13 @@ def hybrid_search(
     # combmax_fuse is a configurable alternative that lifts hard-tail recall
     # (MEMORY.md rca_rank_fusion_combiner); default unchanged.
     if fusion_mode == "combmax":
-        fused = combmax_fuse(rankings)
+        fused = combmax_fuse(rankings, k=rrf_k)
     else:
         if fusion_mode != "rrf":
             logger.warning("hybrid_search_unknown_fusion_mode", fusion_mode=fusion_mode, fallback="rrf")
         importances = {e.id: e.importance for e in entries} if importance_alpha < 1.0 else None
         fused = rrf_fuse(rankings, k=rrf_k, importances=importances, alpha=importance_alpha)
+    fused_scores = {entry_id: score for entry_id, score in fused}
 
     # Map fused ids back to MemoryEntry objects, preserving fusion order.
     fused_entries: list[MemoryEntry] = []
@@ -220,6 +221,7 @@ def hybrid_search(
         as_of=as_of,
         include_superseded=include_superseded,
         age_decay=validity_age_decay,
+        fusion_scores=fused_scores,
     )
 
     # --------------------------------------------------------- Re-ranking

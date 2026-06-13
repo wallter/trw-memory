@@ -106,6 +106,7 @@ def rrf_fuse(
 
 def combmax_fuse(
     rankings: list[list[tuple[str, float]]],
+    k: int = 60,
 ) -> list[tuple[str, float]]:
     """CombMAX rank fusion for hard-tail recall improvement.
 
@@ -125,16 +126,21 @@ def combmax_fuse(
         rankings: List of ranked result lists.  Each inner list is a sequence
             of ``(entry_id, score)`` pairs ordered by relevance descending.
             Scores are ignored — only 1-based rank position matters.
+        k: RRF smoothing constant (default 60, matching the paper canonical
+            default). Use the same value as rrf_fuse for a fair comparison;
+            pipeline passes rrf_k so both modes use consistent smoothing.
 
     Returns:
         Fused list of ``(entry_id, score)`` pairs sorted by score descending,
-        where ``score(d) = max_i 1 / (60 + rank_i(d))`` with the standard
-        k=60 smoothing constant.
+        where ``score(d) = max_i 1 / (k + rank_i(d))``.
     """
     if not rankings:
         return []
 
-    k = 60
+    if k < 1:
+        logger.warning("combmax_k_invalid", k=k, default=60)
+        k = 60
+
     best_scores: dict[str, float] = {}
     for ranking in rankings:
         for rank, (entry_id, _) in enumerate(ranking):
