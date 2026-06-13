@@ -376,3 +376,43 @@ class TestMockedModelSuccess:
         result = provider.embed_batch(["hello", "world"])
         assert result == [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
         assert call_count > 1  # retried at least once
+
+
+class TestGetLocalEmbedderGapFill:
+    """Wave 12: covers get_local_embedder lines 26 and 29-31."""
+
+    def test_returns_provider_when_available(self) -> None:
+        """Line 26: returns provider when available() is True."""
+        from unittest.mock import MagicMock, patch
+
+        from trw_memory.embeddings import get_local_embedder
+        from trw_memory.embeddings.local import LocalEmbeddingProvider
+
+        mock_provider = MagicMock(spec=LocalEmbeddingProvider)
+        mock_provider.available.return_value = True
+
+        with patch(
+            "trw_memory.embeddings.LocalEmbeddingProvider",
+            return_value=mock_provider,
+        ):
+            result = get_local_embedder()
+
+        assert result is mock_provider
+
+    def test_returns_none_on_unexpected_exception(self) -> None:
+        """Lines 29-31: non-LocalOnlyViolation exceptions are caught; None returned."""
+        import structlog.testing
+        from unittest.mock import patch
+
+        from trw_memory.embeddings import get_local_embedder
+
+        with patch(
+            "trw_memory.embeddings.LocalEmbeddingProvider",
+            side_effect=RuntimeError("unexpected init error"),
+        ):
+            with structlog.testing.capture_logs() as logs:
+                result = get_local_embedder()
+
+        assert result is None
+        debug_events = [l["event"] for l in logs if l.get("log_level") == "debug"]
+        assert "embedder_init_failed" in debug_events
