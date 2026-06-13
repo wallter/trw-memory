@@ -349,6 +349,51 @@ class StorageBackend(ABC):
         """
         return {}
 
+    def store_many(self, entries: list[MemoryEntry]) -> int:
+        """Bulk-insert entries in a single transaction.
+
+        Backends that support efficient batch writes should override this.
+        The default falls back to per-entry ``store()`` calls (correct, but
+        slower for large batches).
+
+        Args:
+            entries: Entries to persist (INSERT OR REPLACE semantics).
+
+        Returns:
+            Number of entries written (== ``len(entries)``).
+        """
+        for entry in entries:
+            self.store(entry)
+        return len(entries)
+
+    def search_fts(
+        self,
+        query: str,
+        *,
+        top_k: int = 25,
+        status: MemoryStatus | None = None,
+        min_importance: float = 0.0,
+        namespace: str | None = None,
+    ) -> list[MemoryEntry]:
+        """Full-text search using a backend-native FTS index (e.g. FTS5).
+
+        Backends that provide an FTS index should override this.  The default
+        returns an empty list so callers can always call this method without
+        checking for FTS support.
+
+        Args:
+            query: Free-text search string.
+            top_k: Maximum number of results to return.
+            status: If provided, filter to entries with this status.
+            min_importance: Lower bound on importance (inclusive).
+            namespace: If provided, restrict to this namespace.
+
+        Returns:
+            Up to *top_k* matching entries. Empty if the backend has no FTS
+            support or no matches are found.
+        """
+        return []
+
     # -- Context manager (non-abstract) ------------------------------------
 
     def __enter__(self) -> StorageBackend:
