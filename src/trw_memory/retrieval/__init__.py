@@ -11,6 +11,7 @@ Public API:
 - :func:`~trw_memory.retrieval.recency.recency_rank` — recency-based ranking
 - :func:`~trw_memory.retrieval.recency.recency_score` — per-entry recency score
 - :func:`~trw_memory.retrieval.reranker.cross_encode_rerank` — cross-encoder re-ranking
+- :func:`~trw_memory.retrieval.temporal_query.classify_temporal` — temporal query classifier
 - :func:`~trw_memory.retrieval.token_budget.estimate_tokens` — word-count token estimate
 - :func:`~trw_memory.retrieval.token_budget.estimate_entry_tokens` — entry-level token cost
 - :func:`~trw_memory.retrieval.token_budget.apply_token_budget` — budget-fit a result list
@@ -26,6 +27,7 @@ from trw_memory.retrieval.fusion import combmax_fuse, rrf_fuse
 from trw_memory.retrieval.pipeline import hybrid_search
 from trw_memory.retrieval.recency import recency_rank, recency_score
 from trw_memory.retrieval.reranker import cross_encode_rerank
+from trw_memory.retrieval.temporal_query import classify_temporal
 from trw_memory.retrieval.token_budget import (
     METADATA_OVERHEAD as METADATA_OVERHEAD,
 )
@@ -57,4 +59,5 @@ __all__ = [
     "recency_rank",
     "recency_score",
     "rrf_fuse",
+    "classify_temporal",
 ]

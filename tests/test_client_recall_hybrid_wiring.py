@@ -30,7 +30,7 @@ class TestHybridSearchConfigWiring:
         assert cfg.recall_recency_weight == pytest.approx(0.0)
         assert cfg.recall_recency_halflife_days == pytest.approx(14.0)
         assert cfg.recall_fusion_mode == "rrf"
-        assert cfg.recall_validity_age_decay is False
+        assert cfg.recall_validity_age_decay is True
         assert cfg.recall_rerank is False
         assert cfg.recall_rerank_model == "cross-encoder/ms-marco-MiniLM-L-6-v2"
         assert cfg.recall_rerank_candidates == 50

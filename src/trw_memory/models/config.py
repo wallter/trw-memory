@@ -230,13 +230,12 @@ class MemoryConfig(BaseSettings):
     )
     # Validity age decay — break ties by valid_from recency in the eligibility pass
     recall_validity_age_decay: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("recall_validity_age_decay", "memory_recall_validity_age_decay"),
         description=(
-            "When True, apply a stable-sort age-decay within the validity prior pass "
-            "so a newer valid_from floats above an older one when fusion ranked them "
-            "equal. This is a tie-breaker only — fusion order is otherwise preserved. "
-            "Default False = disabled."
+            "When True, apply tie-only valid_from recency inside the validity prior "
+            "pass so a newer record floats above an older one only when their fused "
+            "scores are equal. Fusion order is otherwise preserved. Default True."
         ),
     )
     # Cross-encoder re-ranking (optional; requires sentence-transformers)
@@ -266,6 +265,17 @@ class MemoryConfig(BaseSettings):
             "Number of top-fusion candidates to pass to the cross-encoder. "
             "Limiting to top-50 captures the quality gain at reasonable latency. "
             "Ignored when recall_rerank=False."
+        ),
+    )
+    recall_auto_temporal: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("recall_auto_temporal", "memory_recall_auto_temporal"),
+        description=(
+            "When True (default), queries containing temporal language (e.g. "
+            "'recent', 'last week', 'latest') automatically receive a "
+            "recency_weight derived from the classifier confidence. Only "
+            "activates when recall_recency_weight=0.0 (explicit config wins). "
+            "Disable to enforce position-only RRF for all queries."
         ),
     )
 

@@ -126,6 +126,26 @@ async def try_hybrid_recall(
     # hold in memory.
     if tags:
         effective_top_k = max(effective_top_k, namespace_size)
+
+    # Auto-detect temporal queries and inject recency_weight when the config
+    # hasn't explicitly enabled it.  Preserves explicit config — if the operator
+    # set recall_recency_weight > 0 we use that value; only the zero-default
+    # case gets the auto-detected weight.
+    effective_recency_weight = client._config.recall_recency_weight
+    if effective_recency_weight == 0.0 and client._config.recall_auto_temporal:
+        from trw_memory.retrieval.temporal_query import classify_temporal
+
+        tc = classify_temporal(query)
+        if tc.is_temporal:
+            effective_recency_weight = tc.recency_weight
+            logger.debug(
+                "temporal_query_detected",
+                query=query[:80],
+                confidence=tc.confidence,
+                recency_weight=effective_recency_weight,
+                patterns=tc.matched_patterns,
+            )
+
     hybrid_search_start = perf_counter()
     try:
         ranked = hybrid_search(
@@ -141,7 +161,7 @@ async def try_hybrid_recall(
             top_k=effective_top_k,
             as_of=as_of,
             include_superseded=include_superseded,
-            recency_weight=client._config.recall_recency_weight,
+            recency_weight=effective_recency_weight,
             recency_halflife_days=client._config.recall_recency_halflife_days,
             fusion_mode=client._config.recall_fusion_mode,
             validity_age_decay=client._config.recall_validity_age_decay,
