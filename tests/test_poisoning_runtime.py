@@ -45,7 +45,7 @@ class TestRuntimePoisoningPolicy:
         stats = read_yaml(Path(cfg.quarantine_path).parent / "anomaly_stats.yaml")
         assert prepared.quarantined is False
         assert stats["sample_count"] == 100
-        assert set(stats["dimensions"]) == {"entry_length", "tag_count", "importance"}
+        assert set(list(stats["dimensions"])) == {"entry_length", "tag_count", "importance"}  # type: ignore[arg-type]
 
     def test_size_anomaly_observe_mode_default_does_not_quarantine_long_entry(self, tmp_path: Path) -> None:
         """SEC-001 default: a long, well-formed learning is observed, NOT quarantined.
@@ -186,8 +186,10 @@ class TestRuntimePoisoningPolicy:
             )
 
         state = read_yaml(state_path)
-        assert "old" not in state["sessions"]
-        assert "current" in state["sessions"]
+        sessions = state["sessions"]
+        assert isinstance(sessions, dict)
+        assert "old" not in sessions
+        assert "current" in sessions
 
     def test_runtime_rate_limit_none_session_id_skips_limiting(self, tmp_path: Path) -> None:
         cfg = MemoryConfig(storage_path=str(tmp_path / "mem"), max_memory_writes_per_minute=1)
