@@ -29,12 +29,33 @@ except ImportError:
 logger = structlog.get_logger(__name__)
 
 
+import re as _re
+
+# Punctuation stripper: keep alphanumerics, whitespace, and hyphens (for tag
+# expansion).  Everything else is replaced with a space so "test." matches
+# "test" and "trw-memory" is kept for hyphen-expansion below.
+_PUNCT_RE = _re.compile(r"[^\w\s-]")
+
+# CamelCase / PascalCase splitter: insert a space before each uppercase letter
+# that follows a lowercase letter or digit so "hybridSearch" → "hybrid Search".
+_CAMEL_RE = _re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def _normalize_text(text: str) -> str:
+    """Lowercase, strip punctuation, and split CamelCase."""
+    text = _CAMEL_RE.sub(" ", text)
+    text = text.lower()
+    text = _PUNCT_RE.sub(" ", text)
+    return text
+
+
 def _tokenize_entry(entry: MemoryEntry) -> list[str]:
-    """Build a lowercased token list for *entry*.
+    """Build a lowercased, punctuation-stripped token list for *entry*.
 
     Concatenates content, detail, and tags.  Hyphenated tags are expanded so
     that ``"pydantic-v2"`` also matches query tokens ``"pydantic"`` and
-    ``"v2"``.
+    ``"v2"``.  CamelCase identifiers are split so ``"hybridSearch"`` matches
+    both ``"hybrid"`` and ``"search"``.
 
     Args:
         entry: The memory entry to tokenize.
@@ -42,19 +63,19 @@ def _tokenize_entry(entry: MemoryEntry) -> list[str]:
     Returns:
         List of lowercase string tokens.
     """
-    content = entry.content.lower()
-    detail = entry.detail.lower()
+    content = _normalize_text(entry.content)
+    detail = _normalize_text(entry.detail)
 
     tag_parts: list[str] = []
     for tag in entry.tags:
-        tag_str = tag.lower()
+        tag_str = _normalize_text(tag)
         tag_parts.append(tag_str)
         if "-" in tag_str:
             tag_parts.extend(tag_str.split("-"))
 
     tags_str = " ".join(tag_parts)
     text = f"{content} {detail} {tags_str}"
-    return text.split()
+    return [t for t in text.split() if t]
 
 
 def bm25_search(
@@ -83,7 +104,7 @@ def bm25_search(
         return []
 
     corpus: list[list[str]] = [_tokenize_entry(e) for e in entries]
-    tokenized_query = query.lower().split()
+    tokenized_query = [t for t in _normalize_text(query).split() if t]
 
     bm25 = BM25Okapi(corpus)
     scores = bm25.get_scores(tokenized_query)

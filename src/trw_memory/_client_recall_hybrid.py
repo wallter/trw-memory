@@ -141,6 +141,13 @@ async def try_hybrid_recall(
             top_k=effective_top_k,
             as_of=as_of,
             include_superseded=include_superseded,
+            recency_weight=client._config.recall_recency_weight,
+            recency_halflife_days=client._config.recall_recency_halflife_days,
+            fusion_mode=client._config.recall_fusion_mode,
+            validity_age_decay=client._config.recall_validity_age_decay,
+            rerank=client._config.recall_rerank,
+            rerank_model=client._config.recall_rerank_model,
+            rerank_candidates=client._config.recall_rerank_candidates,
         )
     except Exception:
         hybrid_search_ms = (perf_counter() - hybrid_search_start) * 1000.0

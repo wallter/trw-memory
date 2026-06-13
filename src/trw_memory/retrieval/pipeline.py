@@ -1,13 +1,17 @@
 """Hybrid search pipeline for trw-memory.
 
-Orchestrates BM25 sparse retrieval, dense vector search, and Reciprocal Rank
-Fusion into a single ``hybrid_search`` entry point.
+Orchestrates BM25 sparse retrieval, dense vector search, optional recency
+ranking, Reciprocal Rank Fusion, and optional cross-encoder re-ranking into a
+single ``hybrid_search`` entry point.
 
 Graceful degradation matrix:
 - ``rank_bm25`` unavailable → BM25 step skipped
 - ``embedder`` is ``None`` or unavailable → dense step skipped
 - Both unavailable → returns empty list
 - Only one source available → uses that source directly (no fusion needed)
+- ``recency_weight > 0`` → recency ranking injected as a third RRF source
+- ``rerank=True`` → cross-encoder re-ranking applied post-fusion (requires
+  sentence-transformers; gracefully skipped when unavailable)
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.bm25 import bm25_search
 from trw_memory.retrieval.dense import dense_search
 from trw_memory.retrieval.fusion import combmax_fuse, rrf_fuse
+from trw_memory.retrieval.recency import recency_rank
 from trw_memory.retrieval.validity_prior import apply_validity_prior
 
 logger = structlog.get_logger(__name__)
@@ -48,6 +53,11 @@ def hybrid_search(
     as_of: datetime | None = None,
     include_superseded: bool = False,
     validity_age_decay: bool = False,
+    recency_weight: float = 0.0,
+    recency_halflife_days: float = 30.0,
+    rerank: bool = False,
+    rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    rerank_candidates: int = 50,
 ) -> list[MemoryEntry]:
     """Hybrid BM25 + vector search with configurable rank fusion.
 
@@ -100,10 +110,34 @@ def hybrid_search(
             hard-tail recall@12 by ~28% (0.583→0.750, McNemar p=0.0074) at
             the cost of weaker cross-list boosting.  Unknown values fall back
             to ``"rrf"`` with a warning.
+        recency_weight: When > 0, inject a recency ranking (sorted by
+            ``valid_from`` age via exponential decay) as an additional source
+            into RRF alongside BM25 and dense.  The weight is the fraction of
+            the RRF input list budget assigned to this source; ``0.0``
+            (default) disables recency ranking completely, preserving
+            the legacy pure text-relevance behaviour.  Values up to ``1.0``
+            are meaningful; ``0.3`` is a reasonable starting point for
+            temporal query workloads.
+        recency_halflife_days: Decay half-life used by the recency ranker.
+            An entry ``halflife_days`` old receives score 0.5 relative to a
+            brand-new entry.  Default ``30.0`` days.  Ignored when
+            ``recency_weight == 0``.
+        rerank: When ``True``, apply cross-encoder re-ranking after fusion
+            to re-score the top ``rerank_candidates`` entries jointly on
+            (query, passage).  Requires ``sentence-transformers``; silently
+            falls back to fusion order when the dependency or model is
+            unavailable.
+        rerank_model: HuggingFace model id for cross-encoder re-ranking.
+            Default ``"cross-encoder/ms-marco-MiniLM-L-6-v2"`` (66M params,
+            MS MARCO passage re-ranker).  Ignored when ``rerank=False``.
+        rerank_candidates: Number of top-fusion candidates to pass to the
+            cross-encoder.  Re-ranking all candidates is expensive; limiting
+            to the top-50 captures the quality gain at reasonable latency.
+            Ignored when ``rerank=False``.
 
     Returns:
         Up to *top_k* :class:`~trw_memory.models.memory.MemoryEntry` objects
-        ordered by fused relevance score descending.
+        ordered by fused (and optionally re-ranked) relevance score descending.
     """
     if not entries:
         return []
@@ -131,6 +165,20 @@ def hybrid_search(
         )
         if dense_results:
             rankings.append(dense_results)
+
+    # ------------------------------------------------------------- Recency
+    # Inject recency ranking as a third RRF source when recency_weight > 0.
+    # This gives temporal queries ("most recent X", "what happened last week")
+    # a freshness signal that neither BM25 nor dense can provide.
+    recency_results: list[tuple[str, float]] = []
+    if recency_weight > 0.0:
+        recency_results = recency_rank(
+            entries,
+            halflife_days=recency_halflife_days,
+            top_k=bm25_candidates,
+        )
+        if recency_results:
+            rankings.append(recency_results)
 
     if not rankings:
         logger.debug(
@@ -173,6 +221,19 @@ def hybrid_search(
         include_superseded=include_superseded,
         age_decay=validity_age_decay,
     )
+
+    # --------------------------------------------------------- Re-ranking
+    # Optional cross-encoder re-ranking: score top-N candidates jointly as
+    # (query, passage) pairs.  This captures finer-grained relevance than
+    # bi-encoder + RRF at the cost of O(rerank_candidates) model calls.
+    if rerank and fused_entries:
+        from trw_memory.retrieval.reranker import cross_encode_rerank  # noqa: PLC0415
+
+        rerank_input = fused_entries[:rerank_candidates]
+        tail = fused_entries[rerank_candidates:]
+        rerank_input = cross_encode_rerank(query, rerank_input, model_name=rerank_model)
+        fused_entries = [*rerank_input, *tail]
+
     results: list[MemoryEntry] = fused_entries[:top_k]
 
     logger.debug(
@@ -180,8 +241,11 @@ def hybrid_search(
         query=query[:80],
         entry_count=len(entries),
         bm25_hits=len(bm25_results) if bm25_results else 0,
+        recency_hits=len(recency_results),
         fused_total=len(fused),
         returned=len(results),
         fusion_mode=fusion_mode,
+        recency_weight=recency_weight,
+        rerank=rerank,
     )
     return results

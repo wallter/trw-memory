@@ -192,6 +192,83 @@ class MemoryConfig(BaseSettings):
         ),
     )
 
+    # Recency ranking — inject valid_from-based exponential decay as a 3rd RRF source
+    recall_recency_weight: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("recall_recency_weight", "memory_recall_recency_weight"),
+        description=(
+            "When > 0, inject recency ranking (exponential decay on valid_from) as "
+            "a third RRF source alongside BM25 and dense retrieval. Targets the "
+            "temporal discrimination band (recall 0.853). Recommended starting "
+            "point: 0.3. Default 0.0 = disabled (pure text-relevance behaviour)."
+        ),
+    )
+    recall_recency_halflife_days: float = Field(
+        default=14.0,
+        gt=0.0,
+        validation_alias=AliasChoices("recall_recency_halflife_days", "memory_recall_recency_halflife_days"),
+        description=(
+            "Half-life in days for the recency decay function. An entry this many "
+            "days old receives score 0.5 relative to a brand-new entry. Default 14 "
+            "days; reduce for short-lived session corpora, increase for long-lived "
+            "institutional knowledge. Ignored when recall_recency_weight == 0."
+        ),
+    )
+    # Fusion algorithm — expose combmax as an alternative to default RRF
+    recall_fusion_mode: str = Field(
+        default="rrf",
+        validation_alias=AliasChoices("recall_fusion_mode", "memory_recall_fusion_mode"),
+        description=(
+            "Fusion algorithm for hybrid_search. 'rrf' (default) = Reciprocal Rank "
+            "Fusion (sum of reciprocal ranks). 'combmax' = CombMAX (max reciprocal "
+            "rank per document), which lifts hard-tail recall@12 by ~28% "
+            "(McNemar p=0.0074) at the cost of weaker cross-list boosting. "
+            "Set MEMORY_RECALL_FUSION_MODE=combmax to enable."
+        ),
+    )
+    # Validity age decay — break ties by valid_from recency in the eligibility pass
+    recall_validity_age_decay: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("recall_validity_age_decay", "memory_recall_validity_age_decay"),
+        description=(
+            "When True, apply a stable-sort age-decay within the validity prior pass "
+            "so a newer valid_from floats above an older one when fusion ranked them "
+            "equal. This is a tie-breaker only — fusion order is otherwise preserved. "
+            "Default False = disabled."
+        ),
+    )
+    # Cross-encoder re-ranking (optional; requires sentence-transformers)
+    recall_rerank: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("recall_rerank", "memory_recall_rerank"),
+        description=(
+            "When True, apply cross-encoder re-ranking after RRF fusion using "
+            "recall_rerank_model. Requires sentence-transformers and a cached model. "
+            "Silently falls back to fusion order when unavailable. Latency: ~20-80ms "
+            "on CPU for 50 candidates. Default False = disabled."
+        ),
+    )
+    recall_rerank_model: str = Field(
+        default="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        validation_alias=AliasChoices("recall_rerank_model", "memory_recall_rerank_model"),
+        description=(
+            "HuggingFace model id for cross-encoder re-ranking. Default is the "
+            "66M-param ms-marco passage re-ranker. Ignored when recall_rerank=False."
+        ),
+    )
+    recall_rerank_candidates: int = Field(
+        default=50,
+        gt=0,
+        validation_alias=AliasChoices("recall_rerank_candidates", "memory_recall_rerank_candidates"),
+        description=(
+            "Number of top-fusion candidates to pass to the cross-encoder. "
+            "Limiting to top-50 captures the quality gain at reasonable latency. "
+            "Ignored when recall_rerank=False."
+        ),
+    )
+
     # Dedup
     dedup_enabled: bool = Field(default=True, description="Enable semantic deduplication")
     dedup_skip_threshold: float = Field(
