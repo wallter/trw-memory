@@ -133,6 +133,10 @@ class TestFR02EntryToDict:
             "sync_seq",
             "last_synced_at",
             "cross_validated",
+            # bi-temporal validity (PRD-CORE-194 FR01/FR02)
+            "valid_from",
+            "invalid_from",
+            "invalidated_by",
             "outcome_history",
             "assertions",
             "anchors",
@@ -156,7 +160,7 @@ class TestFR02EntryToDict:
             "session_count",
         }
         assert set(result.keys()) == expected_keys
-        assert len(result) == 52
+        assert len(result) == 55  # 52 + 3 bi-temporal fields (PRD-CORE-194)
 
         # Verify types of serialized values
         assert result["id"] == "M-TEST-001"
@@ -317,6 +321,9 @@ class TestFR05BooleanConversion:
             now_iso,  # created_at
             now_iso,  # updated_at
             None,  # last_accessed_at
+            None,  # valid_from (PRD-CORE-194)
+            None,  # invalid_from (PRD-CORE-194)
+            None,  # invalidated_by (PRD-CORE-194)
             0,  # access_count
             0,  # session_count
             0.5,  # q_value
@@ -382,6 +389,9 @@ class TestFR05BooleanConversion:
             now_iso,
             now_iso,
             None,
+            None,  # valid_from (PRD-CORE-194)
+            None,  # invalid_from (PRD-CORE-194)
+            None,  # invalidated_by (PRD-CORE-194)
             0,  # access_count
             0,  # session_count
             0.5,
