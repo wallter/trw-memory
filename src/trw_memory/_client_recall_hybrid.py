@@ -127,29 +127,37 @@ async def try_hybrid_recall(
     if tags:
         effective_top_k = max(effective_top_k, namespace_size)
 
-    # Auto-detect temporal queries and inject recency_weight when the config
-    # hasn't explicitly enabled it.  Preserves explicit config — if the operator
-    # set recall_recency_weight > 0 we use that value; only the zero-default
-    # case gets the auto-detected weight.
+    # Auto-detect temporal queries and inject recency_weight + strip boilerplate
+    # prefixes when the config hasn't explicitly enabled either.  Preserves
+    # explicit config — if the operator set recall_recency_weight > 0 we use
+    # that value; only the zero-default case gets the auto-detected weight.
     effective_recency_weight = client._config.recall_recency_weight
-    if effective_recency_weight == 0.0 and client._config.recall_auto_temporal:
-        from trw_memory.retrieval.temporal_query import classify_temporal
+    retrieval_query = query  # may be rewritten for BM25/dense; original used for reranking
+    if client._config.recall_auto_temporal:
+        from trw_memory.retrieval.temporal_query import classify_temporal, strip_temporal_prefix
 
         tc = classify_temporal(query)
         if tc.is_temporal:
-            effective_recency_weight = tc.recency_weight
+            if effective_recency_weight == 0.0:
+                effective_recency_weight = tc.recency_weight
+            if client._config.recall_strip_temporal_prefix:
+                stripped = strip_temporal_prefix(query)
+                if stripped != query:
+                    retrieval_query = stripped
             logger.debug(
                 "temporal_query_detected",
                 query=query[:80],
+                retrieval_query=retrieval_query[:80],
                 confidence=tc.confidence,
                 recency_weight=effective_recency_weight,
                 patterns=tc.matched_patterns,
+                prefix_stripped=retrieval_query != query,
             )
 
     hybrid_search_start = perf_counter()
     try:
         ranked = hybrid_search(
-            query=query,
+            query=retrieval_query,
             entries=all_entries,
             embedder=embedder,
             query_embedding=query_embedding,
@@ -168,6 +176,9 @@ async def try_hybrid_recall(
             rerank=client._config.recall_rerank,
             rerank_model=client._config.recall_rerank_model,
             rerank_candidates=client._config.recall_rerank_candidates,
+            # Cross-encoder always uses the original (unstripped) query so it
+            # scores relevance against the full user intent.
+            rerank_query=query if retrieval_query != query else None,
         )
     except Exception:
         hybrid_search_ms = (perf_counter() - hybrid_search_start) * 1000.0

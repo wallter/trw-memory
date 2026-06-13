@@ -278,6 +278,20 @@ class MemoryConfig(BaseSettings):
             "Disable to enforce position-only RRF for all queries."
         ),
     )
+    recall_strip_temporal_prefix: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "recall_strip_temporal_prefix", "memory_recall_strip_temporal_prefix"
+        ),
+        description=(
+            "When True (default) and the query is classified as temporal, "
+            "strip common boilerplate prefixes ('latest guidance on X' → 'X') "
+            "before running BM25 and dense retrieval.  The cross-encoder "
+            "reranker (when enabled) still receives the original query so "
+            "relevance scoring is unaffected.  Set False to disable prefix "
+            "stripping and pass the raw query to all retrieval stages."
+        ),
+    )
 
     # Dedup
     dedup_enabled: bool = Field(default=True, description="Enable semantic deduplication")

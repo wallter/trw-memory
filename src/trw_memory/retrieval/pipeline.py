@@ -9,7 +9,7 @@ Graceful degradation matrix:
 - ``embedder`` is ``None`` or unavailable → dense step skipped
 - Both unavailable → returns empty list
 - Only one source available → uses that source directly (no fusion needed)
-- ``recency_weight > 0`` → recency ranking injected as a third RRF source
+- ``recency_weight > 0`` → blend normalised relevance with recency score
 - ``rerank=True`` → cross-encoder re-ranking applied post-fusion (requires
   sentence-transformers; gracefully skipped when unavailable)
 """
@@ -58,6 +58,7 @@ def hybrid_search(
     rerank: bool = False,
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
     rerank_candidates: int = 50,
+    rerank_query: str | None = None,
 ) -> list[MemoryEntry]:
     """Hybrid BM25 + vector search with configurable rank fusion.
 
@@ -110,13 +111,11 @@ def hybrid_search(
             hard-tail recall@12 by ~28% (0.583→0.750, McNemar p=0.0074) at
             the cost of weaker cross-list boosting.  Unknown values fall back
             to ``"rrf"`` with a warning.
-        recency_weight: When > 0, inject a recency ranking (sorted by
-            ``valid_from`` age via exponential decay) as an additional source
-            into RRF alongside BM25 and dense.  The weight is the fraction of
-            the RRF input list budget assigned to this source; ``0.0``
-            (default) disables recency ranking completely, preserving
-            the legacy pure text-relevance behaviour.  Values up to ``1.0``
-            are meaningful; ``0.3`` is a reasonable starting point for
+        recency_weight: When > 0, blend normalised relevance with the
+            exponential half-life recency score using this fraction as the
+            freshness weight; ``0.0`` (default) disables recency ranking
+            completely, preserving pure text-relevance behaviour.  Values up to
+            ``1.0`` are meaningful; ``0.3`` is a reasonable starting point for
             temporal query workloads.
         recency_halflife_days: Decay half-life used by the recency ranker.
             An entry ``halflife_days`` old receives score 0.5 relative to a
@@ -258,9 +257,13 @@ def hybrid_search(
     if rerank and fused_entries:
         from trw_memory.retrieval.reranker import cross_encode_rerank
 
+        # Use rerank_query (original un-preprocessed query) when supplied so
+        # the cross-encoder receives the full user intent even if the search
+        # query was stripped of temporal boilerplate.
+        effective_rerank_query = rerank_query if rerank_query is not None else query
         rerank_input = fused_entries[:rerank_candidates]
         tail = fused_entries[rerank_candidates:]
-        rerank_input = cross_encode_rerank(query, rerank_input, model_name=rerank_model)
+        rerank_input = cross_encode_rerank(effective_rerank_query, rerank_input, model_name=rerank_model)
         fused_entries = [*rerank_input, *tail]
 
     results: list[MemoryEntry] = fused_entries[:top_k]

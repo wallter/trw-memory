@@ -1,4 +1,4 @@
-"""Temporal query classifier for automatic recency boost.
+"""Temporal query classifier and prefix stripper for auto-recency boost.
 
 Detects temporal language in queries so callers can auto-populate
 ``recency_weight`` and ``as_of`` without user configuration.
@@ -13,6 +13,12 @@ Patterns captured:
 - Superlative recency: newest, most recent, latest, current
 - Present-state anchors: today, this week/month/year
 - Temporal verbs: was updated, has changed, is now
+
+Temporal queries often start with boilerplate prefixes like
+"latest guidance on X" or "what is the current state of X".  These
+prefixes are high-df noise for BM25 (common across many queries) and
+add semantic drift for dense embedders.  ``strip_temporal_prefix``
+removes them, leaving just the meaningful topic tokens (X).
 
 Returns a dataclass with the detected ``is_temporal`` flag plus a suggested
 ``recency_weight`` scaled by detection confidence.
@@ -57,6 +63,54 @@ _MAX_CONFIDENCE: float = 0.95
 _TEMPORAL_THRESHOLD: float = 0.5
 # Maximum recency_weight we ever auto-suggest (keep user override in control)
 _MAX_AUTO_RECENCY_WEIGHT: float = 0.6
+
+
+# Boilerplate temporal prefixes that carry no topical signal.
+# Ordered longest-first so the greedier match is tried first (prevents
+# "latest" stripping before "latest guidance on" has a chance to match).
+_TEMPORAL_PREFIXES: list[re.Pattern[str]] = [
+    re.compile(
+        r"^(what is |what('s| is) |tell me )?the (latest|current|most recent|newest|up-to-date) "
+        r"(guidance|information|info|update|status|state|version|rules?|docs?|documentation|"
+        r"advice|recommendation|summary|overview) (on|for|about|regarding) ",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(what('s| is) |what are )?the (latest|current|most recent|newest) ",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(latest|current|most recent|newest|up-to-date) (guidance|information|info|update|"
+        r"status|state|rules?|docs?|documentation|advice|recommendation) (on|for|about|regarding) ",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^(latest|most recent|current|newest) (on|for|about|regarding) ", re.IGNORECASE),
+    re.compile(r"^(what('s| is| are) (the )?)?(latest|current|most recent) ", re.IGNORECASE),
+]
+
+
+def strip_temporal_prefix(query: str) -> str:
+    """Remove leading boilerplate temporal phrases from *query*.
+
+    Strips prefixes like "latest guidance on X" → "X" so BM25 and dense
+    search focus on the meaningful topic tokens rather than high-df noise.
+    Returns the original query unchanged when no prefix matches.
+
+    Args:
+        query: Raw recall query string.
+
+    Returns:
+        Query with the temporal boilerplate prefix removed, or the
+        original query if no prefix pattern matches.  Leading/trailing
+        whitespace is stripped from the result.
+    """
+    for pattern in _TEMPORAL_PREFIXES:
+        m = pattern.match(query)
+        if m:
+            remainder = query[m.end():].strip()
+            if remainder:
+                return remainder
+    return query
 
 
 def classify_temporal(query: str) -> TemporalClassification:

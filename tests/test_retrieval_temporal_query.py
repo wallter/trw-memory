@@ -106,3 +106,58 @@ class TestClassifyTemporal:
     def test_future_anchor_combined_with_recency_is_temporal(self) -> None:
         result = classify_temporal("latest upcoming sprint tasks this week")
         assert result.is_temporal is True
+
+
+class TestStripTemporalPrefix:
+    """Tests for strip_temporal_prefix — removes boilerplate from temporal queries."""
+
+    def setup_method(self) -> None:
+        from trw_memory.retrieval.temporal_query import strip_temporal_prefix
+        self._fn = strip_temporal_prefix
+
+    def test_latest_guidance_on_stripped(self) -> None:
+        assert self._fn("latest guidance on auth middleware") == "auth middleware"
+
+    def test_current_guidance_on_stripped(self) -> None:
+        assert self._fn("current guidance on session tokens") == "session tokens"
+
+    def test_most_recent_guidance_on_stripped(self) -> None:
+        assert self._fn("most recent guidance on SQLite WAL") == "SQLite WAL"
+
+    def test_latest_guidance_for_stripped(self) -> None:
+        assert self._fn("latest guidance for deployment") == "deployment"
+
+    def test_latest_guidance_about_stripped(self) -> None:
+        assert self._fn("latest guidance about config schema") == "config schema"
+
+    def test_latest_information_on_stripped(self) -> None:
+        assert self._fn("latest information on retries") == "retries"
+
+    def test_the_latest_guidance_on_stripped(self) -> None:
+        assert self._fn("the latest guidance on backoffs") == "backoffs"
+
+    def test_whats_the_latest_guidance_on_stripped(self) -> None:
+        assert self._fn("what's the latest guidance on CRDTs") == "CRDTs"
+
+    def test_plain_query_unchanged(self) -> None:
+        assert self._fn("auth middleware pattern") == "auth middleware pattern"
+
+    def test_non_temporal_unchanged(self) -> None:
+        assert self._fn("how does BM25 work") == "how does BM25 work"
+
+    def test_empty_remainder_returns_original(self) -> None:
+        # "latest guidance on" with no topic — should not strip to empty string
+        result = self._fn("latest guidance on")
+        assert result  # not empty
+
+    def test_case_insensitive(self) -> None:
+        assert self._fn("Latest Guidance On deployment") == "deployment"
+        assert self._fn("LATEST GUIDANCE ON auth") == "auth"
+
+    def test_what_is_current_state_stripped(self) -> None:
+        result = self._fn("what is the current guidance on hooks")
+        assert result == "hooks"
+
+    def test_latest_without_guidance_stripped(self) -> None:
+        result = self._fn("latest on deployment")
+        assert result == "deployment"
