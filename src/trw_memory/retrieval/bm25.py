@@ -25,7 +25,7 @@ try:
     from rank_bm25 import BM25Okapi
 
     _BM25_AVAILABLE = True
-except ImportError:
+except ImportError:  # pragma: no cover
     _BM25_AVAILABLE = False
 
 logger = structlog.get_logger(__name__)

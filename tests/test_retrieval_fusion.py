@@ -55,6 +55,17 @@ class TestRRFFuse:
         result = rrf_fuse([r1, r2])
         assert {entry_id for entry_id, _ in result} == {"a", "b", "c", "d"}
 
+    def test_k_invalid_logs_warning_and_falls_back(self) -> None:
+        """rrf_fuse with k<1 logs a warning and uses k=60 as fallback."""
+        import structlog.testing
+
+        ranking = [("a", 1.0), ("b", 0.5)]
+        with structlog.testing.capture_logs() as logs:
+            result = rrf_fuse([ranking], k=0)
+        assert len(result) >= 1
+        warning_events = [log["event"] for log in logs if log.get("log_level") == "warning"]
+        assert "rrf_k_invalid" in warning_events
+
 
 class TestRRFImportanceBlend:
     """R-FUSION-001: importance-aware fusion changes the output order.

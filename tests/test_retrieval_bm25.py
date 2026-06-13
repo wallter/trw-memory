@@ -48,6 +48,20 @@ class TestBM25Search:
         results = bm25_search("overlap unique", entries)
         assert isinstance(results, list)
 
+    def test_jaccard_fallback_skips_blank_id_entry(self) -> None:
+        """Jaccard fallback loop skips entries with blank ids (bm25.py line 136)."""
+        from trw_memory.models.memory import MemoryEntry
+
+        # Same content in every entry → BM25 scores all <= 0 → Jaccard fallback
+        entries = [make_entry(f"e{i}", "foo bar baz qux") for i in range(4)]
+        # Construct a blank-id entry bypassing Pydantic validation
+        blank_entry = MemoryEntry.model_construct(id="", content="foo bar baz qux unique")
+        entries.append(blank_entry)
+        entries.append(make_entry("target", "foo bar baz qux unique"))
+        results = bm25_search("unique foo bar", entries)
+        # blank id must not appear in results (skipped in fallback loop)
+        assert all(entry_id != "" for entry_id, _ in results)
+
     def test_unavailable_returns_empty(self) -> None:
         entries = [make_entry("x", "test content")]
         with patch("trw_memory.retrieval.bm25._BM25_AVAILABLE", False):
