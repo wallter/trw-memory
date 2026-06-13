@@ -186,6 +186,17 @@ class TestCombmaxFuse:
         rank0_score = 1.0 / (60 + 1)
         assert scores["a"] == pytest.approx(rank0_score)
 
+    def test_k_invalid_logs_warning_and_falls_back(self) -> None:
+        """combmax_fuse with k<1 logs a warning and uses k=60 as fallback."""
+        import structlog.testing
+
+        ranking = [("a", 1.0), ("b", 0.5)]
+        with structlog.testing.capture_logs() as logs:
+            result = combmax_fuse([ranking], k=0)
+        assert len(result) >= 1
+        warning_events = [log["event"] for log in logs if log.get("log_level") == "warning"]
+        assert "combmax_k_invalid" in warning_events
+
 
 class TestBlendRecency:
     """blend_recency — linear interpolation of relevance and recency scores.

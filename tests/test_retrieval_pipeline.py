@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.pipeline import hybrid_search
 
@@ -79,6 +80,53 @@ class TestHybridSearch:
             top_k=2,
         )
         assert len(results) <= 2
+
+    def test_direct_default_rrf_k_tracks_runtime_config(self) -> None:
+        entries = self._entries()
+        captured: dict[str, int] = {}
+
+        def fake_rrf_fuse(
+            _rankings: list[list[tuple[str, float]]],
+            *,
+            k: int,
+            importances: dict[str, float] | None = None,
+            alpha: float = 1.0,
+        ) -> list[tuple[str, float]]:
+            assert importances is None
+            assert alpha == 1.0
+            captured["k"] = k
+            return [("e1", 1.0)]
+
+        with patch("trw_memory.retrieval.pipeline.bm25_search", return_value=[("e1", 1.0)]):
+            with patch("trw_memory.retrieval.pipeline.dense_search", return_value=[("e2", 1.0)]):
+                with patch("trw_memory.retrieval.pipeline.rrf_fuse", side_effect=fake_rrf_fuse):
+                    results = hybrid_search("pydantic", entries, stored_embeddings={"e2": [0.1, 0.2, 0.3]})
+
+        assert captured["k"] == MemoryConfig().rrf_k == 5
+        assert [entry.id for entry in results] == ["e1"]
+
+    def test_direct_default_recency_halflife_tracks_runtime_config(self) -> None:
+        entries = self._entries()
+        captured: dict[str, float | None] = {}
+
+        def fake_recency_rank(
+            _entries: list[MemoryEntry],
+            *,
+            halflife_days: float,
+            now: object | None = None,
+        ) -> list[tuple[str, float]]:
+            captured["halflife_days"] = halflife_days
+            captured["now"] = now
+            return [("e1", 1.0)]
+
+        with patch("trw_memory.retrieval.pipeline.bm25_search", return_value=[("e1", 1.0)]):
+            with patch("trw_memory.retrieval.pipeline.dense_search", return_value=[]):
+                with patch("trw_memory.retrieval.pipeline.recency_rank", side_effect=fake_recency_rank):
+                    results = hybrid_search("recent pydantic", entries, recency_weight=0.3)
+
+        assert captured["halflife_days"] == MemoryConfig().recall_recency_halflife_days == 14.0
+        assert captured["now"] is None
+        assert [entry.id for entry in results] == ["e1"]
 
     def test_dense_skipped_when_no_stored_embeddings(self) -> None:
         embedder = StubEmbedder()
@@ -232,9 +280,7 @@ class TestHybridSearchPrecomputedQueryEmbedding:
         stored = stored_embeddings_for([e.id for e in entries], embedder)
         precomputed = [0.5, 0.25, 0.125]
         with patch("trw_memory.retrieval.pipeline.dense_search", return_value=[]) as mock_dense:
-            hybrid_search(
-                "pydantic", entries, embedder=embedder, query_embedding=precomputed, stored_embeddings=stored
-            )
+            hybrid_search("pydantic", entries, embedder=embedder, query_embedding=precomputed, stored_embeddings=stored)
         mock_dense.assert_called_once()
         assert mock_dense.call_args.kwargs["query_embedding"] == precomputed
 
@@ -251,6 +297,73 @@ class TestHybridSearchPrecomputedQueryEmbedding:
             stored_embeddings=stored,
         )
         assert "e2" in [e.id for e in results]
+
+
+class TestHybridSearchFusionModes:
+    """fusion_mode parameter wiring."""
+
+    def _entries(self) -> list[MemoryEntry]:
+        return [
+            make_entry("m1", "python asyncio event loop"),
+            make_entry("m2", "structlog structured logging"),
+            make_entry("m3", "pydantic data validation"),
+        ]
+
+    def test_combmax_fusion_returns_results(self) -> None:
+        embedder = StubEmbedder()
+        entries = self._entries()
+        stored = stored_embeddings_for([e.id for e in entries], embedder)
+        results = hybrid_search(
+            "asyncio pydantic",
+            entries,
+            embedder=embedder,
+            stored_embeddings=stored,
+            fusion_mode="combmax",
+        )
+        assert len(results) >= 1
+        assert all(e.id in {"m1", "m2", "m3"} for e in results)
+
+    def test_unknown_fusion_mode_falls_back_to_rrf(self) -> None:
+        entries = self._entries()
+        results = hybrid_search("asyncio", entries, fusion_mode="bogus_mode")
+        assert len(results) >= 1
+
+    def test_rerank_true_called_with_mock(self) -> None:
+        """rerank=True wires cross_encode_rerank into the pipeline."""
+        from unittest.mock import patch
+
+        entries = self._entries()
+        sentinel = [entries[0]]
+
+        with patch(
+            "trw_memory.retrieval.reranker.cross_encode_rerank",
+            return_value=sentinel,
+        ) as mock_rerank:
+            results = hybrid_search("asyncio", entries, rerank=True, rerank_candidates=5)
+
+        mock_rerank.assert_called_once()
+        assert results[0].id == entries[0].id
+
+    def test_rerank_query_override_passed_to_reranker(self) -> None:
+        """rerank_query overrides the search query for the cross-encoder."""
+        from unittest.mock import patch
+
+        entries = self._entries()
+
+        with patch(
+            "trw_memory.retrieval.reranker.cross_encode_rerank",
+            return_value=[entries[0]],
+        ) as mock_rerank:
+            hybrid_search(
+                "asyncio",  # matches entry content so rerank path is reached
+                entries,
+                rerank=True,
+                rerank_query="original full query",
+            )
+
+        mock_rerank.assert_called_once()
+        call_kwargs = mock_rerank.call_args
+        assert call_kwargs[0][0] == "original full query"
 
 
 class TestHybridSearchImportanceBlend:

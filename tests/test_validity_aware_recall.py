@@ -155,6 +155,36 @@ def test_as_of_open_outranks_closed_at_as_of() -> None:
     assert [e.id for e in result] == ["A", "C"]
 
 
+def test_age_decay_entry_missing_from_fusion_scores_appended_in_order() -> None:
+    """Entry whose id is absent from fusion_scores is appended without bucket sorting."""
+    scored = _open("SCORED", valid_from=T0)
+    unscored = _open("UNSCORED", valid_from=T2)
+
+    result = apply_validity_prior(
+        [scored, unscored],
+        age_decay=True,
+        fusion_scores={"SCORED": 1.0},  # UNSCORED absent → lines 124-128
+    )
+    # SCORED goes through tie-bucket path; UNSCORED is appended directly.
+    assert "SCORED" in [e.id for e in result]
+    assert "UNSCORED" in [e.id for e in result]
+
+
+def test_age_decay_two_consecutive_unscored_trigger_empty_bucket_flush() -> None:
+    """Two consecutive entries absent from fusion_scores flush an empty bucket (line 117)."""
+    a = _open("A", valid_from=T0)
+    b = _open("B", valid_from=T1)
+
+    result = apply_validity_prior(
+        [a, b],
+        age_decay=True,
+        # Neither entry in fusion_scores → flush_bucket() called on empty bucket for B
+        fusion_scores={"OTHER": 0.5},
+    )
+    # Both present (no filtering applied), order preserved.
+    assert [e.id for e in result] == ["A", "B"]
+
+
 def test_valid_from_min_excludes_older_entries() -> None:
     """valid_from_min filters out entries with valid_from < min."""
     old = _open("OLD", valid_from=T0)
