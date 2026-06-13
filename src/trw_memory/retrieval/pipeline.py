@@ -24,7 +24,7 @@ from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.bm25 import bm25_search
 from trw_memory.retrieval.dense import dense_search
-from trw_memory.retrieval.fusion import combmax_fuse, rrf_fuse
+from trw_memory.retrieval.fusion import blend_recency, combmax_fuse, rrf_fuse
 from trw_memory.retrieval.recency import recency_rank
 from trw_memory.retrieval.validity_prior import apply_validity_prior
 
@@ -213,50 +213,15 @@ def hybrid_search(
     #
     # Both sides are normalised to [0,1] independently before blending so the
     # recency_weight value is a true proportion (0.3 = "30% freshness, 70% relevance").
-    # Adding recency as an equal 1/3 RRF source (previous approach) produced a
-    # binary switch: all non-zero weights had identical output and nDCG dropped
-    # uniformly because time-ordering overrode relevance for non-temporal queries.
+    # blend_recency() (fusion.py) is the single implementation; this call is the
+    # pipeline integration point that feeds it the right inputs.
     if recency_weight > 0.0:
         recency_results = recency_rank(
             entries,
             halflife_days=recency_halflife_days,
             now=recency_now,
         )
-        if recency_results:
-            # Normalise relevance scores to [0, 1]
-            rel_max = max(s for _, s in relevance_fused) if relevance_fused else 1.0
-            rel_norm = {eid: s / rel_max for eid, s in relevance_fused} if rel_max > 0 else {}
-
-            # Recency scores are already in (0, 1] from the half-life formula.
-            rec_map = dict(recency_results)
-            rel_rank = {eid: rank for rank, (eid, _) in enumerate(relevance_fused)}
-            rec_rank = {eid: rank for rank, (eid, _) in enumerate(recency_results)}
-
-            # Blend: cover all entries from either source while preserving a
-            # deterministic pre-sort order. Building this from a set made equal
-            # final scores depend on PYTHONHASHSEED, which perturbed downstream
-            # validity-prior tie buckets.
-            all_ids = [eid for eid, _ in relevance_fused]
-            all_ids.extend(eid for eid, _ in recency_results if eid not in rel_rank)
-            blended: list[tuple[str, float]] = []
-            for eid in all_ids:
-                rel_s = rel_norm.get(eid, 0.0)
-                rec_s = rec_map.get(eid, 0.0)
-                blended.append((eid, (1.0 - recency_weight) * rel_s + recency_weight * rec_s))
-            rank_sentinel = len(all_ids) + 1
-            blended.sort(
-                key=lambda x: (
-                    -x[1],
-                    rel_rank.get(x[0], rank_sentinel),
-                    rec_rank.get(x[0], rank_sentinel),
-                    x[0],
-                )
-            )
-            fused = blended
-        else:
-            fused = relevance_fused
-    else:
-        fused = relevance_fused
+    fused = blend_recency(relevance_fused, recency_results=recency_results, recency_weight=recency_weight)
 
     fused_scores = dict(fused)
 
