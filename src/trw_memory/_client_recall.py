@@ -38,7 +38,7 @@ import structlog
 
 from trw_memory.lifecycle._recall import record_recall_access
 from trw_memory.lifecycle.tiers._runtime import get_tier_manager, tier_runtime_enabled
-from trw_memory.models.memory import MemoryEntry
+from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.retrieval.source_policy import apply_source_policy
 from trw_memory.security.rbac import Permission
@@ -373,6 +373,7 @@ async def fallback_recall(
             top_k=limit * 3,
             tags=tags,
             namespace=client._namespace,
+            status=MemoryStatus.ACTIVE,
         )
 
     query_terms = set(query.lower().split())

@@ -588,7 +588,8 @@ class MemoryClient(OrgSharedAliasMixin):
             try:
                 parsed_status = _Status(status)
             except ValueError:
-                pass
+                logger.warning("search_fts_invalid_status", invalid_status=status)
+                return []
 
         async with self._lock:
             backend = self._get_backend()
