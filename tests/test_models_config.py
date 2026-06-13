@@ -25,7 +25,7 @@ def test_memory_config_defaults() -> None:
     assert cfg.auto_generate_key is True
     assert cfg.bm25_candidates == 50
     assert cfg.vector_candidates == 50
-    assert cfg.rrf_k == 15  # promoted 2026-06-12 by the memory meta-harness loop
+    assert cfg.rrf_k == 5  # promoted 2026-06-13 by the memory meta-harness loop (LME +0.8pp)
     assert cfg.dedup_enabled is True
     assert cfg.hot_max_entries == 50
     assert cfg.warm_archive_max_score == 0.22
