@@ -133,6 +133,61 @@ def search(
         ) from exc
 
 
+def search_fts(
+    backend: SQLiteBackend,
+    select_columns_sql: str,
+    *,
+    query: str,
+    top_k: int = 25,
+    status: MemoryStatus | None = None,
+    min_importance: float = 0.0,
+    namespace: str | None = None,
+) -> list[MemoryEntry]:
+    """FTS5 full-text search — O(log N) inverted index candidate retrieval.
+
+    Replaces the LIKE '%term%' table scan in :func:`search` for callers that
+    have confirmed ``backend._fts_available``.  Results are ranked by FTS5
+    BM25 for candidate retrieval; the caller's hybrid pipeline may re-rank.
+    Falls back to an empty list when no FTS candidates match.
+    """
+    sanitized = query.replace('"', '""')
+    fts_query = f'"{sanitized}"'
+    filter_sql, filter_params = backend._build_filter_clause(
+        status=status, namespace=namespace, min_importance=min_importance
+    )
+    over_fetch = min(top_k * 4, 500)
+    backend._ensure_connection_fresh()
+    try:
+        with backend._lock:
+            fts_rows = backend._conn.execute(
+                "SELECT id FROM memories_fts WHERE memories_fts MATCH ? ORDER BY rank LIMIT ?",
+                (fts_query, over_fetch),
+            ).fetchall()
+            if not fts_rows:
+                return []
+            ids = [str(row[0]) for row in fts_rows]
+            placeholders = ", ".join(["?"] * len(ids))
+            id_filter = f"id IN ({placeholders})"
+            where_sql = id_filter if filter_sql == "1" else f"{id_filter} AND {filter_sql}"
+            sql = (
+                f"SELECT {select_columns_sql} FROM memories "  # noqa: S608
+                f"WHERE {where_sql} ORDER BY importance DESC, updated_at DESC LIMIT ?"
+            )
+            params: list[object] = [*ids, *filter_params, top_k]
+            fetch_query = backend._fetch_query(
+                where_sql=where_sql,
+                params=[*ids, *filter_params],
+                order_by="importance DESC, updated_at DESC",
+                limit=top_k,
+            )
+            return _execute_resilient(backend, sql, params, fetch_query=fetch_query)
+    except (sqlite3.Error, ValueError, KeyError) as exc:
+        raise StorageError(
+            f"Failed FTS5 search: {exc}",
+            path=str(backend._db_path),
+        ) from exc
+
+
 def find_active_by_content(
     backend: SQLiteBackend,
     content: str,
@@ -244,9 +299,7 @@ def list_entries(
     limit: int = 100,
 ) -> list[MemoryEntry]:
     """Return entries with optional filters, ordered by updated_at desc."""
-    where_sql, params = backend._build_filter_clause(
-        status=status, namespace=namespace, min_importance=min_importance
-    )
+    where_sql, params = backend._build_filter_clause(status=status, namespace=namespace, min_importance=min_importance)
     order_by = "updated_at DESC"
     sql = (
         f"SELECT {select_columns_sql} FROM memories WHERE {where_sql} "  # noqa: S608

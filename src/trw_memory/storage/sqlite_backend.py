@@ -154,6 +154,7 @@ from trw_memory.storage._query_ops import (
     list_entries as _query_ops_list_entries,
     list_namespaces as _query_ops_list_namespaces,
     search as _query_ops_search,
+    search_fts as _query_ops_search_fts,
 )
 
 # CRUD ops extracted to _crud_ops.py (PRD-DIST-245 batch 87).
@@ -292,6 +293,11 @@ class SQLiteBackend(StorageBackend):
 
         # sqlite-vec extension load (fail-open)
         self._vec_available = _init_load_vec_extension(self._conn, db_path, self._dim)
+
+        # FTS5 virtual table (fail-open — gracefully degrades on old SQLite builds)
+        from trw_memory.storage._schema import ensure_fts_table as _ensure_fts_table
+
+        self._fts_available: bool = _ensure_fts_table(self._conn)
 
         # PRD-INFRA-064 (B3): multi-writer advisory registry (fail-open)
         self._writer_registry = _init_register_writer_registry(db_path, self._concurrent_writer_warn_threshold)
@@ -538,6 +544,37 @@ class SQLiteBackend(StorageBackend):
             query=query,
             top_k=top_k,
             tags=tags,
+            status=status,
+            min_importance=min_importance,
+            namespace=namespace,
+        )
+
+    @property
+    def fts_available(self) -> bool:
+        """``True`` when FTS5 is compiled into the active SQLite build."""
+        return self._fts_available
+
+    def search_fts(
+        self,
+        query: str,
+        *,
+        top_k: int = 25,
+        status: MemoryStatus | None = None,
+        min_importance: float = 0.0,
+        namespace: str | None = None,
+    ) -> list[MemoryEntry]:
+        """FTS5 full-text search — O(log N) inverted-index candidate retrieval.
+
+        Raises :class:`~trw_memory.exceptions.StorageError` on SQLite failure.
+        Returns an empty list when FTS5 is unavailable or no entries match.
+        """
+        if not self._fts_available:
+            return []
+        return _query_ops_search_fts(
+            self,
+            _SELECT_COLUMNS_SQL,
+            query=query,
+            top_k=top_k,
             status=status,
             min_importance=min_importance,
             namespace=namespace,

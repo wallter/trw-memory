@@ -119,6 +119,15 @@ def store(
     try:
         with backend._lock:
             backend._conn.execute(sql, entry_to_row(entry))
+            if getattr(backend, "_fts_available", False):
+                tags_json = json.dumps(entry.tags) if isinstance(entry.tags, list) else (entry.tags or "[]")
+                # FTS5 virtual tables don't enforce uniqueness — delete first to
+                # avoid stale rows when store() is called as INSERT OR REPLACE.
+                backend._conn.execute("DELETE FROM memories_fts WHERE id = ?", (entry.id,))
+                backend._conn.execute(
+                    "INSERT INTO memories_fts(id, content, detail, tags) VALUES (?, ?, ?, ?)",
+                    (entry.id, entry.content, entry.detail or "", tags_json),
+                )
             # S9 fix: suppress the commit when inside a ``transaction()`` block
             # so a store() batched with other writes commits exactly once at
             # the outermost COMMIT — matching update()/increment_recall_access.
@@ -172,6 +181,13 @@ def update(
         values: list[object] = []
 
         field_dict: dict[str, object] = dict(fields)
+
+        # Derive FTS content BEFORE the serialize loop converts lists to JSON strings.
+        _fts_content: str = str(field_dict.get("content", existing.content))
+        _fts_detail: str = str(field_dict.get("detail", existing.detail or ""))
+        _raw_tags = field_dict.get("tags", existing.tags or [])
+        _fts_tags: str = json.dumps(_raw_tags) if isinstance(_raw_tags, list) else str(_raw_tags)
+
         if "updated_at" not in field_dict:
             field_dict["updated_at"] = datetime.now(timezone.utc)
 
@@ -209,9 +225,7 @@ def update(
         # can prune the now-stale dense vector after the row update lands.
         new_status = _normalise_status_value(fields["status"]) if "status" in fields else None
         prune_vector = (
-            new_status is not None
-            and new_status in _TERMINAL_STATUS_VALUES
-            and existing.status != new_status
+            new_status is not None and new_status in _TERMINAL_STATUS_VALUES and existing.status != new_status
         )
 
         values.append(entry_id)
@@ -222,6 +236,12 @@ def update(
                 # Keep the entry row for audit; drop only the KNN vector so
                 # dense recall stops returning the retired entry.
                 backend._delete_vector(entry_id)
+            if getattr(backend, "_fts_available", False):
+                backend._conn.execute("DELETE FROM memories_fts WHERE id = ?", (entry_id,))
+                backend._conn.execute(
+                    "INSERT INTO memories_fts(id, content, detail, tags) VALUES (?, ?, ?, ?)",
+                    (entry_id, _fts_content, _fts_detail, _fts_tags),
+                )
             if backend._skip_commit_depth == 0:
                 backend._conn.commit()
         return get(backend, select_columns_sql, entry_id)
@@ -366,6 +386,8 @@ def delete(backend: SQLiteBackend, entry_id: str) -> bool:
             deleted = cursor.rowcount > 0
             if deleted and backend._vec_available:
                 backend._delete_vector(entry_id)
+            if deleted and getattr(backend, "_fts_available", False):
+                backend._conn.execute("DELETE FROM memories_fts WHERE id = ?", (entry_id,))
             # Defer the commit inside a ``transaction()`` block so the row +
             # vector deletes batch into the caller's outermost COMMIT rather
             # than prematurely committing their open transaction.

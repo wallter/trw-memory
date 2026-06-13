@@ -83,8 +83,7 @@ CREATE_IDX_STATUS = "CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(
 # within a namespace; ``search`` orders by importance DESC, updated_at DESC.
 CREATE_IDX_NS_UPDATED = "CREATE INDEX IF NOT EXISTS idx_memories_ns_updated ON memories(namespace, updated_at DESC)"
 CREATE_IDX_NS_IMPORTANCE = (
-    "CREATE INDEX IF NOT EXISTS idx_memories_ns_importance "
-    "ON memories(namespace, importance DESC, updated_at DESC)"
+    "CREATE INDEX IF NOT EXISTS idx_memories_ns_importance ON memories(namespace, importance DESC, updated_at DESC)"
 )
 
 CREATE_GRAPH_EDGES = """
@@ -260,6 +259,38 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         conn.commit()
     finally:
         cursor.close()
+
+
+CREATE_MEMORIES_FTS = """
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    id UNINDEXED,
+    content,
+    detail,
+    tags,
+    tokenize='unicode61 remove_diacritics 1'
+)
+"""
+
+
+def ensure_fts_table(conn: sqlite3.Connection) -> bool:
+    """Create and pre-populate the memories_fts FTS5 virtual table.
+
+    Returns True when FTS5 is available and the table is ready.
+    Safe to call multiple times (idempotent). On first call, bulk-imports
+    all existing memories rows so legacy entries are searchable immediately.
+    """
+    try:
+        conn.execute(CREATE_MEMORIES_FTS)
+        row = conn.execute("SELECT COUNT(*) FROM memories_fts").fetchone()
+        if row is not None and int(row[0]) == 0:
+            conn.execute(
+                "INSERT INTO memories_fts(id, content, detail, tags) "
+                "SELECT id, content, COALESCE(detail, ''), COALESCE(tags, '[]') FROM memories"
+            )
+        conn.commit()
+        return True
+    except sqlite3.OperationalError:
+        return False
 
 
 def ensure_vec_table(conn: sqlite3.Connection, dim: int) -> None:
