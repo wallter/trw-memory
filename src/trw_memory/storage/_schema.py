@@ -86,6 +86,25 @@ CREATE_IDX_NS_IMPORTANCE = (
     "CREATE INDEX IF NOT EXISTS idx_memories_ns_importance ON memories(namespace, importance DESC, updated_at DESC)"
 )
 
+# Enterprise-scale composite indexes (millions of entries). These cover the
+# most common multi-predicate filters that the bare ``idx_memories_namespace``
+# / ``idx_memories_status`` single-column indexes cannot serve efficiently.
+#   * (namespace, status)            — list_entries filtering on both at once
+#   * (namespace, status, importance) — tri-predicate min_importance recall
+#   * (status, updated_at)           — status-only lifecycle sweeps by recency
+# Forward-only additive migration — IF NOT EXISTS, no destructive change.
+CREATE_IDX_NS_STATUS = (
+    "CREATE INDEX IF NOT EXISTS idx_memories_ns_status ON memories(namespace, status)"
+)
+CREATE_IDX_NS_STATUS_IMP = (
+    "CREATE INDEX IF NOT EXISTS idx_memories_ns_status_imp "
+    "ON memories(namespace, status, importance)"
+)
+CREATE_IDX_STATUS_UPDATED = (
+    "CREATE INDEX IF NOT EXISTS idx_memories_status_updated "
+    "ON memories(status, updated_at)"
+)
+
 CREATE_GRAPH_EDGES = """
 CREATE TABLE IF NOT EXISTS memory_graph_edges (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -168,6 +187,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         cursor.execute(CREATE_IDX_STATUS)
         cursor.execute(CREATE_IDX_NS_UPDATED)
         cursor.execute(CREATE_IDX_NS_IMPORTANCE)
+        cursor.execute(CREATE_IDX_NS_STATUS)
+        cursor.execute(CREATE_IDX_NS_STATUS_IMP)
+        cursor.execute(CREATE_IDX_STATUS_UPDATED)
         cursor.execute(CREATE_IDX_MGE_SOURCE)
         cursor.execute(CREATE_IDX_MGE_TARGET)
         cursor.execute(CREATE_IDX_WIKI_REFS_SOURCE)
