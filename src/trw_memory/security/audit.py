@@ -99,10 +99,32 @@ class AuditLog:
         return {"valid": True, "entries_checked": len(records), "first_broken_at": None, "broken_hash": None}
 
     def compact(self, retention_days: int) -> int:
-        """Drop records older than *retention_days* and re-chain the retained suffix."""
+        """Drop records older than *retention_days* and re-chain the retained suffix.
+
+        Before any records are dropped, the *current* chain-head hash and
+        the pre-compact event count are appended to an immutable
+        compact-manifest sidecar (``audit_compact_manifest.jsonl``). The
+        manifest is the only durable record of the chain head that existed
+        prior to re-chaining: ``compact`` re-roots the retained suffix at
+        genesis, so without the manifest an insider could mutate old events
+        and re-compact to produce a self-consistent — but fraudulent —
+        chain that :meth:`verify_chain` would still report as valid. The
+        append-only manifest lets post-hoc forensics detect a hash
+        discontinuity between successive compacted ranges.
+        """
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
         with lock_for_rmw(self._path):
-            records = [record for record in self.read_all() if record.ts >= cutoff]
+            all_records = self.read_all()
+            # Capture the pre-compact chain head + count and pin it to the
+            # manifest BEFORE any record is dropped or re-chained.
+            if all_records:
+                self._write_compact_manifest(
+                    self._path,
+                    head_hash=all_records[-1].hash,
+                    event_count=len(all_records),
+                )
+
+            records = [record for record in all_records if record.ts >= cutoff]
             if not records:
                 self._path.unlink(missing_ok=True)
                 return 0
@@ -134,6 +156,31 @@ class AuditLog:
                 tmp_path.unlink(missing_ok=True)
                 raise
         return len(chained)
+
+    def _write_compact_manifest(self, audit_log_path: Path, *, head_hash: str, event_count: int) -> None:
+        """Append the pre-compact chain head to the immutable compact manifest.
+
+        Writes one JSONL line to ``audit_compact_manifest.jsonl`` alongside
+        the audit log, recording the chain-head hash that existed *before*
+        this compaction re-rooted the retained suffix at genesis. The
+        manifest is append-only: each compaction adds exactly one line, so
+        the full history of chain heads survives any number of compactions.
+        Post-hoc verification can then detect a hash discontinuity between
+        compacted ranges that an in-place re-chain would otherwise hide.
+        """
+        manifest_path = audit_log_path.parent / "audit_compact_manifest.jsonl"
+        entry: dict[str, object] = {
+            "compact_at": datetime.now(timezone.utc).isoformat(),
+            "chain_head_hash": head_hash,
+            "event_count": event_count,
+        }
+        line = json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        with manifest_path.open("a", encoding="utf-8") as fh:
+            fh.write(line)
+            fh.flush()
+            if self._fsync:
+                os.fsync(fh.fileno())
 
     def read_all(self) -> list[AuditRecord]:
         """Read all audit records from disk."""
