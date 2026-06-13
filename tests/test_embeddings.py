@@ -355,3 +355,24 @@ class TestMockedModelSuccess:
 
         result = provider.embed_batch(["a", "b"])
         assert result == [None, None]
+
+    def test_embed_batch_retries_with_smaller_batch_on_oom(self) -> None:
+        provider = self._provider_with_mock_model(dim=3)
+        call_count = 0
+
+        def _encode_fails_first(texts: list[str] | str, **kwargs: object) -> list[list[float]]:
+            nonlocal call_count
+            call_count += 1
+            batch_size = kwargs.get("batch_size", 32)
+            if batch_size > 1:
+                raise RuntimeError("GPU OOM")
+            # Succeeds at batch_size=1
+            if isinstance(texts, str):
+                return [[1.0, 0.0, 0.0]]
+            return [[1.0, 0.0, 0.0]] * len(texts)
+
+        provider._model.encode.side_effect = _encode_fails_first
+
+        result = provider.embed_batch(["hello", "world"])
+        assert result == [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+        assert call_count > 1  # retried at least once

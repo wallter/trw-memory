@@ -268,29 +268,47 @@ class LocalEmbeddingProvider:
             return [None] * len(texts)
 
         results: list[list[float] | None] = []
-        try:
-            non_blank = [t for t in texts if t.strip()]
-            if not non_blank:
-                return [None] * len(texts)
-            vectors = model.encode(  # type: ignore[attr-defined]
-                non_blank,
-                normalize_embeddings=True,
-                batch_size=32,
-            )
-            vec_idx = 0
-            for text in texts:
-                if not text.strip():
-                    results.append(None)
-                else:
-                    results.append([float(v) for v in vectors[vec_idx]])
-                    vec_idx += 1
-        except (RuntimeError, ValueError, TypeError):
-            logger.warning(
-                "embedding_batch_failed",
-                batch_size=len(texts),
-                exc_info=True,
-            )
+        non_blank = [t for t in texts if t.strip()]
+        if not non_blank:
             return [None] * len(texts)
+
+        # Retry with progressively smaller batch sizes on OOM/RuntimeError.
+        # Long sessions (10K+ chars) can exhaust GPU memory at batch_size=32
+        # when the GPU is shared with other processes (e.g. a serving LLM).
+        _batch_size = 32
+        _min_batch = 1
+        vectors = None
+        while _batch_size >= _min_batch:
+            try:
+                vectors = model.encode(  # type: ignore[attr-defined]
+                    non_blank,
+                    normalize_embeddings=True,
+                    batch_size=_batch_size,
+                )
+                break
+            except (RuntimeError, ValueError, TypeError):
+                if _batch_size == _min_batch:
+                    logger.warning(
+                        "embedding_batch_failed",
+                        batch_size=_batch_size,
+                        text_count=len(non_blank),
+                        exc_info=True,
+                    )
+                    return [None] * len(texts)
+                _batch_size = max(_min_batch, _batch_size // 4)
+                logger.debug(
+                    "embedding_batch_retry",
+                    new_batch_size=_batch_size,
+                    text_count=len(non_blank),
+                )
+
+        vec_idx = 0
+        for text in texts:
+            if not text.strip():
+                results.append(None)
+            else:
+                results.append([float(v) for v in vectors[vec_idx]])  # type: ignore[index]
+                vec_idx += 1
 
         return results
 
