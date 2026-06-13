@@ -51,6 +51,7 @@ def hybrid_search(
     top_k: int = 25,
     fusion_mode: str = "rrf",
     as_of: datetime | None = None,
+    valid_from_min: datetime | None = None,
     include_superseded: bool = False,
     validity_age_decay: bool = False,
     recency_weight: float = 0.0,
@@ -122,6 +123,13 @@ def hybrid_search(
             An entry ``halflife_days`` old receives score 0.5 relative to a
             brand-new entry.  Default ``30.0`` days.  Ignored when
             ``recency_weight == 0``.
+        valid_from_min: When set, only include entries whose ``valid_from`` is
+            at or after this datetime.  Useful for narrowing results to a
+            specific date range — e.g. when temporal arithmetic resolves
+            "10 days ago" to a target date, pass
+            ``valid_from_min = target - slack`` to exclude sessions from before
+            the approximate target period.  Applied after fusion as an AND
+            filter alongside *as_of*.
         recency_now: Reference instant for age computation.  ``None`` (the
             default) resolves to ``datetime.now(timezone.utc)`` inside
             :func:`~trw_memory.retrieval.recency.recency_rank`.  Pass an
@@ -268,6 +276,7 @@ def hybrid_search(
     fused_entries = apply_validity_prior(
         fused_entries,
         as_of=as_of,
+        valid_from_min=valid_from_min,
         include_superseded=include_superseded,
         age_decay=validity_age_decay,
         fusion_scores=fused_scores,

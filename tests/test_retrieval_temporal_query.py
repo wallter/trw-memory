@@ -450,3 +450,70 @@ class TestStripTemporalArithmetic:
         result = self._fn("The other day I noticed a bug in the auth module")
         assert "bug" in result or "auth module" in result
         assert "the other day" not in result.lower()
+
+
+class TestResolveTemporalArithmeticOffset:
+    """Tests for resolve_temporal_arithmetic_offset."""
+
+    def setup_method(self) -> None:
+        from datetime import datetime, timezone
+        from trw_memory.retrieval.temporal_query import resolve_temporal_arithmetic_offset
+        self._fn = resolve_temporal_arithmetic_offset
+        self._ref = datetime(2023, 6, 15, 12, 0, tzinfo=timezone.utc)  # Thursday
+
+    def test_n_days_ago_numeric(self) -> None:
+        from datetime import timedelta
+        result = self._fn("What did I buy 10 days ago?", self._ref)
+        assert result == timedelta(days=10)
+
+    def test_n_days_ago_written(self) -> None:
+        from datetime import timedelta
+        result = self._fn("What did I do two days ago?", self._ref)
+        assert result == timedelta(days=2)
+
+    def test_n_weeks_ago(self) -> None:
+        from datetime import timedelta
+        result = self._fn("What gardening activity did I do two weeks ago?", self._ref)
+        assert result == timedelta(weeks=2)
+
+    def test_n_months_ago(self) -> None:
+        from datetime import timedelta
+        result = self._fn("What happened three months ago?", self._ref)
+        assert result == timedelta(days=90)
+
+    def test_a_month_ago(self) -> None:
+        from datetime import timedelta
+        result = self._fn("What meeting did I have a month ago?", self._ref)
+        assert result == timedelta(days=30)
+
+    def test_last_tuesday(self) -> None:
+        from datetime import timedelta
+        # ref is Thursday (weekday=3); last Tuesday (weekday=1) is 2 days back
+        result = self._fn("Who did I meet with last Tuesday?", self._ref)
+        assert result == timedelta(days=2)
+
+    def test_last_monday(self) -> None:
+        from datetime import timedelta
+        # ref is Thursday (weekday=3); last Monday (weekday=0) is 3 days back
+        result = self._fn("What did I do last Monday?", self._ref)
+        assert result == timedelta(days=3)
+
+    def test_last_friday_same_weekday_wraps(self) -> None:
+        from datetime import datetime, timedelta, timezone
+        # ref is Friday (weekday=4); "last Friday" should be 7 days back, not 0
+        ref_fri = datetime(2023, 6, 16, 12, 0, tzinfo=timezone.utc)  # Friday
+        result = self._fn("What happened last Friday?", ref_fri)
+        assert result == timedelta(days=7)
+
+    def test_no_arithmetic_returns_none(self) -> None:
+        result = self._fn("What is the auth middleware pattern?", self._ref)
+        assert result is None
+
+    def test_empty_query_returns_none(self) -> None:
+        result = self._fn("", self._ref)
+        assert result is None
+
+    def test_cardinal_twelve_months_ago(self) -> None:
+        from datetime import timedelta
+        result = self._fn("What did we discuss twelve months ago?", self._ref)
+        assert result == timedelta(days=360)

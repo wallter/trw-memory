@@ -155,6 +155,42 @@ def test_as_of_open_outranks_closed_at_as_of() -> None:
     assert [e.id for e in result] == ["A", "C"]
 
 
+def test_valid_from_min_excludes_older_entries() -> None:
+    """valid_from_min filters out entries with valid_from < min."""
+    old = _open("OLD", valid_from=T0)
+    recent = _open("RECENT", valid_from=T2)
+    # Exclude anything older than T2
+    result = apply_validity_prior([old, recent], valid_from_min=T2)
+    assert [e.id for e in result] == ["RECENT"]
+
+
+def test_valid_from_min_inclusive_boundary() -> None:
+    """valid_from == valid_from_min is included (inclusive lower bound)."""
+    at_min = _open("AT_MIN", valid_from=T1)
+    before_min = _open("BEFORE_MIN", valid_from=T0)
+    result = apply_validity_prior([before_min, at_min], valid_from_min=T1)
+    assert [e.id for e in result] == ["AT_MIN"]
+
+
+def test_valid_from_min_none_includes_all() -> None:
+    """valid_from_min=None (default) does not filter by date."""
+    old = _open("OLD", valid_from=T0)
+    recent = _open("RECENT", valid_from=T2)
+    result = apply_validity_prior([old, recent], valid_from_min=None)
+    assert {e.id for e in result} == {"OLD", "RECENT"}
+
+
+def test_valid_from_min_combined_with_as_of() -> None:
+    """valid_from_min AND as_of are applied together (AND semantics)."""
+    # at T1, entry A is open AND after T0 (valid_from=T0 >= min=T0?)
+    # entry B has valid_from=T2 but as_of=T1 → valid_from=T2 > T1 → excluded by as_of
+    a = _open("A", valid_from=T0)  # valid_from=T0, open always
+    b = _open("B", valid_from=T2)  # valid_from=T2, open always
+    # as_of=T1 → B excluded (valid_from T2 > T1); valid_from_min=T0 → A included
+    result = apply_validity_prior([a, b], as_of=T1, valid_from_min=T0)
+    assert [e.id for e in result] == ["A"]
+
+
 def test_store_round_trip_then_recall_filter(tmp_path: Path) -> None:
     """Integration: superseded entry persisted, then excluded by the prior."""
     backend = SQLiteBackend(tmp_path / "m.db")

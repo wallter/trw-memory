@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 
 @dataclass(frozen=True)
@@ -400,3 +401,94 @@ def classify_temporal(query: str) -> TemporalClassification:
         recency_weight=recency_weight,
         matched_patterns=matched,
     )
+
+
+# ---------------------------------------------------------------------------
+# Temporal arithmetic offset resolver
+# ---------------------------------------------------------------------------
+
+# Maps written-out number words to integer values.
+_WORD_TO_INT: dict[str, int] = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "twenty": 20, "thirty": 30, "forty": 40,
+    "fifty": 50, "sixty": 60, "ninety": 90, "hundred": 100,
+}
+
+_ARITHMETIC_OFFSET_RE = re.compile(
+    r"\b(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"eleven|twelve|twenty|thirty|forty|fifty|sixty|ninety|hundred)\s+"
+    r"(day|days|week|weeks|month|months|year|years)\s+ago\b",
+    re.IGNORECASE,
+)
+
+_WEEKDAY_NAMES: dict[str, int] = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6,
+}
+
+_LAST_WEEKDAY_RE = re.compile(
+    r"\blast\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+    re.IGNORECASE,
+)
+
+
+def resolve_temporal_arithmetic_offset(
+    query: str,
+    reference_date: datetime,
+) -> timedelta | None:
+    """Resolve a temporal arithmetic phrase in *query* to an approximate offset.
+
+    Parses expressions like "10 days ago", "two weeks ago", "last Tuesday" and
+    returns the :class:`~datetime.timedelta` from *reference_date* back to the
+    implied target date.
+
+    Supports:
+    - ``N days/weeks/months/years ago`` (numeric and written-out cardinals)
+    - ``last <weekday>`` (returns offset to the most recent occurrence of that
+      weekday before *reference_date*)
+
+    Returns ``None`` when no arithmetic expression is found or when the
+    expression cannot be resolved.
+
+    Args:
+        query: Free-text recall query, possibly containing temporal arithmetic.
+        reference_date: The "now" instant from which the expression is measured.
+            Must be timezone-aware (UTC preferred).
+
+    Returns:
+        :class:`~datetime.timedelta` representing the offset from
+        *reference_date* back to the implied target, or ``None``.
+    """
+    # Try "N days/weeks/months/years ago"
+    m = _ARITHMETIC_OFFSET_RE.search(query)
+    if m:
+        raw_count, unit = m.group(1), m.group(2).lower()
+        try:
+            count = int(raw_count)
+        except ValueError:
+            count = _WORD_TO_INT.get(raw_count.lower(), 1)
+        unit_base = unit.rstrip("s")  # "days" → "day", "weeks" → "week"
+        if unit_base == "day":
+            return timedelta(days=count)
+        if unit_base == "week":
+            return timedelta(weeks=count)
+        if unit_base == "month":
+            # Approximate: 30 days per month
+            return timedelta(days=count * 30)
+        if unit_base == "year":
+            return timedelta(days=count * 365)
+
+    # Try "last <weekday>"
+    m2 = _LAST_WEEKDAY_RE.search(query)
+    if m2:
+        target_weekday = _WEEKDAY_NAMES.get(m2.group(1).lower())
+        if target_weekday is not None:
+            # Compute days back to the most recent occurrence of target_weekday
+            ref_weekday = reference_date.weekday()  # 0=Monday
+            days_back = (ref_weekday - target_weekday) % 7
+            if days_back == 0:
+                days_back = 7  # "last Tuesday" when today is Tuesday → 7 days ago
+            return timedelta(days=days_back)
+
+    return None

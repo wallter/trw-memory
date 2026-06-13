@@ -42,6 +42,7 @@ def apply_validity_prior(
     entries: list[MemoryEntry],
     *,
     as_of: datetime | None = None,
+    valid_from_min: datetime | None = None,
     include_superseded: bool = False,
     age_decay: bool = False,
     fusion_scores: Mapping[str, float] | None = None,
@@ -52,6 +53,12 @@ def apply_validity_prior(
         entries: Fusion-ordered candidates (highest relevance first).
         as_of: When set, re-scope eligibility to records whose validity window
             contained this instant ("what was believed true as of T").
+        valid_from_min: When set, only include entries whose ``valid_from`` is
+            at or after this datetime.  Useful for narrowing results to a
+            specific date range — e.g. when temporal arithmetic resolves
+            "10 days ago" to a target date, pass
+            ``valid_from_min = target - slack`` to exclude older sessions.
+            Applied in addition to (AND with) *as_of* eligibility.
         include_superseded: When True, ineligible records are appended AFTER all
             eligible records (positional rank penalty, OQ2) rather than dropped.
         age_decay: When True, apply a tie-only age advantage so the newer
@@ -67,7 +74,10 @@ def apply_validity_prior(
     eligible: list[MemoryEntry] = []
     ineligible: list[MemoryEntry] = []
     for entry in entries:
-        if _is_open_at(entry, as_of):
+        in_window = _is_open_at(entry, as_of)
+        if in_window and valid_from_min is not None and entry.valid_from < valid_from_min:
+            in_window = False
+        if in_window:
             eligible.append(entry)
         else:
             ineligible.append(entry)
