@@ -54,16 +54,16 @@ class TestRrfKGuard:
         assert len(result) > 0
 
     def test_k_negative_resets_to_default(self) -> None:
-        """rrf_fuse(k=-1) resets to 60 and produces valid results."""
+        """rrf_fuse(k=-1) resets to 5 (tuned default) and produces valid results."""
         from trw_memory.retrieval.fusion import rrf_fuse
 
         rankings = [[("a", 1.0), ("b", 0.5)]]
         result_neg = rrf_fuse(rankings, k=-1)
-        result_default = rrf_fuse(rankings, k=60)
+        result_default = rrf_fuse(rankings, k=5)
         assert result_neg == result_default
 
     def test_k_default_unchanged(self) -> None:
-        """rrf_fuse() with default k=60 produces expected results."""
+        """rrf_fuse() with default k=5 (tuned) produces expected results."""
         from trw_memory.retrieval.fusion import rrf_fuse
 
         rankings = [[("a", 1.0)]]

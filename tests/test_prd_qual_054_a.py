@@ -112,18 +112,18 @@ class TestRRFKValidation:
     """Verify rrf_fuse guards against invalid k values."""
 
     def test_k_zero_uses_default(self) -> None:
-        """k=0 is invalid (causes division by rank), must reset to 60."""
+        """k=0 is invalid (causes division by rank), must reset to 5 (tuned default)."""
         ranking = [("a", 1.0)]
         result = rrf_fuse([ranking], k=0)
-        # With k=60: score = 1/(60+0+1) = 1/61
-        assert result[0][1] == pytest.approx(1.0 / 61.0)
+        # With k=5: score = 1/(5+0+1) = 1/6
+        assert result[0][1] == pytest.approx(1.0 / 6.0)
 
     def test_k_negative_uses_default(self) -> None:
-        """k=-1 is invalid, must reset to 60."""
+        """k=-1 is invalid, must reset to 5 (tuned default)."""
         ranking = [("a", 1.0)]
         result = rrf_fuse([ranking], k=-1)
-        # With k=60: score = 1/(60+0+1) = 1/61
-        assert result[0][1] == pytest.approx(1.0 / 61.0)
+        # With k=5: score = 1/(5+0+1) = 1/6
+        assert result[0][1] == pytest.approx(1.0 / 6.0)
 
     def test_k_valid_preserved(self) -> None:
         """k=30 is valid and must be used as-is."""
@@ -147,7 +147,7 @@ class TestRRFKValidation:
             call_kwargs = mock_logger.warning.call_args
             assert call_kwargs[0][0] == "rrf_k_invalid"
             assert call_kwargs[1]["k"] == 0
-            assert call_kwargs[1]["default"] == 60
+            assert call_kwargs[1]["default"] == 5
 
 
 # ---------------------------------------------------------------------------
