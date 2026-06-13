@@ -141,6 +141,38 @@ class TestClassifyTemporal:
         result2 = classify_temporal("latest auth middleware guidance")
         assert result.recency_weight <= result2.recency_weight
 
+    def test_a_while_ago_is_temporal(self) -> None:
+        result = classify_temporal("a while ago I told you about my dog")
+        assert result.is_temporal is True
+        assert "recency_adverb" in result.matched_patterns
+
+    def test_a_while_back_is_temporal(self) -> None:
+        result = classify_temporal("a while back I mentioned the deployment issue")
+        assert result.is_temporal is True
+
+    def test_the_other_day_is_temporal(self) -> None:
+        result = classify_temporal("the other day I bought a new laptop")
+        assert result.is_temporal is True
+        assert "recency_adverb" in result.matched_patterns
+
+    def test_some_time_ago_is_temporal(self) -> None:
+        result = classify_temporal("some time ago I configured the VPN")
+        assert result.is_temporal is True
+
+    def test_sometime_ago_is_temporal(self) -> None:
+        result = classify_temporal("sometime ago we discussed the caching strategy")
+        assert result.is_temporal is True
+
+    def test_last_time_is_temporal(self) -> None:
+        result = classify_temporal("the last time I ran this script it failed")
+        assert result.is_temporal is True
+        assert "relative_window" in result.matched_patterns
+
+    def test_do_you_remember_when_is_temporal(self) -> None:
+        result = classify_temporal("do you remember when I showed you the API design?")
+        assert result.is_temporal is True
+        assert "prior_context" in result.matched_patterns
+
 
 class TestPrepareTemporalQuery:
     def test_strips_prefix_and_auto_fills_zero_recency_weight(self) -> None:
@@ -323,6 +355,29 @@ class TestStripTemporalPrefix:
         assert "Nordstrom" in result
         assert "weeks ago" not in result.lower()
 
+    def test_do_you_remember_when_stripped(self) -> None:
+        result = self._fn("Do you remember when I showed you the API design?")
+        assert "API design" in result
+        assert "do you remember" not in result.lower()
+
+    def test_last_time_I_stripped(self) -> None:
+        result = self._fn("The last time I ran this script it failed")
+        assert "script" in result
+        assert "last time" not in result.lower()
+
+    def test_a_while_ago_prefix_stripped(self) -> None:
+        result = self._fn("A while ago I told you about the migration plan")
+        assert "migration plan" in result
+        assert "while ago" not in result.lower()
+
+    def test_a_while_back_prefix_stripped(self) -> None:
+        result = self._fn("A while back you mentioned the database schema issue")
+        assert "database schema" in result
+
+    def test_last_time_we_empty_remainder_is_safe(self) -> None:
+        result = self._fn("Last time I")
+        assert result  # must not be empty
+
 
 class TestStripTemporalArithmetic:
     """Tests for strip_temporal_arithmetic — removes embedded relative-time phrases."""
@@ -375,3 +430,23 @@ class TestStripTemporalArithmetic:
         result = self._fn("What did I buy 10 days ago ?")
         # Double spaces from substitution should be collapsed
         assert "  " not in result
+
+    def test_a_while_ago_inline_stripped(self) -> None:
+        result = self._fn("I bought a car a while ago and it needs service")
+        assert "car" in result
+        assert "a while ago" not in result.lower()
+
+    def test_a_while_back_inline_stripped(self) -> None:
+        result = self._fn("We discussed the deployment pipeline a while back")
+        assert "deployment pipeline" in result
+        assert "a while back" not in result.lower()
+
+    def test_some_time_ago_inline_stripped(self) -> None:
+        result = self._fn("Some time ago I set up the database indexes")
+        assert "database indexes" in result
+        assert "some time ago" not in result.lower()
+
+    def test_the_other_day_inline_stripped(self) -> None:
+        result = self._fn("The other day I noticed a bug in the auth module")
+        assert "bug" in result or "auth module" in result
+        assert "the other day" not in result.lower()

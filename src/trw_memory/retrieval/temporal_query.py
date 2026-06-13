@@ -102,6 +102,34 @@ _PATTERNS: list[tuple[re.Pattern[str], float, str]] = [
         0.6,
         "prior_context",
     ),
+    # Vague recency adverbs — "a while ago", "the other day"
+    # (lower confidence: broad temporal reference with no time bound)
+    (
+        re.compile(r"\ba while (ago|back)\b|\bthe other day\b", re.IGNORECASE),
+        0.6,
+        "recency_adverb",
+    ),
+    # "some time ago" / "sometime ago" — vague past reference, similar to
+    # temporal arithmetic but without a specific count.
+    (
+        re.compile(r"\bsome\s*time\s+ago\b", re.IGNORECASE),
+        0.65,
+        "temporal_arithmetic",
+    ),
+    # "last time" standalone — "the last time I X" / "last time we discussed"
+    # (slightly weaker than named windows because "last time" can be non-temporal
+    #  in constructions like "last time I'll say this").
+    (
+        re.compile(r"\blast time\b", re.IGNORECASE),
+        0.6,
+        "relative_window",
+    ),
+    # Memory-recall opener — "do you remember when I X" / "remember that time"
+    (
+        re.compile(r"\b(do you |you )?(remember|recall)\s+(when|that time|me (saying|telling|mentioning))\b", re.IGNORECASE),
+        0.6,
+        "prior_context",
+    ),
 ]
 
 # Combined confidence ceiling — multiple weak signals can stack but are capped
@@ -175,6 +203,21 @@ _TEMPORAL_PREFIXES: list[re.Pattern[str]] = [
         r"^how many\s+(day|days|week|weeks|month|months|year|years)\s+ago\s+(did|have|has)\s+I\s+",
         re.IGNORECASE,
     ),
+    # "Do you remember when I X?" → "X"
+    re.compile(
+        r"^do you remember when (I|we)\s+",
+        re.IGNORECASE,
+    ),
+    # "The last time I/we X" → "X"
+    re.compile(
+        r"^(the\s+)?last time (I|we)\s+",
+        re.IGNORECASE,
+    ),
+    # "A while ago/back (I|you) X" → "X"
+    re.compile(
+        r"^a while (ago|back)[,]?\s*(I|you|we)?\s*",
+        re.IGNORECASE,
+    ),
 ]
 
 
@@ -231,6 +274,10 @@ _TEMPORAL_ARITHMETIC_INLINE: list[re.Pattern[str]] = [
         r"\bduring\s+the\s+\w+\s+last\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
         re.IGNORECASE,
     ),
+    # "a while ago" / "a while back" / "some time ago" — vague past references
+    re.compile(r"\ba while (ago|back)\b|\bsome\s*time\s+ago\b", re.IGNORECASE),
+    # "the other day" — informal recent reference
+    re.compile(r"\bthe other day\b", re.IGNORECASE),
 ]
 
 
