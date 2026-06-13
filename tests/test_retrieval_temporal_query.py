@@ -274,3 +274,18 @@ class TestStripTemporalPrefix:
             "I WAS LOOKING BACK AT OUR PREVIOUS CONVERSATION ABOUT deployment practices"
         )
         assert "deployment practices" in result
+
+    def test_previous_chat_and_wanted_to_confirm_stripped(self) -> None:
+        result = self._fn(
+            "I was looking back at our previous chat and I wanted to confirm, "
+            "how many times did the Chiefs play the Jaguars at Arrowhead Stadium?"
+        )
+        assert "Chiefs" in result
+        assert "looking back" not in result.lower()
+
+    def test_previous_chat_and_wanted_to_verify_stripped(self) -> None:
+        result = self._fn(
+            "I was looking back at our previous conversation and I wanted to verify, "
+            "what was the deployment command?"
+        )
+        assert "deployment command" in result

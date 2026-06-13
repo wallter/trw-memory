@@ -135,10 +135,19 @@ _TEMPORAL_PREFIXES: list[re.Pattern[str]] = [
     re.compile(r"^(what('s| is| are) (the )?)?(latest|current|most recent) ", re.IGNORECASE),
     # Prior-context boilerplate: "I was looking back at our previous conversation about X"
     # → strip conversational frame, leave topic X.
+    # "I was looking back at our previous conversation about X" → X
     re.compile(
         r"^(I('m| am| was| have been))?\s*(looking back at|going back to|thinking about|"
         r"checking)\s+(our\s+)?(previous|prior|earlier|last)\s+"
         r"(conversation|chat|session|discussion|talk)\s+(about|on|regarding|re:)\s+",
+        re.IGNORECASE,
+    ),
+    # "I was looking back at our previous chat and I wanted to confirm, X" → X
+    re.compile(
+        r"^(I('m| am| was| have been))?\s*(looking back at|going back to|thinking about|"
+        r"checking)\s+(our\s+)?(previous|prior|earlier|last)\s+"
+        r"(conversation|chat|session|discussion|talk)\s+and\s+I\s+wanted\s+to\s+"
+        r"(confirm|check|verify|ask|know|revisit)[.,]?\s+",
         re.IGNORECASE,
     ),
     re.compile(
