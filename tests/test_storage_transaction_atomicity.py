@@ -124,15 +124,11 @@ def test_store_inside_transaction_defers_commit(tmp_path: Path) -> None:
                 backend.store(make_entry(entry_id="M-defer"))
                 # Mid-transaction: the writer staged the row but has NOT
                 # committed — the observer connection must not see it yet.
-                seen_mid = observer.execute(
-                    "SELECT COUNT(*) FROM memories WHERE id = ?", ("M-defer",)
-                ).fetchone()[0]
+                seen_mid = observer.execute("SELECT COUNT(*) FROM memories WHERE id = ?", ("M-defer",)).fetchone()[0]
                 assert seen_mid == 0, "store() committed prematurely inside transaction()"
 
             # After the outermost COMMIT the row is durable and visible.
-            seen_after = observer.execute(
-                "SELECT COUNT(*) FROM memories WHERE id = ?", ("M-defer",)
-            ).fetchone()[0]
+            seen_after = observer.execute("SELECT COUNT(*) FROM memories WHERE id = ?", ("M-defer",)).fetchone()[0]
             assert seen_after == 1
         finally:
             observer.close()
@@ -150,9 +146,7 @@ def test_store_standalone_commits_immediately(tmp_path: Path) -> None:
         backend.store(make_entry(entry_id="M-now"))
         observer = sqlite3.connect(str(db_path))
         try:
-            count = observer.execute(
-                "SELECT COUNT(*) FROM memories WHERE id = ?", ("M-now",)
-            ).fetchone()[0]
+            count = observer.execute("SELECT COUNT(*) FROM memories WHERE id = ?", ("M-now",)).fetchone()[0]
             assert count == 1
         finally:
             observer.close()
@@ -235,13 +229,9 @@ def test_delete_inside_transaction_defers_commit(tmp_path: Path) -> None:
         try:
             with backend.transaction():
                 backend.delete("M-del")
-                seen_mid = observer.execute(
-                    "SELECT COUNT(*) FROM memories WHERE id = ?", ("M-del",)
-                ).fetchone()[0]
+                seen_mid = observer.execute("SELECT COUNT(*) FROM memories WHERE id = ?", ("M-del",)).fetchone()[0]
                 assert seen_mid == 1, "delete() committed prematurely inside transaction()"
-            seen_after = observer.execute(
-                "SELECT COUNT(*) FROM memories WHERE id = ?", ("M-del",)
-            ).fetchone()[0]
+            seen_after = observer.execute("SELECT COUNT(*) FROM memories WHERE id = ?", ("M-del",)).fetchone()[0]
             assert seen_after == 0
         finally:
             observer.close()
@@ -263,9 +253,7 @@ def test_delete_rolls_back_with_transaction_on_error(tmp_path: Path) -> None:
                 with backend.transaction():
                     backend.delete("M-keep")
                     raise RuntimeError("boom")
-            seen_after = observer.execute(
-                "SELECT COUNT(*) FROM memories WHERE id = ?", ("M-keep",)
-            ).fetchone()[0]
+            seen_after = observer.execute("SELECT COUNT(*) FROM memories WHERE id = ?", ("M-keep",)).fetchone()[0]
             assert seen_after == 1, "delete() persisted despite transaction rollback"
         finally:
             observer.close()
@@ -359,9 +347,7 @@ def test_store_and_vector_rollback_leaves_neither(tmp_path: Path) -> None:
         # connection so we are reading committed state only.
         observer = sqlite3.connect(str(db_path))
         try:
-            row_count = observer.execute(
-                "SELECT COUNT(*) FROM memories WHERE id = ?", ("M-rollback",)
-            ).fetchone()[0]
+            row_count = observer.execute("SELECT COUNT(*) FROM memories WHERE id = ?", ("M-rollback",)).fetchone()[0]
             assert row_count == 0, "row survived a rolled-back transaction"
         finally:
             observer.close()
@@ -400,9 +386,7 @@ def test_delete_vector_inside_transaction_defers_commit(tmp_path: Path) -> None:
 
         # The vector delete was staged in the rolled-back transaction, so the
         # vector must still be present. An eager commit would have removed it.
-        assert backend.vector_exists("M-delvec") is True, (
-            "delete_vector() committed prematurely inside transaction()"
-        )
+        assert backend.vector_exists("M-delvec") is True, "delete_vector() committed prematurely inside transaction()"
     finally:
         backend.close()
 
@@ -530,17 +514,9 @@ def test_delete_by_namespace_removes_entries_and_wiki_refs_atomically(tmp_path: 
         observer = sqlite3.connect(str(db_path))
         try:
             # Precondition: 2 doomed entries + 2 doomed wiki_refs are committed.
+            assert observer.execute("SELECT COUNT(*) FROM memories WHERE namespace = ?", ("doomed",)).fetchone()[0] == 2
             assert (
-                observer.execute(
-                    "SELECT COUNT(*) FROM memories WHERE namespace = ?", ("doomed",)
-                ).fetchone()[0]
-                == 2
-            )
-            assert (
-                observer.execute(
-                    "SELECT COUNT(*) FROM wiki_refs WHERE namespace = ?", ("doomed",)
-                ).fetchone()[0]
-                == 2
+                observer.execute("SELECT COUNT(*) FROM wiki_refs WHERE namespace = ?", ("doomed",)).fetchone()[0] == 2
             )
 
             deleted = backend.delete_by_namespace("doomed")
@@ -548,24 +524,11 @@ def test_delete_by_namespace_removes_entries_and_wiki_refs_atomically(tmp_path: 
 
             # Both entries and their wiki_refs are gone; the other namespace
             # is untouched — no orphan refs survive.
+            assert observer.execute("SELECT COUNT(*) FROM memories WHERE namespace = ?", ("doomed",)).fetchone()[0] == 0
             assert (
-                observer.execute(
-                    "SELECT COUNT(*) FROM memories WHERE namespace = ?", ("doomed",)
-                ).fetchone()[0]
-                == 0
+                observer.execute("SELECT COUNT(*) FROM wiki_refs WHERE namespace = ?", ("doomed",)).fetchone()[0] == 0
             )
-            assert (
-                observer.execute(
-                    "SELECT COUNT(*) FROM wiki_refs WHERE namespace = ?", ("doomed",)
-                ).fetchone()[0]
-                == 0
-            )
-            assert (
-                observer.execute(
-                    "SELECT COUNT(*) FROM wiki_refs WHERE namespace = ?", ("other",)
-                ).fetchone()[0]
-                == 1
-            )
+            assert observer.execute("SELECT COUNT(*) FROM wiki_refs WHERE namespace = ?", ("other",)).fetchone()[0] == 1
         finally:
             observer.close()
     finally:
@@ -615,17 +578,11 @@ def test_delete_by_namespace_rollback_leaves_entries_and_wiki_refs_intact(tmp_pa
         try:
             # Entries survived — the staged memories DELETE was rolled back.
             assert (
-                observer.execute(
-                    "SELECT COUNT(*) FROM memories WHERE namespace = ?", ("doomed",)
-                ).fetchone()[0]
-                == 2
+                observer.execute("SELECT COUNT(*) FROM memories WHERE namespace = ?", ("doomed",)).fetchone()[0] == 2
             ), "entries were deleted despite the rolled-back transaction"
             # wiki_refs survived too — no orphan/partial state.
             assert (
-                observer.execute(
-                    "SELECT COUNT(*) FROM wiki_refs WHERE namespace = ?", ("doomed",)
-                ).fetchone()[0]
-                == 2
+                observer.execute("SELECT COUNT(*) FROM wiki_refs WHERE namespace = ?", ("doomed",)).fetchone()[0] == 2
             ), "wiki_refs were partially cleaned despite rollback"
         finally:
             observer.close()

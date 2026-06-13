@@ -123,9 +123,7 @@ def test_checkpoint_wal_unsafe_engine_coerces_truncate_to_passive(
         backend.close()
 
 
-def test_checkpoint_wal_safe_engine_allows_truncate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_checkpoint_wal_safe_engine_allows_truncate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """On a fixed engine (>=3.51.3) TRUNCATE is allowed (reclaims WAL space)."""
     from trw_memory.storage import _dbapi
 
@@ -330,9 +328,7 @@ def test_robust_salvage_logs_partial_when_pages_fail(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(_recovery, "_connection_connect", lambda *a, **k: fake)
 
     with structlog.testing.capture_logs() as logs:
-        _recovery._attempt_primary_salvage(
-            Path("/nonexistent/backup.db"), dbapi=sqlite3, sqlcipher_key_hex=None
-        )
+        _recovery._attempt_primary_salvage(Path("/nonexistent/backup.db"), dbapi=sqlite3, sqlcipher_key_hex=None)
 
     partials = [log for log in logs if log.get("event") == "db_salvage_partial"]
     assert len(partials) == 1

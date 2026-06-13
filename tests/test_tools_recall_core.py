@@ -308,9 +308,7 @@ class TestMemoryRecallImplAdmissionPolicyParity:
         backend = _mock_backend([high, low])
         cfg = MemoryConfig(recall_confidence_filter=0.7)
 
-        result = memory_recall_impl(
-            "", "project:default", backend=backend, config=cfg, include_org_memories=False
-        )
+        result = memory_recall_impl("", "project:default", backend=backend, config=cfg, include_org_memories=False)
 
         ids = [m["id"] for m in cast("list[dict[str, object]]", result["memories"])]
         assert ids == ["M-hi"], f"expected sub-floor record suppressed on tool path, got {ids}"
@@ -333,9 +331,7 @@ class TestMemoryRecallImplAdmissionPolicyParity:
         backend = _mock_backend([current, historical])
         cfg = MemoryConfig(recall_filter_historical_only=True)
 
-        result = memory_recall_impl(
-            "", "project:default", backend=backend, config=cfg, include_org_memories=False
-        )
+        result = memory_recall_impl("", "project:default", backend=backend, config=cfg, include_org_memories=False)
 
         ids = [m["id"] for m in cast("list[dict[str, object]]", result["memories"])]
         assert "M-cur" in ids

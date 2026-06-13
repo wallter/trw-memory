@@ -191,7 +191,7 @@ def test_json_corrupt_arm_skipped_preserves_valid_arms() -> None:
         '"good": {"alpha": 3.0, "beta": 1.5, "window": [0.9, 0.8], "exposure_count": 2}, '
         '"bad_type": "not-a-dict", '
         '"bad_window": {"alpha": 2.0, "beta": 1.0, "window": ["nan-ish"], "exposure_count": 0}'
-        '}}'
+        "}}"
     )
     result = BanditSelector.from_json(payload)
     assert set(result._arms.keys()) == {"good"}
@@ -207,7 +207,7 @@ def test_json_non_iterable_window_arm_skipped() -> None:
         '{"arms": {'
         '"keep": {"alpha": 2.0, "beta": 1.0, "window": [], "exposure_count": 1}, '
         '"drop": {"alpha": 2.0, "beta": 1.0, "window": 5, "exposure_count": 0}'
-        '}}'
+        "}}"
     )
     result = BanditSelector.from_json(payload)
     assert set(result._arms.keys()) == {"keep"}

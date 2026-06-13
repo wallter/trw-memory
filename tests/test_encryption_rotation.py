@@ -68,18 +68,14 @@ class TestRotateKey:
 
         expected_mode = "TRUNCATE" if _driver.is_wal_reset_safe() else "PASSIVE"
         assert f"PRAGMA wal_checkpoint({expected_mode})" in statements
-        assert not any(
-            s.startswith("PRAGMA wal_checkpoint") and f"({expected_mode})" not in s for s in statements
-        )
+        assert not any(s.startswith("PRAGMA wal_checkpoint") and f"({expected_mode})" not in s for s in statements)
         assert "PRAGMA integrity_check" in statements
         assert "PRAGMA cipher = 'aes-256-cbc'" in statements
         assert "PRAGMA cipher_page_size = 4096" in statements
         assert "PRAGMA kdf_iter = 256000" in statements
         assert any(statement.startswith("PRAGMA rekey = \"x'") for statement in statements)
 
-    def test_rotate_key_aborts_when_wal_checkpoint_busy(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_rotate_key_aborts_when_wal_checkpoint_busy(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """If the pre-rotation WAL checkpoint reports busy=1 (another connection
         holds the WAL), rotation aborts rather than risk a racing TRUNCATE on an
         unsafe engine / a partial WAL flush before re-key."""
@@ -200,9 +196,7 @@ class TestRotateKey:
         assert db_path.read_bytes() == original_bytes
         assert any(statement.startswith("PRAGMA rekey = \"x'") for statement in failure_statements)
 
-    def test_rotate_key_never_leaks_key_in_raised_error(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_rotate_key_never_leaks_key_in_raised_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """A driver that echoes the failing rekey SQL (which embeds the new key)
         into its exception must NOT leak the key material through the
         KeyRotationError raised by rotate_key — directly or via the chain."""

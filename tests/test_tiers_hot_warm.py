@@ -302,9 +302,7 @@ class TestWarmTier:
         assert "good" in [str(e.get("id")) for e in listed]
 
         # Acceptance 2 + 3: structured event emitted with locality, no payload.
-        corrupt_events = [
-            log for log in logs if log.get("event") == "warm_tier_sidecar_corrupt_record_skipped"
-        ]
+        corrupt_events = [log for log in logs if log.get("event") == "warm_tier_sidecar_corrupt_record_skipped"]
         assert corrupt_events, "expected a structured corrupt-record event"
         event = corrupt_events[0]
         assert event["path"] == str(sidecar)
@@ -313,9 +311,7 @@ class TestWarmTier:
         # The raw corrupt line must never be logged.
         assert "not valid json" not in json.dumps(event)
 
-    def test_warm_sidecar_non_utf8_row_between_valid_rows_does_not_abort(
-        self, mgr: TierManager
-    ) -> None:
+    def test_warm_sidecar_non_utf8_row_between_valid_rows_does_not_abort(self, mgr: TierManager) -> None:
         """A non-UTF-8 byte row sandwiched between two valid records must not
         abort search/list/remove: both adjacent valid records survive, and the
         skip is logged content-free with a stable ``UnicodeDecodeError`` class
@@ -333,12 +329,7 @@ class TestWarmTier:
         # the two valid rows so the bad row is line 2 and a valid row follows it.
         bad_row = b"\xff\xfe not text \x80\x81"
         sidecar.write_bytes(
-            valid_lines[0].encode("utf-8")
-            + b"\n"
-            + bad_row
-            + b"\n"
-            + valid_lines[1].encode("utf-8")
-            + b"\n"
+            valid_lines[0].encode("utf-8") + b"\n" + bad_row + b"\n" + valid_lines[1].encode("utf-8") + b"\n"
         )
 
         with capture_logs() as logs:
@@ -352,9 +343,7 @@ class TestWarmTier:
         assert {"before", "after"} <= listed_ids
 
         # The non-UTF-8 row is skipped with a content-free structured event.
-        corrupt_events = [
-            log for log in logs if log.get("event") == "warm_tier_sidecar_corrupt_record_skipped"
-        ]
+        corrupt_events = [log for log in logs if log.get("event") == "warm_tier_sidecar_corrupt_record_skipped"]
         assert corrupt_events, "expected a structured corrupt-record event for the non-UTF-8 row"
         event = corrupt_events[0]
         assert event["path"] == str(sidecar)
@@ -368,9 +357,7 @@ class TestWarmTier:
         remaining = {str(e.get("id")) for e in mgr._warm_store.warm_entries()}
         assert remaining == {"after"}
 
-    def test_warm_sidecar_non_utf8_first_row_preserves_following_record(
-        self, mgr: TierManager
-    ) -> None:
+    def test_warm_sidecar_non_utf8_first_row_preserves_following_record(self, mgr: TierManager) -> None:
         """A non-UTF-8 row on line 1 must not hide a valid record on line 2."""
         mgr.warm_add("good", {"id": "good", "content": "python programming", "tags": ["x"]}, None)
         sidecar = mgr._warm_sidecar_path()

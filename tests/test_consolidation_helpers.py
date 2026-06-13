@@ -248,7 +248,12 @@ class TestArchiveOriginals:
                     # the first original's UPDATE has already been staged inside
                     # the open transaction when the crash hits. The entry id is
                     # the trailing bound parameter of ``UPDATE ... WHERE id = ?``.
-                    if sql.strip().startswith("UPDATE memories") and isinstance(params, (list, tuple)) and params and params[-1] == "M-orig2":
+                    if (
+                        sql.strip().startswith("UPDATE memories")
+                        and isinstance(params, (list, tuple))
+                        and params
+                        and params[-1] == "M-orig2"
+                    ):
                         raise RuntimeError("crash-on-second-archival")
                     return real_conn.execute(sql, params)
 
@@ -265,8 +270,7 @@ class TestArchiveOriginals:
             observer = sqlite3.connect(str(db_path))
             try:
                 rows = observer.execute(
-                    "SELECT id, status, consolidated_into FROM memories "
-                    "WHERE id IN ('M-orig1', 'M-orig2') ORDER BY id"
+                    "SELECT id, status, consolidated_into FROM memories WHERE id IN ('M-orig1', 'M-orig2') ORDER BY id"
                 ).fetchall()
             finally:
                 observer.close()

@@ -116,9 +116,7 @@ class TestStoredEmbeddings:
                 raise sqlite3.OperationalError("disk I/O error")
 
         with capture_logs() as logs:
-            result = get_stored_embeddings(
-                _BoomConn(), threading.Lock(), vec_available=True, entry_ids=["x"]
-            )
+            result = get_stored_embeddings(_BoomConn(), threading.Lock(), vec_available=True, entry_ids=["x"])
         assert result == {}
         load_errors = [e for e in logs if e.get("event") == "vector_load_error"]
         assert load_errors and load_errors[0]["log_level"] == "warning"
@@ -132,9 +130,7 @@ class TestStoredEmbeddings:
                 raise sqlite3.OperationalError("no such module: vec0")
 
         with capture_logs() as logs:
-            result = get_stored_embeddings(
-                _VecAbsentConn(), threading.Lock(), vec_available=True, entry_ids=["x"]
-            )
+            result = get_stored_embeddings(_VecAbsentConn(), threading.Lock(), vec_available=True, entry_ids=["x"])
         assert result == {}
         load_errors = [e for e in logs if e.get("event") == "vector_load_error"]
         assert load_errors and load_errors[0]["log_level"] == "debug"

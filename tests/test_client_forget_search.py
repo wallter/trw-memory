@@ -91,9 +91,7 @@ class TestSearch:
         results = await client.search(tags=["python"])
         assert all("python" in r["tags"] for r in results)
 
-    async def test_search_actor_and_quarantined_filters(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_search_actor_and_quarantined_filters(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # Quarantine only fires under enforce mode (observe mode, the default,
         # records the anomaly but stores the entry normally — by design).
         # This test exercises the full quarantine path so it must opt in to

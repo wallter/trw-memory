@@ -178,9 +178,7 @@ class _SpyEmbedder:
         return self._dim
 
 
-async def test_store_skips_embedder_when_no_vector_sink(
-    client: MemoryClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_store_skips_embedder_when_no_vector_sink(client: MemoryClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """(1) A non-vector write path must not call the embedder just to no-op."""
     backend = client._get_backend()
     monkeypatch.setattr(backend, "supports_vectors", lambda: False)

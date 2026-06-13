@@ -121,12 +121,8 @@ class TestRecencyNowParameter:
     def test_recency_now_boosts_entry_fresh_at_reference_time(self) -> None:
         # "past_now" is 2 years ago; entry_old is fresh relative to it, entry_new is stale.
         base = datetime(2023, 6, 1, tzinfo=timezone.utc)
-        entry_old = MemoryEntry(
-            id="old", content="kitchen appliance purchase", valid_from=base - timedelta(days=3)
-        )
-        entry_new = MemoryEntry(
-            id="new", content="kitchen appliance purchase", valid_from=base - timedelta(days=400)
-        )
+        entry_old = MemoryEntry(id="old", content="kitchen appliance purchase", valid_from=base - timedelta(days=3))
+        entry_new = MemoryEntry(id="new", content="kitchen appliance purchase", valid_from=base - timedelta(days=400))
         # With recency_now=base: entry_old (3 days before base) should outrank entry_new (400 days before base)
         result = hybrid_search(
             "kitchen appliance",

@@ -619,9 +619,7 @@ class TestScoreAnomalyActiveFilter:
 
         # score_anomaly must pass status=MemoryStatus.ACTIVE
         assert calls, "list_entries was never called"
-        assert all(
-            status == MemoryStatus.ACTIVE for status in calls
-        ), f"Expected ACTIVE-only calls; got: {calls}"
+        assert all(status == MemoryStatus.ACTIVE for status in calls), f"Expected ACTIVE-only calls; got: {calls}"
 
         backend.close()
 

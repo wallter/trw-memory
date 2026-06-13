@@ -142,9 +142,18 @@ class TestServerModule:
         """
         server_mod, mcp_instance, registered_tools = _reload_server_with_mock()
         expected = {
-            "memory_store", "memory_recall", "memory_audit", "memory_review",
-            "memory_forget", "memory_consolidate", "memory_search", "memory_status",
-            "memory_wiki_lint", "memory_code_index", "memory_code_search", "memory_code_symbol",
+            "memory_store",
+            "memory_recall",
+            "memory_audit",
+            "memory_review",
+            "memory_forget",
+            "memory_consolidate",
+            "memory_search",
+            "memory_status",
+            "memory_wiki_lint",
+            "memory_code_index",
+            "memory_code_search",
+            "memory_code_symbol",
         }
         assert set(registered_tools) == expected, (
             f"registered tool set drift: {sorted(set(registered_tools) ^ expected)}"

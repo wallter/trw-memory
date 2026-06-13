@@ -29,9 +29,7 @@ def _store_ab(client: MemoryClient) -> None:
             invalidated_by="B",
         )
     )
-    backend.store(
-        MemoryEntry(id="B", content="rollback git stash safe", created_at=T2, valid_from=T2)
-    )
+    backend.store(MemoryEntry(id="B", content="rollback git stash safe", created_at=T2, valid_from=T2))
 
 
 async def test_recall_excludes_superseded_by_default(memory_client: MemoryClient) -> None:

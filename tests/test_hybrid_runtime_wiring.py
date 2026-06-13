@@ -391,8 +391,7 @@ async def test_tag_filter_widens_top_k_to_full_pool(client: MemoryClient) -> Non
 
     # 40 entries — larger than the default top_k of 30 (limit 10 * multiplier 3).
     entries = [
-        MemoryEntry(id=f"M-{i:03d}", content=f"content {i}", namespace="default", tags=["wanted"])
-        for i in range(40)
+        MemoryEntry(id=f"M-{i:03d}", content=f"content {i}", namespace="default", tags=["wanted"]) for i in range(40)
     ]
     backend = MagicMock()
     backend.list_entries.return_value = entries
@@ -416,10 +415,7 @@ async def test_no_tags_keeps_default_top_k(client: MemoryClient) -> None:
     assert real_backend is not None
     real_backend.close()
 
-    entries = [
-        MemoryEntry(id=f"M-{i:03d}", content=f"content {i}", namespace="default")
-        for i in range(40)
-    ]
+    entries = [MemoryEntry(id=f"M-{i:03d}", content=f"content {i}", namespace="default") for i in range(40)]
     backend = MagicMock()
     backend.list_entries.return_value = entries
     backend.get_stored_embeddings.return_value = {}
@@ -480,10 +476,7 @@ class TestHybridRecallLatencyTelemetry:
         # is below the 50-floor so the floor wins.
         assert event["effective_bm25_candidates"] == max(client._config.bm25_candidates, 1)
         assert event["effective_vector_candidates"] == max(client._config.vector_candidates, 1)
-        assert (
-            cast("int", event["candidate_pool_size"])
-            >= client._config.hybrid_search_candidate_pool_size
-        )
+        assert cast("int", event["candidate_pool_size"]) >= client._config.hybrid_search_candidate_pool_size
         # Latencies are non-negative floats rounded to 3 decimals.
         for key in ("list_entries_ms", "hybrid_search_ms", "total_ms"):
             assert isinstance(event[key], float)

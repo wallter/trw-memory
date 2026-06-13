@@ -17,9 +17,7 @@ import pytest
 
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
-_POSIX_ONLY = pytest.mark.skipif(
-    sys.platform.startswith("win"), reason="POSIX mode bits"
-)
+_POSIX_ONLY = pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX mode bits")
 
 
 @_POSIX_ONLY
@@ -40,9 +38,7 @@ def test_in_memory_db_does_not_raise() -> None:
 
 
 @_POSIX_ONLY
-def test_chmod_failure_is_swallowed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_chmod_failure_is_swallowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A chmod OSError (non-POSIX) does not block backend construction."""
     import trw_memory.storage.sqlite_backend as mod
 

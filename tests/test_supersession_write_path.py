@@ -34,9 +34,7 @@ def test_consolidation_closes_window_not_delete(tmp_path: Path) -> None:
     cluster = _store_cluster(backend)
     row_count_before = len(backend.list_entries(limit=100))
 
-    consolidated = _create_consolidated_entry(
-        cluster, "merged content", "merged detail", backend, namespace="default"
-    )
+    consolidated = _create_consolidated_entry(cluster, "merged content", "merged detail", backend, namespace="default")
     _archive_originals(cluster, consolidated.id, backend, invalid_from=consolidated.valid_from)
 
     a = backend.get("M-a")
@@ -65,9 +63,7 @@ def test_consolidated_valid_from_equals_close_instant_gap_free(tmp_path: Path) -
     backend = SQLiteBackend(tmp_path / "m.db")
     cluster = _store_cluster(backend)
 
-    consolidated = _create_consolidated_entry(
-        cluster, "merged content", "merged detail", backend, namespace="default"
-    )
+    consolidated = _create_consolidated_entry(cluster, "merged content", "merged detail", backend, namespace="default")
     _archive_originals(cluster, consolidated.id, backend, invalid_from=consolidated.valid_from)
 
     a = backend.get("M-a")
@@ -83,9 +79,7 @@ def test_supersession_no_delete(tmp_path: Path) -> None:
     backend = SQLiteBackend(tmp_path / "m.db")
     cluster = _store_cluster(backend)
     before = len(backend.list_entries(limit=100))
-    consolidated = _create_consolidated_entry(
-        cluster, "merged", "merged", backend, namespace="default"
-    )
+    consolidated = _create_consolidated_entry(cluster, "merged", "merged", backend, namespace="default")
     _archive_originals(cluster, consolidated.id, backend, invalid_from=consolidated.valid_from)
     after = len(backend.list_entries(limit=100))
     assert after >= before

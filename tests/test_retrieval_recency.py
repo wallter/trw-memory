@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from itertools import pairwise
 
 import pytest
 
+from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.recency import (
-    DEFAULT_HALFLIFE_DAYS,
     _MIN_RECENCY_SCORE,
+    DEFAULT_HALFLIFE_DAYS,
     recency_rank,
     recency_score,
 )
@@ -50,7 +52,7 @@ class TestRecencyScore:
     def test_score_monotone_decreasing(self, now: datetime) -> None:
         ages = [0, 7, 30, 90, 365]
         scores = [recency_score(_entry("e", d, now), now, 30.0) for d in ages]
-        for a, b in zip(scores, scores[1:]):
+        for a, b in pairwise(scores):
             assert a >= b
 
     def test_longer_halflife_slower_decay(self, now: datetime) -> None:
@@ -87,7 +89,7 @@ class TestRecencyRank:
         entries = [_entry(f"e{i}", i * 10, now) for i in range(5)]
         results = recency_rank(entries, now=now)
         scores = [s for _, s in results]
-        for a, b in zip(scores, scores[1:]):
+        for a, b in pairwise(scores):
             assert a > b
 
     def test_top_k_truncates(self, now: datetime) -> None:
@@ -107,7 +109,8 @@ class TestRecencyRank:
         # Longer halflife → higher score at same age
         assert r90[0][1] > r30[0][1]
 
-    def test_default_halflife_is_30_days(self, now: datetime) -> None:
+    def test_default_halflife_tracks_runtime_config(self, now: datetime) -> None:
+        assert DEFAULT_HALFLIFE_DAYS == MemoryConfig().recall_recency_halflife_days == 14.0
         e = _entry("e1", DEFAULT_HALFLIFE_DAYS, now)
         results = recency_rank([e], now=now)
         # At halflife age, score should be ≈ 0.5

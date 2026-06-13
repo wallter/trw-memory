@@ -182,9 +182,7 @@ class TestF7AssertionStatusFilter:
             results = backend.entries_with_assertions()
             assert len(results) == 2
             # Most recently updated must come first.
-            assert results[0].id == "e-new", (
-                f"Expected 'e-new' first (newer updated_at) but got {results[0].id!r}"
-            )
+            assert results[0].id == "e-new", f"Expected 'e-new' first (newer updated_at) but got {results[0].id!r}"
             assert results[1].id == "e-old"
         finally:
             backend.close()

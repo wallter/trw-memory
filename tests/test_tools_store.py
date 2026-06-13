@@ -309,9 +309,7 @@ class TestMemoryStoreImpl:
         finally:
             backend.close()
 
-    def test_store_commits_row_and_vector_together(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_store_commits_row_and_vector_together(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Happy path: a successful tool store lands the row AND its vector."""
         pytest.importorskip("sqlite_vec")
         from trw_memory.storage.sqlite_backend import SQLiteBackend

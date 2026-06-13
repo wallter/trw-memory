@@ -63,9 +63,7 @@ class TestClassifyTemporal:
         assert high_conf.recency_weight >= low_conf.recency_weight
 
     def test_recency_weight_bounded_max(self) -> None:
-        result = classify_temporal(
-            "the latest most recent newest entries from last week today"
-        )
+        result = classify_temporal("the latest most recent newest entries from last week today")
         assert result.recency_weight <= 0.6
 
     def test_non_temporal_query_has_zero_weight(self) -> None:
@@ -241,6 +239,7 @@ class TestStripTemporalPrefix:
 
     def setup_method(self) -> None:
         from trw_memory.retrieval.temporal_query import strip_temporal_prefix
+
         self._fn = strip_temporal_prefix
 
     def test_latest_guidance_on_stripped(self) -> None:
@@ -304,16 +303,12 @@ class TestStripTemporalPrefix:
         assert "dinosaurs" in result
 
     def test_wanted_to_follow_up_stripped(self) -> None:
-        result = self._fn(
-            "I wanted to follow up on our previous conversation about binaural beats"
-        )
+        result = self._fn("I wanted to follow up on our previous conversation about binaural beats")
         assert "binaural beats" in result
         assert "follow up" not in result.lower()
 
     def test_remember_you_told_stripped(self) -> None:
-        result = self._fn(
-            "I remember you told me about the refining processes at CITGO"
-        )
+        result = self._fn("I remember you told me about the refining processes at CITGO")
         assert "refining processes" in result or "CITGO" in result
 
     def test_we_discussed_stripped(self) -> None:
@@ -325,9 +320,7 @@ class TestStripTemporalPrefix:
         assert result  # must not be empty
 
     def test_previous_conversation_strip_case_insensitive(self) -> None:
-        result = self._fn(
-            "I WAS LOOKING BACK AT OUR PREVIOUS CONVERSATION ABOUT deployment practices"
-        )
+        result = self._fn("I WAS LOOKING BACK AT OUR PREVIOUS CONVERSATION ABOUT deployment practices")
         assert "deployment practices" in result
 
     def test_previous_chat_and_wanted_to_confirm_stripped(self) -> None:
@@ -340,8 +333,7 @@ class TestStripTemporalPrefix:
 
     def test_previous_chat_and_wanted_to_verify_stripped(self) -> None:
         result = self._fn(
-            "I was looking back at our previous conversation and I wanted to verify, "
-            "what was the deployment command?"
+            "I was looking back at our previous conversation and I wanted to verify, what was the deployment command?"
         )
         assert "deployment command" in result
 
@@ -384,6 +376,7 @@ class TestStripTemporalArithmetic:
 
     def setup_method(self) -> None:
         from trw_memory.retrieval.temporal_query import strip_temporal_arithmetic
+
         self._fn = strip_temporal_arithmetic
 
     def test_n_days_ago_stripped(self) -> None:
@@ -457,49 +450,59 @@ class TestResolveTemporalArithmeticOffset:
 
     def setup_method(self) -> None:
         from datetime import datetime, timezone
+
         from trw_memory.retrieval.temporal_query import resolve_temporal_arithmetic_offset
+
         self._fn = resolve_temporal_arithmetic_offset
         self._ref = datetime(2023, 6, 15, 12, 0, tzinfo=timezone.utc)  # Thursday
 
     def test_n_days_ago_numeric(self) -> None:
         from datetime import timedelta
+
         result = self._fn("What did I buy 10 days ago?", self._ref)
         assert result == timedelta(days=10)
 
     def test_n_days_ago_written(self) -> None:
         from datetime import timedelta
+
         result = self._fn("What did I do two days ago?", self._ref)
         assert result == timedelta(days=2)
 
     def test_n_weeks_ago(self) -> None:
         from datetime import timedelta
+
         result = self._fn("What gardening activity did I do two weeks ago?", self._ref)
         assert result == timedelta(weeks=2)
 
     def test_n_months_ago(self) -> None:
         from datetime import timedelta
+
         result = self._fn("What happened three months ago?", self._ref)
         assert result == timedelta(days=90)
 
     def test_a_month_ago(self) -> None:
         from datetime import timedelta
+
         result = self._fn("What meeting did I have a month ago?", self._ref)
         assert result == timedelta(days=30)
 
     def test_last_tuesday(self) -> None:
         from datetime import timedelta
+
         # ref is Thursday (weekday=3); last Tuesday (weekday=1) is 2 days back
         result = self._fn("Who did I meet with last Tuesday?", self._ref)
         assert result == timedelta(days=2)
 
     def test_last_monday(self) -> None:
         from datetime import timedelta
+
         # ref is Thursday (weekday=3); last Monday (weekday=0) is 3 days back
         result = self._fn("What did I do last Monday?", self._ref)
         assert result == timedelta(days=3)
 
     def test_last_friday_same_weekday_wraps(self) -> None:
         from datetime import datetime, timedelta, timezone
+
         # ref is Friday (weekday=4); "last Friday" should be 7 days back, not 0
         ref_fri = datetime(2023, 6, 16, 12, 0, tzinfo=timezone.utc)  # Friday
         result = self._fn("What happened last Friday?", ref_fri)
@@ -515,5 +518,6 @@ class TestResolveTemporalArithmeticOffset:
 
     def test_cardinal_twelve_months_ago(self) -> None:
         from datetime import timedelta
+
         result = self._fn("What did we discuss twelve months ago?", self._ref)
         assert result == timedelta(days=360)

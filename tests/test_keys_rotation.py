@@ -154,15 +154,16 @@ class TestRotateMasterKey:
             assert count == n_entries
 
             # Spot-check first and last: both decrypt under the NEW key only.
-            for entry_id, expected in (("bulk-0000", "content 0"), (f"bulk-{n_entries - 1:04d}", f"content {n_entries - 1}")):
+            for entry_id, expected in (
+                ("bulk-0000", "content 0"),
+                (f"bulk-{n_entries - 1:04d}", f"content {n_entries - 1}"),
+            ):
                 stored = backend.get(entry_id)
                 assert stored is not None
                 ns_key_new = derive_namespace_key_bytes(new_key, stored.namespace)
                 assert decrypt_entry_fields(stored, ns_key_new).content == expected
 
-    def test_rotate_raises_when_coverage_incomplete(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_rotate_raises_when_coverage_incomplete(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """If the backend perpetually reports more entries than it returns,
         rotation must RAISE (never converge) rather than silently leave data
         under the old key."""

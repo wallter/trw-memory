@@ -62,10 +62,7 @@ class TestFindActiveByContent:
 
         # Default namespace lookup must not see the "team"-namespaced entry.
         assert backend.find_active_by_content("scoped content", "scoped detail") is None
-        assert (
-            backend.find_active_by_content("scoped content", "scoped detail", namespace="team")
-            == "M-team"
-        )
+        assert backend.find_active_by_content("scoped content", "scoped detail", namespace="team") == "M-team"
 
     def test_returns_none_when_no_entries(self, tmp_path: Path) -> None:
         backend = SQLiteBackend(tmp_path / "db.sqlite")

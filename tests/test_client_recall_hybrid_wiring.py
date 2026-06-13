@@ -35,9 +35,7 @@ class TestHybridSearchConfigWiring:
         assert cfg.recall_rerank_model == "cross-encoder/ms-marco-MiniLM-L-6-v2"
         assert cfg.recall_rerank_candidates == 50
 
-    async def test_recency_weight_forwarded_from_config(
-        self, wired_client: MemoryClient
-    ) -> None:
+    async def test_recency_weight_forwarded_from_config(self, wired_client: MemoryClient) -> None:
         await wired_client.store("recent memory for test")
         wired_client._config.recall_recency_weight = 0.7
 
@@ -56,9 +54,7 @@ class TestHybridSearchConfigWiring:
         assert "recency_weight" in captured
         assert captured["recency_weight"] == pytest.approx(0.7)
 
-    async def test_recency_halflife_days_forwarded_from_config(
-        self, wired_client: MemoryClient
-    ) -> None:
+    async def test_recency_halflife_days_forwarded_from_config(self, wired_client: MemoryClient) -> None:
         await wired_client.store("halflife test entry")
         wired_client._config.recall_recency_weight = 0.3
         wired_client._config.recall_recency_halflife_days = 7.0
@@ -77,9 +73,7 @@ class TestHybridSearchConfigWiring:
 
         assert captured.get("recency_halflife_days") == pytest.approx(7.0)
 
-    async def test_fusion_mode_forwarded_from_config(
-        self, wired_client: MemoryClient
-    ) -> None:
+    async def test_fusion_mode_forwarded_from_config(self, wired_client: MemoryClient) -> None:
         await wired_client.store("fusion mode test entry")
         wired_client._config.recall_fusion_mode = "combmax"
 
@@ -97,9 +91,7 @@ class TestHybridSearchConfigWiring:
 
         assert captured.get("fusion_mode") == "combmax"
 
-    async def test_rerank_forwarded_from_config(
-        self, wired_client: MemoryClient
-    ) -> None:
+    async def test_rerank_forwarded_from_config(self, wired_client: MemoryClient) -> None:
         await wired_client.store("rerank test entry one")
         await wired_client.store("rerank test entry two")
         wired_client._config.recall_rerank = True
@@ -120,9 +112,7 @@ class TestHybridSearchConfigWiring:
         assert captured.get("rerank") is True
         assert captured.get("rerank_candidates") == 20
 
-    async def test_validity_age_decay_forwarded_from_config(
-        self, wired_client: MemoryClient
-    ) -> None:
+    async def test_validity_age_decay_forwarded_from_config(self, wired_client: MemoryClient) -> None:
         await wired_client.store("validity decay test entry")
         wired_client._config.recall_validity_age_decay = True
 
@@ -140,9 +130,7 @@ class TestHybridSearchConfigWiring:
 
         assert captured.get("validity_age_decay") is True
 
-    async def test_rerank_model_forwarded_from_config(
-        self, wired_client: MemoryClient
-    ) -> None:
+    async def test_rerank_model_forwarded_from_config(self, wired_client: MemoryClient) -> None:
         custom_model = "cross-encoder/ms-marco-MiniLM-L-12-v2"
         await wired_client.store("rerank model test entry")
         wired_client._config.recall_rerank = True

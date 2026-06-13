@@ -115,9 +115,7 @@ def test_memory_config_platform_telemetry_no_longer_enables_sync(
     assert cfg.sync_enabled is False
 
 
-def test_memory_config_explicit_sync_enabled_takes_precedence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_memory_config_explicit_sync_enabled_takes_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """PRD-SEC-004-FR06: explicit sync_enabled alias still wins over the sharing flag."""
     _write_trw_config(
         tmp_path,

@@ -104,9 +104,7 @@ def test_survivor_merged_content_in_updated_entries() -> None:
     )
     # The survivor's recurrence should be incremented (merged e2 into it).
     survivor = next(e for e in result["updated_entries"] if e.id == "survivor")  # type: ignore[union-attr]
-    assert survivor.recurrence > e1.recurrence, (
-        "Survivor recurrence must be incremented after merge"
-    )
+    assert survivor.recurrence > e1.recurrence, "Survivor recurrence must be incremented after merge"
 
 
 class TestBatchDedup:

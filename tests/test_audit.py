@@ -247,9 +247,7 @@ class TestAuditLogTailCorruption:
         # Content-free: only the exception type, never the raw bytes.
         assert "UnicodeDecodeError" in str(excinfo.value)
 
-    def test_append_does_not_silently_reroot_on_missing_hash_tail(
-        self, audit_log: AuditLog, audit_path: Path
-    ) -> None:
+    def test_append_does_not_silently_reroot_on_missing_hash_tail(self, audit_log: AuditLog, audit_path: Path) -> None:
         # A record dict without a usable hash must fail closed, not link the
         # next append to the genesis hash and silently re-root the chain.
         audit_path.write_text('{"op": "store", "id": "M-001"}\n', encoding="utf-8")
@@ -264,7 +262,7 @@ class TestAuditLogTailCorruption:
         assert audit_log.verify_chain()["valid"] is True
 
     def test_read_all_fails_closed_on_non_utf8(self, audit_log: AuditLog, audit_path: Path) -> None:
-        audit_path.write_bytes(b'\xff\xfe binary garbage\n')
+        audit_path.write_bytes(b"\xff\xfe binary garbage\n")
         with pytest.raises(StorageError):
             audit_log.read_all()
 

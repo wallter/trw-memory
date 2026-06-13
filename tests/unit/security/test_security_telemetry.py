@@ -172,18 +172,12 @@ def test_probe_canaries_self_heals_missing_canary(
         restored = backend.get("canary-001")
         assert restored is not None
         # Restored content is the trusted pin (FR-3: attacker cannot inject via this path).
-        assert (
-            hashlib.sha256(restored.content.encode("utf-8")).hexdigest()
-            == PINNED_HASHES["canary-001"]
-        )
+        assert hashlib.sha256(restored.content.encode("utf-8")).hexdigest() == PINNED_HASHES["canary-001"]
         # Recall is not halted after a self-heal.
         assert should_halt_recalls(config, backend=backend) is False
 
     payloads = [row["payload"] for row in _events_rows(config) if row.get("emitter") == "canary"]
-    assert any(
-        p.get("event_name") == "canary_reseeded" and p.get("canary_id") == "canary-001"
-        for p in payloads
-    )
+    assert any(p.get("event_name") == "canary_reseeded" and p.get("canary_id") == "canary-001" for p in payloads)
 
 
 def test_probe_canaries_drift_log_only_does_not_raise(
