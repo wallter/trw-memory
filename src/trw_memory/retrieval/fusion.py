@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import structlog
 
-__all__ = ["combmax_fuse", "rrf_fuse"]
+__all__ = ["blend_recency", "combmax_fuse", "rrf_fuse"]
 
 logger = structlog.get_logger(__name__)
 
@@ -157,3 +157,75 @@ def combmax_fuse(
         unique_docs=len(result),
     )
     return result
+
+
+def blend_recency(
+    fused: list[tuple[str, float]],
+    *,
+    recency_results: list[tuple[str, float]],
+    recency_weight: float,
+) -> list[tuple[str, float]]:
+    """Blend relevance-fused scores with recency using linear interpolation.
+
+    Mirrors the production hybrid_search recency blend path:
+        final = (1 - w) * normalised_relevance + w * recency_score
+
+    The fused relevance scores are normalised to ``[0, 1]`` (divided by the max
+    fused score in the run) so they share a scale with the recency scores before
+    blending; the recency scores are expected to already lie in ``[0, 1]``.
+
+    When ``recency_weight <= 0``, returns *fused* unchanged.
+    When *recency_results* (or *fused*) is empty, returns *fused* unchanged.
+    Entries that appear in *recency_results* but not in *fused* are appended
+    after all fused entries at their recency-blended score.
+
+    Ties on the blended score are broken deterministically by (1) original
+    relevance rank, then (2) recency rank, then (3) ``entry_id``.
+
+    Args:
+        fused: Relevance-fused ``(entry_id, score)`` pairs ordered by relevance
+            descending (e.g. the output of :func:`rrf_fuse`).
+        recency_results: ``(entry_id, recency_score)`` pairs ordered by recency
+            descending, with recency scores in ``[0, 1]``.
+        recency_weight: Blend weight ``w`` on recency vs. normalised relevance.
+
+    Returns:
+        Blended list of ``(entry_id, score)`` pairs sorted by score descending.
+    """
+    if recency_weight <= 0.0 or not fused or not recency_results:
+        return fused
+
+    rel_max = max(score for _, score in fused)
+    rel_norm = {entry_id: score / rel_max for entry_id, score in fused} if rel_max > 0.0 else {}
+    rec_map = dict(recency_results)
+    rel_rank = {entry_id: rank for rank, (entry_id, _) in enumerate(fused)}
+    rec_rank = {entry_id: rank for rank, (entry_id, _) in enumerate(recency_results)}
+
+    all_ids = [entry_id for entry_id, _ in fused]
+    all_ids.extend(entry_id for entry_id, _ in recency_results if entry_id not in rel_rank)
+
+    blended = [
+        (
+            entry_id,
+            (1.0 - recency_weight) * rel_norm.get(entry_id, 0.0) + recency_weight * rec_map.get(entry_id, 0.0),
+        )
+        for entry_id in all_ids
+    ]
+    rank_sentinel = len(all_ids) + 1
+    blended.sort(
+        key=lambda x: (
+            -x[1],
+            rel_rank.get(x[0], rank_sentinel),
+            rec_rank.get(x[0], rank_sentinel),
+            x[0],
+        )
+    )
+
+    logger.debug(
+        "blend_recency_complete",
+        fused_count=len(fused),
+        recency_count=len(recency_results),
+        recency_weight=recency_weight,
+        unique_docs=len(blended),
+    )
+    return blended

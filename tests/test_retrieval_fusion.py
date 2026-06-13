@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from trw_memory.retrieval.fusion import combmax_fuse, rrf_fuse
+from trw_memory.retrieval.fusion import blend_recency, combmax_fuse, rrf_fuse
 
 
 class TestRRFFuse:
@@ -187,6 +187,65 @@ class TestCombmaxFuse:
         assert scores["a"] == pytest.approx(rank0_score)
 
 
+class TestBlendRecency:
+    """blend_recency — linear interpolation of relevance and recency scores.
+
+    final = (1 - w) * normalised_relevance + w * recency_score
+    """
+
+    def test_zero_weight_returns_fused_unchanged(self) -> None:
+        fused = [("a", 1.0), ("b", 0.5)]
+        recency = [("b", 1.0), ("a", 0.2)]
+        result = blend_recency(fused, recency_results=recency, recency_weight=0.0)
+        assert result is fused  # unchanged (same object, no blending applied)
+
+    def test_empty_recency_returns_fused_unchanged(self) -> None:
+        fused = [("a", 1.0), ("b", 0.5)]
+        result = blend_recency(fused, recency_results=[], recency_weight=0.5)
+        assert result is fused
+
+    def test_blend_moves_recent_entries_up(self) -> None:
+        # 'a' leads on relevance, but 'b' is the most recent. A high recency
+        # weight must promote 'b' above 'a'.
+        fused = [("a", 1.0), ("b", 0.5)]
+        recency = [("b", 1.0), ("a", 0.0)]
+        relevance_only = [eid for eid, _ in fused]
+        assert relevance_only == ["a", "b"], "precondition: relevance favours 'a'"
+
+        blended = blend_recency(fused, recency_results=recency, recency_weight=0.9)
+        ordered = [eid for eid, _ in blended]
+        assert ordered[0] == "b", "high recency weight must promote the recent entry"
+
+    def test_blend_appends_recency_only_entries(self) -> None:
+        # 'c' appears only in the recency list — it must still surface in the
+        # blended output (appended), not be dropped.
+        fused = [("a", 1.0), ("b", 0.5)]
+        recency = [("c", 1.0), ("a", 0.3)]
+        blended = blend_recency(fused, recency_results=recency, recency_weight=0.5)
+        ids = {eid for eid, _ in blended}
+        assert ids == {"a", "b", "c"}, "recency-only entry must be appended"
+
+    def test_full_recency_weight_sorts_by_recency(self) -> None:
+        # weight=1.0 → relevance contributes nothing → order follows recency.
+        fused = [("a", 1.0), ("b", 0.5), ("c", 0.1)]
+        recency = [("c", 1.0), ("b", 0.6), ("a", 0.2)]
+        blended = blend_recency(fused, recency_results=recency, recency_weight=1.0)
+        ordered = [eid for eid, _ in blended]
+        assert ordered == ["c", "b", "a"]
+
+    def test_tie_break_by_original_relevance_rank(self) -> None:
+        # 'a' and 'b' get identical blended scores: equal normalised relevance
+        # (both share rel_max via... constructed below) and equal recency. The
+        # tie must break by original relevance rank ('a' before 'b').
+        fused = [("a", 1.0), ("b", 1.0)]
+        recency = [("a", 0.5), ("b", 0.5)]
+        blended = blend_recency(fused, recency_results=recency, recency_weight=0.5)
+        scores = dict(blended)
+        assert scores["a"] == pytest.approx(scores["b"]), "precondition: scores tie"
+        ordered = [eid for eid, _ in blended]
+        assert ordered == ["a", "b"], "tie must break by original relevance rank"
+
+
 class TestHybridSearchFusionMode:
     """Verify hybrid_search respects the fusion_mode parameter."""
 
@@ -194,10 +253,7 @@ class TestHybridSearchFusionMode:
         from trw_memory.models.memory import MemoryEntry
         from trw_memory.retrieval.pipeline import hybrid_search
 
-        entries = [
-            MemoryEntry(id=f"e{i}", content=f"entry {i}", namespace="default")
-            for i in range(3)
-        ]
+        entries = [MemoryEntry(id=f"e{i}", content=f"entry {i}", namespace="default") for i in range(3)]
         result = hybrid_search("entry", entries, fusion_mode="combmax")
         # Must return MemoryEntry objects, not crash
         assert all(isinstance(e, MemoryEntry) for e in result)
@@ -207,16 +263,14 @@ class TestHybridSearchFusionMode:
         # hybrid_search calls rrf_fuse/combmax_fuse only when rankings is
         # non-empty; we monkeypatch bm25_search to return a non-empty list so
         # the branch is reached.
-        import structlog.testing
         from unittest.mock import patch
+
+        import structlog.testing
 
         from trw_memory.models.memory import MemoryEntry
         from trw_memory.retrieval.pipeline import hybrid_search
 
-        entries = [
-            MemoryEntry(id=f"e{i}", content=f"entry {i}", namespace="default")
-            for i in range(3)
-        ]
+        entries = [MemoryEntry(id=f"e{i}", content=f"entry {i}", namespace="default") for i in range(3)]
         fake_bm25 = [("e0", 1.0), ("e1", 0.5)]
         with (
             patch("trw_memory.retrieval.pipeline.bm25_search", return_value=fake_bm25),
