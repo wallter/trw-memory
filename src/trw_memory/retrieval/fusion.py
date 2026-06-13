@@ -21,7 +21,7 @@ logger = structlog.get_logger(__name__)
 
 def rrf_fuse(
     rankings: list[list[tuple[str, float]]],
-    k: int = 60,
+    k: int = 5,
     *,
     importances: dict[str, float] | None = None,
     alpha: float = 1.0,
@@ -52,8 +52,11 @@ def rrf_fuse(
         rankings: List of ranked result lists.  Each inner list is a sequence
             of ``(entry_id, score)`` pairs ordered by relevance descending.
             The individual scores are ignored — only rank position matters.
-        k: RRF smoothing constant.  The default value of 60 is from the
-            original paper and works well in practice.
+        k: RRF smoothing constant.  Default is 5 — the empirically tuned value
+            from the memory meta-harness loop (2026-06-13, LongMemEval-500:
+            rrf_k=5 → 0.9870 recall@5 vs rrf_k=15 → 0.9790).  The original
+            Cormack et al. (2009) paper used k=60; that value is appropriate
+            for web-scale ranking but over-smooths short memory corpora.
         importances: Optional mapping of ``entry_id`` → importance/impact in
             ``[0, 1]``.  Ignored when ``alpha >= 1.0``.  Missing ids default
             to 0.0 importance.
@@ -70,8 +73,8 @@ def rrf_fuse(
         return []
 
     if k < 1:
-        logger.warning("rrf_k_invalid", k=k, default=60)
-        k = 60
+        logger.warning("rrf_k_invalid", k=k, default=5)
+        k = 5
 
     fused_scores: dict[str, float] = {}
     for ranking in rankings:
