@@ -35,7 +35,13 @@ def hybrid_search(
     stored_embeddings: dict[str, list[float]] | None = None,
     bm25_candidates: int = 50,
     vector_candidates: int = 50,
-    rrf_k: int = 60,
+    # rrf_k=15 (was 60): promoted 2026-06-12 by the memory meta-harness loop —
+    # sharper rank decay improved nDCG@10/recall@10 on two independent evals
+    # (real-learnings gold set, paired held-out t=2.48 n=294; LongMemEval_S
+    # full-500 recall@5 0.904→0.914) with the temporal slice preserved. Tuned
+    # with all-MiniLM-L6-v2 on note/session corpora; the rrf_fuse primitive
+    # keeps the paper-canonical k=60 default.
+    rrf_k: int = 15,
     importance_alpha: float = 1.0,
     top_k: int = 25,
     fusion_mode: str = "rrf",

@@ -90,7 +90,16 @@ class MemoryConfig(BaseSettings):
     # Retrieval
     bm25_candidates: int = Field(default=50, gt=0, description="Number of BM25 candidates to consider")
     vector_candidates: int = Field(default=50, gt=0, description="Number of dense vector candidates to consider")
-    rrf_k: int = Field(default=60, gt=0, description="RRF constant k for reciprocal rank fusion")
+    rrf_k: int = Field(
+        default=15,
+        gt=0,
+        description=(
+            "RRF constant k for reciprocal rank fusion. Default 15 (was 60) "
+            "promoted 2026-06-12 by the memory meta-harness loop: sharper rank "
+            "decay improved nDCG@10/recall@10 on two independent retrieval evals "
+            "with the temporal slice preserved."
+        ),
+    )
     rrf_importance_alpha: float = Field(
         default=0.7,
         ge=0.0,
