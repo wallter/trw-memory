@@ -102,3 +102,39 @@ def test_project_root_as_string(tmp_path: Path) -> None:
     (tmp_path / "mod.py").write_text("MY_CONST = 42")
     anchors = [{"file": "mod.py", "symbol_name": "MY_CONST"}]
     assert compute_anchor_validity(anchors, str(tmp_path)) == 1.0
+
+
+def test_anchor_model_instance_valid(tmp_path: Path) -> None:
+    """Anchor model instances (not dicts) are handled via anchor.file / anchor.symbol_name."""
+    from trw_memory.models.memory import Anchor
+
+    (tmp_path / "mod.py").write_text("def my_func(): pass")
+    anchor = Anchor(file="mod.py", symbol_name="my_func")
+    result = compute_anchor_validity([anchor], tmp_path)
+    assert result == 1.0
+
+
+def test_anchor_model_instance_invalid_file(tmp_path: Path) -> None:
+    """Anchor model instance with missing file returns 0.0 (file not found branch)."""
+    from trw_memory.models.memory import Anchor
+
+    anchor = Anchor(file="nonexistent.py", symbol_name="my_func")
+    result = compute_anchor_validity([anchor], tmp_path)
+    assert result == 0.0
+
+
+def test_os_error_on_read_skips_anchor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """OSError during file read is caught and the anchor is skipped (not counted)."""
+    (tmp_path / "mod.py").write_text("def my_func(): pass")
+    anchors = [{"file": "mod.py", "symbol_name": "my_func"}]
+
+    original_read_text = Path.read_text
+
+    def _raise_on_mod(self: Path, *args: object, **kwargs: object) -> str:
+        if self.name == "mod.py":
+            raise OSError("simulated read error")
+        return original_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", _raise_on_mod)
+    result = compute_anchor_validity(anchors, tmp_path)
+    assert result == 0.0

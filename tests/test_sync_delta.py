@@ -362,3 +362,96 @@ def test_get_dirty_entries_acquires_lock(tmp_path: Path) -> None:
     finally:
         backend._lock = original_lock
         backend.close()
+
+
+# ---------------------------------------------------------------------------
+# Wave 11 gap-fill: uncovered lines in sync/delta.py
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_hash_value_datetime() -> None:
+    """_normalize_hash_value converts datetime to UTC ISO string (line 48)."""
+    from datetime import timezone
+
+    from trw_memory.sync.delta import _normalize_hash_value  # type: ignore[attr-defined]
+
+    dt = datetime(2024, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    result = _normalize_hash_value(dt)
+    assert isinstance(result, str)
+    assert "2024-06-01" in result
+
+
+def test_mark_dirty_existing_entry_increments_seq(tmp_path: Path) -> None:
+    """mark_dirty on an existing entry increments sync_seq and recomputes hash."""
+    backend = SQLiteBackend(tmp_path / "test.db")
+    backend.store(MemoryEntry(id="M-dirty-1", content="initial content"))
+    entry_before = backend.get("M-dirty-1")
+    assert entry_before is not None
+    seq_before = entry_before.sync_seq
+
+    DeltaTracker.mark_dirty("M-dirty-1", backend)
+
+    entry_after = backend.get("M-dirty-1")
+    assert entry_after is not None
+    assert entry_after.sync_seq == seq_before + 1
+    assert entry_after.sync_hash != ""
+    backend.close()
+
+
+def test_mark_dirty_nonexistent_entry_is_noop(tmp_path: Path) -> None:
+    """mark_dirty on a missing entry returns early without error (line 76)."""
+    backend = SQLiteBackend(tmp_path / "test.db")
+    DeltaTracker.mark_dirty("DOES-NOT-EXIST", backend)
+    backend.close()
+
+
+def test_get_dirty_entries_without_lock(tmp_path: Path) -> None:
+    """get_dirty_entries takes the no-lock branch when backend._lock is None (line 104)."""
+    backend = SQLiteBackend(tmp_path / "test.db")
+    backend.store(MemoryEntry(id="M-nl-1", content="no-lock entry"))
+    original_lock = backend._lock  # type: ignore[attr-defined]
+    backend._lock = None  # type: ignore[assignment]
+    try:
+        dirty = DeltaTracker.get_dirty_entries(backend, since_seq=0)
+        assert any(e.id == "M-nl-1" for e in dirty)
+    finally:
+        backend._lock = original_lock
+        backend.close()
+
+
+def test_get_dirty_entries_fallback_non_sqlite(tmp_path: Path) -> None:
+    """get_dirty_entries falls back to list_entries when backend has no _conn (line 107-108)."""
+    from trw_memory.storage.yaml_backend import YAMLBackend
+
+    backend = YAMLBackend(tmp_path)
+    backend.store(MemoryEntry(id="M-yaml-dirty", content="yaml dirty entry"))
+    dirty = DeltaTracker.get_dirty_entries(backend, since_seq=0)
+    assert any(e.id == "M-yaml-dirty" for e in dirty)
+
+
+def test_mark_synced_exception_logs_warning_and_continues(tmp_path: Path) -> None:
+    """mark_synced logs warning and continues when backend.update raises (lines 120-121)."""
+    import structlog.testing
+
+    from trw_memory.sync.delta import DeltaTracker
+
+    backend = SQLiteBackend(tmp_path / "test.db")
+    backend.store(MemoryEntry(id="M-ok-1", content="ok entry"))
+    backend.store(MemoryEntry(id="M-ok-2", content="ok entry 2"))
+
+    original_update = backend.update
+
+    def _raise_on_first(entry_id: str, **kwargs: object) -> object:
+        if entry_id == "M-ok-1":
+            raise RuntimeError("simulated update failure")
+        return original_update(entry_id, **kwargs)
+
+    backend.update = _raise_on_first  # type: ignore[method-assign]
+
+    with structlog.testing.capture_logs() as logs:
+        count = DeltaTracker.mark_synced(["M-ok-1", "M-ok-2"], backend)
+
+    assert count == 1
+    warning_events = [l["event"] for l in logs if l.get("log_level") == "warning"]
+    assert "delta_mark_synced_failed" in warning_events
+    backend.close()
