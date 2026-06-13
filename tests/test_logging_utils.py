@@ -6,13 +6,31 @@ from collections.abc import MutableMapping
 from typing import Any
 
 import pytest
+import structlog
 
 from trw_memory._logging import (
     _add_component,
     _redact_secrets,
     _verbosity_to_level,
     configure_logging,
+
+
 )
+
+
+@pytest.fixture(autouse=True)
+def _restore_structlog_config():
+    """Save and restore structlog global configuration around each test.
+
+    configure_logging() calls structlog.configure() which mutates global state.
+    Without this fixture the mutations bleed into alphabetically-later test
+    modules and break tests that rely on structlog's default capture_logs()
+    behaviour (e.g. test_retrieval_dense, test_sync_subscriber).
+    """
+    saved = structlog.get_config()
+    yield
+    structlog.configure(**saved)
+    structlog.reset_defaults()
 
 
 def _make_event(**kwargs: Any) -> MutableMapping[str, Any]:
