@@ -90,4 +90,3 @@ class TestBM25Search:
         ids = [entry_id for entry_id, _ in results]
         assert "tagged" in ids
         assert ids[0] == "tagged"  # tagged entry should rank first
-
