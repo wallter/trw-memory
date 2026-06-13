@@ -176,9 +176,11 @@ async def try_hybrid_recall(
             rerank=client._config.recall_rerank,
             rerank_model=client._config.recall_rerank_model,
             rerank_candidates=client._config.recall_rerank_candidates,
-            # Cross-encoder always uses the original (unstripped) query so it
-            # scores relevance against the full user intent.
-            rerank_query=query if retrieval_query != query else None,
+            # When prefix was stripped, the cross-encoder also uses the
+            # stripped query — passing the original "latest guidance on X"
+            # confuses the ms-marco reranker because memory entries don't
+            # contain "guidance" vocabulary, causing a -4.5pp T-HR regression.
+            # rerank_query=None → the cross-encoder inherits retrieval_query.
         )
     except Exception:
         hybrid_search_ms = (perf_counter() - hybrid_search_start) * 1000.0
