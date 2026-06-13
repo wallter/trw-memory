@@ -49,18 +49,29 @@ def derive_namespace_key(master_key: bytes, namespace: str) -> str:
     return derive_namespace_key_bytes(master_key, namespace).hex()
 
 
-def encrypt_field(plaintext: str, key: bytes) -> str:
-    """Encrypt a plaintext string with AES-256-GCM."""
+def encrypt_field(plaintext: str, key: bytes, *, aad: bytes | None = None) -> str:
+    """Encrypt a plaintext string with AES-256-GCM.
+
+    *aad* is Additional Authenticated Data bound into the GCM tag.  Passing
+    AAD (e.g. ``b'{entry_id}:{namespace}:{field_name}'``) prevents ciphertext
+    transplant attacks where an adversary swaps the encrypted ``content`` blob
+    of one entry into another entry's ``detail`` field and the decryption still
+    succeeds.  The AAD is NOT stored in the ciphertext — the caller must supply
+    the same value at decrypt time.
+    """
     if len(key) != _KEY_LENGTH:
         raise ValueError(f"key must be {_KEY_LENGTH} bytes, got {len(key)}")
     nonce = os.urandom(_NONCE_LENGTH)
     aesgcm = AESGCM(key)
-    payload = nonce + aesgcm.encrypt(nonce, plaintext.encode("utf-8"), None)
+    payload = nonce + aesgcm.encrypt(nonce, plaintext.encode("utf-8"), aad)
     return base64.b64encode(payload).decode("ascii")
 
 
-def decrypt_field(ciphertext_b64: str, key: bytes) -> str:
-    """Decrypt a base64-encoded AES-256-GCM payload."""
+def decrypt_field(ciphertext_b64: str, key: bytes, *, aad: bytes | None = None) -> str:
+    """Decrypt a base64-encoded AES-256-GCM payload.
+
+    *aad* must match the value supplied to :func:`encrypt_field` exactly.
+    """
     if len(key) != _KEY_LENGTH:
         raise ValueError(f"key must be {_KEY_LENGTH} bytes, got {len(key)}")
     payload = base64.b64decode(ciphertext_b64)
@@ -69,31 +80,42 @@ def decrypt_field(ciphertext_b64: str, key: bytes) -> str:
     nonce = payload[:_NONCE_LENGTH]
     ct_with_tag = payload[_NONCE_LENGTH:]
     aesgcm = AESGCM(key)
-    plaintext_bytes = bytes(aesgcm.decrypt(nonce, ct_with_tag, None))
+    plaintext_bytes = bytes(aesgcm.decrypt(nonce, ct_with_tag, aad))
     return plaintext_bytes.decode("utf-8")
 
 
 def encrypt_entry_fields(entry: MemoryEntry, key: bytes) -> MemoryEntry:
-    """Return a copy of *entry* with ``content`` and ``detail`` encrypted."""
+    """Return a copy of *entry* with ``content`` and ``detail`` encrypted.
+
+    AAD is derived from ``{entry_id}:{namespace}:{field_name}`` so that a
+    ciphertext copied from one field or entry cannot be decrypted as another
+    field (ciphertext transplant prevention — GCM tag binds the AAD).
+    """
+    ns = entry.namespace or "default"
     data = entry.model_dump()
-    data["content"] = encrypt_field(entry.content, key)
+    data["content"] = encrypt_field(entry.content, key, aad=f"{entry.id}:{ns}:content".encode())
     if entry.detail:
-        data["detail"] = encrypt_field(entry.detail, key)
+        data["detail"] = encrypt_field(entry.detail, key, aad=f"{entry.id}:{ns}:detail".encode())
     return MemoryEntry.model_validate(data, strict=False)
 
 
 def decrypt_entry_fields(entry: MemoryEntry, key: bytes) -> MemoryEntry:
     """Return a copy of *entry* with ``content`` and ``detail`` decrypted."""
+    ns = entry.namespace or "default"
     data = entry.model_dump()
-    data["content"] = decrypt_field(entry.content, key)
+    data["content"] = decrypt_field(entry.content, key, aad=f"{entry.id}:{ns}:content".encode())
     if entry.detail:
-        data["detail"] = decrypt_field(entry.detail, key)
+        data["detail"] = decrypt_field(entry.detail, key, aad=f"{entry.id}:{ns}:detail".encode())
     return MemoryEntry.model_validate(data, strict=False)
 
 
 def _namespace_db_path(config: MemoryConfig, namespace: str) -> Path:
     ns_dir = namespace.replace(":", "_")
     return Path(config.storage_path) / ns_dir / config.sqlite_db_name
+
+
+_KDF_SALT = b"trw-memory-key-rotation-v1"  # static per-purpose salt; callers supply the domain
+_KDF_ITERATIONS = 600_000  # NIST SP 800-132 § 5.2 (2023) recommended minimum for PBKDF2-SHA256
 
 
 def _coerce_master_key_input(new_passphrase: str) -> bytes:
@@ -106,7 +128,15 @@ def _coerce_master_key_input(new_passphrase: str) -> bytes:
             decoded = b""
         if len(decoded) == _KEY_LENGTH:
             return decoded
-    return hashlib.sha256(new_passphrase.encode("utf-8")).digest()
+    # Passphrases: stretch with PBKDF2-HMAC-SHA256 so dictionary attacks on
+    # recovered ciphertexts require per-guess hashing rather than a single SHA-256.
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        new_passphrase.encode("utf-8"),
+        _KDF_SALT,
+        _KDF_ITERATIONS,
+        dklen=_KEY_LENGTH,
+    )
 
 
 def _remove_sqlite_sidecars(db_path: Path) -> None:

@@ -107,7 +107,15 @@ class RetryQueue:
 
         for record in entries:
             if record["retry_count"] >= MAX_RETRIES:
-                remaining.append(record)
+                # Exhausted records are evicted from the queue (dead-letter drain)
+                # rather than re-appended.  Silently keeping them blocks new
+                # failures from being enqueued once the 500-entry cap is reached.
+                logger.warning(
+                    "retry_queue_record_exhausted",
+                    entry_id=record.get("entry_id"),
+                    retry_count=record["retry_count"],
+                    last_error=record.get("last_error"),
+                )
                 skipped += 1
                 continue
 

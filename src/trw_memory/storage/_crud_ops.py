@@ -179,7 +179,15 @@ def store_many(
 
     try:
         with backend._lock:
-            backend._conn.execute("BEGIN IMMEDIATE")
+            # Only open our own transaction when not already inside a
+            # ``transaction()`` block.  When _skip_commit_depth > 0 the
+            # outer context manager owns the BEGIN/COMMIT; we must not
+            # issue a nested BEGIN IMMEDIATE (which would raise
+            # "cannot start a transaction within a transaction") or
+            # commit prematurely (which would close the outer transaction).
+            _own_txn = backend._skip_commit_depth == 0
+            if _own_txn:
+                backend._conn.execute("BEGIN IMMEDIATE")
             backend._conn.executemany(sql, rows)
             fts_batch = getattr(backend, "_fts_available", False)
             if fts_batch:
@@ -199,12 +207,14 @@ def store_many(
             # so the merge cost only pays off when many segments were just appended.
             if fts_batch and len(entries) >= 100:
                 backend._conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('optimize')")
-            backend._conn.commit()
+            if _own_txn:
+                backend._conn.commit()
         logger.debug("memory_batch_stored", count=len(entries))
         return len(entries)
     except (sqlite3.Error, json.JSONDecodeError) as exc:
-        with contextlib.suppress(sqlite3.Error):
-            backend._conn.execute("ROLLBACK")
+        if backend._skip_commit_depth == 0:
+            with contextlib.suppress(sqlite3.Error):
+                backend._conn.execute("ROLLBACK")
         raise StorageError(
             f"Failed to batch-store {len(entries)} entries: {exc}",
             path=str(backend._db_path),

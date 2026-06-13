@@ -127,7 +127,9 @@ class TestRetryQueue:
         queue = RetryQueue(queue_path)
         result = queue.drain(lambda _: True)
         assert result == {"drained": 0, "failed": 0, "skipped": 1}
-        assert queue.depth() == 1
+        # Exhausted records are evicted (dead-letter drain) so that new failures
+        # can be enqueued once the 500-entry cap would otherwise be full.
+        assert queue.depth() == 0
 
     def test_drain_handles_publish_exception(self, tmp_path: Path) -> None:
         """Drain catches exceptions from publish_fn and increments retry_count."""

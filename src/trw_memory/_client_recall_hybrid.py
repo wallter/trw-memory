@@ -29,6 +29,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from trw_memory.models.memory import MemoryStatus
+
 if TYPE_CHECKING:
     from trw_memory.client import MemoryClient, MemoryResultDict
     from trw_memory.models.memory import MemoryEntry
@@ -102,6 +104,7 @@ async def try_hybrid_recall(
                     query,
                     top_k=fts_top_k,
                     namespace=client._namespace,
+                    status=MemoryStatus.ACTIVE,
                 )
                 if fts_entries:
                     existing_ids = {e.id for e in all_entries}
