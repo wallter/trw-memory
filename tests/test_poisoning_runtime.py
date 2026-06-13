@@ -326,15 +326,16 @@ class TestRuntimePoisoningPolicy:
         assert matches
 
 
-class TestAnomalyBypassSourcePrefixes:
-    """PRD-DIST-2045 — per-source carve-out for anomaly quarantine.
+class TestAnomalyQuarantineNoCallerBypass:
+    """Security regression: the anomaly quarantine must NOT be bypassable via
+    caller-supplied ``entry.metadata['source']``.
 
-    The c789 investigation found that PRD-SEC-001 _score_entry_anomaly
-    quarantines source-grounded distill records as statistical outliers on
-    entry_length / tag_count. The carve-out bypasses anomaly quarantine
-    when entry.metadata['source'] starts with one of the configured
-    prefixes (default ['distilled:', 'distilled-git:']). PRD-SEC-001 trust
-    scoring + PII redaction still apply.
+    The former PRD-DIST-2045 carve-out skipped anomaly quarantine when
+    ``entry.metadata['source']`` started with a configured prefix (e.g.
+    ``distilled:``). Because ``metadata`` is entirely caller-controlled, any
+    caller could spoof that field and slip a poisoned outlier past the
+    detector. The bypass was removed: in enforce-mode every write — regardless
+    of its claimed source metadata — goes through anomaly quarantine.
     """
 
     @staticmethod
@@ -350,9 +351,14 @@ class TestAnomalyBypassSourcePrefixes:
                 )
             )
 
-    def test_bypass_skips_quarantine_for_distilled_source(self, tmp_path: Path) -> None:
-        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"), poisoning_z_threshold=1.0)
-        # outlier entry: many more tags than seeded baseline
+    def test_distilled_source_metadata_cannot_bypass_quarantine(self, tmp_path: Path) -> None:
+        # A spoofed ``distilled:`` source must NOT exempt an outlier from
+        # enforce-mode quarantine — the bypass was caller-controlled and is gone.
+        cfg = MemoryConfig(
+            storage_path=str(tmp_path / "mem"),
+            poisoning_z_threshold=1.0,
+            poisoning_detection_mode="enforce",
+        )
         outlier = MemoryEntry(
             id="M-distill",
             content="outlier-content",
@@ -365,12 +371,10 @@ class TestAnomalyBypassSourcePrefixes:
             self._seed_namespace(backend)
             prepared = prepare_entry_for_store(outlier, backend=backend, config=cfg)
 
-        assert prepared.quarantined is False
-        assert prepared.entry.id == "M-distill"
+        assert prepared.quarantined is True
+        assert prepared.anomaly_dimension == "tag_count"
 
-    def test_bypass_does_not_skip_for_agent_source(self, tmp_path: Path) -> None:
-        # enforce-mode: the bypass must NOT carve out a non-distilled source even
-        # when quarantine is actively enforced.
+    def test_agent_source_outlier_still_quarantined(self, tmp_path: Path) -> None:
         cfg = MemoryConfig(
             storage_path=str(tmp_path / "mem"),
             poisoning_z_threshold=1.0,
@@ -391,33 +395,11 @@ class TestAnomalyBypassSourcePrefixes:
         assert prepared.quarantined is True
         assert prepared.anomaly_dimension == "tag_count"
 
-    def test_bypass_disabled_when_prefix_list_empty(self, tmp_path: Path) -> None:
+    def test_custom_prefix_metadata_cannot_bypass_quarantine(self, tmp_path: Path) -> None:
         cfg = MemoryConfig(
             storage_path=str(tmp_path / "mem"),
             poisoning_z_threshold=1.0,
-            anomaly_bypass_source_prefixes=[],
             poisoning_detection_mode="enforce",
-        )
-        outlier = MemoryEntry(
-            id="M-distill",
-            content="outlier-content",
-            namespace="project:default",
-            tags=[f"t{i}" for i in range(30)],
-            metadata={"source": "distilled:git:DEADBEEF..CAFEBABE"},
-        )
-
-        with create_backend_from_config(cfg, "project:default") as backend:
-            self._seed_namespace(backend)
-            prepared = prepare_entry_for_store(outlier, backend=backend, config=cfg)
-
-        # With bypass disabled, the distilled record is quarantined like any other outlier.
-        assert prepared.quarantined is True
-
-    def test_bypass_skips_for_custom_prefix_via_config(self, tmp_path: Path) -> None:
-        cfg = MemoryConfig(
-            storage_path=str(tmp_path / "mem"),
-            poisoning_z_threshold=1.0,
-            anomaly_bypass_source_prefixes=["my-pipeline:"],
         )
         outlier = MemoryEntry(
             id="M-custom",
@@ -431,7 +413,7 @@ class TestAnomalyBypassSourcePrefixes:
             self._seed_namespace(backend)
             prepared = prepare_entry_for_store(outlier, backend=backend, config=cfg)
 
-        assert prepared.quarantined is False
+        assert prepared.quarantined is True
 
     def test_provenance_hash_matches_post_pii_content(self, tmp_path: Path) -> None:
         """PRD-DIST-2046 c793: provenance_content_hash MUST equal sha256(stored content + detail).
