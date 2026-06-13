@@ -36,7 +36,9 @@ from trw_memory.models.memory import MemoryEntry
 logger = structlog.get_logger(__name__)
 
 _DEFAULT_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-_MAX_PASSAGE_CHARS = 512
+# ms-marco-MiniLM models accept up to 512 tokens (~2048 chars at 4 chars/token).
+# The old 512-char limit wasted 75% of model capacity on long sessions.
+_MAX_PASSAGE_CHARS = 2048
 _LOADED_MODELS: dict[str, object] = {}
 
 try:
@@ -119,7 +121,7 @@ def cross_encode_rerank(
         logger.warning("cross_encode_rerank_error", error=str(exc)[:120])
         return entries[:top_k] if top_k is not None else entries
 
-    scored = sorted(zip(entries, scores), key=lambda x: float(x[1]), reverse=True)
+    scored = sorted(zip(entries, scores, strict=True), key=lambda x: float(x[1]), reverse=True)
     reranked = [e for e, _ in scored]
 
     logger.debug(
