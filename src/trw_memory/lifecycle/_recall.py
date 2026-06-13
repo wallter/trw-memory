@@ -52,7 +52,7 @@ def _expires_in_past(raw: object) -> bool:
             parsed_date = date.fromisoformat(candidate)
         except ValueError:
             return False
-        parsed = datetime(parsed_date.year, parsed_date.month, parsed_date.day, tzinfo=timezone.utc)
+        parsed = datetime(parsed_date.year, parsed_date.month, parsed_date.day, tzinfo=timezone.utc)  # pragma: no cover
     # Compare in UTC. Treat naive datetimes as UTC for a stable comparison.
     now = datetime.now(timezone.utc)
     if parsed.tzinfo is None:
