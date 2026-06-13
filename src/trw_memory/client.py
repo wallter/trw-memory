@@ -300,6 +300,47 @@ class MemoryClient(OrgSharedAliasMixin):
             self, requests, skip_audit_per_item=skip_audit_per_item, skip_remote_publish=skip_remote_publish
         )
 
+    async def store_many(self, entries: list[dict[str, object]]) -> int:
+        """Bulk-insert memory entries from plain dicts; return rows written.
+
+        Convenience wrapper over :meth:`bulk_store` for callers that hold a
+        list of ``store()``-shaped dicts rather than :class:`BulkStoreRequest`
+        objects. Each dict accepts the same fields as :meth:`store`
+        (``content`` is required; ``detail``, ``tags``, ``importance``,
+        ``metadata``, ``source``, ``source_identity``, ``session_id``,
+        ``entry_id`` are optional). Runs the full validation + security gate +
+        FTS dual-write path, so bulk-inserted rows are immediately searchable
+        via :meth:`search_fts` and :meth:`recall`.
+
+        Args:
+            entries: List of entry dicts — same schema as :meth:`store`.
+
+        Returns:
+            Number of entries written to the primary store (stored + updated).
+            Rejected/quarantined rows are excluded from the count.
+        """
+        if not entries:
+            return 0
+        requests = [
+            BulkStoreRequest(
+                content=str(entry["content"]),
+                detail=str(entry.get("detail", "")),
+                tags=cast("list[str] | None", entry.get("tags")),
+                importance=float(cast("float | int | str", entry.get("importance", 0.5))),
+                metadata=cast("dict[str, str] | None", entry.get("metadata")),
+                source=cast(
+                    "Literal['human', 'agent', 'tool', 'consolidated']",
+                    entry.get("source", "agent"),
+                ),
+                source_identity=str(entry.get("source_identity", "")),
+                session_id=cast("str | None", entry.get("session_id")),
+                entry_id=cast("str | None", entry.get("entry_id")),
+            )
+            for entry in entries
+        ]
+        summary = await self.bulk_store(requests)
+        return summary.succeeded
+
     async def recall(
         self,
         query: str,
@@ -514,6 +555,51 @@ class MemoryClient(OrgSharedAliasMixin):
         return await _impl(
             self, tags=tags, min_importance=min_importance, since=since, limit=limit, actor=actor, status=status
         )
+
+    async def search_fts(
+        self,
+        query: str,
+        *,
+        top_k: int = 25,
+        min_importance: float = 0.0,
+        status: str | None = None,
+    ) -> list[MemoryResultDict]:
+        """FTS5 full-text keyword search — O(log N) via SQLite inverted index.
+
+        Faster than :meth:`recall` for pure keyword lookups when hybrid ranking
+        is not needed. Scans ``content``, ``detail``, and ``tags`` fields using
+        SQLite FTS5 BM25 scoring. Returns an empty list when FTS5 is unavailable
+        (graceful degradation).
+
+        Args:
+            query: Free-text search query.
+            top_k: Maximum number of results to return.
+            min_importance: Minimum importance threshold (0.0–1.0).
+            status: Filter by entry status string (e.g. ``"active"``).
+
+        Returns:
+            List of :class:`MemoryResultDict` ordered by importance descending.
+        """
+        from trw_memory._client_distilled_tiering import entry_to_result as _to_result
+        from trw_memory.models.memory import MemoryStatus as _Status
+
+        parsed_status: _Status | None = None
+        if status is not None:
+            try:
+                parsed_status = _Status(status)
+            except ValueError:
+                pass
+
+        async with self._lock:
+            backend = self._get_backend()
+            entries = backend.search_fts(
+                query,
+                top_k=top_k,
+                min_importance=min_importance,
+                namespace=self._namespace,
+                status=parsed_status,
+            )
+        return [_to_result(e, score=e.importance) for e in entries]
 
     async def audit_learning(self, learning_id: str) -> dict[str, object]:
         """Return SEC-001 audit data for an active or quarantined learning."""
