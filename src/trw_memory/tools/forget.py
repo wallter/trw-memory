@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import structlog
 
-from trw_memory.exceptions import ConfigError, StorageError
+from trw_memory.exceptions import AuthorizationError, ConfigError, StorageError
 from trw_memory.lifecycle.tiers._runtime import remove_entry_from_tiers, supports_tier_runtime
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -89,6 +89,11 @@ def memory_forget_impl(
         entry: MemoryEntry | None = None
         try:
             entry = backend.get(memory_id)
+            if entry is not None and entry.metadata.get("system_canary") == "true":
+                raise AuthorizationError(
+                    f"Refusing to delete system canary entry '{memory_id}': "
+                    "deleting canaries is a security violation."
+                )
             if entry is not None and entry.namespace == namespace:
                 was_deleted = backend.delete(memory_id)
                 deleted_count = 1 if was_deleted else 0
