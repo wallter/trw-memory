@@ -468,6 +468,16 @@ def delete(backend: SQLiteBackend, entry_id: str) -> bool:
                 backend._delete_vector(entry_id)
             if deleted and getattr(backend, "_fts_available", False):
                 backend._conn.execute("DELETE FROM memories_fts WHERE id = ?", (entry_id,))
+            # Remove knowledge-graph edges that reference the deleted entry as
+            # source or target. SQLite does not enforce FK cascades on
+            # memory_graph_edges (no FK pragma), so orphan edges must be
+            # cleaned up explicitly. A single DELETE with OR covers both sides
+            # of a directed edge in one statement.
+            if deleted:
+                backend._conn.execute(
+                    "DELETE FROM memory_graph_edges WHERE source_id = ? OR target_id = ?",
+                    (entry_id, entry_id),
+                )
             # Defer the commit inside a ``transaction()`` block so the row +
             # vector deletes batch into the caller's outermost COMMIT rather
             # than prematurely committing their open transaction.
