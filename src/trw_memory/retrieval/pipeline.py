@@ -166,20 +166,6 @@ def hybrid_search(
         if dense_results:
             rankings.append(dense_results)
 
-    # ------------------------------------------------------------- Recency
-    # Inject recency ranking as a third RRF source when recency_weight > 0.
-    # This gives temporal queries ("most recent X", "what happened last week")
-    # a freshness signal that neither BM25 nor dense can provide.
-    recency_results: list[tuple[str, float]] = []
-    if recency_weight > 0.0:
-        recency_results = recency_rank(
-            entries,
-            halflife_days=recency_halflife_days,
-            top_k=bm25_candidates,
-        )
-        if recency_results:
-            rankings.append(recency_results)
-
     if not rankings:
         logger.debug(
             "hybrid_search_no_results",
@@ -195,13 +181,54 @@ def hybrid_search(
     # combmax_fuse is a configurable alternative that lifts hard-tail recall
     # (MEMORY.md rca_rank_fusion_combiner); default unchanged.
     if fusion_mode == "combmax":
-        fused = combmax_fuse(rankings, k=rrf_k)
+        relevance_fused = combmax_fuse(rankings, k=rrf_k)
     else:
         if fusion_mode != "rrf":
             logger.warning("hybrid_search_unknown_fusion_mode", fusion_mode=fusion_mode, fallback="rrf")
         importances = {e.id: e.importance for e in entries} if importance_alpha < 1.0 else None
-        fused = rrf_fuse(rankings, k=rrf_k, importances=importances, alpha=importance_alpha)
-    fused_scores = {entry_id: score for entry_id, score in fused}
+        relevance_fused = rrf_fuse(rankings, k=rrf_k, importances=importances, alpha=importance_alpha)
+
+    recency_results: list[tuple[str, float]] = []
+
+    # ------------------------------------------------------------- Recency blend
+    # When recency_weight > 0, compute a separate recency score (exponential half-life
+    # decay on valid_from) and LINEARLY BLEND it with the relevance-fused score:
+    #
+    #   final(d) = (1 - w) * relevance_norm(d) + w * recency_score(d)
+    #
+    # Both sides are normalised to [0,1] independently before blending so the
+    # recency_weight value is a true proportion (0.3 = "30% freshness, 70% relevance").
+    # Adding recency as an equal 1/3 RRF source (previous approach) produced a
+    # binary switch: all non-zero weights had identical output and nDCG dropped
+    # uniformly because time-ordering overrode relevance for non-temporal queries.
+    if recency_weight > 0.0:
+        recency_results = recency_rank(
+            entries,
+            halflife_days=recency_halflife_days,
+        )
+        if recency_results:
+            # Normalise relevance scores to [0, 1]
+            rel_max = max(s for _, s in relevance_fused) if relevance_fused else 1.0
+            rel_norm = {eid: s / rel_max for eid, s in relevance_fused} if rel_max > 0 else {}
+
+            # Recency scores are already in (0, 1] from the half-life formula
+            rec_map = dict(recency_results)
+
+            # Blend: cover all entries from either source
+            all_ids = set(rel_norm) | set(rec_map)
+            blended: list[tuple[str, float]] = []
+            for eid in all_ids:
+                rel_s = rel_norm.get(eid, 0.0)
+                rec_s = rec_map.get(eid, 0.0)
+                blended.append((eid, (1.0 - recency_weight) * rel_s + recency_weight * rec_s))
+            blended.sort(key=lambda x: x[1], reverse=True)
+            fused = blended
+        else:
+            fused = relevance_fused
+    else:
+        fused = relevance_fused
+
+    fused_scores = dict(fused)
 
     # Map fused ids back to MemoryEntry objects, preserving fusion order.
     fused_entries: list[MemoryEntry] = []
@@ -229,7 +256,7 @@ def hybrid_search(
     # (query, passage) pairs.  This captures finer-grained relevance than
     # bi-encoder + RRF at the cost of O(rerank_candidates) model calls.
     if rerank and fused_entries:
-        from trw_memory.retrieval.reranker import cross_encode_rerank  # noqa: PLC0415
+        from trw_memory.retrieval.reranker import cross_encode_rerank
 
         rerank_input = fused_entries[:rerank_candidates]
         tail = fused_entries[rerank_candidates:]

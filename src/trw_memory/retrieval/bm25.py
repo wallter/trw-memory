@@ -15,6 +15,8 @@ callers degrade gracefully without raising.
 
 from __future__ import annotations
 
+import re
+
 import structlog
 
 from trw_memory.models.memory import MemoryEntry
@@ -29,16 +31,14 @@ except ImportError:
 logger = structlog.get_logger(__name__)
 
 
-import re as _re
-
 # Punctuation stripper: keep alphanumerics, whitespace, and hyphens (for tag
 # expansion).  Everything else is replaced with a space so "test." matches
 # "test" and "trw-memory" is kept for hyphen-expansion below.
-_PUNCT_RE = _re.compile(r"[^\w\s-]")
+_PUNCT_RE = re.compile(r"[^\w\s-]")
 
 # CamelCase / PascalCase splitter: insert a space before each uppercase letter
 # that follows a lowercase letter or digit so "hybridSearch" → "hybrid Search".
-_CAMEL_RE = _re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
 
 def _normalize_text(text: str) -> str:
@@ -116,9 +116,11 @@ def bm25_search(
         if entry_id:
             paired.append((entry_id, float(scores[i])))
 
-    # BM25 IDF is 0 when a term appears in exactly N/2 documents (small
-    # corpora).  Fall back to token-overlap scoring when all scores are zero.
-    if all(s == 0.0 for _, s in paired):
+    # BM25 IDF is 0 or negative when a term appears in >= N/2 documents (small
+    # corpora).  Fall back to token-overlap scoring when no entries score > 0:
+    # rank_bm25 BM25Okapi IDF can go negative (log((N+0.5)/(df+0.5)) < 0 when
+    # df > N/2), so checking all(s == 0.0) misses the negative-score case.
+    if all(s <= 0.0 for _, s in paired):
         query_set = set(tokenized_query)
         fallback: list[tuple[str, float]] = []
         for i, entry in enumerate(entries):
