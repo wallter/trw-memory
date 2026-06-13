@@ -16,6 +16,8 @@ callers degrade gracefully without raising.
 from __future__ import annotations
 
 import re
+import threading
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -28,7 +30,28 @@ try:
 except ImportError:  # pragma: no cover
     _BM25_AVAILABLE = False
 
+if TYPE_CHECKING:  # pragma: no cover
+    from rank_bm25 import BM25Okapi as _BM25OkapiType
+
 logger = structlog.get_logger(__name__)
+
+
+# Invalidation-based corpus cache (PRD: BM25Okapi rebuild O(N) per recall call).
+# At 1M+ entries, rebuilding the tokenized corpus + BM25Okapi model on every
+# recall costs 7-15GB RAM and seconds of CPU.  We cache the most-recently-built
+# model keyed on the *set* of entry ids that produced it; when the next call
+# presents the identical id set we reuse the model and the precomputed corpus
+# tokenization instead of rebuilding.  Single-process, in-memory only — no
+# persistence.  A lock guards the cache for thread safety (recall is called
+# concurrently by parallel agents).
+#
+# Cache entry: (id_set, model, ordered_ids, corpus_tokens)
+#   id_set        — frozenset of entry ids that built the model (invalidation key)
+#   model         — the cached BM25Okapi instance
+#   ordered_ids   — entry ids in the order the corpus rows were built
+#   corpus_tokens — the tokenized corpus rows (reused for the Jaccard fallback)
+_bm25_cache: tuple[frozenset[str], "_BM25OkapiType", list[str], list[list[str]]] | None = None
+_bm25_cache_lock = threading.Lock()
 
 
 # Punctuation stripper: keep alphanumerics, whitespace, and hyphens (for tag
@@ -78,6 +101,60 @@ def _tokenize_entry(entry: MemoryEntry) -> list[str]:
     return [t for t in text.split() if t]
 
 
+def _build_or_reuse_model(
+    entries: list[MemoryEntry],
+) -> tuple["_BM25OkapiType", list[str], list[list[str]]]:
+    """Return a BM25Okapi model + the entry-id order and corpus it was built on.
+
+    Reuses the module-level cache when the *set* of entry ids is unchanged from
+    the previous call.  The cache is invalidated (rebuilt) whenever the id set
+    differs — added, removed, or swapped entries.  Both the model and the
+    tokenized corpus rows are reused, so a cache hit skips re-tokenizing every
+    entry as well as reconstructing the BM25Okapi index.
+
+    The returned ``ordered_ids`` and ``corpus`` are in the model's *build order*
+    (``model.get_scores()[i]`` corresponds to ``ordered_ids[i]`` /
+    ``corpus[i]``).  Because the model's score vector is positionally bound to
+    the order it was constructed in, the caller MUST align scores to entries by
+    id — not by ``entries`` position — so a reordered (but set-identical) call
+    still scores correctly off the cached model.
+
+    Args:
+        entries: Candidate memory entries (must be non-empty).
+
+    Returns:
+        ``(model, ordered_ids, corpus)`` — all three in the model's build order.
+    """
+    global _bm25_cache
+
+    id_set = frozenset(e.id for e in entries)
+
+    with _bm25_cache_lock:
+        cached = _bm25_cache
+        if (
+            cached is not None
+            and cached[0] == id_set
+            and len(id_set) == len(entries)  # no duplicate ids — safe to map by id
+        ):
+            _, model, ordered_ids, cached_corpus = cached
+            logger.debug("bm25_cache_hit", entry_count=len(entries))
+            return model, ordered_ids, cached_corpus
+
+    # Cache miss (or unsafe to reuse): rebuild outside the lock to avoid holding
+    # it during the O(N) tokenization + index construction.
+    corpus = [_tokenize_entry(e) for e in entries]
+    model = BM25Okapi(corpus)
+    ordered_ids = [e.id for e in entries]
+
+    # Only cache when the id set is unambiguous (no duplicate ids); duplicate
+    # ids would break the by-id score lookup on a subsequent hit.
+    if len(id_set) == len(entries):
+        with _bm25_cache_lock:
+            _bm25_cache = (id_set, model, ordered_ids, corpus)
+    logger.debug("bm25_cache_miss", entry_count=len(entries))
+    return model, ordered_ids, corpus
+
+
 def bm25_search(
     query: str,
     entries: list[MemoryEntry],
@@ -103,7 +180,13 @@ def bm25_search(
         )
         return []
 
-    corpus: list[list[str]] = [_tokenize_entry(e) for e in entries]
+    # Reuse a cached BM25Okapi model + tokenized corpus when the entry-id set is
+    # unchanged from the prior call; otherwise rebuild and refresh the cache.
+    # ``ordered_ids`` / ``corpus`` are in the model's BUILD order, which is the
+    # order ``get_scores()`` returns — so we map scores to ids by build position,
+    # never by ``entries`` position (the two can differ on a reordered cache hit).
+    bm25, ordered_ids, corpus = _build_or_reuse_model(entries)
+
     # Mirror the document tokenizer's hyphen-expansion so "pydantic-v2" in a
     # query matches both the composite token and the split tokens indexed from tags.
     _raw_q = [t for t in _normalize_text(query).split() if t]
@@ -113,15 +196,17 @@ def bm25_search(
         if "-" in _t:
             tokenized_query.extend(_t.split("-"))
 
-    bm25 = BM25Okapi(corpus)
     scores = bm25.get_scores(tokenized_query)
 
-    # Build (entry_id, score) pairs — skip entries with blank ids
+    # Build (entry_id, score) pairs by the model's build order — skip blank ids.
+    # ``tokens_by_id`` lets the Jaccard fallback below address entries by id
+    # regardless of the current ``entries`` ordering.
+    tokens_by_id: dict[str, list[str]] = {}
     paired: list[tuple[str, float]] = []
-    for i, entry in enumerate(entries):
-        entry_id = entry.id
+    for i, entry_id in enumerate(ordered_ids):
         if entry_id:
             paired.append((entry_id, float(scores[i])))
+            tokens_by_id[entry_id] = corpus[i]
 
     # BM25 IDF is 0 or negative when a term appears in >= N/2 documents (small
     # corpora).  Fall back to token-overlap scoring when no entries score > 0:
@@ -130,11 +215,11 @@ def bm25_search(
     if all(s <= 0.0 for _, s in paired):
         query_set = set(tokenized_query)
         fallback: list[tuple[str, float]] = []
-        for i, entry in enumerate(entries):
-            entry_id = entry.id
-            if not entry_id:
-                continue
-            entry_tokens = set(corpus[i])
+        # Address tokens by id (build-order safe) so a reordered cache hit and a
+        # fresh build produce identical fallback rankings.  Blank ids were never
+        # added to ``tokens_by_id`` so they are skipped here too.
+        for entry_id, entry_tokens_list in tokens_by_id.items():
+            entry_tokens = set(entry_tokens_list)
             overlap = len(query_set & entry_tokens)
             if overlap > 0:
                 jaccard = overlap / len(query_set | entry_tokens)
