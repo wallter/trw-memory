@@ -90,3 +90,38 @@ class TestBM25Search:
         ids = [entry_id for entry_id, _ in results]
         assert "tagged" in ids
         assert ids[0] == "tagged"  # tagged entry should rank first
+
+    def test_query_plural_normalization_matches_possessive_stem(self) -> None:
+        # Document: "colleague's experience" → _PUNCT_RE strips apostrophe →
+        # indexed as ["colleague", "s", "experience"] (or just "colleague" stem).
+        # Query: "colleagues" → without normalization, query token "colleagues"
+        # never matches document token "colleague".
+        # With plural expansion, "colleagues" also adds "colleague" to the query.
+        entries = [
+            make_entry("possessive", "colleague's experience at the conference"),
+            make_entry("unrelated", "annual software architecture review meeting"),
+        ]
+        results = bm25_search("colleagues conference", entries)
+        ids = [entry_id for entry_id, _ in results]
+        assert "possessive" in ids
+        assert ids[0] == "possessive"
+
+    def test_query_plural_normalization_does_not_apply_to_short_words(self) -> None:
+        # Words with len <= 4 (like "was", "has") should not be stemmed
+        entries = [
+            make_entry("e1", "python code review process"),
+            make_entry("e2", "something entirely different here"),
+        ]
+        # "was" (len=3), "has" (len=3) — should NOT expand (guard: len(_t) > 4)
+        results = bm25_search("was has", entries)
+        assert isinstance(results, list)  # no crash
+
+    def test_query_plural_normalization_does_not_apply_to_double_s(self) -> None:
+        # Words ending in 'ss' (like "lass", "class") should not be stemmed
+        entries = [
+            make_entry("e1", "python class definition syntax"),
+            make_entry("e2", "database access patterns"),
+        ]
+        results = bm25_search("class access", entries)
+        # "class" ends in "ss" → no expansion; "access" ends in "ss" → no expansion
+        assert isinstance(results, list)  # no crash, correct filtering

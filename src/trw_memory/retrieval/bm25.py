@@ -112,6 +112,15 @@ def bm25_search(
         tokenized_query.append(_t)
         if "-" in _t:
             tokenized_query.extend(_t.split("-"))
+        # Query-side plural normalization: "colleagues" → also "colleague".
+        # Documents index possessives as their stem ("colleague's" → "colleague"
+        # via _PUNCT_RE), so an unmodified plural query misses possessive forms.
+        # Additive expansion preserves exact-match scores; only applies to
+        # words ending in 's' that are long enough to be meaningful stems.
+        if _t.endswith("s") and not _t.endswith("ss") and len(_t) > 4:
+            stem = _t[:-1]
+            if len(stem) >= 3:
+                tokenized_query.append(stem)
 
     bm25 = BM25Okapi(corpus)
     scores = bm25.get_scores(tokenized_query)
