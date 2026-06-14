@@ -362,6 +362,7 @@ class MemoryClient(OrgSharedAliasMixin):
         as_of: datetime | None = None,
         include_superseded: bool = False,
         include_graph_expansion: bool = False,
+        query_expansion: str | None = None,
     ) -> list[MemoryResultDict]:
         """Search memories by keyword query using hybrid retrieval.
 
@@ -371,6 +372,14 @@ class MemoryClient(OrgSharedAliasMixin):
         thresholds, limit capping, and optional token-budget fitting.
         Implementation lives in ``_client_recall.recall_impl`` (PRD-DIST-246
         batch 105).
+
+        Args:
+            query_expansion: Optional hypothetical document for HyDE — when
+                provided, the dense embedding uses this text instead of the
+                raw query, while BM25 still searches the original ``query``.
+                Callers that have LLM access can generate a hypothetical
+                answer to the query and pass it here for improved recall on
+                under-specified or abstract queries.
         """
         from trw_memory._client_recall import recall_impl as _recall_impl
 
@@ -394,6 +403,7 @@ class MemoryClient(OrgSharedAliasMixin):
             as_of=as_of,
             include_superseded=include_superseded,
             include_graph_expansion=include_graph_expansion,
+            query_expansion=query_expansion,
         )
 
     def _get_embedder(self) -> EmbeddingProvider | None:

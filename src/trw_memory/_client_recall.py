@@ -102,6 +102,7 @@ async def recall_impl(
     as_of: datetime | None = None,
     include_superseded: bool = False,
     include_graph_expansion: bool = False,
+    query_expansion: str | None = None,
 ) -> list[MemoryResultDict]:
     """Async impl for :meth:`MemoryClient.recall`.
 
@@ -122,7 +123,10 @@ async def recall_impl(
     embedder = client._get_embedder() if query.strip() else None
     query_embedding: list[float] | None = None
     if embedder is not None:
-        query_embedding = await asyncio.to_thread(embedder.embed, query)
+        # HyDE: when a hypothetical expansion document is provided, embed it
+        # instead of the raw query for dense search. BM25 still uses `query`.
+        dense_text = query_expansion if query_expansion and query_expansion.strip() else query
+        query_embedding = await asyncio.to_thread(embedder.embed, dense_text)
 
     async with client._lock:
         backend = client._get_backend()
