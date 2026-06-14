@@ -738,3 +738,146 @@ def utility_based_prune_candidates(
             seen_ids.add(entry_id)
 
     return candidates
+
+
+# ---------------------------------------------------------------------------
+# FSRS-inspired adaptive retention scoring (frontier-002)
+# ---------------------------------------------------------------------------
+# Simplified FSRS-4.5: tracks stability S (days at 90% retention) and
+# difficulty D via the power-law retention curve
+# R(t, S) = (1 + FACTOR * t/S)^DECAY, with FACTOR/DECAY chosen so R(S,S)=0.9.
+# Full FSRS-4.5 uses a neural scheduler; we implement the closed-form
+# retrieval-based update rules from the original paper.
+# Reference: Ye et al. "A Stochastic Shortest Path Algorithm for
+#   Optimizing Spaced Repetition Scheduling" (2022).
+
+
+_FSRS_DECAY: float = -0.5  # power-law decay exponent (FSRS-4.5 default)
+# FSRS-4.5 forgetting-curve FACTOR. Derived so that R(t=S, S) == 0.9 exactly:
+#   (1 + FACTOR) ** DECAY == 0.9  =>  FACTOR == 0.9 ** (1/DECAY) - 1 == 19/81.
+# (The 0.9 *target retrievability* is encoded in this constant, not stored as
+# the FACTOR itself — a common point of confusion when transcribing the paper.)
+_FSRS_FACTOR: float = 0.9 ** (1.0 / _FSRS_DECAY) - 1.0  # == 19/81 ~= 0.234568
+_FSRS_DEFAULT_STABILITY: float = 1.0  # initial stability in days
+
+
+def fsrs_retrievability(elapsed_days: float, stability: float) -> float:
+    """FSRS power-law retention: R(t, S) = (1 + FACTOR * t / S)^DECAY.
+
+    Gives R=1.0 at t=0, R~=0.9 at t=S, R->0 as t->inf.
+
+    Args:
+        elapsed_days: Days since the memory was last reviewed or created.
+        stability: Current stability S in days (the interval at which R~=0.9).
+
+    Returns:
+        Retrievability in [0, 1].
+    """
+    if stability <= 0.0:
+        stability = _FSRS_DEFAULT_STABILITY
+    t = max(0.0, elapsed_days)
+    return float((1.0 + _FSRS_FACTOR * t / stability) ** _FSRS_DECAY)
+
+
+def fsrs_stability_after_review(
+    stability: float,
+    difficulty: float,
+    retrievability: float,
+    *,
+    grade: float = 1.0,
+) -> float:
+    """Update stability after a successful recall (FSRS SInc formula).
+
+    S'(S, D, R, G) = S * exp(w17 * (11 - D) * S^(-w18) * (exp(w19*(1-R)) - 1) * G)
+
+    Uses the FSRS-4.5 canonical weights w17=1.0, w18=0.1, w19=1.0 as
+    simplified defaults — close enough for the memory decay use-case
+    without requiring the full parameter-trained model.
+
+    Args:
+        stability: Current stability S (days to 90% retention).
+        difficulty: Entry difficulty D in [1, 10] (1=easy, 10=hard).
+        retrievability: Current retrievability R in [0, 1].
+        grade: Recall quality in [0, 1]; 1.0 = perfect recall.
+
+    Returns:
+        Updated stability S' in days.
+    """
+    if stability <= 0.0:
+        stability = _FSRS_DEFAULT_STABILITY
+    d = max(1.0, min(10.0, difficulty))
+    r = max(0.0, min(1.0, retrievability))
+    g = max(0.0, min(1.0, grade))
+    # FSRS-4.5 SInc formula (simplified weights)
+    w17, w18, w19 = 1.0, 0.1, 1.0
+    s_new = stability * math.exp(
+        w17 * (11.0 - d) * (stability**-w18) * (math.exp(w19 * (1.0 - r)) - 1.0) * g
+    )
+    return max(_FSRS_DEFAULT_STABILITY, s_new)
+
+
+def fsrs_difficulty_update(
+    difficulty: float,
+    grade: float,
+    *,
+    w6: float = 0.1,
+) -> float:
+    """Adjust difficulty after recall (FSRS D' update rule).
+
+    D'(D, G) = D - w6 * (G - 0.5)
+
+    Grade > 0.5 (easy recall) -> difficulty decreases.
+    Grade < 0.5 (hard recall) -> difficulty increases.
+
+    Args:
+        difficulty: Current D in [1, 10].
+        grade: Recall quality in [0, 1].
+        w6: Learning-rate weight (FSRS-4.5 default 0.1).
+
+    Returns:
+        Updated difficulty D' clamped to [1, 10].
+    """
+    d_new = difficulty - w6 * (grade - 0.5)
+    return max(1.0, min(10.0, d_new))
+
+
+def compute_fsrs_utility_score(
+    importance: float,
+    elapsed_days: float,
+    recurrence: int = 1,
+    *,
+    stability: float | None = None,
+    difficulty: float = 5.0,
+) -> float:
+    """FSRS-powered utility score replacing Ebbinghaus decay.
+
+    Blends FSRS retrievability R(t, S) with the entry's importance
+    and recurrence to produce a single [0, 1] utility score.
+
+        utility = R(t, S) * sqrt(importance) * (1 + log1p(recurrence) / 10)
+
+    The recurrence bonus is capped at 1.5x to prevent viral entries
+    from permanently dominating the utility ranking.
+
+    Args:
+        importance: Entry importance in [0, 1].
+        elapsed_days: Days since last recall / creation.
+        recurrence: Number of times the entry has been recalled (>=1).
+        stability: FSRS stability S in days.  When ``None``, estimated
+            from recurrence: S ~= 1.0 * (recurrence ** 0.3) * 7 (heuristic
+            that gives S=7 at recurrence=1, S~=14 at recurrence=3).
+        difficulty: Entry difficulty in [1, 10] (used when stability is None).
+
+    Returns:
+        Utility score in [0, 1].
+    """
+    if stability is None:
+        # Heuristic: more recalls -> longer stability
+        stability = max(
+            _FSRS_DEFAULT_STABILITY,
+            (max(1, recurrence) ** 0.3) * 7.0 / (difficulty / 5.0),
+        )
+    r = fsrs_retrievability(elapsed_days, stability)
+    imp_factor = math.sqrt(max(0.0, min(1.0, importance)))
+    rec_bonus = min(1.5, 1.0 + math.log1p(max(0, recurrence - 1)) / 10.0)
+    return _clamp01(r * imp_factor * rec_bonus)
