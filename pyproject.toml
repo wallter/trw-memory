@@ -87,6 +87,19 @@ trw-memory-server = "trw_memory.server:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/trw_memory"]
 
+[tool.hatch.build.targets.sdist]
+# Defense in depth alongside .gitignore: hatchling honors the package-local
+# .gitignore but NOT a global git excludesfile, so local runtime/test state
+# (the .memory/ store dirs, coverage artifacts, stray SQLite files) must be
+# excluded explicitly here too — they must never ship in the published sdist.
+exclude = [
+  ".memory",
+  "coverage.json",
+  "*.db",
+  "*.db-wal",
+  "*.db-shm",
+]
+
 [tool.deptry]
 known_first_party = ["trw_memory"]
 optional_dependencies_dev_groups = ["dev"]
