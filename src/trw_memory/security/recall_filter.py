@@ -22,6 +22,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.security.pii import strip_pii
 from trw_memory.security.poisoning import _INJECTION_PATTERNS
 
 __all__ = ["RecallDecision", "RecallFilterResult", "filter_recall_window"]
@@ -113,7 +114,12 @@ def _shadow_quarantine(
         record = {
             "id": entry.id,
             "reasons": reasons,
-            "content_preview": entry.content[:120],
+            # Redact PII before persisting: this entry was flagged (often FOR a
+            # PII/injection pattern), so writing its raw content to the shadow
+            # partition would leak the very secret/email that triggered the flag.
+            # strip_pii preserves injection-pattern structure for forensics while
+            # masking emails/API keys/PATs.
+            "content_preview": strip_pii(entry.content[:120]),
             "shadowed_at": datetime.now(timezone.utc).isoformat(),
             "mode": "observe",
         }

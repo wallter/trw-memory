@@ -249,6 +249,12 @@ def enforce_write_rate_limit(
     if not session_id or config.max_memory_writes_per_minute <= 0:
         return
 
+    # Cap a caller-controlled session_id so a pathologically long value cannot
+    # balloon the persisted YAML rate-limit state (disk-growth DoS). Legitimate
+    # IDs (UUIDs, content hashes) are far under this bound.
+    if len(session_id) > 256:
+        session_id = session_id[:256]
+
     state_path = Path(config.rate_limit_state_path)
     now = time()
     with lock_for_rmw(state_path):
