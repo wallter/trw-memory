@@ -25,6 +25,23 @@ class TestCheckDuplicate:
         result = check_duplicate("new content", [], embedder)
         assert result == DedupResult("store", None, 0.0)
 
+    def test_dimension_mismatch_candidate_is_skipped_not_raised(self) -> None:
+        """A mixed-dimension candidate must not crash the dedup pass.
+
+        After an embedding-model change a store can hold vectors of differing
+        widths; such a candidate cannot be a duplicate, so it is skipped rather
+        than raising DimensionMismatchError out of check_duplicate.
+        """
+        embedder = StubEmbedder(available=True)
+        embedder.set_vector("new content ", [1.0, 0.0, 0.0, 0.0])  # 4-dim query
+        embedder.set_vector("existing content ", [1.0, 0.0, 0.0])  # 3-dim candidate
+        entries = [make_entry("e1", content="existing content")]
+
+        result = check_duplicate("new content", entries, embedder)
+
+        assert result.action == "store"
+        assert result.existing_id is None
+
     def test_skip_when_similarity_at_threshold(self) -> None:
         embedder = StubEmbedder(available=True)
         vec = [1.0, 0.0, 0.0]

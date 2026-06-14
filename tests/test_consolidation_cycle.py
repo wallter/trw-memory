@@ -339,6 +339,30 @@ class TestConsolidateCycle:
         )
         assert result["consolidated_count"] == 1
 
+    def test_namespace_none_fails_closed_when_list_namespaces_raises(self) -> None:
+        """A namespace-enumeration failure must fail closed, not fall through.
+
+        If list_namespaces() raises we cannot prove the store is single-tenant,
+        so namespace=None must refuse rather than silently clustering across
+        tenants into "default".
+        """
+
+        class _BrokenEnumBackend(_InMemoryBackend):
+            def list_namespaces(self) -> list[str]:
+                raise RuntimeError("transient enumeration failure")
+
+        storage = _BrokenEnumBackend()
+        for i in range(3):
+            storage.store(_make_entry(f"e{i}", content=f"content {i}", detail=f"detail {i}"))
+        embedder = _make_embedder(vectors=[_V1, _V2, _V3])
+
+        with pytest.raises(ValueError, match="could not enumerate"):
+            consolidate_cycle(storage, embedder, config=MemoryConfig())
+
+        # Fail-closed: nothing was clustered or relocated.
+        consolidated = [e for e in storage.list_entries() if e.source == "consolidated"]
+        assert consolidated == []
+
     def test_partial_archival_failure_restores_originals_when_delete_fails(self) -> None:
         """memory-lifecycle-7: rollback must restore originals even if the
 

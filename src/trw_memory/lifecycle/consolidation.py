@@ -17,7 +17,7 @@ from uuid import uuid4
 import structlog
 
 from trw_memory.embeddings.interface import EmbeddingProvider
-from trw_memory.exceptions import StorageError
+from trw_memory.exceptions import DimensionMismatchError, StorageError
 from trw_memory.graph import schedule_graph_update
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
@@ -72,12 +72,21 @@ def complete_linkage_cluster(
     if similarity_fn is None:
         similarity_fn = cosine_similarity
 
+    def _pair_similarity(a: list[float], b: list[float]) -> float:
+        # Mixed-dimension stores (e.g. after an embedding-model change) must not
+        # abort the whole consolidation cycle: a dimension-mismatched pair simply
+        # cannot belong to the same cluster, so it scores 0.0 instead of raising.
+        try:
+            return similarity_fn(a, b)
+        except (DimensionMismatchError, ZeroDivisionError):
+            return 0.0
+
     n = len(items)
     cluster_id: list[int] = list(range(n))
 
     for i in range(n):
         for j in range(i + 1, n):
-            sim = similarity_fn(items[i][1], items[j][1])
+            sim = _pair_similarity(items[i][1], items[j][1])
             if sim >= similarity_threshold:
                 cid_i = cluster_id[i]
                 cid_j = cluster_id[j]
@@ -87,7 +96,7 @@ def complete_linkage_cluster(
                 i_members = [k for k in range(n) if cluster_id[k] == cid_i]
                 j_members = [k for k in range(n) if cluster_id[k] == cid_j]
                 can_merge = all(
-                    similarity_fn(items[a][1], items[b][1]) >= similarity_threshold
+                    _pair_similarity(items[a][1], items[b][1]) >= similarity_threshold
                     for a in i_members
                     for b in j_members
                 )
@@ -510,9 +519,17 @@ def consolidate_cycle(
     if namespace is None:
         try:
             existing_namespaces = storage.list_namespaces()
-        except Exception:
+        except Exception as exc:
+            # Fail closed: if we cannot enumerate namespaces we cannot prove the
+            # store is single-tenant, so refuse the ambiguous namespace=None path
+            # rather than risk clustering + relocating other tenants' entries into
+            # "default". A transient enumeration failure skips one maintenance
+            # cycle, which is safe; a silent cross-tenant merge is not.
             logger.warning("consolidation_list_namespaces_failed", exc_info=True)
-            existing_namespaces = []
+            raise ValueError(
+                "namespace required for consolidate_cycle: could not enumerate "
+                "namespaces to verify the store is single-tenant"
+            ) from exc
         if len(existing_namespaces) > 1:
             raise ValueError(
                 "namespace required for consolidate_cycle on multi-tenant stores: "

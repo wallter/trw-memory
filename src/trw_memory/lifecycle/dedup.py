@@ -13,6 +13,7 @@ from typing import Literal, NamedTuple
 import structlog
 
 from trw_memory.embeddings.interface import EmbeddingProvider
+from trw_memory.exceptions import DimensionMismatchError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import Assertion, MemoryEntry, MemoryStatus, ProtectionTier
 from trw_memory.retrieval.dense import cosine_similarity
@@ -154,7 +155,13 @@ def check_duplicate(
         if vec is None:
             continue
 
-        sim = cosine_similarity(new_vector, vec)
+        try:
+            sim = cosine_similarity(new_vector, vec)
+        except DimensionMismatchError:
+            # Mixed-dimension store (e.g. after an embedding-model change): a
+            # candidate with a different vector width cannot be a duplicate, so
+            # skip it instead of aborting the whole dedup pass with an exception.
+            continue
         if sim > best_similarity:
             best_similarity = sim
             best_id = entry.id
