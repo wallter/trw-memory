@@ -143,9 +143,15 @@ class RetryQueue:
                 remaining.append(record)
                 failed += 1
 
-        # Write results back under lock.
+        # Write results back under lock. Re-read first and re-append any records
+        # enqueued during the lock-free processing window above: drain snapshots
+        # the queue under the lock, releases it to publish/sleep, then re-acquires
+        # to write. Overwriting with `remaining` alone would silently drop a
+        # record that enqueue() appended in that window (TOCTOU data loss).
         with self._lock:
-            self._write_all(remaining)
+            processed_keys = {self._record_key(r) for r in entries}
+            new_arrivals = [r for r in self._read_all() if self._record_key(r) not in processed_keys]
+            self._write_all(remaining + new_arrivals)
         return {"drained": drained, "failed": failed, "skipped": skipped}
 
     def clear(self) -> None:
@@ -283,6 +289,17 @@ class RetryQueue:
             handle.flush()
             os.fsync(handle.fileno())
         tmp_path.replace(self._path)
+
+    @staticmethod
+    def _record_key(record: QueueRecord) -> tuple[str, str]:
+        """Stable identity for a record across a drain read/write cycle.
+
+        ``(entry_id, queued_at)`` survives the ``retry_count`` mutation drain
+        applies, so a record processed this cycle is still matched after its
+        counter changes — while a record enqueued during the lock-free window
+        (a fresh ``queued_at``) is recognised as a new arrival and preserved.
+        """
+        return (record["entry_id"], record["queued_at"])
 
     @staticmethod
     def _serialized_size(entry: QueueRecord) -> int:

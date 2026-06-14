@@ -528,14 +528,20 @@ class TestDrainLockNotHeldDuringSleep:
         with patch("trw_memory.sync.retry_queue.time.sleep", side_effect=fake_sleep):
             queue.drain(lambda _: False)
 
-        # The key assertion: enqueue must have completed without deadlock.
-        # (Note: the drain's final _write_all may overwrite the concurrent enqueue's
-        # file write — that is an acknowledged limitation of the JSONL design and
-        # orthogonal to the lock-starve fix. The bug we are guarding against is
-        # the lock being held during sleep, causing enqueue to block indefinitely.)
+        # First guarantee: enqueue completes without deadlock (lock released
+        # before sleep).
         assert concurrent_enqueue_completed.is_set(), (
             "Concurrent enqueue during drain backoff must complete without deadlock — "
             "drain must release self._lock before sleeping"
+        )
+        # Second guarantee (TOCTOU data-loss fix): the record enqueued during the
+        # lock-free window must SURVIVE drain's write-back. drain now re-reads the
+        # queue and re-appends new arrivals instead of clobbering them with
+        # `remaining` alone. This was previously an acknowledged JSONL limitation.
+        surviving = {r["entry_id"] for r in queue.snapshot()}
+        assert "M-concurrent" in surviving, (
+            "A record enqueued during the drain window must not be lost when drain "
+            "writes back its results"
         )
 
     def test_depth_not_blocked_during_drain_publish(self, tmp_path: Path) -> None:
