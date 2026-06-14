@@ -281,3 +281,59 @@ class TestSQLiteAssertionsUpdate:
         assert loaded is not None
         assert len(loaded.assertions) == 1
         db.close()
+
+
+@pytest.mark.integration
+class TestSQLiteCorruptTimestampDegrades:
+    """SQLite row mapper must fail open on a corrupt timestamp like yaml_backend.
+
+    Parity with TestCorruptTimestampDegrades: the 2026-06-10 WAL-reset byte-shift
+    corruption class (``'026-04-13T00:00:00+00:002'``) previously crashed the
+    whole SQLite ``get``/``list_entries`` read because ``_row_mapper`` used the
+    strict ``parse_dt``. It now degrades the bad field instead of raising.
+    """
+
+    _BAD_TS = "026-04-13T00:00:00+00:002"
+
+    def _store(self, db: SQLiteBackend, entry_id: str) -> None:
+        db.store(
+            MemoryEntry(
+                id=entry_id,
+                content=f"content for {entry_id}",
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+
+    def test_corrupt_created_at_does_not_crash_get(self, tmp_path: Path) -> None:
+        db = SQLiteBackend(tmp_path / "test.db")
+        self._store(db, "M-sql-ts-bad")
+        # Corrupt the persisted created_at directly, mimicking the WAL-reset shift.
+        db._conn.execute(
+            "UPDATE memories SET created_at = ? WHERE id = ?",
+            (self._BAD_TS, "M-sql-ts-bad"),
+        )
+        db._conn.commit()
+
+        loaded = db.get("M-sql-ts-bad")
+
+        assert loaded is not None  # no ValueError / crash
+        assert loaded.created_at.tzinfo is not None  # degraded to a usable tz-aware datetime
+        assert loaded.updated_at.year >= 2026  # valid sibling field untouched
+        db.close()
+
+    def test_one_corrupt_row_does_not_collapse_listing(self, tmp_path: Path) -> None:
+        db = SQLiteBackend(tmp_path / "test.db")
+        self._store(db, "M-sql-good")
+        self._store(db, "M-sql-bad")
+        db._conn.execute(
+            "UPDATE memories SET created_at = ? WHERE id = ?",
+            (self._BAD_TS, "M-sql-bad"),
+        )
+        db._conn.commit()
+
+        ids = {e.id for e in db.list_entries()}
+
+        assert "M-sql-good" in ids
+        assert "M-sql-bad" in ids  # corrupt row degrades in place, not dropped
+        db.close()

@@ -7,6 +7,7 @@ The column order is defined by :data:`trw_memory.storage._shared.ENTRY_COLUMNS`.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Literal, TypeVar, cast
 
 from pydantic import BaseModel, ValidationError
@@ -21,7 +22,7 @@ from trw_memory.models.memory import (
     ProtectionTier,
 )
 from trw_memory.storage._parsing import (
-    parse_dt,
+    parse_dt_safe,
     parse_float,
     parse_json_dict_int,
     parse_json_dict_str,
@@ -123,6 +124,14 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
     # as strings, and Assertion has strict=True on the model.
     assertions = parse_model_list(assertions_json, Assertion, strict=False)
 
+    # Fail-open timestamp parsing (mirrors yaml_backend): a single WAL-reset-
+    # corrupted timestamp degrades that one field instead of raising and crashing
+    # the whole row read (the 2026-06-10 corruption class that took down
+    # list_entries). created_at/updated_at are required, so they fall back to now.
+    _now = datetime.now(timezone.utc)
+    created_at_val = parse_dt_safe(created_at_s, default=_now) or _now
+    updated_at_val = parse_dt_safe(updated_at_s, default=_now) or _now
+
     return MemoryEntry(
         id=str(id_),
         content=str(content),
@@ -133,13 +142,13 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         status=MemoryStatus(status),
         recurrence=int(str(recurrence)),
         namespace=str(namespace),
-        created_at=parse_dt(created_at_s),
-        updated_at=parse_dt(updated_at_s),
-        last_accessed_at=parse_dt(last_accessed_s) if last_accessed_s else None,
+        created_at=created_at_val,
+        updated_at=updated_at_val,
+        last_accessed_at=parse_dt_safe(last_accessed_s, default=None) if last_accessed_s else None,
         # PRD-CORE-194: absent valid_from (pre-migration row) => open validity,
         # back-filled to created_at by the model ``mode="before"`` validator.
-        valid_from=parse_dt(valid_from_s) if valid_from_s else parse_dt(created_at_s),
-        invalid_from=parse_dt(invalid_from_s) if invalid_from_s else None,
+        valid_from=(parse_dt_safe(valid_from_s, default=created_at_val) or created_at_val) if valid_from_s else created_at_val,
+        invalid_from=parse_dt_safe(invalid_from_s, default=None) if invalid_from_s else None,
         invalidated_by=str(invalidated_by_raw) if invalidated_by_raw else None,
         access_count=int(str(access_count)),
         session_count=int(str(session_count)) if session_count else 0,
@@ -177,7 +186,7 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         outcome_correlation=str(outcome_correlation_raw) if outcome_correlation_raw else "",
         sync_hash=str(sync_hash_raw) if sync_hash_raw else "",
         sync_seq=int(str(sync_seq_raw)) if sync_seq_raw else 0,
-        last_synced_at=parse_dt(last_synced_at_raw) if last_synced_at_raw else None,
+        last_synced_at=parse_dt_safe(last_synced_at_raw, default=None) if last_synced_at_raw else None,
         recall_count=int(str(recall_count_raw)) if recall_count_raw else 0,
         helpful_count=int(str(helpful_count_raw)) if helpful_count_raw else 0,
         unhelpful_count=int(str(unhelpful_count_raw)) if unhelpful_count_raw else 0,
