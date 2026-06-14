@@ -4,6 +4,19 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dedup-on-write no longer silently no-ops when embeddings are unavailable.**
+  Previously `check_duplicate` returned `store` (accept) for every entry when no
+  embedder was available, so a store with embeddings disabled could accumulate
+  unbounded exact duplicates (observed: one project's active store reached ~79%
+  near-duplicates, with identical summaries repeated dozens of times). It now
+  falls back to an exact normalized-text (whitespace-collapsed, casefolded)
+  duplicate check — zero false-positive risk — and returns `skip` on an exact
+  active-entry match. Gated by the new `dedup_lexical_fallback` config flag
+  (default `True`; set `False` to restore the legacy no-op). Embedding-based
+  semantic dedup is unchanged when an embedder is available.
+
 ## [0.9.9] — 2026-06-14
 
 ### Security

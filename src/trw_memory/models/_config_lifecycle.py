@@ -22,6 +22,14 @@ class _LifecycleConfigMixin:
     dedup_merge_threshold: float = Field(
         default=0.85, ge=0.0, le=1.0, description="Similarity threshold for merging similar entries"
     )
+    dedup_lexical_fallback: bool = Field(
+        default=True,
+        description=(
+            "When embeddings are unavailable, fall back to exact normalized-text "
+            "dedup so identical entries are still caught instead of silently "
+            "accumulating. Set False to restore legacy no-op-without-embeddings."
+        ),
+    )
 
     # Tiers
     hot_max_entries: int = Field(default=50, gt=0, description="Maximum entries in the hot tier")

@@ -7,6 +7,7 @@ Gracefully degrades to no-op when embeddings are unavailable.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Literal, NamedTuple
 
@@ -19,6 +20,44 @@ from trw_memory.models.memory import Assertion, MemoryEntry, MemoryStatus, Prote
 from trw_memory.retrieval.dense import cosine_similarity
 
 logger = structlog.get_logger(__name__)
+
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _normalize_text(text: str) -> str:
+    """Collapse whitespace + casefold for exact-duplicate comparison.
+
+    Used by the embedding-free lexical dedup fallback: two entries whose
+    content+detail normalise to the same string are unambiguous exact
+    duplicates (zero false-positive risk), so they can be deduped even when no
+    embedder is available.
+    """
+    return _WHITESPACE_RE.sub(" ", text).strip().casefold()
+
+
+def _lexical_duplicate(
+    content: str,
+    detail: str,
+    entries: list[MemoryEntry],
+) -> DedupResult | None:
+    """Embedding-free exact-text duplicate check (degraded-path fallback).
+
+    Returns a ``skip`` DedupResult for the first ACTIVE entry whose normalised
+    content+detail exactly matches the incoming text, else None. Exact match is
+    treated as similarity 1.0. This is the guard that stops identical entries
+    accumulating when embeddings are unavailable (the silent-no-op gap that let
+    one project's store reach ~79% near-duplicates).
+    """
+    target = _normalize_text(f"{content} {detail}")
+    if not target:
+        return None
+    for entry in entries:
+        if entry.status != MemoryStatus.ACTIVE:
+            continue
+        if _normalize_text(f"{entry.content} {entry.detail}") == target:
+            return DedupResult("skip", entry.id, 1.0)
+    return None
+
 
 # Strength ordering for protection-preserving merges (higher index = stronger).
 _PROTECTION_TIER_ORDER: tuple[str, ...] = (
@@ -113,6 +152,7 @@ def check_duplicate(
     cfg = config or MemoryConfig()
     skip_threshold = cfg.dedup_skip_threshold
     merge_threshold = cfg.dedup_merge_threshold
+    lexical_fallback = getattr(cfg, "dedup_lexical_fallback", True)
 
     # Validate thresholds — merge must be strictly less than skip
     if merge_threshold >= skip_threshold:
@@ -124,8 +164,15 @@ def check_duplicate(
         skip_threshold = 0.95
         merge_threshold = 0.85
 
-    # Check embedder availability
+    # Check embedder availability. When embeddings are unavailable, fall back to
+    # an exact normalized-text match (zero false-positive risk) instead of a
+    # silent no-op — otherwise identical entries accumulate unchecked.
     if embedder is None or not embedder.available():
+        if lexical_fallback:
+            lexical = _lexical_duplicate(content, detail, entries)
+            if lexical is not None:
+                logger.debug("dedup_lexical_match", existing_id=lexical.existing_id, reason="embeddings_unavailable")
+                return lexical
         logger.debug("dedup_embed_unavailable", reason="no_embedder_or_unavailable")
         return DedupResult("store", None, 0.0)
 
@@ -137,6 +184,11 @@ def check_duplicate(
     new_vector = embedder.embed(new_text)
 
     if new_vector is None:
+        if lexical_fallback:
+            lexical = _lexical_duplicate(content, detail, entries)
+            if lexical is not None:
+                logger.debug("dedup_lexical_match", existing_id=lexical.existing_id, reason="embed_returned_none")
+                return lexical
         logger.debug("dedup_embed_unavailable", text_len=len(new_text))
         return DedupResult("store", None, 0.0)
 
