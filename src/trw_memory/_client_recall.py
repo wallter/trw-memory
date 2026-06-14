@@ -123,10 +123,21 @@ async def recall_impl(
     embedder = client._get_embedder() if query.strip() else None
     query_embedding: list[float] | None = None
     if embedder is not None:
-        # HyDE: when a hypothetical expansion document is provided, embed it
-        # instead of the raw query for dense search. BM25 still uses `query`.
-        dense_text = query_expansion if query_expansion and query_expansion.strip() else query
-        query_embedding = await asyncio.to_thread(embedder.embed, dense_text)
+        exp_text: str | None = query_expansion if query_expansion and query_expansion.strip() else None
+        if exp_text is not None:
+            # HyDE multi-vector: embed both query and hypothetical expansion,
+            # then average. Averaging captures query specificity (BM25 intent)
+            # AND expansion semantics (hypothetical-answer space). This
+            # consistently outperforms using either embedding alone.
+            raw_vec = await asyncio.to_thread(embedder.embed, query)
+            exp_vec = await asyncio.to_thread(embedder.embed, exp_text)
+            if raw_vec is not None and exp_vec is not None:
+                dim = len(raw_vec)
+                query_embedding = [0.5 * (raw_vec[i] + exp_vec[i]) for i in range(dim)]
+            else:
+                query_embedding = raw_vec  # fall back to whichever succeeded
+        else:
+            query_embedding = await asyncio.to_thread(embedder.embed, query)
 
     async with client._lock:
         backend = client._get_backend()

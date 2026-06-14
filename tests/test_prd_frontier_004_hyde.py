@@ -37,8 +37,8 @@ class TestQueryExpansionParameter:
         await client.close()
 
     @pytest.mark.asyncio
-    async def test_query_expansion_uses_expansion_for_dense_embedding(self) -> None:
-        """Dense embedding must use query_expansion text, not the raw query."""
+    async def test_query_expansion_embeds_both_query_and_expansion(self) -> None:
+        """Multi-vector HyDE: both query and expansion must be embedded and averaged."""
         from trw_memory._client_recall import recall_impl
         from trw_memory.client import MemoryClient
 
@@ -64,7 +64,10 @@ class TestQueryExpansionParameter:
             except Exception:
                 pass
 
-        # The dense embedding must have been called with the expansion text
+        # Both the original query and the expansion must be embedded for averaging
+        assert "original query" in embedded_texts, (
+            f"Expected original query to be embedded, got: {embedded_texts}"
+        )
         assert expansion in embedded_texts, (
             f"Expected expansion text to be embedded, got: {embedded_texts}"
         )
