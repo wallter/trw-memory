@@ -270,10 +270,14 @@ def entry_utility(
         base_impact = feedback_decay_score(base_impact, recall_ct, helpful_ct)
 
     if cfg.lifecycle_use_fsrs:
+        # FSRS measures retrieval practice count; recall_count (incremented by
+        # the recall API) is more accurate than recurrence (re-store count).
+        # Fall back to recurrence when recall_count is zero (cold-start entry).
+        fsrs_practice = max(recall_ct, recurrence)
         return compute_fsrs_utility_score(
             importance=base_impact,
             elapsed_days=float(days_unused),
-            recurrence=recurrence,
+            recurrence=fsrs_practice,
         )
 
     return compute_utility_score(
