@@ -157,6 +157,12 @@ def test_all_exports_complete() -> None:
         "MemoryIndex",
         "MemoryNotFoundError",
         "MemoryStatus",
+        "NoOpQuestionGenerator",
+        "PIIBlockError",
+        "PoisoningError",
+        "QuestionGenerator",
+        "RateLimitError",
+        "SchemaValidationError",
         "StorageError",
         "ToolAlreadyRegisteredError",
         "__version__",
@@ -179,6 +185,10 @@ def test_exceptions_inherit_properly() -> None:
         MemoryConnectionError,
         MemoryError,
         MemoryNotFoundError,
+        PIIBlockError,
+        PoisoningError,
+        RateLimitError,
+        SchemaValidationError,
         StorageError,
         ToolAlreadyRegisteredError,
     )
@@ -195,6 +205,12 @@ def test_exceptions_inherit_properly() -> None:
     assert issubclass(EncryptionUnavailableError, MemoryError)
     assert issubclass(KeyRotationError, MemoryError)
     assert issubclass(MasterKeyNotFoundError, MemoryError)
+    # Store-path exceptions are now top-level exported so callers can catch them
+    # without reaching into trw_memory.exceptions (they all subclass MemoryError).
+    assert issubclass(SchemaValidationError, MemoryError)
+    assert issubclass(PIIBlockError, MemoryError)
+    assert issubclass(PoisoningError, MemoryError)
+    assert issubclass(RateLimitError, MemoryError)
 
 
 def test_memory_status_is_enum() -> None:
