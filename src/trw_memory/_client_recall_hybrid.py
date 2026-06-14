@@ -128,6 +128,21 @@ async def try_hybrid_recall(
 
         stored_embeddings = backend.get_stored_embeddings([entry.id for entry in all_entries])
 
+        # PRD-CORE-195 FR04: when HyPE is enabled, also load each candidate
+        # parent's ``{parent}#hype{n}`` sibling vectors and merge them into the
+        # dense pool. hybrid_search collapses those hits back to the parent id
+        # before fusion. Bounded by the candidate pool size; no extra namespace
+        # scan. Skipped entirely (bit-for-bit unchanged) when hype_enabled=False.
+        if client._config.hype_enabled:
+            sibling_ids: list[str] = []
+            for entry in all_entries:
+                sibling_ids.extend(backend.hype_sibling_ids(entry.id))
+            if sibling_ids:
+                stored_embeddings = {
+                    **stored_embeddings,
+                    **backend.get_stored_embeddings(sibling_ids),
+                }
+
     namespace_size = len(all_entries)
     if not all_entries:
         _emit_hybrid_recall_telemetry(
@@ -238,6 +253,10 @@ async def try_hybrid_recall(
             rerank=client._config.recall_rerank,
             rerank_model=client._config.recall_rerank_model,
             rerank_candidates=client._config.recall_rerank_candidates,
+            # PRD-CORE-195 FR04: collapse ``#hype`` dense hits to their parent
+            # before fusion. Gated on hype_enabled so the disabled arm runs no
+            # collapse pass (NFR05 byte-identical ordering).
+            collapse_hype=client._config.hype_enabled,
             # When prefix was stripped, the cross-encoder also uses the
             # stripped query — passing the original "latest guidance on X"
             # confuses the ms-marco reranker because memory entries don't

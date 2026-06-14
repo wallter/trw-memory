@@ -290,6 +290,44 @@ class MemoryConfig(BaseSettings):
         ),
     )
 
+    # HyPE — index-time hypothetical-question expansion (PRD-CORE-195).
+    # All three default to the pre-HyPE behaviour bit-for-bit: with
+    # ``hype_enabled=False`` the store path writes zero sibling vectors and the
+    # recall path runs no collapse/dedup pass (NFR05). The question generator is
+    # injected by the caller; the engine ships no LLM dependency.
+    hype_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("hype_enabled", "memory_hype_enabled"),
+        description=(
+            "PRD-CORE-195: when True, generate hypothetical questions at WRITE "
+            "time (via an injected QuestionGenerator), embed them, and store "
+            "them as secondary '{parent_id}#hype{n}' retrieval vectors that fuse "
+            "back to the parent entry at recall. Default False = pre-HyPE "
+            "behaviour bit-for-bit (no siblings written, no collapse pass)."
+        ),
+    )
+    hype_questions_per_entry: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        validation_alias=AliasChoices("hype_questions_per_entry", "memory_hype_questions_per_entry"),
+        description=(
+            "PRD-CORE-195: maximum number of hypothetical-question sibling "
+            "vectors stored per entry when HyPE is enabled. The frontier-refresh "
+            "note recommends 3-5; default 3. Caps the per-store embedding cost."
+        ),
+    )
+    hype_min_question_chars: int = Field(
+        default=8,
+        ge=1,
+        validation_alias=AliasChoices("hype_min_question_chars", "memory_hype_min_question_chars"),
+        description=(
+            "PRD-CORE-195: minimum character length for a generated question to "
+            "be embedded + stored as a HyPE sibling. Shorter questions are "
+            "skipped (likely degenerate generator output). Default 8."
+        ),
+    )
+
     # Dedup
     dedup_enabled: bool = Field(default=True, description="Enable semantic deduplication")
     dedup_skip_threshold: float = Field(

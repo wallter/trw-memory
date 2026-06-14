@@ -60,6 +60,7 @@ def hybrid_search(
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
     rerank_candidates: int = 50,
     rerank_query: str | None = None,
+    collapse_hype: bool = False,
 ) -> list[MemoryEntry]:
     """Hybrid BM25 + vector search with configurable rank fusion.
 
@@ -161,6 +162,19 @@ def hybrid_search(
     entry_map: dict[str, MemoryEntry] = {e.id: e for e in entries}
     entry_ids: list[str] = list(entry_map.keys())
 
+    # PRD-CORE-195 FR04: when HyPE collapse is enabled, extend the dense
+    # candidate id pool with any synthetic ``{parent}#hype{n}`` ids present in
+    # stored_embeddings so dense_search can rank the sibling vectors. The
+    # collapse step (below) maps those hits back to their parent BEFORE fusion.
+    # When disabled, dense_entry_ids == entry_ids bit-for-bit (NFR05).
+    dense_entry_ids = entry_ids
+    if collapse_hype:
+        from trw_memory.retrieval._hype_collapse import hype_sibling_ids_in
+
+        sibling_ids = hype_sibling_ids_in(stored_embeddings)
+        if sibling_ids:
+            dense_entry_ids = [*entry_ids, *sibling_ids]
+
     rankings: list[list[tuple[str, float]]] = []
 
     # ---------------------------------------------------------------- BM25
@@ -172,12 +186,22 @@ def hybrid_search(
     if embedder is not None or query_embedding is not None or stored_embeddings:
         dense_results = dense_search(
             query=query,
-            entry_ids=entry_ids,
+            entry_ids=dense_entry_ids,
             embedder=embedder,
             query_embedding=query_embedding,
             stored_embeddings=stored_embeddings,
             top_k=vector_candidates,
         )
+        # PRD-CORE-195 FR04: collapse ``#hype`` hits to their parent id, deduped
+        # by best rank, dropping orphans whose parent is not in entry_map. Runs
+        # BEFORE fusion so every downstream stage sees only real parent ids and
+        # no synthetic id can ever leak to the caller.
+        if dense_results and collapse_hype:
+            from trw_memory.retrieval._hype_collapse import collapse_hype_ranking
+
+            dense_results, collapsed_hits = collapse_hype_ranking(dense_results, set(entry_map.keys()))
+            if collapsed_hits:
+                logger.debug("hype_parent_collapse", op="recall", collapsed_hits=collapsed_hits)
         if dense_results:
             rankings.append(dense_results)
 

@@ -49,6 +49,7 @@ from trw_memory.exceptions import (
     StorageError,
     ToolAlreadyRegisteredError,
 )
+from trw_memory.hype import NoOpQuestionGenerator, QuestionGenerator
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.events import MemoryEvent, MemoryEventType
 from trw_memory.models.memory import MemoryEntry, MemoryIndex, MemoryStatus
@@ -73,6 +74,8 @@ __all__ = [
     "MemoryIndex",
     "MemoryNotFoundError",
     "MemoryStatus",
+    "NoOpQuestionGenerator",
+    "QuestionGenerator",
     "StorageError",
     "ToolAlreadyRegisteredError",
     "__version__",

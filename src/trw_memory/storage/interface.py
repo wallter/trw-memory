@@ -377,6 +377,24 @@ class StorageBackend(ABC):
         """
         return {}
 
+    def hype_sibling_ids(self, parent_id: str) -> list[str]:
+        """Return a parent's ``{parent_id}#hype{n}`` HyPE sibling vector ids.
+
+        PRD-CORE-195. Backends with vector persistence should override this.
+        The default returns an empty list so the HyPE lifecycle path no-ops on
+        backends without vector support.
+        """
+        return []
+
+    def delete_hype_siblings(self, parent_id: str) -> int:
+        """Delete a parent's HyPE sibling vectors; return the count removed.
+
+        PRD-CORE-195. Idempotent. Backends with vector persistence should
+        override this. The default returns ``0`` (no-op) so forget/update can
+        always call it without branching on backend capabilities.
+        """
+        return 0
+
     def store_many(self, entries: list[MemoryEntry]) -> int:
         """Bulk-insert entries in a single transaction.
 

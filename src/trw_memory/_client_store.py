@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
+from trw_memory._client_hype import expand_hype_siblings
 from trw_memory.exceptions import SchemaValidationError, StorageError
 from trw_memory.graph import schedule_graph_update
 from trw_memory.lifecycle.tiers._runtime import embedding_has_consumer, remember_entry_in_tiers
@@ -187,6 +188,17 @@ async def store_impl(
                 backend.store(entry)
                 if embedding is not None:
                     backend.upsert_vector(entry.id, embedding)
+                # PRD-CORE-195 FR03/FR05: generate + store HyPE sibling vectors
+                # inside the SAME transaction (purge-then-regenerate on UPDATE).
+                # Gated on hype_enabled; fail-open so the canonical row + primary
+                # vector always commit even if generation/embedding raises.
+                expand_hype_siblings(
+                    backend=backend,
+                    config=client._config,
+                    entry=entry,
+                    embedder=embedder,
+                    generator=client._question_generator,
+                )
         except Exception as exc:
             raise StorageError(f"failed to persist entry+vector for {entry.id!r}; transaction rolled back") from exc
         try:

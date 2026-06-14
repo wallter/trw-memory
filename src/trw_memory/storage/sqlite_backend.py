@@ -135,10 +135,12 @@ from trw_memory.storage._resilient_fetch import (
 
 # Vector operations extracted to _vector_ops.py (PRD-DIST-245 batch 85).
 from trw_memory.storage._vector_ops import (
+    delete_hype_siblings as _vec_ops_delete_hype_siblings,
     delete_vector as _vec_ops_delete_vector,
     delete_vector_internal as _vec_ops_delete_vector_internal,
     existing_vector_ids as _vec_ops_existing_vector_ids,
     get_stored_embeddings as _vec_ops_get_stored_embeddings,
+    hype_sibling_ids as _vec_ops_hype_sibling_ids,
     search_vectors as _vec_ops_search_vectors,
     upsert_vector as _vec_ops_upsert_vector,
     vector_exists as _vec_ops_vector_exists,
@@ -807,4 +809,25 @@ class SQLiteBackend(StorageBackend):
         """Bulk lookup of packed embedding blobs."""
         return _vec_ops_get_stored_embeddings(
             self._conn, self._lock, vec_available=self._vec_available, entry_ids=entry_ids
+        )
+
+    def hype_sibling_ids(self, parent_id: str) -> list[str]:
+        """PRD-CORE-195: stored ``{parent_id}#hype{n}`` sibling ids for a parent."""
+        return _vec_ops_hype_sibling_ids(
+            self._conn, self._lock, vec_available=self._vec_available, parent_id=parent_id
+        )
+
+    def delete_hype_siblings(self, parent_id: str) -> int:
+        """PRD-CORE-195: purge a parent's HyPE sibling vectors (idempotent).
+
+        Defers the commit when inside a ``transaction()`` block so the deletes
+        batch into the caller's outermost COMMIT (atomicity parity with
+        ``delete_vector``/``upsert_vector``).
+        """
+        return _vec_ops_delete_hype_siblings(
+            self._conn,
+            self._lock,
+            vec_available=self._vec_available,
+            parent_id=parent_id,
+            skip_commit=self._skip_commit_depth != 0,
         )

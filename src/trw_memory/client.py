@@ -26,6 +26,7 @@ import structlog
 from typing_extensions import NotRequired
 
 from trw_memory.embeddings.interface import EmbeddingProvider
+from trw_memory.hype import NoOpQuestionGenerator, QuestionGenerator
 from trw_memory.exceptions import MemoryConnectionError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -193,6 +194,7 @@ class MemoryClient(OrgSharedAliasMixin):
     _sse_subscriber: SSESubscriber | None
     _sse_subscriber_started: bool
     _tier_manager: object | None
+    _question_generator: QuestionGenerator
 
     def __init__(
         self,
@@ -201,6 +203,7 @@ class MemoryClient(OrgSharedAliasMixin):
         timeout: float = 5.0,
         *,
         db_path: Path | str | None = None,
+        question_generator: QuestionGenerator | None = None,
     ) -> None:
         """Initialise a MemoryClient with namespace isolation and mode selection.
 
@@ -216,10 +219,17 @@ class MemoryClient(OrgSharedAliasMixin):
         ``namespace`` column, so the on-disk file location is decoupled from
         the queried namespace — used by trw-distill to seed the MCP-read flat
         store at ``<trw_dir>/memory/memory.db`` under ``namespace="default"``.
+
+        ``question_generator`` (PRD-CORE-195) is the optional, injected HyPE
+        hypothetical-question generator. When ``None`` (the default), a
+        :class:`~trw_memory.hype.NoOpQuestionGenerator` is bound so the engine
+        stays LLM-free; HyPE expansion is additionally gated on
+        ``MemoryConfig.hype_enabled`` (default ``False``).
         """
         from trw_memory._client_lifecycle import init_client as _impl
 
         _impl(self, namespace, mode=mode, timeout=timeout, db_path=db_path)
+        self._question_generator = question_generator or NoOpQuestionGenerator()
 
     def __repr__(self) -> str:
         return f"MemoryClient(namespace={self._namespace!r}, mode={self._resolved_mode!r})"

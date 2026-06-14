@@ -4,7 +4,7 @@ Belongs to the ``sqlite_backend.py`` facade. Re-exported there for
 back-compat — ``SQLiteBackend.upsert_vector`` etc. become 1-line
 delegators that pass instance state.
 
-7 helpers covering vec_index/vec_memories CRUD + KNN search:
+Helpers covering vec_index/vec_memories CRUD + KNN search:
 
 - ``delete_vector_internal`` — internal "remove if present" used by both
   the public delete + by store/update flows that re-write a vector.
@@ -135,6 +135,75 @@ def existing_vector_ids(
             logger.warning("existing_vector_ids_query_failed", exc_info=True)
         return set()
     return {str(row[0]) for row in rows}
+
+
+def _hype_like_pattern(parent_id: str) -> str:
+    """SQL LIKE pattern matching a parent's ``{parent_id}#hype{n}`` siblings.
+
+    ``#`` is not a LIKE wildcard, and ``%`` after it captures every ``hype{n}``
+    suffix. Parent ids are opaque app strings; a parent id that itself contained
+    LIKE wildcards (``%``/``_``) could over-match, but parent ids here are
+    engine-generated uuids/keys, so no ESCAPE clause is needed.
+    """
+    return f"{parent_id}#hype%"
+
+
+def hype_sibling_ids(
+    conn: Any,
+    lock: threading.Lock,
+    *,
+    vec_available: bool,
+    parent_id: str,
+) -> list[str]:
+    """Return the stored ``{parent_id}#hype{n}`` sibling ids for *parent_id*.
+
+    PRD-CORE-195 FR05: enumerates a parent's HyPE siblings via a bounded
+    ``LIKE`` scan on ``vec_index``. Empty list when sqlite-vec is unavailable.
+    """
+    if not vec_available:
+        return []
+    try:
+        with lock:
+            rows = conn.execute(
+                "SELECT entry_id FROM vec_index WHERE entry_id LIKE ?",
+                (_hype_like_pattern(parent_id),),
+            ).fetchall()
+    except sqlite3.Error as exc:
+        if _is_optional_vec_unavailable_error(exc):
+            logger.debug("hype_sibling_ids_query_failed", exc_info=True)
+        else:
+            logger.warning("hype_sibling_ids_query_failed", exc_info=True)
+        return []
+    return [str(row[0]) for row in rows]
+
+
+def delete_hype_siblings(
+    conn: Any,
+    lock: threading.Lock,
+    *,
+    vec_available: bool,
+    parent_id: str,
+    skip_commit: bool = False,
+) -> int:
+    """Delete all ``{parent_id}#hype{n}`` sibling vectors for *parent_id*.
+
+    PRD-CORE-195 FR05: idempotent purge used on forget + on UPDATE
+    (purge-then-regenerate). Returns the number of sibling rows removed.
+    No-op (returns 0) when sqlite-vec is unavailable. When ``skip_commit`` is
+    True the deletes batch into the caller's open ``transaction()`` COMMIT —
+    same defer-commit contract as :func:`delete_vector`.
+    """
+    if not vec_available:
+        return 0
+    sibling_ids = hype_sibling_ids(conn, lock, vec_available=vec_available, parent_id=parent_id)
+    if not sibling_ids:
+        return 0
+    with lock:
+        for sibling_id in sibling_ids:
+            delete_vector_internal(conn, sibling_id)
+        if not skip_commit:
+            conn.commit()
+    return len(sibling_ids)
 
 
 def upsert_vector(

@@ -77,6 +77,10 @@ async def forget_impl(
                     continue
                 if backend.delete(candidate.id):
                     deleted_count += 1
+                    # PRD-CORE-195 FR05: purge the parent's HyPE sibling vectors
+                    # so they cannot linger as orphan dense hits. Idempotent;
+                    # no-op when vec support / siblings are absent.
+                    backend.delete_hype_siblings(candidate.id)
                     _c.remove_entry_from_tiers(client._config, client._namespace, candidate.id)
             deleted_count += _c.delete_quarantined_entries(client._config, namespace=client._namespace, actor=actor)
             append_audit_event(
@@ -123,6 +127,8 @@ async def forget_impl(
             raise MemoryNotFoundError(f"Memory entry {memory_id!r} not found in namespace {client._namespace!r}")
         remote_id = existing.remote_id
         backend.delete(memory_id)
+        # PRD-CORE-195 FR05: purge the parent's HyPE sibling vectors on forget.
+        backend.delete_hype_siblings(memory_id)
         _c.remove_entry_from_tiers(client._config, client._namespace, memory_id)
         append_audit_event(
             client._config,
