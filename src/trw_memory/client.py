@@ -361,6 +361,7 @@ class MemoryClient(OrgSharedAliasMixin):
         exclude_historical_only: bool | None = None,
         as_of: datetime | None = None,
         include_superseded: bool = False,
+        include_graph_expansion: bool = False,
     ) -> list[MemoryResultDict]:
         """Search memories by keyword query using hybrid retrieval.
 
@@ -392,6 +393,7 @@ class MemoryClient(OrgSharedAliasMixin):
             exclude_historical_only=exclude_historical_only,
             as_of=as_of,
             include_superseded=include_superseded,
+            include_graph_expansion=include_graph_expansion,
         )
 
     def _get_embedder(self) -> EmbeddingProvider | None:

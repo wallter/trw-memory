@@ -101,6 +101,7 @@ async def recall_impl(
     exclude_historical_only: bool | None = None,
     as_of: datetime | None = None,
     include_superseded: bool = False,
+    include_graph_expansion: bool = False,
 ) -> list[MemoryResultDict]:
     """Async impl for :meth:`MemoryClient.recall`.
 
@@ -157,6 +158,11 @@ async def recall_impl(
         as_of=as_of,
         include_superseded=include_superseded,
     )
+    if hybrid_results is not None and include_graph_expansion:
+        from trw_memory._client_recall_graph import graph_expand_results
+
+        async with client._lock:
+            hybrid_results = graph_expand_results(client, hybrid_results)
     if hybrid_results is not None:
         filtered = [r for r in hybrid_results if r["score"] >= min_score]
         # PRD-DIST-2049 c802: apply admission filter on the FULL hybrid candidate
@@ -227,6 +233,11 @@ async def recall_impl(
         return final
 
     results = await client._fallback_recall(query, limit, tags, min_score)
+    if include_graph_expansion:
+        from trw_memory._client_recall_graph import graph_expand_results
+
+        async with client._lock:
+            results = graph_expand_results(client, results)
     # PRD-DIST-2049 c802: apply filter on fallback candidates AND tier candidates
     # before merge, mirroring the hybrid path.
     results = apply_admission_filter(
