@@ -6,12 +6,29 @@ All notable changes to the TRW Memory package.
 
 ### Added
 
+- **`MemoryClient.store_many(entries)` — dict-based bulk insert.** A convenience
+  wrapper over `bulk_store` that accepts a list of plain `store()`-shaped dicts
+  (rather than `BulkStoreRequest` objects), runs the full validation + security
+  gate + FTS dual-write path, and returns the number of rows written. Inserted
+  rows are immediately searchable via `search_fts`/`recall`.
+- **`MemoryClient.search_fts(query, ...)` — SQLite FTS5 keyword search.** An
+  O(log N) inverted-index BM25 lookup over `content`/`detail`/`tags` for
+  pure-keyword queries that do not need hybrid ranking, exposed on both the
+  client and `SQLiteBackend`. Degrades to an empty result when FTS5 is
+  unavailable.
 - **Bi-temporal validity fields on `MemoryEntry`.** Entries now carry explicit
   validity-interval metadata so callers can distinguish when a fact was recorded
   from the time window over which it is asserted to hold.
 - **CombMAX fusion as a configurable retrieval combiner.** A max-reciprocal-rank
   fusion strategy is selectable alongside the default RRF, preserving
   single-ranker champions on hard-tail queries instead of diluting them.
+- **Embedding-download disclosure + offline switch (PRD-QUAL-110).** A
+  network-capable embedding load now emits a disclosure log line before any
+  huggingface.co fetch. `TRW_OFFLINE=1` / `HF_HUB_OFFLINE=1` (or
+  `local_only: true`) force `local_files_only=True`; when the model is not
+  cached the standalone engine raises a clear `LocalOnlyViolationError`
+  explaining how to pre-download (it does not silently fall back to keyword-only
+  recall — that graceful path lives in the trw-mcp embedder wrapper).
 
 ### Changed
 
@@ -19,6 +36,22 @@ All notable changes to the TRW Memory package.
   poisoning size-anomaly path no longer quarantines against a cold/empty
   reference distribution by default, so legitimate longer learnings are not
   dropped on the first batch; `strict` remains opt-in.
+
+### Security
+
+- **`memory.db` is created mode `0600` (owner-only) (PRD-QUAL-110).** The
+  file-backed SQLite store is `chmod 0600` on creation, mirroring the trw-mcp
+  pins-file hardening; a non-POSIX platform degrades to a `db_chmod_failed`
+  warning. In-memory (`:memory:`) backends have no file to harden.
+- **Caller-controlled anomaly-quarantine bypass removed (`security/runtime.py`,
+  commit `209a47853`).** The anomaly quarantine could previously be bypassed by
+  any caller setting `metadata['source']` to a configured prefix (e.g.
+  `distilled:`). Because `entry.metadata` is caller-supplied, a poisoned outlier
+  could skip the detector by spoofing one field. `MemoryEntry` has no
+  system-owned trusted-source flag, so the runtime bypass is removed entirely;
+  spoofed source metadata can no longer bypass enforce-mode quarantine. The
+  `anomaly_bypass_source_prefixes` config field remains for compatibility but no
+  longer gates the runtime anomaly path.
 
 ### Fixed
 

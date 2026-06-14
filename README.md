@@ -21,8 +21,9 @@ Designed as the storage backend for [trw-mcp](https://github.com/wallter/trw-mcp
 
 ## Features
 
-- **MemoryClient SDK** -- High-level async Python client with store/bulk_store/recall/forget/search plus audit_learning and review_quarantined
+- **MemoryClient SDK** -- High-level async Python client with store/bulk_store/store_many/recall/search/search_fts/forget plus audit_learning and review_quarantined
 - **Hybrid Search (BM25 + vector)** -- BM25 keyword matching + dense vector similarity via sqlite-vec, combined with Reciprocal Rank Fusion (RRF). [Learn more](https://trwframework.com/docs)
+- **FTS5 keyword search** -- `MemoryClient.search_fts()` runs O(log N) SQLite FTS5 BM25 lookups over content/detail/tags for pure-keyword queries that don't need hybrid ranking; degrades to an empty result when FTS5 is unavailable
 - **Hybrid order preservation by default** -- recall preserves the hybrid BM25+dense+RRF order when enough local candidates are already available, avoiding a legacy score-scale mismatch in tier merging. To restore the legacy tier rescore for a workload, set `MEMORY_RECALL_PRESERVE_HYBRID_ORDER=false`.
 - **Tiered Storage** -- Hot/warm/cold tiers for fast recall, warm-sidecar persistence, recall-time cold promotion, and explicit sweep-based archiving/purging. [Architecture details](https://trwframework.com/docs)
 - **Semantic Deduplication** -- Detects and merges near-duplicate learnings using cosine similarity (0.85 threshold)
@@ -79,13 +80,23 @@ async with MemoryClient(namespace="project:my-app") as client:
     # Search with filters
     high_impact = await client.search(min_importance=0.7, tags=["gotcha"])
 
+    # Fast keyword-only lookup via SQLite FTS5 (no hybrid ranking)
+    fts_hits = await client.search_fts("BEGIN IMMEDIATE", top_k=10)
+
     # Forget an entry
     await client.forget(results[0]["memory_id"])
 
-    # Store many entries in one call
-    await client.bulk_store([
+    # Store many entries from plain store()-shaped dicts in one call
+    written = await client.store_many([
         {"content": "Use BEGIN IMMEDIATE for write transactions", "tags": ["sqlite"]},
-        {"content": "RRF k=60 is the default fusion constant", "tags": ["retrieval"]},
+        {"content": "RRF k is a configurable fusion constant", "tags": ["retrieval"]},
+    ])
+
+    # Or bulk-store with structured BulkStoreRequest objects (per-item error reporting)
+    from trw_memory.client import BulkStoreRequest
+    summary = await client.bulk_store([
+        BulkStoreRequest(content="Use BEGIN IMMEDIATE for write transactions", tags=["sqlite"]),
+        BulkStoreRequest(content="RRF k is a configurable fusion constant", tags=["retrieval"]),
     ])
 
     # Inspect provenance/lifecycle for one entry
@@ -197,7 +208,7 @@ drift quickly.)
 
 | Name | Module | Description |
 |------|--------|-------------|
-| `MemoryClient` | `client` | High-level async SDK — `store`, `bulk_store`, `recall`, `search`, `forget`, `audit_learning`, `review_quarantined`, `register_tools`, `auto_recall` |
+| `MemoryClient` | `client` | High-level async SDK — `store`, `bulk_store`, `store_many`, `recall`, `search`, `search_fts`, `forget`, `audit_learning`, `review_quarantined`, `register_tools`, `auto_recall` |
 | `SQLiteBackend` | `storage.sqlite_backend` | Primary storage with keyword search, WAL, and sqlite-vec vectors |
 | `YAMLBackend` | `storage.yaml_backend` | File-based storage (backup/migration) |
 | `hybrid_search()` | `retrieval.pipeline` | BM25 + dense vector search with RRF fusion |
@@ -237,9 +248,11 @@ The hybrid search pipeline combines sparse keyword retrieval with dense semantic
 
 ```
 Query --> BM25 (keyword, rank-bm25) --+
-                                       +--> RRF Fusion (k=60) --> Ranked Results
+                                       +--> RRF Fusion (k, configurable) --> Ranked Results
 Query --> Dense (cosine, sqlite-vec) --+
 ```
+
+The RRF constant `k` is configurable via `MemoryConfig.rrf_k` (env `MEMORY_RRF_K`); the shipped default is tuned by the memory meta-harness loop and may change between releases, so treat the exact value as a default rather than a contract.
 
 The pipeline gracefully degrades: if BM25 is unavailable, only dense search runs (and vice versa). If neither is available, falls back to the storage backend's built-in keyword search (case-insensitive `LIKE` matching).
 
@@ -270,8 +283,8 @@ Store/recall operations keep Hot/Warm in sync, Cold-tier hits are promoted back 
 | Feature | Implementation |
 |---------|---------------|
 | Field encryption | AES-256-GCM with HKDF-SHA256 per-namespace key derivation |
-| PII detection | Regex patterns (email, phone, SSN, credit card, API keys) + Shannon entropy analysis |
-| Poisoning defense | Z-score anomaly detection on frequency, size, and content patterns |
+| PII detection | Regex patterns (email, phone, SSN, credit card, API keys) + Shannon entropy analysis. Store path **blocks** API-key/token writes and **redacts** email/IP/SSN/phone/credit-card |
+| Poisoning defense | Z-score anomaly detection on frequency, size, and content patterns — **observe mode by default** (records + telemetry, does not quarantine); `enforce` is opt-in |
 | Access control | Role-based (admin/editor/viewer) per namespace |
 | Audit trail | Append-only security event log |
 | Key management | Master key derivation, per-namespace keys, rotation support |
@@ -285,9 +298,11 @@ trw-memory is **local-first**: with the default configuration all data lives in 
 | Surface | When | Default | Opt-out / control |
 |---------|------|---------|-------------------|
 | **Embedding model download** | First embedding operation downloads `all-MiniLM-L6-v2` from huggingface.co (only with the `[embeddings]` extra installed) | enabled when the extra is present | `TRW_OFFLINE=1` / `HF_HUB_OFFLINE=1`, or `local_only: true` (alias `memory_local_only`) — forces `local_files_only` so no download is attempted; a disclosure log line precedes any network-capable load |
-| **Remote sync / publish** | Only when `sync_enabled=true` AND `local_only=false` | **off** (`local_only` defaults on for the local engine) | leave sync disabled, or set `local_only: true` to hard-block all egress |
+| **Remote sync / publish** | Only when `sync_enabled=true` AND `local_only=false` | **off** (`sync_enabled` defaults `false`) | leave sync disabled, or set `local_only: true` to hard-block all egress |
 
-With an offline switch engaged, a missing cached model degrades to keyword-only recall (no crash) and, under `local_only`, raises a clear `LocalOnlyViolationError` telling you how to pre-download.
+`sync_enabled` defaults `false`, so the engine performs no remote sync out of the box even though `local_only` itself defaults `false`. Setting `local_only: true` is the hard-block: an `@model_validator` forces `sync_enabled=False`, clears `sync_namespace`/`platform_url`, and pins `rbac_mode="local"`, so no remote-capable surface can be re-enabled while it is set.
+
+With an offline switch engaged (`TRW_OFFLINE` / `HF_HUB_OFFLINE`) **or** `local_only: true`, the standalone engine loads the embedding model with `local_files_only=True`; if the model is not already cached it raises a clear `LocalOnlyViolationError` telling you how to pre-download (this is the behaviour in both cases — `local.py` does **not** silently fall back to keyword-only recall here). The graceful "degrade to keyword-only, no crash" path is provided one layer up by trw-mcp's embedder wrapper, which catches that error; a direct trw-memory caller that wants keyword-only recall under an offline switch should pre-download the model or run without the `[embeddings]` extra installed.
 
 ### Environment-variable inventory
 
@@ -301,16 +316,19 @@ With an offline switch engaged, a missing cached model degrades to keyword-only 
 
 | Capability | Default | Notes |
 |-----------|---------|-------|
-| Field-level encryption | **off** | opt-in (AES-256-GCM per-namespace keys) |
-| PII redaction | **on** | sensitive values redacted in logs |
-| Poisoning detection | **observe** | detects, does not block, by default |
-| Remote sync / publishing | **off** | `local_only` defaults on for the local engine |
-| `memory.db` permissions | `0600` | the on-disk store is chmod-ed owner-only on creation (non-POSIX degrades to a warning) |
+| Field-level encryption | **off** (`encryption_enabled=False`) | opt-in (AES-256-GCM per-namespace keys) |
+| PII detection | **on** (`pii_enabled=True`) | always scans `content`/`detail`/`tags` on the store path; the configurable `pii_action` default is `warn` for the public `check_entry_pii` helper. The runtime store path is stricter: detected **API keys / tokens block the write** (`PIIBlockError`); emails, IPs, SSNs, phone numbers, and credit-card numbers are **redacted** in place |
+| Poisoning / size-anomaly detection | **observe** (`poisoning_detection_mode="observe"`) | the SEC-001 statistical size/tag-count detector records anomaly stats + telemetry but does **not** quarantine by default; `enforce` is opt-in. (As of `209a47853` the caller-controlled `metadata['source']` quarantine bypass was removed from the runtime — a spoofed source can no longer skip enforce-mode quarantine; `anomaly_bypass_source_prefixes` remains in `MemoryConfig` but no longer gates the runtime anomaly path.) |
+| Trust scoring | **observe** (`trust_scoring_mode="observe"`) | logs intake trust decisions; `enforce`/`strict` are opt-in |
+| Provenance signing | **required** (`provenance_required=True`) | persisted rows carry a signed provenance hash-chain |
+| Canary tamper response | **halt** (`canary_fail_mode="halt"`) | seeded canaries are probed on recall; tamper detection halts by default (`degrade`/`log-only` opt-in) |
+| Remote sync / publishing | **off** (`sync_enabled=False`) | no remote sync out of the box; `local_only=True` hard-blocks it via a validator |
+| `memory.db` permissions | `0600` | the file-backed store is `chmod 0600` (owner-only) on creation; a non-POSIX platform degrades to a `db_chmod_failed` warning |
 
 ### Enterprise hardening recipe
 
 ```bash
-export TRW_OFFLINE=1   # no huggingface.co egress; keyword-only recall
+export TRW_OFFLINE=1   # block the huggingface.co model download (local_files_only)
 ```
 
 ```yaml
@@ -318,7 +336,7 @@ export TRW_OFFLINE=1   # no huggingface.co egress; keyword-only recall
 local_only: true       # hard-block all remote sync + model download
 ```
 
-Verify the on-disk `memory.db` is mode `0600` and no outbound connection is attempted on first use.
+With either switch set, pre-download the embedding model (`python -m sentence_transformers download all-MiniLM-L6-v2`) if you want hybrid recall — otherwise the first embedding load raises `LocalOnlyViolationError`. To run keyword-only without that error, omit the `[embeddings]` extra entirely. Verify the on-disk `memory.db` is mode `0600` and that no outbound connection is attempted on first use.
 
 ### MCP Tools
 
