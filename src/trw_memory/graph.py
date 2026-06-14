@@ -72,8 +72,8 @@ VALID_EDGE_TYPES: frozenset[str] = frozenset(
     }
 )
 
-_ENTRY_UPDATE_LOCKS: dict[tuple[str, str], threading.Lock] = {}
-_ENTRY_UPDATE_LOCKS_GUARD = threading.Lock()
+# _ENTRY_UPDATE_LOCKS / _ENTRY_UPDATE_LOCKS_GUARD are owned by
+# _graph_cross_project and re-imported below for back-compat; no local copy here.
 _BACKGROUND_GRAPH_THREADS: set[threading.Thread] = set()
 _BACKGROUND_GRAPH_THREADS_GUARD = threading.Lock()
 

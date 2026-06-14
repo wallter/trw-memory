@@ -23,6 +23,7 @@ Extracted as PRD-DIST-245 Phase 1 batch 82.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import time
 from pathlib import Path
@@ -195,6 +196,7 @@ def check_integrity(
     Returns:
         Dict with ``ok`` (bool), ``detail`` (str), and ``db_path``.
     """
+    conn: Any = None
     try:
         conn = connect(
             db_path,
@@ -204,11 +206,16 @@ def check_integrity(
             sqlcipher_key_hex=sqlcipher_key_hex,
         )
         rows = conn.execute("PRAGMA quick_check").fetchall()
-        conn.close()
         healthy = len(rows) == 1 and rows[0][0] == "ok"
         return {"ok": healthy, "detail": rows[0][0] if rows else "empty", "db_path": str(db_path)}
     except sqlite3.DatabaseError as exc:
         return {"ok": False, "detail": str(exc), "db_path": str(db_path)}
+    finally:
+        # Close in finally so a non-sqlite exception (KeyboardInterrupt, MemoryError)
+        # during quick_check cannot leak the connection.
+        if conn is not None:
+            with contextlib.suppress(sqlite3.Error):
+                conn.close()
 
 
 def db_has_data(
@@ -222,6 +229,7 @@ def db_has_data(
     Non-destructive: this proves rows are readable; it does not prove the
     database is structurally healthy after a failed quick_check.
     """
+    conn: Any = None
     try:
         conn = connect(
             db_path,
@@ -230,12 +238,12 @@ def db_has_data(
             check_same_thread=True,
             sqlcipher_key_hex=sqlcipher_key_hex,
         )
-        try:
-            count = conn.execute("SELECT count(*) FROM memories").fetchone()[0]
-            conn.close()
-            return bool(count > 0)
-        except sqlite3.Error:
-            conn.close()
-            return False
+        count = conn.execute("SELECT count(*) FROM memories").fetchone()[0]
+        return bool(count > 0)
     except sqlite3.Error:
         return False
+    finally:
+        # Close in finally so an unexpected (non-sqlite) exception cannot leak it.
+        if conn is not None:
+            with contextlib.suppress(sqlite3.Error):
+                conn.close()

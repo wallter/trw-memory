@@ -199,6 +199,21 @@ class TestCheckIntegrity:
         assert result["ok"] is False
         assert "corrupt" in str(result["detail"])
 
+    def test_connection_closed_on_unexpected_exception(self, tmp_path: Path) -> None:
+        """A non-sqlite exception during quick_check must still close the conn.
+
+        Regression: close() lived in the try body, so a KeyboardInterrupt/
+        MemoryError (anything not sqlite3.DatabaseError) leaked the connection.
+        """
+        mock_conn = MagicMock()
+        mock_conn.execute.side_effect = RuntimeError("boom")  # not a sqlite3 error
+
+        with patch("trw_memory.storage._connection.connect", return_value=mock_conn):
+            with pytest.raises(RuntimeError, match="boom"):
+                check_integrity(tmp_path / "test.db")
+
+        mock_conn.close.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # db_has_data (lines 203-219)
