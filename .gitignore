@@ -38,3 +38,7 @@ docs/
 
 # Scratch workspace
 scratch/
+
+# Local memory store + test artifacts (must never ship to PyPI)
+.memory/
+coverage.json
