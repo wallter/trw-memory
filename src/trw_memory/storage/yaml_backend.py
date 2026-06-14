@@ -164,6 +164,9 @@ def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
         outcome_history=_str_list("outcome_history"),
         assertions=_parse_assertions(data.get("assertions", [])),
         anchors=anchors,
+        valid_from=parse_dt_safe(data.get("valid_from"), default=created_at) or created_at,
+        invalid_from=parse_dt_safe(data.get("invalid_from"), default=None) if data.get("invalid_from") else None,
+        invalidated_by=str(data["invalidated_by"]) if data.get("invalidated_by") else None,
         anchor_validity=_float("anchor_validity", 1.0),
         type=_str("type", "pattern"),
         nudge_line=_str("nudge_line", ""),
@@ -447,6 +450,7 @@ class YAMLBackend(StorageBackend):
         namespace: str | None = None,
         min_importance: float = 0.0,
         limit: int = 100,
+        exclude_superseded: bool = False,
     ) -> list[MemoryEntry]:
         """Return entries with optional filters.
 
@@ -457,6 +461,8 @@ class YAMLBackend(StorageBackend):
                 >= this value (parity with the SQLite backend's storage-layer
                 pre-filter). Default 0.0 disables the importance filter.
             limit: Maximum entries to return.
+            exclude_superseded: When True, exclude entries with a non-null
+                ``invalid_from`` (bi-temporal superseded entries).
 
         Returns:
             Up to *limit* matching entries ordered by updated_at descending.
@@ -473,6 +479,8 @@ class YAMLBackend(StorageBackend):
             if namespace is not None and entry.namespace != namespace:
                 continue
             if min_importance > 0.0 and entry.importance < min_importance:
+                continue
+            if exclude_superseded and entry.invalid_from is not None:
                 continue
             results.append(entry)
 

@@ -85,9 +85,14 @@ async def try_hybrid_recall(
         # which silently lost targets ranked past position 50 on namespaces > 50.
         candidate_pool_size = max(limit * 5, client._config.hybrid_search_candidate_pool_size)
         list_entries_start = perf_counter()
+        # Exclude superseded entries at the SQL level when as_of is not set and
+        # include_superseded is False.  This prevents superseded candidates from
+        # consuming slots in the BM25/dense candidate pool; apply_validity_prior
+        # still handles the as_of case in post-fusion.
         all_entries = backend.list_entries(
             namespace=client._namespace,
             limit=candidate_pool_size,
+            exclude_superseded=not include_superseded and as_of is None,
         )
         list_entries_ms = (perf_counter() - list_entries_start) * 1000.0
 

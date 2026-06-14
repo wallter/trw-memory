@@ -136,6 +136,7 @@ class StorageBackend(ABC):
         namespace: str | None = None,
         min_importance: float = 0.0,
         limit: int = 100,
+        exclude_superseded: bool = False,
     ) -> list[MemoryEntry]:
         """Return entries with optional filters.
 
@@ -148,6 +149,11 @@ class StorageBackend(ABC):
                 hydrate the full namespace into memory first. Default 0.0 keeps
                 the legacy behaviour (no importance filter).
             limit: Maximum number of entries to return.
+            exclude_superseded: When True, exclude entries that have a non-null
+                ``invalid_from`` value (bi-temporal superseded entries).  Only
+                effective for the common case where ``as_of`` is not set; callers
+                doing point-in-time queries should leave this False and rely on
+                ``apply_validity_prior`` post-fusion instead.
 
         Returns:
             Up to *limit* entries ordered by ``updated_at`` descending.

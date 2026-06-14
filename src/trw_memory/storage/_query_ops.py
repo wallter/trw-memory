@@ -306,9 +306,20 @@ def list_entries(
     namespace: str | None = None,
     min_importance: float = 0.0,
     limit: int = 100,
+    exclude_superseded: bool = False,
 ) -> list[MemoryEntry]:
-    """Return entries with optional filters, ordered by updated_at desc."""
+    """Return entries with optional filters, ordered by updated_at desc.
+
+    When *exclude_superseded* is True, entries with a non-null ``invalid_from``
+    value are excluded at the SQL layer rather than post-hoc.  This prevents
+    superseded candidates from consuming slots in the BM25/dense candidate pool
+    during hybrid retrieval.  Pass ``True`` when the caller has already decided
+    that superseded entries are unwanted (e.g. ``include_superseded=False`` on
+    the hybrid recall path without an ``as_of`` anchor).
+    """
     where_sql, params = backend._build_filter_clause(status=status, namespace=namespace, min_importance=min_importance)
+    if exclude_superseded:
+        where_sql = f"({where_sql}) AND (invalid_from IS NULL OR invalid_from = '')"
     order_by = "updated_at DESC"
     sql = (
         f"SELECT {select_columns_sql} FROM memories WHERE {where_sql} "  # noqa: S608

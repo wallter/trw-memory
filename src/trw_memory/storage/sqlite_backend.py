@@ -639,6 +639,7 @@ class SQLiteBackend(StorageBackend):
         namespace: str | None = None,
         min_importance: float = 0.0,
         limit: int = 100,
+        exclude_superseded: bool = False,
     ) -> list[MemoryEntry]:
         """Return entries with optional filters, ordered by updated_at desc."""
         return _query_ops_list_entries(
@@ -648,6 +649,7 @@ class SQLiteBackend(StorageBackend):
             namespace=namespace,
             min_importance=min_importance,
             limit=limit,
+            exclude_superseded=exclude_superseded,
         )
 
     def list_namespaces(self) -> list[str]:
