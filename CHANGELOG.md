@@ -4,6 +4,13 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+## [0.9.9] — 2026-06-14
+
+### Security
+
+- Remediated 8 vulnerable transitive dependencies in uv.lock (aiohttp 3.14.1, authlib 1.7.2, langchain-core 1.4.7, langsmith 0.8.15, pip 26.1.2, uv 0.11.21, torch 2.12.0). Lock-only; the published wheel does not ship uv.lock. chromadb 1.1.1 and one torch advisory have no fixed upstream release and are left as-is. (f1e17f5cf)
+- SECURITY.md now discloses the installer supply-chain trust model and the fail-closed checksum lever. (65e226650)
+
 ### Added
 
 - **`MemoryClient.store_many(entries)` — dict-based bulk insert.** A convenience
