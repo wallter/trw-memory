@@ -19,6 +19,10 @@ htmlcov/
 coverage.xml
 .mypy_cache/
 
+# pip-compile lockfile (dev-machine specific, too broad for public repo —
+# leaks non-dependency monorepo packages like Authlib/fastapi into the public subtree)
+requirements.lock
+
 # IDE
 .vscode/
 .idea/
