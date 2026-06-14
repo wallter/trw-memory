@@ -54,7 +54,8 @@ def test_normalize_empty_is_empty() -> None:
 def test_lexical_duplicate_matches_active_exact() -> None:
     entries = [make_entry("e1", "use absolute paths", detail="always")]
     result = _lexical_duplicate("use absolute paths", "always", entries)
-    assert result == DedupResult("skip", "e1", 1.0)
+    # merge (not skip) so re-learn metadata folds in + recurrence increments.
+    assert result == DedupResult("merge", "e1", 1.0)
 
 
 def test_lexical_duplicate_skips_non_active() -> None:
@@ -72,18 +73,18 @@ def test_lexical_duplicate_empty_target_is_none() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_unavailable_embedder_skips_exact_duplicate() -> None:
+def test_unavailable_embedder_merges_exact_duplicate() -> None:
     embedder = StubEmbedder(available=False)
     entries = [make_entry("e1", "phase field empty in JSONL logs")]
     result = check_duplicate("phase field empty in JSONL logs", entries, embedder)
-    assert result == DedupResult("skip", "e1", 1.0)
+    assert result == DedupResult("merge", "e1", 1.0)
 
 
 def test_unavailable_embedder_normalizes_before_match() -> None:
     embedder = StubEmbedder(available=False)
     entries = [make_entry("e1", "Use   Absolute Paths", detail="Always")]
     result = check_duplicate("use absolute paths", entries, embedder, detail="always")
-    assert result == DedupResult("skip", "e1", 1.0)
+    assert result == DedupResult("merge", "e1", 1.0)
 
 
 def test_unavailable_embedder_non_duplicate_returns_store() -> None:
@@ -109,7 +110,7 @@ def test_embed_returns_none_falls_back_to_lexical() -> None:
     embedder = _AvailableButNoneEmbedder()
     entries = [make_entry("e1", "broken embedder dup")]
     result = check_duplicate("broken embedder dup", entries, embedder)
-    assert result == DedupResult("skip", "e1", 1.0)
+    assert result == DedupResult("merge", "e1", 1.0)
 
 
 # ---------------------------------------------------------------------------

@@ -42,11 +42,16 @@ def _lexical_duplicate(
 ) -> DedupResult | None:
     """Embedding-free exact-text duplicate check (degraded-path fallback).
 
-    Returns a ``skip`` DedupResult for the first ACTIVE entry whose normalised
+    Returns a ``merge`` DedupResult for the first ACTIVE entry whose normalised
     content+detail exactly matches the incoming text, else None. Exact match is
     treated as similarity 1.0. This is the guard that stops identical entries
     accumulating when embeddings are unavailable (the silent-no-op gap that let
     one project's store reach ~79% near-duplicates).
+
+    Action is ``merge`` (not ``skip``) so the re-learn's tags/evidence/impact
+    still fold into the survivor and ``recurrence`` increments — preserving the
+    rediscovery-count signal the lifecycle relies on. This matches the trw-mcp
+    sibling package's documented exact-match policy (state/dedup.py).
     """
     target = _normalize_text(f"{content} {detail}")
     if not target:
@@ -55,7 +60,7 @@ def _lexical_duplicate(
         if entry.status != MemoryStatus.ACTIVE:
             continue
         if _normalize_text(f"{entry.content} {entry.detail}") == target:
-            return DedupResult("skip", entry.id, 1.0)
+            return DedupResult("merge", entry.id, 1.0)
     return None
 
 
@@ -133,7 +138,9 @@ def check_duplicate(
 
     Steps:
     1. Generate embedding for ``content + " " + detail``.
-    2. If embedding unavailable → return DedupResult("store", None, 0.0).
+    2. If embedding unavailable AND ``dedup_lexical_fallback`` (default True) →
+       check for an exact normalized-text match and return ``merge`` on a hit;
+       otherwise return DedupResult("store", None, 0.0).
     3. Filter entries to active only.
     4. For each active entry, compute cosine similarity with the new embedding.
     5. Return DedupResult based on thresholds from config.
@@ -152,7 +159,7 @@ def check_duplicate(
     cfg = config or MemoryConfig()
     skip_threshold = cfg.dedup_skip_threshold
     merge_threshold = cfg.dedup_merge_threshold
-    lexical_fallback = getattr(cfg, "dedup_lexical_fallback", True)
+    lexical_fallback = cfg.dedup_lexical_fallback
 
     # Validate thresholds — merge must be strictly less than skip
     if merge_threshold >= skip_threshold:
