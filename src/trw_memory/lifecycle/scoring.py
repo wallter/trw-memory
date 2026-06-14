@@ -269,6 +269,13 @@ def entry_utility(
     if recall_ct > 0:
         base_impact = feedback_decay_score(base_impact, recall_ct, helpful_ct)
 
+    if cfg.lifecycle_use_fsrs:
+        return compute_fsrs_utility_score(
+            importance=base_impact,
+            elapsed_days=float(days_unused),
+            recurrence=recurrence,
+        )
+
     return compute_utility_score(
         q_value=q_value,
         days_since_last_access=days_unused,
