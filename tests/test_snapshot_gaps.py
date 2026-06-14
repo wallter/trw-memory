@@ -49,13 +49,28 @@ class TestTakeWeeklySnapshotNotSunday:
         result = take_weekly_snapshot(db_path, base_dir, force=False, now=monday)
         assert result is None
 
-    def test_returns_none_when_now_is_none_and_not_sunday(self, tmp_path: Path) -> None:
-        """now=None on a non-Sunday → datetime.now() branch executed (line 241)."""
+    def test_returns_none_when_now_is_none_and_not_sunday(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """now=None on a non-Sunday → datetime.now() branch executed (line 241).
+
+        The module clock is pinned to a fixed Saturday so the test is deterministic
+        instead of failing whenever it actually runs on a Sunday.
+        """
+        import trw_memory.storage._snapshot as snap_mod
+
+        class _FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz: object = None) -> datetime:  # type: ignore[override]
+                return datetime(2026, 6, 13, tzinfo=timezone.utc)  # Saturday (isoweekday=6)
+
+        monkeypatch.setattr(snap_mod, "datetime", _FixedDatetime)
+
         db_path = tmp_path / "memory.db"
         db_path.write_bytes(b"")
         base_dir = tmp_path / "snapshots"
-        # Today is June 13 2026 (Saturday); calling without now= exercises line 241
-        # and then returns None because Saturday (isoweekday=6) != Sunday (7)
+        # now=None exercises the datetime.now() default branch; the pinned Saturday
+        # then returns None because isoweekday=6 != Sunday (7).
         result = take_weekly_snapshot(db_path, base_dir, force=False)
         assert result is None
 

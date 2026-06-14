@@ -370,6 +370,12 @@ def restore_from_snapshot(base_dir: Path, snapshot: Path, db_path: Path) -> None
         shutil.copy2(str(snapshot), str(db_path))
     except OSError as exc:
         raise SnapshotError(f"snapshot restore failed: {exc}") from exc
+    # Clear stale WAL/SHM sidecars left by the prior DB at this path: applying old
+    # WAL frames on top of a freshly-restored base file would corrupt the restore.
+    for suffix in (".db-wal", ".db-shm"):
+        sidecar = db_path.with_name(db_path.name.replace(".db", suffix))
+        with contextlib.suppress(OSError):
+            sidecar.unlink(missing_ok=True)
     logger.info(
         "snapshot_restored",
         snapshot=str(snapshot),

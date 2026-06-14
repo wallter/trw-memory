@@ -326,6 +326,26 @@ def test_restore_copies_snapshot_over_db(tmp_path: Path) -> None:
     assert _row_count(src) == 5
 
 
+def test_restore_clears_stale_wal_shm_sidecars(tmp_path: Path) -> None:
+    """Restore must delete stale -wal/-shm so old WAL frames can't corrupt the base."""
+    base = tmp_path
+    src = tmp_path / "memory.db"
+    _make_db(src, rows=5)
+    snap = take_daily_snapshot(base, src, keep_daily=7, now=datetime(2026, 4, 13, tzinfo=timezone.utc))
+    # Stale sidecars left from a prior live DB session at this path.
+    wal = tmp_path / "memory.db-wal"
+    shm = tmp_path / "memory.db-shm"
+    wal.write_bytes(b"stale wal frames")
+    shm.write_bytes(b"stale shm")
+
+    restore_from_snapshot(base, snap, src)
+
+    assert src.exists()
+    assert _row_count(src) == 5
+    assert not wal.exists()  # stale WAL removed so it cannot replay onto the base
+    assert not shm.exists()
+
+
 def test_restore_rejects_path_traversal(tmp_path: Path) -> None:
     """Restore MUST refuse snapshot paths outside the snapshots root."""
     base = tmp_path
