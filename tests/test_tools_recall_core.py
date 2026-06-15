@@ -157,6 +157,15 @@ class TestMemoryRecallImpl:
             "INSERT INTO memory_graph_edges (source_id, target_id, edge_type, weight) VALUES (?, ?, ?, ?)",
             ("M-root", "M-related", "similarity", 0.91),
         )
+        # The BFS is namespace-scoped: graph_query joins target_id to `memories`
+        # to filter out foreign-namespace neighbours. In production these tables
+        # share one connection, so the test connection mirrors that — both rows
+        # live in the recall namespace (project:default).
+        conn.execute("CREATE TABLE memories (id TEXT, namespace TEXT)")
+        conn.executemany(
+            "INSERT INTO memories (id, namespace) VALUES (?, ?)",
+            [("M-root", "project:default"), ("M-related", "project:default")],
+        )
         conn.commit()
 
         result = memory_recall_impl("", "project:default", backend=backend, graph_depth=1, conn=conn)
@@ -166,6 +175,33 @@ class TestMemoryRecallImpl:
         assert related_items[0]["content"] == "related entry"
         assert related_items[0]["edge_type"] == "similarity"
         assert related_items[0]["depth"] == 1
+        conn.close()
+
+    def test_graph_depth_excludes_foreign_namespace_related_entry(self) -> None:
+        import sqlite3
+
+        root = _make_entry("M-root", content="root entry")
+        backend = _mock_backend([root])
+        backend.get.side_effect = lambda entry_id: {"M-root": root}.get(entry_id)
+
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE memory_graph_edges (source_id TEXT, target_id TEXT, edge_type TEXT, weight REAL)")
+        conn.execute(
+            "INSERT INTO memory_graph_edges (source_id, target_id, edge_type, weight) VALUES (?, ?, ?, ?)",
+            ("M-root", "M-foreign", "similarity", 0.91),
+        )
+        # M-foreign belongs to a DIFFERENT namespace — the namespace-scoped BFS
+        # must not surface it for a project:default recall (data-isolation).
+        conn.execute("CREATE TABLE memories (id TEXT, namespace TEXT)")
+        conn.executemany(
+            "INSERT INTO memories (id, namespace) VALUES (?, ?)",
+            [("M-root", "project:default"), ("M-foreign", "project:other")],
+        )
+        conn.commit()
+
+        result = memory_recall_impl("", "project:default", backend=backend, graph_depth=1, conn=conn)
+
+        assert result["related"] == []
         conn.close()
 
     def test_include_org_memories_appends_cross_validated_project_entries(self, tmp_path: Path) -> None:
