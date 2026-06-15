@@ -113,6 +113,33 @@ class TestSecurityMaintenanceQueue:
         assert security_runtime.security_maintenance_status()["queued"] == 1
         assert security_runtime.drain_security_maintenance_queue(cfg) == {"drained": 1, "queued": 0}
 
+    def test_processed_cache_stays_bounded_across_many_distinct_keys(self, tmp_path: Path) -> None:
+        # Reproduces the unbounded-growth bug: each distinct
+        # (audit_log_path, retention_days) tuple was .add()'d with no eviction,
+        # so a long-lived process grew _AUDIT_MAINTENANCE_CACHE forever while
+        # security_maintenance_status() hardcoded bounded=True.
+        security_runtime._AUDIT_MAINTENANCE_CACHE.clear()
+        security_runtime._AUDIT_MAINTENANCE_QUEUE.clear()
+        cap = security_runtime._AUDIT_MAINTENANCE_CACHE_MAX
+
+        # Drive far more distinct inline-maintenance keys than the cap.
+        for i in range(cap * 2 + 5):
+            cfg = MemoryConfig(
+                audit_log_path=str(tmp_path / f"audit-{i}.jsonl"),
+                security_maintenance_inline=True,
+            )
+            security_runtime.ensure_security_maintenance(cfg)
+
+        status = security_runtime.security_maintenance_status()
+        # The set never exceeds its cap, and bounded reflects ACTUAL state.
+        assert len(security_runtime._AUDIT_MAINTENANCE_CACHE) <= cap
+        assert status["processed"] <= cap
+        assert status["bounded"] is True
+        assert status["max_processed_size"] == cap
+
+        security_runtime._AUDIT_MAINTENANCE_CACHE.clear()
+        security_runtime._AUDIT_MAINTENANCE_QUEUE.clear()
+
 
 class TestAuditLogVerify:
     def test_verify_chain_missing_file_returns_empty_valid_result(self, tmp_path: Path) -> None:

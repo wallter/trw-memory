@@ -31,6 +31,13 @@ from trw_memory.security.trust_scorer import score_intake
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.persistence import lock_for_rmw, read_yaml, write_yaml
 
+# Hard cap on the once-per-process maintenance dedup set. A long-lived process
+# (or a test suite) that touches many distinct (audit_log_path, retention_days)
+# tuples would otherwise grow this set without bound. On overflow we clear it:
+# the only cost is re-running an idempotent retention compaction for a key whose
+# membership was evicted, never a correctness problem. This makes the
+# ``bounded`` claim in ``security_maintenance_status`` provably true.
+_AUDIT_MAINTENANCE_CACHE_MAX = 256
 _AUDIT_MAINTENANCE_CACHE: set[str] = set()
 _AUDIT_MAINTENANCE_QUEUE: deque[str] = deque(maxlen=128)
 _AUDIT_MAINTENANCE_LOCK = threading.RLock()
@@ -320,8 +327,22 @@ def ensure_security_maintenance(config: MemoryConfig) -> None:
 
 
 def _drain_security_maintenance_key(config: MemoryConfig, cache_key: str) -> None:
-    """Drain one maintenance item outside scoring/write-lock paths."""
+    """Drain one maintenance item outside scoring/write-lock paths.
+
+    Caller holds ``_AUDIT_MAINTENANCE_LOCK`` (both call sites — ``ensure_*``
+    and ``drain_security_maintenance_queue`` — hold it), so the bounded-set
+    eviction below is race-free.
+    """
     get_audit_log(config).compact(config.audit_retention_days)
+    # Clear-on-overflow eviction keeps the dedup set bounded. Re-running an
+    # idempotent compaction for an evicted key is the only cost.
+    if len(_AUDIT_MAINTENANCE_CACHE) >= _AUDIT_MAINTENANCE_CACHE_MAX:
+        logger.debug(
+            "security_maintenance_cache_evicted",
+            size=len(_AUDIT_MAINTENANCE_CACHE),
+            cap=_AUDIT_MAINTENANCE_CACHE_MAX,
+        )
+        _AUDIT_MAINTENANCE_CACHE.clear()
     _AUDIT_MAINTENANCE_CACHE.add(cache_key)
 
 
@@ -346,11 +367,19 @@ def drain_security_maintenance_queue(config: MemoryConfig) -> dict[str, object]:
 def security_maintenance_status() -> dict[str, object]:
     """Return compact process-local maintenance queue state."""
     with _AUDIT_MAINTENANCE_LOCK:
+        processed = len(_AUDIT_MAINTENANCE_CACHE)
+        queued = len(_AUDIT_MAINTENANCE_QUEUE)
+        queue_max = _AUDIT_MAINTENANCE_QUEUE.maxlen or 0
+        # ``bounded`` reflects ACTUAL state: both the dedup set (clear-on-overflow
+        # at _AUDIT_MAINTENANCE_CACHE_MAX) and the queue (deque maxlen) cannot
+        # grow past their caps. It is no longer a hardcoded True.
+        bounded = processed <= _AUDIT_MAINTENANCE_CACHE_MAX and queued <= queue_max
         return {
-            "queued": len(_AUDIT_MAINTENANCE_QUEUE),
-            "processed": len(_AUDIT_MAINTENANCE_CACHE),
-            "bounded": True,
+            "queued": queued,
+            "processed": processed,
+            "bounded": bounded,
             "max_queue_size": _AUDIT_MAINTENANCE_QUEUE.maxlen,
+            "max_processed_size": _AUDIT_MAINTENANCE_CACHE_MAX,
         }
 
 
