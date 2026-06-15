@@ -369,7 +369,7 @@ def memory_recall_impl(
 
     # Graph traversal for related entries
     if graph_depth > 0 and result_dicts:
-        related = _graph_related(result_dicts, graph_depth, backend, conn)
+        related = _graph_related(result_dicts, graph_depth, backend, conn, namespace=namespace)
         response["related"] = related
 
     return response

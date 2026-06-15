@@ -6,7 +6,7 @@ import time
 
 from trw_memory.graph import graph_query
 
-from ._test_graph_support import _insert_edge, _make_conn
+from ._test_graph_support import _insert_edge, _insert_memory_row, _make_conn
 
 
 class TestGraphQuery:
@@ -94,6 +94,53 @@ class TestGraphQuery:
 
         results = graph_query(conn, ["X"], depth=2)
         assert results == []
+
+
+class TestGraphQueryNamespaceIsolation:
+    def test_namespace_filter_excludes_foreign_namespace_target(self) -> None:
+        conn = _make_conn()
+        # A and B(ns A) belong to namespace A; X belongs to namespace B.
+        _insert_memory_row(conn, "A", namespace="project:a")
+        _insert_memory_row(conn, "B", namespace="project:a")
+        _insert_memory_row(conn, "X", namespace="project:b")
+        # A -> B (same ns) and A -> X (cross-namespace leak edge)
+        _insert_edge(conn, "A", "B", "similarity", 0.9)
+        _insert_edge(conn, "A", "X", "similarity", 0.9)
+
+        results = graph_query(conn, ["A"], depth=2, namespace="project:a")
+
+        ids = {result["id"] for result in results}
+        assert "B" in ids
+        # The ns-B node must NOT be returned for a ns-A BFS.
+        assert "X" not in ids
+
+    def test_namespace_filter_blocks_recursion_through_foreign_node(self) -> None:
+        conn = _make_conn()
+        _insert_memory_row(conn, "A", namespace="project:a")
+        _insert_memory_row(conn, "X", namespace="project:b")
+        _insert_memory_row(conn, "Y", namespace="project:b")
+        # A -> X (foreign) -> Y (foreign). Filtering X out must also prevent
+        # the BFS from recursing into Y via X.
+        _insert_edge(conn, "A", "X", "similarity", 0.9)
+        _insert_edge(conn, "X", "Y", "similarity", 0.9)
+
+        results = graph_query(conn, ["A"], depth=2, namespace="project:a")
+
+        ids = {result["id"] for result in results}
+        assert ids == set()
+
+    def test_namespace_none_preserves_legacy_unscoped_behavior(self) -> None:
+        conn = _make_conn()
+        _insert_memory_row(conn, "A", namespace="project:a")
+        _insert_memory_row(conn, "X", namespace="project:b")
+        _insert_edge(conn, "A", "X", "similarity", 0.9)
+
+        # Without a namespace argument the legacy cross-namespace behaviour
+        # is retained (no JOIN to memories).
+        results = graph_query(conn, ["A"], depth=1)
+
+        ids = {result["id"] for result in results}
+        assert ids == {"X"}
 
 
 class TestGraphQueryEdgeCases:

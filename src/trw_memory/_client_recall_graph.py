@@ -63,8 +63,13 @@ def graph_expand_results(
 
     root_ids = [r["memory_id"] for r in results]
 
+    # Scope BFS to the client's namespace so graph expansion never surfaces
+    # neighbours belonging to a foreign namespace (data-isolation leak —
+    # memory_graph_edges has no namespace column).
+    namespace = getattr(client, "_namespace", None)
+
     try:
-        nodes = graph_query(conn, root_ids, depth=depth)
+        nodes = graph_query(conn, root_ids, depth=depth, namespace=namespace)
     except Exception:  # pragma: no cover -- sqlite / value errors
         logger.debug("graph_expand_error", exc_info=True)
         return results

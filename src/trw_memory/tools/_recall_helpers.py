@@ -160,8 +160,14 @@ def _graph_related(
     depth: int,
     backend: StorageBackend,
     conn: sqlite3.Connection | None,
+    namespace: str | None = None,
 ) -> list[dict[str, object]]:
-    """Query the knowledge graph for entries related to the recall results."""
+    """Query the knowledge graph for entries related to the recall results.
+
+    ``namespace`` scopes BFS traversal so related entries never leak across
+    namespaces (memory_graph_edges has no namespace column). ``None`` keeps
+    the legacy unscoped behaviour for back-compat.
+    """
     effective_conn = conn
     if effective_conn is None:
         effective_conn = getattr(backend, "_conn", None)
@@ -172,7 +178,7 @@ def _graph_related(
     root_ids = [str(d["id"]) for d in result_dicts if "id" in d]
 
     try:
-        related_nodes = graph_query(effective_conn, root_ids, depth=depth)
+        related_nodes = graph_query(effective_conn, root_ids, depth=depth, namespace=namespace)
     except (sqlite3.Error, ValueError, KeyError):
         logger.debug("graph_related_error", exc_info=True)
         return []

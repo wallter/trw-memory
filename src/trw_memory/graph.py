@@ -350,6 +350,7 @@ def graph_query(
     root_ids: list[str],
     depth: int = 2,
     edge_types: list[str] | None = None,
+    namespace: str | None = None,
 ) -> list[dict[str, str | int | float]]:
     """BFS traversal from root nodes up to specified depth.
 
@@ -358,6 +359,15 @@ def graph_query(
         root_ids: Starting node IDs.
         depth: Max traversal depth (clamped to 3).
         edge_types: Filter by edge type(s). None = all types.
+        namespace: When provided, restrict traversal to edges whose
+            ``target_id`` resolves to a ``memories`` row in this namespace.
+            ``memory_graph_edges`` has no namespace column and a single
+            SQLite DB holds many namespaces, so without this predicate a
+            root from namespace A can follow cross-namespace edges and
+            surface (and recurse into) node IDs that belong to namespace B
+            — a data-isolation leak. ``None`` keeps the legacy unscoped
+            behaviour (mirrors the ``namespace`` scoping added to the
+            vector-ops path).
 
     Returns:
         List of {"id": str, "depth": int, "edge_type": str, "weight": float}
@@ -377,6 +387,18 @@ def graph_query(
     for rid in root_ids:
         queue.append((rid, 0))
 
+    # Namespace scoping is applied as a correlated EXISTS against `memories`
+    # so the target row's namespace must match — edges pointing at foreign
+    # namespaces (or at deleted rows) are skipped entirely.
+    ns_clause = ""
+    ns_param: tuple[str, ...] = ()
+    if namespace is not None:
+        ns_clause = (
+            " AND EXISTS (SELECT 1 FROM memories m "
+            "WHERE m.id = memory_graph_edges.target_id AND m.namespace = ?)"
+        )
+        ns_param = (namespace,)
+
     while queue:
         node_id, current_depth = queue.popleft()
         if current_depth >= depth:
@@ -387,12 +409,15 @@ def graph_query(
             placeholders = ", ".join("?" for _ in edge_types)
             sql = (
                 f"SELECT target_id, edge_type, weight FROM memory_graph_edges "  # noqa: S608 — placeholders is ? repeated (no user input in SQL structure); values are parameterized
-                f"WHERE source_id = ? AND edge_type IN ({placeholders})"
+                f"WHERE source_id = ? AND edge_type IN ({placeholders}){ns_clause}"
             )
-            params: tuple[str, ...] = (node_id, *edge_types)
+            params: tuple[str, ...] = (node_id, *edge_types, *ns_param)
         else:
-            sql = "SELECT target_id, edge_type, weight FROM memory_graph_edges WHERE source_id = ?"
-            params = (node_id,)
+            sql = (
+                f"SELECT target_id, edge_type, weight FROM memory_graph_edges "  # noqa: S608 — ns_clause uses a parameterized ? placeholder; no user input in SQL structure
+                f"WHERE source_id = ?{ns_clause}"
+            )
+            params = (node_id, *ns_param)
 
         for row in conn.execute(sql, params).fetchall():
             target_id, edge_type, weight = row
