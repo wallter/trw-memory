@@ -36,6 +36,17 @@ from trw_memory.storage.persistence import write_yaml
 
 logger = structlog.get_logger(__name__)
 
+# Rolling-window size used for per-namespace anomaly statistics.
+_ROLLING_WINDOW = 100
+# Over-fetch buffer: list_entries already returns updated_at DESC, so the
+# rolling window is the first _ROLLING_WINDOW clean rows. We fetch 2x the
+# window so the small set of in-store filtered rows (system canaries — capped
+# at 5 by canary_injection_rate; legacy quarantined rows are kept in a
+# SEPARATE quarantine store) can be skipped without dropping below the window.
+# This caps per-write deserialization at 2x the window instead of the prior
+# fixed 1,000 full MemoryEntry objects (sliced to 100 and the rest discarded).
+_REFERENCE_FETCH_LIMIT = _ROLLING_WINDOW * 2
+
 
 @dataclass(frozen=True)
 class AnomalyStats:
@@ -56,7 +67,7 @@ def score_anomaly(
     reference_entries = backend.list_entries(
         namespace=entry.namespace,
         status=MemoryStatus.ACTIVE,
-        limit=1_000,
+        limit=_REFERENCE_FETCH_LIMIT,
     )
     clean_reference = [
         candidate
@@ -64,7 +75,7 @@ def score_anomaly(
         if candidate.metadata.get("quarantined") != "true" and candidate.metadata.get("system_canary") != "true"
     ]
     clean_reference.sort(key=lambda candidate: candidate.updated_at, reverse=True)
-    rolling = clean_reference[:100]
+    rolling = clean_reference[:_ROLLING_WINDOW]
     stats = build_anomaly_stats(rolling)
     anomaly_reference = [candidate for candidate in rolling if (candidate.content + candidate.detail).strip()]
     anomaly = score_entry_anomaly(entry, anomaly_reference, z_threshold=config.poisoning_z_threshold)
