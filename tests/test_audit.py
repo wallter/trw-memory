@@ -202,6 +202,46 @@ class TestAuditLogVerify:
         assert [record.id for record in records] == ["M-0", "M-1", "M-2"]
         assert audit_log.verify_chain()["valid"] is True
 
+    def test_compact_fast_path_skips_rewrite_when_nothing_expires(
+        self, audit_log: AuditLog, audit_path: Path
+    ) -> None:
+        # All records are recent → the oldest-record fast path must skip the
+        # full read+rewrite (which would re-chain and rewrite the file). We
+        # prove no rewrite happened by asserting the on-disk bytes are
+        # unchanged, while the count contract is preserved.
+        for index in range(3):
+            audit_log.append("store", entry_id=f"M-{index}")
+        before = audit_path.read_bytes()
+
+        retained = audit_log.compact(retention_days=365)
+
+        assert retained == 3
+        assert audit_path.read_bytes() == before, "fast path must not rewrite the file"
+        assert audit_log.verify_chain()["valid"] is True
+
+    def test_compact_fast_path_noop_on_empty_log_returns_zero(self, audit_log: AuditLog, audit_path: Path) -> None:
+        # No log file at all → fast path returns 0 without creating anything.
+        assert not audit_path.exists()
+        assert audit_log.compact(retention_days=365) == 0
+        assert not audit_path.exists()
+
+    def test_compact_still_prunes_when_oldest_record_expired(self, audit_log: AuditLog, audit_path: Path) -> None:
+        # The oldest record is stale → fast path must NOT short-circuit; the
+        # full compaction path runs and drops the expired record.
+        for index in range(3):
+            audit_log.append("store", entry_id=f"M-{index}")
+        lines = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+        stale_ts = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+        lines[0]["ts"] = stale_ts
+        audit_path.write_text("\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
+
+        retained = audit_log.compact(retention_days=365)
+
+        records = audit_log.read_all()
+        assert retained == 2
+        assert [record.id for record in records] == ["M-1", "M-2"]
+        assert audit_log.verify_chain()["valid"] is True
+
     def test_compact_all_records_expired_leaves_valid_empty_state(self, audit_log: AuditLog, audit_path: Path) -> None:
         for index in range(2):
             audit_log.append("store", entry_id=f"M-{index}")

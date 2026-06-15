@@ -113,6 +113,17 @@ class AuditLog:
         discontinuity between successive compacted ranges.
         """
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        # Fast path: the log is append-only and chronological, so the OLDEST
+        # record is line 1. If even the oldest record is within retention there
+        # is nothing to drop — skip the lock + full read+rewrite entirely. This
+        # bounds the common-case cost (called inline at every operation
+        # boundary when security_maintenance_inline=True) to a single-line read
+        # instead of holding lock_for_rmw across read_all() + the rewrite,
+        # which would otherwise block all concurrent append() callers (they
+        # share the same RMW lock) for the duration of a large-log rewrite.
+        oldest_ts = self._read_oldest_ts()
+        if oldest_ts is not None and oldest_ts >= cutoff:
+            return self._count_records()
         with lock_for_rmw(self._path):
             all_records = self.read_all()
             # Capture the pre-compact chain head + count and pin it to the
@@ -253,6 +264,33 @@ class AuditLog:
                 f"Unable to read audit log: {type(exc).__name__}",
                 path=str(self._path),
             ) from exc
+
+    def _read_oldest_ts(self) -> datetime | None:
+        """Return the timestamp of the OLDEST (first) audit record, or None.
+
+        The log is append-only and chronological, so line 1 is the oldest
+        record. Used by :meth:`compact` to cheaply decide whether anything is
+        old enough to prune before taking the RMW lock + reading the whole
+        file. Returns ``None`` when the log is absent/empty or the first line's
+        timestamp is missing/unparseable (callers then fall through to the full
+        compaction path, which fails closed on corruption).
+        """
+        for _line_no, data in self._iter_record_dicts():
+            raw_ts = data.get("ts")
+            if not isinstance(raw_ts, str):
+                return None
+            try:
+                parsed = datetime.fromisoformat(raw_ts)
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
+        return None
+
+    def _count_records(self) -> int:
+        """Count non-blank JSONL records without validating each payload."""
+        return sum(1 for _ in self._iter_record_dicts())
 
     def _read_last_hash_unlocked(self) -> str:
         """Return the chain-head hash for the next append, failing closed.
