@@ -136,3 +136,41 @@ class TestWriteTimeValidation:
         anomaly = score_entry_anomaly(outlier, reference, z_threshold=3.0)
         assert anomaly is not None
         assert anomaly[0] == "entry_length"
+
+    def test_score_entry_anomaly_warns_when_baseline_insufficient(self) -> None:
+        import structlog
+
+        # Fewer than 10 clean reference entries → statistical detection is
+        # skipped, but a WARNING must be emitted so operators can observe
+        # sub-baseline (new-namespace) write patterns.
+        reference = [make_entry(entry_id=f"M-{i}", content="x") for i in range(5)]
+        outlier = make_entry(entry_id="M-outlier", content="A" * 5000)
+
+        with structlog.testing.capture_logs() as logs:
+            result = score_entry_anomaly(outlier, reference, z_threshold=3.0)
+
+        assert result is None
+        skip_events = [
+            entry
+            for entry in logs
+            if entry.get("event") == "anomaly_detection_skipped_insufficient_baseline"
+        ]
+        assert len(skip_events) == 1
+        assert skip_events[0]["sample_count"] == 5
+        assert skip_events[0]["log_level"] == "warning"
+
+    def test_score_entry_anomaly_no_skip_warning_when_baseline_sufficient(self) -> None:
+        import structlog
+
+        reference = [make_entry(entry_id=f"M-{i}", content="normal") for i in range(20)]
+        outlier = make_entry(entry_id="M-outlier", content="A" * 5000)
+
+        with structlog.testing.capture_logs() as logs:
+            score_entry_anomaly(outlier, reference, z_threshold=3.0)
+
+        skip_events = [
+            entry
+            for entry in logs
+            if entry.get("event") == "anomaly_detection_skipped_insufficient_baseline"
+        ]
+        assert skip_events == []

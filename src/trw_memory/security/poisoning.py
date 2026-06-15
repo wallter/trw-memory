@@ -325,6 +325,20 @@ def score_entry_anomaly(
     """Return the strongest anomaly dimension for *entry*, or ``None``."""
     clean_reference = [candidate for candidate in reference_entries if candidate.metadata.get("quarantined") != "true"]
     if len(clean_reference) < 10:
+        # Statistical anomaly detection needs a stable baseline (>=10 clean
+        # entries) before z-scores are meaningful. New / freshly-purged
+        # namespaces fall below it, so they get no statistical protection —
+        # an attacker could seed up to 9 entries undetected by THIS check.
+        # Injection-pattern checks in validate_entry_payload run
+        # unconditionally on every write and still cover those entries; emit a
+        # WARNING so operators can observe sub-baseline write patterns.
+        logger.warning(
+            "anomaly_detection_skipped_insufficient_baseline",
+            op="poisoning",
+            namespace=entry.namespace,
+            sample_count=len(clean_reference),
+            min_baseline=10,
+        )
         return None
 
     candidates: list[tuple[str, float, list[float]]] = [
