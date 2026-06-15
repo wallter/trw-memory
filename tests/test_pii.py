@@ -175,6 +175,32 @@ class TestDetectPII:
         ip_matches = [m for m in matches if m.pii_type == PIIType.IP_ADDRESS]
         assert len(ip_matches) == 1
 
+    def test_real_ip_still_redacted(self) -> None:
+        """Closure re-audit #3: a real IP is still detected after octet-range tightening."""
+        from trw_memory.models.memory import MemoryEntry
+        from trw_memory.security.pii import PIIAction, check_entry_pii
+
+        entry = MemoryEntry(id="IP-1", content="connect to 192.168.1.1 please")
+        updated, matches = check_entry_pii(entry, action=PIIAction.REDACT)
+        assert any(m.pii_type == PIIType.IP_ADDRESS for m in matches)
+        assert "192.168.1.1" not in updated.content
+        assert "[REDACTED:ip_address]" in updated.content
+
+    def test_version_string_not_redacted_as_ip(self) -> None:
+        """Closure re-audit #3: a 4-segment version string must NOT match IP_ADDRESS."""
+        from trw_memory.models.memory import MemoryEntry
+        from trw_memory.security.pii import PIIAction, check_entry_pii
+
+        entry = MemoryEntry(id="V-1", content="upgraded to python 3.11.0.2 today")
+        updated, matches = check_entry_pii(entry, action=PIIAction.REDACT)
+        assert not any(m.pii_type == PIIType.IP_ADDRESS for m in matches)
+        assert "3.11.0.2" in updated.content
+
+    def test_out_of_range_octets_not_ip(self) -> None:
+        """An octet > 255 is not a valid IPv4 address."""
+        matches = detect_pii("build 999.300.1.500 shipped")
+        assert not any(m.pii_type == PIIType.IP_ADDRESS for m in matches)
+
     def test_detect_file_path(self) -> None:
         """Absolute filesystem paths are detected."""
         matches = detect_pii("Read /home/alice/.ssh/config for setup")

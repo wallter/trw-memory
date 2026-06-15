@@ -109,7 +109,19 @@ _PII_PATTERNS: list[tuple[PIIType, re.Pattern[str], float]] = [
     ),
     (
         PIIType.IP_ADDRESS,
-        re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
+        # Octet-range-validated IPv4 (each octet 0-255) so version strings like
+        # "3.11.0.2" or "999.300.1.500" are NOT redacted (closure re-audit #3:
+        # the old ``\b(?:\d{1,3}\.){3}\d{1,3}\b`` over-matched any 4 dotted
+        # digit-runs, corrupting content with false-positive redaction). The
+        # ``(?<![\d.])`` / ``(?![\d.])`` guards stop a valid 4-octet subspan
+        # from being carved out of a longer dotted-number run (e.g. the leading
+        # "3." or a trailing ".5" in a 5-segment version).
+        re.compile(
+            r"(?<![\d.])"
+            r"(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}"
+            r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+            r"(?![\d.])"
+        ),
         0.85,
     ),
     (
@@ -127,6 +139,47 @@ _PII_PATTERNS: list[tuple[PIIType, re.Pattern[str], float]] = [
 # Minimum token length and entropy threshold for high-entropy detection
 _MIN_ENTROPY_TOKEN_LEN = 20
 _DEFAULT_ENTROPY_THRESHOLD = 4.5
+
+# Closure re-audit #3: a 4-segment dotted run whose octets are all in range is
+# ambiguous between a real IPv4 address and a software version string (e.g.
+# "3.11.0.2"). When the dotted run is introduced by a version-context word
+# ("python 3.11.0.2", "version 1.2.3.4", "v2.0.0.1") we treat it as a version
+# and suppress the IP redaction so it does not corrupt content. The context
+# word is matched case-insensitively immediately before the match (allowing a
+# single ``v``/``V`` prefix attached to the number).
+_VERSION_CONTEXT_WORDS = frozenset(
+    {
+        "v",
+        "version",
+        "ver",
+        "release",
+        "rel",
+        "build",
+        "python",
+        "py",
+        "node",
+        "nodejs",
+        "ruby",
+        "go",
+        "rust",
+        "java",
+        "php",
+        "perl",
+        "gcc",
+        "clang",
+        "kernel",
+        "linux",
+        "ubuntu",
+        "debian",
+        "package",
+        "pkg",
+        "upgraded",
+        "downgraded",
+        "bumped",
+        "tag",
+    }
+)
+_VERSION_PREFIX_RE = re.compile(r"([A-Za-z]+)\s*v?$")
 
 # ReDoS hardening for caller-supplied custom patterns. Python's ``re`` engine
 # has no execution timeout, so a single pathological pattern could hang the
@@ -215,6 +268,20 @@ def shannon_entropy(text: str) -> float:
     return entropy
 
 
+def _is_version_context(text: str, ip_start: int) -> bool:
+    """Return True when the dotted run at *ip_start* is preceded by a version word.
+
+    Used to suppress IPv4 false positives on octet-valid version strings such as
+    ``python 3.11.0.2`` or ``v1.2.3.4`` (closure re-audit #3). Matches the word
+    immediately before the run (case-insensitive, tolerating a trailing ``v``
+    prefix attached to the number) against ``_VERSION_CONTEXT_WORDS``.
+    """
+    prefix = _VERSION_PREFIX_RE.search(text[:ip_start])
+    if prefix is None:
+        return False
+    return prefix.group(1).lower() in _VERSION_CONTEXT_WORDS
+
+
 def detect_pii(
     text: str,
     entropy_threshold: float = _DEFAULT_ENTROPY_THRESHOLD,
@@ -234,16 +301,20 @@ def detect_pii(
 
     # Regex-based detection
     for pii_type, pattern, confidence in _PII_PATTERNS:
-        matches.extend(
-            PIIMatch(
-                pii_type=pii_type,
-                value=m.group(),
-                start=m.start(),
-                end=m.end(),
-                confidence=confidence,
+        for m in pattern.finditer(text):
+            if pii_type == PIIType.IP_ADDRESS and _is_version_context(text, m.start()):
+                # Suppress a version string masquerading as an IPv4 address so
+                # we never false-positive-redact (closure re-audit #3).
+                continue
+            matches.append(
+                PIIMatch(
+                    pii_type=pii_type,
+                    value=m.group(),
+                    start=m.start(),
+                    end=m.end(),
+                    confidence=confidence,
+                )
             )
-            for m in pattern.finditer(text)
-        )
 
     patterns = custom_patterns or []
     if len(patterns) > _MAX_CUSTOM_PATTERNS:
