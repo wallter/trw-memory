@@ -110,7 +110,8 @@ def _entry_to_result(entry: object, score: float = 0.0) -> MemoryResultDict:
     from trw_memory._client_distilled_tiering import entry_to_result as _impl
     from trw_memory.models.memory import MemoryEntry
 
-    assert isinstance(entry, MemoryEntry)
+    if not isinstance(entry, MemoryEntry):
+        raise TypeError(f"expected MemoryEntry, got {type(entry).__name__}")
     return _impl(entry, score=score)
 
 

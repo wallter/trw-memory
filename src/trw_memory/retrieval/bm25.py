@@ -50,7 +50,7 @@ logger = structlog.get_logger(__name__)
 #   model         — the cached BM25Okapi instance
 #   ordered_ids   — entry ids in the order the corpus rows were built
 #   corpus_tokens — the tokenized corpus rows (reused for the Jaccard fallback)
-_bm25_cache: tuple[frozenset[str], "_BM25OkapiType", list[str], list[list[str]]] | None = None
+_bm25_cache: tuple[frozenset[str], _BM25OkapiType, list[str], list[list[str]]] | None = None
 _bm25_cache_lock = threading.Lock()
 
 
@@ -103,7 +103,7 @@ def _tokenize_entry(entry: MemoryEntry) -> list[str]:
 
 def _build_or_reuse_model(
     entries: list[MemoryEntry],
-) -> tuple["_BM25OkapiType", list[str], list[list[str]]]:
+) -> tuple[_BM25OkapiType, list[str], list[list[str]]]:
     """Return a BM25Okapi model + the entry-id order and corpus it was built on.
 
     Reuses the module-level cache when the *set* of entry ids is unchanged from

@@ -78,6 +78,39 @@ def clear_master_key_cache_fixture() -> Iterator[None]:
     clear_key_cache()
 
 
+@pytest.fixture(autouse=True)
+def restore_logging_state() -> Iterator[None]:
+    """Save+restore global structlog and stdlib-logging config around each test.
+
+    ``trw_memory._logging.configure_logging`` mutates *process-global* state:
+    it calls ``logging.basicConfig(force=True)`` (which tears out every root
+    handler — including pytest's ``LogCaptureHandler`` — and pins the root
+    level) and ``structlog.configure(...)``. Any test that invokes it (e.g.
+    the CLI tests) leaves that configuration in place, so a later test relying
+    on ``caplog`` (e.g. ``test_id_gen_collision_log``) can silently miss DEBUG
+    records: the raised root level filters propagated records before pytest's
+    re-attached handler ever sees them. That makes ``pytest -x`` order-dependent.
+
+    Snapshotting structlog's config plus the root logger's handler list and
+    level, then restoring both on teardown, makes the suite deterministic
+    regardless of collection order without weakening any assertion.
+    """
+    import logging
+
+    import structlog
+
+    saved_structlog = structlog.get_config()
+    root = logging.getLogger()
+    saved_handlers = list(root.handlers)
+    saved_level = root.level
+    try:
+        yield
+    finally:
+        structlog.configure(**saved_structlog)
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
+
+
 # ---------------------------------------------------------------------------
 # SQLiteBackend fixture
 # ---------------------------------------------------------------------------

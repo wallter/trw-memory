@@ -92,12 +92,21 @@ packages = ["src/trw_memory"]
 # .gitignore but NOT a global git excludesfile, so local runtime/test state
 # (the .memory/ store dirs, coverage artifacts, stray SQLite files) must be
 # excluded explicitly here too — they must never ship in the published sdist.
+#
+# The agent-facing dev docs (CLAUDE.md / AGENTS.md / FRAMEWORK.md) and the uv
+# lockfile are monorepo development artifacts, not part of the published
+# library — they are excluded so the public PyPI sdist carries only library
+# sources, packaging metadata, and the changelog/license/readme.
 exclude = [
   ".memory",
   "coverage.json",
   "*.db",
   "*.db-wal",
   "*.db-shm",
+  "uv.lock",
+  "CLAUDE.md",
+  "AGENTS.md",
+  "FRAMEWORK.md",
 ]
 
 [tool.deptry]

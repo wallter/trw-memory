@@ -21,6 +21,20 @@ All notable changes to the TRW Memory package.
 
 ## [0.9.9] — 2026-06-14
 
+> **Version progression note.** `0.9.7` and `0.9.8` were internal monorepo
+> version bumps that were never tagged or published to PyPI; their changes are
+> folded into this `0.9.9` public release, which is the next release after the
+> tagged `0.9.6`. The folded work was:
+>
+> - **0.9.7** — temporal-prefix stripping: `strip_temporal_prefix()` /
+>   `prepare_temporal_query()` remove "latest guidance on X" boilerplate before
+>   retrieval, a recency linear-blend fix (`(1-w)*rel + w*rec` instead of an
+>   equal RRF source), auto re-embed of the stripped query for dense-path
+>   coherence, a BM25 small-corpus negative-IDF fallback fix, and the
+>   `recall_strip_temporal_prefix` config field (default `True`).
+> - **0.9.8** — temporal-arithmetic stripping and prior-context query patterns
+>   building on the 0.9.7 temporal preprocessing.
+
 ### Security
 
 - Remediated 8 vulnerable transitive dependencies in uv.lock (aiohttp 3.14.1, authlib 1.7.2, langchain-core 1.4.7, langsmith 0.8.15, pip 26.1.2, uv 0.11.21, torch 2.12.0). Lock-only; the published wheel does not ship uv.lock. chromadb 1.1.1 and one torch advisory have no fixed upstream release and are left as-is. (f1e17f5cf)
@@ -497,13 +511,13 @@ All notable changes to the TRW Memory package.
   `MemoryConfig.recall_preserve_hybrid_order` now defaults to `True`, so
   `MemoryClient.recall()` preserves the hybrid BM25+dense+RRF ordering whenever
   the hybrid retriever already produced enough local candidates. This avoids the
-  c805 score-scale mismatch where the legacy tier merge compared hybrid RRF
+  score-scale mismatch where the legacy tier merge compared hybrid RRF
   scores with tier-only `entry_utility` scores and pushed high-rank hybrid hits
   out of the top-K. The opt-out remains available:
   set `MEMORY_RECALL_PRESERVE_HYBRID_ORDER=false` to restore the legacy rescore.
-  trw-distill c811-c815 validated the flip across 4 curated-query oracles,
-  3 languages, and K=10/20/30/50 sweeps; the strongest observed curated-query
-  lift was Recall@5 `0.4167 → 1.0000` on the trw-framework oracle.
+  The flip was validated across curated-query benchmarks spanning multiple
+  languages and K sweeps; the strongest observed curated-query lift was
+  Recall@5 `0.4167 → 1.0000`.
 
 ## [0.8.3] — 2026-05-17
 
@@ -694,8 +708,7 @@ covering three of the eight HIGH findings attributed to trw-memory.
   (commit `e4f9961b5`). Default fork context inherited open SQLite
   handles from the parent test worker and sporadically failed under
   `pytest-xdist`. Spawn context gives each worker a clean interpreter.
-  Matches the fix already applied to concurrent-write tests in
-  trw-eval.
+  Matches a fix applied elsewhere to concurrent-write tests.
 
 ## [0.7.0] — 2026-04-18 — UTF-8 prevention + per-row quarantine + stale-handle detection
 

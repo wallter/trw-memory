@@ -10,7 +10,7 @@ fixture generator that emits each entry's OWN positive golden query strings as
 its hypothetical questions. This isolates the storage/fusion machinery: it shows
 the maximal uplift HyPE can deliver when the generated questions perfectly
 paraphrase the eval queries, without coupling the benchmark to any LLM, network,
-or proprietary trw-eval artifact.
+or external eval artifact.
 
 Requires the optional ``[vectors]`` (sqlite-vec) and ``[embeddings]``
 (sentence-transformers) extras — without dense vectors HyPE is a no-op and both
