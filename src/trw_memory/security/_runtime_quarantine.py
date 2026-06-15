@@ -125,7 +125,12 @@ def list_quarantined_entries(
     _ensure_maintenance(config)
     entries: list[MemoryEntry] = []
     with open_quarantine_backend(config) as backend:
-        for entry in backend.list_entries(namespace=namespace, limit=limit * 5):
+        # Over-fetch with a large bound (matching the delete path) so the
+        # actor/quarantined Python-side filter cannot silently drop matching
+        # entries that sort beyond a small ``limit * 5`` window — an audit
+        # truncation hazard (closure re-audit #2). The final ``[:limit]``
+        # slice is applied AFTER the updated_at sort, so the newest matches win.
+        for entry in backend.list_entries(namespace=namespace, limit=10_000):
             if entry.metadata.get("quarantined") != "true":
                 continue
             if actor is not None and entry.source_identity != actor:
@@ -147,6 +152,21 @@ def delete_quarantined_entries(
     deleted = 0
     with open_quarantine_backend(config) as backend:
         if memory_id is not None:
+            # Closure re-audit #1 + #6: the quarantine DB is a single SQLite
+            # store keyed on config (NOT per-namespace), so a blind
+            # ``backend.delete(memory_id)`` would let a caller scoped to one
+            # namespace delete another namespace's row by id — and would also
+            # delete a non-quarantined row that happens to live in the
+            # quarantine DB. Fetch first and gate on both namespace match and
+            # the ``quarantined=true`` flag (same flag set by
+            # ``store_quarantined_entry``).
+            entry = backend.get(memory_id)
+            if entry is None:
+                return 0
+            if entry.namespace != namespace:
+                return 0
+            if entry.metadata.get("quarantined") != "true":
+                return 0
             return 1 if backend.delete(memory_id) else 0
         for entry in backend.list_entries(namespace=namespace, limit=10_000):
             if actor is not None and entry.source_identity != actor:
