@@ -34,14 +34,20 @@ class TestDiscoverAnchorTrwDir:
         result = _discover_anchor(cfg)
         assert result == storage_path.parent.resolve()
 
-    def test_cwd_walk_finds_trw_dir_when_exists(self) -> None:
-        """CWD walk hits .trw discovery branch (lines 28-32) when .trw exists in parent tree."""
+    def test_cwd_walk_finds_trw_dir_when_exists(self, tmp_path: Path) -> None:
+        """CWD walk hits the .trw discovery branch when .trw exists in the parent tree."""
         cfg = MemoryConfig(storage_path="relative/path.db")
-        # /tmp/.trw exists in this environment; the walk from /tmp will find it
+        # Hermetic: create .trw in a controlled tmp tree and walk up from a subdir below
+        # it — does NOT depend on the host having a /tmp/.trw (the prior assumption made
+        # this test fail on hosts without one).
+        (tmp_path / ".trw").mkdir()
+        sub = tmp_path / "a" / "b"
+        sub.mkdir(parents=True)
         with patch.dict(os.environ, {"TRW_DIR": ""}):
-            with patch("trw_memory.security.startup.Path.cwd", return_value=Path("/tmp")):
+            with patch("trw_memory.security.startup.Path.cwd", return_value=sub):
                 result = _discover_anchor(cfg)
         assert isinstance(result, Path)
+        assert str(tmp_path.resolve()) in str(result.resolve())  # found OUR .trw, not ambient host state
 
     def test_raises_when_no_trw_dir_found(self) -> None:
         """All .trw checks return False → SecurityDefaultUnresolvableError (lines 33-34)."""
