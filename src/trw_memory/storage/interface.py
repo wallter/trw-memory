@@ -269,7 +269,7 @@ class StorageBackend(ABC):
         """
         yield self
 
-    def checkpoint_wal(self, mode: str = "PASSIVE") -> Mapping[str, object]:  # noqa: B027
+    def checkpoint_wal(self, mode: str = "PASSIVE") -> Mapping[str, object]:
         """Checkpoint a write-ahead log, if the backend keeps one.
 
         This is an optional maintenance seam mirroring the :meth:`supports_vectors`
