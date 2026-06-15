@@ -5880,7 +5880,7 @@ wheels = [
 
 [[package]]
 name = "trw-memory"
-version = "0.9.8"
+version = "0.9.9"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
