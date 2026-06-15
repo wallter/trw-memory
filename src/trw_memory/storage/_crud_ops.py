@@ -212,9 +212,15 @@ def store_many(
         logger.debug("memory_batch_stored", count=len(entries))
         return len(entries)
     except (sqlite3.Error, json.JSONDecodeError) as exc:
+        # The ``with backend._lock`` above has already released by the time we
+        # reach here, so the rollback must RE-ACQUIRE the lock — otherwise a
+        # concurrent writer can interleave on the single shared connection
+        # between our failure and the ROLLBACK (mirrors _transaction.py's
+        # locked rollback). backend._lock is a non-reentrant threading.Lock and
+        # is NOT held at this point, so re-acquiring it cannot deadlock.
         if backend._skip_commit_depth == 0:
-            with contextlib.suppress(sqlite3.Error):
-                backend._conn.execute("ROLLBACK")
+            with backend._lock, contextlib.suppress(sqlite3.Error):
+                backend._conn.rollback()
         raise StorageError(
             f"Failed to batch-store {len(entries)} entries: {exc}",
             path=str(backend._db_path),

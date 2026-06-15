@@ -166,6 +166,66 @@ class TestStoreManyFts:
         assert len(results) == 10
 
 
+class TestStoreManyRollbackLocking:
+    """store_many's failure-path ROLLBACK must run while holding backend._lock.
+
+    The rollback previously ran AFTER the ``with backend._lock`` block released,
+    so a concurrent writer could interleave on the single shared connection
+    between the failure and the ROLLBACK. The fix re-acquires the lock for the
+    rollback.
+    """
+
+    def test_failed_batch_rolls_back_under_lock_and_leaves_no_rows(
+        self, backend: SQLiteBackend
+    ) -> None:
+        import sqlite3
+        from typing import Any
+
+        # Pre-seed one valid row so we can prove the failed batch does not persist.
+        backend.store_many([_entry(content="pre-existing", entry_id="KEEP")])
+        assert backend.count() == 1
+
+        lock_held_during_rollback: list[bool] = []
+        real_conn = backend._conn
+        lock = backend._lock
+
+        class _ConnProxy:
+            """Delegating proxy — pysqlite3 Connection attributes are read-only,
+            so we cannot monkeypatch rollback/executemany in place."""
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(real_conn, name)
+
+            def executemany(self, sql: str, seq_of_params: object) -> Any:
+                if "INSERT" in sql.upper() and "memories" in sql:
+                    raise sqlite3.OperationalError("injected batch failure")
+                return real_conn.executemany(sql, seq_of_params)
+
+            def rollback(self) -> None:
+                # backend._lock is non-reentrant: acquire(blocking=False)
+                # returns False only when the lock is ALREADY held (by the
+                # rollback's own with-block). True == held during rollback.
+                acquired = lock.acquire(blocking=False)
+                if acquired:
+                    lock.release()
+                lock_held_during_rollback.append(not acquired)
+                real_conn.rollback()
+
+        backend._conn = _ConnProxy()  # type: ignore[assignment]
+        try:
+            with pytest.raises(Exception):  # StorageError wraps the sqlite error
+                backend.store_many([_entry(content="will fail", entry_id="FAIL")])
+        finally:
+            backend._conn = real_conn
+
+        # Rollback happened while the lock was held.
+        assert lock_held_during_rollback == [True]
+        # The failed batch left no partial rows; the pre-existing row survives.
+        assert backend.count() == 1
+        assert backend.get("FAIL") is None
+        assert backend.get("KEEP") is not None
+
+
 class TestStoreManyThroughput:
     def test_store_many_faster_than_per_row_at_1k(self, tmp_path: Path) -> None:
         """store_many must be at least 5x faster than per-row store at 1K entries."""
