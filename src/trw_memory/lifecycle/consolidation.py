@@ -26,9 +26,16 @@ from trw_memory.storage.interface import StorageBackend
 
 logger = structlog.get_logger(__name__)
 
-# NFR06 — Path redaction pattern for LLM prompts
+# NFR06 — Path redaction pattern for LLM prompts.
+#
+# Matches absolute paths under common roots, Windows drive paths, the
+# home-relative ``~/`` form, and explicit relative ``./`` / ``../`` prefixes.
+# The ``~/`` and ``./``/``../`` alternatives carry their own trailing
+# separator so the shared body ``[^\s...]*`` consumes the rest of the path.
+# Order matters: ``\.\./`` must precede ``\./`` so ``../`` is not partially
+# matched as ``./``.
 _PATH_RE = re.compile(
-    r"(?:/home/|/Users/|/mnt/|/tmp/|/var/|[A-Z]:\\)[^\s,;\"')\]}>]*",
+    r"(?:/home/|/Users/|/mnt/|/tmp/|/var/|[A-Z]:\\|~/|\.\./|\./)[^\s,;\"')\]}>]*",
 )
 
 

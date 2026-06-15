@@ -47,6 +47,29 @@ class TestRedactPaths:
         result = _redact_paths("temp file /tmp/abc123")
         assert "[REDACTED_PATH]" in result
 
+    def test_redacts_home_tilde_path(self) -> None:
+        result = _redact_paths("key at ~/projects/secrets/key.pem here")
+        assert "[REDACTED_PATH]" in result
+        assert "~/projects/secrets/key.pem" not in result
+
+    def test_redacts_dot_relative_path(self) -> None:
+        result = _redact_paths("config in ./config.yaml loaded")
+        assert "[REDACTED_PATH]" in result
+        assert "./config.yaml" not in result
+
+    def test_redacts_parent_relative_path(self) -> None:
+        result = _redact_paths("cert at ../certs/ca.pem present")
+        assert "[REDACTED_PATH]" in result
+        assert "../certs/ca.pem" not in result
+        # ".." must not be partially matched as "./" leaving a stray dot.
+        assert "/certs/ca.pem" not in result
+
+    def test_plain_prose_with_punctuation_not_redacted(self) -> None:
+        # A sentence ending with "..." or containing "e.g." must not be
+        # mistaken for a relative path (no following path body).
+        text = "Consider the options, e.g. retry. Done."
+        assert _redact_paths(text) == text
+
 
 class TestSummarizeClusterFallback:
     def test_selects_longest_content(self) -> None:
