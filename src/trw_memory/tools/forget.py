@@ -64,15 +64,35 @@ def memory_forget_impl(
     require_namespace_permission(cfg, namespace, Permission.DELETE, "forget")
 
     if actor:
-        entries = backend.list_entries(namespace=namespace, limit=max(10_000, backend.count(namespace=namespace)))
+        # Closure re-audit #5: count + scan + delete must be atomic. A concurrent
+        # write landing between a separate count() and list_entries() yields a
+        # wrong fetch bound / partial delete (TOCTOU). Cover them with one
+        # BEGIN IMMEDIATE snapshot when the backend supports transaction().
         deleted_count = 0
-        for candidate in entries:
-            if candidate.source_identity != actor:
-                continue
-            if backend.delete(candidate.id):
-                deleted_count += 1
-                if supports_tier_runtime(backend):
-                    remove_entry_from_tiers(cfg, namespace, candidate.id)
+        txn_ctx = backend.transaction() if hasattr(backend, "transaction") else None
+        if txn_ctx is not None:
+            with txn_ctx:
+                entries = backend.list_entries(
+                    namespace=namespace, limit=max(10_000, backend.count(namespace=namespace))
+                )
+                for candidate in entries:
+                    if candidate.source_identity != actor:
+                        continue
+                    if backend.delete(candidate.id):
+                        deleted_count += 1
+                        if supports_tier_runtime(backend):
+                            remove_entry_from_tiers(cfg, namespace, candidate.id)
+        else:
+            entries = backend.list_entries(
+                namespace=namespace, limit=max(10_000, backend.count(namespace=namespace))
+            )
+            for candidate in entries:
+                if candidate.source_identity != actor:
+                    continue
+                if backend.delete(candidate.id):
+                    deleted_count += 1
+                    if supports_tier_runtime(backend):
+                        remove_entry_from_tiers(cfg, namespace, candidate.id)
         deleted_count += delete_quarantined_entries(cfg, namespace=namespace, actor=actor)
         append_audit_event(
             cfg,

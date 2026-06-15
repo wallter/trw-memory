@@ -69,19 +69,35 @@ async def forget_impl(
         backend = client._get_backend()
         if actor:
             deleted_count = 0
-            for candidate in backend.list_entries(
-                namespace=client._namespace,
-                limit=max(10_000, backend.count(namespace=client._namespace)),
-            ):
-                if candidate.source_identity != actor:
-                    continue
-                if backend.delete(candidate.id):
-                    deleted_count += 1
-                    # PRD-CORE-195 FR05: purge the parent's HyPE sibling vectors
-                    # so they cannot linger as orphan dense hits. Idempotent;
-                    # no-op when vec support / siblings are absent.
-                    backend.delete_hype_siblings(candidate.id)
-                    _c.remove_entry_from_tiers(client._config, client._namespace, candidate.id)
+
+            def _scan_and_delete_actor() -> int:
+                # Closure re-audit #4: count + scan + delete must run under one
+                # snapshot. A concurrent write between a separate count() and
+                # list_entries() yields a wrong fetch bound / partial delete
+                # (TOCTOU). The caller wraps this in backend.transaction()
+                # (BEGIN IMMEDIATE) when available.
+                local_deleted = 0
+                for candidate in backend.list_entries(
+                    namespace=client._namespace,
+                    limit=max(10_000, backend.count(namespace=client._namespace)),
+                ):
+                    if candidate.source_identity != actor:
+                        continue
+                    if backend.delete(candidate.id):
+                        local_deleted += 1
+                        # PRD-CORE-195 FR05: purge the parent's HyPE sibling
+                        # vectors so they cannot linger as orphan dense hits.
+                        # Idempotent; no-op when vec support / siblings absent.
+                        backend.delete_hype_siblings(candidate.id)
+                        _c.remove_entry_from_tiers(client._config, client._namespace, candidate.id)
+                return local_deleted
+
+            txn_ctx = backend.transaction() if hasattr(backend, "transaction") else None
+            if txn_ctx is not None:
+                with txn_ctx:
+                    deleted_count = _scan_and_delete_actor()
+            else:
+                deleted_count = _scan_and_delete_actor()
             deleted_count += _c.delete_quarantined_entries(client._config, namespace=client._namespace, actor=actor)
             append_audit_event(
                 client._config,
