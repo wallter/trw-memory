@@ -339,11 +339,16 @@ class StorageBackend(ABC):
         """Return whether a dense vector currently exists for *entry_id*."""
         return False
 
-    def existing_vector_ids(self) -> set[str]:
+    def existing_vector_ids(self, namespace: str | None = None) -> set[str]:
         """Return the set of entry IDs that currently have a stored vector.
 
         Default returns an empty set so callers can opt into batch backfill
         skipping without branching on backend capabilities.
+
+        Args:
+            namespace: When provided, scope the lookup to that namespace so a
+                shared multi-namespace store does not return every tenant's
+                vector ids. ``None`` keeps the legacy full lookup.
         """
         return set()
 
@@ -351,6 +356,7 @@ class StorageBackend(ABC):
         self,
         query_embedding: list[float],
         top_k: int = 25,
+        namespace: str | None = None,
     ) -> list[tuple[str, float]]:
         """KNN search over stored dense vectors.
 
@@ -362,6 +368,9 @@ class StorageBackend(ABC):
             query_embedding: Query vector.  Length must match the backend's
                 configured dimensionality.
             top_k: Maximum number of nearest neighbours to return.
+            namespace: When provided, scope results to that namespace so a
+                shared multi-namespace store does not surface another tenant's
+                vectors. ``None`` keeps the legacy unscoped search.
 
         Returns:
             List of ``(entry_id, distance)`` tuples sorted by distance

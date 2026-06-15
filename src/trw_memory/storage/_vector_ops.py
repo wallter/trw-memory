@@ -34,6 +34,15 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+# Namespace-scoped KNN over-fetch: sqlite-vec applies its ``k`` limit to the
+# MATCH scan, so a namespace predicate cannot be pushed into the KNN itself.
+# We request more candidates than ``top_k`` and post-filter by namespace, then
+# truncate. The factor trades wasted scan against the risk of returning fewer
+# than ``top_k`` in-namespace hits when other namespaces dominate the global
+# nearest neighbours; the cap bounds the worst-case scan cost.
+_NAMESPACE_OVERFETCH_FACTOR = 4
+_NAMESPACE_OVERFETCH_CAP = 500
+
 
 def _is_optional_vec_unavailable_error(exc: sqlite3.Error) -> bool:
     """Return True when SQLite cannot open sqlite-vec's ``vec0`` module."""
@@ -115,16 +124,34 @@ def existing_vector_ids(
     lock: threading.Lock,
     *,
     vec_available: bool,
+    namespace: str | None = None,
 ) -> set[str]:
     """Return the set of entry IDs that currently have a stored vector.
 
     Empty set when sqlite-vec is unavailable. Single-query bulk lookup.
+
+    When *namespace* is provided the lookup is scoped to that namespace by
+    joining ``vec_index`` to the canonical ``memories`` rows (vec_index itself
+    carries no namespace column). This avoids a full-table scan that would load
+    every tenant's vector ids — a backfill caller only needs the ids in its own
+    namespace. ``namespace=None`` keeps the legacy unscoped full scan.
     """
     if not vec_available:
         return set()
     try:
         with lock:
-            rows = conn.execute("SELECT entry_id FROM vec_index").fetchall()
+            if namespace is None:
+                rows = conn.execute("SELECT entry_id FROM vec_index").fetchall()
+            else:
+                # INNER JOIN scopes to one namespace's rows. Vectors whose
+                # canonical memory row is in another namespace (or absent) are
+                # excluded, so the result never spans tenants.
+                rows = conn.execute(
+                    "SELECT vi.entry_id FROM vec_index vi "
+                    "JOIN memories m ON m.id = vi.entry_id "
+                    "WHERE m.namespace = ?",
+                    (namespace,),
+                ).fetchall()
     except sqlite3.Error as exc:
         # Real SQL error here (vec_available was already True) → surface at
         # warning so a bulk backfill doesn't silently re-embed everything on a
@@ -283,8 +310,20 @@ def search_vectors(
     dim: int,
     query_embedding: list[float],
     top_k: int = 25,
+    namespace: str | None = None,
 ) -> list[tuple[str, float]]:
-    """KNN search in vec_memories. Empty list when sqlite-vec absent."""
+    """KNN search in vec_memories. Empty list when sqlite-vec absent.
+
+    When *namespace* is provided results are scoped to that namespace, closing a
+    cross-namespace data-isolation leak: ``vec_index`` carries no namespace
+    column, so an unscoped KNN can surface entry ids whose canonical memory row
+    belongs to another tenant. sqlite-vec requires the ``k = ?`` KNN limit on
+    the MATCH scan itself (a namespace predicate cannot be pushed into that
+    scan), so we OVER-FETCH ``k`` (k * over_fetch_factor, capped), JOIN to
+    ``memories`` to filter by namespace, then truncate to ``top_k``. This keeps
+    the requested count met as long as the namespace holds enough near neighbours
+    within the over-fetch window. ``namespace=None`` keeps the legacy behaviour.
+    """
     if not vec_available:
         return []
     if len(query_embedding) != dim:
@@ -301,17 +340,33 @@ def search_vectors(
     query_bytes = struct.pack(f"{dim}f", *query_embedding)
     try:
         with lock:
+            if namespace is None:
+                rows = conn.execute(
+                    """
+                    SELECT vi.entry_id, vm.distance
+                    FROM vec_memories vm
+                    JOIN vec_index vi ON vm.rowid = vi.rowid
+                    WHERE vm.embedding MATCH ? AND k = ?
+                    ORDER BY vm.distance
+                    """,
+                    (query_bytes, top_k),
+                ).fetchall()
+                return [(str(r[0]), float(r[1])) for r in rows]
+            # Over-fetch then post-filter by namespace. The KNN k applies to the
+            # MATCH scan; the namespace filter happens in the JOIN to memories.
+            knn_k = min(max(top_k * _NAMESPACE_OVERFETCH_FACTOR, top_k), _NAMESPACE_OVERFETCH_CAP)
             rows = conn.execute(
                 """
                 SELECT vi.entry_id, vm.distance
                 FROM vec_memories vm
                 JOIN vec_index vi ON vm.rowid = vi.rowid
-                WHERE vm.embedding MATCH ? AND k = ?
+                JOIN memories mem ON mem.id = vi.entry_id
+                WHERE vm.embedding MATCH ? AND k = ? AND mem.namespace = ?
                 ORDER BY vm.distance
                 """,
-                (query_bytes, top_k),
+                (query_bytes, knn_k, namespace),
             ).fetchall()
-        return [(str(r[0]), float(r[1])) for r in rows]
+        return [(str(r[0]), float(r[1])) for r in rows[:top_k]]
     except sqlite3.Error as exc:
         # Keep the graceful BM25-only fallback (return []), but surface a REAL
         # SQL error (corruption, I/O) at warning — only the expected

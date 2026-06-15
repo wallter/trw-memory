@@ -785,9 +785,16 @@ class SQLiteBackend(StorageBackend):
         """Single-row vec_index probe."""
         return _vec_ops_vector_exists(self._conn, vec_available=self._vec_available, entry_id=entry_id)
 
-    def existing_vector_ids(self) -> set[str]:
-        """Bulk set of entry IDs with stored vectors."""
-        return _vec_ops_existing_vector_ids(self._conn, self._lock, vec_available=self._vec_available)
+    def existing_vector_ids(self, namespace: str | None = None) -> set[str]:
+        """Bulk set of entry IDs with stored vectors.
+
+        When *namespace* is provided the lookup is scoped to that namespace (via
+        a JOIN to the canonical memories rows) instead of scanning every
+        tenant's vector ids. ``None`` keeps the legacy full scan.
+        """
+        return _vec_ops_existing_vector_ids(
+            self._conn, self._lock, vec_available=self._vec_available, namespace=namespace
+        )
 
     def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:
         """Insert or update a vector in vec_memories."""
@@ -801,8 +808,15 @@ class SQLiteBackend(StorageBackend):
             skip_commit=self._skip_commit_depth != 0,
         )
 
-    def search_vectors(self, query_embedding: list[float], top_k: int = 25) -> list[tuple[str, float]]:
-        """KNN search in vec_memories."""
+    def search_vectors(
+        self, query_embedding: list[float], top_k: int = 25, namespace: str | None = None
+    ) -> list[tuple[str, float]]:
+        """KNN search in vec_memories.
+
+        When *namespace* is provided results are scoped to that namespace,
+        closing a cross-namespace isolation leak (vec_index has no namespace
+        column). ``None`` keeps the legacy unscoped behaviour.
+        """
         return _vec_ops_search_vectors(
             self._conn,
             self._lock,
@@ -810,6 +824,7 @@ class SQLiteBackend(StorageBackend):
             dim=self._dim,
             query_embedding=query_embedding,
             top_k=top_k,
+            namespace=namespace,
         )
 
     def get_stored_embeddings(self, entry_ids: list[str]) -> dict[str, list[float]]:
