@@ -692,6 +692,18 @@ class SQLiteBackend(StorageBackend):
             deleted = _query_ops_delete_by_namespace(self, namespace)
             with self._lock:
                 self._conn.execute("DELETE FROM wiki_refs WHERE namespace = ?", (namespace,))
+                # Remove knowledge-graph edges that referenced any deleted row as
+                # source OR target. memory_graph_edges has no namespace column and
+                # SQLite enforces no FK cascade here, so the bulk namespace delete
+                # must clean edges explicitly — exactly as the per-row delete() in
+                # _crud_ops.py does — or orphan edges accumulate forever and a BFS
+                # follows them to ghost (deleted / foreign) node IDs.
+                placeholders = ",".join("?" for _ in entry_ids)
+                self._conn.execute(
+                    f"DELETE FROM memory_graph_edges WHERE source_id IN ({placeholders}) "  # noqa: S608 — placeholders is ? repeated; entry_ids are parameterized values
+                    f"OR target_id IN ({placeholders})",
+                    (*entry_ids, *entry_ids),
+                )
                 if self._vec_available:
                     for entry_id in entry_ids:
                         self._delete_vector(entry_id)

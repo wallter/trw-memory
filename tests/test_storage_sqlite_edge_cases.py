@@ -23,6 +23,58 @@ from trw_memory.storage.sqlite_backend import SQLiteBackend
 from ._test_storage_sqlite_support import backend, make_entry
 
 
+class TestDeleteByNamespaceGraphEdges:
+    """delete_by_namespace must clean orphan memory_graph_edges (GDPR/integrity)."""
+
+    @staticmethod
+    def _insert_edge(backend: SQLiteBackend, source_id: str, target_id: str) -> None:
+        backend._conn.execute(
+            "INSERT INTO memory_graph_edges (source_id, target_id, edge_type, weight, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (source_id, target_id, "similarity", 0.9, "2026-06-15T00:00:00+00:00"),
+        )
+        backend._conn.commit()
+
+    @staticmethod
+    def _edge_count(backend: SQLiteBackend) -> int:
+        row = backend._conn.execute("SELECT COUNT(*) FROM memory_graph_edges").fetchone()
+        return int(row[0]) if row else 0
+
+    def test_delete_by_namespace_removes_edges_touching_deleted_rows(self, backend: SQLiteBackend) -> None:
+        backend.store(make_entry("A", namespace="project:gone"))
+        backend.store(make_entry("B", namespace="project:gone"))
+        backend.store(make_entry("K", namespace="project:keep"))
+        # edge fully inside the deleted ns, plus edges crossing into/out of it,
+        # plus one edge entirely within the surviving ns.
+        self._insert_edge(backend, "A", "B")  # both deleted
+        self._insert_edge(backend, "A", "K")  # source deleted, target kept
+        self._insert_edge(backend, "K", "B")  # source kept, target deleted
+        self._insert_edge(backend, "K", "K")  # both kept (must survive)
+        assert self._edge_count(backend) == 4
+
+        deleted = backend.delete_by_namespace("project:gone")
+
+        assert deleted == 2
+        # Only the wholly-surviving K->K edge remains; the three edges with any
+        # endpoint in the deleted namespace are gone.
+        rows = [
+            (str(r[0]), str(r[1]))
+            for r in backend._conn.execute(
+                "SELECT source_id, target_id FROM memory_graph_edges"
+            ).fetchall()
+        ]
+        assert rows == [("K", "K")]
+
+    def test_delete_by_namespace_no_entries_leaves_edges_untouched(self, backend: SQLiteBackend) -> None:
+        backend.store(make_entry("K", namespace="project:keep"))
+        self._insert_edge(backend, "K", "K")
+
+        deleted = backend.delete_by_namespace("project:empty")
+
+        assert deleted == 0
+        assert self._edge_count(backend) == 1
+
+
 class TestCrossThreadSafety:
     """Verify SQLiteBackend can be used from multiple threads."""
 
