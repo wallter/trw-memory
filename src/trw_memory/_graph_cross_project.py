@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import sqlite3
 import threading
+import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,7 +41,14 @@ logger = structlog.get_logger(__name__)
 CROSS_VALIDATION_THRESHOLD = 0.92
 CANDIDATE_LIMIT = 500
 
-_ENTRY_UPDATE_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+# WeakValueDictionary so a per-entry lock is reclaimed once no caller holds a
+# reference to it. A plain dict accumulated one Lock per (backend, entry_id)
+# pair ever cross-validated, with no eviction/TTL/cap — unbounded RAM growth in
+# long-lived processes (e.g. an MCP server). The lock is always returned and
+# immediately used inside a ``with`` block, so the caller holds a strong
+# reference for the entire critical section; the weak entry can only be
+# collected after every holder has released it.
+_ENTRY_UPDATE_LOCKS: weakref.WeakValueDictionary[tuple[str, str], threading.Lock] = weakref.WeakValueDictionary()
 _ENTRY_UPDATE_LOCKS_GUARD = threading.Lock()
 
 

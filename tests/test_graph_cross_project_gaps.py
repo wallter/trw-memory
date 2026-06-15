@@ -39,6 +39,40 @@ def _entry(**kwargs) -> MemoryEntry:
 # line 83: persist_cross_validated_entry early return when updated == original
 # ---------------------------------------------------------------------------
 
+class TestEntryUpdateLockBounded:
+    def test_locks_are_evicted_when_not_referenced(self) -> None:
+        """The per-entry lock registry must not grow without bound.
+
+        Each (backend, entry_id) lock is reclaimed once no caller holds it,
+        so requesting locks for many distinct entries does not accumulate
+        entries forever (the prior plain dict had no eviction).
+        """
+        import gc
+
+        import trw_memory._graph_cross_project as gx
+
+        backend = MagicMock()
+        backend._db_path = "/tmp/some-backend.db"
+
+        # Request locks for many distinct entries, holding NO references.
+        for i in range(500):
+            entry_update_lock(backend, f"entry-{i}")
+
+        gc.collect()
+        # With a WeakValueDictionary the unreferenced locks are collected, so
+        # the registry does not retain all 500 keys.
+        assert len(gx._ENTRY_UPDATE_LOCKS) < 500
+
+    def test_same_lock_returned_while_reference_held(self) -> None:
+        """Concurrent callers for the same key must share one lock object."""
+        backend = MagicMock()
+        backend._db_path = "/tmp/shared-backend.db"
+
+        lock_a = entry_update_lock(backend, "same-entry")
+        lock_b = entry_update_lock(backend, "same-entry")
+        assert lock_a is lock_b, "same key must yield the same lock while held"
+
+
 class TestPersistCrossValidatedEntry:
     def test_no_update_when_entry_unchanged(self, tmp_path) -> None:
         """persist skips backend.update when updated == original (line 83)."""
