@@ -451,6 +451,7 @@ class YAMLBackend(StorageBackend):
         min_importance: float = 0.0,
         limit: int = 100,
         exclude_superseded: bool = False,
+        tags: list[str] | None = None,
     ) -> list[MemoryEntry]:
         """Return entries with optional filters.
 
@@ -463,6 +464,9 @@ class YAMLBackend(StorageBackend):
             limit: Maximum entries to return.
             exclude_superseded: When True, exclude entries with a non-null
                 ``invalid_from`` (bi-temporal superseded entries).
+            tags: If provided, only return entries containing ALL of these tags.
+                Applied BEFORE the limit so tagged entries past the row limit
+                are not truncated away (parity with the SQLite backend).
 
         Returns:
             Up to *limit* matching entries ordered by updated_at descending.
@@ -470,6 +474,7 @@ class YAMLBackend(StorageBackend):
         status_val: str | None = None
         if status is not None:
             status_val = status.value
+        required_tags = set(tags) if tags else None
 
         results: list[MemoryEntry] = []
         for entry in self._load_all():
@@ -481,6 +486,8 @@ class YAMLBackend(StorageBackend):
             if min_importance > 0.0 and entry.importance < min_importance:
                 continue
             if exclude_superseded and entry.invalid_from is not None:
+                continue
+            if required_tags is not None and not required_tags.issubset(set(entry.tags)):
                 continue
             results.append(entry)
 

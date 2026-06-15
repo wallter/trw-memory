@@ -642,8 +642,14 @@ class SQLiteBackend(StorageBackend):
         min_importance: float = 0.0,
         limit: int = 100,
         exclude_superseded: bool = False,
+        tags: list[str] | None = None,
     ) -> list[MemoryEntry]:
-        """Return entries with optional filters, ordered by updated_at desc."""
+        """Return entries with optional filters, ordered by updated_at desc.
+
+        When *tags* is provided the predicate is pushed into SQL so the LIMIT
+        applies AFTER tag filtering — tagged entries past the row limit are not
+        silently truncated away before the filter runs.
+        """
         return _query_ops_list_entries(
             self,
             _SELECT_COLUMNS_SQL,
@@ -652,6 +658,7 @@ class SQLiteBackend(StorageBackend):
             min_importance=min_importance,
             limit=limit,
             exclude_superseded=exclude_superseded,
+            tags=tags,
         )
 
     def list_namespaces(self) -> list[str]:

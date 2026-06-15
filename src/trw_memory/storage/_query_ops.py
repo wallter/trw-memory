@@ -307,6 +307,7 @@ def list_entries(
     min_importance: float = 0.0,
     limit: int = 100,
     exclude_superseded: bool = False,
+    tags: list[str] | None = None,
 ) -> list[MemoryEntry]:
     """Return entries with optional filters, ordered by updated_at desc.
 
@@ -316,10 +317,25 @@ def list_entries(
     during hybrid retrieval.  Pass ``True`` when the caller has already decided
     that superseded entries are unwanted (e.g. ``include_superseded=False`` on
     the hybrid recall path without an ``as_of`` anchor).
+
+    When *tags* is provided every listed entry must contain ALL of them. The
+    predicate is pushed into SQL so the LIMIT applies AFTER tag filtering — a
+    tagged entry past the row limit (older ``updated_at``) is still returned,
+    rather than being truncated away before the filter runs (the recall-path
+    silent-drop bug). Tags are stored as a JSON array (e.g. ``["foo","bar"]``);
+    each required tag matches its JSON-quoted token so ``"foo"`` does not match
+    ``["foobar"]``. An exact ``issubset`` re-check below remains authoritative.
     """
     where_sql, params = backend._build_filter_clause(status=status, namespace=namespace, min_importance=min_importance)
     if exclude_superseded:
         where_sql = f"({where_sql}) AND (invalid_from IS NULL OR invalid_from = '')"
+    tag_clauses: list[str] = []
+    for tag in tags or []:
+        tag_clauses.append("tags LIKE ? ESCAPE '\\'")
+        escaped_tag = tag.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params.append(f'%"{escaped_tag}"%')
+    if tag_clauses:
+        where_sql = f"({where_sql}) AND " + " AND ".join(tag_clauses)
     order_by = "updated_at DESC"
     sql = (
         f"SELECT {select_columns_sql} FROM memories WHERE {where_sql} "  # noqa: S608
@@ -331,12 +347,19 @@ def list_entries(
     backend._ensure_connection_fresh()
     try:
         with backend._lock:
-            return _execute_resilient(backend, sql, params, fetch_query=fetch_query)
+            results = _execute_resilient(backend, sql, params, fetch_query=fetch_query)
     except (sqlite3.Error, ValueError, KeyError) as exc:
         raise StorageError(
             f"Failed to list entries: {exc}",
             path=str(backend._db_path),
         ) from exc
+    if tags:
+        # Authoritative exact filter: the SQL LIKE on the JSON token narrows the
+        # candidate set (so the LIMIT bites the filtered rows) but issubset is
+        # the source of truth for "entry has ALL required tags".
+        required = set(tags)
+        results = [e for e in results if required.issubset(set(e.tags))]
+    return results
 
 
 def list_namespaces(backend: SQLiteBackend) -> list[str]:

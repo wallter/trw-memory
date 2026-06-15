@@ -34,6 +34,68 @@ from trw_memory.models.memory import (
 )
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
+class TestTagFilterAppliesBeforeLimit:
+    """Pushing the tag predicate into SQL so LIMIT applies AFTER tag filtering.
+
+    Previously list_entries truncated rows at LIMIT first, then an in-memory tag
+    filter pruned the truncated set — so a tagged entry past the limit (older
+    updated_at) was silently dropped even though it matched the requested tags.
+    """
+
+    def _store(self, backend: SQLiteBackend, entry_id: str, tags: list[str], updated: datetime) -> None:
+        backend.store(
+            MemoryEntry(
+                id=entry_id,
+                content=f"content {entry_id}",
+                detail="",
+                tags=tags,
+                namespace="default",
+                status=MemoryStatus.ACTIVE,
+                created_at=updated,
+                updated_at=updated,
+            )
+        )
+
+    def test_tagged_entry_past_row_limit_is_still_returned(self, tmp_path: Path) -> None:
+        backend = SQLiteBackend(tmp_path / "tags.db")
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        # 5 NEWER untagged entries crowd the front of the updated_at DESC order.
+        for i in range(5):
+            self._store(backend, f"U-{i}", ["other"], base + timedelta(days=10 + i))
+        # The matching entry is the OLDEST → it sorts LAST in updated_at DESC.
+        self._store(backend, "WANTED", ["target"], base)
+
+        # limit=3 is smaller than the 5 newer untagged rows, so without an
+        # SQL-level tag predicate WANTED would never survive the truncation.
+        results = backend.list_entries(
+            status=MemoryStatus.ACTIVE,
+            namespace="default",
+            limit=3,
+            tags=["target"],
+        )
+
+        ids = {e.id for e in results}
+        assert "WANTED" in ids
+        assert ids == {"WANTED"}
+
+    def test_no_tags_filter_keeps_legacy_behavior(self, tmp_path: Path) -> None:
+        backend = SQLiteBackend(tmp_path / "notags.db")
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        for i in range(4):
+            self._store(backend, f"E-{i}", ["x"], base + timedelta(days=i))
+        results = backend.list_entries(status=MemoryStatus.ACTIVE, namespace="default", limit=2)
+        assert len(results) == 2  # limit honored, no tag filtering applied
+
+    def test_tag_token_match_does_not_collide_on_substring(self, tmp_path: Path) -> None:
+        backend = SQLiteBackend(tmp_path / "collide.db")
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        self._store(backend, "EXACT", ["foo"], base + timedelta(days=2))
+        self._store(backend, "SUBSTR", ["foobar"], base + timedelta(days=1))
+        results = backend.list_entries(status=MemoryStatus.ACTIVE, namespace="default", limit=10, tags=["foo"])
+        ids = {e.id for e in results}
+        assert ids == {"EXACT"}  # "foo" must NOT match the ["foobar"] tag list
+
+
 # ---------------------------------------------------------------------------
 # F6 — expiry filtering on the recall path
 # ---------------------------------------------------------------------------

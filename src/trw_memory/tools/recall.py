@@ -153,20 +153,20 @@ def memory_recall_impl(
                 logger.debug("recall_expired_namespace_skipped", namespace=ns)
                 continue
 
+            # Push the tag predicate into SQL so the row LIMIT applies AFTER the
+            # tag filter. Previously list_entries truncated at limit=10_000 and
+            # the in-memory tag filter ran over the TRUNCATED set, silently
+            # dropping tagged entries beyond position 10_000 (older updated_at).
             ns_entries = ns_backend.list_entries(
                 status=MemoryStatus.ACTIVE,
                 namespace=ns,
                 limit=10_000,
+                tags=tags or None,
             )
             all_entries.extend(ns_entries)
 
             if query and ns_entries:
                 stored_embeddings.update(ns_backend.get_stored_embeddings([entry.id for entry in ns_entries]))
-
-    # Apply tag filter
-    if tags:
-        tag_set = set(tags)
-        all_entries = [e for e in all_entries if tag_set.issubset(set(e.tags))]
 
     # Retrieve via hybrid search (gracefully degrades to BM25-only or empty)
     if query and all_entries:

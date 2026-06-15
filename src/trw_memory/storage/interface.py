@@ -137,6 +137,7 @@ class StorageBackend(ABC):
         min_importance: float = 0.0,
         limit: int = 100,
         exclude_superseded: bool = False,
+        tags: list[str] | None = None,
     ) -> list[MemoryEntry]:
         """Return entries with optional filters.
 
@@ -154,6 +155,10 @@ class StorageBackend(ABC):
                 effective for the common case where ``as_of`` is not set; callers
                 doing point-in-time queries should leave this False and rely on
                 ``apply_validity_prior`` post-fusion instead.
+            tags: If provided, only return entries containing ALL of these tags.
+                The predicate is applied BEFORE the limit so tagged entries past
+                the row limit are not truncated away (the recall silent-drop
+                bug). When omitted the legacy behaviour (no tag filter) holds.
 
         Returns:
             Up to *limit* entries ordered by ``updated_at`` descending.
