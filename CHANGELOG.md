@@ -6,6 +6,15 @@ All notable changes to the TRW Memory package.
 
 ### Fixed
 
+- **`mypy --strict` CI failure on the optional PyNaCl signing-key fallbacks.**
+  The public CI installs the dep set without PyNaCl, so `mypy --strict` reported
+  unused `# type: ignore` comments on the `nacl` import fallbacks in
+  `security/provenance.py` and `security/keys.py` (the ignores are *used* when
+  PyNaCl is present — it ships `py.typed` — and *unused* when it is absent).
+  Added `nacl`/`nacl.*` `ignore_missing_imports` overrides plus a per-module
+  `warn_unused_ignores = false` override for those two modules so both
+  environments type-check cleanly. Type-check hygiene only — no runtime change.
+
 - **Dedup-on-write no longer silently no-ops when embeddings are unavailable.**
   Previously `check_duplicate` returned `store` (accept) for every entry when no
   embedder was available, so a store with embeddings disabled could accumulate

@@ -274,6 +274,25 @@ ignore_missing_imports = true
 module = "cryptography.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "nacl"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "nacl.*"
+ignore_missing_imports = true
+
+# PyNaCl is an optional dep. The signing-key fallbacks in these two modules
+# carry `# type: ignore[misc,assignment]` that is USED when PyNaCl is present
+# (real nacl types -> rebinding to Any is a genuine error these ignores
+# suppress) but UNUSED when PyNaCl is absent (e.g. the public CI dep set,
+# where nacl resolves to Any via the override above). `warn_unused_ignores`
+# would therefore fire in CI only. Disabling it for just these modules keeps
+# both environments green without env-dependent source edits.
+[[tool.mypy.overrides]]
+module = ["trw_memory.security.provenance", "trw_memory.security.keys"]
+warn_unused_ignores = false
+
 [tool.coverage.run]
 source = ["trw_memory"]
 omit = ["*/server.py"]
