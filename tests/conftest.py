@@ -111,6 +111,25 @@ def restore_logging_state() -> Iterator[None]:
         root.setLevel(saved_level)
 
 
+@pytest.fixture(autouse=True)
+def _sec001_hermetic_anchor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """SEC-001 anchor must not depend on an ambient ``.trw`` found by the cwd-walk
+    (present in the monorepo, ABSENT in the standalone published package / public-mirror
+    CI). Pin ``TRW_DIR`` to a hermetic per-test anchor so MemoryClient/security startup
+    resolves via ``_discover_anchor`` step 2 instead of the cwd-walk. Anchor-resolution
+    tests that exercise the cwd-walk / step-3 / no-anchor branches override or clear this
+    with their own ``patch.dict(os.environ, {"TRW_DIR": ...})``.
+
+    The anchor lives in a dedicated ``_sec001_anchor`` subdir of ``tmp_path`` (NOT
+    ``tmp_path / ".trw"``) so it never collides with tests that create their own
+    ``tmp_path / ".trw"`` (e.g. the cwd-walk / path-resolution anchor tests that share
+    the same function-scoped ``tmp_path``).
+    """
+    anchor = tmp_path / "_sec001_anchor" / ".trw"
+    anchor.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("TRW_DIR", str(anchor))
+
+
 # ---------------------------------------------------------------------------
 # SQLiteBackend fixture
 # ---------------------------------------------------------------------------

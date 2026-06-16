@@ -6,6 +6,12 @@ All notable changes to the TRW Memory package.
 
 ### Fixed
 
+- **Client/security-startup tests now pin a hermetic SEC-001 `TRW_DIR` anchor so they
+  pass in the standalone package** (they previously relied on the monorepo's ambient
+  `.trw/` discovered via the `_discover_anchor` cwd-walk, which is absent in the
+  public-mirror CI and caused `SecurityDefaultUnresolvableError` setup failures). Test
+  harness only — no runtime change.
+
 - **`mypy --strict` CI failure on the optional PyNaCl signing-key fallbacks.**
   The public CI installs the dep set without PyNaCl, so `mypy --strict` reported
   unused `# type: ignore` comments on the `nacl` import fallbacks in

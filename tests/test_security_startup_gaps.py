@@ -31,7 +31,10 @@ class TestDiscoverAnchorTrwDir:
         storage_path = tmp_path / "memory" / "store.db"
         storage_path.parent.mkdir(parents=True)
         cfg = MemoryConfig(storage_path=str(storage_path))
-        result = _discover_anchor(cfg)
+        # Clear the autouse hermetic TRW_DIR so step 3 (absolute storage_path →
+        # parent) is exercised instead of step 2 (TRW_DIR env).
+        with patch.dict(os.environ, {"TRW_DIR": ""}):
+            result = _discover_anchor(cfg)
         assert result == storage_path.parent.resolve()
 
     def test_cwd_walk_finds_trw_dir_when_exists(self, tmp_path: Path) -> None:
