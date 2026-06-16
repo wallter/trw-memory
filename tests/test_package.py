@@ -532,11 +532,22 @@ def test_pyproject_declares_core_runtime_direct_dependencies() -> None:
     assert "typing-extensions" in _dependency_names(dependencies)
 
 
+# ``requirements.lock`` is a monorepo build artifact; it is NOT shipped in the
+# standalone public mirror (github.com/wallter/trw-memory). Guard the lock-pin
+# tests so they enforce in the monorepo but skip cleanly in the mirror CI.
+skip_if_requirements_lock_absent = pytest.mark.skipif(
+    not REQUIREMENTS_LOCK_PATH.exists(),
+    reason="requirements.lock is a monorepo build artifact, absent in the standalone mirror",
+)
+
+
+@skip_if_requirements_lock_absent
 def test_requirements_lock_fastmcp_pin_is_patched() -> None:
     """requirements.lock must not pin vulnerable FastMCP releases."""
     assert _version_tuple(_requirements_lock_package_version("fastmcp")) >= (3, 2, 0)
 
 
+@skip_if_requirements_lock_absent
 def test_requirements_lock_security_pin_floors_are_patched() -> None:
     """Known-audited requirements.lock pins stay above patched floors."""
     floors = {
@@ -554,6 +565,7 @@ def test_requirements_lock_security_pin_floors_are_patched() -> None:
         assert _version_tuple(_requirements_lock_package_version(package)) >= floor
 
 
+@skip_if_requirements_lock_absent
 def test_requirements_lock_has_no_stale_self_pin() -> None:
     """requirements.lock must not pin trw-memory to a frozen git commit.
 

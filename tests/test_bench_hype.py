@@ -32,24 +32,38 @@ def test_two_arm_delta_deterministic_fake_embedder(tmp_path: Path, monkeypatch: 
     from benchmarks import bench_hype
     from tests.test_hype_recall import _LabelEmbedder
 
+    # Isolate the relative ``.memory`` tier sidecars to a per-test dir. Without
+    # this the benchmark's MemoryClient writes warm/cold sidecars under a
+    # ``.memory`` dir resolved relative to the process cwd, which accumulates
+    # entries across runs and across the bundled-fixture benchmark. That shared
+    # pollution non-deterministically changes which docs fill the off-arm
+    # top-10 (it MASKED this assertion in the monorepo by pushing the target out
+    # of the off-arm window; a clean store surfaces it and the strict-uplift
+    # assertion flips). Pinning a hermetic store makes both arms deterministic.
+    monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "store"))
+
     # Synthetic golden set: content uses label @doc; the positive query uses
     # @ask. With HyPE off the query cannot reach the entry via dense; with HyPE
     # on the sibling (which carries @ask) collapses to the parent.
     fixture = tmp_path / "mini.json"
-    # Target content is orthogonal to the query (@doc vs @ask) and shares no
-    # query tokens, so neither BM25 nor dense can reach it on the off arm. A few
-    # unrelated distractors fill the pool. With HyPE on, the target's @ask
-    # sibling (kept because the query is >= hype_min_question_chars) provides the
-    # only dense hit that collapses back to the target → strict uplift.
+    # The target content is dense-orthogonal to the query (@doc vs @ask). To keep
+    # the off-arm from trivially returning the target as a low-score fallback, the
+    # corpus must be LARGER than the recall limit (10) AND the distractors must
+    # outrank the target on BM25 — so each distractor shares the query token
+    # "request" (which the target does not) and there are 15 of them. On the off
+    # arm the BM25-positive distractors fill the top-10 and the orthogonal target
+    # is excluded (recall 0). With HyPE on, the target's @ask sibling (kept because
+    # the query is >= hype_min_question_chars) provides the only dense hit that
+    # collapses back to the target → strict uplift.
     distractors = [
         {
             "id": f"distractor-{i}",
-            "content": f"unrelated filler entry number {i} zzz",
+            "content": f"paraphrased request filler entry number {i} zzz",
             "tags": ["t"],
             "importance": 0.3,
             "queries": [],
         }
-        for i in range(3)
+        for i in range(15)
     ]
     target = {
         "id": "default-mini-1",

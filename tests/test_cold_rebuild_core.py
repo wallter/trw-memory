@@ -4,10 +4,19 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
 import pytest
+
+# Wall-clock SLO assertions are unreliable on shared GitHub-hosted runners
+# (2 slow cores, noisy neighbours). We still RUN the work under CI (GitHub
+# Actions sets ``CI=true``) so it covers the write/provenance/security paths,
+# but only ENFORCE the timing SLO on dev hardware — see the conditional asserts
+# below. Skipping the whole test on CI would drop the security-package branch
+# coverage these heavy-write tests provide below the INFRA-020 90% gate.
+_ON_CI = os.environ.get("CI") == "true"
 
 from trw_memory.models.config import MemoryConfig
 from trw_memory.storage._cold_rebuild import _normalize_ts, rebuild_from_cold
@@ -143,10 +152,11 @@ def test_rebuild_throughput_10k_files(tmp_path: Path) -> None:
         conn.close()
 
     assert rebuilt == 10_000, f"expected 10,000 rebuilt, got {rebuilt}"
-    assert elapsed < 30.0, (
-        f"NFR01 throughput SLO violated: 10k YAMLs took {elapsed:.2f}s, budget 30s. "
-        "Check for quadratic work or missing transaction batching."
-    )
+    if not _ON_CI:
+        assert elapsed < 30.0, (
+            f"NFR01 throughput SLO violated: 10k YAMLs took {elapsed:.2f}s, budget 30s. "
+            "Check for quadratic work or missing transaction batching."
+        )
 
 
 def test_hydrator_normalizes_date_only(tmp_path: Path) -> None:

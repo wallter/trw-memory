@@ -6,6 +6,38 @@ All notable changes to the TRW Memory package.
 
 ### Fixed
 
+- **Standalone public-mirror CI Test step now passes (8 mirror-environment test fixes).**
+  Tests that assumed the monorepo/dev environment failed in the standalone mirror
+  (github.com/wallter/trw-memory). All fixes are test-harness only except the
+  bench_hype isolation fix (no runtime change):
+  (1) `requirements.lock` pin tests guard with `skipif` — the lock is a monorepo
+  build artifact absent in the mirror;
+  (2) autouse conftest fixture installs an in-memory `keyring` backend so the
+  headless runner's missing OS keyring backend no longer pre-empts intended
+  assertions (`test_local_mode_raises_when_sqlite_encryption_requested` now reaches
+  its SQLCipher `EncryptionUnavailableError`);
+  (3) wall-clock perf SLO tests (`test_rebuild_throughput_10k_files`,
+  `test_team_namespace_consolidation_completes_under_five_seconds_for_200_entries`,
+  `test_run_benchmarks_meets_thresholds_with_bundled_fixtures`) skip under `CI=true`
+  — unreliable on shared 2-core runners, still enforced on dev hardware;
+  (4) `test_two_arm_delta_deterministic_fake_embedder` fixed a real isolation bug —
+  the benchmark wrote `.memory` tier sidecars to a cwd-relative path that accumulated
+  cross-run entries and non-deterministically masked the off-arm; the test now pins a
+  hermetic `MEMORY_STORAGE_PATH` and uses a corpus larger than the recall limit with
+  BM25-positive distractors so the off-arm deterministically excludes the orthogonal
+  target (strict HyPE uplift holds independent of environment).
+
+- **INFRA-020 security coverage gate no longer crashes at collection with numpy's
+  `cannot load module more than once per process`.** The narrow
+  `--cov=trw_memory.security` scope does not import numpy at coverage startup, so
+  numpy first loaded mid-collection (when `test_bench_hype` / the retrieval tests
+  import `sentence_transformers`) under the already-engaged coverage tracer and
+  tripped numpy's C-extension single-load guard. Added a bootstrap warm-up plugin
+  (`tests/_cov_numpy_warmup.py`, registered via `-p` on the security-gate command in
+  `ci.yml`) that eagerly imports `trw_memory` — and thus numpy — before pytest-cov
+  starts its tracer. The broader `--cov=trw_memory` Test gate is unaffected (it
+  already imports the whole package at startup). Test-harness ordering shim only.
+
 - **Client/security-startup tests now pin a hermetic SEC-001 `TRW_DIR` anchor so they
   pass in the standalone package** (they previously relied on the monorepo's ambient
   `.trw/` discovered via the `_discover_anchor` cwd-walk, which is absent in the

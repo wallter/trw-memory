@@ -112,6 +112,63 @@ def restore_logging_state() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_keyring_backend() -> Iterator[None]:
+    """Install an in-memory keyring backend for the duration of each test.
+
+    The public-mirror CI installs the ``keyring`` package but the headless
+    GitHub runner has NO OS keyring backend available (no SecretStorage /
+    kwallet / macOS Keychain), so any code path that stores or reads a master
+    key via ``keyring.set_password`` raises
+    ``keyring.errors.NoKeyringError: No recommended backend was available``.
+    In the monorepo dev box a real backend (or none) is present and masks this.
+
+    Pinning a process-local in-memory backend makes the keyring path hermetic
+    and deterministic: tests that expect a DIFFERENT raise downstream (e.g.
+    ``test_local_mode_raises_when_sqlite_encryption_requested`` asserting the
+    SQLCipher-driver ``EncryptionUnavailableError``) reach their intended
+    assertion instead of being pre-empted by the keyring-store failure.
+
+    This is a test-only fixture — it does NOT add ``keyrings.alt`` (or any
+    other backend) to the runtime dependency set.
+    """
+    try:  # keyring is a test/CI dep, not a hard runtime dep — fail open if absent.
+        import keyring
+        import keyring.backend
+        from keyring.errors import PasswordDeleteError
+    except Exception:  # pragma: no cover - keyring genuinely unavailable
+        yield
+        return
+
+    class _InMemoryKeyring(keyring.backend.KeyringBackend):  # type: ignore[misc]
+        """A minimal RAM-only keyring backend for hermetic tests."""
+
+        priority = 1.0  # type: ignore[assignment]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._store: dict[tuple[str, str], str] = {}
+
+        def get_password(self, service: str, username: str) -> str | None:
+            return self._store.get((service, username))
+
+        def set_password(self, service: str, username: str, password: str) -> None:
+            self._store[(service, username)] = password
+
+        def delete_password(self, service: str, username: str) -> None:
+            try:
+                del self._store[(service, username)]
+            except KeyError as exc:
+                raise PasswordDeleteError("not found") from exc
+
+    previous = keyring.get_keyring()
+    keyring.set_keyring(_InMemoryKeyring())
+    try:
+        yield
+    finally:
+        keyring.set_keyring(previous)
+
+
+@pytest.fixture(autouse=True)
 def _sec001_hermetic_anchor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """SEC-001 anchor must not depend on an ambient ``.trw`` found by the cwd-walk
     (present in the monorepo, ABSENT in the standalone published package / public-mirror
