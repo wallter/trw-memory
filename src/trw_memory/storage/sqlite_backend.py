@@ -661,9 +661,14 @@ class SQLiteBackend(StorageBackend):
             tags=tags,
         )
 
-    def list_namespaces(self) -> list[str]:
-        """Return all distinct namespaces that have stored entries."""
-        return _query_ops_list_namespaces(self)
+    def list_namespaces(self, required_namespaces: list[str] | None = None) -> list[str]:
+        """Return distinct namespaces that have stored entries.
+
+        When ``required_namespaces`` is provided the result is scoped to that
+        authorized set so enumeration never leaks other tenants' namespaces
+        (trw-memory-11). ``None`` returns every namespace (admin/single-tenant).
+        """
+        return _query_ops_list_namespaces(self, required_namespaces)
 
     def delete_by_namespace(self, namespace: str) -> int:
         """Delete all entries in a namespace atomically.
@@ -847,9 +852,7 @@ class SQLiteBackend(StorageBackend):
 
     def hype_sibling_ids(self, parent_id: str) -> list[str]:
         """PRD-CORE-195: stored ``{parent_id}#hype{n}`` sibling ids for a parent."""
-        return _vec_ops_hype_sibling_ids(
-            self._conn, self._lock, vec_available=self._vec_available, parent_id=parent_id
-        )
+        return _vec_ops_hype_sibling_ids(self._conn, self._lock, vec_available=self._vec_available, parent_id=parent_id)
 
     def delete_hype_siblings(self, parent_id: str) -> int:
         """PRD-CORE-195: purge a parent's HyPE sibling vectors (idempotent).

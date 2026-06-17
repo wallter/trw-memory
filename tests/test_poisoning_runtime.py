@@ -47,6 +47,68 @@ class TestRuntimePoisoningPolicy:
         assert stats["sample_count"] == 100
         assert set(list(stats["dimensions"])) == {"entry_length", "tag_count", "importance"}  # type: ignore[arg-type]
 
+    def test_sub_baseline_namespace_emits_audit_event(self, tmp_path: Path) -> None:
+        """trw-memory-10: a namespace below the statistical baseline (<10 clean
+        entries) must record an audit event for the skipped anomaly detection, not
+        only a structlog WARNING — so the sub-baseline window is visible in the
+        audit trail an attacker could exploit by seeding baseline-1 entries.
+        """
+        from trw_memory.security.audit import AuditLog
+
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
+        assert cfg.poisoning_detection_enabled is True
+
+        with create_backend_from_config(cfg, "project:default") as backend:
+            # Seed only 5 clean entries — below the 10-entry baseline.
+            for index in range(5):
+                backend.store(
+                    MemoryEntry(
+                        id=f"M-seed-{index}",
+                        content="seed content",
+                        namespace="project:default",
+                        importance=0.5,
+                    )
+                )
+            prepare_entry_for_store(
+                MemoryEntry(id="M-new", content="normal entry", namespace="project:default"),
+                backend=backend,
+                config=cfg,
+            )
+
+        records = AuditLog(Path(cfg.audit_log_path)).read_all()
+        baseline_events = [r for r in records if r.op == "anomaly_baseline_insufficient"]
+        assert len(baseline_events) == 1
+        event = baseline_events[0]
+        assert event.data["min_baseline"] == 10
+        assert int(str(event.data["sample_count"])) < 10
+        assert event.data["reason"] == "below_statistical_baseline"
+
+    def test_above_baseline_namespace_emits_no_baseline_audit_event(self, tmp_path: Path) -> None:
+        """The sub-baseline audit event must NOT fire once the namespace has a
+        full statistical baseline — the signal is specific to the skip window."""
+        from trw_memory.security.audit import AuditLog
+
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
+
+        with create_backend_from_config(cfg, "project:default") as backend:
+            for index in range(30):
+                backend.store(
+                    MemoryEntry(
+                        id=f"M-seed-{index}",
+                        content="seed content",
+                        namespace="project:default",
+                        importance=0.5,
+                    )
+                )
+            prepare_entry_for_store(
+                MemoryEntry(id="M-new", content="normal entry", namespace="project:default"),
+                backend=backend,
+                config=cfg,
+            )
+
+        records = AuditLog(Path(cfg.audit_log_path)).read_all()
+        assert not [r for r in records if r.op == "anomaly_baseline_insufficient"]
+
     def test_size_anomaly_observe_mode_default_does_not_quarantine_long_entry(self, tmp_path: Path) -> None:
         """SEC-001 default: a long, well-formed learning is observed, NOT quarantined.
 
@@ -326,6 +388,30 @@ class TestRuntimePoisoningPolicy:
         assert "123-45-6789" not in secured.tags[0]
         assert "<ssn>" in secured.tags[0]
         assert matches
+
+    def test_pii_policy_redacts_high_entropy_token_in_content(self, tmp_path: Path) -> None:
+        """A HIGH_ENTROPY secret (no API_KEY prefix) must be redacted, not stored verbatim.
+
+        Regression (2026-06-17): HIGH_ENTROPY was detected — the metadata flag was
+        set — but absent from REDACTED_PII_TYPES, so replace_pii() fell through its
+        ``else: continue`` and persisted the raw secret in content/detail/tags.
+        """
+        from trw_memory.security._runtime_pii import apply_runtime_pii_policy
+
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
+        # A 40-char token with no recognized prefix that clears the entropy floor.
+        secret = "aB3cD9eF2gH5iJ8kL1mN4oP7qR6sT0uV3wX5yZ8b"
+        entry = MemoryEntry(
+            id="M-high-entropy-redact",
+            content=f"the credential is {secret} keep it safe",
+            namespace="project:default",
+        )
+
+        secured, matches = apply_runtime_pii_policy(entry, cfg)
+        assert secret not in secured.content
+        assert "<high_entropy_secret>" in secured.content
+        assert secured.metadata["contains_high_entropy_token"] == "true"
+        assert any(str(m.pii_type) == "high_entropy" for m in matches)
 
 
 class TestAnomalyQuarantineNoCallerBypass:

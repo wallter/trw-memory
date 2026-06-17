@@ -362,11 +362,31 @@ def list_entries(
     return results
 
 
-def list_namespaces(backend: SQLiteBackend) -> list[str]:
-    """Return all distinct namespaces that have stored entries."""
+def list_namespaces(backend: SQLiteBackend, required_namespaces: list[str] | None = None) -> list[str]:
+    """Return distinct namespaces that have stored entries.
+
+    Args:
+        backend: SQLite backend.
+        required_namespaces: When provided, the result is scoped to this set —
+            only namespaces the caller is authorized to see are returned
+            (trw-memory-11). When ``None`` (default) every namespace is returned,
+            preserving the prior admin/single-tenant behaviour. Callers in a
+            multi-tenant context should pass the caller's authorized namespaces
+            so enumeration never leaks the existence of other tenants' scopes.
+    """
     try:
         with backend._lock:
-            rows = backend._conn.execute("SELECT DISTINCT namespace FROM memories ORDER BY namespace").fetchall()
+            if required_namespaces is not None:
+                allowed = list(dict.fromkeys(required_namespaces))
+                if not allowed:
+                    return []
+                placeholders = ", ".join(["?"] * len(allowed))
+                rows = backend._conn.execute(
+                    f"SELECT DISTINCT namespace FROM memories WHERE namespace IN ({placeholders}) ORDER BY namespace",  # noqa: S608 — placeholders are positional binds, not interpolated values
+                    allowed,
+                ).fetchall()
+            else:
+                rows = backend._conn.execute("SELECT DISTINCT namespace FROM memories ORDER BY namespace").fetchall()
         return [str(row[0]) for row in rows]
     except sqlite3.Error as exc:
         raise StorageError(
@@ -392,9 +412,7 @@ def delete_by_namespace(backend: SQLiteBackend, namespace: str) -> int:
             # Anti-join against the remaining memories table removes exactly
             # the rows that were just deleted, regardless of namespace.
             if getattr(backend, "_fts_available", False) and deleted > 0:
-                backend._conn.execute(
-                    "DELETE FROM memories_fts WHERE id NOT IN (SELECT id FROM memories)"
-                )
+                backend._conn.execute("DELETE FROM memories_fts WHERE id NOT IN (SELECT id FROM memories)")
             if backend._skip_commit_depth == 0:
                 backend._conn.commit()
         logger.debug("namespace_deleted", namespace=namespace, entries_deleted=deleted)

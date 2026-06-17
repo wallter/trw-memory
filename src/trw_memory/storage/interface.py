@@ -178,12 +178,18 @@ class StorageBackend(ABC):
 
     # -- Non-abstract extension points (safe defaults) ----------------------
 
-    def list_namespaces(self) -> list[str]:
-        """Return all distinct namespaces that have stored entries.
+    def list_namespaces(self, required_namespaces: list[str] | None = None) -> list[str]:
+        """Return distinct namespaces that have stored entries.
 
         Subclasses that support multi-namespace storage should override this
         to query their underlying store.  The default returns an empty list,
         which is safe for single-namespace or in-memory backends.
+
+        Args:
+            required_namespaces: When provided, scope the result to this
+                authorized set so enumeration never leaks the existence of
+                other tenants' namespaces (trw-memory-11). ``None`` returns
+                every namespace (admin/single-tenant behaviour).
 
         Returns:
             Sorted list of unique namespace strings.  Empty if the backend

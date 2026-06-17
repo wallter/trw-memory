@@ -4,7 +4,65 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+## [0.9.12] — 2026-06-17
+
+### Docs
+
+- Add a verified **Benchmarks** section to the README (hybrid-retrieval Recall@10/nDCG@10
+  same-harness ablation, n=889 gold queries + LongMemEval_S n=500; Preventable Rediscovery
+  Ratio with 95% CIs, n=175; and the H1-MEMORY-BENCH knowledge-compounding result, 58/58 vs
+  0/50, McNemar p=3.6×10⁻¹⁵ over 49 matched pairs). Every number is reconciled against the
+  canonical empirical sources (`docs/eval/iter-notes/CROSS-ITER-SYNTHESIS.md`,
+  `docs/research/memory-context-benchmarks/LOOP-REPORT-2026-06-12.md` and
+  `REDISCOVERY-READOUT-2026-06-14.md`) and matches the already-published public marketing set.
+  The Plane-1 retrieval and Plane-2 rediscovery ablations were independently re-run locally and
+  reproduce the published direction (hybrid ≫ bm25, disjoint CIs). Brittle per-query-type point
+  figures that did not reproduce on the current retrieval surface were softened to a directional
+  statement; the honest SWE-bench-null scope caveat is preserved.
+
+## [0.9.11] — 2026-06-17
+
+trw-harden adversarial audit pass (14 verified findings).
+
+### Security
+
+- **Runtime PII path now redacts HIGH_ENTROPY secrets** (trw-memory-1) — high-entropy tokens are masked on the runtime ingest path, not only in batch consolidation.
+- **`detect_pii` and `strip_pii` share one secret-pattern set** (trw-memory-4/9/12) so a value flagged by detection is also stripped; version-context word list widened to cut false positives.
+- **Sub-baseline anomaly detection emits an audit event when skipped** (trw-memory-10) instead of silently passing, and the cross-namespace canary oracle is closed (trw-memory-5).
+- **`list_namespaces` is scoped to authorized namespaces** (trw-memory-11) — no cross-tenant namespace disclosure.
+
 ### Fixed
+
+- **Hot-tier eviction drops the LRU evictee, not the incoming write, on `warm_add` failure** (trw-memory-2) — a failed demotion no longer discards the entry being stored.
+- **SEC-001 admission filter runs before the limit cap and token budget** (trw-memory-3/8) so quarantined entries cannot consume result slots.
+- **`forget` distinguishes `not_found` from `ok`** (trw-memory-5) rather than reporting success for a missing entry.
+- **Delete + increment ops roll back on commit failure outside a transaction** (trw-memory-13).
+- **Tool recall path honors `hybrid_search_candidate_pool_size`** (trw-memory-14).
+- **Cold-tier search cache is now a bounded LRU** (trw-memory-15) — `ColdTierStore._search_cache` previously grew without limit (one entry per distinct cold YAML searched), leaking RAM on long-lived processes with large cold archives. New `cold_search_cache_max` config knob (default 1000) caps it; least-recently-used files are evicted.
+
+## [0.9.10] — 2026-06-16
+
+### Added
+
+- **HyPE index-time hypothetical-question expansion** (PRD-CORE-195) — entries can be indexed with generated hypothetical questions to improve recall on question-shaped queries.
+
+### Security
+
+- **Namespace isolation leaks closed.** `graph_query` BFS is now scoped to its namespace (no cross-namespace traversal); vector existing-id checks and KNN search are namespace-scoped; quarantine delete-by-id is namespace-isolated and no longer truncates the list. A fail-closed cross-tenant consolidation guard with dimension-mismatch resilience was added.
+- **PII/redaction hardening.** Relative paths (`~/`, `./`, `../`) are redacted before LLM consolidation; the recall-filter shadow record redacts PII and caps the rate-limit `session_id`; the `IP_ADDRESS` PII regex no longer mangles version strings.
+- **GDPR/data-lifecycle.** `delete_by_namespace` now also cleans `memory_graph_edges` (no orphaned edges); actor-scoped `forget` does count+scan+delete atomically.
+
+### Fixed
+
+- Dedup-on-write no longer silently no-ops when embeddings are unavailable — falls back to an exact normalized-text check and returns `merge` (not `skip`) on an exact active match (`dedup_lexical_fallback`, default on).
+- `store_many` failure now ROLLBACKs under the backend lock; the DB connection is closed in `finally` on unexpected errors; snapshot restore clears stale WAL/SHM; retry-queue drain no longer drops records enqueued mid-drain; the SQLite row mapper fails open on corrupt timestamps (parity with the YAML backend).
+- Store-path exceptions are exported at the top level.
+
+### Performance
+
+- `AuditLog.compact` fast-path skips the lock+rewrite when nothing expires; `score_anomaly` reference fetch is bounded to 2× the rolling window; the recall tag predicate is pushed into SQL so `LIMIT` applies after tag filtering; `_ENTRY_UPDATE_LOCKS` and the audit-maintenance dedup set are bounded.
+
+### Fixed (mirror/CI harness — no runtime change)
 
 - **Standalone public-mirror CI Test step now passes (8 mirror-environment test fixes).**
   Tests that assumed the monorepo/dev environment failed in the standalone mirror

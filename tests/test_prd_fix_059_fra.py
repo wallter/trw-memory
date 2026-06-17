@@ -155,6 +155,25 @@ class TestStorageBackendDefaults:
         result = backend.list_namespaces()
         assert result == []
 
+    def test_sqlite_backend_list_namespaces_scoped_to_authorized(self, tmp_path: Path) -> None:
+        """trw-memory-11: SQLite list_namespaces scopes to the authorized set
+        via a parameterized IN clause, never leaking other namespaces."""
+        from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+        backend = SQLiteBackend(tmp_path / "ns.db")
+        backend.store(_make_test_entry(entry_id="A", namespace="project:alpha", content="a"))
+        backend.store(_make_test_entry(entry_id="B", namespace="project:beta", content="b"))
+        backend.store(_make_test_entry(entry_id="C", namespace="project:gamma", content="c"))
+
+        assert backend.list_namespaces(required_namespaces=["project:beta"]) == ["project:beta"]
+        assert backend.list_namespaces(required_namespaces=["project:alpha", "project:gamma"]) == [
+            "project:alpha",
+            "project:gamma",
+        ]
+        assert backend.list_namespaces(required_namespaces=[]) == []
+        assert backend.list_namespaces() == ["project:alpha", "project:beta", "project:gamma"]
+        backend.close()
+
     def test_storage_backend_default_delete_by_namespace(self) -> None:
         """FR-03: Default delete_by_namespace() must return 0."""
         backend = self._make_concrete_backend()
@@ -198,6 +217,23 @@ class TestYAMLBackendNamespaceOps:
 
         namespaces = backend.list_namespaces()
         assert namespaces == ["project:alpha", "project:beta"]
+
+    def test_yaml_backend_list_namespaces_scoped_to_authorized(self, tmp_path: Path) -> None:
+        """trw-memory-11: required_namespaces scopes enumeration so other
+        tenants' namespaces are never returned."""
+        from trw_memory.storage.yaml_backend import YAMLBackend
+
+        backend = YAMLBackend(entries_dir=tmp_path / "entries")
+        backend.store(_make_test_entry(entry_id="A", namespace="project:alpha", content="a"))
+        backend.store(_make_test_entry(entry_id="B", namespace="project:beta", content="b"))
+        backend.store(_make_test_entry(entry_id="C", namespace="project:gamma", content="c"))
+
+        # Caller authorized only for alpha must not learn beta/gamma exist.
+        assert backend.list_namespaces(required_namespaces=["project:alpha"]) == ["project:alpha"]
+        # Empty authorization set yields nothing.
+        assert backend.list_namespaces(required_namespaces=[]) == []
+        # None (admin) still returns everything.
+        assert backend.list_namespaces() == ["project:alpha", "project:beta", "project:gamma"]
 
     def test_yaml_backend_list_namespaces_empty(self, tmp_path: Path) -> None:
         """FR-03: list_namespaces returns [] when no entries exist."""

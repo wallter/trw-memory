@@ -23,6 +23,7 @@ from types import TracebackType
 import pytest
 
 from tests.conftest import make_entry
+from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
@@ -257,6 +258,57 @@ def test_delete_rolls_back_with_transaction_on_error(tmp_path: Path) -> None:
             assert seen_after == 1, "delete() persisted despite transaction rollback"
         finally:
             observer.close()
+    finally:
+        backend.close()
+
+
+def test_delete_rolls_back_on_commit_failure_outside_transaction(tmp_path: Path) -> None:
+    """trw-memory-13: when delete() runs OUTSIDE a transaction() and commit()
+    raises, the partial multi-statement delete must be rolled back — not left
+    dangling for a concurrent writer's commit to persist.
+    """
+    import sqlite3
+
+    db_path = tmp_path / "del_commit_fail.db"
+    backend = SQLiteBackend(db_path)
+
+    class _CommitFailingConn:
+        """Proxy that fails the first commit() and tracks rollback()."""
+
+        def __init__(self, real: sqlite3.Connection) -> None:
+            self._real = real
+            self.rolled_back = False
+            self.fail_commit = True
+
+        def commit(self) -> None:
+            if self.fail_commit:
+                raise sqlite3.OperationalError("disk I/O error")
+            self._real.commit()
+
+        def rollback(self) -> None:
+            self.rolled_back = True
+            self._real.rollback()
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._real, name)
+
+    try:
+        backend.store(make_entry(entry_id="M-keep", content="searchable content"))
+
+        real_conn = backend._conn
+        proxy = _CommitFailingConn(real_conn)
+        backend._conn = proxy  # type: ignore[assignment]
+
+        with pytest.raises(StorageError):
+            backend.delete("M-keep")
+
+        # The except path rolled back the staged (uncommitted) delete.
+        assert proxy.rolled_back, "delete() did not roll back after commit failure"
+
+        # Restore the real connection and verify the row survived (delete
+        # reverted) — no FTS/vec/graph orphan was committed.
+        backend._conn = real_conn  # type: ignore[assignment]
+        assert backend.get("M-keep") is not None
     finally:
         backend.close()
 

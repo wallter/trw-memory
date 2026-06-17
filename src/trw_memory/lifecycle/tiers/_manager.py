@@ -52,7 +52,9 @@ class TierManager:
         self._hot_lock = threading.Lock()
 
         self._warm_store = WarmTierStore(base_dir)
-        self._cold_store = ColdTierStore(base_dir, self._warm_store)
+        self._cold_store = ColdTierStore(
+            base_dir, self._warm_store, search_cache_max=self._config.cold_search_cache_max
+        )
 
     def update_config(self, config: MemoryConfig) -> None:
         """Refresh the active config for call-time policy overrides."""
@@ -103,11 +105,18 @@ class TierManager:
                 try:
                     self.warm_add(evicted_id, evicted_entry.model_dump(mode="json"), None)
                 except (OSError, ValueError):
-                    self._hot.pop(entry_id, None)
+                    # warm_add failed for the LRU evictee. Previously we popped
+                    # ``entry_id`` (the just-written MRU entry) — that lost the new
+                    # write AND left the LRU evictee in place, so overflow was never
+                    # resolved (hot stayed at hot_max_entries + 1). Drop the LRU
+                    # evictee instead: it was already selected for demotion, so
+                    # removing it from hot resolves the overflow while preserving the
+                    # freshly-written entry the caller just stored.
+                    self._hot.pop(evicted_id, None)
                     logger.warning(
-                        "hot_tier_evict_deferred",
+                        "hot_tier_evict_dropped",
                         evicted_id=evicted_id,
-                        rejected_entry_id=entry_id,
+                        kept_entry_id=entry_id,
                         reason="warm_add_failed",
                         capacity=cfg.hot_max_entries,
                         exc_info=True,

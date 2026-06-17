@@ -23,7 +23,7 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.audit import AuditLog
 from trw_memory.security.pii import PIIMatch
-from trw_memory.security.poisoning import quarantine_entry, validate_entry_payload
+from trw_memory.security.poisoning import MIN_ANOMALY_BASELINE, quarantine_entry, validate_entry_payload
 from trw_memory.security.provenance import build_entry_provenance, derive_verify_key, verify_entry_provenance
 from trw_memory.security.startup import _discover_anchor, resolve_security_path, verify_defaults
 from trw_memory.security.telemetry_emit import build_security_traceability, emit_security_event
@@ -171,6 +171,29 @@ def prepare_entry_for_store(
     _write_anomaly_stats(config, anomaly_stats)
 
     if anomaly is None or not config.poisoning_detection_enabled:
+        # trw-memory-10: when statistical anomaly detection is enabled but the
+        # namespace has fewer than the required clean-baseline entries, the
+        # z-score detector is silently skipped (score_entry_anomaly returns None
+        # + a structlog WARNING). An attacker can seed up to baseline-1 entries
+        # under this window. Emit an AUDIT event for the sub-baseline condition so
+        # it is visible to audit-trail analysis, not only in structured logs.
+        if (
+            anomaly is None
+            and config.poisoning_detection_enabled
+            and anomaly_stats.sample_count < MIN_ANOMALY_BASELINE
+        ):
+            append_audit_event(
+                config,
+                "anomaly_baseline_insufficient",
+                entry_id=secured_entry.id,
+                actor=actor,
+                namespace=secured_entry.namespace,
+                data={
+                    "sample_count": anomaly_stats.sample_count,
+                    "min_baseline": MIN_ANOMALY_BASELINE,
+                    "reason": "below_statistical_baseline",
+                },
+            )
         return PreparedStoreEntry(entry=secured_entry, op=op, pii_matches=tuple(pii_matches))
 
     dimension, z_score = anomaly

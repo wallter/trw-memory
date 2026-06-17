@@ -147,7 +147,9 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         last_accessed_at=parse_dt_safe(last_accessed_s, default=None) if last_accessed_s else None,
         # PRD-CORE-194: absent valid_from (pre-migration row) => open validity,
         # back-filled to created_at by the model ``mode="before"`` validator.
-        valid_from=(parse_dt_safe(valid_from_s, default=created_at_val) or created_at_val) if valid_from_s else created_at_val,
+        valid_from=(parse_dt_safe(valid_from_s, default=created_at_val) or created_at_val)
+        if valid_from_s
+        else created_at_val,
         invalid_from=parse_dt_safe(invalid_from_s, default=None) if invalid_from_s else None,
         invalidated_by=str(invalidated_by_raw) if invalidated_by_raw else None,
         access_count=int(str(access_count)),

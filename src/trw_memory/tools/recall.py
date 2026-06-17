@@ -154,13 +154,19 @@ def memory_recall_impl(
                 continue
 
             # Push the tag predicate into SQL so the row LIMIT applies AFTER the
-            # tag filter. Previously list_entries truncated at limit=10_000 and
-            # the in-memory tag filter ran over the TRUNCATED set, silently
-            # dropping tagged entries beyond position 10_000 (older updated_at).
+            # tag filter (the in-memory tag filter must not run over a truncated
+            # set, which would silently drop older tagged entries beyond the cap).
+            # Honor the configured candidate-pool knob instead of a hardcoded
+            # 10_000 (trw-memory-14) and mirror the SDK recall path
+            # (_client_recall_hybrid) exactly: max(limit * 5,
+            # hybrid_search_candidate_pool_size) so the two recall surfaces
+            # converge and operators can bound recall memory/latency via
+            # MEMORY_HYBRID_SEARCH_CANDIDATE_POOL_SIZE.
+            candidate_pool_size = max(limit * 5, cfg.hybrid_search_candidate_pool_size)
             ns_entries = ns_backend.list_entries(
                 status=MemoryStatus.ACTIVE,
                 namespace=ns,
-                limit=10_000,
+                limit=candidate_pool_size,
                 tags=tags or None,
             )
             all_entries.extend(ns_entries)
@@ -306,6 +312,17 @@ def memory_recall_impl(
     )
     if min_score > 0.0:
         result_dicts = [d for d in result_dicts if float(str(d.get("score", entry_utility(d)))) >= min_score]
+
+    # SEC-001 recall filter runs on the FULL ranked candidate set BEFORE the
+    # token-budget fitting and limit cap (trw-memory-3 / trw-memory-8). Running
+    # it after the limit cap silently under-delivered: a caller requesting
+    # `limit` entries received `limit - filtered` while clean entries ranked
+    # beyond the cap were never considered, and `tokens_used` over-reported by
+    # counting entries the filter later dropped. Filtering first lets the
+    # budget + cap operate on the secured set, so the caller gets up to `limit`
+    # admitted entries and `tokens_used` matches what is actually returned.
+    result_dicts = _apply_sec001_recall_policy(result_dicts, config=cfg, namespace=namespace)
+
     tokens_used = 0
     tokens_truncated = False
 
@@ -357,10 +374,10 @@ def memory_recall_impl(
         tokens_truncated=tokens_truncated,
     )
 
-    secure_result_dicts = _apply_sec001_recall_policy(result_dicts, config=cfg, namespace=namespace)
+    # SEC-001 filtering already applied above (before token budget + limit cap).
     response: dict[str, object] = {
-        "memories": secure_result_dicts,
-        "total_matches": len(secure_result_dicts),
+        "memories": result_dicts,
+        "total_matches": len(result_dicts),
         "query": query,
         "tokens_used": tokens_used,
         "tokens_budget": token_budget,

@@ -394,8 +394,7 @@ def graph_query(
     ns_param: tuple[str, ...] = ()
     if namespace is not None:
         ns_clause = (
-            " AND EXISTS (SELECT 1 FROM memories m "
-            "WHERE m.id = memory_graph_edges.target_id AND m.namespace = ?)"
+            " AND EXISTS (SELECT 1 FROM memories m WHERE m.id = memory_graph_edges.target_id AND m.namespace = ?)"
         )
         ns_param = (namespace,)
 

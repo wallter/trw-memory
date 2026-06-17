@@ -148,6 +148,43 @@ class TestHotTierThreadSafety:
         mgr.close()
 
 
+class TestHotTierEvictOnWarmAddFailure:
+    """trw-memory-2: warm_add failure during overflow must keep the new write."""
+
+    def test_warm_add_failure_keeps_new_entry_and_resolves_overflow(self, tmp_path: Path) -> None:
+        """When warm_add raises during eviction, the just-written entry survives
+        and the hot tier is brought back under capacity by dropping the LRU
+        evictee — previously the new write was lost and overflow stayed unresolved.
+        """
+        cfg = MemoryConfig(hot_max_entries=3)
+        mgr = TierManager(base_dir=tmp_path, config=cfg)
+
+        # Fill to capacity (entry-0 is the LRU / oldest).
+        for i in range(3):
+            mgr.hot_put(f"entry-{i}", _make_entry(f"entry-{i}", f"content-{i}"))
+
+        # Force warm_add to fail so the eviction's demotion-to-warm path errors.
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise OSError("warm tier unavailable")
+
+        mgr.warm_add = _boom  # type: ignore[method-assign]
+
+        # This put triggers overflow (4 > 3); warm_add fails on the LRU evictee.
+        mgr.hot_put("entry-new", _make_entry("entry-new", "fresh-write"))
+
+        # The freshly written entry MUST survive — it was not discarded.
+        kept = mgr.hot_get("entry-new")
+        assert kept is not None
+        assert kept.content == "fresh-write"
+
+        # The LRU evictee (entry-0) was dropped to resolve overflow.
+        assert mgr.hot_get("entry-0") is None
+
+        # Overflow is resolved: hot tier is back at capacity, not capacity + 1.
+        assert len(mgr._hot) == cfg.hot_max_entries
+        mgr.close()
+
+
 class TestSweepHotTierRace:
     """memory-lifecycle-3: hot-tier sweep must not race concurrent hot writers."""
 

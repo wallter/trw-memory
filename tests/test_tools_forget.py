@@ -31,11 +31,13 @@ class TestMemoryForgetImpl:
         assert result["deleted"] == 1
 
     def test_delete_missing_id(self) -> None:
+        """trw-memory-5: a missing id returns not_found, not a silent ok/0 — so
+        callers can distinguish 'nothing deleted' from a successful delete."""
         backend = _mock_backend()
         backend.get.return_value = None
         backend.delete.return_value = False
         result = memory_forget_impl("M-999", None, "project:default", backend=backend)
-        assert result["status"] == "ok"
+        assert result["status"] == "not_found"
         assert result["deleted"] == 0
 
     def test_invalid_namespace_returns_error(self) -> None:
@@ -70,12 +72,42 @@ class TestMemoryForgetImpl:
         assert result["deleted"] == 0
 
     def test_namespace_isolation_blocks_cross_namespace_delete(self) -> None:
+        """A cross-namespace id is never deleted from the other namespace's
+        primary store (isolation preserved) and the response is indistinguishable
+        from a genuinely-missing id (trw-memory-5: no cross-namespace oracle)."""
         entry = _make_entry("M-001", namespace="project:repo-a")
         backend = _mock_backend([entry])
         backend.get.return_value = entry
         result = memory_forget_impl("M-001", None, "project:repo-b", backend=backend)
-        assert result["status"] == "ok"
+        # Same shape as test_delete_missing_id — cross-namespace existence is not
+        # confirmed via a distinguishable response.
+        assert result["status"] == "not_found"
         assert result["deleted"] == 0
+        backend.delete.assert_not_called()
+
+    def test_cross_namespace_canary_id_does_not_leak_via_oracle(self) -> None:
+        """trw-memory-5: probing a canary id scoped to ANOTHER namespace must not
+        raise AuthorizationError (which would reveal it is a canary). The canary
+        refusal only fires for an entry in the caller's own namespace."""
+        canary = _make_entry("M-canary", namespace="project:repo-a")
+        canary.metadata["system_canary"] = "true"
+        backend = _mock_backend([canary])
+        backend.get.return_value = canary
+        # Caller is scoped to a DIFFERENT namespace — must get not_found, no raise.
+        result = memory_forget_impl("M-canary", None, "project:repo-b", backend=backend)
+        assert result["status"] == "not_found"
+        assert result["deleted"] == 0
+        backend.delete.assert_not_called()
+
+    def test_same_namespace_canary_delete_still_refused(self) -> None:
+        """The canary deletion guard must STILL fire for an entry in the caller's
+        own namespace — the oracle fix must not weaken canary protection."""
+        canary = _make_entry("M-canary", namespace="project:repo-a")
+        canary.metadata["system_canary"] = "true"
+        backend = _mock_backend([canary])
+        backend.get.return_value = canary
+        with pytest.raises(AuthorizationError, match="canary"):
+            memory_forget_impl("M-canary", None, "project:repo-a", backend=backend)
         backend.delete.assert_not_called()
 
     def test_empty_memory_id_returns_error(self) -> None:

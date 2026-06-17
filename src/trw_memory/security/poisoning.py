@@ -22,6 +22,13 @@ from trw_memory.exceptions import PoisoningError, SchemaValidationError
 from trw_memory.models.memory import MemoryEntry
 
 logger = structlog.get_logger(__name__)
+
+# Minimum number of clean reference entries before statistical (z-score) anomaly
+# detection produces meaningful results. Below this, score_entry_anomaly returns
+# None (skipped). Single source of truth shared with security/runtime.py, which
+# audits the sub-baseline condition (trw-memory-10).
+MIN_ANOMALY_BASELINE = 10
+
 _INJECTION_PATTERNS = (
     re.compile(r"ignore (?:all )?previous instructions", re.IGNORECASE),
     re.compile(r"<script\b", re.IGNORECASE),
@@ -324,7 +331,7 @@ def score_entry_anomaly(
 ) -> tuple[str, float] | None:
     """Return the strongest anomaly dimension for *entry*, or ``None``."""
     clean_reference = [candidate for candidate in reference_entries if candidate.metadata.get("quarantined") != "true"]
-    if len(clean_reference) < 10:
+    if len(clean_reference) < MIN_ANOMALY_BASELINE:
         # Statistical anomaly detection needs a stable baseline (>=10 clean
         # entries) before z-scores are meaningful. New / freshly-purged
         # namespaces fall below it, so they get no statistical protection —
@@ -337,7 +344,7 @@ def score_entry_anomaly(
             op="poisoning",
             namespace=entry.namespace,
             sample_count=len(clean_reference),
-            min_baseline=10,
+            min_baseline=MIN_ANOMALY_BASELINE,
         )
         return None
 

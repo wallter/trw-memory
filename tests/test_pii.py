@@ -201,6 +201,24 @@ class TestDetectPII:
         matches = detect_pii("build 999.300.1.500 shipped")
         assert not any(m.pii_type == PIIType.IP_ADDRESS for m in matches)
 
+    def test_package_name_version_not_redacted_as_ip(self) -> None:
+        """trw-memory-9: a version string preceded by a common package name must
+        NOT be false-positive-redacted as an IPv4 address.
+
+        Previously _VERSION_CONTEXT_WORDS omitted package names like mysql /
+        openssl / nginx, so their octet-valid dotted versions were corrupted.
+        """
+        for text, version in (
+            ("upgraded mysql 3.0.0.5 in prod", "3.0.0.5"),
+            ("openssl 1.1.1.2 patched", "1.1.1.2"),
+            ("nginx 1.25.0.1 deployed", "1.25.0.1"),
+            ("postgres 14.2.0.1 migration", "14.2.0.1"),
+        ):
+            matches = detect_pii(text)
+            assert not any(m.pii_type == PIIType.IP_ADDRESS for m in matches), (
+                f"version {version!r} in {text!r} false-positive-flagged as IP"
+            )
+
     def test_detect_file_path(self) -> None:
         """Absolute filesystem paths are detected."""
         matches = detect_pii("Read /home/alice/.ssh/config for setup")
@@ -469,6 +487,28 @@ class TestStripPII:
         """token- prefixed keys are replaced."""
         result = strip_pii("token-abcdefghijklmnopqrstuvwxyz")
         assert "<api_key>" in result
+
+    def test_secret_prefix_replaced(self) -> None:
+        """secret- prefixed keys are scrubbed (trw-memory-4 / trw-memory-12).
+
+        Regression: strip_pii's inlined API-key pattern omitted the ``secret``
+        prefix that detect_pii / _PII_PATTERNS recognises, so a ``secret-<token>``
+        credential was blocked at store time yet written verbatim to the
+        shadow-quarantine JSONL. strip_pii now shares _SECRET_PREFIX_PATTERN.
+        """
+        leaked = "secret-abcdefghijklmnopqrstuvwxyz0123"
+        result = strip_pii(f"the value is {leaked} keep safe")
+        assert "<api_key>" in result
+        assert leaked not in result
+
+    def test_strip_pii_secret_prefix_matches_detect_pii(self) -> None:
+        """strip_pii and detect_pii agree on the secret- prefix shape."""
+        from trw_memory.security.pii import PIIType, detect_pii
+
+        leaked = "secret-abcdefghijklmnopqrstuvwxyz0123"
+        matches = detect_pii(f"cred {leaked}")
+        assert any(str(m.pii_type) == PIIType.API_KEY.value for m in matches)
+        assert leaked not in strip_pii(f"cred {leaked}")
 
     def test_github_pat_replaced(self) -> None:
         """GitHub PATs are scrubbed from telemetry text.

@@ -7,6 +7,7 @@ of infrequently accessed memory entries.
 from __future__ import annotations
 
 import contextlib
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,12 +39,17 @@ class ColdTierStore:
     Args:
         base_dir: Base directory for memory storage.
         warm_store: WarmTierStore instance for cross-tier operations.
+        search_cache_max: Maximum number of cold YAML files retained in the
+            in-memory search cache before the least-recently-used entry is
+            evicted (trw-memory-15). Bounds RAM on long-lived processes with
+            large cold archives; the cache previously grew without limit.
     """
 
-    def __init__(self, base_dir: Path, warm_store: WarmTierStore) -> None:
+    def __init__(self, base_dir: Path, warm_store: WarmTierStore, search_cache_max: int = 1000) -> None:
         self._base_dir = base_dir
         self._warm_store = warm_store
-        self._search_cache: dict[str, _ColdSearchCacheEntry] = {}
+        self._search_cache_max = max(1, search_cache_max)
+        self._search_cache: OrderedDict[str, _ColdSearchCacheEntry] = OrderedDict()
 
     def _cold_dir(self) -> Path:
         """Base cold archive directory (base_dir/memory/cold/)."""
@@ -383,6 +389,7 @@ class ColdTierStore:
 
         cached = self._search_cache.get(cache_key)
         if cached is not None and cached.mtime_ns == mtime_ns:
+            self._search_cache.move_to_end(cache_key)  # LRU touch on hit
             return cached
 
         try:
@@ -397,7 +404,20 @@ class ColdTierStore:
         text += " " + " ".join(tags)
         entry = _ColdSearchCacheEntry(mtime_ns=mtime_ns, data=data, search_text=text)
         self._search_cache[cache_key] = entry
+        self._search_cache.move_to_end(cache_key)  # mark most-recently-used
+        self._evict_search_cache_overflow()
         return entry
+
+    def _evict_search_cache_overflow(self) -> None:
+        """Bound the cold-tier search cache to ``search_cache_max`` (LRU).
+
+        ``_cached_search_entry`` inserts one entry per distinct cold YAML file
+        searched. Without this bound the cache grew without limit, leaking RAM
+        on long-lived processes that search across a large cold archive
+        (trw-memory-15). Eviction drops the least-recently-used key first.
+        """
+        while len(self._search_cache) > self._search_cache_max:
+            self._search_cache.popitem(last=False)
 
     def _archive_payload(
         self,

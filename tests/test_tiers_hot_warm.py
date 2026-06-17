@@ -93,8 +93,11 @@ class TestHotTier:
             mgr.warm_add = original_warm_add  # type: ignore[method-assign]
 
         assert mgr.hot_size == 3
-        assert mgr.hot_get("e1") is not None
-        assert mgr.hot_get("e4") is None
+        # trw-memory-2: warm_add failure drops the LRU evictee (e1) and preserves
+        # the freshly written entry (e4) — previously the new write was lost
+        # (see TierManager.hot_put + test_tier_thread_safety.py).
+        assert mgr.hot_get("e1") is None
+        assert mgr.hot_get("e4") is not None
 
     def test_hot_put_refresh_existing(self, mgr: TierManager) -> None:
         mgr.hot_put("e1", _make_entry("e1"))

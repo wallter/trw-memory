@@ -59,6 +59,27 @@ class PIIAction(str, Enum):
 
 
 # ---------------------------------------------------------------------------
+# Shared API-key / secret pattern sources (single source of truth)
+# ---------------------------------------------------------------------------
+# These raw pattern strings are referenced by BOTH the detection set
+# (``_PII_PATTERNS``, used by detect_pii / the live store-time gate) AND the
+# anonymization helper ``strip_pii`` (used for telemetry + shadow-quarantine
+# scrubbing). Keeping one source of truth prevents the divergence found in the
+# 2026-06-17 audit, where strip_pii's inlined copy omitted the ``secret`` prefix
+# so a ``secret-<token>`` credential was blocked at store time but written
+# verbatim to the shadow-quarantine JSONL. Add a new credential shape HERE and
+# both paths stay in sync.
+
+# Generic ``<prefix>[-_]<20+ alnum>`` credential shape.
+_SECRET_PREFIX_PATTERN = r"(?:sk|pk|api|key|token|secret)[-_][a-zA-Z0-9]{20,}"  # noqa: S105 — regex, not a credential
+# Provider-specific shapes that lack a "<prefix>[-_]" separator and fall below
+# the Shannon-entropy backstop (GitHub PATs, AWS access key IDs). Anchored +
+# bounded (no nested quantifiers) so they stay ReDoS-free.
+_PROVIDER_SECRET_PATTERN = (
+    r"\b(?:gh[posru]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,})\b|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"  # noqa: S105 — regex, not a credential
+)
+
+# ---------------------------------------------------------------------------
 # Regex patterns for each PII type
 # ---------------------------------------------------------------------------
 
@@ -86,7 +107,7 @@ _PII_PATTERNS: list[tuple[PIIType, re.Pattern[str], float]] = [
     (
         PIIType.API_KEY,
         re.compile(
-            r"\b(?:sk|pk|api|key|token|secret)[-_][a-zA-Z0-9]{20,}\b",
+            r"\b" + _SECRET_PREFIX_PATTERN + r"\b",
             re.IGNORECASE,
         ),
         0.9,
@@ -95,16 +116,11 @@ _PII_PATTERNS: list[tuple[PIIType, re.Pattern[str], float]] = [
     # fall below the Shannon-entropy backstop (e.g. a 40-char GitHub PAT scores
     # ~4.1 bits/char, under the 4.5 default). These leaked silently before — a
     # token in `content`/`detail` matched neither the generic API_KEY pattern
-    # nor the high-entropy path. Patterns are anchored + bounded (no nested
-    # quantifiers) so they stay ReDoS-free.
+    # nor the high-entropy path. See _PROVIDER_SECRET_PATTERN (shared with
+    # strip_pii).
     (
         PIIType.API_KEY,
-        re.compile(
-            # GitHub: ghp_/gho_/ghu_/ghs_/ghr_ + 36 base62, or github_pat_ + long body
-            r"\b(?:gh[posru]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,})\b"
-            # AWS access key IDs: AKIA/ASIA + 16 uppercase base32
-            r"|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b",
-        ),
+        re.compile(_PROVIDER_SECRET_PATTERN),
         0.95,
     ),
     (
@@ -177,6 +193,37 @@ _VERSION_CONTEXT_WORDS = frozenset(
         "downgraded",
         "bumped",
         "tag",
+        # Common package / tool names that precede a dotted version string. Without
+        # these, "mysql 3.0.0.5" / "openssl 1.1.1.2" had their version octet-valid
+        # dotted run false-positive-redacted as an IPv4 address (trw-memory-9).
+        "mysql",
+        "postgres",
+        "postgresql",
+        "redis",
+        "nginx",
+        "apache",
+        "openssl",
+        "docker",
+        "kubernetes",
+        "k8s",
+        "npm",
+        "pip",
+        "cargo",
+        "gradle",
+        "maven",
+        "django",
+        "flask",
+        "react",
+        "vue",
+        "angular",
+        "typescript",
+        "deno",
+        "dotnet",
+        "kotlin",
+        "swift",
+        "scala",
+        "elixir",
+        "erlang",
     }
 )
 _VERSION_PREFIX_RE = re.compile(r"([A-Za-z]+)\s*v?$")
@@ -459,18 +506,21 @@ def strip_pii(text: str) -> str:
         "<email>",
         text,
     )
-    # API key / token patterns (prefix followed by 20+ alphanumeric chars)
+    # API key / token patterns (prefix followed by 20+ alphanumeric chars).
+    # Shares _SECRET_PREFIX_PATTERN with _PII_PATTERNS so the ``secret`` prefix
+    # (and any future addition) stays in sync — the 2026-06-17 audit found this
+    # inlined copy omitted ``secret``, leaking ``secret-<token>`` credentials to
+    # the shadow-quarantine JSONL though detect_pii blocked them at store time.
     text = re.sub(
-        r"(sk|pk|api|key|token)[-_][a-zA-Z0-9]{20,}",
+        _SECRET_PREFIX_PATTERN,
         "<api_key>",
         text,
         flags=re.IGNORECASE,
     )
     # Provider-specific secret shapes without a "<prefix>[-_]" separator
-    # (GitHub PATs, AWS access key IDs) — see _PII_PATTERNS above.
+    # (GitHub PATs, AWS access key IDs) — shared with _PII_PATTERNS.
     text = re.sub(
-        r"\b(?:gh[posru]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,})\b"
-        r"|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b",
+        _PROVIDER_SECRET_PATTERN,
         "<api_key>",
         text,
     )

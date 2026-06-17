@@ -498,17 +498,25 @@ class YAMLBackend(StorageBackend):
     # Namespace operations (override ABC defaults)
     # ------------------------------------------------------------------
 
-    def list_namespaces(self) -> list[str]:
-        """Return all distinct namespaces across stored YAML entries.
+    def list_namespaces(self, required_namespaces: list[str] | None = None) -> list[str]:
+        """Return distinct namespaces across stored YAML entries.
 
         Performs an O(N) scan of all YAML files, extracting the ``namespace``
         field from each.  Silently skips corrupt files.
 
+        Args:
+            required_namespaces: When provided, scope the result to this
+                authorized set so enumeration never leaks other tenants'
+                namespaces (trw-memory-11). ``None`` returns every namespace.
+
         Returns:
             Sorted list of unique namespace strings.
         """
+        allowed = set(required_namespaces) if required_namespaces is not None else None
         namespaces: set[str] = set()
         for entry in self._load_all():
+            if allowed is not None and entry.namespace not in allowed:
+                continue
             namespaces.add(entry.namespace)
         return sorted(namespaces)
 

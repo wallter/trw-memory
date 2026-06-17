@@ -83,9 +83,7 @@ def memory_forget_impl(
                         if supports_tier_runtime(backend):
                             remove_entry_from_tiers(cfg, namespace, candidate.id)
         else:
-            entries = backend.list_entries(
-                namespace=namespace, limit=max(10_000, backend.count(namespace=namespace))
-            )
+            entries = backend.list_entries(namespace=namespace, limit=max(10_000, backend.count(namespace=namespace)))
             for candidate in entries:
                 if candidate.source_identity != actor:
                     continue
@@ -107,38 +105,61 @@ def memory_forget_impl(
     if memory_id:
         deleted_count = 0
         entry: MemoryEntry | None = None
+        # When an entry exists but lives in a DIFFERENT namespace than the one
+        # the caller is scoped to, we must NOT reveal anything about it —
+        # including whether it is a system canary. Evaluating the canary refusal
+        # before the namespace check (the previous ordering) let an attacker
+        # probe cross-namespace canary IDs via the AuthorizationError oracle
+        # (trw-memory-5). Resolve the namespace match FIRST.
+        in_namespace = False
         try:
             entry = backend.get(memory_id)
-            if entry is not None and entry.metadata.get("system_canary") == "true":
+            in_namespace = entry is not None and entry.namespace == namespace
+            if in_namespace and entry is not None and entry.metadata.get("system_canary") == "true":
+                # Canary refusal only fires for an entry in the caller's own
+                # namespace, so canary IDs never leak across namespace boundaries.
                 raise AuthorizationError(
-                    f"Refusing to delete system canary entry '{memory_id}': "
-                    "deleting canaries is a security violation."
+                    f"Refusing to delete system canary entry '{memory_id}': deleting canaries is a security violation."
                 )
-            if entry is not None and entry.namespace == namespace:
+            if in_namespace:
                 was_deleted = backend.delete(memory_id)
                 deleted_count = 1 if was_deleted else 0
                 if was_deleted and supports_tier_runtime(backend):
                     remove_entry_from_tiers(cfg, namespace, memory_id)
             else:
+                # Entry is missing OR lives in a different namespace. In BOTH
+                # cases we only consult the caller's own quarantine partition
+                # (delete_quarantined_entries is namespace-scoped) — never the
+                # primary store of another namespace. Crucially, "exists in
+                # another namespace" and "does not exist anywhere" return the
+                # SAME shape below, so cross-namespace existence is not confirmed
+                # via a distinguishable response (trw-memory-5 namespace
+                # isolation / canary oracle).
                 deleted_count = delete_quarantined_entries(cfg, namespace=namespace, memory_id=memory_id)
         except StorageError as exc:
             logger.warning("memory_forget_delete_error", memory_id=memory_id, error=str(exc))
 
+        # Distinguish "actually removed something" (ok) from "nothing matched in
+        # this namespace" (not_found) so callers stop treating a silent 0-delete
+        # as success — without leaking whether the id exists elsewhere.
+        status = "ok" if deleted_count > 0 else "not_found"
+        actor_identity = entry.source_identity if (entry is not None and in_namespace) else ""
         logger.info(
             "memory_forget",
             memory_id=memory_id,
             deleted=deleted_count,
             namespace=namespace,
+            outcome=status,
         )
         append_audit_event(
             cfg,
             "forget",
             entry_id=memory_id,
-            actor=entry.source_identity if entry is not None else "",
+            actor=actor_identity,
             namespace=namespace,
-            data={"entries_deleted": deleted_count, "selector": "memory_id"},
+            data={"entries_deleted": deleted_count, "selector": "memory_id", "outcome": status},
         )
-        return {"deleted": deleted_count, "status": "ok"}
+        return {"deleted": deleted_count, "status": status}
 
     # --- Bulk delete via search query ---
     assert query is not None  # noqa: S101 — mypy narrowing guard; query is not None here: the memory_id branch above returns before reaching this line, and the early-return guard ensures at least one of memory_id/query is set

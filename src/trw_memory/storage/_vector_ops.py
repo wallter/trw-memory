@@ -147,9 +147,7 @@ def existing_vector_ids(
                 # canonical memory row is in another namespace (or absent) are
                 # excluded, so the result never spans tenants.
                 rows = conn.execute(
-                    "SELECT vi.entry_id FROM vec_index vi "
-                    "JOIN memories m ON m.id = vi.entry_id "
-                    "WHERE m.namespace = ?",
+                    "SELECT vi.entry_id FROM vec_index vi JOIN memories m ON m.id = vi.entry_id WHERE m.namespace = ?",
                     (namespace,),
                 ).fetchall()
     except sqlite3.Error as exc:

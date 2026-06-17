@@ -19,6 +19,41 @@ TRW-Memory is a standalone **persistent memory engine for AI agents** that gives
 
 Designed as the storage backend for [trw-mcp](https://github.com/wallter/trw-mcp) and [TRW Framework](https://trwframework.com), but usable independently by any AI agent framework that needs persistent memory with recall.
 
+## Benchmarks
+
+Every number below is a **same-harness ablation** — retrieval strategies compared on one fixed corpus and query set, each reported with its sample size and, where the claim is comparative, non-overlapping 95% confidence intervals or a paired test. These are **not** leaderboard claims against other systems. Methodology and raw readouts live in the [verification docs](https://trwframework.com/docs/verification).
+
+### Hybrid retrieval beats either ranker alone
+
+On a gold set of real engineering learnings (**n = 889** typed queries), Reciprocal Rank Fusion of BM25 + dense vectors outranks either single ranker — and the same direction replicates on a second, independent benchmark (LongMemEval_S, **n = 500** questions):
+
+| Retriever | Recall@10 | nDCG@10 |
+|-----------|:---------:|:-------:|
+| BM25 only | 0.869 | 0.771 |
+| Vector only | 0.914 | 0.806 |
+| **Hybrid (BM25 + vector, RRF)** | **0.938** | **0.839** |
+
+Fusion earns its keep on the hard questions: exact-match queries are near ceiling for every retriever, so the lift concentrates in the temporal / multi-session discrimination band.
+
+### Better recall prevents re-discovery
+
+On TRW's own active learning store (**n = 175** near-duplicate "rediscoveries"), the share of duplicates a recall *would have caught* before re-deriving them — the Preventable Rediscovery Ratio — is far higher for hybrid than for keyword search alone, with **non-overlapping 95% CIs**:
+
+| Retriever | Preventable Rediscovery Ratio (95% CI) |
+|-----------|:--------------------------------------:|
+| BM25 only | 0.720 [0.649, 0.781] |
+| **Hybrid** | **0.943 [0.898, 0.969]** |
+
+Direct evidence that retrieval quality — not just storage — is what keeps an agent from re-deriving what it already knows.
+
+### Knowledge compounding, measured
+
+On a controlled recall-dependent benchmark (H1-MEMORY-BENCH), agents **with** memory solved every task that required recalling a fact established in an earlier session — **58/58** — while agents **without** memory solved **0/50** (the fact is absent by construction). Paired McNemar **p = 3.6×10⁻¹⁵** across **49 matched pairs** (exceeds the pre-registered n ≥ 30), replicated on a second model family.
+
+> **Scope, honestly.** This demonstrates the *mechanism*: cross-session recall lets an agent complete work it otherwise cannot. Whether that compounds into broad, end-to-end coding-task improvement is a separate, still-open question — early SWE-bench single-shot runs (n ≥ 40) produced null. See the [verification docs](https://trwframework.com/docs/verification) for the full evidence posture.
+
+*Throughput (single-run baseline, not CI-backed): sub-millisecond store (p95 ≈ 0.31 ms) and ~116 ms hybrid recall p95 at 1,000 entries; on-disk footprint ≈ 1.2 MB per 1k entries.*
+
 ## Features
 
 - **MemoryClient SDK** -- High-level async Python client with store/bulk_store/store_many/recall/search/search_fts/forget plus audit_learning and review_quarantined

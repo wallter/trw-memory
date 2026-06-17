@@ -198,7 +198,12 @@ def store_many(
                 backend._conn.executemany(
                     "INSERT INTO memories_fts(id, content, detail, tags) VALUES (?, ?, ?, ?)",
                     [
-                        (e.id, e.content, e.detail or "", json.dumps(e.tags) if isinstance(e.tags, list) else (e.tags or "[]"))
+                        (
+                            e.id,
+                            e.content,
+                            e.detail or "",
+                            json.dumps(e.tags) if isinstance(e.tags, list) else (e.tags or "[]"),
+                        )
                         for e in entries
                     ],
                 )
@@ -372,6 +377,9 @@ def increment_session_counts(
                 backend._conn.commit()
             return int(backend._conn.total_changes - before)
     except sqlite3.Error as exc:
+        if backend._skip_commit_depth == 0:
+            with backend._lock, contextlib.suppress(sqlite3.Error):
+                backend._conn.rollback()
         raise StorageError(
             f"Failed to increment session counts: {exc}",
             path=str(backend._db_path),
@@ -410,6 +418,9 @@ def increment_access_counts(
                 backend._conn.commit()
             return int(backend._conn.total_changes - before)
     except sqlite3.Error as exc:
+        if backend._skip_commit_depth == 0:
+            with backend._lock, contextlib.suppress(sqlite3.Error):
+                backend._conn.rollback()
         raise StorageError(
             f"Failed to increment access counts: {exc}",
             path=str(backend._db_path),
@@ -458,6 +469,9 @@ def increment_recall_access(
                 backend._conn.commit()
             return int(backend._conn.total_changes - before)
     except sqlite3.Error as exc:
+        if backend._skip_commit_depth == 0:
+            with backend._lock, contextlib.suppress(sqlite3.Error):
+                backend._conn.rollback()
         raise StorageError(
             f"Failed to increment recall access: {exc}",
             path=str(backend._db_path),
@@ -492,6 +506,16 @@ def delete(backend: SQLiteBackend, entry_id: str) -> bool:
         logger.debug("memory_deleted", entry_id=entry_id, existed=deleted)
         return bool(deleted)
     except sqlite3.Error as exc:
+        # delete() runs FOUR statements (memories + vector + FTS + graph edges)
+        # before commit. If commit (or any later statement) raises, the lock has
+        # already released, so a concurrent writer's commit could persist this
+        # partially-applied delete — leaving e.g. the memories row gone but
+        # FTS/vec/graph rows behind. Roll back under a re-acquired lock, mirroring
+        # store_many() (trw-memory-13). Suppressed only inside an outer
+        # transaction() block, which owns the rollback.
+        if backend._skip_commit_depth == 0:
+            with backend._lock, contextlib.suppress(sqlite3.Error):
+                backend._conn.rollback()
         raise StorageError(
             f"Failed to delete entry {entry_id}: {exc}",
             path=str(backend._db_path),

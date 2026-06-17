@@ -54,6 +54,13 @@ REDACTED_PII_TYPES = frozenset(
         PIIType.PHONE,
         PIIType.SSN,
         PIIType.CREDIT_CARD,
+        # Security audit 2026-06-17: HIGH_ENTROPY tokens (entropy-backstop secrets
+        # without a recognized API_KEY prefix) were detected — metadata flag set —
+        # but never redacted: replace_pii() fell through its else: continue, storing
+        # the raw secret verbatim in content/detail/tags. The public check_entry_pii
+        # path already redacts HIGH_ENTROPY generically via redact_text; this aligns
+        # the runtime path with it. Redact-not-block (parity with EMAIL/IP).
+        PIIType.HIGH_ENTROPY,
     }
 )
 CODE_SNIPPET_PATTERNS = (
@@ -161,6 +168,8 @@ def redaction_marker(pii_type: PIIType) -> str:
         return "<ssn>"
     if pii_type == PIIType.CREDIT_CARD:
         return "<credit_card>"
+    if pii_type == PIIType.HIGH_ENTROPY:
+        return "<high_entropy_secret>"  # redaction marker, not a credential
     return f"<{pii_type}>"
 
 

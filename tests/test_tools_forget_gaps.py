@@ -11,14 +11,18 @@ from ._test_tools_support import _make_entry, _mock_backend
 
 
 class TestForgetStorageErrorPaths:
-    def test_storage_error_on_get_logs_warning_and_returns_ok(self) -> None:
-        """StorageError during backend.get() → warning logged, returns ok (lines 99-100)."""
+    def test_storage_error_on_get_logs_warning_and_returns_not_found(self) -> None:
+        """StorageError during backend.get() → warning logged, nothing deleted.
+
+        trw-memory-5: a 0-delete now surfaces as not_found rather than a silent
+        ok, so the caller can tell nothing was removed.
+        """
         backend = _mock_backend()
         backend.get.side_effect = StorageError("disk error", path="/tmp/test.db")
 
         result = memory_forget_impl("M-001", None, "project:default", backend=backend)
 
-        assert result["status"] == "ok"
+        assert result["status"] == "not_found"
         assert result["deleted"] == 0
 
     def test_storage_error_on_search_returns_ok_with_zero_deleted(self) -> None:
@@ -97,4 +101,4 @@ class TestRegisterForgetTool:
                 registered["fn"]("M-missing", None, "project:default")  # type: ignore[operator]
             )
 
-        assert result["status"] == "ok"
+        assert result["status"] == "not_found"

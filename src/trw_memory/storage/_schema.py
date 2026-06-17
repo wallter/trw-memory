@@ -93,17 +93,11 @@ CREATE_IDX_NS_IMPORTANCE = (
 #   * (namespace, status, importance) — tri-predicate min_importance recall
 #   * (status, updated_at)           — status-only lifecycle sweeps by recency
 # Forward-only additive migration — IF NOT EXISTS, no destructive change.
-CREATE_IDX_NS_STATUS = (
-    "CREATE INDEX IF NOT EXISTS idx_memories_ns_status ON memories(namespace, status)"
-)
+CREATE_IDX_NS_STATUS = "CREATE INDEX IF NOT EXISTS idx_memories_ns_status ON memories(namespace, status)"
 CREATE_IDX_NS_STATUS_IMP = (
-    "CREATE INDEX IF NOT EXISTS idx_memories_ns_status_imp "
-    "ON memories(namespace, status, importance)"
+    "CREATE INDEX IF NOT EXISTS idx_memories_ns_status_imp ON memories(namespace, status, importance)"
 )
-CREATE_IDX_STATUS_UPDATED = (
-    "CREATE INDEX IF NOT EXISTS idx_memories_status_updated "
-    "ON memories(status, updated_at)"
-)
+CREATE_IDX_STATUS_UPDATED = "CREATE INDEX IF NOT EXISTS idx_memories_status_updated ON memories(status, updated_at)"
 
 CREATE_GRAPH_EDGES = """
 CREATE TABLE IF NOT EXISTS memory_graph_edges (

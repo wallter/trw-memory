@@ -362,6 +362,17 @@ class MemoryConfig(BaseSettings):
         le=1.0,
         description="Maximum composite tier score allowed before a cold entry is purged",
     )
+    cold_search_cache_max: int = Field(
+        default=1000,
+        gt=0,
+        description=(
+            "Maximum number of cold-tier YAML files held in the in-memory search "
+            "cache (trw-memory-15). The cache is a bounded LRU: once it exceeds "
+            "this many entries the least-recently-used file is evicted, capping "
+            "RAM growth on long-lived processes with large cold archives. Each "
+            "cached entry holds the deserialized YAML + search text for one file."
+        ),
+    )
 
     # Forced importance-tier distribution caps (mirror trw-mcp impact_tier_*_cap)
     impact_tier_critical_cap: float = Field(

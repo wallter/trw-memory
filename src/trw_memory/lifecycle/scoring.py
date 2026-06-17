@@ -821,9 +821,7 @@ def fsrs_stability_after_review(
     g = max(0.0, min(1.0, grade))
     # FSRS-4.5 SInc formula (simplified weights)
     w17, w18, w19 = 1.0, 0.1, 1.0
-    s_new = stability * math.exp(
-        w17 * (11.0 - d) * (stability**-w18) * (math.exp(w19 * (1.0 - r)) - 1.0) * g
-    )
+    s_new = stability * math.exp(w17 * (11.0 - d) * (stability**-w18) * (math.exp(w19 * (1.0 - r)) - 1.0) * g)
     return max(_FSRS_DEFAULT_STABILITY, s_new)
 
 
