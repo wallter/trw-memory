@@ -29,16 +29,13 @@ import asyncio
 import functools
 from typing import TYPE_CHECKING, Any
 
-import structlog
-
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.dense import cosine_similarity
+from trw_memory.sync._remote_common import decode_learning_api_v1_result
 
 if TYPE_CHECKING:
     from trw_memory.client import MemoryClient, MemoryResultDict
-
-logger = structlog.get_logger(__name__)
 
 
 def _client_logger() -> Any:
@@ -120,19 +117,24 @@ async def load_entries_for_results(
 
 def shared_result_to_result(result: dict[str, object]) -> MemoryResultDict:
     """Normalize a shared remote result into the client result shape."""
-    memory_id = str(result.get("memory_id", result.get("id", result.get("remote_id", ""))))
-    detail = str(result.get("detail", ""))
-    raw_tags = result.get("tags", [])
+    # This dict arrives from the remote/org learning API, so its external
+    # impact vocabulary MUST cross the versioned learning_api_v1 boundary rather
+    # than a local fallback read — that is the single place the wire field is
+    # mapped onto canonical importance (PRD-CORE-181-FR06 source-census rule).
+    decoded = decode_learning_api_v1_result(dict(result))
+    memory_id = str(decoded.get("memory_id", decoded.get("id", decoded.get("remote_id", ""))))
+    detail = str(decoded.get("detail", ""))
+    raw_tags = decoded.get("tags", [])
     tags = [str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else []
-    importance_raw = result.get("importance", result.get("impact", 0.0))
-    score_raw = result.get("score", importance_raw)
-    namespace = str(result.get("namespace", "shared"))
-    created_at = str(result.get("created_at", ""))
-    updated_at = str(result.get("updated_at", created_at))
-    source = str(result.get("source", "shared"))
+    importance_raw = decoded.get("importance", 0.0)
+    score_raw = decoded.get("score", importance_raw)
+    namespace = str(decoded.get("namespace", "shared"))
+    created_at = str(decoded.get("created_at", ""))
+    updated_at = str(decoded.get("updated_at", created_at))
+    source = str(decoded.get("source", "shared"))
     shared_result: MemoryResultDict = {
         "memory_id": memory_id,
-        "content": str(result.get("content", "")),
+        "content": str(decoded.get("content", "")),
         "detail": detail,
         "tags": tags,
         "importance": coerce_float(importance_raw),

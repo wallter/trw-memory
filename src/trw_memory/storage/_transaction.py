@@ -27,36 +27,33 @@ def transaction(backend: SQLiteBackend) -> Iterator[SQLiteBackend]:
     Re-entrant by depth — only the outermost ``transaction()`` issues
     BEGIN/COMMIT; inner exceptions propagate; outermost issues ROLLBACK.
 
-    Concurrency: the re-entrant ``_txn_serializer`` is held for the whole body
-    so two threads cannot both open a BEGIN IMMEDIATE on the single shared
-    connection. Same-thread nested ``transaction()`` calls re-enter the RLock
-    and are classified inner by depth, so they never re-issue BEGIN.
+    Concurrency: the backend's re-entrant connection lock is held for the whole
+    body. Same-thread nested calls re-enter it; other threads cannot join or
+    observe the open transaction. This synchronous context must not span an
+    ``await`` because a thread-reentrant lock cannot distinguish asyncio tasks
+    running on the same thread.
     """
-    backend._txn_serializer.acquire()
-    try:
+    # Hold the connection lock for the entire body. Public operations re-enter
+    # it on this thread; other threads cannot join the transaction, skip their
+    # own commit, or observe uncommitted rows.
+    with backend._lock:
         is_outer = backend._skip_commit_depth == 0
-        if is_outer:
-            with backend._lock:
-                backend._conn.execute("BEGIN IMMEDIATE")
-                backend._skip_commit_depth += 1
-        else:
-            with backend._lock:
-                backend._skip_commit_depth += 1
+        # Direct compatibility writes can leave SQLite in an implicit
+        # transaction without passing through this depth tracker. Adopt that
+        # transaction instead of issuing a nested BEGIN.
+        if is_outer and not backend._conn.in_transaction:
+            backend._conn.execute("BEGIN IMMEDIATE")
+        backend._skip_commit_depth += 1
         try:
             yield backend
             if is_outer:
-                with backend._lock:
-                    backend._conn.commit()
+                backend._conn.commit()
         except BaseException:
             if is_outer:
                 try:
-                    with backend._lock:
-                        backend._conn.rollback()
+                    backend._conn.rollback()
                 except sqlite3.Error:
                     logger.exception("transaction_rollback_failed", db=str(backend._db_path))
             raise
         finally:
-            with backend._lock:
-                backend._skip_commit_depth -= 1
-    finally:
-        backend._txn_serializer.release()
+            backend._skip_commit_depth -= 1

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
@@ -53,6 +55,11 @@ class TestSearch:
             backend.store(make_entry(f"s{i}", f"python code item {i}"))
         results = backend.search("python", top_k=3)
         assert len(results) <= 3
+
+    @pytest.mark.parametrize("top_k", [0, -1])
+    def test_search_non_positive_top_k_returns_empty(self, backend: SQLiteBackend, top_k: int) -> None:
+        backend.store(make_entry("match", "python code"))
+        assert backend.search("python", top_k=top_k) == []
 
     def test_search_status_filter(self, backend: SQLiteBackend) -> None:
         backend.store(make_entry("active_match", "pydantic thing", status=MemoryStatus.ACTIVE))
@@ -116,6 +123,24 @@ class TestSearch:
         ids = {entry.id for entry in results}
         assert "exact" in ids
         assert "superstring" not in ids
+
+    @pytest.mark.parametrize("tag", ["café", 'a"b', "a\\b", "line\nbreak", "emoji-🧠"])
+    def test_special_character_tags_match_keyword_and_exact_filters(self, backend: SQLiteBackend, tag: str) -> None:
+        backend.store(make_entry("special-tag", "tagged content", tags=[tag]))
+
+        assert [entry.id for entry in backend.search(tag)] == ["special-tag"]
+        assert [entry.id for entry in backend.search("tagged", tags=[tag])] == ["special-tag"]
+        assert [entry.id for entry in backend.list_entries(tags=[tag])] == ["special-tag"]
+
+    def test_malformed_legacy_tags_are_skipped_by_json_filters(self, backend: SQLiteBackend) -> None:
+        backend.store(make_entry("malformed-tags", "needle", tags=["wanted"]))
+        with backend._lock:
+            backend._conn.execute("UPDATE memories SET tags = ? WHERE id = ?", ("{broken", "malformed-tags"))
+            backend._conn.commit()
+
+        assert backend.search("wanted") == []
+        assert backend.search("needle", tags=["wanted"]) == []
+        assert backend.list_entries(tags=["wanted"]) == []
 
     def test_search_matches_entry_id(self, backend: SQLiteBackend) -> None:
         """FIX-055: search LIKE clause includes the id column."""

@@ -401,8 +401,9 @@ class TestGetLocalEmbedderGapFill:
 
     def test_returns_none_on_unexpected_exception(self) -> None:
         """Lines 29-31: non-LocalOnlyViolation exceptions are caught; None returned."""
-        import structlog.testing
         from unittest.mock import patch
+
+        import structlog.testing
 
         from trw_memory.embeddings import get_local_embedder
 

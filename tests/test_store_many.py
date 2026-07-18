@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import datetime
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -124,6 +125,19 @@ class TestStoreManyDuplicates:
         assert backend.count() == 2
         assert backend.get(existing.id).content == "updated content"  # type: ignore[union-attr]
 
+    def test_same_batch_duplicate_id_indexes_only_last_entry(self, backend: SQLiteBackend) -> None:
+        if not backend.fts_available:
+            pytest.skip("FTS5 not available")
+        entry_id = str(uuid.uuid4())
+        first = _entry(entry_id=entry_id, content="obsolete_unique_term")
+        final = _entry(entry_id=entry_id, content="current_unique_term")
+
+        assert backend.store_many([first, final]) == 2
+        assert backend.get(entry_id).content == "current_unique_term"  # type: ignore[union-attr]
+        assert backend.search_fts("obsolete_unique_term") == []
+        assert [entry.id for entry in backend.search_fts("current_unique_term")] == [entry_id]
+        assert backend._conn.execute("SELECT COUNT(*) FROM memories_fts WHERE id = ?", (entry_id,)).fetchone()[0] == 1
+
 
 class TestStoreManyFts:
     def test_fts_indexed_after_store_many(self, backend: SQLiteBackend) -> None:
@@ -175,9 +189,7 @@ class TestStoreManyRollbackLocking:
     rollback.
     """
 
-    def test_failed_batch_rolls_back_under_lock_and_leaves_no_rows(
-        self, backend: SQLiteBackend
-    ) -> None:
+    def test_failed_batch_rolls_back_under_lock_and_leaves_no_rows(self, backend: SQLiteBackend) -> None:
         import sqlite3
         from typing import Any
 
@@ -202,13 +214,19 @@ class TestStoreManyRollbackLocking:
                 return real_conn.executemany(sql, seq_of_params)
 
             def rollback(self) -> None:
-                # backend._lock is non-reentrant: acquire(blocking=False)
-                # returns False only when the lock is ALREADY held (by the
-                # rollback's own with-block). True == held during rollback.
-                acquired = lock.acquire(blocking=False)
-                if acquired:
-                    lock.release()
-                lock_held_during_rollback.append(not acquired)
+                acquired_from_peer: list[bool] = []
+
+                def probe_lock() -> None:
+                    acquired = lock.acquire(blocking=False)
+                    acquired_from_peer.append(acquired)
+                    if acquired:
+                        lock.release()
+
+                probe = threading.Thread(target=probe_lock)
+                probe.start()
+                probe.join(timeout=1)
+                assert not probe.is_alive()
+                lock_held_during_rollback.append(acquired_from_peer == [False])
                 real_conn.rollback()
 
         backend._conn = _ConnProxy()  # type: ignore[assignment]
@@ -246,6 +264,4 @@ class TestStoreManyThroughput:
         perrow_ms = (time.perf_counter() - t0) * 1000
 
         speedup = perrow_ms / batch_ms
-        assert speedup >= 3, (
-            f"store_many speedup {speedup:.1f}x < 3x: batch={batch_ms:.0f}ms, perrow={perrow_ms:.0f}ms"
-        )
+        assert speedup >= 3, f"store_many speedup {speedup:.1f}x < 3x: batch={batch_ms:.0f}ms, perrow={perrow_ms:.0f}ms"

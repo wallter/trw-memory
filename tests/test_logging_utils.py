@@ -1,4 +1,5 @@
 """Wave 12: coverage gap-fill for trw_memory._logging (lines 54, 70-74, 80, 98, 106, 122, 148-149)."""
+
 from __future__ import annotations
 
 import logging
@@ -12,9 +13,8 @@ from trw_memory._logging import (
     _add_component,
     _redact_secrets,
     _verbosity_to_level,
+    configure_library_logging,
     configure_logging,
-
-
 )
 
 
@@ -88,18 +88,29 @@ class TestVerbosityToLevel:
 
 
 class TestConfigureLogging:
+    def test_library_logging_preserves_existing_consumer_config(self) -> None:
+        processors = [structlog.processors.JSONRenderer()]
+        structlog.configure(processors=processors)
+
+        configure_library_logging()
+
+        assert structlog.get_config()["processors"] is processors
+
     def test_explicit_log_level_override(self) -> None:
         configure_logging(log_level="WARNING")
         assert logging.getLogger().level == logging.WARNING
 
     def test_json_output_false_uses_console_renderer(self) -> None:
         configure_logging(json_output=False)
+        assert logging.getLogger().handlers
 
     def test_json_output_true_uses_json_renderer(self) -> None:
         configure_logging(json_output=True)
+        assert logging.getLogger().handlers
 
     def test_version_bind_exception_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import importlib.metadata as meta
 
         monkeypatch.setattr(meta, "version", lambda _: (_ for _ in ()).throw(Exception("no ver")))
         configure_logging()
+        assert logging.getLogger().level == logging.INFO

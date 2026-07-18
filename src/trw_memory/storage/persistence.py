@@ -14,6 +14,7 @@ import tempfile
 from collections.abc import Generator
 from datetime import date, datetime
 from pathlib import Path
+from typing import Protocol, cast
 
 import structlog
 from ruamel.yaml import YAML
@@ -21,14 +22,31 @@ from ruamel.yaml.error import YAMLError
 
 from trw_memory.exceptions import StorageError
 
-# fcntl is POSIX-only (Linux/macOS). On Windows it is unavailable;
-# file locking is skipped in that case (acceptable for single-process use).
+# Use the platform-native advisory locking primitive so read-modify-write
+# sections serialize across processes on both POSIX and Windows.
 try:
     import fcntl
 
     _FCNTL_AVAILABLE = True
 except ImportError:
     _FCNTL_AVAILABLE = False
+
+
+class _MsvcrtLocking(Protocol):
+    LK_LOCK: int
+    LK_UNLCK: int
+
+    def locking(self, fd: int, mode: int, count: int) -> None: ...
+
+
+try:
+    import msvcrt as _msvcrt_module
+
+    _msvcrt: _MsvcrtLocking | None = cast("_MsvcrtLocking", _msvcrt_module)
+    _MSVCRT_AVAILABLE = True
+except ImportError:
+    _msvcrt = None
+    _MSVCRT_AVAILABLE = False
 
 logger = structlog.get_logger(__name__)
 
@@ -255,6 +273,26 @@ def _in_process_lock_for(lock_path: Path) -> _thread.RLock:
         return lock
 
 
+def _acquire_rmw_file_lock(handle: object) -> None:
+    fd = _handle_fileno(handle)
+    if _FCNTL_AVAILABLE:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    elif _MSVCRT_AVAILABLE and _msvcrt is not None:
+        if os.fstat(fd).st_size == 0:
+            os.write(fd, b"\0")
+        os.lseek(fd, 0, os.SEEK_SET)
+        _msvcrt.locking(fd, _msvcrt.LK_LOCK, 1)
+
+
+def _release_rmw_file_lock(handle: object) -> None:
+    fd = _handle_fileno(handle)
+    if _FCNTL_AVAILABLE:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    elif _MSVCRT_AVAILABLE and _msvcrt is not None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        _msvcrt.locking(fd, _msvcrt.LK_UNLCK, 1)
+
+
 @contextlib.contextmanager
 def lock_for_rmw(path: Path) -> Generator[Path, None, None]:
     """Advisory exclusive lock for read-modify-write cycles.
@@ -280,13 +318,15 @@ def lock_for_rmw(path: Path) -> Generator[Path, None, None]:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     process_lock = _in_process_lock_for(lock_path)
     with process_lock:
-        lock_fh = lock_path.open("a+", encoding="utf-8")
+        lock_fh = lock_path.open("a+b")
+        acquired = False
         try:
-            if _FCNTL_AVAILABLE:
-                fcntl.flock(_handle_fileno(lock_fh), fcntl.LOCK_EX)
+            _acquire_rmw_file_lock(lock_fh)
+            acquired = True
             yield path
         finally:
-            if _FCNTL_AVAILABLE:
-                fcntl.flock(_handle_fileno(lock_fh), fcntl.LOCK_UN)
-            _close_handle(lock_fh)
-            lock_path.unlink(missing_ok=True)
+            try:
+                if acquired:
+                    _release_rmw_file_lock(lock_fh)
+            finally:
+                _close_handle(lock_fh)

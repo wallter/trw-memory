@@ -49,6 +49,7 @@ def test_close_is_idempotent(tmp_path: Path) -> None:
     reg.register()
     reg.close()
     reg.close()  # second close must not raise
+    assert not reg._lock_file.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +153,7 @@ def test_registry_never_refuses_open(tmp_path: Path, monkeypatch: MonkeyPatch) -
     reg = WriterRegistry(db)
     reg.register()  # must return, never raise
     reg.close()  # must not raise either
+    assert reg.concurrent_writers == 0
 
 
 # ---------------------------------------------------------------------------
@@ -281,3 +283,4 @@ def test_close_after_failed_register_is_noop(tmp_path: Path, monkeypatch: Monkey
     reg = WriterRegistry(db)
     reg.register()  # fails silently
     reg.close()  # noop; must not raise
+    assert reg.concurrent_writers == 0

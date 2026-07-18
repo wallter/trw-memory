@@ -4,6 +4,7 @@ Target lines: 87-88, 119-120, 128-132, 206, 211, 224-230,
               273-276, 301-304, 313-314, 336-337, 361-362,
               476, 495-498, 516-536.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -36,6 +37,7 @@ class TestDictToEntryHelpers:
         """Invalid MemoryStatus string → MemoryStatus.ACTIVE (lines 119-120)."""
         entry = _dict_to_entry(_base_data(status="not_a_valid_status"))
         from trw_memory.models.memory import MemoryStatus
+
         assert entry.status == MemoryStatus.ACTIVE
 
     def test_bad_anchors_list_is_skipped(self) -> None:
@@ -59,6 +61,31 @@ class TestYAMLBackendPathTraversal:
         backend = YAMLBackend(tmp_path / "entries")
         with pytest.raises(StorageError, match="path traversal"):
             backend._path("../evil")
+
+    @pytest.mark.parametrize("entry_id", ["nested/id", "nested\\id", "../escape", "/absolute", "nul\x00id"])
+    def test_nested_or_unsafe_components_are_rejected(self, tmp_path: Path, entry_id: str) -> None:
+        backend = YAMLBackend(tmp_path / "entries")
+        with pytest.raises(StorageError, match="Invalid entry_id"):
+            backend.store(MemoryEntry(id=entry_id, content="hidden", namespace="project:default"))
+        assert backend.count() == 0
+        assert not (tmp_path / "entries" / "nested").exists()
+
+    def test_normalized_alias_cannot_overwrite_existing_entry(self, tmp_path: Path) -> None:
+        backend = YAMLBackend(tmp_path / "entries")
+        backend.store(MemoryEntry(id="victim", content="original", namespace="project:default"))
+
+        with pytest.raises(StorageError, match="Invalid entry_id"):
+            backend.store(MemoryEntry(id="alias/../victim", content="overwrite", namespace="project:default"))
+
+        assert backend.count() == 1
+        assert backend.get("victim").content == "original"  # type: ignore[union-attr]
+
+    @pytest.mark.parametrize("entry_id", ["percent%", "under_score", "parent#hype0", "space id", "café"])
+    def test_safe_opaque_ids_round_trip(self, tmp_path: Path, entry_id: str) -> None:
+        backend = YAMLBackend(tmp_path / "entries")
+        backend.store(MemoryEntry(id=entry_id, content="safe", namespace="project:default"))
+        assert backend.get(entry_id).id == entry_id  # type: ignore[union-attr]
+        assert backend.count() == 1
 
 
 class TestYAMLBackendLoadAllCorrupt:

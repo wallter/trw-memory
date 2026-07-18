@@ -167,6 +167,11 @@ class TestListEntries:
         results = backend.list_entries(limit=3)
         assert len(results) == 3
 
+    @pytest.mark.parametrize("limit", [0, -1])
+    def test_list_entries_non_positive_limit_returns_empty(self, backend: SQLiteBackend, limit: int) -> None:
+        backend.store(make_entry("limited"))
+        assert backend.list_entries(limit=limit) == []
+
     def test_list_entries_empty_store_returns_empty(self, backend: SQLiteBackend) -> None:
         assert backend.list_entries() == []
 
@@ -213,6 +218,11 @@ class TestEntriesWithAssertions:
 
         capped = backend.entries_with_assertions(limit=3)
         assert len(capped) == 3
+
+    @pytest.mark.parametrize("limit", [0, -1])
+    def test_non_positive_limit_returns_empty(self, backend: SQLiteBackend, limit: int) -> None:
+        backend.store(self._assertion_entry("limited", "default"))
+        assert backend.entries_with_assertions(limit=limit) == []
 
 
 class TestIncrementSessionCounts:

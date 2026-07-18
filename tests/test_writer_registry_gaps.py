@@ -1,4 +1,5 @@
 """Wave 15: coverage gap-fill for storage/_writer_registry.py (lines 120-121, 142-143, 195-196, 220-221, 240-241, 251, 261-262, 294-303, 308-309)."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -13,6 +14,7 @@ class TestRegisterPruneFails:
         reg = WriterRegistry(tmp_path / "test.db")
         with patch.object(WriterRegistry, "_prune_stale_peers", side_effect=OSError("no perms")):
             reg.register()  # should not raise
+        assert reg.concurrent_writers == 1
         reg.close()
 
     def test_file_exists_error_triggers_utime_path(self, tmp_path: Path) -> None:
@@ -21,7 +23,9 @@ class TestRegisterPruneFails:
         # Create the lock file first so O_EXCL raises FileExistsError
         reg._registry_dir.mkdir(parents=True, exist_ok=True)
         reg._lock_file.write_text("99999\n")
+        before = reg._lock_file.stat().st_mtime_ns
         reg.register()  # should hit FileExistsError path, touch mtime
+        assert reg._lock_file.stat().st_mtime_ns >= before
         reg.close()
 
     def test_oserror_on_lock_create_is_logged_and_ignored(self, tmp_path: Path) -> None:
@@ -29,6 +33,7 @@ class TestRegisterPruneFails:
         reg = WriterRegistry(tmp_path / "test.db")
         with patch("trw_memory.storage._writer_registry.os.open", side_effect=PermissionError("permission denied")):
             reg.register()  # should not raise even if lock creation fails
+        assert reg.concurrent_writers == 0
         reg.close()
 
 
@@ -39,6 +44,7 @@ class TestUnregisterSilentOsError:
         reg.register()
         with patch("trw_memory.storage._writer_registry.Path.unlink", side_effect=OSError("busy")):
             reg.close()  # should not raise
+        assert reg._lock_file.exists()
 
 
 class TestEnumerateLivePeersGlobFails:
@@ -56,6 +62,7 @@ class TestPruneStaleGlobFails:
         reg = WriterRegistry(tmp_path / "test.db")
         with patch("trw_memory.storage._writer_registry.Path.glob", side_effect=OSError("no perms")):
             reg._prune_stale_peers()  # should not raise
+        assert reg.peer_pids == []
 
     def test_unparseable_lockfile_name_is_skipped(self, tmp_path: Path) -> None:
         """Lock file with unparseable name → continue (line 251)."""
@@ -64,6 +71,7 @@ class TestPruneStaleGlobFails:
         bad_lock = reg._registry_dir / "notanumber.lock"
         bad_lock.write_text("")
         reg._prune_stale_peers()  # should not raise; skips unparseable file
+        assert bad_lock.exists()
 
     def test_oserror_on_stale_unlink_is_logged(self, tmp_path: Path) -> None:
         """OSError on f.unlink() for stale peer → logged (lines 261-262)."""
@@ -77,3 +85,4 @@ class TestPruneStaleGlobFails:
             patch("trw_memory.storage._writer_registry.Path.unlink", side_effect=OSError("busy")),
         ):
             reg._prune_stale_peers()  # should not raise
+        assert dead_lock.exists()

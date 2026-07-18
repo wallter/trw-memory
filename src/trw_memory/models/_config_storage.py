@@ -8,12 +8,12 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 __all__ = ["_StorageConfigMixin"]
 
 
-class _StorageConfigMixin:
+class _StorageConfigMixin(BaseModel):
     # Storage
     storage_backend: Literal["sqlite", "yaml"] = Field(default="sqlite", description="Storage backend type")
     storage_path: str = Field(default=".memory", description="Root directory for memory storage files")

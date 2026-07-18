@@ -1,4 +1,3 @@
-# ruff: noqa: F401
 """Key derivation and namespace isolation tests for trw_memory.security.encryption."""
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ from trw_memory.security import (
     generate_master_key,
 )
 
-from ._test_encryption_support import _KEY_LENGTH, clear_master_key_cache_fixture
+from ._test_encryption_support import _KEY_LENGTH
 
 
 class TestGenerateMasterKey:

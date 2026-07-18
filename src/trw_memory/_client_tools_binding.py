@@ -25,8 +25,6 @@ import inspect
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
-import structlog
-
 from trw_memory.exceptions import (
     MemoryConnectionError,
     StorageError,
@@ -43,8 +41,6 @@ if TYPE_CHECKING:
         StoreResultDict,
         _ToolFn,
     )
-
-logger = structlog.get_logger(__name__)
 
 
 def _client_logger() -> Any:
@@ -171,7 +167,7 @@ def auto_recall(
         async def wrapper(*args: object, **kwargs: object) -> object:
             memories: list[MemoryResultDict] = []
             try:
-                query = kwargs.get(query_from, "")
+                query = sig.bind_partial(*args, **kwargs).arguments.get(query_from, "")
                 if query:
                     raw = await client.recall(str(query), limit=limit)
                     memories = [m for m in raw if float(m["score"]) >= min_score]

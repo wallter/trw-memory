@@ -89,9 +89,13 @@ def test_two_arm_delta_deterministic_fake_embedder(tmp_path: Path, monkeypatch: 
 
 
 @pytest.mark.slow
-def test_two_arm_delta_reports_metrics(tmp_path: Path) -> None:
+def test_two_arm_delta_reports_metrics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Exercises the REAL store+recall path on the bundled fixture for both arms.
-    report = HypeBenchmark().run(tmp_path)
+    # Keep tier sidecars inside the test sandbox; otherwise MemoryClient defaults
+    # to a shared cwd-relative .memory directory and amplifies benchmark I/O
+    # across repeated/local/xdist release runs.
+    monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "store"))
+    report = HypeBenchmark().run(tmp_path / "dbs")
     assert set(report) == {"off", "on", "delta"}
     for arm in ("off", "on"):
         assert 0.0 <= report[arm]["recall_at_10"] <= 1.0

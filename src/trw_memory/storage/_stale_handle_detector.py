@@ -142,8 +142,6 @@ class StaleHandleDetector:
         if now - self._last_checked < self._check_interval:
             return False
 
-        self._last_checked = now
-
         # Belt 1: sentinel mtime
         try:
             sentinel_mtime = self._sentinel_path.stat().st_mtime
@@ -177,4 +175,5 @@ class StaleHandleDetector:
             except OSError:
                 pass  # DB temporarily absent — report as stale so caller reconnects
 
+        self._last_checked = now
         return False

@@ -15,6 +15,14 @@ def test_id_helpers_round_trip() -> None:
     assert parent_of_hype_id("parent-1") == "parent-1"  # non-hype passes through
 
 
+def test_id_helpers_preserve_hype_tokens_inside_canonical_parent_ids() -> None:
+    sibling = hype_sibling_id("team#hypeguide", 0)
+    assert parent_of_hype_id(sibling) == "team#hypeguide"
+    assert not is_hype_id("team#hypeguide")
+    assert not is_hype_id("team#hype")
+    assert not is_hype_id("team#hype\u0661")
+
+
 def test_sibling_ids_in_filters_synthetic() -> None:
     stored = {"p1": [0.0], "p1#hype0": [0.0], "p2": [0.0], "p2#hype1": [0.0]}
     assert set(hype_sibling_ids_in(stored)) == {"p1#hype0", "p2#hype1"}
@@ -49,3 +57,15 @@ def test_collapse_emits_no_synthetic_ids() -> None:
     ranking = [("p1#hype0", 0.9), ("p1#hype1", 0.8)]
     collapsed, _ = collapse_hype_ranking(ranking, {"p1"})
     assert all(not is_hype_id(eid) for eid, _ in collapsed)
+
+
+def test_collapse_prioritizes_canonical_numeric_suffix_ids() -> None:
+    ranking = [("foo#hype0", 0.9), ("foo#hype0#hype1", 0.8)]
+    collapsed, hits = collapse_hype_ranking(ranking, {"foo#hype0"})
+    assert collapsed == [("foo#hype0", 0.9)]
+    assert hits == 1
+
+
+def test_sibling_ids_exclude_known_canonical_numeric_suffix_ids() -> None:
+    stored = {"foo#hype0": [0.0], "foo#hype0#hype1": [0.0]}
+    assert hype_sibling_ids_in(stored, {"foo#hype0"}) == ["foo#hype0#hype1"]

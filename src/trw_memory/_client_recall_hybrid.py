@@ -29,19 +29,13 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from trw_memory._client_distilled_tiering import entry_to_result as _entry_to_result
 from trw_memory.models.memory import MemoryStatus
 
 if TYPE_CHECKING:
     from trw_memory.client import MemoryClient, MemoryResultDict
-    from trw_memory.models.memory import MemoryEntry
 
 logger = structlog.get_logger(__name__)
-
-
-def _entry_to_result(entry: MemoryEntry, score: float = 0.0) -> MemoryResultDict:
-    from trw_memory._client_distilled_tiering import entry_to_result as _impl
-
-    return _impl(entry, score=score)
 
 
 async def try_hybrid_recall(

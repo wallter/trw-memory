@@ -2,6 +2,7 @@
 
 Target lines: 148-149, 163-170, 194, 229-239, 250-260, 270, 281-283, 287-288, 297, 319.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -9,8 +10,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from trw_memory._client_bulk_store import bulk_store_impl
 from trw_memory.client import BulkStoreRequest, MemoryClient
-from trw_memory._client_bulk_store import BulkStoreItemResult, bulk_store_impl
+from trw_memory.exceptions import ScorerUnavailableError
 
 
 @pytest.fixture
@@ -48,6 +50,7 @@ async def team_client(tmp_path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient
 # lines 148-149, 163-170: SchemaValidationError path → rejected item
 # ---------------------------------------------------------------------------
 
+
 class TestBulkStoreSchemaValidationRejection:
     async def test_whitespace_only_content_is_rejected(self, isolated_client: MemoryClient) -> None:
         """BulkStoreRequest with whitespace content fails validate_store_inputs → rejected (lines 148-149, 163-170)."""
@@ -57,6 +60,7 @@ class TestBulkStoreSchemaValidationRejection:
         assert summary.total == 2
         assert summary.rejected == 1
         assert summary.stored == 1
+        assert [item.status for item in summary.items] == ["stored", "rejected"]
         rejected_item = next(it for it in summary.items if it.status == "rejected")
         assert "content" in rejected_item.skipped_reason
 
@@ -65,25 +69,55 @@ class TestBulkStoreSchemaValidationRejection:
 # line 194: update path (existing entry)
 # ---------------------------------------------------------------------------
 
+
 class TestBulkStoreUpdatePath:
     async def test_update_existing_entry(self, isolated_client: MemoryClient) -> None:
         """entry_id matches existing entry → model_copy update path (line 194)."""
-        store_result = await isolated_client.store("original content", detail="original")
+        store_result = await isolated_client.store("original content", detail="original", evidence=["proof"])
         memory_id = store_result["memory_id"]
+        original = isolated_client._get_backend().get(memory_id)
+        assert original is not None
         req = BulkStoreRequest(content="updated content", detail="new detail", entry_id=memory_id)
         summary = await isolated_client.bulk_store([req])
         assert summary.updated == 1
+        updated = isolated_client._get_backend().get(memory_id)
+        assert updated is not None
+        assert updated.content == "updated content"
+        assert updated.evidence == ["proof"]
+        assert updated.vector_clock != original.vector_clock
+
+    async def test_update_rejects_entry_in_another_namespace(self, tmp_path) -> None:
+        from trw_memory.models.memory import MemoryEntry
+
+        db_path = tmp_path / "shared.db"
+        owner = MemoryClient("project:owner", db_path=db_path)
+        other = MemoryClient("project:other", db_path=db_path)
+        try:
+            owner._get_backend().store(MemoryEntry(id="M-shared", content="owner content", namespace="project:owner"))
+            with patch.object(other, "_get_embedder", return_value=MagicMock()):
+                summary = await other.bulk_store([BulkStoreRequest(content="other content", entry_id="M-shared")])
+
+            assert summary.rejected == 1
+            assert summary.items[0].skipped_reason == "entry_not_found"
+            stored = owner._get_backend().get("M-shared")
+            assert stored is not None
+            assert stored.content == "owner content"
+            assert stored.namespace == "project:owner"
+        finally:
+            await owner.close()
+            await other.close()
 
 
 # ---------------------------------------------------------------------------
 # lines 229-239: quarantine path
 # ---------------------------------------------------------------------------
 
+
 class TestBulkStoreQuarantinePath:
     async def test_quarantined_decision_lands_in_quarantine(self, isolated_client: MemoryClient) -> None:
         """When security decision quarantines an entry → quarantined result (lines 229-239)."""
-        from trw_memory.security.runtime import PreparedStoreEntry
         from trw_memory.models.memory import MemoryEntry
+        from trw_memory.security.runtime import PreparedStoreEntry
 
         fake_entry = MemoryEntry(id="M-quarantined", content="test", namespace="project:default")
         quarantined_decision = PreparedStoreEntry(
@@ -103,10 +137,21 @@ class TestBulkStoreQuarantinePath:
         quarantine_item = next(it for it in summary.items if it.quarantined)
         assert quarantine_item.anomaly_dimension == "injection"
 
+    async def test_security_dependency_failure_propagates_without_writes(self, isolated_client: MemoryClient) -> None:
+        with patch(
+            "trw_memory._client_bulk_store.prepare_entry_for_store",
+            side_effect=ScorerUnavailableError("scorer unavailable"),
+        ):
+            with pytest.raises(ScorerUnavailableError, match="scorer unavailable"):
+                await isolated_client.bulk_store([BulkStoreRequest(content="test", detail="d")])
+
+        assert isolated_client._get_backend().count(namespace=isolated_client.namespace) == 0
+
 
 # ---------------------------------------------------------------------------
 # lines 250-260: embed_batch exception
 # ---------------------------------------------------------------------------
+
 
 class TestBulkStoreEmbedBatchFailure:
     async def test_embed_batch_exception_uses_none_embeddings(self, isolated_client: MemoryClient) -> None:
@@ -125,6 +170,7 @@ class TestBulkStoreEmbedBatchFailure:
 # line 270: team namespace ensure_team_namespace
 # ---------------------------------------------------------------------------
 
+
 class TestBulkStoreTeamNamespace:
     async def test_team_namespace_creates_team_ns(self, team_client: MemoryClient) -> None:
         """team: namespace → NamespaceManager.ensure_team_namespace called (line 270)."""
@@ -135,6 +181,7 @@ class TestBulkStoreTeamNamespace:
 # ---------------------------------------------------------------------------
 # lines 281-283: embedding upsert in transaction
 # ---------------------------------------------------------------------------
+
 
 class TestBulkStoreVectorUpsert:
     async def test_vector_upserted_when_embedding_available(self, isolated_client: MemoryClient) -> None:
@@ -153,6 +200,7 @@ class TestBulkStoreVectorUpsert:
 # lines 287-288: schedule_graph_update RuntimeError
 # ---------------------------------------------------------------------------
 
+
 class TestBulkStoreGraphScheduleFailure:
     async def test_graph_update_runtime_error_is_logged(self, isolated_client: MemoryClient) -> None:
         """schedule_graph_update raises RuntimeError → warning logged, continues (lines 287-288)."""
@@ -165,6 +213,7 @@ class TestBulkStoreGraphScheduleFailure:
 # ---------------------------------------------------------------------------
 # line 297: skip_audit_per_item=False path
 # ---------------------------------------------------------------------------
+
 
 class TestBulkStoreTransactionFailure:
     async def test_transaction_exception_raises_storage_error(self, isolated_client: MemoryClient) -> None:
@@ -198,13 +247,16 @@ class TestBulkStorePerItemAudit:
 class TestBulkStoreRemotePublish:
     async def test_remote_publish_scheduled_when_not_skipped(self, isolated_client: MemoryClient) -> None:
         """skip_remote_publish=False + _should_attempt_remote_publish=True → scheduled (line 319)."""
+        # The scheduler takes ownership of the coroutine created by _publish_entry.
+        # This test replaces the scheduler, so its stand-in must release that
+        # coroutine rather than leaving it for a later garbage-collection cycle.
+        mock_schedule = MagicMock(side_effect=lambda coro: coro.close())
         with patch.object(isolated_client, "_should_attempt_remote_publish", return_value=True):
-            with patch.object(isolated_client, "_schedule_background_task") as mock_schedule:
-                with patch.object(isolated_client, "_publish_entry", return_value=None):
-                    summary = await bulk_store_impl(
-                        isolated_client,
-                        [BulkStoreRequest(content="remote pub", detail="d")],
-                        skip_remote_publish=False,
-                    )
+            with patch.object(isolated_client, "_schedule_background_task", new=mock_schedule):
+                summary = await bulk_store_impl(
+                    isolated_client,
+                    [BulkStoreRequest(content="remote pub", detail="d")],
+                    skip_remote_publish=False,
+                )
         assert summary.stored == 1
-        mock_schedule.assert_called()
+        mock_schedule.assert_called_once()

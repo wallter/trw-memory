@@ -39,9 +39,7 @@ def test_offline_forces_local_files_only(monkeypatch: pytest.MonkeyPatch) -> Non
     captured: dict[str, object] = {}
 
     class _FakeST:
-        def __init__(
-            self, model_name: str, local_files_only: bool = False, trust_remote_code: bool = False
-        ) -> None:
+        def __init__(self, model_name: str, local_files_only: bool = False, trust_remote_code: bool = False) -> None:
             captured["model_name"] = model_name
             captured["local_files_only"] = local_files_only
 

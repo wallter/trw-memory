@@ -15,7 +15,6 @@ from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.lifecycle.consolidation import (
     _archive_originals,
     _create_consolidated_entry,
-    _redact_paths,
     _summarize_cluster_fallback,
 )
 from trw_memory.models.config import MemoryConfig
@@ -23,52 +22,6 @@ from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 from ._test_consolidation_support import _V1, _InMemoryBackend, _make_embedder, _make_entry
-
-
-class TestRedactPaths:
-    def test_redacts_unix_home(self) -> None:
-        result = _redact_paths("file at /home/user/project/file.py")
-        assert "[REDACTED_PATH]" in result
-        assert "/home/user" not in result
-
-    def test_redacts_mnt_path(self) -> None:
-        result = _redact_paths("stored at /mnt/c/Users/Tyler/project")
-        assert "[REDACTED_PATH]" in result
-
-    def test_redacts_windows_path(self) -> None:
-        result = _redact_paths(r"path C:\Users\Tyler\project")
-        assert "[REDACTED_PATH]" in result
-
-    def test_no_paths_unchanged(self) -> None:
-        text = "no filesystem paths here"
-        assert _redact_paths(text) == text
-
-    def test_redacts_tmp_path(self) -> None:
-        result = _redact_paths("temp file /tmp/abc123")
-        assert "[REDACTED_PATH]" in result
-
-    def test_redacts_home_tilde_path(self) -> None:
-        result = _redact_paths("key at ~/projects/secrets/key.pem here")
-        assert "[REDACTED_PATH]" in result
-        assert "~/projects/secrets/key.pem" not in result
-
-    def test_redacts_dot_relative_path(self) -> None:
-        result = _redact_paths("config in ./config.yaml loaded")
-        assert "[REDACTED_PATH]" in result
-        assert "./config.yaml" not in result
-
-    def test_redacts_parent_relative_path(self) -> None:
-        result = _redact_paths("cert at ../certs/ca.pem present")
-        assert "[REDACTED_PATH]" in result
-        assert "../certs/ca.pem" not in result
-        # ".." must not be partially matched as "./" leaving a stray dot.
-        assert "/certs/ca.pem" not in result
-
-    def test_plain_prose_with_punctuation_not_redacted(self) -> None:
-        # A sentence ending with "..." or containing "e.g." must not be
-        # mistaken for a relative path (no following path body).
-        text = "Consider the options, e.g. retry. Done."
-        assert _redact_paths(text) == text
 
 
 class TestSummarizeClusterFallback:

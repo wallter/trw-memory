@@ -222,9 +222,7 @@ class Anchor(BaseModel):
     @field_validator("signature", mode="before")
     @classmethod
     def _truncate_signature(cls, v: str) -> str:
-        if len(v) > 200:
-            return v[:200]
-        return v
+        return v[:200]
 
 
 class MemoryEntry(BaseModel):

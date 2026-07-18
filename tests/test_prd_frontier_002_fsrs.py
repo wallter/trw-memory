@@ -1,15 +1,12 @@
 """Tests for FSRS-inspired spaced repetition scoring (frontier-002)."""
-from __future__ import annotations
 
-import math
+from __future__ import annotations
 
 import pytest
 
 from trw_memory.lifecycle.scoring import (
     compute_fsrs_utility_score,
-    fsrs_difficulty_update,
     fsrs_retrievability,
-    fsrs_stability_after_review,
 )
 
 
@@ -41,46 +38,6 @@ class TestFsrsRetrieval:
         """stability=0 uses default without ZeroDivisionError."""
         r = fsrs_retrievability(1.0, stability=0.0)
         assert 0.0 < r <= 1.0
-
-
-class TestFsrsStabilityUpdate:
-    def test_perfect_recall_increases_stability(self):
-        """Perfect recall (grade=1.0) at high retrievability increases stability."""
-        s_old = 10.0
-        s_new = fsrs_stability_after_review(s_old, difficulty=5.0, retrievability=0.9, grade=1.0)
-        assert s_new > s_old
-
-    def test_stability_always_at_least_default(self):
-        """Updated stability never drops below _FSRS_DEFAULT_STABILITY."""
-        from trw_memory.lifecycle.scoring import _FSRS_DEFAULT_STABILITY
-
-        s = fsrs_stability_after_review(0.01, difficulty=9.0, retrievability=0.99, grade=0.0)
-        assert s >= _FSRS_DEFAULT_STABILITY
-
-    def test_high_difficulty_slower_growth(self):
-        """Hard entries (D=9) grow stability slower than easy (D=1)."""
-        s_easy = fsrs_stability_after_review(10.0, difficulty=1.0, retrievability=0.7, grade=1.0)
-        s_hard = fsrs_stability_after_review(10.0, difficulty=9.0, retrievability=0.7, grade=1.0)
-        assert s_easy > s_hard
-
-
-class TestFsrsDifficultyUpdate:
-    def test_easy_recall_decreases_difficulty(self):
-        """Grade > 0.5 (easy) should decrease difficulty."""
-        d_new = fsrs_difficulty_update(5.0, grade=1.0)
-        assert d_new < 5.0
-
-    def test_hard_recall_increases_difficulty(self):
-        """Grade < 0.5 (hard) should increase difficulty."""
-        d_new = fsrs_difficulty_update(5.0, grade=0.0)
-        assert d_new > 5.0
-
-    def test_difficulty_clamped_to_range(self):
-        """Difficulty stays in [1, 10]."""
-        d_min = fsrs_difficulty_update(1.0, grade=1.0)
-        d_max = fsrs_difficulty_update(10.0, grade=0.0)
-        assert d_min >= 1.0
-        assert d_max <= 10.0
 
 
 class TestComputeFsrsUtility:

@@ -181,7 +181,7 @@ async def test_no_embedder_writes_no_siblings(tmp_path: Path) -> None:
         await client.close()
 
 
-async def test_no_event_kwarg_on_hype_log_sites() -> None:
+def test_no_event_kwarg_on_hype_log_sites() -> None:
     # NFR02: the store-side HyPE module must not use the reserved `event=` kwarg.
     source = Path(__file__).resolve().parents[1] / "src" / "trw_memory" / "_client_hype.py"
     text = source.read_text(encoding="utf-8")

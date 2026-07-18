@@ -30,25 +30,22 @@ Extracted as PRD-DIST-246 batch 105.
 from __future__ import annotations
 
 import asyncio
-import os
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
+from trw_memory._client_distilled_tiering import entry_to_result as _entry_to_result
 from trw_memory.lifecycle._recall import record_recall_access
 from trw_memory.lifecycle.tiers._runtime import get_tier_manager, tier_runtime_enabled
-from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.retrieval.source_policy import apply_source_policy
 from trw_memory.security.rbac import Permission
-from trw_memory.security.recall_filter import filter_recall_window
 from trw_memory.security.runtime import (
     append_audit_event,
-    probe_canaries,
     should_halt_recalls,
 )
-from trw_memory.security.telemetry_emit import build_security_traceability, emit_security_event
 
 if TYPE_CHECKING:
     from trw_memory.client import MemoryClient, MemoryResultDict
@@ -67,12 +64,6 @@ def _client_logger() -> Any:
 _FALLBACK_TF_WEIGHT: float = 0.7
 _FALLBACK_IMPORTANCE_WEIGHT: float = 0.3
 _FALLBACK_TF_SCALE: float = 10.0
-
-
-def _entry_to_result(entry: MemoryEntry, score: float = 0.0) -> MemoryResultDict:
-    from trw_memory._client_distilled_tiering import entry_to_result as _impl
-
-    return _impl(entry, score=score)
 
 
 def _create_local_backend(config: Any, namespace: str) -> Any:
@@ -135,7 +126,7 @@ async def recall_impl(
                 dim = len(raw_vec)
                 query_embedding = [0.5 * (raw_vec[i] + exp_vec[i]) for i in range(dim)]
             else:
-                query_embedding = raw_vec  # fall back to whichever succeeded
+                query_embedding = raw_vec if raw_vec is not None else exp_vec
         else:
             query_embedding = await asyncio.to_thread(embedder.embed, query)
 
@@ -226,16 +217,7 @@ async def recall_impl(
         )
         if min_score > 0.0:
             final_scored = [result for result in final_scored if result["score"] >= min_score]
-        final = client._apply_recall_security(client._apply_budget(final_scored[:limit], token_budget))
-        await client._record_recall_access(final)
-        append_audit_event(
-            client._config,
-            "recall",
-            actor="",
-            namespace=client._namespace,
-            data={"query": query[:80], "entries_returned": len(final)},
-        )
-        client._remember_results_in_tiers(final)
+        final = await _finalize_recall(client, final_scored, query=query, limit=limit, token_budget=token_budget)
         _client_logger().debug(
             "memory_recalled",
             op="recall",
@@ -295,7 +277,23 @@ async def recall_impl(
     )
     if min_score > 0.0:
         filtered_results = [result for result in filtered_results if result["score"] >= min_score]
-    final = client._apply_recall_security(client._apply_budget(filtered_results[:limit], token_budget))
+    return await _finalize_recall(client, filtered_results, query=query, limit=limit, token_budget=token_budget)
+
+
+async def _finalize_recall(
+    client: MemoryClient,
+    results: list[MemoryResultDict],
+    *,
+    query: str,
+    limit: int,
+    token_budget: int | None,
+) -> list[MemoryResultDict]:
+    """Apply final security, accounting, audit, and tier side effects in order."""
+    from trw_memory._client_recall_graph import filter_conflicting_results
+
+    async with client._lock:
+        results = filter_conflicting_results(client, results)
+    final = client._apply_recall_security(client._apply_budget(results[:limit], token_budget))
     await client._record_recall_access(final)
     append_audit_event(
         client._config,
@@ -308,63 +306,9 @@ async def recall_impl(
     return final
 
 
-def apply_recall_security(
-    client: MemoryClient,
-    results: list[MemoryResultDict],
-) -> list[MemoryResultDict]:
-    if client._backend is not None:
-        probe_canaries(client._config, backend=client._backend)
-    if not client._config.enable_recall_filter:
-        return results
-    score_by_id: dict[str, float] = {}
-    result_by_id: dict[str, MemoryResultDict] = {}
-    entries: list[MemoryEntry] = []
-    for idx, result in enumerate(results):
-        synthetic_id = f"{result['namespace']}::{result['memory_id']}::{idx}"
-        score_by_id[synthetic_id] = result["score"]
-        result_by_id[synthetic_id] = result
-        raw_result = {"id": synthetic_id, **result}
-        recalled_at = datetime.now(timezone.utc)
-        for timestamp_field in ("created_at", "updated_at"):
-            if raw_result.get(timestamp_field) in {"", "None", None}:
-                raw_result[timestamp_field] = recalled_at
-        if raw_result.get("last_accessed_at") in {"", "None", None}:
-            raw_result["last_accessed_at"] = None
-        entries.append(MemoryEntry.model_validate(raw_result))
-    filtered = filter_recall_window(entries, mode=client._config.recall_filter_mode)
-    session_id = os.environ.get("TRW_SESSION_ID", "").strip() or client._namespace
-    run_id = os.environ.get("TRW_RUN_ID", "").strip() or None
-    emit_security_event(
-        client._config,
-        emitter="recall_filter",
-        session_id=session_id,
-        run_id=run_id,
-        payload={
-            "event_name": "recall_filter_outcome",
-            "path": "client_recall",
-            "namespace": client._namespace,
-            "mode": client._config.recall_filter_mode,
-            "window_size": len(entries),
-            "accepted_count": len(filtered.accepted),
-            "would_reject_count": len(filtered.would_reject),
-            "actions": dict(filtered.actions),
-            "traceability": build_security_traceability(
-                live_path="client.MemoryClient._apply_recall_security",
-                requirement_ids=["FR-003", "NFR-010", "NFR-011"],
-            ),
-        },
-    )
-    secured: list[MemoryResultDict] = []
-    for entry in filtered.accepted:
-        if entry.metadata.get("system_canary") == "true":
-            continue
-        original = dict(result_by_id[entry.id])
-        original["content"] = entry.content
-        original["detail"] = entry.detail
-        original["metadata"] = dict(entry.metadata)
-        original["score"] = score_by_id[entry.id]
-        secured.append(cast("MemoryResultDict", original))
-    return secured
+from trw_memory._client_recall_security import (  # noqa: E402
+    apply_recall_security as apply_recall_security,
+)
 
 
 # `apply_budget` and `merge_org_results` extracted to

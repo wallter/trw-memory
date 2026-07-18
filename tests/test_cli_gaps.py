@@ -2,22 +2,53 @@
 
 Target lines: 69, 80, 163, 168, 173-184, 189-190, 195-208, 213-225, 247-249, 270, 277.
 """
+
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
-import sys
+import threading
 from pathlib import Path
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from trw_memory.cli import _dispatch, main
+from trw_memory.cli import _dispatch, _run_async, main
+
+
+async def _answer() -> int:
+    return 42
+
+
+def test_cli_async_bridge_preserves_callers_dormant_event_loop() -> None:
+    """Library invocation must not orphan an embedding host's policy loop."""
+    errors: list[BaseException] = []
+
+    def _exercise_owned_loop() -> None:
+        caller_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(caller_loop)
+        try:
+            assert _run_async(_answer()) == 42
+            assert asyncio.get_event_loop() is caller_loop
+            assert not caller_loop.is_closed()
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            caller_loop.close()
+            asyncio.set_event_loop(None)
+
+    thread = threading.Thread(target=_exercise_owned_loop)
+    thread.start()
+    thread.join()
+    if errors:
+        raise errors[0]
 
 
 # ---------------------------------------------------------------------------
 # lines 69, 80: SystemExit re-raise in _cli_error_boundary (async + sync)
 # ---------------------------------------------------------------------------
+
 
 class TestCliErrorBoundarySystemExitReRaise:
     async def test_async_handler_systemexit_is_reraised(self) -> None:
@@ -62,6 +93,7 @@ class TestCliErrorBoundarySystemExitReRaise:
 # lines 163, 168: _handle_restore and _handle_snapshot via _dispatch
 # ---------------------------------------------------------------------------
 
+
 class TestHandleRestoreAndSnapshot:
     async def test_restore_handler_dispatched(self, tmp_path: Path) -> None:
         """_dispatch('restore') → _handle_restore called (line 163)."""
@@ -85,6 +117,7 @@ class TestHandleRestoreAndSnapshot:
 # ---------------------------------------------------------------------------
 # lines 173-184: _handle_wiki_lint
 # ---------------------------------------------------------------------------
+
 
 class TestHandleWikiLint:
     async def test_wiki_lint_valid_pages(self, tmp_path: Path, capsys) -> None:
@@ -114,6 +147,7 @@ class TestHandleWikiLint:
 # lines 189-190: _handle_code_index
 # ---------------------------------------------------------------------------
 
+
 class TestHandleCodeIndex:
     async def test_code_index_dispatched(self, tmp_path: Path, capsys) -> None:
         """_dispatch('code-index') → memory_code_index_impl called (lines 189-190)."""
@@ -129,6 +163,7 @@ class TestHandleCodeIndex:
 # ---------------------------------------------------------------------------
 # lines 195-208: _handle_code_search
 # ---------------------------------------------------------------------------
+
 
 class TestHandleCodeSearch:
     async def test_code_search_dispatched(self, tmp_path: Path, capsys) -> None:
@@ -154,6 +189,7 @@ class TestHandleCodeSearch:
 # lines 213-225: _handle_code_symbol
 # ---------------------------------------------------------------------------
 
+
 class TestHandleCodeSymbol:
     async def test_code_symbol_dispatched(self, tmp_path: Path, capsys) -> None:
         """_dispatch('code-symbol') → memory_code_symbol_impl called (lines 213-225)."""
@@ -177,6 +213,7 @@ class TestHandleCodeSymbol:
 # lines 247-249: unknown command in _dispatch
 # ---------------------------------------------------------------------------
 
+
 class TestDispatchUnknownCommand:
     async def test_unknown_command_returns_1(self, capsys) -> None:
         """_dispatch with unknown command → prints error, returns 1 (lines 247-249)."""
@@ -190,6 +227,7 @@ class TestDispatchUnknownCommand:
 # ---------------------------------------------------------------------------
 # line 270: quiet mode sets verbosity = -1
 # ---------------------------------------------------------------------------
+
 
 class TestMainQuietMode:
     def test_quiet_flag_sets_verbosity_minus_one(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

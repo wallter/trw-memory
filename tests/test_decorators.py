@@ -67,6 +67,20 @@ class TestAutoRecallHappy:
         assert result is not None
         assert len(result) <= 2
 
+    async def test_query_extracted_from_positional_argument(self, client: MemoryClient) -> None:
+        await client.store("positional query memory")
+
+        @client.auto_recall(query_from="prompt")
+        async def handler(
+            prompt: str, *, recalled_memories: list[dict[str, Any]] | None = None
+        ) -> list[dict[str, Any]] | None:
+            return recalled_memories
+
+        result = await handler("positional query")
+
+        assert result is not None
+        assert [item["content"] for item in result] == ["positional query memory"]
+
 
 # ---------------------------------------------------------------------------
 # Fail-open behaviour

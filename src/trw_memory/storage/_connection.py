@@ -146,22 +146,25 @@ def open_and_configure(
         cached_statements=0,
         sqlcipher_key_hex=sqlcipher_key_hex,
     )
-    apply_open_pragmas(conn, verify=True)
+    try:
+        apply_open_pragmas(conn, verify=True)
 
-    for attempt in range(2):
-        rows = conn.execute("PRAGMA quick_check").fetchall()
-        if len(rows) == 1 and rows[0][0] == "ok":
-            return conn
-        if attempt == 0:
-            logger.warning(
-                "integrity_check_retry",
-                db=str(db_path),
-                detail=rows[0][0] if rows else "empty",
-            )
-            time.sleep(1.0)
-
-    conn.close()
-    raise sqlite3.DatabaseError("database disk image is malformed (quick_check failed twice)")
+        for attempt in range(2):
+            rows = conn.execute("PRAGMA quick_check").fetchall()
+            if len(rows) == 1 and rows[0][0] == "ok":
+                return conn
+            if attempt == 0:
+                logger.warning(
+                    "integrity_check_retry",
+                    db=str(db_path),
+                    detail=rows[0][0] if rows else "empty",
+                )
+                time.sleep(1.0)
+        raise sqlite3.DatabaseError("database disk image is malformed (quick_check failed twice)")
+    except BaseException:
+        with contextlib.suppress(Exception):
+            conn.close()
+        raise
 
 
 def open_without_integrity_check(

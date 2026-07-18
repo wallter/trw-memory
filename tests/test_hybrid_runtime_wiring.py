@@ -206,9 +206,10 @@ def test_memory_store_impl_uses_configured_embedder_settings() -> None:
     config = MemoryConfig(embedding_model="custom-model", embedding_dim=768)
 
     with patch("trw_memory.tools.store.get_local_embedder", return_value=None) as embedder_mock:
-        memory_store_impl("stored through tool", "project:default", backend=backend, config=config)
+        result = memory_store_impl("stored through tool", "project:default", backend=backend, config=config)
 
     embedder_mock.assert_called_once_with(model_name="custom-model", dim=768)
+    assert result["status"] == "stored"
 
 
 def test_memory_store_impl_ignores_non_entry_backend_get_result() -> None:
@@ -254,9 +255,10 @@ def test_memory_recall_impl_uses_configured_embedder_settings() -> None:
         patch("trw_memory.tools.recall.get_local_embedder", return_value=None) as embedder_mock,
         patch("trw_memory.tools.recall.hybrid_search", return_value=[entry]),
     ):
-        memory_recall_impl("pydantic", "project:default", backend=backend, config=config)
+        result = memory_recall_impl("pydantic", "project:default", backend=backend, config=config)
 
     embedder_mock.assert_called_once_with(model_name="custom-model", dim=768)
+    assert result["memories"][0]["content"] == "pydantic"
 
 
 def test_memory_recall_impl_forwards_retrieval_config_to_hybrid_search() -> None:
@@ -367,13 +369,80 @@ def test_client_get_embedder_uses_configured_settings(
     client = MemoryClient(namespace="default", mode="local")
     try:
         with patch("trw_memory.embeddings.get_local_embedder", return_value=None) as embedder_mock:
-            client._get_embedder()
+            result = client._get_embedder()
     finally:
         backend = client._backend
         if backend is not None:
             backend.close()
 
     embedder_mock.assert_called_once_with(model_name="custom-model", dim=768)
+    assert result is None
+
+
+def test_client_get_embedder_reuses_provider_for_client_lifetime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated operations must not reload the sentence-transformers model."""
+    monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+    monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+
+    provider = _StubEmbedder()
+    client = MemoryClient(namespace="default", mode="local")
+    try:
+        with patch("trw_memory.embeddings.get_local_embedder", return_value=provider) as embedder_mock:
+            first = client._get_embedder()
+            second = client._get_embedder()
+    finally:
+        backend = client._backend
+        if backend is not None:
+            backend.close()
+
+    assert first is provider
+    assert second is provider
+    embedder_mock.assert_called_once_with(
+        model_name=client._config.embedding_model,
+        dim=client._config.embedding_dim,
+    )
+
+
+def test_client_get_embedder_caches_unavailable_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing optional provider must not be probed on every operation."""
+    monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+    monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+
+    client = MemoryClient(namespace="default", mode="local")
+    try:
+        with patch("trw_memory.embeddings.get_local_embedder", return_value=None) as embedder_mock:
+            assert client._get_embedder() is None
+            assert client._get_embedder() is None
+    finally:
+        backend = client._backend
+        if backend is not None:
+            backend.close()
+
+    embedder_mock.assert_called_once()
+
+
+async def test_client_close_releases_cached_embedder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The client owns its provider reference and releases it on close."""
+    monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+    monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+
+    provider = _StubEmbedder()
+    client = MemoryClient(namespace="default", mode="local")
+    with patch("trw_memory.embeddings.get_local_embedder", return_value=provider):
+        assert client._get_embedder() is provider
+
+    await client.close()
+
+    assert client._embedder is None
 
 
 async def test_tag_filter_widens_top_k_to_full_pool(client: MemoryClient) -> None:

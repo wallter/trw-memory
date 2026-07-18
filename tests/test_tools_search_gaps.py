@@ -1,7 +1,7 @@
 """Wave 14: coverage gap-fill for tools/search.py (lines 62, 64, 82, 145-184)."""
+
 from __future__ import annotations
 
-import asyncio
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
@@ -58,7 +58,7 @@ class TestSearchQuarantinedBranch:
 
 
 class TestRegisterSearchTool:
-    def test_registered_function_delegates_to_impl(self) -> None:
+    async def test_registered_function_delegates_to_impl(self) -> None:
         """register_search_tool wires memory_search to impl (lines 145-184)."""
         registered: dict[str, object] = {}
         mock_mcp = MagicMock()
@@ -78,15 +78,14 @@ class TestRegisterSearchTool:
             @contextmanager
             def _cm(*_a, **_kw):
                 yield backend
+
             return _cm
 
         with patch(
             "trw_memory.integrations._backend.create_backend_from_config",
             new=_ctx_factory(mock_backend),
         ):
-            result = asyncio.run(
-                registered["fn"]("project:default")  # type: ignore[operator]
-            )
+            result = await registered["fn"]("project:default")  # type: ignore[operator]
 
         assert isinstance(result, dict)
         assert "entries" in result

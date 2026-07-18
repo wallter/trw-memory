@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from trw_memory.graph import graph_query
+from trw_memory.graph import filter_conflicts, graph_query
 from trw_memory.models.memory import MemoryStatus
 
 if TYPE_CHECKING:
@@ -115,4 +115,48 @@ def _entry_to_result(entry: object, score: float = 0.0) -> MemoryResultDict:
     return _impl(entry, score=score)
 
 
-__all__ = ["graph_expand_results"]
+def filter_conflicting_results(
+    client: MemoryClient,
+    results: list[MemoryResultDict],
+) -> list[MemoryResultDict]:
+    """Suppress the lower-importance member of recalled conflict pairs.
+
+    The graph is a secondary index, so an unavailable/non-SQLite backend or a
+    malformed graph row degrades to the unfiltered recall result rather than
+    making recall unavailable.
+    """
+    if len(results) < 2 or client._backend is None:
+        return results
+    conn = getattr(client._backend, "_conn", None)
+    if conn is None:
+        return results
+
+    namespace = getattr(client, "_namespace", None)
+    local_results = [
+        result for result in results if namespace is None or result.get("namespace", namespace) == namespace
+    ]
+    if len(local_results) < 2:
+        return results
+    graph_entries = [
+        {
+            "id": result["memory_id"],
+            "importance": result.get("importance", 0.5),
+        }
+        for result in local_results
+    ]
+    try:
+        kept = filter_conflicts(graph_entries, conn)
+    except Exception:  # justified: graph index is advisory; primary recall remains available
+        logger.debug("conflict_filter_error", exc_info=True)
+        return results
+
+    kept_ids = {str(entry["id"]) for entry in kept}
+    return [
+        result
+        for result in results
+        if (namespace is not None and result.get("namespace", namespace) != namespace)
+        or result["memory_id"] in kept_ids
+    ]
+
+
+__all__ = ["filter_conflicting_results", "graph_expand_results"]

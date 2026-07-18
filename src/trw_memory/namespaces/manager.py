@@ -22,11 +22,8 @@ class NamespaceManager:
         self._backend = backend
 
     def _lifecycle_metadata_path(self) -> Path | None:
-        from trw_memory.storage.sqlite_backend import SQLiteBackend
         from trw_memory.storage.yaml_backend import YAMLBackend
 
-        if isinstance(self._backend, SQLiteBackend):
-            return self._backend._db_path.parent / _LIFECYCLE_METADATA_FILE
         if isinstance(self._backend, YAMLBackend):
             return self._backend._dir.parent / _LIFECYCLE_METADATA_FILE
         return None

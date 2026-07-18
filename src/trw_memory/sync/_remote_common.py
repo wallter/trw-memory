@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
-from typing import TypedDict
 from urllib.parse import urlparse
+
+from typing_extensions import TypedDict
 
 from trw_memory.exceptions import LocalOnlyViolationError
 
@@ -25,6 +26,70 @@ class AnonymizedEntry(TypedDict):
     embedding: list[float] | None
     source_project: str
     source_learning_id: str
+
+
+# ---------------------------------------------------------------------------
+# learning_api_v1 protocol boundary (PRD-CORE-181-FR06)
+# ---------------------------------------------------------------------------
+#
+# The first-party learning API speaks the legacy ``impact`` / ``min_impact``
+# vocabulary on the wire, but every local storage / lifecycle reader is
+# canonical ``importance`` after the memory_model_v2 cutover. This module is the
+# SOLE, explicitly versioned translation boundary: publish/fetch call through
+# these encoders/decoders and never reference ``impact`` directly, so a source
+# census can prove the external vocabulary is contained here.
+
+LEARNING_API_VERSION = "learning_api_v1"
+
+
+def encode_learning_api_v1(
+    *,
+    summary: str,
+    detail: str | None,
+    tags: list[str],
+    importance: float,
+    embedding: list[float] | None,
+    source_project: str,
+    source_learning_id: str,
+) -> AnonymizedEntry:
+    """Encode canonical fields into the external ``learning_api_v1`` publish payload.
+
+    Maps canonical ``importance`` onto the external ``impact`` wire field. This
+    is the only place the outbound ``impact`` vocabulary is produced.
+    """
+    return AnonymizedEntry(
+        summary=summary,
+        detail=detail,
+        tags=tags,
+        impact=importance,
+        embedding=embedding,
+        source_project=source_project,
+        source_learning_id=source_learning_id,
+    )
+
+
+def encode_learning_api_v1_search(
+    *,
+    query: str,
+    limit: int,
+    min_importance: float,
+) -> dict[str, object]:
+    """Encode a search request, mapping ``min_importance`` -> external ``min_impact``."""
+    return {"query": query, "limit": limit, "min_impact": min_importance}
+
+
+def decode_learning_api_v1_result(result: dict[str, object]) -> dict[str, object]:
+    """Decode an external ``learning_api_v1`` result into canonical vocabulary.
+
+    Maps the external ``impact`` field back onto canonical ``importance`` so
+    downstream local readers never see the wire vocabulary. Results without an
+    ``impact`` field pass through unchanged.
+    """
+    if "impact" not in result:
+        return result
+    decoded = dict(result)
+    decoded["importance"] = decoded.pop("impact")
+    return decoded
 
 
 class PublishResult(TypedDict):

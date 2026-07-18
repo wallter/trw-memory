@@ -11,7 +11,9 @@ from trw_memory.lifecycle.tiers import TierManager
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 
-pytest_plugins = ("tests._test_tiers_support",)
+from ._test_tiers_support import cfg as _cfg_fixture  # noqa: F401
+from ._test_tiers_support import mem_dir as _mem_dir_fixture  # noqa: F401
+from ._test_tiers_support import mgr as _mgr_fixture  # noqa: F401
 
 
 def _make_entry(

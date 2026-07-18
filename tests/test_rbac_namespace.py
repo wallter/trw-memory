@@ -7,7 +7,7 @@ from typing import Literal, cast
 
 import pytest
 
-from trw_memory.exceptions import AuthorizationError
+from trw_memory.exceptions import AuthorizationError, ConfigError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.security import Permission, require_namespace_permission
 
@@ -76,3 +76,11 @@ def test_rbac_check_overhead_p99() -> None:
     durations_ns.sort()
     p99_ns = durations_ns[int(len(durations_ns) * 0.99)]
     assert p99_ns < 1_000_000
+
+
+@pytest.mark.parametrize("namespace", ["../../escape", "project:bad/name", "", "project:"])
+def test_namespace_permission_rejects_invalid_namespace(namespace: str) -> None:
+    config = MemoryConfig(rbac_enabled=True, default_role="admin")
+
+    with pytest.raises(ConfigError, match=r"namespace|Namespace"):
+        require_namespace_permission(config, namespace, Permission.ADMIN, "memory_rotate_key")

@@ -115,9 +115,10 @@ def compute_importance_score(
     decay_rate = math.log(2) / half_life if half_life > 0 else 0.0
     recency = math.exp(-decay_rate * days)
 
-    # Importance: prefer the calibrated q-value surface when present, but keep
-    # legacy impact-only entries rankable during migration and tier hydration.
-    base_importance = float(str(entry.get("importance", entry.get("impact", 0.5))))
+    # Importance: prefer the calibrated q-value surface when present. Reads
+    # canonical ``importance`` only — the PRD-CORE-181 FR06 cutover migrated
+    # every legacy record, so no dual-read fallback remains here.
+    base_importance = float(str(entry.get("importance", 0.5)))
     q_value = float(str(entry.get("q_value", base_importance)))
     q_observations = int(str(entry.get("q_observations", 0)))
     blended_importance = bayesian_calibrate(q_value)

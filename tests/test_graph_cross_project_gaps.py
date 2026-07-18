@@ -2,26 +2,21 @@
 
 Target lines: 83, 109-113, 134, 136, 168, 187, 195, 217.
 """
+
 from __future__ import annotations
 
-from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
-from datetime import datetime, timezone
-
-import pytest
 
 from trw_memory._graph_cross_project import (
-    CROSS_VALIDATION_THRESHOLD,
     append_cross_validation,
     apply_cross_project_validation,
     backend_update_guard,
-    entry_has_cross_validation,
     entry_update_lock,
     merge_cross_validated_entry,
     persist_cross_validated_entry,
     project_scope_key,
 )
-from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 
@@ -38,6 +33,7 @@ def _entry(**kwargs) -> MemoryEntry:
 # ---------------------------------------------------------------------------
 # line 83: persist_cross_validated_entry early return when updated == original
 # ---------------------------------------------------------------------------
+
 
 class TestEntryUpdateLockBounded:
     def test_locks_are_evicted_when_not_referenced(self) -> None:
@@ -101,6 +97,7 @@ class TestPersistCrossValidatedEntry:
 # lines 109-113: backend_update_guard YAML-backend path (_dir attribute)
 # ---------------------------------------------------------------------------
 
+
 class TestBackendUpdateGuardYAMLPath:
     def test_yaml_backend_uses_dir_lock(self, tmp_path) -> None:
         """backend_update_guard uses _dir lock for YAML-style backends (lines 109-113)."""
@@ -125,6 +122,7 @@ class TestBackendUpdateGuardYAMLPath:
 # line 134: merge_cross_validated_entry when entry not found
 # ---------------------------------------------------------------------------
 
+
 class TestMergeCrossValidatedEntryNotFound:
     def test_returns_none_false_when_entry_missing(self) -> None:
         """merge returns (None, False) when backend.get returns None (line 134)."""
@@ -139,6 +137,7 @@ class TestMergeCrossValidatedEntryNotFound:
 # ---------------------------------------------------------------------------
 # line 136: merge_cross_validated_entry skip already-validated
 # ---------------------------------------------------------------------------
+
 
 class TestMergeCrossValidatedEntryAlreadyValidated:
     def test_returns_current_false_when_already_validated(self, tmp_path) -> None:
@@ -157,6 +156,7 @@ class TestMergeCrossValidatedEntryAlreadyValidated:
 # line 168: apply_cross_project_validation with non-project namespace
 # ---------------------------------------------------------------------------
 
+
 class TestApplyCrossProjectValidationNonProjectNS:
     def test_non_project_namespace_returns_zero(self, tmp_path) -> None:
         """apply_cross_project_validation returns 0 when namespace not project: (line 168)."""
@@ -171,6 +171,7 @@ class TestApplyCrossProjectValidationNonProjectNS:
 # ---------------------------------------------------------------------------
 # line 187: project_id is None for remote namespace → continue
 # ---------------------------------------------------------------------------
+
 
 class TestApplyCrossProjectValidationNoneProjectId:
     def test_non_project_remote_namespace_skipped(self, tmp_path) -> None:
@@ -195,9 +196,7 @@ class TestApplyCrossProjectValidationNoneProjectId:
             return _ctx()
 
         with patch("trw_memory.integrations._backend.discover_namespace_backends", side_effect=_fake_discover):
-            result = apply_cross_project_validation(
-                entry, backend, mock_conn, embedding=[0.1, 0.2]
-            )
+            result = apply_cross_project_validation(entry, backend, mock_conn, embedding=[0.1, 0.2])
         assert result == 0  # no projects matched
 
     def test_project_scope_key_returns_none_in_for_loop(self, tmp_path) -> None:
@@ -230,15 +229,14 @@ class TestApplyCrossProjectValidationNoneProjectId:
 
         with patch("trw_memory.integrations._backend.discover_namespace_backends", side_effect=_fake_discover):
             with patch("trw_memory._graph_cross_project.project_scope_key", side_effect=_flaky_scope_key):
-                result = apply_cross_project_validation(
-                    entry, backend, mock_conn, embedding=[0.1, 0.2]
-                )
+                result = apply_cross_project_validation(entry, backend, mock_conn, embedding=[0.1, 0.2])
         assert result == 0
 
 
 # ---------------------------------------------------------------------------
 # line 195: no remote entries → continue
 # ---------------------------------------------------------------------------
+
 
 class TestApplyCrossProjectValidationEmptyRemote:
     def test_empty_remote_entries_skipped(self, tmp_path) -> None:
@@ -262,15 +260,14 @@ class TestApplyCrossProjectValidationEmptyRemote:
             return _ctx()
 
         with patch("trw_memory.integrations._backend.discover_namespace_backends", side_effect=_fake_discover):
-            result = apply_cross_project_validation(
-                entry, backend, mock_conn, embedding=[0.1, 0.2]
-            )
+            result = apply_cross_project_validation(entry, backend, mock_conn, embedding=[0.1, 0.2])
         assert result == 0
 
 
 # ---------------------------------------------------------------------------
 # line 217: similarity <= threshold → continue
 # ---------------------------------------------------------------------------
+
 
 class TestApplyCrossProjectValidationLowSimilarity:
     def test_low_similarity_skips_merge(self, tmp_path) -> None:
@@ -304,10 +301,6 @@ class TestApplyCrossProjectValidationLowSimilarity:
             with patch("trw_memory.graph.detect_cross_validation", return_value=True):
                 with patch("trw_memory.graph._safe_cosine_similarity", return_value=0.5):
                     # 0.5 <= 0.92 threshold → hits continue at line 217
-                    remote_backend.get_stored_embeddings = MagicMock(
-                        return_value={"M-remote": remote_embedding}
-                    )
-                    result = apply_cross_project_validation(
-                        entry, backend, mock_conn, embedding=embedding
-                    )
+                    remote_backend.get_stored_embeddings = MagicMock(return_value={"M-remote": remote_embedding})
+                    result = apply_cross_project_validation(entry, backend, mock_conn, embedding=embedding)
         assert result == 0  # no merges applied

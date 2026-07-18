@@ -20,7 +20,8 @@ import uuid
 from collections.abc import Callable, Coroutine
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol, TypedDict, cast, runtime_checkable
+from typing import Any, Literal, Protocol, cast, runtime_checkable
+from typing_extensions import TypedDict
 
 import structlog
 from typing_extensions import NotRequired
@@ -29,7 +30,7 @@ from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.hype import NoOpQuestionGenerator, QuestionGenerator
 from trw_memory.exceptions import MemoryConnectionError
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import MemoryEntry
+from trw_memory.models.memory import Assertion, MemoryEntry
 from trw_memory.security.rbac import Permission, require_namespace_permission as require_namespace_permission  # noqa: F401 — re-exported for downstream consumers
 from trw_memory.security.runtime import (
     audit_entry,
@@ -53,6 +54,8 @@ from trw_memory.sync.subscriber import SSESubscriber as SSESubscriber  # noqa: F
 # (PRD-DIST-246 effective-LOC ratchet). MemoryClient mixes it in so the
 # `self._X` / `MemoryClient._X` monkeypatch seam resolves via the MRO.
 from trw_memory._client_org_shared_aliases import OrgSharedAliasMixin
+from trw_memory._client_operations import ClientOperationsMixin
+from trw_memory._client_context import ClientContextMixin
 
 logger = structlog.get_logger(__name__)
 
@@ -83,13 +86,11 @@ from trw_memory._client_bulk_store import (
     BulkStoreSummary as BulkStoreSummary,
     bulk_store_impl as _bulk_store_impl,
 )
-
-
-# Fallback recall scoring (used when hybrid retrieval pipeline is unavailable).
-# Blends term-frequency relevance with stored importance.
-_FALLBACK_TF_WEIGHT: float = 0.7
-_FALLBACK_IMPORTANCE_WEIGHT: float = 0.3
-_FALLBACK_TF_SCALE: float = 10.0  # amplify raw TF ratio to [0, 1] range
+from trw_memory._client_recall import (
+    _FALLBACK_IMPORTANCE_WEIGHT as _FALLBACK_IMPORTANCE_WEIGHT,
+    _FALLBACK_TF_SCALE as _FALLBACK_TF_SCALE,
+    _FALLBACK_TF_WEIGHT as _FALLBACK_TF_WEIGHT,
+)
 
 # Re-export old names for backward compatibility (internal only).
 _TF_WEIGHT = _FALLBACK_TF_WEIGHT
@@ -161,7 +162,7 @@ def _create_local_backend(
     return create_backend_from_config(config, namespace, db_path_override=db_path_override)
 
 
-class MemoryClient(OrgSharedAliasMixin):
+class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixin):
     """High-level async client for the trw-memory system.
 
     Args:
@@ -194,6 +195,8 @@ class MemoryClient(OrgSharedAliasMixin):
     _sse_subscriber: SSESubscriber | None
     _sse_subscriber_started: bool
     _tier_manager: object | None
+    _embedder: EmbeddingProvider | None
+    _embedder_initialized: bool
     _question_generator: QuestionGenerator
 
     def __init__(
@@ -266,6 +269,8 @@ class MemoryClient(OrgSharedAliasMixin):
         detail: str = "",
         metadata: dict[str, str] | None = None,
         expires: str = "",
+        evidence: list[str] | None = None,
+        assertions: list[Assertion] | None = None,
         *,
         source: Literal["human", "agent", "tool", "consolidated"] = "agent",
         source_identity: str = "",
@@ -285,10 +290,12 @@ class MemoryClient(OrgSharedAliasMixin):
             self,
             content,
             tags=tags,
+            evidence=evidence,
             importance=importance,
             detail=detail,
             metadata=metadata,
             expires=expires,
+            assertions=assertions,
             source=source,
             source_identity=source_identity,
             session_id=session_id,
@@ -316,9 +323,10 @@ class MemoryClient(OrgSharedAliasMixin):
         Convenience wrapper over :meth:`bulk_store` for callers that hold a
         list of ``store()``-shaped dicts rather than :class:`BulkStoreRequest`
         objects. Each dict accepts the same fields as :meth:`store`
-        (``content`` is required; ``detail``, ``tags``, ``importance``,
-        ``metadata``, ``source``, ``source_identity``, ``session_id``,
-        ``entry_id`` are optional). Runs the full validation + security gate +
+        (``content`` is required; ``detail``, ``tags``, ``evidence``, ``importance``,
+        ``metadata``, ``expires``, ``assertions``, ``source``,
+        ``source_identity``, ``session_id``, ``entry_id`` are optional). Runs
+        the full validation + security gate +
         FTS dual-write path, so bulk-inserted rows are immediately searchable
         via :meth:`search_fts` and :meth:`recall`.
 
@@ -336,8 +344,11 @@ class MemoryClient(OrgSharedAliasMixin):
                 content=str(entry["content"]),
                 detail=str(entry.get("detail", "")),
                 tags=cast("list[str] | None", entry.get("tags")),
+                evidence=cast("list[str] | None", entry.get("evidence")),
                 importance=float(cast("float | int | str", entry.get("importance", 0.5))),
                 metadata=cast("dict[str, str] | None", entry.get("metadata")),
+                expires=str(entry.get("expires", "")),
+                assertions=cast("list[Assertion] | None", entry.get("assertions")),
                 source=cast(
                     "Literal['human', 'agent', 'tool', 'consolidated']",
                     entry.get("source", "agent"),
@@ -417,19 +428,24 @@ class MemoryClient(OrgSharedAliasMixin):
         )
 
     def _get_embedder(self) -> EmbeddingProvider | None:
-        """Try to obtain a local embedding provider; return None on failure.
+        """Return this client's cached local embedding provider, if available.
 
         This is a best-effort helper: when sentence-transformers is not
         installed or the provider reports itself as unavailable, dense
         retrieval is silently skipped and the hybrid pipeline degrades
-        to BM25-only mode.
+        to BM25-only mode. Both success and unavailability are cached for the
+        client lifetime so repeated operations do not reload the model or
+        repeat a failed optional-dependency probe.
         """
         from trw_memory.embeddings import get_local_embedder
 
-        return get_local_embedder(
-            model_name=self._config.embedding_model,
-            dim=self._config.embedding_dim,
-        )
+        if not self._embedder_initialized:
+            self._embedder = get_local_embedder(
+                model_name=self._config.embedding_model,
+                dim=self._config.embedding_dim,
+            )
+            self._embedder_initialized = True
+        return self._embedder
 
     # ---- Recall helper aliases (PRD-DIST-246 batch 105) -------------------
     # Re-export thin wrappers so existing test patches on
@@ -546,99 +562,7 @@ class MemoryClient(OrgSharedAliasMixin):
     # Org-shared helper aliases (PRD-DIST-246 batch 107) moved to the
     # ``OrgSharedAliasMixin`` base (`_client_org_shared_aliases.py`).
 
-    async def forget(self, memory_id: str | None = None, *, actor: str | None = None) -> ForgetResultDict:
-        """Delete a memory entry.
-
-        Implementation lives in ``_client_forget_search.forget_impl``
-        (PRD-DIST-246 batch 106). Supports memory_id-targeted delete and
-        actor-scoped GDPR bulk erasure; quarantine-aware.
-        """
-        from trw_memory._client_forget_search import forget_impl as _impl
-
-        return await _impl(self, memory_id, actor=actor)
-
-    async def search(
-        self,
-        tags: list[str] | None = None,
-        min_importance: float = 0.0,
-        since: datetime | None = None,
-        limit: int = 50,
-        *,
-        actor: str | None = None,
-        status: str | None = None,
-    ) -> list[MemoryResultDict]:
-        """Filtered search (tags + min_importance + since + status filter).
-
-        Implementation lives in ``_client_forget_search.search_impl``
-        (PRD-DIST-246 batch 106).
-        """
-        from trw_memory._client_forget_search import search_impl as _impl
-
-        return await _impl(
-            self, tags=tags, min_importance=min_importance, since=since, limit=limit, actor=actor, status=status
-        )
-
-    async def search_fts(
-        self,
-        query: str,
-        *,
-        top_k: int = 25,
-        min_importance: float = 0.0,
-        status: str | None = None,
-    ) -> list[MemoryResultDict]:
-        """FTS5 full-text keyword search — O(log N) via SQLite inverted index.
-
-        Faster than :meth:`recall` for pure keyword lookups when hybrid ranking
-        is not needed. Scans ``content``, ``detail``, and ``tags`` fields using
-        SQLite FTS5 BM25 scoring. Returns an empty list when FTS5 is unavailable
-        (graceful degradation).
-
-        Args:
-            query: Free-text search query.
-            top_k: Maximum number of results to return.
-            min_importance: Minimum importance threshold (0.0–1.0).
-            status: Filter by entry status string (e.g. ``"active"``).
-
-        Returns:
-            List of :class:`MemoryResultDict` ordered by importance descending.
-        """
-        from trw_memory._client_distilled_tiering import entry_to_result as _to_result
-        from trw_memory.models.memory import MemoryStatus as _Status
-
-        parsed_status: _Status | None = None
-        if status is not None:
-            try:
-                parsed_status = _Status(status)
-            except ValueError:
-                logger.warning("search_fts_invalid_status", invalid_status=status)
-                return []
-
-        async with self._lock:
-            backend = self._get_backend()
-            entries = backend.search_fts(
-                query,
-                top_k=top_k,
-                min_importance=min_importance,
-                namespace=self._namespace,
-                status=parsed_status,
-            )
-        return [_to_result(e, score=e.importance) for e in entries]
-
-    async def audit_learning(self, learning_id: str) -> dict[str, object]:
-        """Return SEC-001 audit data for an active or quarantined learning."""
-        return audit_entry(self._config, learning_id=learning_id, active_backend=self._get_backend())
-
-    async def review_quarantined(
-        self, learning_id: str, *, decision: Literal["approve", "reject"], reviewer_id: str
-    ) -> dict[str, str]:
-        """Review a quarantined learning and either promote or reject it."""
-        return review_quarantined_entry(
-            self._config,
-            active_backend=self._get_backend(),
-            learning_id=learning_id,
-            decision=decision,
-            reviewer_id=reviewer_id,
-        )
+    # Search, deletion, and security-review methods live in ``ClientOperationsMixin``.
 
     # ------------------------------------------------------------------
     # Tool registration (FR09)
@@ -664,70 +588,4 @@ class MemoryClient(OrgSharedAliasMixin):
 
         return _impl(self, query_from, limit=limit, min_score=min_score)
 
-    # ------------------------------------------------------------------
-    # Context manager
-    # ------------------------------------------------------------------
-
-    # ---- Lifecycle aliases (PRD-DIST-246 batches 111+112) -----------------
-
-    async def __aenter__(self) -> MemoryClient:
-        from trw_memory._client_lifecycle import aenter as _impl
-
-        return await _impl(self)
-
-    async def __aexit__(
-        self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: object
-    ) -> None:
-        from trw_memory._client_lifecycle import aexit as _impl
-
-        await _impl(self, exc_type, exc_val, cast("Any", exc_tb))
-
-    async def close(self) -> None:
-        from trw_memory._client_lifecycle import close_client as _impl
-
-        await _impl(self)
-
-    def _should_start_retry_drain(self) -> bool:
-        from trw_memory._client_lifecycle import should_start_retry_drain as _impl
-
-        return _impl(self)
-
-    def _should_start_sse_subscription(self) -> bool:
-        from trw_memory._client_lifecycle import should_start_sse_subscription as _impl
-
-        return _impl(self)
-
-    def _maybe_start_sse_subscription(self) -> None:
-        from trw_memory._client_lifecycle import maybe_start_sse_subscription as _impl
-
-        _impl(self)
-
-    def _maybe_start_retry_drain(self) -> None:
-        from trw_memory._client_lifecycle import maybe_start_retry_drain as _impl
-
-        _impl(self)
-
-    def _handle_sse_event(self, event: dict[str, object]) -> None:
-        from trw_memory._client_lifecycle import handle_sse_event as _impl
-
-        _impl(self, event)
-
-    def _cache_shared_event(self, event: dict[str, object]) -> None:
-        from trw_memory._client_lifecycle import cache_shared_event as _impl
-
-        _impl(self, event)
-
-    async def _drain_retry_queue(self) -> None:
-        from trw_memory._client_lifecycle import drain_retry_queue_impl as _impl
-
-        await _impl(self)
-
-    async def _retire_remote_entry(self, memory_id: str, remote_id: str) -> None:
-        from trw_memory._client_lifecycle import retire_remote_entry as _impl
-
-        await _impl(self, memory_id, remote_id)
-
-    async def _apply_pending_remote_retirements(self) -> None:
-        from trw_memory._client_lifecycle import apply_pending_remote_retirements as _impl
-
-        await _impl(self)
+    # Context and background lifecycle methods live in ``ClientContextMixin``.

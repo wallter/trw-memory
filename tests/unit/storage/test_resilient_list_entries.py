@@ -22,6 +22,7 @@ from trw_memory.storage._resilient_fetch import (
     fetch_rows_resilient,
     fetch_rows_via_bytes_fallback,
     get_bytes_fallback_failures,
+    get_schema_row_quarantines,
     is_utf8_decode_error,
     reset_bytes_fallback_failures,
 )
@@ -515,8 +516,11 @@ def test_bytes_fallback_quarantines_unmappable_row(tmp_path: Path) -> None:
 
     ids = {e.id for e in results}
     assert ids == {"M-good-001"}
-    columns = {log.get("column") for log in logs if log.get("action") == "memory_row_utf8_quarantined"}
-    assert "row_to_entry" in columns, "Unmappable row should log column='row_to_entry'"
+    schema_logs = [log for log in logs if log.get("action") == "memory_row_schema_quarantined"]
+    assert len(schema_logs) == 1
+    assert schema_logs[0]["column"] == "row_to_entry"
+    assert schema_logs[0]["reason"] == "schema_validation"
+    assert get_schema_row_quarantines() == 1
     backend2.close()
 
 
@@ -544,9 +548,12 @@ def test_fast_path_quarantines_unmappable_row_without_utf8_corruption(tmp_path: 
 
     ids = {e.id for e in results}
     assert ids == {"M-good-001", "M-good-002"}, "Good rows must survive a co-resident bad row"
-    assert backend2.quarantine_count_utf8 >= 1, "The malformed row must be counted as quarantined"
-    columns = {log.get("column") for log in logs if log.get("action") == "memory_row_utf8_quarantined"}
-    assert "row_to_entry" in columns, "Fast-path unmappable row should log column='row_to_entry'"
+    assert backend2.quarantine_count_utf8 == 0, "Cleanly decoded schema failures are not UTF-8 corruption"
+    schema_logs = [log for log in logs if log.get("action") == "memory_row_schema_quarantined"]
+    assert len(schema_logs) == 1
+    assert schema_logs[0]["event"] == "db_invalid_row_quarantined"
+    assert schema_logs[0]["column"] == "row_to_entry"
+    assert get_schema_row_quarantines() == 1
     backend2.close()
 
 

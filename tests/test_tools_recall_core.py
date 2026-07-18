@@ -14,6 +14,7 @@ from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.manager import NamespaceManager
+from trw_memory.retrieval.token_budget import estimate_entry_tokens
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools.recall import _apply_sec001_recall_policy, memory_recall_impl
 
@@ -150,10 +151,35 @@ class TestMemoryRecallImpl:
 
         # tokens_used must match the single clean entry, not include the large
         # poisoned entry that was filtered out.
-        from trw_memory.retrieval.token_budget import estimate_entry_tokens
-
         expected = sum(estimate_entry_tokens(m) for m in memories)
         assert result["tokens_used"] == expected
+
+    @pytest.mark.parametrize("token_budget", [None, 100_000])
+    def test_tokens_used_excludes_entries_removed_by_limit(self, token_budget: int | None) -> None:
+        """Usage telemetry reflects returned entries after the result cap."""
+        entries = [
+            MemoryEntry(
+                id=f"M-{index}",
+                content="useful memory " * (index + 2),
+                namespace="project:default",
+                importance=1.0 - index / 10,
+            )
+            for index in range(3)
+        ]
+        backend = _mock_backend(entries)
+
+        result = memory_recall_impl(
+            "",
+            "project:default",
+            backend=backend,
+            limit=1,
+            token_budget=token_budget,
+            include_org_memories=False,
+        )
+
+        memories = cast("list[dict[str, object]]", result["memories"])
+        assert len(memories) == 1
+        assert result["tokens_used"] == sum(estimate_entry_tokens(memory) for memory in memories)
 
     def test_invalid_namespace_returns_error(self) -> None:
         backend = _mock_backend()

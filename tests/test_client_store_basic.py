@@ -1,15 +1,16 @@
-# ruff: noqa: F401
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from trw_memory.client import MemoryClient
-from trw_memory.exceptions import AuthorizationError, PIIBlockError, SchemaValidationError
-from trw_memory.models.memory import MemoryEntry
+from trw_memory.exceptions import AuthorizationError, MemoryNotFoundError, PIIBlockError, SchemaValidationError
+from trw_memory.models.memory import Assertion, AssertionType, MemoryEntry
 from trw_memory.security.audit import AuditLog
 
 
@@ -29,6 +30,32 @@ class TestStore:
     async def test_store_whitespace_only_raises(self, client: MemoryClient) -> None:
         with pytest.raises(SchemaValidationError, match="content"):
             await client.store("   ")
+
+    async def test_store_embedding_does_not_block_event_loop(self, client: MemoryClient) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        embedder = MagicMock()
+
+        def slow_embed(_text: str) -> list[float]:
+            started.set()
+            release.wait(timeout=1.0)
+            return [0.0] * client._config.embedding_dim
+
+        embedder.embed.side_effect = slow_embed
+        safety_release = threading.Timer(0.5, release.set)
+        start = time.monotonic()
+        safety_release.start()
+        try:
+            with patch("trw_memory._client_store.embedding_has_consumer", return_value=True):
+                with patch.object(client, "_get_embedder", return_value=embedder):
+                    task = asyncio.create_task(client.store("non-blocking embedding"))
+                    assert await asyncio.to_thread(started.wait, 0.3)
+                    assert time.monotonic() - start < 0.3
+                    release.set()
+                    await task
+        finally:
+            release.set()
+            safety_release.cancel()
 
 
 class TestRbacEnforcement:
@@ -52,6 +79,20 @@ class TestRbacEnforcement:
             match=r"Role 'writer' does not have recall permission on namespace 'default'\.",
         ):
             await client.recall("blocked read")
+
+    async def test_audit_denied_without_read_permission(self, client: MemoryClient) -> None:
+        client._config.rbac_enabled = True
+        client._config.namespace_roles = {"default": "writer"}
+
+        with pytest.raises(AuthorizationError, match="audit_learning permission"):
+            await client.audit_learning("M-blocked")
+
+    async def test_quarantine_review_requires_admin_permission(self, client: MemoryClient) -> None:
+        client._config.rbac_enabled = True
+        client._config.namespace_roles = {"default": "reader"}
+
+        with pytest.raises(AuthorizationError, match="review_quarantined permission"):
+            await client.review_quarantined("M-blocked", decision="approve", reviewer_id="reader")
 
     async def test_admin_role_allows_store_recall_and_forget(self, client: MemoryClient) -> None:
         client._config.rbac_enabled = True
@@ -87,6 +128,22 @@ class TestRbacEnforcement:
         result = await client.store("summary", detail="extended explanation", tags=["a"])
         assert result["status"] == "stored"
 
+    async def test_store_persists_and_preserves_assertions_on_update(self, client: MemoryClient) -> None:
+        assertion = Assertion(type=AssertionType.GLOB_EXISTS, target="src/**/*.py")
+        await client.store(
+            "grounded",
+            evidence=["src/example.py:10-20"],
+            assertions=[assertion],
+            entry_id="M-grounded",
+        )
+        await client.store("grounded update", entry_id="M-grounded")
+
+        stored = client._get_backend().get("M-grounded")
+
+        assert stored is not None
+        assert stored.evidence == ["src/example.py:10-20"]
+        assert stored.assertions == [assertion]
+
     async def test_store_blocks_api_keys_and_audits_rejection(self, client: MemoryClient) -> None:
         with pytest.raises(PIIBlockError, match="blocked by PII policy"):
             await client.store("sk-abcdefghijklmnopqrstuvwxyz")
@@ -105,6 +162,24 @@ class TestRbacEnforcement:
         assert updated["status"] == "updated"
         assert [result["memory_id"] for result in results] == ["M-fixed"]
         assert any(record.op == "update" and record.id == "M-fixed" for record in audit_records)
+
+    async def test_store_cannot_update_entry_in_another_namespace(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "shared.db"
+        owner = MemoryClient("project:owner", db_path=db_path)
+        other = MemoryClient("project:other", db_path=db_path)
+        try:
+            with patch("trw_memory._client_store.embedding_has_consumer", return_value=False):
+                await owner.store("owner content", entry_id="M-shared")
+                with pytest.raises(MemoryNotFoundError, match="not found in namespace"):
+                    await other.store("other content", entry_id="M-shared")
+
+            stored = owner._get_backend().get("M-shared")
+            assert stored is not None
+            assert stored.content == "owner content"
+            assert stored.namespace == "project:owner"
+        finally:
+            await owner.close()
+            await other.close()
 
     async def test_forget_actor_deletes_matching_entries(self, client: MemoryClient) -> None:
         await client.store("alice one", source_identity="alice")

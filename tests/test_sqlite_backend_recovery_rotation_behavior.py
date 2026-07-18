@@ -109,6 +109,7 @@ def test_negative_unlink_permission_error_is_swallowed(tmp_path: Path, monkeypat
 
     monkeypatch.setattr(Path, "unlink", _raise_perm)
     SQLiteBackend._prune_corrupt_backups(tmp_path, keep_n=1)
+    assert (tmp_path / "memory.db.corrupt.2026-04-01T00-00-00Z.bak").exists()
 
 
 def test_negative_keep_equals_1_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

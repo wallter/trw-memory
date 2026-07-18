@@ -21,7 +21,7 @@ created_at vs created).
 from __future__ import annotations
 
 import math
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import structlog
@@ -331,17 +331,11 @@ def bayesian_calibrate(
 
 
 def compute_calibration_accuracy(recall_stats: dict[str, object]) -> float:
-    """Compute user calibration accuracy from recall tracking data.
-
-    Returns:
-        Accuracy score 0.0-2.0 (used as user_weight in bayesian_calibrate).
-    """
+    """Compute the recall-history weight consumed by TRW's Bayesian calibrator."""
     total = int(str(recall_stats.get("total_recalls", 0)))
     positive = int(str(recall_stats.get("positive_outcomes", 0)))
-
     if total == 0:
-        return 1.0  # default weight
-
+        return 1.0
     ratio = positive / total
     if ratio >= 0.75:
         return 2.0
@@ -601,154 +595,34 @@ def rank_by_utility(
     lambda_weight: float,
     config: MemoryConfig | None = None,
 ) -> list[dict[str, object]]:
-    """Re-rank matched entries by combined relevance + utility score.
+    """Compatibility wrapper for :func:`lifecycle._recall.rank_by_utility`."""
+    # Import lazily because _recall imports entry_utility from this module.
+    from trw_memory.lifecycle._recall import rank_by_utility as _rank_by_utility
 
-    Combined score = (1 - lambda) * relevance + lambda * utility
-
-    Args:
-        matches: List of MemoryEntry dicts.
-        query_tokens: Lowercased query tokens for relevance scoring.
-        lambda_weight: Blend factor. 0.0 = pure relevance, 1.0 = pure utility.
-        config: MemoryConfig for utility calculation. Defaults to MemoryConfig().
-
-    Returns:
-        Sorted list (highest combined score first).
-    """
-    if not matches:
-        return matches
-
-    scored: list[tuple[float, dict[str, object]]] = []
-
-    for entry in matches:
-        # Text relevance score — MemoryEntry uses 'content' (was 'summary')
-        content = str(entry.get("content", "")).lower()
-        detail = str(entry.get("detail", "")).lower()
-        raw_tags = entry.get("tags", [])
-        tag_text = " ".join(str(t).lower() for t in raw_tags) if isinstance(raw_tags, list) else ""
-
-        if query_tokens:
-            content_hits = sum(1 for t in query_tokens if t in content)
-            tag_hits = sum(1 for t in query_tokens if t in tag_text)
-            detail_hits = sum(1 for t in query_tokens if t in detail)
-            weighted_hits = content_hits * 3 + tag_hits * 2 + detail_hits
-            max_possible = len(query_tokens) * 3
-            relevance = min(1.0, weighted_hits / max(max_possible, 1))
-        else:
-            relevance = 1.0  # wildcard query
-
-        utility = entry_utility(entry, config=config)
-        combined = (1.0 - lambda_weight) * relevance + lambda_weight * utility
-
-        scored.append((combined, entry))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [e for _, e in scored]
+    return _rank_by_utility(matches, query_tokens, lambda_weight, config=config)
 
 
 # ---------------------------------------------------------------------------
 # Pruning candidate identification
 # ---------------------------------------------------------------------------
 
-# Default thresholds (matching trw-mcp scoring.py defaults)
-_DELETE_THRESHOLD = 0.05
-_PRUNE_THRESHOLD = 0.15
-
 
 def utility_based_prune_candidates(
     entries: list[dict[str, object]],
     config: MemoryConfig | None = None,
     *,
-    delete_threshold: float = _DELETE_THRESHOLD,
-    prune_threshold: float = _PRUNE_THRESHOLD,
+    delete_threshold: float = 0.05,
+    prune_threshold: float = 0.15,
 ) -> list[dict[str, object]]:
-    """Identify prune candidates using composite utility scoring.
+    """Compatibility wrapper for the canonical recall-time implementation."""
+    from trw_memory.lifecycle._recall import utility_based_prune_candidates as _prune_candidates
 
-    Three tiers:
-    1. Status-based cleanup: entries already resolved/obsolete
-    2. Delete candidates: utility < delete_threshold
-    3. Obsolete candidates: utility < prune_threshold and age > 14 days
-
-    Args:
-        entries: List of serialised MemoryEntry dicts.
-        config: MemoryConfig for utility calculation.
-        delete_threshold: Utility below this → delete candidate.
-        prune_threshold: Utility below this (and age > 14 days) → obsolete candidate.
-
-    Returns:
-        List of candidate dicts with id, content, utility, and suggested_status.
-    """
-    candidates: list[dict[str, object]] = []
-    seen_ids: set[str] = set()
-    today = datetime.now(tz=timezone.utc).date()
-
-    for data in entries:
-        entry_id = str(data.get("id", ""))
-        if entry_id in seen_ids:
-            continue
-
-        created_raw = data.get("created_at")
-        created_str = str(created_raw) if created_raw is not None else ""
-        try:
-            created = (
-                date.fromisoformat(created_str[:10]) if created_str and created_str not in ("None", "null") else today
-            )
-        except ValueError:
-            created = today
-
-        age_days = max(0, (today - created).days)
-        entry_status = str(data.get("status", "active"))
-
-        # Tier 1: Status-based cleanup
-        if entry_status in ("resolved", "obsolete"):
-            candidates.append(
-                {
-                    "id": entry_id,
-                    "content": data.get("content", ""),
-                    "age_days": age_days,
-                    "utility": 0.0,
-                    "suggested_status": entry_status,
-                    "reason": f"Already marked {entry_status} — cleanup candidate",
-                }
-            )
-            seen_ids.add(entry_id)
-            continue
-
-        utility = entry_utility(data, config=config, fallback_days=age_days)
-
-        # Tier 2: Delete-level utility
-        if utility < delete_threshold:
-            candidates.append(
-                {
-                    "id": entry_id,
-                    "content": data.get("content", ""),
-                    "age_days": age_days,
-                    "utility": round(utility, 3),
-                    "suggested_status": "obsolete",
-                    "reason": (
-                        f"Utility {utility:.3f} below delete threshold ({delete_threshold:.3f}). age={age_days}d"
-                    ),
-                }
-            )
-            seen_ids.add(entry_id)
-            continue
-
-        # Tier 3: Prune-level utility (fading, older than 14 days)
-        if utility < prune_threshold and age_days > 14:
-            candidates.append(
-                {
-                    "id": entry_id,
-                    "content": data.get("content", ""),
-                    "age_days": age_days,
-                    "utility": round(utility, 3),
-                    "suggested_status": "obsolete",
-                    "reason": (
-                        f"Utility {utility:.3f} below prune threshold ({prune_threshold:.3f}) and age {age_days}d > 14d"
-                    ),
-                }
-            )
-            seen_ids.add(entry_id)
-
-    return candidates
+    return _prune_candidates(
+        entries,
+        config=config,
+        delete_threshold=delete_threshold,
+        prune_threshold=prune_threshold,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -788,66 +662,6 @@ def fsrs_retrievability(elapsed_days: float, stability: float) -> float:
         stability = _FSRS_DEFAULT_STABILITY
     t = max(0.0, elapsed_days)
     return float((1.0 + _FSRS_FACTOR * t / stability) ** _FSRS_DECAY)
-
-
-def fsrs_stability_after_review(
-    stability: float,
-    difficulty: float,
-    retrievability: float,
-    *,
-    grade: float = 1.0,
-) -> float:
-    """Update stability after a successful recall (FSRS SInc formula).
-
-    S'(S, D, R, G) = S * exp(w17 * (11 - D) * S^(-w18) * (exp(w19*(1-R)) - 1) * G)
-
-    Uses the FSRS-4.5 canonical weights w17=1.0, w18=0.1, w19=1.0 as
-    simplified defaults — close enough for the memory decay use-case
-    without requiring the full parameter-trained model.
-
-    Args:
-        stability: Current stability S (days to 90% retention).
-        difficulty: Entry difficulty D in [1, 10] (1=easy, 10=hard).
-        retrievability: Current retrievability R in [0, 1].
-        grade: Recall quality in [0, 1]; 1.0 = perfect recall.
-
-    Returns:
-        Updated stability S' in days.
-    """
-    if stability <= 0.0:
-        stability = _FSRS_DEFAULT_STABILITY
-    d = max(1.0, min(10.0, difficulty))
-    r = max(0.0, min(1.0, retrievability))
-    g = max(0.0, min(1.0, grade))
-    # FSRS-4.5 SInc formula (simplified weights)
-    w17, w18, w19 = 1.0, 0.1, 1.0
-    s_new = stability * math.exp(w17 * (11.0 - d) * (stability**-w18) * (math.exp(w19 * (1.0 - r)) - 1.0) * g)
-    return max(_FSRS_DEFAULT_STABILITY, s_new)
-
-
-def fsrs_difficulty_update(
-    difficulty: float,
-    grade: float,
-    *,
-    w6: float = 0.1,
-) -> float:
-    """Adjust difficulty after recall (FSRS D' update rule).
-
-    D'(D, G) = D - w6 * (G - 0.5)
-
-    Grade > 0.5 (easy recall) -> difficulty decreases.
-    Grade < 0.5 (hard recall) -> difficulty increases.
-
-    Args:
-        difficulty: Current D in [1, 10].
-        grade: Recall quality in [0, 1].
-        w6: Learning-rate weight (FSRS-4.5 default 0.1).
-
-    Returns:
-        Updated difficulty D' clamped to [1, 10].
-    """
-    d_new = difficulty - w6 * (grade - 0.5)
-    return max(1.0, min(10.0, d_new))
 
 
 def compute_fsrs_utility_score(

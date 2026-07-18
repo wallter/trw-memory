@@ -7,7 +7,6 @@ file-backed code-index storage.
 from __future__ import annotations
 
 import hashlib
-from enum import Enum
 from pathlib import PurePosixPath
 from typing import Literal
 
@@ -32,17 +31,6 @@ __all__ = [
 _SHELL_METACHARS = frozenset(";|&`$<>\\")
 _MAX_SNIPPET_LINES = 40
 _MAX_SNIPPET_CHARS = 400
-
-
-class CodeSymbolKind(str, Enum):
-    """Common code symbol kinds used for stable indexing."""
-
-    CLASS = "class"
-    FUNCTION = "function"
-    METHOD = "method"
-    VARIABLE = "variable"
-    MODULE = "module"
-    UNKNOWN = "unknown"
 
 
 class EmbeddingMetadata(BaseModel):

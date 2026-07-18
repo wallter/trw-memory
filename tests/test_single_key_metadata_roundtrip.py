@@ -1,11 +1,11 @@
-"""PRD-DIST-255 — single-key metadata round-trip investigation.
+"""Single-key metadata round-trip investigation.
 
-Cycle-111 trw-distill smoke surfaced that records stored with single-key
+A downstream smoke test surfaced that records stored with single-key
 ``metadata={"utility_grade": "R3"}`` come back from ``MemoryClient.recall``
 with ``metadata={}``. Records with multi-key metadata round-trip cleanly.
 
 This test reproduces the bug and pins the expected behavior. Bisects
-across the four hypothesis paths in PRD-DIST-255 §4.FR02.
+across the four hypothesis paths for this investigation.
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ class TestSingleKeyMetadataRoundTrip:
     async def test_client_recall_returns_user_metadata(self, memory_client: MemoryClient) -> None:
         """MemoryClient.recall: user metadata flows through into result dicts.
 
-        This is the original cycle-111 bug surface. ``recall`` should
+        This is the original bug surface. ``recall`` should
         return a result dict where ``metadata['utility_grade'] == 'R3'``.
         """
         await memory_client.store(
@@ -101,10 +101,10 @@ class TestSingleKeyMetadataRoundTrip:
 
     @pytest.mark.asyncio
     async def test_bulk_store_then_recall_preserves_user_keys(self, memory_client: MemoryClient) -> None:
-        """bulk_store + recall: same path the cycle-111 fixture used.
+        """bulk_store + recall: same path the original fixture used.
 
-        This is the exact reproducer for the trw-distill cycle-111 audit's
-        bug observation: BulkStoreRequest with single-key metadata comes
+        This is the exact reproducer for the original audit's bug
+        observation: BulkStoreRequest with single-key metadata comes
         back through recall with metadata={}.
         """
         from trw_memory._client_bulk_store import BulkStoreRequest

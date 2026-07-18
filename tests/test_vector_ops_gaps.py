@@ -2,12 +2,13 @@
 
 Target lines: 63, 84, 96, 124, 128-136, 160, 205, 220, 232-255, 267, 293, 296-301.
 """
+
 from __future__ import annotations
 
 import sqlite3
 import struct
 import threading
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -36,6 +37,7 @@ def _lock() -> threading.Lock:
 # delete_vector_internal
 # ---------------------------------------------------------------------------
 
+
 class TestDeleteVectorInternalRaise:
     def test_non_vec_sqlite_error_is_reraised(self) -> None:
         """Non-optional sqlite error in delete_vector_internal → re-raise (line 63)."""
@@ -48,6 +50,7 @@ class TestDeleteVectorInternalRaise:
 # ---------------------------------------------------------------------------
 # delete_vector with vec_available=False
 # ---------------------------------------------------------------------------
+
 
 class TestDeleteVectorUnavailable:
     def test_vec_unavailable_returns_false(self) -> None:
@@ -62,6 +65,7 @@ class TestDeleteVectorUnavailable:
 # vector_exists with vec_available=False
 # ---------------------------------------------------------------------------
 
+
 class TestVectorExistsUnavailable:
     def test_vec_unavailable_returns_false(self) -> None:
         """vector_exists with vec_available=False → return False (line 96)."""
@@ -74,6 +78,7 @@ class TestVectorExistsUnavailable:
 # ---------------------------------------------------------------------------
 # existing_vector_ids
 # ---------------------------------------------------------------------------
+
 
 class TestExistingVectorIdsUnavailable:
     def test_vec_unavailable_returns_empty_set(self) -> None:
@@ -101,6 +106,7 @@ class TestExistingVectorIdsUnavailable:
 # upsert_vector
 # ---------------------------------------------------------------------------
 
+
 class TestUpsertVectorUnavailable:
     def test_vec_unavailable_returns_early(self) -> None:
         """upsert_vector with vec_available=False → return without touching conn (line 160)."""
@@ -120,6 +126,7 @@ class TestUpsertVectorUnavailable:
 # search_vectors
 # ---------------------------------------------------------------------------
 
+
 class TestSearchVectorsUnavailable:
     def test_vec_unavailable_returns_empty_list(self) -> None:
         """search_vectors with vec_available=False → return [] (line 220)."""
@@ -132,6 +139,13 @@ class TestSearchVectorsUnavailable:
         """query_embedding length != dim → return [] (lines 226-231)."""
         conn = _mock_conn()
         result = search_vectors(conn, _lock(), vec_available=True, dim=3, query_embedding=[0.1, 0.2])
+        assert result == []
+        conn.execute.assert_not_called()
+
+    @pytest.mark.parametrize("top_k", [0, -1])
+    def test_non_positive_top_k_returns_without_query(self, top_k: int) -> None:
+        conn = _mock_conn()
+        result = search_vectors(conn, _lock(), vec_available=True, dim=3, query_embedding=[0.1, 0.2, 0.3], top_k=top_k)
         assert result == []
         conn.execute.assert_not_called()
 
@@ -160,6 +174,7 @@ class TestSearchVectorsUnavailable:
 # ---------------------------------------------------------------------------
 # get_stored_embeddings
 # ---------------------------------------------------------------------------
+
 
 class TestGetStoredEmbeddingsUnavailable:
     def test_vec_unavailable_returns_empty_dict(self) -> None:

@@ -29,6 +29,8 @@ Performance notes
 
 from __future__ import annotations
 
+from typing import Any
+
 import structlog
 
 from trw_memory.models.memory import MemoryEntry
@@ -41,21 +43,62 @@ _DEFAULT_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 _MAX_PASSAGE_CHARS = 2048
 _LOADED_MODELS: dict[str, object] = {}
 
-try:
-    from sentence_transformers import CrossEncoder as _CrossEncoder
+# Lazy-import state for ``sentence_transformers.CrossEncoder``.
+#
+# ``sentence_transformers`` transitively imports ``torch`` (~2.5-5.6s), so
+# importing it at module load time made *every* consumer of
+# ``trw_memory.retrieval`` pay the torch tax — including the ``trw_mcp.server``
+# boot path, which pushed MCP connect past clients' 30s timeout under
+# contention (production feedback sub_psVs_nUWnLJGvOs3).  We defer the import to
+# first use and cache the outcome so the import machinery runs at most once.
+#
+# ``_cross_encoder_available`` is ``None`` until the first probe, then a bool.
+_cross_encoder_cls: Any = None
+_cross_encoder_available: bool | None = None
 
-    _CROSS_ENCODER_AVAILABLE = True
-except ImportError:
-    _CROSS_ENCODER_AVAILABLE = False
+
+def _import_cross_encoder() -> bool:
+    """Attempt to import ``sentence_transformers.CrossEncoder`` lazily.
+
+    On the first call this runs the (expensive) import and caches the resolved
+    class — or ``None`` on :class:`ImportError` — plus an availability flag in
+    module globals, so subsequent calls never re-enter the import machinery.
+
+    Returns:
+        ``True`` when the cross-encoder is importable, ``False`` otherwise.
+    """
+    global _cross_encoder_cls, _cross_encoder_available
+    if _cross_encoder_available is None:
+        try:
+            from sentence_transformers import CrossEncoder
+
+            _cross_encoder_cls = CrossEncoder
+            _cross_encoder_available = True
+        except ImportError:
+            _cross_encoder_cls = None
+            _cross_encoder_available = False
+    return _cross_encoder_available
+
+
+def __getattr__(name: str) -> object:
+    """PEP 562 module attribute hook.
+
+    Preserves the legacy ``reranker._CROSS_ENCODER_AVAILABLE`` module-level
+    boolean (still consumed by tests and any external caller) without paying the
+    eager import cost: it is resolved lazily on first access.
+    """
+    if name == "_CROSS_ENCODER_AVAILABLE":
+        return _import_cross_encoder()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _get_model(model_name: str) -> object | None:
     """Lazy-load and cache a CrossEncoder model by name."""
-    if not _CROSS_ENCODER_AVAILABLE:
+    if not _import_cross_encoder():
         return None
     if model_name not in _LOADED_MODELS:
         try:
-            _LOADED_MODELS[model_name] = _CrossEncoder(model_name, max_length=512)
+            _LOADED_MODELS[model_name] = _cross_encoder_cls(model_name, max_length=512)
             logger.debug("reranker_model_loaded", model=model_name)
         except Exception:
             logger.warning("reranker_model_load_failed", model=model_name)

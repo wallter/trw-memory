@@ -6,12 +6,12 @@ keeping each module under the effective-LOC gate.
 
 from __future__ import annotations
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 __all__ = ["_RetrievalConfigMixin"]
 
 
-class _RetrievalConfigMixin:
+class _RetrievalConfigMixin(BaseModel):
     # Retrieval
     bm25_candidates: int = Field(default=50, gt=0, description="Number of BM25 candidates to consider")
     vector_candidates: int = Field(default=50, gt=0, description="Number of dense vector candidates to consider")
@@ -43,14 +43,14 @@ class _RetrievalConfigMixin:
         default=1000,
         ge=10,
         description=(
-            "PRD-DIST-2047 c796: max entries loaded from a namespace for the "
-            "hybrid_search candidate pool. Pre-c796 the pool was capped at "
-            "limit*5 (=50 for default limit=10), which silently lost targets "
-            "ranked past position 50 on namespaces > 50 records. Set higher "
-            "for very large namespaces; recall-time cost is O(namespace_size) "
-            "for BM25 + O(namespace_size x embedding_dim) for dense search "
-            "when the auto-scaled bm25_candidates/vector_candidates lift the "
-            "50-cap floor."
+            "Max entries loaded from a namespace for the hybrid_search "
+            "candidate pool. An earlier build capped the pool at limit*5 "
+            "(=50 for default limit=10), which silently lost targets ranked "
+            "past position 50 on namespaces > 50 records. Set higher for very "
+            "large namespaces; recall-time cost is O(namespace_size) for BM25 "
+            "+ O(namespace_size x embedding_dim) for dense search when the "
+            "auto-scaled bm25_candidates/vector_candidates lift the 50-cap "
+            "floor."
         ),
     )
     recall_confidence_filter: float | None = Field(
@@ -59,27 +59,29 @@ class _RetrievalConfigMixin:
         le=1.0,
         validation_alias=AliasChoices("recall_confidence_filter", "memory_recall_confidence_filter"),
         description=(
-            "PRD-DIST-2049 c802: opt-in recall-time confidence floor. When "
-            "set, records with metadata['confidence'] < value are suppressed "
-            "from MemoryClient.recall() results between merge_tier_results "
-            "and apply_source_policy. Default None = filter OFF (current "
-            "behavior bit-for-bit). Closes the c800/c801 contamination lever "
-            "(2-5pp absolute SC2 lift on full-corpus shapes across "
-            "Python/TS/PHP)."
+            "Opt-in recall-time confidence floor. When set, records with "
+            "metadata['confidence'] < value are suppressed from "
+            "MemoryClient.recall() results between merge_tier_results and "
+            "apply_source_policy. Default None = filter OFF (current behavior "
+            "bit-for-bit). Closes a low-confidence contamination lever "
+            "(a few percentage points of retrieval-accuracy lift on "
+            "full-corpus shapes across multiple languages in offline "
+            "evaluation)."
         ),
     )
     recall_filter_historical_only: bool = Field(
         default=False,
         validation_alias=AliasChoices("recall_filter_historical_only", "memory_recall_filter_historical_only"),
         description=(
-            "PRD-DIST-2049 c802: opt-in suppression of F2-softened records. "
-            "When True, records with metadata['currentness_status'] == "
-            "'historical_only' are suppressed from MemoryClient.recall() "
-            "results between merge_tier_results and apply_source_policy. "
-            "Default False = filter OFF. Mirrors the trw-distill eval-side "
-            "_retrieval_policy_filter behaviour into the memory-side recall "
-            "path (closes the c800 c763 finding that the F2 label is "
-            "necessary but not fully sufficient at recall time)."
+            "Opt-in suppression of records softened to a historical-only "
+            "currentness status. When True, records with "
+            "metadata['currentness_status'] == 'historical_only' are "
+            "suppressed from MemoryClient.recall() results between "
+            "merge_tier_results and apply_source_policy. Default False = "
+            "filter OFF. Mirrors the eval-side retrieval-policy filter into "
+            "the memory-side recall path (offline evaluation found the "
+            "currentness label necessary but not fully sufficient at recall "
+            "time)."
         ),
     )
     recall_top_k_multiplier: int = Field(
@@ -88,13 +90,14 @@ class _RetrievalConfigMixin:
         le=50,
         validation_alias=AliasChoices("recall_top_k_multiplier", "memory_recall_top_k_multiplier"),
         description=(
-            "PRD-DIST-2050 c804: depth multiplier for the hybrid_search "
-            "candidate pool returned by _try_hybrid_recall. Effective top_k "
-            "= limit * recall_top_k_multiplier (default 3 → top-30 for "
-            "limit=10, matches pre-c804 hardcoded behaviour). Raise to 10 "
-            "or higher when the recall-time admission filter (PRD-DIST-2049) "
-            "is enabled on pure-zombie corpora — c803 found those filters "
-            "can suppress but not promote baseline records ranked past the "
+            "Depth multiplier for the hybrid_search candidate pool returned "
+            "by _try_hybrid_recall. Effective top_k = limit * "
+            "recall_top_k_multiplier (default 3 → top-30 for limit=10, "
+            "matches the prior hardcoded behaviour). Raise to 10 or higher "
+            "when a recall-time admission filter (recall_confidence_filter / "
+            "recall_filter_historical_only) is enabled on corpora dominated "
+            "by stale records — offline evaluation found those filters can "
+            "suppress but not promote baseline records ranked past the "
             "current top-30 candidate pool depth. Capped at 50 to keep "
             "downstream per-result cost bounded."
         ),
@@ -103,16 +106,15 @@ class _RetrievalConfigMixin:
         default=True,
         validation_alias=AliasChoices("recall_preserve_hybrid_order", "memory_recall_preserve_hybrid_order"),
         description=(
-            "PRD-DIST-2051 c806 / PRD-DIST-2058 c817: when True, "
-            "merge_tier_results returns "
-            "local_results[:limit] (preserving the BM25+dense+RRF ordering "
-            "from _try_hybrid_recall) whenever len(local_results) >= limit. "
-            "Skips the compute_importance_score rescore that mixes hybrid "
-            "RRF (1/(1+rank)) and tier-only entry_utility (absolute) scales. "
-            "c805 trace showed all 4 missing hono baselines were at "
+            "When True, merge_tier_results returns local_results[:limit] "
+            "(preserving the BM25+dense+RRF ordering from _try_hybrid_recall) "
+            "whenever len(local_results) >= limit. Skips the "
+            "compute_importance_score rescore that mixes hybrid RRF "
+            "(1/(1+rank)) and tier-only entry_utility (absolute) scales. An "
+            "offline trace showed missing baseline records sat at "
             "hybrid_rank=2 but got pushed past top-10 by the rescore; "
-            "c811-c815 showed default-ON is robust across curated-query "
-            "oracles, languages, and K-depths. Set "
+            "follow-up sweeps showed default-ON is robust across "
+            "curated-query oracles, languages, and K-depths. Set "
             "MEMORY_RECALL_PRESERVE_HYBRID_ORDER=false to opt out."
         ),
     )
@@ -212,5 +214,50 @@ class _RetrievalConfigMixin:
             "before running BM25, dense retrieval, and optional cross-encoder "
             "reranking. Set False to disable prefix stripping and pass the raw "
             "query to all retrieval stages."
+        ),
+    )
+
+    # HyPE — index-time hypothetical-question expansion (PRD-CORE-195).
+    hype_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("hype_enabled", "memory_hype_enabled"),
+        description=(
+            "PRD-CORE-195: when True, generate hypothetical questions at WRITE "
+            "time (via an injected QuestionGenerator), embed them, and store "
+            "them as secondary '{parent_id}#hype{n}' retrieval vectors that fuse "
+            "back to the parent entry at recall. Default False = pre-HyPE "
+            "behaviour bit-for-bit (no siblings written, no collapse pass)."
+        ),
+    )
+    hype_questions_per_entry: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        validation_alias=AliasChoices("hype_questions_per_entry", "memory_hype_questions_per_entry"),
+        description=(
+            "PRD-CORE-195: maximum number of hypothetical-question sibling "
+            "vectors stored per entry when HyPE is enabled. The frontier-refresh "
+            "note recommends 3-5; default 3. Caps the per-store embedding cost."
+        ),
+    )
+    hype_min_question_chars: int = Field(
+        default=8,
+        ge=1,
+        validation_alias=AliasChoices("hype_min_question_chars", "memory_hype_min_question_chars"),
+        description=(
+            "PRD-CORE-195: minimum character length for a generated question to "
+            "be embedded + stored as a HyPE sibling. Shorter questions are "
+            "skipped (likely degenerate generator output). Default 8."
+        ),
+    )
+    cold_search_cache_max: int = Field(
+        default=1000,
+        gt=0,
+        description=(
+            "Maximum number of cold-tier YAML files held in the in-memory search "
+            "cache (trw-memory-15). The cache is a bounded LRU: once it exceeds "
+            "this many entries the least-recently-used file is evicted, capping "
+            "RAM growth on long-lived processes with large cold archives. Each "
+            "cached entry holds the deserialized YAML + search text for one file."
         ),
     )

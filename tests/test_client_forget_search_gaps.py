@@ -2,11 +2,12 @@
 
 Target lines: 67, 107-121, 123, 170, 192-193, 211.
 """
+
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncGenerator
 from unittest.mock import patch
-from typing import AsyncGenerator
 
 import pytest
 
@@ -35,6 +36,7 @@ async def client(tmp_path, monkeypatch: pytest.MonkeyPatch) -> AsyncGenerator[Me
 # line 67: no memory_id and no actor → ValueError
 # ---------------------------------------------------------------------------
 
+
 class TestForgetNoArgs:
     async def test_forget_no_memory_id_no_actor_raises(self, client: MemoryClient) -> None:
         """forget() with neither memory_id nor actor → ValueError (line 67)."""
@@ -45,6 +47,7 @@ class TestForgetNoArgs:
 # ---------------------------------------------------------------------------
 # lines 107-121: entry not in backend but IS in quarantine → success delete
 # ---------------------------------------------------------------------------
+
 
 class TestForgetQuarantinePath:
     async def test_forget_quarantined_entry_succeeds(self, client: MemoryClient) -> None:
@@ -74,6 +77,7 @@ class TestForgetQuarantinePath:
 # line 123: entry found but in different namespace → MemoryNotFoundError
 # ---------------------------------------------------------------------------
 
+
 class TestForgetWrongNamespace:
     async def test_forget_wrong_namespace_raises(self, client: MemoryClient) -> None:
         """forget(memory_id) where entry.namespace != client._namespace → MemoryNotFoundError (line 123)."""
@@ -93,6 +97,7 @@ class TestForgetWrongNamespace:
 # line 170: invalid status → ValueError
 # ---------------------------------------------------------------------------
 
+
 class TestSearchInvalidStatus:
     async def test_invalid_status_raises(self, client: MemoryClient) -> None:
         """search(status='bad') → ValueError (line 170)."""
@@ -103,6 +108,7 @@ class TestSearchInvalidStatus:
 # ---------------------------------------------------------------------------
 # lines 192-193: MemoryStatus(status) raises ValueError → _status_enum = None
 # ---------------------------------------------------------------------------
+
 
 class TestSearchStatusEnumFallback:
     async def test_status_enum_value_error_falls_back_to_none(self, client: MemoryClient) -> None:
@@ -121,6 +127,7 @@ class TestSearchStatusEnumFallback:
 # ---------------------------------------------------------------------------
 # line 211: status filter skips entries whose status doesn't match
 # ---------------------------------------------------------------------------
+
 
 class TestSearchStatusFilterSkipsNonMatching:
     async def test_status_filter_excludes_non_matching_entries(self, client: MemoryClient) -> None:

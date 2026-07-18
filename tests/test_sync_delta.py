@@ -172,6 +172,59 @@ def test_get_dirty_entries_respects_since_seq(tmp_path: Path) -> None:
     backend.close()
 
 
+def test_fallback_dirty_scan_expands_past_synced_prefix() -> None:
+    synced = MemoryEntry(
+        id="M-synced",
+        content="already synced",
+        sync_seq=2,
+        last_synced_at=datetime.now(tz=timezone.utc),
+    )
+    dirty = MemoryEntry(id="M-old-dirty", content="must not starve", sync_seq=3)
+
+    class _GrowingFallbackBackend:
+        def __init__(self) -> None:
+            self.counts = iter((10_001, 10_003, 10_003))
+            self.limits: list[int] = []
+
+        def count(self) -> int:
+            return next(self.counts)
+
+        def list_entries(self, *, limit: int) -> list[MemoryEntry]:
+            self.limits.append(limit)
+            return [synced] if limit < 10_004 else [synced, dirty]
+
+    backend = _GrowingFallbackBackend()
+
+    result = DeltaTracker.get_dirty_entries(backend, since_seq=2)  # type: ignore[arg-type]
+
+    assert [entry.id for entry in result] == ["M-old-dirty"]
+    assert backend.limits == [10_002, 10_004]
+
+
+def test_fallback_dirty_scan_is_bounded_when_backend_keeps_growing() -> None:
+    dirty = MemoryEntry(id="M-dirty", content="latest bounded snapshot", sync_seq=1)
+
+    class _GrowingFallbackBackend:
+        def __init__(self) -> None:
+            self.current_count = 100
+            self.limits: list[int] = []
+
+        def count(self) -> int:
+            self.current_count += 2
+            return self.current_count
+
+        def list_entries(self, *, limit: int) -> list[MemoryEntry]:
+            self.limits.append(limit)
+            return [dirty]
+
+    backend = _GrowingFallbackBackend()
+
+    result = DeltaTracker.get_dirty_entries(backend)  # type: ignore[arg-type]
+
+    assert [entry.id for entry in result] == ["M-dirty"]
+    assert backend.limits == [103, 105, 107]
+
+
 def test_sqlite_update_recomputes_sync_hash(tmp_path: Path) -> None:
     """FR06: SQLite updates recompute sync_hash and clear last_synced_at."""
     backend = SQLiteBackend(tmp_path / "test.db")

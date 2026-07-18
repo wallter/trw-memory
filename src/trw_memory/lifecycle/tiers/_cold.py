@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, cast
 import structlog
 
 from trw_memory.exceptions import StorageError
+from trw_memory.lifecycle.tiers._cold_partition import entry_partition_timestamp as _entry_partition_timestamp
 from trw_memory.lifecycle.tiers._warm import WarmTierStore
 from trw_memory.storage.persistence import read_yaml, write_yaml
 
@@ -68,17 +69,7 @@ class ColdTierStore:
             ts = datetime.now(timezone.utc)
         return self._cold_dir() / str(ts.year) / f"{ts.month:02d}"
 
-    @staticmethod
-    def _entry_partition_timestamp(entry_data: dict[str, object]) -> datetime | None:
-        """Return the entry creation timestamp used for cold archive partitioning."""
-        raw = entry_data.get("created_at", entry_data.get("created"))
-        if isinstance(raw, datetime):
-            return raw.astimezone(timezone.utc)
-        if isinstance(raw, str) and raw:
-            normalized = raw.replace("Z", "+00:00")
-            with contextlib.suppress(ValueError):
-                return datetime.fromisoformat(normalized).astimezone(timezone.utc)
-        return None
+    _entry_partition_timestamp = staticmethod(_entry_partition_timestamp)
 
     def _assert_within_cold_dir(self, path: Path) -> None:
         """Guard against path traversal attacks on cold archive operations.

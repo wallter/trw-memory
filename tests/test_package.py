@@ -279,6 +279,8 @@ def test_pyproject_declares_current_optional_extras_and_scripts() -> None:
     }
     assert optional["all"] == ["trw-memory[mcp,embeddings,vectors,bm25,llm]"]
     assert optional["all-integrations"] == ["trw-memory[langchain,llamaindex,crewai]"]
+    assert "chromadb<1.0" in optional["crewai"]
+    assert "litellm>=1.84.0" in optional["crewai"]
     assert optional["mcp"] == ["fastmcp>=3.2.0,<4.0.0"]
     assert scripts["trw-memory"] == "trw_memory.cli:main"
     assert scripts["trw-memory-server"] == "trw_memory.server:main"
@@ -552,10 +554,11 @@ def test_requirements_lock_security_pin_floors_are_patched() -> None:
     """Known-audited requirements.lock pins stay above patched floors."""
     floors = {
         "Authlib": (1, 6, 12),
-        "cryptography": (46, 0, 7),
+        "cryptography": (48, 0, 1),
         "idna": (3, 15),
         "Pygments": (2, 20, 0),
         "PyJWT": (2, 13, 0),
+        "pydantic-settings": (2, 14, 2),
         "pytest": (9, 0, 3),
         "python-dotenv": (1, 2, 2),
         "python-multipart": (0, 0, 27),

@@ -98,6 +98,24 @@ async def test_audit_uses_real_verification_key_semantics(secure_client: MemoryC
     assert audit["verified"] is False
 
 
+async def test_audit_and_review_hide_other_namespace_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "shared.db"
+    owner = MemoryClient("project:owner", db_path=db_path)
+    other = MemoryClient("project:other", db_path=db_path)
+    try:
+        owner._get_backend().store(
+            MemoryEntry(id="M-foreign", content="owner only", namespace="project:owner", metadata={})
+        )
+
+        assert (await other.audit_learning("M-foreign"))["status"] == "not_found"
+        assert (await other.review_quarantined("M-foreign", decision="approve", reviewer_id="other-admin"))[
+            "status"
+        ] == "not_found"
+    finally:
+        await owner.close()
+        await other.close()
+
+
 async def test_observe_mode_store_starts_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     trw_dir = tmp_path / ".trw"
     monkeypatch.setenv("TRW_DIR", str(trw_dir))

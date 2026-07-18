@@ -12,33 +12,38 @@ Usage::
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from trw_memory.exceptions import Utf8ValidationError
 
-# Fields whose values are stored as TEXT columns and must be valid UTF-8.
-# JSON-serialised fields (tags, evidence, metadata, …) are already safe because
-# json.dumps() escapes surrogates; this list targets bare string columns.
-_TEXT_FIELDS: frozenset[str] = frozenset(
-    {
-        "id",
-        "content",
-        "detail",
-        "nudge_line",
-        "type",
-        "namespace",
-        "source",
-        "source_identity",
-        "client_profile",
-        "model_id",
-        "consolidated_into",
-        "remote_id",
-        "expires_at",
-        "task_type",
-        "phase_origin",
-        "team_origin",
-        "outcome_correlation",
-        "sync_hash",
-    }
+if TYPE_CHECKING:
+    from trw_memory.models.memory import MemoryEntry
+
+# Bare TEXT columns and their MemoryEntry attributes. JSON-serialised fields
+# are already safe because json.dumps() escapes surrogates.
+_ENTRY_TEXT_FIELDS: tuple[tuple[str, str], ...] = (
+    ("id", "id"),
+    ("content", "content"),
+    ("detail", "detail"),
+    ("nudge_line", "nudge_line"),
+    ("type", "type"),
+    ("namespace", "namespace"),
+    ("source", "source"),
+    ("source_identity", "source_identity"),
+    ("client_profile", "client_profile"),
+    ("model_id", "model_id"),
+    ("consolidated_into", "consolidated_into"),
+    ("remote_id", "remote_id"),
+    ("expires_at", "expires"),
+    ("task_type", "task_type"),
+    ("phase_origin", "phase_origin"),
+    ("team_origin", "team_origin"),
+    ("outcome_correlation", "outcome_correlation"),
+    ("sync_hash", "sync_hash"),
+    ("invalidated_by", "invalidated_by"),
 )
+_TEXT_FIELD_ORDER: tuple[str, ...] = tuple(column for column, _attribute in _ENTRY_TEXT_FIELDS)
+_TEXT_FIELDS: frozenset[str] = frozenset(_TEXT_FIELD_ORDER)
 
 
 def _is_valid_utf8(value: str) -> bool:
@@ -68,7 +73,7 @@ def validate_utf8_fields(row_dict: dict[str, object]) -> None:
             exception lists every offending field name.
     """
     failed: list[str] = []
-    for field in _TEXT_FIELDS:
+    for field in _TEXT_FIELD_ORDER:
         raw = row_dict.get(field)
         if not isinstance(raw, str):
             continue
@@ -79,3 +84,8 @@ def validate_utf8_fields(row_dict: dict[str, object]) -> None:
             f"Write rejected: {len(failed)} field(s) contain invalid UTF-8: {failed!r}",
             failed_fields=failed,
         )
+
+
+def validate_entry_utf8(entry: MemoryEntry) -> None:
+    """Validate the bare TEXT fields persisted from a memory entry."""
+    validate_utf8_fields({column: getattr(entry, attribute) for column, attribute in _ENTRY_TEXT_FIELDS})

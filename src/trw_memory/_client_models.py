@@ -17,9 +17,9 @@ Extracted as PRD-DIST-246 batch 113.
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
-from typing import Protocol, TypedDict, runtime_checkable
+from typing import Protocol, runtime_checkable
 
-from typing_extensions import NotRequired
+from typing_extensions import NotRequired, TypedDict
 
 
 class MemoryResultDict(TypedDict):

@@ -171,7 +171,7 @@ def hybrid_search(
     if collapse_hype:
         from trw_memory.retrieval._hype_collapse import hype_sibling_ids_in
 
-        sibling_ids = hype_sibling_ids_in(stored_embeddings)
+        sibling_ids = hype_sibling_ids_in(stored_embeddings, set(entry_ids))
         if sibling_ids:
             dense_entry_ids = [*entry_ids, *sibling_ids]
 

@@ -110,3 +110,23 @@ def test_list_org_shared_filters_below_threshold(monkeypatch: Any) -> None:
 
     result = graph.list_org_shared_entries(MemoryConfig(), "project:current", min_importance=0.8)
     assert result == []
+
+
+def test_list_org_shared_omits_sibling_without_read_permission(monkeypatch: Any) -> None:
+    from trw_memory import graph
+
+    secret_ns = "project:secret"
+    spy = _SpyBackend([_xv(make_entry(content="secret", namespace=secret_ns, importance=0.95))])
+
+    @contextmanager
+    def _fake_discover(_config: MemoryConfig) -> Any:
+        yield [([secret_ns], spy)]
+
+    monkeypatch.setattr("trw_memory.integrations._backend.discover_namespace_backends", _fake_discover)
+    config = MemoryConfig(
+        rbac_enabled=True,
+        namespace_roles={"project:current": "reader", secret_ns: "none"},
+    )
+
+    assert graph.list_org_shared_entries(config, "project:current") == []
+    assert spy.list_entries_calls == []

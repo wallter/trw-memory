@@ -1,9 +1,8 @@
 """Wave 12: coverage for _client_org_shared_aliases.py static method delegates."""
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
 
 
 class TestOrgSharedStaticMethods:
@@ -43,7 +42,7 @@ class TestOrgSharedStaticMethods:
         assert OrgSharedAliasMixin._is_retired_shared_result({"status": "active"}) is False
         assert OrgSharedAliasMixin._is_retired_shared_result({}) is False
 
-    def _make_result(self, content: str = "", detail: str = "", tags: list = None) -> dict:
+    def _make_result(self, content: str = "", detail: str = "", tags: list[str] | None = None) -> dict:
         return {
             "memory_id": "MQ-001",
             "content": content,

@@ -12,9 +12,11 @@ from uuid import uuid4
 
 import structlog
 
+from trw_memory._client_store import _existing_entry_for_namespace
 from trw_memory.embeddings import get_local_embedder
 from trw_memory.exceptions import (
     ConfigError,
+    MemoryNotFoundError,
     PIIBlockError,
     PoisoningError,
     RateLimitError,
@@ -28,7 +30,7 @@ from trw_memory.lifecycle.tiers._runtime import (
     supports_tier_runtime,
 )
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.models.memory import Assertion, MemoryEntry, MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.security.poisoning import validate_store_inputs
@@ -54,6 +56,9 @@ def memory_store_impl(
     source_identity: str = "",
     session_id: str | None = None,
     entry_id: str | None = None,
+    evidence: list[str] | None = None,
+    expires: str = "",
+    assertions: list[Assertion] | None = None,
     raise_security_errors: bool = False,
 ) -> dict[str, object]:
     """Core implementation of memory_store (callable without MCP).
@@ -66,6 +71,9 @@ def memory_store_impl(
         importance: Importance score in [0.0, 1.0]. Defaults to 0.5.
         detail: Extended explanation or context. Defaults to "".
         metadata: Optional string key-value metadata. Defaults to {}.
+        evidence: Optional source references supporting the entry.
+        expires: Optional expiration date or condition.
+        assertions: Optional machine-verifiable grounding assertions.
 
     Returns:
         {"memory_id": str, "status": "stored", "namespace": str}
@@ -95,18 +103,24 @@ def memory_store_impl(
 
     entry_id = entry_id or ("M-" + uuid4().hex[:16])
     now = datetime.now(timezone.utc)
-    existing_raw = backend.get(entry_id) if entry_id is not None else None
-    existing = existing_raw if isinstance(existing_raw, MemoryEntry) else None
+    try:
+        existing = _existing_entry_for_namespace(backend, entry_id, namespace)
+    except MemoryNotFoundError as exc:
+        return {"error": str(exc), "status": "not_found", "namespace": namespace}
     entry_metadata = dict(existing.metadata) if existing is not None else {}
     entry_metadata.update(metadata or {})
+    entry_expires = expires or (existing.expires if existing is not None else "")
     if existing is None:
         entry = MemoryEntry(
             id=entry_id,
             content=content.strip(),
             detail=detail,
             tags=tags or [],
+            evidence=list(evidence or []),
             importance=importance,
             metadata=entry_metadata,
+            expires=entry_expires,
+            assertions=list(assertions or []),
             namespace=namespace,
             status=MemoryStatus.ACTIVE,
             created_at=now,
@@ -120,8 +134,11 @@ def memory_store_impl(
                 "content": content.strip(),
                 "detail": detail,
                 "tags": tags or [],
+                "evidence": list(evidence) if evidence is not None else existing.evidence,
                 "importance": importance,
                 "metadata": entry_metadata,
+                "expires": entry_expires,
+                "assertions": list(assertions) if assertions is not None else existing.assertions,
                 "updated_at": now,
                 "source": source,
                 "source_identity": source_identity or existing.source_identity,
@@ -253,6 +270,9 @@ def register_store_tool(mcp: McpServer) -> None:
         source_identity: str = "",
         session_id: str | None = None,
         entry_id: str | None = None,
+        evidence: list[str] | None = None,
+        expires: str = "",
+        assertions: list[Assertion] | None = None,
     ) -> dict[str, object]:
         """Store a new memory entry in the memory system.
 
@@ -263,6 +283,9 @@ def register_store_tool(mcp: McpServer) -> None:
             importance: Importance score 0.0-1.0 (default 0.5).
             detail: Extended explanation or context.
             metadata: Optional key-value string metadata.
+            evidence: Optional source references supporting the entry.
+            expires: Optional expiration date or condition.
+            assertions: Optional machine-verifiable grounding assertions.
 
         Returns:
             {"memory_id": str, "status": "stored", "namespace": str}
@@ -281,5 +304,8 @@ def register_store_tool(mcp: McpServer) -> None:
                 source_identity=source_identity,
                 session_id=session_id,
                 entry_id=entry_id,
+                evidence=evidence,
+                expires=expires,
+                assertions=assertions,
                 raise_security_errors=True,
             )

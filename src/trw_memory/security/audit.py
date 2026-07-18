@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import tempfile
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,7 @@ from trw_memory.exceptions import StorageError
 from trw_memory.storage.persistence import lock_for_rmw
 
 _GENESIS_HASH = "0" * 64
+_COMPACT_MANIFEST_NAME = "audit_compact_manifest.jsonl"
 
 
 class AuditRecord(BaseModel):
@@ -37,6 +39,8 @@ class AuditLog:
     """Append-only JSONL audit log with tamper-evident hash chaining."""
 
     def __init__(self, log_path: Path, *, fsync: bool = False) -> None:
+        if log_path.name == _COMPACT_MANIFEST_NAME:
+            raise ValueError(f"audit log path uses reserved compact manifest name: {_COMPACT_MANIFEST_NAME}")
         self._path = log_path
         self._fsync = fsync
 
@@ -57,6 +61,8 @@ class AuditLog:
         if not effective_op:
             raise ValueError("append requires op or action")
         with lock_for_rmw(self._path):
+            if self._path.is_symlink():
+                raise StorageError("Refusing symlink audit log path", path=str(self._path))
             prev_hash = self._read_last_hash_unlocked()
             record = AuditRecord(
                 op=effective_op,
@@ -112,6 +118,8 @@ class AuditLog:
         append-only manifest lets post-hoc forensics detect a hash
         discontinuity between successive compacted ranges.
         """
+        if self._path.is_symlink():
+            raise StorageError("Refusing symlink audit log path", path=str(self._path))
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
         # Fast path: the log is append-only and chronological, so the OLDEST
         # record is line 1. If even the oldest record is within retention there
@@ -125,6 +133,8 @@ class AuditLog:
         if oldest_ts is not None and oldest_ts >= cutoff:
             return self._count_records()
         with lock_for_rmw(self._path):
+            if self._path.is_symlink():
+                raise StorageError("Refusing symlink audit log path", path=str(self._path))
             all_records = self.read_all()
             # Capture the pre-compact chain head + count and pin it to the
             # manifest BEFORE any record is dropped or re-chained.
@@ -179,19 +189,16 @@ class AuditLog:
         Post-hoc verification can then detect a hash discontinuity between
         compacted ranges that an in-place re-chain would otherwise hide.
         """
-        manifest_path = audit_log_path.parent / "audit_compact_manifest.jsonl"
+        manifest_path = audit_log_path.parent / _COMPACT_MANIFEST_NAME
         entry: dict[str, object] = {
             "compact_at": datetime.now(timezone.utc).isoformat(),
             "chain_head_hash": head_hash,
             "event_count": event_count,
         }
-        line = json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n"
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        with manifest_path.open("a", encoding="utf-8") as fh:
-            fh.write(line)
-            fh.flush()
-            if self._fsync:
-                os.fsync(fh.fileno())
+        with lock_for_rmw(manifest_path):
+            if manifest_path.is_symlink():
+                raise StorageError("Refusing symlink compact manifest path", path=str(manifest_path))
+            self._append_line_unlocked(entry, path=manifest_path)
 
     def read_all(self) -> list[AuditRecord]:
         """Read all audit records from disk."""
@@ -314,14 +321,53 @@ class AuditLog:
             last_hash = hash_value
         return last_hash if last_hash is not None else _GENESIS_HASH
 
-    def _append_line_unlocked(self, record_data: dict[str, object]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(record_data, sort_keys=True, separators=(",", ":"), default=self._json_default) + "\n"
-        with self._path.open("a", encoding="utf-8") as fh:
-            fh.write(line)
-            fh.flush()
+    def _append_line_unlocked(self, record_data: dict[str, object], *, path: Path | None = None) -> None:
+        target = path or self._path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = (
+            json.dumps(record_data, sort_keys=True, separators=(",", ":"), default=self._json_default) + "\n"
+        ).encode("utf-8")
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        try:
+            fd = os.open(target, flags, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError as exc:
+            raise StorageError(
+                f"Unable to append audit log: {type(exc).__name__}",
+                path=str(target),
+            ) from exc
+        original_size: int | None = None
+        try:
+            opened = os.fstat(fd)
+            original_size = opened.st_size
+            leaf = os.lstat(target)
+            if not stat.S_ISREG(leaf.st_mode) or (opened.st_dev, opened.st_ino) != (leaf.st_dev, leaf.st_ino):
+                raise OSError("audit log path changed during secure open")
+            fchmod = getattr(os, "fchmod", None)
+            if fchmod is not None:
+                fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+            remaining = memoryview(payload)
+            while remaining:
+                written = os.write(fd, remaining)
+                if written <= 0:
+                    raise OSError("failed to append audit record")
+                remaining = remaining[written:]
             if self._fsync:
-                os.fsync(fh.fileno())
+                os.fsync(fd)
+        except BaseException as exc:
+            if original_size is not None:
+                try:
+                    os.ftruncate(fd, original_size)
+                except OSError:
+                    pass
+            if isinstance(exc, OSError):
+                raise StorageError(
+                    f"Unable to append audit log: {type(exc).__name__}",
+                    path=str(target),
+                ) from exc
+            raise
+        finally:
+            os.close(fd)
 
 
 def audit_verify(log_path: Path) -> dict[str, object]:

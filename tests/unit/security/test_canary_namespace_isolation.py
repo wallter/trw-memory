@@ -1,15 +1,15 @@
 """Regression: canary state must be keyed per (quarantine, backend) pair.
 
-Cycle 121 of the trw-distill lab uncovered ``CanaryTamperError`` raised
+A concurrent multi-backend audit uncovered ``CanaryTamperError`` raised
 on every recall when a sweep iterated over multiple configs whose
 quarantine DBs were the same but whose memory backends differed
-(``project_lab-audit/memory.db``, ``project_lab-hyb-naive/memory.db``,
-…). Root cause: ``CANARY_STATE`` keyed only on quarantine path made
-config-2's ``initialize_canaries`` short-circuit on "already seeded",
-but config-2's backend never received the canaries, so the next
-``probe_canaries`` raised.
+(e.g. ``project_a/memory.db``, ``project_b/memory.db``, …). Root cause:
+``CANARY_STATE`` keyed only on quarantine path made config-2's
+``initialize_canaries`` short-circuit on "already seeded", but config-2's
+backend never received the canaries, so the next ``probe_canaries``
+raised.
 
-These tests pin the per-backend isolation the cycle-122 fix introduces.
+These tests pin the per-backend isolation the fix introduces.
 """
 
 from __future__ import annotations

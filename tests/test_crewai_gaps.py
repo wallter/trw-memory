@@ -2,6 +2,8 @@
 
 Target lines: 29-30, 44, 51-52, 192.
 """
+
+# ruff: noqa: F811  # pytest fixture imports are consumed by same-named parameters
 from __future__ import annotations
 
 import importlib
@@ -15,7 +17,7 @@ from ._test_integrations_support import (
     _import_crewai_adapter,
     _make_crewai_mocks,
     _purge_modules,
-    tmp_backend,
+    tmp_backend,  # noqa: F401  # imported fixture is discovered by pytest
 )
 
 _MODULE = "trw_memory.integrations.crewai"
@@ -24,6 +26,7 @@ _MODULE = "trw_memory.integrations.crewai"
 # ---------------------------------------------------------------------------
 # line 44: _parse_version break on non-digit part
 # ---------------------------------------------------------------------------
+
 
 class TestParseVersion:
     @pytest.fixture(autouse=True)
@@ -51,6 +54,7 @@ class TestParseVersion:
 # line 192: reset() early return when deleted == 0
 # ---------------------------------------------------------------------------
 
+
 class TestTRWCrewStorageReset:
     @pytest.fixture(autouse=True)
     def _setup(self):
@@ -75,6 +79,7 @@ class TestTRWCrewStorageReset:
 # lines 29-30: find_spec raises ValueError → _crewai_spec = None → ImportError
 # ---------------------------------------------------------------------------
 
+
 class TestModuleLevelFindSpecFailure:
     def test_find_spec_value_error_triggers_import_error(self) -> None:
         """find_spec raises ValueError → _crewai_spec = None (line 30) → ImportError raised."""
@@ -97,6 +102,7 @@ class TestModuleLevelFindSpecFailure:
 # ---------------------------------------------------------------------------
 # lines 51-52: PackageNotFoundError → ImportError raised
 # ---------------------------------------------------------------------------
+
 
 class TestModuleLevelPackageNotFoundError:
     def test_metadata_not_found_triggers_import_error(self) -> None:

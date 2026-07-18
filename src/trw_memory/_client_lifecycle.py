@@ -31,13 +31,13 @@ import socket
 import threading
 from collections.abc import Coroutine
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-import structlog
-
-from trw_memory.exceptions import MemoryConnectionError
+from trw_memory._client_backend import create_local_backend as _create_local_backend
+from trw_memory.exceptions import MemoryConnectionError, SecurityDependencyError
 from trw_memory.lifecycle.tiers._runtime import tier_runtime_enabled, warmup_tier_manager
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -45,13 +45,10 @@ from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.security.pii import anonymize_installation_id
 from trw_memory.security.runtime import initialize_canaries
 from trw_memory.security.startup import verify_defaults
-from trw_memory.storage.interface import StorageBackend
 from trw_memory.sync.retry_queue import RetryQueue
 
 if TYPE_CHECKING:
     from trw_memory.client import MemoryClient, MemoryResultDict
-
-logger = structlog.get_logger(__name__)
 
 SHARED_EVENT_CACHE_MAX = 256
 
@@ -61,16 +58,6 @@ def _client_logger() -> Any:
     from trw_memory import client as _c
 
     return _c.logger
-
-
-def _create_local_backend(
-    config: MemoryConfig,
-    namespace: str,
-    db_path_override: Path | str | None = None,
-) -> StorageBackend:
-    from trw_memory.client import _create_local_backend as _impl
-
-    return _impl(config, namespace, db_path_override=db_path_override)
 
 
 # ---------------------------------------------------------------------------
@@ -93,13 +80,22 @@ def init_client(
     local/auto only). See ``MemoryClient.__init__`` for the use case.
     """
     validate_namespace(namespace)
+    if mode not in {"local", "mcp", "auto"}:
+        raise ValueError(f"Unsupported memory client mode: {mode!r}")
+    if not isfinite(timeout) or timeout <= 0:
+        raise ValueError(f"timeout must be a positive finite value, got {timeout!r}")
     client._namespace = namespace
     client._timeout = timeout
     client._lock = asyncio.Lock()
     client._tools_registered = False
     client._backend = None
     client._resolved_mode = ""
-    client._config = MemoryConfig()
+    # An explicit SQLite file is also the authority for ancillary local state
+    # (tier sidecars and retry queue). Without this override the primary row
+    # store used ``db_path`` while those files leaked into the process CWD's
+    # default ``.memory`` tree, surprising embedders and test harnesses.
+    explicit_db_path = Path(db_path).expanduser().resolve() if db_path is not None else None
+    client._config = MemoryConfig(storage_path=str(explicit_db_path.parent)) if explicit_db_path else MemoryConfig()
     client._project_root = str(Path.cwd())
     client._installation_id = f"{socket.gethostname()}:{Path(client._config.storage_path).resolve()}"
     client._local_node_id = anonymize_installation_id(client._installation_id)
@@ -110,16 +106,14 @@ def init_client(
     client._shared_event_cache_lock = threading.Lock()
     client._pending_remote_retirements = set()
     client._pending_remote_retirements_lock = threading.Lock()
-    client._sse_subscriber = None
-    client._sse_subscriber_started = False
-    client._tier_manager = None
+    client._initialize_resource_state()
 
     if mode == "mcp":
         raise NotImplementedError("MCP mode is not yet implemented")
 
     if mode in ("local", "auto"):
         try:
-            client._backend = _create_local_backend(client._config, namespace, db_path_override=db_path)
+            client._backend = _create_local_backend(client._config, namespace, db_path_override=explicit_db_path)
             verify_defaults(client._config)
             initialize_canaries(client._config, backend=client._backend)
             client._resolved_mode = "local"
@@ -132,7 +126,19 @@ def init_client(
             )
             if tier_runtime_enabled(client._config):
                 client._tier_manager = warmup_tier_manager(client._config, namespace, client._backend)
-        except (OSError, ValueError, ImportError) as exc:
+        except Exception as exc:
+            failed_backend = client._backend
+            client._backend = None
+            client._resolved_mode = ""
+            if failed_backend is not None:
+                try:
+                    failed_backend.close()
+                except Exception:
+                    _client_logger().warning("client_init_backend_close_failed", exc_info=True)
+            if isinstance(exc, SecurityDependencyError):
+                raise
+            if not isinstance(exc, (ImportError, OSError, ValueError)):
+                raise
             if mode == "local":
                 raise MemoryConnectionError(f"Failed to create local backend: {exc}") from exc
 
@@ -159,7 +165,17 @@ def should_attempt_remote_publish(client: MemoryClient, entry: MemoryEntry) -> b
 def schedule_background_task(client: MemoryClient, coro: Coroutine[object, object, None]) -> None:
     task = asyncio.create_task(coro)
     client._background_tasks.add(task)
-    task.add_done_callback(client._background_tasks.discard)
+
+    def _consume_result(done: asyncio.Task[None]) -> None:
+        client._background_tasks.discard(done)
+        if done.cancelled():
+            return
+        try:
+            done.result()
+        except Exception:
+            _client_logger().warning("memory_background_task_failed", exc_info=True)
+
+    task.add_done_callback(_consume_result)
 
 
 async def publish_entry(
@@ -232,12 +248,26 @@ async def close_client(client: MemoryClient) -> None:
         client._sse_subscriber.stop()
         client._sse_subscriber = None
         client._sse_subscriber_started = False
-    if client._background_tasks:
-        await asyncio.gather(*list(client._background_tasks), return_exceptions=True)
-    if client._backend is not None:
-        client._backend.close()
+    cancelled = False
+    try:
+        if client._background_tasks:
+            await asyncio.gather(*list(client._background_tasks), return_exceptions=True)
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
+    finally:
+        client._embedder = None
+        backend = client._backend
         client._backend = None
-        _client_logger().debug("client_closed", op="close", namespace=client._namespace)
+        if backend is not None:
+            try:
+                backend.close()
+            except Exception:
+                if not cancelled:
+                    raise
+                _client_logger().warning("client_close_failed_during_cancellation", exc_info=True)
+            else:
+                _client_logger().debug("client_closed", op="close", namespace=client._namespace)
 
 
 # ---------------------------------------------------------------------------
@@ -262,12 +292,22 @@ def maybe_start_retry_drain(client: MemoryClient) -> None:
 
 
 async def drain_retry_queue_impl(client: MemoryClient) -> None:
-    from trw_memory import client as _c
+    try:
+        await _drain_retry_queue_once(client)
+    finally:
+        client._retry_drain_started = False
 
-    queued_before = {record["entry_id"] for record in client._retry_queue.snapshot()}
-    result = await asyncio.to_thread(_c.drain_retry_queue, client._retry_queue, client._config)
-    queued_after = {record["entry_id"] for record in client._retry_queue.snapshot()}
-    drained_ids = queued_before - queued_after
+
+async def _drain_retry_queue_once(client: MemoryClient) -> None:
+    """Drain one retry batch; the public wrapper owns restart state."""
+    from trw_memory.sync._remote_publish import _drain_retry_queue_with_ids
+
+    result, published_entry_ids = await asyncio.to_thread(
+        _drain_retry_queue_with_ids,
+        client._retry_queue,
+        client._config,
+    )
+    drained_ids = set(published_entry_ids)
     if drained_ids:
         async with client._lock:
             backend = client._get_backend()
@@ -411,19 +451,21 @@ async def apply_pending_remote_retirements(client: MemoryClient) -> None:
     if not remote_ids:
         return
 
-    async with client._lock:
-        backend = client._get_backend()
-        limit = max(backend.count(namespace=client._namespace), 1)
-        entries = backend.list_entries(namespace=client._namespace, limit=limit)
-        unresolved = set(remote_ids)
-        for entry in entries:
-            if entry.remote_id not in unresolved:
-                continue
-            if entry.last_synced_at is None:
-                continue
-            updated = backend.update(entry.id, pending_delete=True)
-            if updated is not None:
-                unresolved.discard(str(entry.remote_id))
-    if unresolved:
-        with client._pending_remote_retirements_lock:
-            client._pending_remote_retirements.update(unresolved)
+    unresolved = set(remote_ids)
+    try:
+        async with client._lock:
+            backend = client._get_backend()
+            limit = max(backend.count(namespace=client._namespace), 1)
+            entries = backend.list_entries(namespace=client._namespace, limit=limit)
+            for entry in entries:
+                if entry.remote_id not in unresolved:
+                    continue
+                if entry.last_synced_at is None:
+                    continue
+                updated = backend.update(entry.id, pending_delete=True)
+                if updated is not None:
+                    unresolved.discard(str(entry.remote_id))
+    finally:
+        if unresolved:
+            with client._pending_remote_retirements_lock:
+                client._pending_remote_retirements.update(unresolved)

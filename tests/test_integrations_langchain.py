@@ -125,6 +125,7 @@ class TestLangChainAdapter:
         history = self.mod.TRWChatMessageHistory(session_id="s1", backend=mock_backend)
         history.close()
         mock_backend.close.assert_not_called()
+        assert history._backend is mock_backend
 
     def test_close_owned_backend(self) -> None:
         """close() on owned backend releases resources."""
@@ -133,6 +134,7 @@ class TestLangChainAdapter:
         history._owns_backend = True
         history.close()
         mock_backend.close.assert_called_once()
+        assert history._backend is mock_backend
 
     def test_context_manager(self, tmp_backend: Any) -> None:
         """Context manager calls close() on exit."""

@@ -1,10 +1,9 @@
 """Wave 12: targeted tests for uncovered branches in lifecycle/_recall.py."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-
-import pytest
 
 from trw_memory.lifecycle._recall import (
     rank_by_utility,
@@ -13,7 +12,6 @@ from trw_memory.lifecycle._recall import (
 )
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
-
 
 # ---------------------------------------------------------------------------
 # rank_by_utility — empty-after-drop branch (line 113)
@@ -139,8 +137,8 @@ class TestUtilityBasedPruneCandidates:
         """Utility < prune_threshold and age > 14 days → obsolete candidate (Tier 3)."""
         result = utility_based_prune_candidates(
             [_entry(id="P-004", created_at="2020-01-01", access_count=0)],
-            delete_threshold=0.0,   # nothing qualifies for delete
-            prune_threshold=1.0,    # everything below this
+            delete_threshold=0.0,  # nothing qualifies for delete
+            prune_threshold=1.0,  # everything below this
         )
         assert len(result) == 1
         assert result[0]["id"] == "P-004"
@@ -148,9 +146,7 @@ class TestUtilityBasedPruneCandidates:
 
     def test_new_entry_below_prune_threshold_not_pruned(self) -> None:
         """Entry < 14 days old is excluded from Tier 3 pruning."""
-        from datetime import date, timedelta
-
-        today = date.today().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
         result = utility_based_prune_candidates(
             [_entry(id="P-005", created_at=today, access_count=0)],
             delete_threshold=0.0,

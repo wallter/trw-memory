@@ -10,7 +10,7 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 
 
-@pytest.fixture
+@pytest.fixture(name="cfg")
 def cfg() -> MemoryConfig:
     return _cfg()
 
@@ -28,14 +28,14 @@ def _cfg() -> MemoryConfig:
     )
 
 
-@pytest.fixture
+@pytest.fixture(name="mem_dir")
 def mem_dir(tmp_path: Path) -> Path:
     memory_dir = tmp_path / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
     return tmp_path
 
 
-@pytest.fixture
+@pytest.fixture(name="mgr")
 def mgr(tmp_path: Path) -> TierManager:
     memory_dir = tmp_path / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)

@@ -175,6 +175,104 @@ def test_concurrent_checkpoints_serialize_without_error(tmp_path: Path) -> None:
         backend.close()
 
 
+def test_separate_backends_checkpointing_same_database_serialize(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The WAL safety lock is shared by every backend for one database."""
+    import threading
+
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    second_entered = threading.Event()
+    call_guard = threading.Lock()
+    call_count = 0
+
+    def controlled_checkpoint(*_args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal call_count
+        with call_guard:
+            call_count += 1
+            call_number = call_count
+        if call_number == 1:
+            first_entered.set()
+            assert release_first.wait(timeout=2)
+        else:
+            second_entered.set()
+        return {"mode": "PASSIVE", "busy": 0, "checkpointed": 0, "remaining": 0}
+
+    monkeypatch.setattr("trw_memory.storage.sqlite_backend.run_checkpoint", controlled_checkpoint)
+    path = tmp_path / "m.db"
+    first = SQLiteBackend(path)
+    second = SQLiteBackend(path)
+    errors: list[BaseException] = []
+
+    def checkpoint(backend: SQLiteBackend, started: threading.Event | None = None) -> None:
+        if started is not None:
+            started.set()
+        try:
+            backend.checkpoint_wal()
+        except BaseException as exc:
+            errors.append(exc)
+
+    first_thread = threading.Thread(target=checkpoint, args=(first,))
+    second_thread = threading.Thread(target=checkpoint, args=(second, second_started))
+    try:
+        first_thread.start()
+        assert first_entered.wait(timeout=2)
+        second_thread.start()
+        assert second_started.wait(timeout=2)
+        assert not second_entered.wait(timeout=0.2)
+        release_first.set()
+        first_thread.join(timeout=2)
+        second_thread.join(timeout=2)
+        assert second_entered.is_set()
+        assert errors == []
+    finally:
+        release_first.set()
+        first_thread.join(timeout=2)
+        second_thread.join(timeout=2)
+        first.close()
+        second.close()
+
+
+def test_in_memory_checkpoint_does_not_use_filesystem_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = SQLiteBackend(Path(":memory:"))
+    monkeypatch.setattr(
+        "trw_memory.storage.sqlite_backend.lock_for_rmw",
+        lambda _path: pytest.fail("in-memory checkpoint created a filesystem lock"),
+    )
+    try:
+        assert "mode" in backend.checkpoint_wal()
+    finally:
+        backend.close()
+
+
+def test_checkpoint_lock_failure_returns_error_without_running_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = SQLiteBackend(tmp_path / "m.db")
+
+    def fail_lock(_path: Path) -> object:
+        raise PermissionError("read-only directory")
+
+    monkeypatch.setattr(
+        "trw_memory.storage.sqlite_backend.lock_for_rmw",
+        fail_lock,
+    )
+    monkeypatch.setattr(
+        "trw_memory.storage.sqlite_backend.run_checkpoint",
+        lambda *_args, **_kwargs: pytest.fail("checkpoint ran without its safety lock"),
+    )
+    try:
+        result = backend.checkpoint_wal()
+    finally:
+        backend.close()
+
+    assert result == {"busy": 1, "checkpointed": 0, "mode": "error"}
+
+
 # ---------------------------------------------------------------------------
 # 3. Robust primary salvage
 # ---------------------------------------------------------------------------
@@ -423,6 +521,58 @@ def test_run_checkpoint_fail_open_on_sqlite_error() -> None:
     assert result == {"busy": 1, "checkpointed": 0, "mode": "error"}
     failures = [log for log in logs if log.get("event") == "wal_checkpoint_failed"]
     assert len(failures) == 1
+
+
+def test_run_checkpoint_fail_open_on_active_driver_error() -> None:
+    """The caller can supply a non-sqlite3 DB-API error family."""
+    from trw_memory.storage._wal_checkpoint import run_checkpoint
+
+    class DriverError(Exception):
+        pass
+
+    def execute(sql: str) -> object:
+        raise DriverError("driver checkpoint failed")
+
+    with structlog.testing.capture_logs() as logs:
+        result = run_checkpoint(
+            execute,
+            "TRUNCATE",
+            wal_reset_safe=True,
+            db_path="/encrypted.db",
+            db_error=DriverError,
+        )
+
+    assert result == {"busy": 1, "checkpointed": 0, "mode": "error"}
+    failures = [log for log in logs if log.get("event") == "wal_checkpoint_failed"]
+    assert len(failures) == 1
+
+
+def test_checkpoint_wal_threads_active_driver_error_type(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SQLiteBackend passes its active DB-API error class to the primitive."""
+
+    class DriverError(Exception):
+        pass
+
+    class Driver:
+        Error = DriverError
+
+    captured: dict[str, object] = {}
+
+    def checkpoint_spy(*_args: object, **kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"busy": 0, "checkpointed": 0, "mode": "PASSIVE"}
+
+    backend = SQLiteBackend(tmp_path / "m.db")
+    try:
+        backend._dbapi = Driver()
+        monkeypatch.setattr("trw_memory.storage.sqlite_backend.run_checkpoint", checkpoint_spy)
+        assert backend.checkpoint_wal("PASSIVE")["mode"] == "PASSIVE"
+        assert captured["db_error"] is DriverError
+    finally:
+        backend.close()
 
 
 def test_run_checkpoint_missing_row_treated_as_busy() -> None:

@@ -202,9 +202,7 @@ class TestAuditLogVerify:
         assert [record.id for record in records] == ["M-0", "M-1", "M-2"]
         assert audit_log.verify_chain()["valid"] is True
 
-    def test_compact_fast_path_skips_rewrite_when_nothing_expires(
-        self, audit_log: AuditLog, audit_path: Path
-    ) -> None:
+    def test_compact_fast_path_skips_rewrite_when_nothing_expires(self, audit_log: AuditLog, audit_path: Path) -> None:
         # All records are recent → the oldest-record fast path must skip the
         # full read+rewrite (which would re-chain and rewrite the file). We
         # prove no rewrite happened by asserting the on-disk bytes are

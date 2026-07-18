@@ -8,7 +8,48 @@ focused on read/write operations.
 from __future__ import annotations
 
 import contextlib
+import json
 import sqlite3
+from collections.abc import Callable
+
+# ---------------------------------------------------------------------------
+# Schema versioning
+# ---------------------------------------------------------------------------
+#
+# ``PRAGMA user_version`` gates the DDL/migration storm so it runs exactly
+# once per database, then is skipped on every subsequent open (fast path).
+#
+# Adoption contract (trw-memory ships to real user databases in the wild):
+#   * A database written by TODAY's released build carries user_version=0
+#     (no prior build set it) yet may already hold every column. Opening it
+#     with this build re-runs the fully-idempotent bootstrap once (all ALTERs
+#     duplicate-suppressed => zero row mutation) and STAMPS it to
+#     ``SCHEMA_VERSION`` — never a destructive rewrite.
+#   * A FRESH database (user_version=0, no tables) migrates 0 -> current.
+#   * A database whose user_version EXCEEDS ``SCHEMA_VERSION`` (an older build
+#     opening a newer db) fails LOUDLY via :class:`SchemaDowngradeError`
+#     BEFORE any DDL runs, rather than silently mis-reading it.
+#
+# ``SCHEMA_VERSION`` == 1 is the baseline shape produced by
+# ``_bootstrap_and_backfill`` (all columns through PRD-CORE-194 validity +
+# PRD-CORE-132 feedback counters). ``SCHEMA_VERSION`` == 2 is the PRD-CORE-181
+# FR06 ``memory_model_v2_importance_type`` cutover: canonical ``importance`` +
+# valid ``type`` (missing/empty ``type`` -> ``pattern``; conflicting
+# impact/importance or an invalid ``type`` BLOCKS with no version bump). A
+# user_version 0 database normalises through the v1 bootstrap FIRST, then the
+# v2 delta. Bump this and register a delta in ``_MIGRATIONS`` for each future
+# forward-only migration.
+SCHEMA_VERSION = 3
+
+
+class SchemaDowngradeError(RuntimeError):
+    """A database was opened by a trw-memory build older than the one that wrote it.
+
+    Raised when ``PRAGMA user_version`` exceeds :data:`SCHEMA_VERSION`. Failing
+    loudly here prevents a stale build from silently mis-reading (and possibly
+    corrupting) a database written by a newer schema.
+    """
+
 
 # ---------------------------------------------------------------------------
 # DDL
@@ -151,130 +192,250 @@ CREATE_IDX_MN_STATUS = "CREATE INDEX IF NOT EXISTS idx_mn_status ON memory_names
 # ---------------------------------------------------------------------------
 
 
+def _bootstrap_and_backfill(cursor: sqlite3.Cursor) -> None:
+    """Run the full idempotent DDL + column-backfill storm (v0 -> v1).
+
+    Every statement is idempotent (``CREATE ... IF NOT EXISTS`` or an
+    ``ALTER ... ADD COLUMN`` whose duplicate-column ``OperationalError`` is
+    suppressed), so this normalises a database of ANY historical column count
+    to the v1 shape without introspection and without mutating existing rows.
+    Does NOT commit — the caller (:func:`ensure_schema`) owns the transaction.
+    """
+    cursor.execute(CREATE_MEMORIES)
+    cursor.execute(CREATE_GRAPH_EDGES)
+    cursor.execute(CREATE_WIKI_REFS)
+    cursor.execute(CREATE_NAMESPACES)
+
+    # Migration: rename columns from older schema versions.
+    # Must run BEFORE index creation since indexes reference new names.
+    _rename_cols = [
+        ("memories", "impact", "importance"),
+        ("memories", "expires", "expires_at"),
+        ("memory_graph_edges", "relation", "edge_type"),
+    ]
+    for table, old_name, new_name in _rename_cols:
+        with contextlib.suppress(sqlite3.OperationalError):
+            cursor.execute(f"ALTER TABLE {table} RENAME COLUMN {old_name} TO {new_name}")
+
+    cursor.execute(CREATE_IDX_NAMESPACE)
+    cursor.execute(CREATE_IDX_STATUS)
+    cursor.execute(CREATE_IDX_NS_UPDATED)
+    cursor.execute(CREATE_IDX_NS_IMPORTANCE)
+    cursor.execute(CREATE_IDX_NS_STATUS)
+    cursor.execute(CREATE_IDX_NS_STATUS_IMP)
+    cursor.execute(CREATE_IDX_STATUS_UPDATED)
+    cursor.execute(CREATE_IDX_MGE_SOURCE)
+    cursor.execute(CREATE_IDX_MGE_TARGET)
+    cursor.execute(CREATE_IDX_WIKI_REFS_SOURCE)
+    cursor.execute(CREATE_IDX_WIKI_REFS_TARGET)
+
+    # Migration: add missing columns to memory_namespaces
+    for col_name, col_def in [
+        ("team_id", "TEXT"),
+        ("expires_at", "TEXT"),
+        ("status", "TEXT NOT NULL DEFAULT 'active'"),
+    ]:
+        with contextlib.suppress(sqlite3.OperationalError):
+            cursor.execute(f"ALTER TABLE memory_namespaces ADD COLUMN {col_name} {col_def}")
+
+    cursor.execute(CREATE_IDX_MN_STATUS)
+
+    # Migration: add new columns for sync + graph (Sprint 37)
+    _migrate_cols = [
+        ("metadata", "TEXT DEFAULT '{}'"),
+        ("vector_clock", "TEXT DEFAULT '{}'"),
+        ("remote_id", "TEXT"),
+        ("published_to_platform", "INTEGER DEFAULT 0"),
+        ("pending_delete", "INTEGER DEFAULT 0"),
+        ("cross_validated", "INTEGER DEFAULT 0"),
+        ("outcome_history", "TEXT DEFAULT '[]'"),
+        ("assertions", "TEXT DEFAULT '[]'"),
+    ]
+    # Migration: add provenance columns (PRD-CORE-099)
+    _migrate_cols += [
+        ("client_profile", "TEXT DEFAULT ''"),
+        ("model_id", "TEXT DEFAULT ''"),
+    ]
+    # Migration: add PRD-CORE-110 typed entry fields
+    _migrate_cols += [
+        ("session_count", "INTEGER DEFAULT 0"),
+        ("type", "TEXT DEFAULT 'pattern'"),
+        ("nudge_line", "TEXT DEFAULT ''"),
+        ("expires_at", "TEXT DEFAULT ''"),
+        ("confidence", "TEXT DEFAULT 'unverified'"),
+        ("task_type", "TEXT DEFAULT ''"),
+        ("domain", "TEXT DEFAULT '[]'"),
+        ("phase_origin", "TEXT DEFAULT ''"),
+        ("phase_affinity", "TEXT DEFAULT '[]'"),
+        ("team_origin", "TEXT DEFAULT ''"),
+        ("protection_tier", "TEXT DEFAULT 'normal'"),
+    ]
+    # Migration: add PRD-CORE-111 anchor fields
+    _migrate_cols += [
+        ("anchors", "TEXT DEFAULT '[]'"),
+        ("anchor_validity", "REAL DEFAULT 1.0"),
+    ]
+    # Migration: add PRD-CORE-108 outcome attribution fields
+    _migrate_cols += [
+        ("sessions_surfaced", "INTEGER DEFAULT 0"),
+        ("avg_rework_delta", "TEXT DEFAULT NULL"),
+        ("outcome_correlation", "TEXT DEFAULT ''"),
+    ]
+    # Migration: add PRD-INFRA-051 sync pipeline delta tracking
+    _migrate_cols += [
+        ("sync_hash", "TEXT DEFAULT ''"),
+        ("sync_seq", "INTEGER DEFAULT 0"),
+        ("last_synced_at", "TEXT"),
+    ]
+    # Migration: add PRD-CORE-132 feedback lifecycle counters
+    _migrate_cols += [
+        ("recall_count", "INTEGER DEFAULT 0"),
+        ("helpful_count", "INTEGER DEFAULT 0"),
+        ("unhelpful_count", "INTEGER DEFAULT 0"),
+    ]
+    # Migration: add PRD-CORE-194 bi-temporal validity fields. Additive-only,
+    # nullable; absent valid_from = open validity (back-filled to created_at
+    # on read by the row mapper / model validator, never by a rewrite). No
+    # destructive ALTER, zero existing rows mutated on read (NFR01).
+    _migrate_cols += [
+        ("valid_from", "TEXT"),
+        ("invalid_from", "TEXT"),
+        ("invalidated_by", "TEXT"),
+    ]
+    for col_name, col_def in _migrate_cols:
+        with contextlib.suppress(sqlite3.OperationalError):
+            cursor.execute(f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}")
+
+    with contextlib.suppress(sqlite3.OperationalError):
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_sync_seq ON memories(sync_seq)")
+
+    # Migration: add edge_metadata column for PRD-CORE-107 typed edges
+    with contextlib.suppress(sqlite3.OperationalError):
+        cursor.execute("ALTER TABLE memory_graph_edges ADD COLUMN edge_metadata TEXT DEFAULT '{}'")
+
+
+# Forward-only migration deltas keyed by the target user_version. v1 has no
+# per-version delta because ``_bootstrap_and_backfill`` normalises any legacy
+# shape to v1 without one (an arbitrary historical column count cannot be
+# expressed as a single ordered diff). ``_MIGRATIONS[2]`` is the PRD-CORE-181
+# FR06 ``memory_model_v2_importance_type`` SQLite delta — imported lazily below
+# to avoid an import cycle with :mod:`_memory_model_v2`.
+_MIGRATIONS: dict[int, Callable[[sqlite3.Cursor], None]] = {}
+
+
+_CANONICAL_MEMORY_TYPES = frozenset({"incident", "pattern", "convention", "hypothesis", "workaround"})
+_CANONICAL_CONFIDENCE = frozenset({"unverified", "low", "medium", "high", "verified"})
+
+
+def _migrate_v3_legacy_enums(cursor: sqlite3.Cursor) -> None:
+    """Canonicalise legacy enum values without discarding their exact form.
+
+    Older producers persisted ``type='gotcha'`` and numeric confidence scores.
+    Both are valid historical semantics but cannot populate today's enums.  The
+    canonical value is deliberately conservative while the original value is
+    retained in metadata, making this migration lossless and idempotent.
+    """
+    columns = {str(row[1]) for row in cursor.execute("PRAGMA table_info(memories)").fetchall()}
+    if "metadata" not in columns:
+        cursor.execute("ALTER TABLE memories ADD COLUMN metadata TEXT DEFAULT '{}'")
+    rows = cursor.execute("SELECT id, type, confidence, metadata FROM memories").fetchall()
+    for entry_id, type_raw, confidence_raw, metadata_raw in rows:
+        type_value = str(type_raw or "").strip()
+        confidence_value = str(confidence_raw or "").strip()
+        invalid_type = type_value not in _CANONICAL_MEMORY_TYPES
+        invalid_confidence = confidence_value not in _CANONICAL_CONFIDENCE
+        if not invalid_type and not invalid_confidence:
+            continue
+
+        try:
+            parsed_metadata = json.loads(str(metadata_raw or "{}"))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            parsed_metadata = {"legacy_metadata_raw": str(metadata_raw)}
+        metadata = parsed_metadata if isinstance(parsed_metadata, dict) else {"legacy_metadata_raw": metadata_raw}
+
+        canonical_type = type_value
+        if invalid_type:
+            metadata.setdefault("legacy_memory_type", type_value)
+            # Historical ``gotcha`` rows in TRW are audit findings; incident is
+            # the taxonomy's loss-minimising canonical category. Unknown future
+            # values remain readable as patterns with their exact value retained.
+            canonical_type = "incident" if type_value == "gotcha" else "pattern"
+
+        canonical_confidence = confidence_value
+        if invalid_confidence:
+            metadata.setdefault("legacy_confidence", confidence_value)
+            # A numeric score is not proof of the enum's validation lifecycle.
+            canonical_confidence = "unverified"
+
+        cursor.execute(
+            "UPDATE memories SET type = ?, confidence = ?, metadata = ? WHERE id = ?",
+            (canonical_type, canonical_confidence, json.dumps(metadata, sort_keys=True), str(entry_id)),
+        )
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """Create core tables, run column migrations, and build indexes.
+
+    Gated by ``PRAGMA user_version`` so the idempotent DDL/migration storm runs
+    exactly once per database and is skipped (fast path) on every later open.
+
+    * ``user_version > SCHEMA_VERSION`` -> :class:`SchemaDowngradeError` raised
+      BEFORE any DDL (older build must not silently mis-read a newer db).
+    * ``user_version == SCHEMA_VERSION`` -> return immediately (fast path).
+    * otherwise -> bootstrap/backfill to v1, apply any registered
+      ``_MIGRATIONS`` deltas up to ``SCHEMA_VERSION``, then stamp the version.
 
     Safe to call multiple times (all operations are idempotent).
 
     Args:
         conn: An open SQLite connection.
+
+    Raises:
+        SchemaDowngradeError: the database was written by a newer trw-memory.
     """
+    current = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if current > SCHEMA_VERSION:
+        raise SchemaDowngradeError(
+            f"database schema user_version={current} is newer than this "
+            f"trw-memory build supports (max {SCHEMA_VERSION}); refusing to "
+            "open it to avoid silent mis-reads — upgrade trw-memory."
+        )
+    if current == SCHEMA_VERSION:
+        return
+
     cursor = conn.cursor()
     try:
-        cursor.execute(CREATE_MEMORIES)
-        cursor.execute(CREATE_GRAPH_EDGES)
-        cursor.execute(CREATE_WIKI_REFS)
-        cursor.execute(CREATE_NAMESPACES)
-
-        # Migration: rename columns from older schema versions.
-        # Must run BEFORE index creation since indexes reference new names.
-        _rename_cols = [
-            ("memories", "impact", "importance"),
-            ("memories", "expires", "expires_at"),
-            ("memory_graph_edges", "relation", "edge_type"),
-        ]
-        for table, old_name, new_name in _rename_cols:
-            with contextlib.suppress(sqlite3.OperationalError):
-                cursor.execute(f"ALTER TABLE {table} RENAME COLUMN {old_name} TO {new_name}")
-
-        cursor.execute(CREATE_IDX_NAMESPACE)
-        cursor.execute(CREATE_IDX_STATUS)
-        cursor.execute(CREATE_IDX_NS_UPDATED)
-        cursor.execute(CREATE_IDX_NS_IMPORTANCE)
-        cursor.execute(CREATE_IDX_NS_STATUS)
-        cursor.execute(CREATE_IDX_NS_STATUS_IMP)
-        cursor.execute(CREATE_IDX_STATUS_UPDATED)
-        cursor.execute(CREATE_IDX_MGE_SOURCE)
-        cursor.execute(CREATE_IDX_MGE_TARGET)
-        cursor.execute(CREATE_IDX_WIKI_REFS_SOURCE)
-        cursor.execute(CREATE_IDX_WIKI_REFS_TARGET)
-
-        # Migration: add missing columns to memory_namespaces
-        for col_name, col_def in [
-            ("team_id", "TEXT"),
-            ("expires_at", "TEXT"),
-            ("status", "TEXT NOT NULL DEFAULT 'active'"),
-        ]:
-            with contextlib.suppress(sqlite3.OperationalError):
-                cursor.execute(f"ALTER TABLE memory_namespaces ADD COLUMN {col_name} {col_def}")
-
-        cursor.execute(CREATE_IDX_MN_STATUS)
-
-        # Migration: add new columns for sync + graph (Sprint 37)
-        _migrate_cols = [
-            ("vector_clock", "TEXT DEFAULT '{}'"),
-            ("remote_id", "TEXT"),
-            ("published_to_platform", "INTEGER DEFAULT 0"),
-            ("pending_delete", "INTEGER DEFAULT 0"),
-            ("cross_validated", "INTEGER DEFAULT 0"),
-            ("outcome_history", "TEXT DEFAULT '[]'"),
-            ("assertions", "TEXT DEFAULT '[]'"),
-        ]
-        # Migration: add provenance columns (PRD-CORE-099)
-        _migrate_cols += [
-            ("client_profile", "TEXT DEFAULT ''"),
-            ("model_id", "TEXT DEFAULT ''"),
-        ]
-        # Migration: add PRD-CORE-110 typed entry fields
-        _migrate_cols += [
-            ("session_count", "INTEGER DEFAULT 0"),
-            ("type", "TEXT DEFAULT 'pattern'"),
-            ("nudge_line", "TEXT DEFAULT ''"),
-            ("expires_at", "TEXT DEFAULT ''"),
-            ("confidence", "TEXT DEFAULT 'unverified'"),
-            ("task_type", "TEXT DEFAULT ''"),
-            ("domain", "TEXT DEFAULT '[]'"),
-            ("phase_origin", "TEXT DEFAULT ''"),
-            ("phase_affinity", "TEXT DEFAULT '[]'"),
-            ("team_origin", "TEXT DEFAULT ''"),
-            ("protection_tier", "TEXT DEFAULT 'normal'"),
-        ]
-        # Migration: add PRD-CORE-111 anchor fields
-        _migrate_cols += [
-            ("anchors", "TEXT DEFAULT '[]'"),
-            ("anchor_validity", "REAL DEFAULT 1.0"),
-        ]
-        # Migration: add PRD-CORE-108 outcome attribution fields
-        _migrate_cols += [
-            ("sessions_surfaced", "INTEGER DEFAULT 0"),
-            ("avg_rework_delta", "TEXT DEFAULT NULL"),
-            ("outcome_correlation", "TEXT DEFAULT ''"),
-        ]
-        # Migration: add PRD-INFRA-051 sync pipeline delta tracking
-        _migrate_cols += [
-            ("sync_hash", "TEXT DEFAULT ''"),
-            ("sync_seq", "INTEGER DEFAULT 0"),
-            ("last_synced_at", "TEXT"),
-        ]
-        # Migration: add PRD-CORE-132 feedback lifecycle counters
-        _migrate_cols += [
-            ("recall_count", "INTEGER DEFAULT 0"),
-            ("helpful_count", "INTEGER DEFAULT 0"),
-            ("unhelpful_count", "INTEGER DEFAULT 0"),
-        ]
-        # Migration: add PRD-CORE-194 bi-temporal validity fields. Additive-only,
-        # nullable; absent valid_from = open validity (back-filled to created_at
-        # on read by the row mapper / model validator, never by a rewrite). No
-        # destructive ALTER, zero existing rows mutated on read (NFR01).
-        _migrate_cols += [
-            ("valid_from", "TEXT"),
-            ("invalid_from", "TEXT"),
-            ("invalidated_by", "TEXT"),
-        ]
-        for col_name, col_def in _migrate_cols:
-            with contextlib.suppress(sqlite3.OperationalError):
-                cursor.execute(f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}")
-
-        with contextlib.suppress(sqlite3.OperationalError):
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_sync_seq ON memories(sync_seq)")
-
-        # Migration: add edge_metadata column for PRD-CORE-107 typed edges
-        with contextlib.suppress(sqlite3.OperationalError):
-            cursor.execute("ALTER TABLE memory_graph_edges ADD COLUMN edge_metadata TEXT DEFAULT '{}'")
-
+        # v0 -> v1: normalise any legacy shape via the idempotent storm. Also
+        # runs for an already-fully-migrated wild db (user_version=0) — every
+        # statement is a no-op there, so it is stamped, never rewritten.
+        _bootstrap_and_backfill(cursor)
+        for version in range(current + 1, SCHEMA_VERSION + 1):
+            migrate = _MIGRATIONS.get(version)
+            if migrate is not None:
+                migrate(cursor)
+        # PRAGMA cannot bind parameters; SCHEMA_VERSION is a trusted int literal.
+        cursor.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
+    except Exception:
+        # A blocked migration (e.g. MigrationBlocked from the v2 delta) must
+        # leave NO partial writes and NO version bump — roll the whole DDL /
+        # migration storm back before re-raising (PRD-CORE-181-FR06).
+        with contextlib.suppress(sqlite3.Error):
+            conn.rollback()
+        raise
     finally:
         cursor.close()
+
+
+# Register the PRD-CORE-181 FR06 v2 delta. Imported here (module bottom) rather
+# than at the top so :mod:`_memory_model_v2` can lazily import ``ensure_schema``
+# / ``SCHEMA_VERSION`` from this module without a circular import at load time.
+from trw_memory.storage._memory_model_v2 import (  # noqa: E402
+    migrate_sqlite_importance_type as _migrate_v2_memory_model,
+)
+
+_MIGRATIONS[2] = _migrate_v2_memory_model
+_MIGRATIONS[3] = _migrate_v3_legacy_enums
 
 
 CREATE_MEMORIES_FTS = """

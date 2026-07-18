@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -123,6 +124,93 @@ def test_sentinel_mtime_triggers_reconnect(tmp_path: Path) -> None:
     backend.close()
 
 
+@pytest.mark.parametrize("operation", ["get", "count", "store"])
+def test_previously_unchecked_operations_reconnect_before_use(tmp_path: Path, operation: str) -> None:
+    db_path = tmp_path / f"{operation}.db"
+    backend = SQLiteBackend(db_path)
+    try:
+        backend.store(_make_entry("M-old"))
+        backup = tmp_path / f"{operation}.bak"
+        shutil.move(str(db_path), backup)
+        _fresh_empty_db(db_path)
+        write_sentinel(db_path, backup)
+
+        replacement = SQLiteBackend(db_path)
+        replacement.store(_make_entry("M-new"))
+        replacement.close()
+        backend._stale_detector._last_checked = 0.0  # type: ignore[attr-defined]
+
+        if operation == "get":
+            assert backend.get("M-new") is not None
+            assert backend.get("M-old") is None
+        elif operation == "count":
+            assert backend.count() == 1
+        else:
+            backend.store(_make_entry("M-written-after-replacement"))
+            observer = SQLiteBackend(db_path)
+            try:
+                assert observer.get("M-written-after-replacement") is not None
+            finally:
+                observer.close()
+        assert backend.reconnect_count == 1
+    finally:
+        backend.close()
+
+
+def test_reconnect_waits_for_active_connection_use(tmp_path: Path) -> None:
+    backend = SQLiteBackend(tmp_path / "serialized.db")
+    backend.store(_make_entry("M-row"))
+    real_conn = backend._conn
+    execute_started = threading.Event()
+    release_execute = threading.Event()
+    reconnect_done = threading.Event()
+    errors: list[BaseException] = []
+
+    class _BlockingConnection:
+        def execute(self, sql: str, params: object = ()) -> object:
+            execute_started.set()
+            assert release_execute.wait(timeout=2)
+            return real_conn.execute(sql, params)
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(real_conn, name)
+
+    backend._conn = _BlockingConnection()  # type: ignore[assignment]
+
+    def read() -> None:
+        try:
+            assert backend.get("M-row") is not None
+        except BaseException as exc:
+            errors.append(exc)
+
+    def reconnect() -> None:
+        try:
+            backend._reconnect()
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            reconnect_done.set()
+
+    reader = threading.Thread(target=read)
+    reopener = threading.Thread(target=reconnect)
+    try:
+        reader.start()
+        assert execute_started.wait(timeout=2)
+        reopener.start()
+        assert not reconnect_done.wait(timeout=0.05)
+        release_execute.set()
+        reader.join(timeout=2)
+        reopener.join(timeout=2)
+        assert not reader.is_alive()
+        assert not reopener.is_alive()
+        assert errors == []
+    finally:
+        release_execute.set()
+        reader.join(timeout=2)
+        reopener.join(timeout=2)
+        backend.close()
+
+
 # ---------------------------------------------------------------------------
 # Test: precheck cached within budget — no extra stat calls
 # ---------------------------------------------------------------------------
@@ -159,6 +247,22 @@ def test_precheck_is_cheap_cached_within_budget(tmp_path: Path) -> None:
     backend.close()
 
 
+def test_positive_stale_result_is_not_cached_as_fresh(tmp_path: Path) -> None:
+    """Staleness remains visible until a successful reconnect resets it."""
+    db_path = tmp_path / "memory.db"
+    backend = SQLiteBackend(db_path)
+    try:
+        detector = backend._stale_detector
+        detector._check_interval = 60.0
+        sentinel_path(db_path).write_text("recovered\n", encoding="utf-8")
+        detector._last_checked = 0.0
+
+        assert detector.is_stale() is True
+        assert detector.is_stale() is True
+    finally:
+        backend.close()
+
+
 # ---------------------------------------------------------------------------
 # Test: reconnect failure raises StaleConnectionError
 # ---------------------------------------------------------------------------
@@ -183,12 +287,34 @@ def test_reconnect_failure_raises_stale_connection_error(tmp_path: Path) -> None
         SQLiteBackend,
         "_open_and_configure",
         side_effect=_sqlite3.DatabaseError("injected failure"),
-    ):
-        with pytest.raises(StaleConnectionError):
-            backend.list_entries()
+    ) as reopen:
+        for _ in range(2):
+            with pytest.raises(StaleConnectionError):
+                backend.list_entries()
 
-    # Cleanup — connection may be closed already
-    try:
+    assert reopen.call_count == 2, "a failed reconnect must not cache the stale handle as fresh"
+
+    # A failed candidate open leaves the last usable handle intact.
+    assert backend._conn.execute("SELECT 1").fetchone()[0] == 1
+    backend.close()
+
+
+def test_reconnect_reloads_vector_capabilities(tmp_path: Path) -> None:
+    pytest.importorskip("sqlite_vec")
+    db_path = tmp_path / "vectors.db"
+    backend = SQLiteBackend(db_path)
+    if not backend.vec_available:
         backend.close()
-    except Exception:
-        pass
+        pytest.skip("sqlite-vec extension not available")
+    try:
+        backup = tmp_path / "vectors.bak"
+        shutil.move(str(db_path), backup)
+        _fresh_empty_db(db_path)
+        write_sentinel(db_path, backup)
+        backend._stale_detector._last_checked = 0.0  # type: ignore[attr-defined]
+
+        assert backend.count() == 0
+        backend.upsert_vector("M-after-reconnect", [0.0] * backend._dim)
+        assert backend.vector_exists("M-after-reconnect")
+    finally:
+        backend.close()

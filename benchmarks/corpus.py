@@ -91,7 +91,7 @@ def generate_corpus(size: int, seed: int = 42) -> list[MemoryEntry]:
             namespace="benchmark",
             created_at=created,
             updated_at=created,
-            source="synthetic",
+            source="agent",
             recurrence=rng.randint(1, 5),
         )
         entries.append(entry)

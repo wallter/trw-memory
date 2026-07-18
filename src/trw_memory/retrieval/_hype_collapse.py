@@ -15,18 +15,18 @@ rerank) operate on real entries — composing cleanly with PRD-CORE-194.
 
 from __future__ import annotations
 
-import structlog
-
-from trw_memory._client_hype import is_hype_id, parent_of_hype_id
-
-logger = structlog.get_logger(__name__)
+from trw_memory._hype_ids import is_hype_id, parent_of_hype_id
 
 
-def hype_sibling_ids_in(stored_embeddings: dict[str, list[float]] | None) -> list[str]:
+def hype_sibling_ids_in(
+    stored_embeddings: dict[str, list[float]] | None,
+    valid_parent_ids: set[str] | None = None,
+) -> list[str]:
     """Return the synthetic ``#hype`` ids present in *stored_embeddings*."""
     if not stored_embeddings:
         return []
-    return [eid for eid in stored_embeddings if is_hype_id(eid)]
+    canonical_ids = valid_parent_ids or set()
+    return [eid for eid in stored_embeddings if eid not in canonical_ids and is_hype_id(eid)]
 
 
 def collapse_hype_ranking(
@@ -57,7 +57,9 @@ def collapse_hype_ranking(
     collapsed: list[tuple[str, float]] = []
     collapsed_hits = 0
     for entry_id, score in ranking:
-        if is_hype_id(entry_id):
+        if entry_id in valid_parent_ids:
+            parent_id = entry_id
+        elif is_hype_id(entry_id):
             collapsed_hits += 1
             parent_id = parent_of_hype_id(entry_id)
         else:

@@ -1,4 +1,5 @@
 """Wave 13: coverage gap-fill for wiki/storage.py (lines 78-79, 94-95, 132-133, 143-144)."""
+
 from __future__ import annotations
 
 import json
@@ -28,9 +29,7 @@ def _wiki_entry(entry_id: str = "M-001") -> MemoryEntry:
             "provenance": [],
             "confidence": "unverified",
             "evidence": [],
-            "outbound_refs": [
-                {"target_slug": "topic/bar", "ref_type": "related", "label": "", "bidirectional": True}
-            ],
+            "outbound_refs": [{"target_slug": "topic/bar", "ref_type": "related", "label": "", "bidirectional": True}],
             "path": "",
         }
     )

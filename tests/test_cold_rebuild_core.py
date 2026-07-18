@@ -16,13 +16,13 @@ import pytest
 # but only ENFORCE the timing SLO on dev hardware — see the conditional asserts
 # below. Skipping the whole test on CI would drop the security-package branch
 # coverage these heavy-write tests provide below the INFRA-020 90% gate.
-_ON_CI = os.environ.get("CI") == "true"
-
 from trw_memory.models.config import MemoryConfig
 from trw_memory.storage._cold_rebuild import _normalize_ts, rebuild_from_cold
 from trw_memory.storage.sqlite_backend import _resolve_cold_rebuild_base
 
 from ._test_cold_rebuild_support import _configure_structlog, _make_yaml, _open_fresh_db
+
+_ON_CI = os.environ.get("CI") == "true"
 
 
 def test_config_knob_default_is_true() -> None:

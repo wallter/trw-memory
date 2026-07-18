@@ -17,8 +17,10 @@ WHERE clause, ORDER BY, and LIMIT — so the degraded path preserves
 query semantics (status/namespace filters and row caps) rather than
 returning every row in the table.
 
-Returns ``(results, quarantine_delta)`` so callers can update their
-own ``quarantine_count_utf8`` counter.
+Returns ``(results, utf8_quarantine_delta)`` so callers can update their
+own ``quarantine_count_utf8`` counter. Cleanly decoded rows that fail model
+validation use a distinct event and process-wide schema counter; they never
+inflate the UTF-8 corruption metric.
 
 Extracted as PRD-DIST-245 Phase 1 batch 84.
 """
@@ -54,9 +56,10 @@ logger = structlog.get_logger(__name__)
 
 @dataclass(slots=True)
 class _FallbackMetrics:
-    """Process-wide counter for bytes-mode fallback hard failures."""
+    """Process-wide counters for row-recovery failures."""
 
     bytes_fallback_failures: int = 0
+    schema_row_quarantines: int = 0
 
 
 _fallback_metrics = _FallbackMetrics()
@@ -76,6 +79,16 @@ def get_bytes_fallback_failures() -> int:
 def reset_bytes_fallback_failures() -> None:
     """Reset the fallback-failure counter (test isolation / monitoring window)."""
     _fallback_metrics.bytes_fallback_failures = 0
+
+
+def get_schema_row_quarantines() -> int:
+    """Return cleanly decoded rows skipped because their schema was invalid."""
+    return _fallback_metrics.schema_row_quarantines
+
+
+def reset_schema_row_quarantines() -> None:
+    """Reset the semantic/schema quarantine counter (test isolation)."""
+    _fallback_metrics.schema_row_quarantines = 0
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +193,31 @@ def _quarantine_log(
     )
 
 
+def _schema_quarantine_log(
+    *,
+    db_path: Path,
+    table: str,
+    row_id: str | None,
+    row_index: int | None,
+    error: str,
+) -> None:
+    """Report a decoded row that cannot satisfy the persisted model schema."""
+    _fallback_metrics.schema_row_quarantines += 1
+    logger.warning(
+        "db_invalid_row_quarantined",
+        action="memory_row_schema_quarantined",
+        outcome="quarantined",
+        reason="schema_validation",
+        row_id=row_id,
+        column="row_to_entry",
+        db_path=str(db_path),
+        table=table,
+        row_index=row_index,
+        error=error,
+        schema_row_quarantines=_fallback_metrics.schema_row_quarantines,
+    )
+
+
 def fetch_rows_resilient(
     cursor: _CursorLike,
     *,
@@ -189,7 +227,7 @@ def fetch_rows_resilient(
 ) -> tuple[list[MemoryEntry], int]:
     """Iterate cursor row-by-row, quarantining bad-UTF-8 rows.
 
-    Returns ``(results, quarantine_delta)`` — caller adds the delta to
+    Returns ``(results, utf8_quarantine_delta)`` — caller adds the delta to
     its own ``quarantine_count_utf8`` counter. If ``fetchall()`` raises a
     UTF-8 decode error (older drivers), control routes to
     :func:`fetch_rows_via_bytes_fallback`, which re-executes *query* so
@@ -230,12 +268,10 @@ def fetch_rows_resilient(
             # narrow exception set mirrors row_to_entry's failure modes —
             # enum/int/float coercion raise ValueError, shape errors raise
             # TypeError, and dict-keyed lookups raise KeyError.
-            quarantine_delta += 1
-            _quarantine_log(
+            _schema_quarantine_log(
                 db_path=db_path,
                 table=query.table,
                 row_id=_safe_row_id(raw_row),
-                column="row_to_entry",
                 row_index=idx,
                 error=str(exc),
             )
@@ -328,12 +364,10 @@ def _decode_bytes_rows(
             # Columns decoded cleanly but model construction failed (bad
             # enum value, malformed JSON, schema drift). Quarantine the row
             # rather than failing the whole listing.
-            quarantine_delta += 1
-            _quarantine_log(
+            _schema_quarantine_log(
                 db_path=db_path,
                 table=table,
                 row_id=_row_id_from_bytes(raw_row),
-                column="row_to_entry",
                 row_index=idx,
                 error=str(exc),
             )

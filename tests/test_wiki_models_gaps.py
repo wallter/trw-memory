@@ -1,4 +1,5 @@
 """Wave 13: coverage gap-fill for wiki/models.py (lines 81, 107-110, 120-123, 137, 150, 184, 204, 207, 215, 221, 223)."""
+
 from __future__ import annotations
 
 import pytest
@@ -124,5 +125,5 @@ class TestValidateWikiPath:
 
     def test_leading_double_dot_in_path_raises_value_error(self) -> None:
         """Path starting with ../  → ValueError for traversal (existing ValidatePath behaviour)."""
-        with pytest.raises(ValueError, match="traversal|relative"):
+        with pytest.raises(ValueError, match=r"traversal|relative"):
             validate_wiki_path("../secret.md")

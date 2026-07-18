@@ -1,4 +1,3 @@
-# ruff: noqa: F401
 """Field and entry encryption tests for trw_memory.security.encryption."""
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ from trw_memory.security import (
     generate_master_key,
 )
 
-from ._test_encryption_support import _make_entry, clear_master_key_cache_fixture
+from ._test_encryption_support import _make_entry
 
 
 class TestEncryptDecryptField:

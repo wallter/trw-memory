@@ -8,12 +8,12 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, BaseModel, Field
 
 __all__ = ["_LifecycleConfigMixin"]
 
 
-class _LifecycleConfigMixin:
+class _LifecycleConfigMixin(BaseModel):
     # Dedup
     dedup_enabled: bool = Field(default=True, description="Enable semantic deduplication")
     dedup_skip_threshold: float = Field(
@@ -66,6 +66,16 @@ class _LifecycleConfigMixin:
     # Scoring
     decay_half_life_days: float = Field(default=14.0, gt=0.0, description="Half-life in days for recency decay")
     decay_use_exponent: float = Field(default=0.6, ge=0.0, le=1.0, description="Exponent for utility-based decay")
+    lifecycle_use_fsrs: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("lifecycle_use_fsrs", "memory_lifecycle_use_fsrs"),
+        description=(
+            "When True, entry_utility() uses FSRS-4.5 power-law retention "
+            "(R(t,S)=(1+FACTOR*t/S)^DECAY) instead of the Ebbinghaus exponential. "
+            "FSRS models spaced-repetition dynamics more accurately for entries "
+            "that have been recalled multiple times."
+        ),
+    )
     q_learning_rate: float = Field(default=0.15, ge=0.0, le=1.0, description="Q-learning update rate")
     score_relevance_weight: float = Field(
         default=0.4, ge=0.0, le=1.0, description="Weight for relevance in composite score"

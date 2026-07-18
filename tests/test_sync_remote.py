@@ -1,4 +1,3 @@
-# ruff: noqa: F401
 """Tests for trw_memory.sync.remote — PRD-CORE-047."""
 
 from __future__ import annotations
@@ -6,7 +5,6 @@ from __future__ import annotations
 import json
 import socket
 import time
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -382,6 +380,40 @@ class TestFetchSharedMemories:
 
         results = fetch_shared_memories("query", cfg, local_entries=local, embedder=embedder)
         assert results == []
+
+    @pytest.mark.parametrize("failure", ["available", "embed_batch", "dimension", "truncated_batch"])
+    @patch("trw_memory.sync.remote.httpx.Client")
+    def test_semantic_dedup_failure_preserves_lexical_candidates(
+        self,
+        mock_client_cls: MagicMock,
+        failure: str,
+    ) -> None:
+        """Optional semantic dedup cannot discard a successful remote fetch."""
+        _mock_httpx_client(
+            mock_client_cls,
+            status_code=200,
+            json_data=[{"summary": "Unique remote guidance"}],
+        )
+        embedder = MagicMock()
+        embedder.available.return_value = True
+        embedder.embed_batch.return_value = [[1.0, 0.0], [0.0, 1.0]]
+        if failure == "available":
+            embedder.available.side_effect = RuntimeError("provider unavailable")
+        elif failure == "embed_batch":
+            embedder.embed_batch.side_effect = RuntimeError("CUDA OOM")
+        elif failure == "dimension":
+            embedder.embed_batch.return_value = [[1.0, 0.0], [1.0]]
+        else:
+            embedder.embed_batch.return_value = [[1.0, 0.0]]
+
+        results = fetch_shared_memories(
+            "query",
+            _make_config(),
+            local_entries=[_make_entry(content="Different local knowledge")],
+            embedder=embedder,
+        )
+
+        assert [result["content"] for result in results] == ["[shared] Unique remote guidance"]
 
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_returns_empty_on_invalid_json(self, mock_client_cls: MagicMock) -> None:

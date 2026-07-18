@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 
+from ._test_embedding_support import StubEmbedder as StubEmbedder
+
 
 def make_entry(
     entry_id: str,
@@ -27,27 +29,6 @@ def make_entry(
         created_at=now,
         updated_at=now,
     )
-
-
-class StubEmbedder:
-    """Minimal EmbeddingProvider stub that uses the first 3 chars as a vector."""
-
-    def __init__(self, available: bool = True) -> None:
-        self._available = available
-
-    def embed(self, text: str) -> list[float] | None:
-        if not self._available:
-            return None
-        return [float(ord(c)) / 128.0 for c in text[:3].ljust(3)]
-
-    def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
-        return [self.embed(text) for text in texts]
-
-    def available(self) -> bool:
-        return self._available
-
-    def dim(self) -> int:
-        return 3
 
 
 def stored_embeddings_for(

@@ -1,4 +1,5 @@
 """Wave 15: coverage gap-fill for storage/persistence.py (lines 92-96, 105-110, 193, 229-230)."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -50,6 +51,7 @@ class TestCloseHandleWrappedPath:
         obj = WrappedHandle(inner)
         _close_handle(obj)
         inner.close.assert_called_once()
+        assert obj._fh is inner
 
     def test_raises_when_no_close_at_all(self) -> None:
         """_close_handle raises TypeError when no close method exists (lines 109-110)."""

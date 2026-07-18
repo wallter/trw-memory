@@ -2,8 +2,9 @@
 
 Belongs to ``client.py``. Re-exported there for back-compat.
 
-Single helper extracted from ``MemoryClient.store(...)``:
+Helpers extracted from ``MemoryClient.store(...)``:
 
+- ``_build_store_entry`` — shared new/update entry construction for single and bulk stores.
 - ``store_impl`` — full per-entry write path: schema validation,
   permission check, retry-drain, prepare_entry_for_store gate
   (PII / poisoning / anomaly), backend.store, vector upsert with
@@ -19,16 +20,15 @@ Extracted as PRD-DIST-246 batch 110.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
 
-import structlog
-
 from trw_memory._client_hype import expand_hype_siblings
-from trw_memory.exceptions import SchemaValidationError, StorageError
+from trw_memory.exceptions import MemoryNotFoundError, SchemaValidationError, StorageError
 from trw_memory.graph import schedule_graph_update
 from trw_memory.lifecycle.tiers._runtime import embedding_has_consumer, remember_entry_in_tiers
-from trw_memory.models.memory import MemoryEntry
+from trw_memory.models.memory import Assertion, MemoryEntry
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.security.poisoning import validate_store_inputs
 from trw_memory.security.rbac import Permission
@@ -41,8 +41,17 @@ from trw_memory.sync.conflict import increment_clock, init_clock
 
 if TYPE_CHECKING:
     from trw_memory.client import MemoryClient, StoreResultDict
+    from trw_memory.storage.interface import StorageBackend
 
-logger = structlog.get_logger(__name__)
+
+def _existing_entry_for_namespace(backend: StorageBackend, entry_id: str, namespace: str) -> MemoryEntry | None:
+    """Resolve an update target without exposing or mutating another namespace."""
+    existing = backend.get(entry_id)
+    if not isinstance(existing, MemoryEntry):
+        return None
+    if existing.namespace != namespace:
+        raise MemoryNotFoundError(f"Memory entry {entry_id!r} not found in namespace {namespace!r}")
+    return existing
 
 
 def _client_logger() -> Any:
@@ -58,6 +67,70 @@ def _make_id() -> str:
     return _impl()
 
 
+def _build_store_entry(
+    *,
+    memory_id: str,
+    existing: MemoryEntry | None,
+    content: str,
+    detail: str,
+    tags: list[str] | None,
+    evidence: list[str] | None,
+    importance: float,
+    namespace: str,
+    metadata: dict[str, str] | None,
+    expires: str,
+    assertions: list[Assertion] | None,
+    source: Literal["human", "agent", "tool", "consolidated"],
+    source_identity: str,
+    now: datetime,
+    installation_id: str,
+    local_node_id: str,
+) -> MemoryEntry:
+    """Build the identical new/update entry shape for single and bulk stores."""
+    entry_metadata = dict(existing.metadata) if existing is not None else {}
+    entry_metadata.update(metadata or {})
+    entry_metadata.setdefault("installation_id", installation_id)
+    entry_expires = expires or (existing.expires if existing is not None else "")
+
+    if existing is None:
+        return MemoryEntry(
+            id=memory_id,
+            content=content.strip(),
+            detail=detail,
+            tags=tags or [],
+            evidence=list(evidence or []),
+            importance=importance,
+            namespace=namespace,
+            metadata=entry_metadata,
+            created_at=now,
+            updated_at=now,
+            expires=entry_expires,
+            assertions=list(assertions or []),
+            source=source,
+            source_identity=source_identity,
+            vector_clock=init_clock(local_node_id),
+        )
+
+    return existing.model_copy(
+        update={
+            "content": content.strip(),
+            "detail": detail,
+            "tags": tags or [],
+            "evidence": list(evidence) if evidence is not None else existing.evidence,
+            "importance": importance,
+            "metadata": entry_metadata,
+            "updated_at": now,
+            "expires": entry_expires,
+            "assertions": list(assertions) if assertions is not None else existing.assertions,
+            "source": source,
+            "source_identity": source_identity or existing.source_identity,
+            # Advance local causality; resetting the clock makes a newer local
+            # update appear concurrent with its stale snapshot.
+            "vector_clock": increment_clock(existing.vector_clock, local_node_id),
+        }
+    )
+
+
 async def store_impl(
     client: MemoryClient,
     content: str,
@@ -66,6 +139,8 @@ async def store_impl(
     detail: str = "",
     metadata: dict[str, str] | None = None,
     expires: str = "",
+    evidence: list[str] | None = None,
+    assertions: list[Assertion] | None = None,
     *,
     source: Literal["human", "agent", "tool", "consolidated"] = "agent",
     source_identity: str = "",
@@ -95,48 +170,28 @@ async def store_impl(
     memory_id = entry_id or _make_id()
     async with client._lock:
         backend = client._get_backend()
-        existing = backend.get(memory_id) if entry_id is not None else None
+        existing = (
+            _existing_entry_for_namespace(backend, memory_id, client._namespace) if entry_id is not None else None
+        )
         now = datetime.now(timezone.utc)
-        entry_metadata = dict(existing.metadata) if existing is not None else {}
-        entry_metadata.update(metadata or {})
-        entry_metadata.setdefault("installation_id", client._installation_id)
-        entry_expires = expires or (existing.expires if existing is not None else "")
-
-        if existing is None:
-            entry = MemoryEntry(
-                id=memory_id,
-                content=content.strip(),
-                detail=detail,
-                tags=tags or [],
-                importance=importance,
-                namespace=client._namespace,
-                metadata=entry_metadata,
-                created_at=now,
-                updated_at=now,
-                expires=entry_expires,
-                source=source,
-                source_identity=source_identity,
-                vector_clock=init_clock(client._local_node_id),
-            )
-        else:
-            entry = existing.model_copy(
-                update={
-                    "content": content.strip(),
-                    "detail": detail,
-                    "tags": tags or [],
-                    "importance": importance,
-                    "metadata": entry_metadata,
-                    "updated_at": now,
-                    "expires": entry_expires,
-                    "source": source,
-                    "source_identity": source_identity or existing.source_identity,
-                    # FR04: advance the local node's counter on edit so causality
-                    # is expressible. Resetting to init_clock() here stalled the
-                    # clock at {node: 1}, making a locally-newer entry look
-                    # concurrent with its own stale remote snapshot.
-                    "vector_clock": increment_clock(existing.vector_clock, client._local_node_id),
-                }
-            )
+        entry = _build_store_entry(
+            memory_id=memory_id,
+            existing=existing,
+            content=content,
+            detail=detail,
+            tags=tags,
+            evidence=evidence,
+            importance=importance,
+            namespace=client._namespace,
+            metadata=metadata,
+            expires=expires,
+            assertions=assertions,
+            source=source,
+            source_identity=source_identity,
+            now=now,
+            installation_id=client._installation_id,
+            local_node_id=client._local_node_id,
+        )
 
         decision = prepare_entry_for_store(
             entry,
@@ -175,7 +230,9 @@ async def store_impl(
         # Only pay for the embedding model when a vector sink can actually
         # consume the result; otherwise every downstream upsert_vector no-ops.
         embedder = client._get_embedder() if embedding_has_consumer(client._config, backend) else None
-        embedding = embedder.embed(f"{entry.content} {entry.detail}") if embedder is not None else None
+        embedding = (
+            await asyncio.to_thread(embedder.embed, f"{entry.content} {entry.detail}") if embedder is not None else None
+        )
         if client._namespace.startswith("team:"):
             NamespaceManager(backend).ensure_team_namespace(client._namespace, created_at=now)
         # S1 fix: commit the row + its vector in ONE transaction so a crash

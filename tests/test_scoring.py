@@ -7,7 +7,6 @@ Covers:
   source boost, clamp behaviour
 - apply_time_decay: linear decay, 0.3 floor, naive/aware datetime handling
 - bayesian_calibrate: weighted average, org_weight cap
-- compute_calibration_accuracy: ratio tiers
 - enforce_tier_distribution: demotion logic, small-set no-op
 - rank_by_utility: relevance+utility blending, wildcard query
 - entry_utility: field extraction from MemoryEntry dict
@@ -288,6 +287,9 @@ def test_bayesian_calibrate_clamp() -> None:
 
 # ---------------------------------------------------------------------------
 # compute_calibration_accuracy
+# (restored release-verify 2026-07-17 P1: b6237f80d9 deleted these as "unused",
+#  but b918df2f19 restored the function — it is a load-bearing cross-package
+#  import consumed by trw-mcp _learning_helpers — without re-adding the tests.)
 # ---------------------------------------------------------------------------
 
 
@@ -578,6 +580,13 @@ def test_compute_utility_score_extreme_age_bounded() -> None:
 
 def test_rank_by_utility_empty() -> None:
     assert rank_by_utility([], ["python"], 0.5) == []
+
+
+def test_rank_by_utility_compatibility_import_drops_expired_entries() -> None:
+    expired = _entry(entry_id="M-expired")
+    expired["expires"] = "2020-01-01T00:00:00+00:00"
+
+    assert rank_by_utility([expired], ["python"], 0.5) == []
 
 
 def test_rank_by_utility_wildcard_all_same_relevance() -> None:

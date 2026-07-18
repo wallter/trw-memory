@@ -24,9 +24,10 @@ the caller supplies the locked, owning connection for (a).
 from __future__ import annotations
 
 import sqlite3
-from typing import TYPE_CHECKING, Literal, TypedDict, cast, get_args
+from typing import TYPE_CHECKING, Literal, cast, get_args
 
 import structlog
+from typing_extensions import TypedDict
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -104,6 +105,7 @@ def run_checkpoint(
     *,
     wal_reset_safe: bool,
     db_path: str,
+    db_error: type[Exception] = sqlite3.Error,
 ) -> CheckpointResult:
     """Run a WAL checkpoint via *execute_pragma*, returning a :class:`CheckpointResult`.
 
@@ -114,8 +116,8 @@ def run_checkpoint(
 
     A resetting checkpoint that returns ``busy=1`` (readers held pages) falls
     back to a non-blocking ``PASSIVE`` checkpoint on the SAME connection.
-    Fail-open: any ``sqlite3.Error`` yields ``mode="error"`` and is logged,
-    never raised.
+    Fail-open: any active DB-API ``db_error`` yields ``mode="error"`` and is
+    logged, never raised.
     """
     used: RunMode = normalize_mode(requested_mode, wal_reset_safe=wal_reset_safe)
     try:
@@ -125,7 +127,7 @@ def run_checkpoint(
             # this same connection (no second connection -> no race).
             busy, checkpointed = _read_checkpoint_row(execute_pragma("PRAGMA wal_checkpoint(PASSIVE)"))
             used = "PASSIVE"
-    except sqlite3.Error as exc:
+    except db_error as exc:
         logger.warning("wal_checkpoint_failed", error=str(exc), db=db_path)
         return CheckpointResult(busy=1, checkpointed=0, mode="error")
     logger.debug(

@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from typing import TypedDict
+
+from typing_extensions import TypedDict
 
 from trw_memory.models.memory import MemoryEntry
 
@@ -33,8 +34,6 @@ def _truncate(text: str, max_len: int = 80) -> str:
 
 def _format_tags(tags: list[str]) -> str:
     """Format a tag list as ``[tag1,tag2]``."""
-    if not tags:
-        return "[]"
     return "[" + ",".join(tags) + "]"
 
 
@@ -143,7 +142,7 @@ def format_import_summary(imported: int, skipped: int) -> str:
 def entry_to_export_dict(entry: MemoryEntry) -> dict[str, object]:
     """Convert a MemoryEntry to a serializable dict for lossless export.
 
-    Includes all 28 fields to enable full backup/restore via CLI
+    Includes every field returned by :meth:`MemoryEntry.to_dict` for full backup/restore via CLI
     export/import.
     """
     return entry.to_dict()

@@ -25,6 +25,7 @@ from trw_memory.sync._remote_common import (
     SnapshotHashPayload,
     _raise_local_only_violation,
     build_platform_headers,
+    encode_learning_api_v1,
     is_valid_platform_url,
 )
 from trw_memory.sync.retry_queue import RetryQueue
@@ -35,11 +36,13 @@ logger = structlog.get_logger(__name__)
 def _anonymize_entry(entry: MemoryEntry, project_root: str = "") -> AnonymizedEntry:
     content = redact_paths(strip_pii(entry.content), project_root)
     detail = redact_paths(strip_pii(entry.detail), project_root)
-    return AnonymizedEntry(
+    # Canonical ``importance`` -> external wire vocabulary via the sole
+    # learning_api_v1 boundary encoder (PRD-CORE-181-FR06).
+    return encode_learning_api_v1(
         summary=content[:MAX_SUMMARY_LENGTH],
         detail=detail[:MAX_DETAIL_LENGTH] if detail else None,
         tags=entry.tags[:MAX_TAGS_COUNT],
-        impact=entry.importance,
+        importance=entry.importance,
         embedding=None,
         source_project=anonymize_installation_id(entry.metadata.get("installation_id", "")),
         source_learning_id=entry.id,
@@ -86,10 +89,6 @@ def _publish_payload_result(
         return {"success": False, "remote_id": None, "retryable": True}
 
 
-def _publish_payload(payload: dict[str, object], cfg: MemoryConfig, *, entry_id: str = "") -> bool:
-    return _publish_payload_result(payload, cfg, entry_id=entry_id)["success"]
-
-
 def publish_memory_result(
     entry: MemoryEntry,
     cfg: MemoryConfig,
@@ -126,32 +125,55 @@ def publish_memory(
 
 
 def drain_retry_queue(queue: RetryQueue, cfg: MemoryConfig) -> RetryDrainResult:
+    result, _ = _drain_retry_queue_with_ids(queue, cfg)
+    return result
+
+
+def _drain_retry_queue_with_ids(
+    queue: RetryQueue,
+    cfg: MemoryConfig,
+) -> tuple[RetryDrainResult, list[str]]:
     if cfg.local_only:
         logger.warning("memory_retry_drain_blocked_local_only")
         _raise_local_only_violation()
     if not cfg.sync_enabled or not cfg.platform_url:
-        return {"drained": 0, "failed": 0, "skipped": queue.depth(), "remote_ids": {}}
+        return {
+            "drained": 0,
+            "failed": 0,
+            "skipped": queue.depth(),
+            "remote_ids": {},
+        }, []
     if not is_valid_platform_url(cfg.platform_url):
         logger.warning("memory_retry_drain_invalid_platform_url")
-        return {"drained": 0, "failed": 0, "skipped": queue.depth(), "remote_ids": {}}
+        return {
+            "drained": 0,
+            "failed": 0,
+            "skipped": queue.depth(),
+            "remote_ids": {},
+        }, []
 
-    remote_ids: dict[str, str] = {}
+    published_remote_ids: list[str | None] = []
 
     def publish_payload(payload: dict[str, object]) -> bool:
         source_learning_id = payload.get("source_learning_id")
         entry_id = str(source_learning_id) if isinstance(source_learning_id, str) else ""
         result = _publish_payload_result(payload, cfg, entry_id=entry_id)
-        if result["success"] and entry_id and result["remote_id"] is not None:
-            remote_ids[entry_id] = result["remote_id"]
+        if result["success"]:
+            published_remote_ids.append(result["remote_id"])
         return result["success"]
 
-    drain_result = queue.drain(publish_payload)
+    drain_result, published_entry_ids = queue._drain_with_ids(publish_payload)
+    remote_ids = {
+        entry_id: remote_id
+        for entry_id, remote_id in zip(published_entry_ids, published_remote_ids, strict=True)
+        if remote_id is not None
+    }
     return {
         "drained": drain_result["drained"],
         "failed": drain_result["failed"],
         "skipped": drain_result["skipped"],
         "remote_ids": remote_ids,
-    }
+    }, published_entry_ids
 
 
 def clear_retry_queue(queue: RetryQueue) -> None:

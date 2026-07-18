@@ -35,6 +35,7 @@ class TestConsolidateCycle:
         result = consolidate_cycle(storage, embedder, dry_run=True, config=MemoryConfig())
 
         assert result["dry_run"] is True
+        assert result["clusters_found"] == len(result["clusters"]) == 1
         assert result["consolidated_count"] == 0
         assert result["skipped_reason"] == "dry_run"
         assert storage.count() == 3
@@ -363,7 +364,8 @@ class TestConsolidateCycle:
         consolidated = [e for e in storage.list_entries() if e.source == "consolidated"]
         assert consolidated == []
 
-    def test_partial_archival_failure_restores_originals_when_delete_fails(self) -> None:
+    @pytest.mark.parametrize("delete_raises", [False, True])
+    def test_partial_archival_failure_restores_originals_when_delete_fails(self, delete_raises: bool) -> None:
         """memory-lifecycle-7: rollback must restore originals even if the
 
         consolidated-entry delete itself fails. On a YAML backend the per-entry
@@ -407,9 +409,11 @@ class TestConsolidateCycle:
             raise RuntimeError("archive failed mid-loop")
 
         def _delete_always_fails(entry_id: str) -> bool:
-            # The consolidated-entry delete during rollback fails (returns
-            # False) — this is the path that used to skip _restore_originals.
+            # Both a false return and an exception must happen only after the
+            # originals are restored.
             del entry_id
+            if delete_raises:
+                raise StorageError("delete exploded")
             return False
 
         storage.update_override = _update_then_fail

@@ -18,7 +18,8 @@ import structlog
 
 from trw_memory.embeddings import get_local_embedder
 from trw_memory.exceptions import ConfigError
-from trw_memory.lifecycle.scoring import entry_utility, rank_by_utility
+from trw_memory.lifecycle._recall import rank_by_utility
+from trw_memory.lifecycle.scoring import entry_utility
 from trw_memory.lifecycle.tiers._runtime import remember_entry_data_in_tiers, supports_tier_runtime, tier_candidates
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
@@ -323,16 +324,14 @@ def memory_recall_impl(
     # admitted entries and `tokens_used` matches what is actually returned.
     result_dicts = _apply_sec001_recall_policy(result_dicts, config=cfg, namespace=namespace)
 
-    tokens_used = 0
     tokens_truncated = False
 
     if token_budget is not None and result_dicts:
-        result_dicts, tokens_used, tokens_truncated = apply_token_budget(result_dicts, token_budget)
-    else:
-        tokens_used = sum(estimate_entry_tokens(d) for d in result_dicts)
+        result_dicts, _, tokens_truncated = apply_token_budget(result_dicts, token_budget)
 
     # Apply limit cap AFTER token budget
     result_dicts = result_dicts[:limit]
+    tokens_used = sum(estimate_entry_tokens(d) for d in result_dicts)
     _record_access_by_namespace(result_dicts, backend, namespace, namespace_backend_factory)
     append_audit_event(
         cfg,

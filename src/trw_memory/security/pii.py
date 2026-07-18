@@ -15,13 +15,10 @@ import math
 import re
 from enum import Enum
 
-import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
 from trw_memory.exceptions import ConfigError, MemoryError
 from trw_memory.models.memory import MemoryEntry
-
-logger = structlog.get_logger(__name__)
 
 
 class PIIType(str, Enum):

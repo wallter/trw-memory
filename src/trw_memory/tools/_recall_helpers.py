@@ -10,8 +10,8 @@ from contextlib import ExitStack
 import structlog
 
 from trw_memory.graph import graph_query, list_org_shared_entries
-from trw_memory.lifecycle._recall import record_recall_access
-from trw_memory.lifecycle.scoring import entry_utility, rank_by_utility
+from trw_memory.lifecycle._recall import rank_by_utility, record_recall_access
+from trw_memory.lifecycle.scoring import entry_utility
 from trw_memory.lifecycle.tiers._scoring import compute_importance_score
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus

@@ -100,6 +100,7 @@ class TestFsyncOnAppend:
         with patch("os.fsync") as mock_fsync:
             log.append(action="test", target_id="M-test")
             mock_fsync.assert_called_once()
+        assert '"id":"M-test"' in (tmp_path / "audit.jsonl").read_text()
 
 
 # --- FR07: __repr__ ---

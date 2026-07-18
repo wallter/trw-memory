@@ -35,15 +35,35 @@ import structlog
 
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
-from trw_memory.storage._resilient_fetch import is_utf8_decode_error
+from trw_memory.storage._resilient_fetch import FetchQuery, is_utf8_decode_error
+from trw_memory.storage._sql_utils import iter_bind_chunks
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from trw_memory.storage._resilient_fetch import FetchQuery
     from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 logger = structlog.get_logger(__name__)
+
+_SAFE_TAGS_JSON = (
+    "CASE WHEN json_valid(tags) THEN CASE WHEN json_type(tags) = 'array' THEN tags ELSE '[]' END ELSE '[]' END"
+)
+_TAG_KEYWORD_CLAUSE = (
+    f"EXISTS (SELECT 1 FROM json_each({_SAFE_TAGS_JSON}) AS query_tag "  # noqa: S608 - fixed internal SQL
+    "WHERE CAST(query_tag.value AS TEXT) LIKE ? ESCAPE '\\')"
+)
+_EXACT_TAG_CLAUSE = (
+    f"EXISTS (SELECT 1 FROM json_each({_SAFE_TAGS_JSON}) AS required_tag "  # noqa: S608 - fixed internal SQL
+    "WHERE required_tag.type = 'text' AND required_tag.value = ?)"
+)
+
+
+def _append_exact_tag_filters(where_sql: str, params: list[object], tags: list[str] | None) -> str:
+    """Add exact JSON-array membership predicates for every required tag."""
+    if not tags:
+        return where_sql
+    params.extend(tags)
+    return f"({where_sql}) AND " + " AND ".join([_EXACT_TAG_CLAUSE] * len(tags))
 
 
 def _execute_resilient(
@@ -82,10 +102,12 @@ def search(
     namespace: str | None = None,
 ) -> list[MemoryEntry]:
     """Keyword LIKE search on content + detail + tags with filters."""
+    if top_k <= 0:
+        return []
     escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     like_term = f"%{escaped}%"
     like_clause = (
-        "(id LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\' OR detail LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')"
+        f"(id LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\' OR detail LIKE ? ESCAPE '\\' OR {_TAG_KEYWORD_CLAUSE})"
     )
     like_params: list[object] = [like_term, like_term, like_term, like_term]
     filter_sql, filter_params = backend._build_filter_clause(
@@ -98,17 +120,10 @@ def search(
     # not before. Previously the SQL LIMIT truncated rows first and the
     # in-memory tag filter pruned that truncated set, so tag-scoped searches
     # under-delivered (returned fewer than top_k matching entries even when
-    # more existed). Tags are stored as a JSON array (e.g. ["foo","bar"]); we
-    # match each required tag as its JSON-quoted token to avoid substring
-    # collisions ("foo" must not match ["foobar"]). The in-memory issubset
-    # check below remains as the authoritative exact filter.
-    tag_clauses: list[str] = []
-    for tag in tags or []:
-        tag_clauses.append("tags LIKE ? ESCAPE '\\'")
-        escaped_tag = tag.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        params.append(f'%"{escaped_tag}"%')
-    if tag_clauses:
-        where_sql = f"{where_sql} AND " + " AND ".join(tag_clauses)
+    # more existed). JSON1 array membership preserves exact tag values across
+    # quotes, backslashes, Unicode, and control-character serialization. The
+    # in-memory issubset check below remains the authoritative exact filter.
+    where_sql = _append_exact_tag_filters(where_sql, params, tags)
     order_by = "importance DESC, updated_at DESC"
     sql = (
         f"SELECT {select_columns_sql} FROM memories WHERE {where_sql} "  # noqa: S608
@@ -116,8 +131,6 @@ def search(
     )
     params.append(top_k)
     fetch_query = backend._fetch_query(where_sql=where_sql, params=params[:-1], order_by=order_by, limit=top_k)
-
-    backend._ensure_connection_fresh()
 
     try:
         with backend._lock:
@@ -150,6 +163,8 @@ def search_fts(
     BM25 for candidate retrieval; the caller's hybrid pipeline may re-rank.
     Falls back to an empty list when no FTS candidates match.
     """
+    if top_k <= 0:
+        return []
     # Sanitize: strip whitespace, enforce max length, escape for FTS5 phrase query.
     # Phrase-quoting (wrapping in "...") makes FTS5 operators (AND, OR, NOT, NEAR)
     # and colon prefix operators literal; the empty guard and length cap add
@@ -165,13 +180,15 @@ def search_fts(
         status=status, namespace=namespace, min_importance=min_importance
     )
     over_fetch = min(top_k * 4, 500)
-    backend._ensure_connection_fresh()
     try:
         with backend._lock:
-            fts_rows = backend._conn.execute(
-                "SELECT id FROM memories_fts WHERE memories_fts MATCH ? ORDER BY rank LIMIT ?",
-                (fts_query, over_fetch),
-            ).fetchall()
+            candidate_sql = f"""
+                SELECT memories_fts.id FROM memories_fts
+                JOIN memories ON memories.id = memories_fts.id
+                WHERE memories_fts MATCH ? AND {filter_sql}
+                ORDER BY rank LIMIT ?
+            """  # noqa: S608 - filter_sql is built only from fixed internal clauses.
+            fts_rows = backend._conn.execute(candidate_sql, (fts_query, *filter_params, over_fetch)).fetchall()
             if not fts_rows:
                 return []
             ids = [str(row[0]) for row in fts_rows]
@@ -271,6 +288,8 @@ def entries_with_assertions(
     rows for aggregate stats, so an unbounded full-table scan on a large store
     is avoided (memory-storage-5).
     """
+    if limit <= 0:
+        return []
     where_sql = "assertions IS NOT NULL AND assertions != '[]'"
     params: tuple[object, ...] = ()
     if status is not None:
@@ -286,7 +305,6 @@ def entries_with_assertions(
     )
     exec_params: tuple[object, ...] = (*params, limit)
     fetch_query = backend._fetch_query(where_sql=where_sql, params=params, order_by=order_by, limit=limit)
-    backend._ensure_connection_fresh()
     try:
         with backend._lock:
             return _execute_resilient(backend, sql, exec_params, fetch_query=fetch_query)
@@ -322,20 +340,16 @@ def list_entries(
     predicate is pushed into SQL so the LIMIT applies AFTER tag filtering — a
     tagged entry past the row limit (older ``updated_at``) is still returned,
     rather than being truncated away before the filter runs (the recall-path
-    silent-drop bug). Tags are stored as a JSON array (e.g. ``["foo","bar"]``);
-    each required tag matches its JSON-quoted token so ``"foo"`` does not match
-    ``["foobar"]``. An exact ``issubset`` re-check below remains authoritative.
+    silent-drop bug). JSON1 array membership preserves exact values without
+    coupling the query to JSON string serialization. An exact ``issubset``
+    re-check below remains authoritative.
     """
+    if limit <= 0:
+        return []
     where_sql, params = backend._build_filter_clause(status=status, namespace=namespace, min_importance=min_importance)
     if exclude_superseded:
         where_sql = f"({where_sql}) AND (invalid_from IS NULL OR invalid_from = '')"
-    tag_clauses: list[str] = []
-    for tag in tags or []:
-        tag_clauses.append("tags LIKE ? ESCAPE '\\'")
-        escaped_tag = tag.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        params.append(f'%"{escaped_tag}"%')
-    if tag_clauses:
-        where_sql = f"({where_sql}) AND " + " AND ".join(tag_clauses)
+    where_sql = _append_exact_tag_filters(where_sql, params, tags)
     order_by = "updated_at DESC"
     sql = (
         f"SELECT {select_columns_sql} FROM memories WHERE {where_sql} "  # noqa: S608
@@ -344,7 +358,6 @@ def list_entries(
     filter_params = list(params)
     params.append(limit)
     fetch_query = backend._fetch_query(where_sql=where_sql, params=filter_params, order_by=order_by, limit=limit)
-    backend._ensure_connection_fresh()
     try:
         with backend._lock:
             results = _execute_resilient(backend, sql, params, fetch_query=fetch_query)
@@ -354,9 +367,8 @@ def list_entries(
             path=str(backend._db_path),
         ) from exc
     if tags:
-        # Authoritative exact filter: the SQL LIKE on the JSON token narrows the
-        # candidate set (so the LIMIT bites the filtered rows) but issubset is
-        # the source of truth for "entry has ALL required tags".
+        # JSON1 narrows candidates before LIMIT; issubset remains the source of
+        # truth for "entry has ALL required tags" after materialization.
         required = set(tags)
         results = [e for e in results if required.issubset(set(e.tags))]
     return results
@@ -380,14 +392,18 @@ def list_namespaces(backend: SQLiteBackend, required_namespaces: list[str] | Non
                 allowed = list(dict.fromkeys(required_namespaces))
                 if not allowed:
                     return []
-                placeholders = ", ".join(["?"] * len(allowed))
-                rows = backend._conn.execute(
-                    f"SELECT DISTINCT namespace FROM memories WHERE namespace IN ({placeholders}) ORDER BY namespace",  # noqa: S608 — placeholders are positional binds, not interpolated values
-                    allowed,
-                ).fetchall()
+                rows = []
+                for chunk in iter_bind_chunks(allowed):
+                    placeholders = ", ".join(["?"] * len(chunk))
+                    rows.extend(
+                        backend._conn.execute(
+                            f"SELECT DISTINCT namespace FROM memories WHERE namespace IN ({placeholders})",  # noqa: S608
+                            chunk,
+                        ).fetchall()
+                    )
             else:
                 rows = backend._conn.execute("SELECT DISTINCT namespace FROM memories ORDER BY namespace").fetchall()
-        return [str(row[0]) for row in rows]
+        return sorted({str(row[0]) for row in rows})
     except sqlite3.Error as exc:
         raise StorageError(
             f"Failed to list namespaces: {exc}",

@@ -26,14 +26,10 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any
 
-import structlog
-
 from trw_memory.models.memory import MemoryEntry
 
 if TYPE_CHECKING:
     from trw_memory.client import MemoryResultDict
-
-logger = structlog.get_logger(__name__)
 
 DEFAULT_DISTILLED_RECALL_WEIGHT: float = 0.75
 

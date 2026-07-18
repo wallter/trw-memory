@@ -1,4 +1,5 @@
 """Wave 13: coverage gap-fill for wiki/indexer.py."""
+
 from __future__ import annotations
 
 import pytest
@@ -61,9 +62,7 @@ class TestProposeWikiPages:
     def test_existing_slug_excluded_from_proposals(self) -> None:
         """Slug matching existing_slugs → skipped (line 118 via existing check)."""
         candidate = self._make_candidate("My Topic")
-        result = propose_wiki_pages(
-            [candidate], enabled=True, dry_run=False, existing_slugs=["topic/my-topic"]
-        )
+        result = propose_wiki_pages([candidate], enabled=True, dry_run=False, existing_slugs=["topic/my-topic"])
         assert result.proposals == []
 
     def test_title_with_all_non_slug_chars_becomes_untitled(self) -> None:

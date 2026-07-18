@@ -8,7 +8,8 @@ import functools
 import inspect
 import json
 import sys
-from collections.abc import Awaitable, Callable
+import threading
+from collections.abc import Awaitable, Callable, Coroutine
 from pathlib import Path
 from typing import ParamSpec, TypeVar, cast, overload
 
@@ -47,6 +48,37 @@ logger = structlog.get_logger(__name__)
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+
+def _run_async(coro: Coroutine[object, object, R]) -> R:
+    """Run CLI dispatch without replacing a caller-owned event loop.
+
+    ``asyncio.run`` clears the current thread's dormant policy loop. That is
+    harmless in a fresh console process but leaks an embedding host's loop and
+    self-pipe sockets when ``main`` is invoked as a library entry point. A
+    short-lived worker thread gives dispatch an isolated loop while preserving
+    both dormant and running loops owned by the caller.
+    """
+    results: list[R] = []
+    errors: list[BaseException] = []
+
+    def _runner() -> None:
+        try:
+            results.append(asyncio.run(coro))
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=_runner, name="trw-memory-cli-dispatch")
+    thread.start()
+    thread.join()
+    if errors:
+        raise errors[0]
+    return results[0]
+
+
+def _emit_json(payload: object) -> int:
+    print(json.dumps(payload, sort_keys=True))
+    return 0
 
 
 @overload
@@ -180,49 +212,39 @@ def _handle_wiki_lint(args: argparse.Namespace) -> int:
     except JsonInputError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
-    print(json.dumps(memory_wiki_lint_impl(pages, top_limit=args.top_limit), sort_keys=True))
-    return 0
+    return _emit_json(memory_wiki_lint_impl(pages, top_limit=args.top_limit))
 
 
 @_cli_error_boundary
 def _handle_code_index(args: argparse.Namespace) -> int:
-    print(json.dumps(memory_code_index_impl(args.root, namespace=args.namespace), sort_keys=True))
-    return 0
+    return _emit_json(memory_code_index_impl(args.root, namespace=args.namespace))
 
 
 @_cli_error_boundary
 def _handle_code_search(args: argparse.Namespace) -> int:
-    print(
-        json.dumps(
-            memory_code_search_impl(
-                args.root,
-                args.query,
-                namespace=args.namespace,
-                path_glob=args.path_glob,
-                language=args.language,
-                limit=args.limit,
-            ),
-            sort_keys=True,
+    return _emit_json(
+        memory_code_search_impl(
+            args.root,
+            args.query,
+            namespace=args.namespace,
+            path_glob=args.path_glob,
+            language=args.language,
+            limit=args.limit,
         )
     )
-    return 0
 
 
 @_cli_error_boundary
 def _handle_code_symbol(args: argparse.Namespace) -> int:
-    print(
-        json.dumps(
-            memory_code_symbol_impl(
-                args.root,
-                args.name,
-                namespace=args.namespace,
-                kind=args.kind,
-                path=args.path,
-            ),
-            sort_keys=True,
+    return _emit_json(
+        memory_code_symbol_impl(
+            args.root,
+            args.name,
+            namespace=args.namespace,
+            kind=args.kind,
+            path=args.path,
         )
     )
-    return 0
 
 
 async def _dispatch(args: argparse.Namespace) -> int:
@@ -270,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         verbosity = -1
 
     configure_logging(verbosity=verbosity, log_level=args.log_level)
-    return asyncio.run(_dispatch(args))
+    return _run_async(_dispatch(args))
 
 
 if __name__ == "__main__":

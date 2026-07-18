@@ -132,6 +132,9 @@ class SSESubscriber:
                 data: dict[str, object] = raw
                 event_type = self._pending_event_type or str(data.get("type", ""))
                 if event_type in {"learning_published", "learning_updated", "learning_retired"}:
+                    # Standard SSE puts the event name in the ``event:`` line;
+                    # downstream handlers consume the normalized payload only.
+                    data["type"] = event_type
                     if self._pending_event_id:
                         self._last_event_id = self._pending_event_id
                     self._on_event(data)

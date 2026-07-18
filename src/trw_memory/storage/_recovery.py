@@ -34,6 +34,7 @@ from trw_memory.storage._connection import (
 from trw_memory.storage._connection import (
     connect as _connection_connect,
 )
+from trw_memory.storage._permissions import harden_db_file_mode, prepare_db_file_mode
 
 # Bounded open-time preflight + advisory state sidecar extracted to
 # _recovery_preflight.py (PRD-DIST-245 effective-LOC ratchet). Re-exported
@@ -180,6 +181,7 @@ def _open_recovered_conn(
     sqlcipher_key_hex: str | None,
 ) -> Any:
     """Open the post-recovery DB with WAL + ensure_schema."""
+    prepare_db_file_mode(db_path)
     new_conn = _connection_connect(
         db_path,
         dbapi=dbapi,
@@ -190,6 +192,7 @@ def _open_recovered_conn(
     # Match the hardened open profile (busy_timeout + WAL + journal_size_limit)
     # so a recovered connection is configured identically to a normal open.
     apply_open_pragmas(new_conn)
+    harden_db_file_mode(db_path)
     ensure_schema(new_conn)
     return new_conn
 

@@ -17,8 +17,11 @@ Signatures are optional — legacy SHA-256-only chains verify unchanged.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import os
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,16 +30,16 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from trw_memory.exceptions import StorageError
+from trw_memory.storage.persistence import lock_for_rmw
 
 try:
     from nacl.exceptions import BadSignatureError
-    from nacl.signing import SigningKey, VerifyKey
+    from nacl.signing import SigningKey
 
     _NACL_AVAILABLE = True
 except ImportError:  # pragma: no cover — PyNaCl is optional
     _NACL_AVAILABLE = False
     SigningKey = Any  # type: ignore[misc,assignment]
-    VerifyKey = Any  # type: ignore[misc,assignment]
     BadSignatureError = Exception  # type: ignore[misc,assignment]
 
 __all__ = [
@@ -128,6 +131,64 @@ def _read_last(chain_path: Path) -> ProvenanceEntry | None:
         ) from None
 
 
+def _append_record(
+    chain_path: Path,
+    entry: ProvenanceEntry,
+    *,
+    request_signature: bool,
+    signing_key: Any | None,
+) -> tuple[ProvenanceEntry, str, str]:
+    """Link and securely append one complete provenance record."""
+    chain_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_for_rmw(chain_path):
+        if chain_path.is_symlink():
+            raise OSError("refusing symlink provenance chain path")
+        prior = _read_last(chain_path)
+        prev_hash = _hash(prior) if prior is not None else _GENESIS
+
+        if request_signature and _NACL_AVAILABLE and signing_key is not None:
+            msg = _sign_message(entry.learning_id, entry.content_hash, prev_hash)
+            sig_bytes: bytes = signing_key.sign(msg).signature
+            linked = entry.model_copy(update={"prev_hash": prev_hash, "signature": sig_bytes.hex()})
+        elif request_signature:
+            _LOG.warning(
+                "provenance.append_signed_degraded",
+                reason="pynacl_unavailable" if not _NACL_AVAILABLE else "no_signing_key",
+                learning_id=entry.learning_id,
+            )
+            linked = entry.model_copy(update={"prev_hash": prev_hash, "signature": ""})
+        else:
+            linked = entry.model_copy(update={"prev_hash": prev_hash})
+
+        payload = _canonical(linked) + b"\n"
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        fd = os.open(chain_path, flags, stat.S_IRUSR | stat.S_IWUSR)
+        original_size = os.fstat(fd).st_size
+        try:
+            opened = os.fstat(fd)
+            leaf = os.lstat(chain_path)
+            if not stat.S_ISREG(leaf.st_mode) or (opened.st_dev, opened.st_ino) != (leaf.st_dev, leaf.st_ino):
+                raise OSError("provenance chain path changed during secure open")
+            fchmod = getattr(os, "fchmod", None)
+            if fchmod is not None:
+                fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+            remaining = memoryview(payload)
+            while remaining:
+                written = os.write(fd, remaining)
+                if written <= 0:
+                    raise OSError("failed to append provenance record")
+                remaining = remaining[written:]
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.ftruncate(fd, original_size)
+            raise
+        finally:
+            os.close(fd)
+
+        return linked, _hash(linked), prev_hash
+
+
 def append(chain_path: Path, entry: ProvenanceEntry) -> str:
     """Atomically append *entry* to the chain at *chain_path*.
 
@@ -135,16 +196,12 @@ def append(chain_path: Path, entry: ProvenanceEntry) -> str:
     prior record (or ``"GENESIS"`` if this is the first). Returns the
     new chain head hash (``sha256(entry)``).
     """
-    chain_path.parent.mkdir(parents=True, exist_ok=True)
-    prior = _read_last(chain_path)
-    prev_hash = _hash(prior) if prior is not None else _GENESIS
-    linked = entry.model_copy(update={"prev_hash": prev_hash})
-    line = json.dumps(linked.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
-    # Atomic append via O_APPEND on POSIX; write+flush for Windows parity.
-    with chain_path.open("a", encoding="utf-8") as fh:
-        fh.write(line + "\n")
-        fh.flush()
-    head = _hash(linked)
+    linked, head, prev_hash = _append_record(
+        chain_path,
+        entry,
+        request_signature=False,
+        signing_key=None,
+    )
     _LOG.info(
         "provenance.append",
         learning_id=linked.learning_id,
@@ -283,28 +340,12 @@ def append_signed(
 
     Returns the new chain head hash.
     """
-    chain_path.parent.mkdir(parents=True, exist_ok=True)
-    prior = _read_last(chain_path)
-    prev_hash = _hash(prior) if prior is not None else _GENESIS
-
-    if not _NACL_AVAILABLE or signing_key is None:
-        _LOG.warning(
-            "provenance.append_signed_degraded",
-            reason="pynacl_unavailable" if not _NACL_AVAILABLE else "no_signing_key",
-            learning_id=entry.learning_id,
-        )
-        linked = entry.model_copy(update={"prev_hash": prev_hash, "signature": ""})
-    else:
-        msg = _sign_message(entry.learning_id, entry.content_hash, prev_hash)
-        # nacl SigningKey.sign returns SignedMessage whose .signature is bytes
-        sig_bytes: bytes = signing_key.sign(msg).signature
-        linked = entry.model_copy(update={"prev_hash": prev_hash, "signature": sig_bytes.hex()})
-
-    line = json.dumps(linked.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
-    with chain_path.open("a", encoding="utf-8") as fh:
-        fh.write(line + "\n")
-        fh.flush()
-    head = _hash(linked)
+    linked, head, prev_hash = _append_record(
+        chain_path,
+        entry,
+        request_signature=True,
+        signing_key=signing_key,
+    )
     _LOG.info(
         "provenance.append_signed",
         learning_id=linked.learning_id,

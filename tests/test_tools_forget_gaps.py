@@ -1,4 +1,5 @@
 """Wave 13: coverage gap-fill for tools/forget.py (lines 99-100, 126-128, 136-138, 185-187)."""
+
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -58,8 +59,10 @@ class TestBulkDeleteWithTierRuntime:
         backend.search.return_value = entries
         backend.delete.return_value = True
 
-        with _patch("trw_memory.tools.forget.supports_tier_runtime", return_value=True), \
-             _patch("trw_memory.tools.forget.remove_entry_from_tiers") as mock_remove:
+        with (
+            _patch("trw_memory.tools.forget.supports_tier_runtime", return_value=True),
+            _patch("trw_memory.tools.forget.remove_entry_from_tiers") as mock_remove,
+        ):
             result = memory_forget_impl(None, "some query", "project:default", backend=backend)
 
         assert result["status"] == "ok"
@@ -68,7 +71,7 @@ class TestBulkDeleteWithTierRuntime:
 
 
 class TestRegisterForgetTool:
-    def test_registered_function_delegates_to_impl(self) -> None:
+    async def test_registered_function_delegates_to_impl(self) -> None:
         """register_forget_tool wires memory_forget to memory_forget_impl (lines 185-187)."""
         mock_backend = _mock_backend()
         mock_backend.get.return_value = None
@@ -78,6 +81,7 @@ class TestRegisterForgetTool:
             @contextmanager
             def _cm(*_a, **_kw):
                 yield backend
+
             return _cm
 
         registered: dict[str, object] = {}
@@ -96,9 +100,6 @@ class TestRegisterForgetTool:
             "trw_memory.integrations._backend.create_backend_from_config",
             new=_ctx_factory(mock_backend),
         ):
-            import asyncio
-            result = asyncio.run(
-                registered["fn"]("M-missing", None, "project:default")  # type: ignore[operator]
-            )
+            result = await registered["fn"]("M-missing", None, "project:default")  # type: ignore[operator]
 
         assert result["status"] == "not_found"

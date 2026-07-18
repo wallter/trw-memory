@@ -69,7 +69,7 @@ class WarmTierStore:
     def _warm_db_path(self) -> Path:
         """Resolve path to warm.db."""
         mem_dir = self._base_dir / "memory"
-        mem_dir.mkdir(parents=True, exist_ok=True)
+        mem_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         return mem_dir / "warm.db"
 
     def _warm_sidecar_path(self) -> Path:
@@ -178,7 +178,7 @@ class WarmTierStore:
         entries, falls back to full read-filter-write.
         """
         sidecar = self._warm_sidecar_path()
-        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
         # Use 'content' (MemoryEntry) or fall back to 'summary' (legacy)
         summary = str(entry_data.get("content", entry_data.get("summary", "")))

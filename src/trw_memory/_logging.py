@@ -43,6 +43,33 @@ _SENSITIVE_VALUE_RE = re.compile(
 )
 
 
+def configure_library_logging() -> None:
+    """Route unconfigured structlog through silent stdlib library logging.
+
+    Structlog's process default is a ``PrintLogger`` that emits every level
+    directly to stderr. A clean Python process therefore used to print DEBUG
+    and INFO records merely by constructing a :class:`MemoryClient`, despite
+    this package installing a ``NullHandler``. Preserve application ownership:
+    an existing structlog configuration is never replaced, and the CLI still
+    installs its explicit renderer/level later via :func:`configure_logging`.
+    """
+    logging.getLogger("trw_memory").addHandler(logging.NullHandler())
+    if structlog.is_configured():
+        return
+    structlog.configure(
+        processors=[
+            structlog.stdlib.filter_by_level,
+            structlog.stdlib.add_log_level,
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.stdlib.BoundLogger,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        cache_logger_on_first_use=False,
+    )
+
+
 def _redact_secrets(
     logger: Any,
     method_name: str,

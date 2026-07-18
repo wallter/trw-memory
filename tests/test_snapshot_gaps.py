@@ -1,4 +1,5 @@
 """Wave 15: coverage gap-fill for storage/_snapshot.py (lines 167-170, 241, 314-315, 321-323, 346, 371-372, 408-409, 426-427, 435)."""
+
 from __future__ import annotations
 
 import sqlite3
@@ -130,11 +131,12 @@ class TestPruneTierUnlinkFails:
     def test_oserror_on_unlink_is_logged(self, tmp_path: Path) -> None:
         """OSError on victim.unlink() → debug logged, loop continues (lines 408-409)."""
         import re
+
         tier_dir = tmp_path / "daily"
         tier_dir.mkdir()
         # Create 3 snapshot files (keep 2, prune 1)
         for i in range(3):
-            (tier_dir / f"memory-2026-06-0{i+1}.db").write_bytes(b"")
+            (tier_dir / f"memory-2026-06-0{i + 1}.db").write_bytes(b"")
         with patch("trw_memory.storage._snapshot.Path.unlink", side_effect=OSError("busy")):
             remaining, pruned = _prune_tier(tier_dir, keep=2, pattern=re.compile(r".*\.db"))
         assert pruned == 0  # unlink failed, so none pruned
@@ -160,6 +162,7 @@ class TestSortedParseableOsError:
     def test_oserror_in_iterdir_returns_empty_list(self, tmp_path: Path) -> None:
         """OSError during iterdir → return [] (lines 426-427)."""
         import re
+
         tier_dir = tmp_path / "daily"
         tier_dir.mkdir()
         with patch("trw_memory.storage._snapshot.Path.iterdir", side_effect=OSError("permission denied")):
@@ -169,6 +172,7 @@ class TestSortedParseableOsError:
     def test_nonexistent_tier_dir_returns_empty_list(self, tmp_path: Path) -> None:
         """tier_dir does not exist → return [] early (line 422-423)."""
         import re
+
         tier_dir = tmp_path / "nonexistent"
         result = _sorted_parseable(tier_dir, pattern=re.compile(r".*\.db"))
         assert result == []

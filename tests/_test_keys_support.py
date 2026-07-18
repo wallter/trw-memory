@@ -2,24 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Literal
 
-import pytest
-
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
-from trw_memory.security.keys import clear_key_cache
 
 _KEY_LENGTH = 32
-
-
-@pytest.fixture(autouse=True)
-def clear_master_key_cache_fixture() -> Iterator[None]:
-    clear_key_cache()
-    yield
-    clear_key_cache()
 
 
 def _make_config(

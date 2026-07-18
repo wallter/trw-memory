@@ -1,12 +1,12 @@
 """Wave 15: coverage gap-fill for code_index/search.py (lines 50, 85, 93-96, 131)."""
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from trw_memory.code_index.models import CodeChunk
 from trw_memory.code_index.indexer import InMemoryCodeIndex
+from trw_memory.code_index.models import CodeChunk
 from trw_memory.code_index.search import CodeSearchEngine, _lexical_score
-
 
 _CONTENT_HASH = "a" * 64  # valid sha256 hex placeholder
 

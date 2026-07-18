@@ -26,15 +26,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-import structlog
-
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.security.poisoning import score_entry_anomaly
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.persistence import write_yaml
-
-logger = structlog.get_logger(__name__)
 
 # Rolling-window size used for per-namespace anomaly statistics.
 _ROLLING_WINDOW = 100

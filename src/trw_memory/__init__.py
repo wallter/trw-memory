@@ -27,11 +27,11 @@ except ImportError:
 # is already swapped; the import is purely for the helper API.
 from trw_memory.storage import _dbapi as _dbapi  # noqa: I001
 
-import logging
+from trw_memory._logging import configure_library_logging as _configure_library_logging
 
-# Library best practice: prevent "No handler found" warnings.
-# The consuming application (trw-mcp, user projects) configures logging.
-logging.getLogger(__name__).addHandler(logging.NullHandler())
+# Library best practice: stay silent until the consuming application or the
+# trw-memory CLI explicitly configures logging.
+_configure_library_logging()
 
 from trw_memory._version import __version__
 from trw_memory.client import MemoryClient

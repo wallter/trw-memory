@@ -11,12 +11,13 @@ high-importance entries are copied to the project namespace.
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import ExitStack
 from datetime import datetime, timezone
 
 import structlog
 
 from trw_memory.embeddings import get_local_embedder
-from trw_memory.exceptions import ConfigError, StorageError
+from trw_memory.exceptions import AuthorizationError, ConfigError, StorageError
 from trw_memory.integrations._backend import discover_namespace_backends
 from trw_memory.lifecycle.consolidation import consolidate_cycle
 from trw_memory.models.config import MemoryConfig
@@ -30,6 +31,12 @@ from trw_memory.tools._types import McpServer
 
 logger = structlog.get_logger(__name__)
 TEAM_NAMESPACE_WILDCARD = "team:*"
+PROJECT_NAMESPACE = "project:default"
+
+
+def _require_team_promotion_permissions(cfg: MemoryConfig, namespace: str) -> None:
+    require_namespace_permission(cfg, namespace, Permission.WRITE, "consolidate")
+    require_namespace_permission(cfg, PROJECT_NAMESPACE, Permission.WRITE, "promote")
 
 
 def _promote_team_memories(
@@ -118,32 +125,38 @@ def _promote_all_team_namespaces(
                     continue
                 seen_namespaces.add(namespace)
 
-                manager = NamespaceManager(store_backend)
-                if manager.team_namespace_completed(namespace):
-                    logger.debug("team_namespace_wildcard_skip_completed", namespace=namespace)
-                    continue
-
-                project_backend = (
-                    namespace_backend_factory("project:default") if namespace_backend_factory else store_backend
-                )
                 try:
-                    namespace_results.append(
-                        _promote_team_memories(
+                    _require_team_promotion_permissions(cfg, namespace)
+                    manager = NamespaceManager(store_backend)
+                    if manager.team_namespace_completed(namespace):
+                        logger.debug("team_namespace_wildcard_skip_completed", namespace=namespace)
+                        continue
+
+                    with ExitStack() as stack:
+                        project_backend = store_backend
+                        if namespace_backend_factory is not None:
+                            project_backend = stack.enter_context(namespace_backend_factory(PROJECT_NAMESPACE))
+                        result = _promote_team_memories(
                             namespace,
                             store_backend,
                             target_backend=project_backend,
                         )
-                    )
-                except (StorageError, ValueError) as exc:
+                        namespace_results.append(result)
+                except (
+                    AuthorizationError,
+                    ConfigError,
+                    StorageError,
+                    TypeError,
+                    ValueError,
+                    OSError,
+                    RuntimeError,
+                ) as exc:
                     logger.exception(
                         "team_namespace_wildcard_namespace_failed",
                         namespace=namespace,
                         error=str(exc),
                     )
                     errors.append({"namespace": namespace, "error": str(exc)})
-                finally:
-                    if project_backend is not store_backend:
-                        project_backend.close()
 
     if not namespace_results and not errors:
         logger.debug("team_namespace_wildcard_skipped", reason="no_team_namespaces")
@@ -203,10 +216,9 @@ def memory_consolidate_impl(
         return {"error": str(exc), "status": "invalid"}
 
     cfg = config or MemoryConfig()
-    require_namespace_permission(cfg, namespace, Permission.WRITE, "consolidate")
-
     # Team namespace promotion: copy high-impact entries to project namespace
     if namespace.startswith("team:"):
+        _require_team_promotion_permissions(cfg, namespace)
         manager = NamespaceManager(backend)
         if manager.team_namespace_completed(namespace):
             return {
@@ -217,7 +229,7 @@ def memory_consolidate_impl(
                 "status": "skipped",
                 "skipped_reason": "already_completed",
             }
-        project_backend = namespace_backend_factory("project:default") if namespace_backend_factory else backend
+        project_backend = namespace_backend_factory(PROJECT_NAMESPACE) if namespace_backend_factory else backend
         try:
             return _promote_team_memories(
                 namespace,
@@ -227,6 +239,8 @@ def memory_consolidate_impl(
         finally:
             if project_backend is not backend:
                 project_backend.close()
+
+    require_namespace_permission(cfg, namespace, Permission.WRITE, "consolidate")
 
     embedder = get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim)
 
@@ -305,12 +319,17 @@ def register_consolidate_tool(mcp: McpServer) -> None:
             {"clusters_found": int, "entries_consolidated": int, "dry_run": bool}
         """
         cfg = MemoryConfig()
-        backend_namespace = "default" if namespace == TEAM_NAMESPACE_WILDCARD else namespace
-        with create_backend_from_config(cfg, backend_namespace) as backend:
+
+        def backend_factory(extra_ns: str) -> StorageBackend:
+            return create_backend_from_config(cfg, extra_ns)
+
+        if namespace == TEAM_NAMESPACE_WILDCARD:
+            return _promote_all_team_namespaces(cfg, namespace_backend_factory=backend_factory)
+        with create_backend_from_config(cfg, namespace) as backend:
             return memory_consolidate_impl(
                 namespace,
                 backend=backend,
                 dry_run=dry_run,
                 config=cfg,
-                namespace_backend_factory=lambda extra_ns: create_backend_from_config(cfg, extra_ns),
+                namespace_backend_factory=backend_factory,
             )

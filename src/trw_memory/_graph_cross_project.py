@@ -30,13 +30,9 @@ import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 
-import structlog
-
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.interface import StorageBackend
-
-logger = structlog.get_logger(__name__)
 
 CROSS_VALIDATION_THRESHOLD = 0.92
 CANDIDATE_LIMIT = 500

@@ -1,4 +1,5 @@
 """Wave 14: coverage gap-fill for exceptions.py (lines 67-68, 75-76, 83-84, 91-92, 124-125)."""
+
 from __future__ import annotations
 
 from trw_memory.exceptions import (

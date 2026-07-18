@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -57,6 +58,19 @@ class TestValidateNamespace:
         long_ns = "project:" + "a" * 200
         with pytest.raises(ConfigError, match="too long"):
             validate_namespace(long_ns)
+
+    @pytest.mark.parametrize("ns", [b"global", ["global"], {"namespace": "global"}])
+    def test_non_string_namespaces_are_rejected(self, ns: object) -> None:
+        with pytest.raises(ConfigError, match="namespace must be a string"):
+            validate_namespace(cast("str", ns))
+
+    def test_object_cannot_spoof_namespace_through_strip(self) -> None:
+        class SpoofedNamespace:
+            def strip(self) -> str:
+                return "global"
+
+        with pytest.raises(ConfigError, match="namespace must be a string"):
+            validate_namespace(cast("str", SpoofedNamespace()))
 
 
 class TestNamespaceToPath:

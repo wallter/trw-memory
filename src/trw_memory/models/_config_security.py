@@ -8,12 +8,12 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 __all__ = ["_SecurityConfigMixin"]
 
 
-class _SecurityConfigMixin:
+class _SecurityConfigMixin(BaseModel):
     # Poisoning defense
     poisoning_detection_enabled: bool = Field(default=True, description="Enable statistical poisoning detection")
     poisoning_detection_mode: Literal["observe", "enforce"] = Field(

@@ -8,10 +8,10 @@ FR-07: Code quality — __all__ exports, MemoryConfig __repr__.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
@@ -64,7 +64,7 @@ class TestExportCompleteness:
     """FR-04: entry_to_export_dict returns all MemoryEntry fields."""
 
     def test_export_dict_all_fields(self) -> None:
-        """Exported dict must contain all 28 MemoryEntry.to_dict() keys."""
+        """Exported dict must contain every MemoryEntry.to_dict() key."""
         entry = _make_entry()
         exported = entry_to_export_dict(entry)
 
@@ -119,54 +119,48 @@ class TestExportCompleteness:
 class TestAuditFlush:
     """FR-05: audit log flush() is called after each write."""
 
-    def test_audit_flush_called(self, tmp_path: Path) -> None:
-        """Verify flush() is called after writing an audit record."""
+    def test_audit_flush_called(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify each append durably delivers the record to the OS.
+
+        The secure append path (audit hardening, 2026-07-11 "secure audit log
+        appends") writes through a raw file descriptor: ``os.write`` pushes
+        bytes straight to the OS kernel with no userspace buffer, and
+        ``os.fsync`` forces them to stable storage when ``fsync=True``. This
+        superseded the old buffered ``Path.open('a')`` + explicit ``flush()``
+        seam, so intercepting ``Path.open`` no longer observes the write. The
+        durability guarantee is unchanged: after each append the record bytes
+        reach the OS (and, under fsync, the disk). This test intercepts the
+        real fd-based path and asserts that guarantee.
+        """
         from trw_memory.security.audit import AuditLog
 
         log_path = tmp_path / "audit.jsonl"
-        audit = AuditLog(log_path=log_path)
+        audit = AuditLog(log_path=log_path, fsync=True)
 
-        # Patch open to track flush calls
-        original_open = Path.open
+        written = bytearray()
+        fsynced_fds: list[int] = []
+        real_write = os.write
+        real_fsync = os.fsync
 
-        flush_called = False
+        def tracking_write(fd: int, data: Any) -> int:
+            n = real_write(fd, data)
+            written.extend(bytes(data)[:n])
+            return n
 
-        class TrackingWriter:
-            """Wrapper that tracks flush() calls."""
+        def tracking_fsync(fd: int) -> None:
+            fsynced_fds.append(fd)
+            real_fsync(fd)
 
-            def __init__(self, fh: Any) -> None:
-                self._fh = fh
+        monkeypatch.setattr("trw_memory.security.audit.os.write", tracking_write)
+        monkeypatch.setattr("trw_memory.security.audit.os.fsync", tracking_fsync)
 
-            def write(self, data: str) -> int:
-                return self._fh.write(data)
+        audit.append(action="store", target_id="M-test1")
 
-            def flush(self) -> None:
-                nonlocal flush_called
-                flush_called = True
-                self._fh.flush()
-
-            def close(self) -> None:
-                self._fh.close()
-
-            def __getattr__(self, name: str) -> Any:
-                return getattr(self._fh, name)
-
-            def __enter__(self) -> TrackingWriter:
-                return self
-
-            def __exit__(self, *args: Any) -> None:
-                self._fh.__exit__(*args)
-
-        def patched_open(self_path: Any, *args: Any, **kwargs: Any) -> Any:
-            fh = original_open(self_path, *args, **kwargs)
-            if "a" in (args[0] if args else kwargs.get("mode", "r")):
-                return TrackingWriter(fh)
-            return fh
-
-        with patch.object(Path, "open", patched_open):
-            audit.append(action="store", target_id="M-test1")
-
-        assert flush_called, "flush() was not called after writing audit record"
+        # The record bytes were delivered to the OS via os.write ...
+        assert b"M-test1" in bytes(written), "audit record was not written to the OS"
+        assert bytes(written).endswith(b"\n"), "audit record was not terminated/flushed as a full line"
+        # ... and fsync forced them to stable storage after the write.
+        assert fsynced_fds, "os.fsync was not called after writing audit record"
 
 
 # -----------------------------------------------------------------------

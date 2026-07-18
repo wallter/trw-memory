@@ -100,7 +100,30 @@ def apply_runtime_pii_policy(
         for tag in entry.tags
     ]
     tag_matches = [match for matches in tag_matches_by_index for match in matches]
-    all_matches = content_matches + detail_matches + tag_matches
+    # Security audit 2026-07-17 (SEC-001 release-blocker): evidence[] and each
+    # Assertion.last_evidence are publicly reachable via memory_store and were
+    # persisted verbatim — a credential/email/SSN placed there bypassed BOTH the
+    # block gate and redaction while still surfacing at recall. Scan + redact them
+    # with the same policy as content/detail/tags.
+    evidence_matches_by_index: list[list[PIIMatch]] = [
+        detect_pii(
+            item,
+            entropy_threshold=config.pii_entropy_threshold,
+            custom_patterns=config.pii_custom_patterns,
+        )
+        for item in entry.evidence
+    ]
+    evidence_matches = [match for matches in evidence_matches_by_index for match in matches]
+    assertion_matches_by_index: list[list[PIIMatch]] = [
+        detect_pii(
+            assertion.last_evidence,
+            entropy_threshold=config.pii_entropy_threshold,
+            custom_patterns=config.pii_custom_patterns,
+        )
+        for assertion in entry.assertions
+    ]
+    assertion_matches = [match for matches in assertion_matches_by_index for match in matches]
+    all_matches = content_matches + detail_matches + tag_matches + evidence_matches + assertion_matches
     if not all_matches:
         return entry, []
 
@@ -121,12 +144,35 @@ def apply_runtime_pii_policy(
     new_content = replace_pii(entry.content, content_matches)
     new_detail = replace_pii(entry.detail, detail_matches)
     new_tags = [replace_pii(tag, matches) for tag, matches in zip(entry.tags, tag_matches_by_index, strict=True)]
+    new_evidence = [
+        replace_pii(item, matches) for item, matches in zip(entry.evidence, evidence_matches_by_index, strict=True)
+    ]
+    # Assertion.last_evidence is a nested-model string field; model_copy does not
+    # re-run validation, so redacting it in place is safe (no risk of tripping the
+    # grep-pattern validator). Only touch assertions that actually matched.
+    new_assertions = [
+        (
+            assertion.model_copy(update={"last_evidence": replace_pii(assertion.last_evidence, matches)})
+            if matches
+            else assertion
+        )
+        for assertion, matches in zip(entry.assertions, assertion_matches_by_index, strict=True)
+    ]
     metadata = dict(entry.metadata)
     metadata["pii_types"] = ",".join(sorted({match.pii_type for match in all_matches}))
     if any(match.pii_type == PIIType.HIGH_ENTROPY for match in all_matches):
         metadata["contains_high_entropy_token"] = "true"  # noqa: S105 — flag value, not a credential
     return (
-        entry.model_copy(update={"content": new_content, "detail": new_detail, "tags": new_tags, "metadata": metadata}),
+        entry.model_copy(
+            update={
+                "content": new_content,
+                "detail": new_detail,
+                "tags": new_tags,
+                "evidence": new_evidence,
+                "assertions": new_assertions,
+                "metadata": metadata,
+            }
+        ),
         all_matches,
     )
 

@@ -23,8 +23,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-import structlog
-
+from trw_memory._client_distilled_tiering import entry_to_result as _entry_to_result
 from trw_memory.exceptions import MemoryNotFoundError
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.security.rbac import Permission
@@ -36,20 +35,12 @@ from trw_memory.security.runtime import (
 if TYPE_CHECKING:
     from trw_memory.client import ForgetResultDict, MemoryClient, MemoryResultDict
 
-logger = structlog.get_logger(__name__)
-
 
 def _client_logger() -> Any:
     """Parent-module logger lookup so test patches on ``trw_memory.client.logger`` propagate."""
     from trw_memory import client as _c
 
     return _c.logger
-
-
-def _entry_to_result(entry: Any, score: float = 0.0) -> MemoryResultDict:
-    from trw_memory._client_distilled_tiering import entry_to_result as _impl
-
-    return _impl(entry, score=score)
 
 
 async def forget_impl(

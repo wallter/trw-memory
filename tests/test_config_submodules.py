@@ -1,12 +1,9 @@
 """Behavior tests for the MemoryConfig field-group mixin modules.
 
-These modules (``models/_config_lifecycle.py``, ``_config_retrieval.py``,
-``_config_security.py``, ``_config_storage.py``) define the field groups that
-make up ``MemoryConfig``. They carry Pydantic ``Field`` constraints (``ge``,
-``gt``, ``le``) and ``Literal`` enumerations. Because the mixin classes are
-not themselves wired into ``MemoryConfig`` at HEAD (the fields are re-declared
-inline), we exercise the mixins directly by composing each one into an ad-hoc
-``BaseModel`` / ``BaseSettings`` so the field validators actually run.
+These modules define the field groups composed by ``MemoryConfig``. They carry
+Pydantic ``Field`` constraints and ``Literal`` enumerations. The focused models
+below exercise each group independently; integration tests also prove that the
+public settings model inherits every field instead of redeclaring a stale copy.
 
 The tests verify *behavior* — that valid values are accepted, that invalid
 values (negative limits, out-of-range fractions, unknown enum members) are
@@ -23,6 +20,7 @@ from trw_memory.models._config_lifecycle import _LifecycleConfigMixin
 from trw_memory.models._config_retrieval import _RetrievalConfigMixin
 from trw_memory.models._config_security import _SecurityConfigMixin
 from trw_memory.models._config_storage import _StorageConfigMixin
+from trw_memory.models.config import MemoryConfig
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +42,24 @@ class _SecurityModel(_SecurityConfigMixin, BaseModel):
 
 class _StorageModel(_StorageConfigMixin, BaseModel):
     pass
+
+
+def test_memory_config_composes_every_mixin_field_once() -> None:
+    mixin_fields: set[str] = set()
+    for mixin in (_LifecycleModel, _RetrievalModel, _SecurityModel, _StorageModel):
+        mixin_fields.update(mixin.model_fields)
+
+    assert mixin_fields == set(MemoryConfig.model_fields)
+    assert not (set(MemoryConfig.__annotations__) & mixin_fields)
+
+
+def test_recent_fields_live_in_their_owning_mixins() -> None:
+    cfg = MemoryConfig()
+    assert cfg.hype_enabled is False
+    assert cfg.hype_questions_per_entry == 3
+    assert cfg.hype_min_question_chars == 8
+    assert cfg.cold_search_cache_max == 1000
+    assert cfg.lifecycle_use_fsrs is False
 
 
 # ===========================================================================

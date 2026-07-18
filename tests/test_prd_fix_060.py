@@ -236,15 +236,15 @@ class TestFR02EntryToDict:
 
 
 # ---------------------------------------------------------------------------
-# FR-03: Lock file cleanup
+# FR-03: Stable advisory lock inode
 # ---------------------------------------------------------------------------
 
 
-class TestFR03LockFileCleanup:
-    """Verify lock files are cleaned up after lock_for_rmw."""
+class TestFR03LockFilePersistence:
+    """Verify lock files retain one stable inode across contenders."""
 
-    def test_lock_file_cleaned_up(self, tmp_path: Path) -> None:
-        """No .lock file should remain after lock_for_rmw completes."""
+    def test_lock_file_remains_after_release(self, tmp_path: Path) -> None:
+        """Deleting the lock file would let a third process bypass a waiter."""
         from trw_memory.storage.persistence import lock_for_rmw
 
         target_file = tmp_path / "test_entry.yaml"
@@ -255,11 +255,10 @@ class TestFR03LockFileCleanup:
             # Lock file should exist during the context
             assert lock_path.exists(), "Lock file should exist during lock_for_rmw"
 
-        # Lock file should be cleaned up after context exits
-        assert not lock_path.exists(), "Lock file should be removed after lock_for_rmw exits"
+        assert lock_path.exists(), "Lock file inode must remain stable across lock acquisitions"
 
-    def test_lock_file_cleaned_up_on_exception(self, tmp_path: Path) -> None:
-        """Lock file should be cleaned up even if the context body raises."""
+    def test_lock_file_remains_after_exception(self, tmp_path: Path) -> None:
+        """An exceptional holder still releases without replacing the inode."""
         from trw_memory.storage.persistence import lock_for_rmw
 
         target_file = tmp_path / "test_entry.yaml"
@@ -270,7 +269,7 @@ class TestFR03LockFileCleanup:
             with lock_for_rmw(target_file):
                 raise RuntimeError("intentional error")
 
-        assert not lock_path.exists(), "Lock file should be removed even after exception"
+        assert lock_path.exists(), "Lock file inode must remain stable after exceptional release"
 
 
 # ---------------------------------------------------------------------------

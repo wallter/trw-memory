@@ -324,6 +324,20 @@ def test_migrate_entries_dir_skips_malformed_yaml(tmp_path: Path) -> None:
     assert results[0].id == "L-valid"
 
 
+def test_migrate_entries_dir_isolates_yaml_parser_error(tmp_path: Path) -> None:
+    entries_dir = tmp_path / "entries"
+    entries_dir.mkdir()
+    (entries_dir / "00-bad.yaml").write_text("key: [unterminated\n", encoding="utf-8")
+    _write_yaml(
+        entries_dir / "01-valid.yaml",
+        {"id": "L-valid", "summary": "good", "created": "2026-01-01"},
+    )
+
+    results = migrate_entries_dir(entries_dir)
+
+    assert [entry.id for entry in results] == ["L-valid"]
+
+
 def test_migrate_entries_dir_three_files_all_converted(tmp_path: Path) -> None:
     """Three sample files all convert successfully."""
     entries_dir = tmp_path / "entries"

@@ -1,11 +1,10 @@
 """Wave 12: targeted tests for uncovered branches in storage/_dbapi.py."""
+
 from __future__ import annotations
 
 import sys
 from types import ModuleType
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 
 class TestIsWalResetSafe:
@@ -100,7 +99,7 @@ class TestInstallPysqlite3IfAvailable:
             sys.modules["pysqlite3"] = fake_pysqlite3
             # Remove swap flag so we don't hit the already-swapped path
             if "sqlite3" in sys.modules:
-                del sys.modules["sqlite3"]._trw_pysqlite3_active  # type: ignore[attr-defined]  # noqa: SIM910
+                del sys.modules["sqlite3"]._trw_pysqlite3_active  # type: ignore[attr-defined]
         except (AttributeError, KeyError):
             pass
 

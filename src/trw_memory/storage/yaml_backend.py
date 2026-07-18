@@ -209,7 +209,15 @@ class YAMLBackend(StorageBackend):
         return f"YAMLBackend(entries_dir={self._dir!r})"
 
     def _path(self, entry_id: str) -> Path:
-        candidate = (self._dir / f"{entry_id}.yaml").resolve()
+        if not entry_id or "\x00" in entry_id or "/" in entry_id or "\\" in entry_id:
+            raise StorageError(
+                f"Invalid entry_id: path traversal or nested component in {entry_id!r}",
+                path=str(self._dir),
+            )
+        filename = f"{entry_id}.yaml"
+        if Path(filename).name != filename:
+            raise StorageError(f"Invalid entry_id: path traversal detected in {entry_id!r}", path=str(self._dir))
+        candidate = (self._dir / filename).resolve()
         if not candidate.is_relative_to(self._dir.resolve()):
             raise StorageError(
                 f"Invalid entry_id: path traversal detected in {entry_id!r}",
@@ -393,6 +401,8 @@ class YAMLBackend(StorageBackend):
         Returns:
             Up to *top_k* matching entries sorted by importance desc.
         """
+        if top_k <= 0:
+            return []
         needle = query.lower()
         status_val: str | None = None
         if status is not None:
@@ -471,6 +481,8 @@ class YAMLBackend(StorageBackend):
         Returns:
             Up to *limit* matching entries ordered by updated_at descending.
         """
+        if limit <= 0:
+            return []
         status_val: str | None = None
         if status is not None:
             status_val = status.value

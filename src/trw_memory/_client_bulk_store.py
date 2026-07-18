@@ -21,16 +21,18 @@ Extracted as PRD-DIST-246 batch 104.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
-from trw_memory.exceptions import SchemaValidationError, StorageError
+from trw_memory._client_store import _build_store_entry, _existing_entry_for_namespace
+from trw_memory.exceptions import MemoryNotFoundError, SchemaValidationError, SecurityDependencyError, StorageError
 from trw_memory.graph import schedule_graph_update
 from trw_memory.lifecycle.tiers._runtime import embedding_has_consumer, remember_entry_in_tiers
-from trw_memory.models.memory import MemoryEntry
+from trw_memory.models.memory import Assertion, MemoryEntry
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.security.poisoning import validate_store_inputs
 from trw_memory.security.rbac import Permission
@@ -39,7 +41,6 @@ from trw_memory.security.runtime import (
     prepare_entry_for_store,
     store_quarantined_entry,
 )
-from trw_memory.sync.conflict import increment_clock, init_clock
 
 if TYPE_CHECKING:
     from trw_memory.client import MemoryClient
@@ -65,6 +66,9 @@ class BulkStoreRequest:
     source_identity: str = ""
     session_id: str | None = None
     entry_id: str | None = None
+    evidence: list[str] | None = None
+    expires: str = ""
+    assertions: list[Assertion] | None = None
 
 
 @dataclass
@@ -148,7 +152,7 @@ async def bulk_store_impl(
         except SchemaValidationError as exc:
             prepared.append((req, f"schema_invalid:{','.join(exc.failed_fields)}"))
 
-    items: list[BulkStoreItemResult] = []
+    item_slots: list[BulkStoreItemResult | None] = [None] * len(prepared)
     embedder = client._get_embedder()
     accepted_indices: list[int] = []
     accepted_entries: list[MemoryEntry] = []
@@ -160,53 +164,43 @@ async def bulk_store_impl(
         decisions: list[Any] = [None] * len(prepared)
         for i, (req, validation_error) in enumerate(prepared):
             if validation_error is not None:
-                items.append(
-                    BulkStoreItemResult(
-                        memory_id=req.entry_id or "",
-                        status="rejected",
-                        skipped_reason=validation_error,
-                    )
+                item_slots[i] = BulkStoreItemResult(
+                    memory_id=req.entry_id or "",
+                    status="rejected",
+                    skipped_reason=validation_error,
                 )
                 continue
 
             memory_id = req.entry_id or _make_id()
-            existing = backend.get(memory_id) if req.entry_id is not None else None
-            entry_metadata = dict(existing.metadata) if existing is not None else {}
-            entry_metadata.update(req.metadata or {})
-            entry_metadata.setdefault("installation_id", client._installation_id)
-
-            if existing is None:
-                entry = MemoryEntry(
-                    id=memory_id,
-                    content=req.content.strip(),
-                    detail=req.detail,
-                    tags=req.tags or [],
-                    importance=req.importance,
-                    namespace=client._namespace,
-                    metadata=entry_metadata,
-                    created_at=now,
-                    updated_at=now,
-                    source=req.source,
-                    source_identity=req.source_identity,
-                    vector_clock=init_clock(client._local_node_id),
+            try:
+                existing = (
+                    _existing_entry_for_namespace(backend, memory_id, client._namespace)
+                    if req.entry_id is not None
+                    else None
                 )
-            else:
-                entry = existing.model_copy(
-                    update={
-                        "content": req.content.strip(),
-                        "detail": req.detail,
-                        "tags": req.tags or [],
-                        "importance": req.importance,
-                        "metadata": entry_metadata,
-                        "updated_at": now,
-                        "source": req.source,
-                        "source_identity": req.source_identity or existing.source_identity,
-                        # FR04: advance, do not reset, the local node's counter on
-                        # edit (matches store_impl); a reset stalled causality at
-                        # {node: 1}. See test_sync_clock_monotonic.
-                        "vector_clock": increment_clock(existing.vector_clock, client._local_node_id),
-                    }
+            except MemoryNotFoundError:
+                item_slots[i] = BulkStoreItemResult(
+                    memory_id=memory_id, status="rejected", skipped_reason="entry_not_found"
                 )
+                continue
+            entry = _build_store_entry(
+                memory_id=memory_id,
+                existing=existing,
+                content=req.content,
+                detail=req.detail,
+                tags=req.tags,
+                evidence=req.evidence,
+                importance=req.importance,
+                namespace=client._namespace,
+                metadata=req.metadata,
+                expires=req.expires,
+                assertions=req.assertions,
+                source=req.source,
+                source_identity=req.source_identity,
+                now=now,
+                installation_id=client._installation_id,
+                local_node_id=client._local_node_id,
+            )
 
             try:
                 decision = prepare_entry_for_store(
@@ -215,26 +209,24 @@ async def bulk_store_impl(
                     config=client._config,
                     session_id=req.session_id,
                 )
+            except SecurityDependencyError:
+                raise
             except Exception as exc:
-                items.append(
-                    BulkStoreItemResult(
-                        memory_id=memory_id,
-                        status="rejected",
-                        skipped_reason=f"{type(exc).__name__}:{str(exc)[:80]}",
-                    )
+                item_slots[i] = BulkStoreItemResult(
+                    memory_id=memory_id,
+                    status="rejected",
+                    skipped_reason=f"{type(exc).__name__}:{str(exc)[:80]}",
                 )
                 continue
 
             if decision.quarantined:
                 store_quarantined_entry(client._config, decision.entry)
-                items.append(
-                    BulkStoreItemResult(
-                        memory_id=decision.entry.id,
-                        status="quarantined",
-                        quarantined=True,
-                        anomaly_dimension=decision.anomaly_dimension,
-                        z_score=decision.anomaly_z_score,
-                    )
+                item_slots[i] = BulkStoreItemResult(
+                    memory_id=decision.entry.id,
+                    status="quarantined",
+                    quarantined=True,
+                    anomaly_dimension=decision.anomaly_dimension,
+                    z_score=decision.anomaly_z_score,
                 )
                 continue
 
@@ -249,7 +241,7 @@ async def bulk_store_impl(
         if accepted_entries and embedder is not None and embedding_has_consumer(client._config, backend):
             try:
                 texts = [f"{e.content} {e.detail}" for e in accepted_entries]
-                embeddings = embedder.embed_batch(texts)
+                embeddings = await asyncio.to_thread(embedder.embed_batch, texts)
             except Exception as exc:
                 logger.warning(
                     "bulk_store_embed_batch_failed",
@@ -308,16 +300,17 @@ async def bulk_store_impl(
                     },
                 )
 
-            items.append(
-                BulkStoreItemResult(
-                    memory_id=entry.id,
-                    status="updated" if decision.op == "update" else "stored",
-                )
+            item_slots[orig_i] = BulkStoreItemResult(
+                memory_id=entry.id,
+                status="updated" if decision.op == "update" else "stored",
             )
 
             if not skip_remote_publish and client._should_attempt_remote_publish(entry):
                 client._schedule_background_task(client._publish_entry(entry, embedding))
 
+    if any(item is None for item in item_slots):
+        raise RuntimeError("bulk_store did not produce a result for every request")
+    items = [item for item in item_slots if item is not None]
     stored_count = sum(1 for it in items if it.status == "stored")
     updated_count = sum(1 for it in items if it.status == "updated")
     quarantined_count = sum(1 for it in items if it.status == "quarantined")

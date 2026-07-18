@@ -1,4 +1,5 @@
 """Wave 14: coverage gap-fill for security/startup.py (lines 21-34, 45-60, 65-81)."""
+
 from __future__ import annotations
 
 import os
@@ -110,8 +111,29 @@ class TestVerifyDefaults:
         ):
             verify_defaults(cfg)
 
+    def test_verify_defaults_rejects_signing_key_symlink(self, tmp_path: Path) -> None:
+        canary_dir = tmp_path / "fixtures"
+        canary_dir.mkdir()
+        target = tmp_path / "attacker-key.bin"
+        target.write_bytes(b"x" * 32)
+        signing_key = tmp_path / "signing.pem"
+        signing_key.symlink_to(target)
+        cfg = MemoryConfig()
+
+        with (
+            patch.object(cfg, "canary_fixtures_path", str(canary_dir)),
+            patch.object(cfg, "quarantine_db_path", str(tmp_path / "quarantine.db")),
+            patch.object(cfg, "provenance_signing_key_path", str(signing_key)),
+            pytest.raises(SecurityDefaultUnresolvableError, match="must not be a symlink"),
+        ):
+            verify_defaults(cfg)
+
+        assert target.read_bytes() == b"x" * 32
+
     def test_verify_defaults_raises_when_canary_dir_missing(self, tmp_path: Path) -> None:
-        """Missing canary fixtures dir → SecurityDefaultUnresolvableError (lines 66-67)."""
+        """Missing canary fixtures use the specific fail-loud dependency error."""
+        from trw_memory.exceptions import CanaryFixturesMissingError
+
         canary_dir = tmp_path / "nonexistent_fixtures"
         quarantine_db = tmp_path / "quarantine.db"
         signing_key = tmp_path / "signing.pem"
@@ -122,8 +144,9 @@ class TestVerifyDefaults:
             patch.object(cfg, "quarantine_db_path", str(quarantine_db)),
             patch.object(cfg, "provenance_signing_key_path", str(signing_key)),
         ):
-            with pytest.raises(SecurityDefaultUnresolvableError, match="canary fixtures"):
+            with pytest.raises(CanaryFixturesMissingError, match="canary fixtures") as exc_info:
                 verify_defaults(cfg)
+        assert isinstance(exc_info.value, SecurityDefaultUnresolvableError)
 
     def test_oserror_on_quarantine_mkdir_raises(self, tmp_path: Path) -> None:
         """OSError creating quarantine DB parent → SecurityDefaultUnresolvableError (lines 72-73)."""

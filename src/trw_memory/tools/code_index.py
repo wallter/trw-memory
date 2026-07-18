@@ -42,9 +42,7 @@ def memory_code_search_impl(
         root_path = Path(root).resolve()
         if not root_path.is_dir():
             return {"status": "failed", "error_code": "invalid_root", "error": f"{root} is not a directory"}
-        store = _store_for(root_path, namespace)
-        if not store.list_files(namespace=namespace):
-            CodeIndexer(root=root_path, store=store, namespace=namespace).index()
+        store = _indexed_store_for(root_path, namespace)
         results = code_search(
             store,
             query=query,
@@ -77,9 +75,7 @@ def memory_code_symbol_impl(
         root_path = Path(root).resolve()
         if not root_path.is_dir():
             return {"status": "failed", "error_code": "invalid_root", "error": f"{root} is not a directory"}
-        store = _store_for(root_path, namespace)
-        if not store.list_files(namespace=namespace):
-            CodeIndexer(root=root_path, store=store, namespace=namespace).index()
+        store = _indexed_store_for(root_path, namespace)
         results = lookup_symbols(store, namespace=namespace, name=name, kind=kind, path=path)
         return {
             "status": "ok",
@@ -133,3 +129,11 @@ def register_code_index_tools(mcp: McpServer) -> None:
 
 def _store_for(root: Path, namespace: str) -> InMemoryCodeIndex:
     return _STORES.setdefault((str(root), namespace), InMemoryCodeIndex())
+
+
+def _indexed_store_for(root: Path, namespace: str) -> InMemoryCodeIndex:
+    """Return the namespaced store, populating it on first use."""
+    store = _store_for(root, namespace)
+    if not store.list_files(namespace=namespace):
+        CodeIndexer(root=root, store=store, namespace=namespace).index()
+    return store

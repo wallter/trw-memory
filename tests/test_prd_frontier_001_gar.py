@@ -207,9 +207,7 @@ class TestMemoryClientRecallGraphExpansion:
         backend = memory_client._backend
         ids = [e.id for e in backend.list_entries(namespace=memory_client._namespace)]
         anchor_id = next(
-            e.id
-            for e in backend.list_entries(namespace=memory_client._namespace)
-            if "zzqqxx" in e.content
+            e.id for e in backend.list_entries(namespace=memory_client._namespace) if "zzqqxx" in e.content
         )
         other_id = next(i for i in ids if i != anchor_id)
         _upsert_edge(backend._conn, anchor_id, other_id, "related_to", 1.0, _now())

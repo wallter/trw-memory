@@ -64,6 +64,7 @@ class TestStoreSchema:
     def test_content_property(self) -> None:
         props = get_memory_store_schema()["parameters"]["properties"]
         _validate_property(props["content"], "string")
+        assert props["content"]["type"] == "string"
 
     def test_tags_property(self) -> None:
         props = get_memory_store_schema()["parameters"]["properties"]
@@ -158,8 +159,10 @@ class TestGenerateOpenAIFunctions:
         assert len(fns) == 4
 
     def test_all_have_valid_structure(self) -> None:
-        for fn in generate_openai_functions():
+        functions = generate_openai_functions()
+        for fn in functions:
             _validate_function_schema(fn)
+        assert {fn["name"] for fn in functions} == {"memory_store", "memory_recall", "memory_forget", "memory_search"}
 
     def test_function_names(self) -> None:
         names = {fn["name"] for fn in generate_openai_functions()}

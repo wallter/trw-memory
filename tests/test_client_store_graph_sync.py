@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import threading
 import time
 from collections.abc import Iterator
@@ -12,11 +13,60 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from trw_memory.client import MemoryClient
-from trw_memory.graph import wait_for_graph_updates
+from trw_memory.graph import update_entry_graph, wait_for_graph_updates
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+
+class TestDbapiGraphCompatibility:
+    def test_graph_update_accepts_dbapi_compatible_connection_proxy(self, tmp_path: Path) -> None:
+        """Graph enrichment supports SQLCipher-like non-stdlib connection types."""
+
+        class ConnectionProxy:
+            def __init__(self, delegate: sqlite3.Connection) -> None:
+                self._delegate = delegate
+
+            def execute(self, *args: object, **kwargs: object) -> sqlite3.Cursor:
+                return self._delegate.execute(*args, **kwargs)
+
+            def commit(self) -> None:
+                self._delegate.commit()
+
+        backend = SQLiteBackend(tmp_path / "graph.db")
+        candidate = MemoryEntry(
+            id="M-proxy-candidate",
+            content="candidate",
+            namespace="default",
+            tags=["python", "graph"],
+        )
+        target = MemoryEntry(
+            id="M-proxy-target",
+            content="target",
+            namespace="default",
+            tags=["python", "graph"],
+        )
+        real_connection = backend._conn
+        try:
+            backend.store(candidate)
+            backend.store(target)
+            backend._conn = ConnectionProxy(real_connection)
+            result = update_entry_graph(target, backend)
+            backend._conn = real_connection
+
+            assert result["tag_edges"] == 2
+            rows = real_connection.execute(
+                "SELECT source_id, target_id FROM memory_graph_edges WHERE edge_type = 'tag_cooccurrence' "
+                "ORDER BY source_id, target_id"
+            ).fetchall()
+            assert [tuple(row) for row in rows] == [
+                ("M-proxy-candidate", "M-proxy-target"),
+                ("M-proxy-target", "M-proxy-candidate"),
+            ]
+        finally:
+            backend._conn = real_connection
+            backend.close()
 
 
 class TestRbacEnforcement:

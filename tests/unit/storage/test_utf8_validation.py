@@ -5,6 +5,7 @@ All tests use in-memory SQLite so there is no filesystem I/O.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,71 @@ def test_upsert_accepts_valid_unicode_including_emoji() -> None:
     result = backend.get("M-utf8-002")
     assert result is not None
     assert result.detail == "✓ 🚀 日本語"
+    backend.close()
+
+
+def test_store_many_rejects_bad_row_without_partial_write() -> None:
+    backend = SQLiteBackend(Path(":memory:"))
+    entries = [
+        _make_entry(entry_id="M-batch-valid"),
+        _make_entry(entry_id="M-batch-invalid", detail="\ud83d"),
+    ]
+
+    with pytest.raises(Utf8ValidationError) as exc_info:
+        backend.store_many(entries)
+
+    assert exc_info.value.failed_fields == ["detail"]
+    assert backend.count() == 0
+    backend.close()
+
+
+def test_store_many_validates_invalidated_by() -> None:
+    backend = SQLiteBackend(Path(":memory:"))
+    entry = _make_entry(entry_id="M-invalid-closer").model_copy(
+        update={"invalid_from": datetime.now(timezone.utc), "invalidated_by": "\ud83d"}
+    )
+
+    with pytest.raises(Utf8ValidationError) as exc_info:
+        backend.store_many([entry])
+
+    assert exc_info.value.failed_fields == ["invalidated_by"]
+    assert backend.count() == 0
+    backend.close()
+
+
+@pytest.mark.parametrize("field", ["content", "detail"])
+def test_update_rejects_lone_surrogate(field: str) -> None:
+    backend = SQLiteBackend(Path(":memory:"))
+    entry = _make_entry()
+    backend.store(entry)
+
+    with pytest.raises(Utf8ValidationError) as exc_info:
+        backend.update(entry.id, **{field: "\ud83d"})
+
+    assert exc_info.value.failed_fields == [field]
+    assert backend.get(entry.id) == entry
+    backend.close()
+
+
+def test_update_validates_invalidated_by() -> None:
+    backend = SQLiteBackend(Path(":memory:"))
+    entry = _make_entry()
+    backend.store(entry)
+
+    with pytest.raises(Utf8ValidationError) as exc_info:
+        backend.update(entry.id, invalid_from=datetime.now(timezone.utc), invalidated_by="\ud83d")
+
+    assert exc_info.value.failed_fields == ["invalidated_by"]
+    assert backend.get(entry.id) == entry
+    backend.close()
+
+
+def test_store_many_accepts_valid_unicode() -> None:
+    backend = SQLiteBackend(Path(":memory:"))
+    entry = _make_entry(entry_id="M-batch-unicode", detail="✓ 🚀 日本語")
+
+    assert backend.store_many([entry]) == 1
+    assert backend.get(entry.id) == entry
     backend.close()
 
 

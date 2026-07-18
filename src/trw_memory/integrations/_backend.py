@@ -80,6 +80,26 @@ def _read_namespace_metadata(namespace_dir: Path) -> str | None:
     return namespace or None
 
 
+def _create_sqlite_backend(
+    config: MemoryConfig,
+    db_path: Path,
+    *,
+    sqlcipher_key_hex: str | None,
+) -> StorageBackend:
+    """Create SQLite storage with the canonical recovery and dimension settings."""
+    from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+    return SQLiteBackend(
+        db_path=db_path,
+        dim=config.embedding_dim,
+        sqlcipher_key_hex=sqlcipher_key_hex,
+        recovery_policy=config.memory_recovery_policy,
+        corrupt_backup_keep=config.memory_corrupt_backup_keep,
+        rebuild_from_cold=config.memory_recovery_rebuild_from_cold,
+        recovery_inline_max_bytes=config.memory_recovery_inline_max_bytes,
+    )
+
+
 def resolve_backend(
     namespace: str,
     storage_path: str | None,
@@ -149,8 +169,6 @@ def create_backend_from_config(
     ns_dir = namespace.replace(":", "_")
 
     if config.storage_backend == "sqlite":
-        from trw_memory.storage.sqlite_backend import SQLiteBackend
-
         if db_path_override is not None:
             db_path = Path(db_path_override)
             namespace_dir = db_path.parent
@@ -162,15 +180,7 @@ def create_backend_from_config(
         if config.encryption_enabled:
             master_key = get_master_key(config)
             sqlcipher_key_hex = derive_namespace_key(master_key, namespace)
-        return SQLiteBackend(
-            db_path=db_path,
-            dim=config.embedding_dim,
-            sqlcipher_key_hex=sqlcipher_key_hex,
-            recovery_policy=config.memory_recovery_policy,
-            corrupt_backup_keep=config.memory_corrupt_backup_keep,
-            rebuild_from_cold=config.memory_recovery_rebuild_from_cold,
-            recovery_inline_max_bytes=config.memory_recovery_inline_max_bytes,
-        )
+        return _create_sqlite_backend(config, db_path, sqlcipher_key_hex=sqlcipher_key_hex)
 
     from trw_memory.storage.yaml_backend import YAMLBackend
 
@@ -202,8 +212,6 @@ def discover_namespace_backends(
         stores: list[tuple[list[str], StorageBackend]] = []
 
         if config.storage_backend == "sqlite":
-            from trw_memory.storage.sqlite_backend import SQLiteBackend
-
             master_key: bytes | None = get_master_key(config) if config.encryption_enabled else None
 
             for candidate in sorted(base.iterdir()):
@@ -217,16 +225,8 @@ def discover_namespace_backends(
                         logger.warning("encrypted_namespace_discovery_skipped", path=str(candidate))
                         continue
                     sqlcipher_key_hex = derive_namespace_key(master_key, namespace)
-                store_backend: StorageBackend = stack.enter_context(
-                    SQLiteBackend(
-                        db_path=db_path,
-                        dim=config.embedding_dim,
-                        sqlcipher_key_hex=sqlcipher_key_hex,
-                        recovery_policy=config.memory_recovery_policy,
-                        corrupt_backup_keep=config.memory_corrupt_backup_keep,
-                        rebuild_from_cold=config.memory_recovery_rebuild_from_cold,
-                        recovery_inline_max_bytes=config.memory_recovery_inline_max_bytes,
-                    )
+                store_backend = stack.enter_context(
+                    _create_sqlite_backend(config, db_path, sqlcipher_key_hex=sqlcipher_key_hex)
                 )
                 namespaces = store_backend.list_namespaces()
                 if namespaces:

@@ -56,9 +56,7 @@ def counting_bm25(monkeypatch: pytest.MonkeyPatch) -> type[_CountingBM25]:
 
 
 class TestBm25Cache:
-    def test_bm25_model_reused_on_same_corpus(
-        self, counting_bm25: type[_CountingBM25]
-    ) -> None:
+    def test_bm25_model_reused_on_same_corpus(self, counting_bm25: type[_CountingBM25]) -> None:
         """BM25Okapi is not rebuilt when the entry id set is unchanged."""
         entries = [
             make_entry("e1", "pydantic validation error handling"),
@@ -75,9 +73,7 @@ class TestBm25Cache:
         assert "e1" in [eid for eid, _ in first]
         assert "e2" in [eid for eid, _ in second]
 
-    def test_bm25_model_rebuilt_on_corpus_change(
-        self, counting_bm25: type[_CountingBM25]
-    ) -> None:
+    def test_bm25_model_rebuilt_on_corpus_change(self, counting_bm25: type[_CountingBM25]) -> None:
         """BM25Okapi is rebuilt when the entry id set changes (add/remove/swap)."""
         base = [
             make_entry("e1", "pydantic validation error handling"),
@@ -87,7 +83,7 @@ class TestBm25Cache:
         assert counting_bm25.construction_count == 1
 
         # Add an entry → new id set → rebuild.
-        added = base + [make_entry("e3", "structlog reserved keyword")]
+        added = [*base, make_entry("e3", "structlog reserved keyword")]
         bm25_search("structlog", added)
         assert counting_bm25.construction_count == 2
 
@@ -104,9 +100,7 @@ class TestBm25Cache:
         bm25_search("fastmcp", swapped)
         assert counting_bm25.construction_count == 4
 
-    def test_cache_invalidates_on_id_swap_same_count(
-        self, counting_bm25: type[_CountingBM25]
-    ) -> None:
+    def test_cache_invalidates_on_id_swap_same_count(self, counting_bm25: type[_CountingBM25]) -> None:
         """Same entry count but different id membership must NOT be a cache hit.
 
         Guards against a count-only invalidation bug — the brief explicitly
@@ -120,9 +114,7 @@ class TestBm25Cache:
 
         assert counting_bm25.construction_count == 2
 
-    def test_cache_hit_independent_of_entry_order(
-        self, counting_bm25: type[_CountingBM25]
-    ) -> None:
+    def test_cache_hit_independent_of_entry_order(self, counting_bm25: type[_CountingBM25]) -> None:
         """Reordering the same id set is still a cache hit and stays correct."""
         entries = [
             make_entry("x", "machine learning training data"),
@@ -137,9 +129,7 @@ class TestBm25Cache:
         # Correct entry still wins despite the reordered corpus alignment.
         assert results[0][0] == "x"
 
-    def test_reused_model_matches_uncached_results(
-        self, counting_bm25: type[_CountingBM25]
-    ) -> None:
+    def test_reused_model_matches_uncached_results(self, counting_bm25: type[_CountingBM25]) -> None:
         """A cache-hit query returns identical results to a fresh build."""
         entries = [
             make_entry("alpha", "machine learning training data pipeline"),
@@ -156,9 +146,7 @@ class TestBm25Cache:
 
         assert cached_results == fresh_results
 
-    def test_duplicate_ids_not_cached(
-        self, counting_bm25: type[_CountingBM25]
-    ) -> None:
+    def test_duplicate_ids_not_cached(self, counting_bm25: type[_CountingBM25]) -> None:
         """Entries with duplicate ids are never cached (ambiguous reorder key).
 
         With duplicate ids ``len(id_set) != len(entries)``, so the by-id reorder

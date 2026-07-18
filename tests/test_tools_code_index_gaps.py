@@ -1,4 +1,5 @@
 """Wave 12: coverage gap-fill for tools/code_index.py."""
+
 from __future__ import annotations
 
 from pathlib import Path

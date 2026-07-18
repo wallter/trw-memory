@@ -28,6 +28,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 import structlog
+from ruamel.yaml.error import YAMLError
 
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.persistence import _new_yaml
@@ -250,7 +251,7 @@ def migrate_entries_dir(entries_dir: Path) -> list[MemoryEntry]:
             (typically ``.trw/learnings/entries/``).
 
     Returns:
-        List of :class:`MemoryEntry` objects in filesystem order.
+        List of :class:`MemoryEntry` objects in lexicographic filename order.
     """
     if not entries_dir.exists():
         logger.warning(
@@ -281,7 +282,7 @@ def migrate_entries_dir(entries_dir: Path) -> list[MemoryEntry]:
             data: dict[str, object] = {str(k): v for k, v in raw.items()}
             entry = from_learning_entry(data)
             entries.append(entry)
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, YAMLError):
             logger.warning(
                 "migration_entry_failed",
                 file=yaml_path.name,

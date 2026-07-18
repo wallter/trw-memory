@@ -68,8 +68,8 @@ def test_hydrate_yaml_missing_updated_falls_back_to_created() -> None:
     assert created == updated
 
 
-def test_hydrate_yaml_bad_impact_raises() -> None:
-    """_hydrate_yaml raises on non-float impact."""
+def test_hydrate_yaml_bad_importance_raises() -> None:
+    """_hydrate_yaml raises on non-float canonical importance."""
     with pytest.raises(_HydrationError) as exc_info:
         _hydrate_yaml(
             {
@@ -77,10 +77,39 @@ def test_hydrate_yaml_bad_impact_raises() -> None:
                 "summary": "x",
                 "created": "2026-04-12",
                 "updated": "2026-04-12",
-                "impact": "not-a-number",
+                "importance": "not-a-number",
             }
         )
-    assert exc_info.value.field == "impact"
+    assert exc_info.value.field == "importance"
+
+
+def test_hydrate_yaml_legacy_impact_key_preserves_value() -> None:
+    """Pre-cutover cold YAML keyed only on legacy 'impact' must NOT recover as 0.5.
+
+    Regression for the release-verify 2026-07-17 P0: the impact->importance rename
+    dropped the legacy fallback, so disaster-recovery (recover_db auto-invokes
+    rebuild_from_cold) would silently reset every un-migrated entry's importance to
+    the 0.5 default. The YAML v2 cutover has no automatic caller, so real archives
+    are still 'impact'-keyed.
+    """
+    from trw_memory.storage._cold_rebuild import _INSERT_COLUMNS
+
+    row = _hydrate_yaml(
+        {"id": "L-IMP", "summary": "x", "created": "2026-05-09", "impact": 0.92}
+    )
+    assert row is not None
+    assert row[_INSERT_COLUMNS.index("importance")] == 0.92
+
+
+def test_hydrate_yaml_importance_wins_over_legacy_impact() -> None:
+    """When both keys exist, canonical 'importance' is primary (no ambiguous guess)."""
+    from trw_memory.storage._cold_rebuild import _INSERT_COLUMNS
+
+    row = _hydrate_yaml(
+        {"id": "L-BOTH", "summary": "x", "created": "2026-05-09", "importance": 0.7, "impact": 0.1}
+    )
+    assert row is not None
+    assert row[_INSERT_COLUMNS.index("importance")] == 0.7
 
 
 def test_hydrate_yaml_bad_recurrence_raises() -> None:

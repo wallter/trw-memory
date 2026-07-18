@@ -11,11 +11,15 @@ Constants:
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
+
 __all__ = [
     "METADATA_OVERHEAD",
     "TOKEN_MULTIPLIER",
     "apply_token_budget",
     "estimate_entry_tokens",
+    "estimate_serialized_entry_tokens",
     "estimate_tokens",
 ]
 
@@ -71,9 +75,29 @@ def estimate_entry_tokens(entry: dict[str, object]) -> int:
     return estimate_tokens(combined) + METADATA_OVERHEAD
 
 
+def estimate_serialized_entry_tokens(entry: dict[str, object]) -> int:
+    """Estimate the token cost of an entry's FULL serialized form.
+
+    :func:`estimate_entry_tokens` counts only ``content``/``detail``/``tags``
+    plus a fixed overhead, which undercounts the real response cost of an
+    entry (key names, punctuation, and every other field are invisible to
+    it).  This variant serializes the whole entry to compact JSON and uses
+    the common ~4-characters-per-token heuristic, so a budget applied with
+    it bounds what a caller actually receives.  Fail-open: entries that
+    cannot be serialized fall back to :func:`estimate_entry_tokens`.
+    """
+    try:
+        serialized = json.dumps(entry, default=str, ensure_ascii=False, separators=(",", ":"))
+    except Exception:  # justified: fail-open — default=str may propagate arbitrary __str__ errors
+        return estimate_entry_tokens(entry)
+    return max(1, len(serialized) // 4)
+
+
 def apply_token_budget(
     results: list[dict[str, object]],
     token_budget: int,
+    *,
+    estimator: Callable[[dict[str, object]], int] | None = None,
 ) -> tuple[list[dict[str, object]], int, bool]:
     """Filter *results* to fit within *token_budget*.
 
@@ -85,6 +109,10 @@ def apply_token_budget(
     Args:
         results: Ordered list of memory result dicts.
         token_budget: Maximum token budget.  Must be a positive integer.
+        estimator: Per-entry token estimator.  Defaults to
+            :func:`estimate_entry_tokens` (content-field heuristic).  Pass
+            :func:`estimate_serialized_entry_tokens` to budget against the
+            full serialized entry instead.
 
     Returns:
         A 3-tuple of ``(filtered_results, tokens_used, was_truncated)``.
@@ -98,12 +126,13 @@ def apply_token_budget(
     if not results:
         return [], 0, False
 
+    estimate = estimator if estimator is not None else estimate_entry_tokens
     filtered: list[dict[str, object]] = []
     tokens_used = 0
     truncated = False
 
     for entry in results:
-        cost = estimate_entry_tokens(entry)
+        cost = estimate(entry)
         if tokens_used + cost > token_budget and filtered:
             truncated = True
             break

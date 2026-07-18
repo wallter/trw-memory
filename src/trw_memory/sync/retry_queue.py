@@ -14,9 +14,11 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TypedDict
 
 import structlog
+from typing_extensions import TypedDict
+
+from trw_memory.storage.persistence import lock_for_rmw
 
 logger = structlog.get_logger(__name__)
 
@@ -43,6 +45,7 @@ class RetryQueue:
 
     def __init__(self, queue_path: Path) -> None:
         self._path = queue_path
+        self._drain_lock_path = queue_path.with_name(f"{queue_path.name}.drain")
         self._lock = threading.Lock()
 
     def enqueue(self, entry_id: str, payload: dict[str, object]) -> bool:
@@ -50,7 +53,7 @@ class RetryQueue:
 
         Returns ``False`` if the queue is at capacity (500 entries).
         """
-        with self._lock:
+        with self._lock, lock_for_rmw(self._path):
             entries = self._read_all()
             if len(entries) >= MAX_QUEUE_DEPTH:
                 logger.warning(
@@ -91,19 +94,36 @@ class RetryQueue:
         Returns:
             ``{"drained": int, "failed": int, "skipped": int}``
         """
+        result, _ = self._drain_with_ids(publish_fn)
+        return result
+
+    def _drain_with_ids(
+        self,
+        publish_fn: Callable[[dict[str, object]], bool],
+    ) -> tuple[dict[str, int], list[str]]:
+        """Drain queued records and return canonical IDs for successful records."""
+        with lock_for_rmw(self._drain_lock_path):
+            return self._drain_serialized(publish_fn)
+
+    def _drain_serialized(
+        self,
+        publish_fn: Callable[[dict[str, object]], bool],
+    ) -> tuple[dict[str, int], list[str]]:
+        """Process one drain while the cross-instance drain lock is held."""
         # Collect work under lock, then release before sleeping/publishing so
         # enqueue/depth/snapshot are not starved for up to ~30s per drain cycle.
         # (Bug: original held self._lock across time.sleep(backoff_seconds) inside
         # the loop — up to 30s of lock contention per retry.)
-        with self._lock:
+        with self._lock, lock_for_rmw(self._path):
             entries = self._read_all()
         if not entries:
-            return {"drained": 0, "failed": 0, "skipped": 0}
+            return {"drained": 0, "failed": 0, "skipped": 0}, []
 
         remaining: list[QueueRecord] = []
         drained = 0
         failed = 0
         skipped = 0
+        drained_entry_ids: list[str] = []
 
         for record in entries:
             if record["retry_count"] >= MAX_RETRIES:
@@ -137,6 +157,7 @@ class RetryQueue:
 
             if success:
                 drained += 1
+                drained_entry_ids.append(record["entry_id"])
             else:
                 record["retry_count"] += 1
                 record["last_error"] = "publish returned False"
@@ -148,25 +169,25 @@ class RetryQueue:
         # the queue under the lock, releases it to publish/sleep, then re-acquires
         # to write. Overwriting with `remaining` alone would silently drop a
         # record that enqueue() appended in that window (TOCTOU data loss).
-        with self._lock:
+        with self._lock, lock_for_rmw(self._path):
             processed_keys = {self._record_key(r) for r in entries}
             new_arrivals = [r for r in self._read_all() if self._record_key(r) not in processed_keys]
             self._write_all(remaining + new_arrivals)
-        return {"drained": drained, "failed": failed, "skipped": skipped}
+        return {"drained": drained, "failed": failed, "skipped": skipped}, drained_entry_ids
 
     def clear(self) -> None:
         """Clear the entire retry queue."""
-        with self._lock:
-            self._path.write_text("")
+        with self._lock, lock_for_rmw(self._path):
+            self._write_all([])
 
     def depth(self) -> int:
         """Return the number of entries in the queue."""
-        with self._lock:
+        with self._lock, lock_for_rmw(self._path):
             return len(self._read_all())
 
     def snapshot(self) -> list[QueueRecord]:
         """Return a copy of the current queue records for reconciliation logic."""
-        with self._lock:
+        with self._lock, lock_for_rmw(self._path):
             return list(self._read_all())
 
     # ------------------------------------------------------------------

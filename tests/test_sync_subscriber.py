@@ -69,6 +69,17 @@ class TestSSESubscriber:
         assert len(received) == 1
         assert received[0]["type"] == "learning_published"
 
+    def test_process_line_injects_standard_sse_event_type(self) -> None:
+        """An event header is preserved when the JSON payload omits type."""
+        cfg = _make_config()
+        received: list[dict[str, Any]] = []
+        sub = SSESubscriber(cfg, on_event=lambda data: received.append(data))
+
+        sub._process_line("event: learning_updated")
+        sub._process_line('data: {"id": "42"}')
+
+        assert received == [{"id": "42", "type": "learning_updated"}]
+
     def test_process_line_calls_on_event_for_learning_retired(self) -> None:
         """Retirement events flow through the real SSE parser."""
         cfg = _make_config()

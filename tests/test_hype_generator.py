@@ -10,8 +10,8 @@ import sys
 
 import pytest
 
-from trw_memory.hype import NoOpQuestionGenerator, QuestionGenerator
 from tests.conftest import make_entry
+from trw_memory.hype import NoOpQuestionGenerator, QuestionGenerator
 
 
 def test_noop_returns_empty_list() -> None:

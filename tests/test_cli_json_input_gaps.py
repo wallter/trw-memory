@@ -1,4 +1,5 @@
 """Wave 15: coverage gap-fill for cli_json_input.py (lines 44-45, 82, 84, 88, 91-93)."""
+
 from __future__ import annotations
 
 from pathlib import Path

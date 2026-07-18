@@ -41,6 +41,7 @@ from trw_memory.security.encryption import (
     generate_master_key,
 )
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.storage.persistence import lock_for_rmw
 
 try:
     import keyring as _keyring
@@ -441,7 +442,51 @@ def get_or_create_ed25519_key(trw_dir: Path) -> Any:
 def get_or_create_ed25519_key_at_path(key_path: Path) -> Any:
     """Return an Ed25519 signing key stored exactly at *key_path*."""
     key_dir = key_path.parent
-    if key_path.exists():
+    key_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    with lock_for_rmw(key_path):
+        if key_path.is_symlink():
+            logger.warning("ed25519_key_symlink_rejected", path=str(key_path))
+            return None
+        if not key_path.exists():
+            seed = generate_ed25519_signing_key()
+            temp_path = key_dir / f".{key_path.name}.{secrets.token_hex(16)}.tmp"
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(temp_path, flags, stat.S_IRUSR | stat.S_IWUSR)
+            try:
+                fchmod = getattr(os, "fchmod", None)
+                if fchmod is not None:
+                    fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+                else:  # pragma: no cover - Windows fallback
+                    os.chmod(temp_path, stat.S_IRUSR | stat.S_IWUSR)
+                remaining = memoryview(seed)
+                while remaining:
+                    written = os.write(fd, remaining)
+                    if written <= 0:
+                        raise OSError("failed to write Ed25519 seed")
+                    remaining = remaining[written:]
+                os.fsync(fd)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                with contextlib.suppress(OSError):
+                    temp_path.unlink()
+                raise
+            else:
+                os.close(fd)
+            try:
+                os.link(temp_path, key_path, follow_symlinks=False)
+            except FileExistsError:
+                if key_path.is_symlink():
+                    logger.warning("ed25519_key_symlink_rejected", path=str(key_path))
+                    return None
+            else:
+                logger.info("ed25519_key_generated", path=str(key_path))
+            finally:
+                with contextlib.suppress(OSError):
+                    temp_path.unlink()
+
         if _NACL_AVAILABLE or _CRYPTO_ED25519_AVAILABLE:
             try:
                 return load_ed25519_signing_key(key_path)
@@ -450,16 +495,3 @@ def get_or_create_ed25519_key_at_path(key_path: Path) -> Any:
                 return None
         logger.warning("ed25519_runtime_unavailable", path=str(key_path))
         return None
-
-    # Create new key
-    key_dir.mkdir(parents=True, exist_ok=True)
-    seed = generate_ed25519_signing_key()
-    key_path.write_bytes(seed)
-    with contextlib.suppress(OSError):
-        key_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
-    logger.info("ed25519_key_generated", path=str(key_path))
-
-    if not (_NACL_AVAILABLE or _CRYPTO_ED25519_AVAILABLE):
-        logger.warning("ed25519_runtime_unavailable_after_write", path=str(key_path))
-        return None
-    return load_ed25519_signing_key(key_path)

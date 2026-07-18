@@ -7,13 +7,12 @@ review date. Idempotent — re-invocations read the existing file without
 overwriting the original ``started_at`` timestamp.
 
 Wired into :func:`trw_memory.security.trust_scorer.score_intake` via a
-module-level ``_clock_started`` flag so the disk read happens at most
+module-level ``_clock_started_for`` set so the disk read happens at most
 once per process.
 """
 
 from __future__ import annotations
 
-import io
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -21,6 +20,8 @@ import structlog
 from pydantic import BaseModel, ConfigDict
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
+
+from trw_memory.storage.persistence import lock_for_rmw, write_yaml
 
 __all__ = ["ObserveClockState", "read_observe_clock", "start_observe_clock"]
 
@@ -84,25 +85,22 @@ def start_observe_clock(
     written with ``started_at=<now>`` and ``promotion_review_at=<now +
     window_days>`` and then returned.
     """
-    existing = read_observe_clock(trw_dir)
-    if existing is not None:
-        return existing
-
-    now = datetime.now(timezone.utc)
-    review_at = now + timedelta(days=window_days)
-    state = ObserveClockState(
-        started_at=now.isoformat(),
-        phase="observe",
-        promotion_review_at=review_at.isoformat(),
-        prd=prd,
-    )
     path = _clock_path(trw_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    yaml = YAML(typ="safe")
-    yaml.default_flow_style = False
-    buf = io.StringIO()
-    yaml.dump(dict(sorted(state.model_dump(mode="json").items())), buf)
-    path.write_text(buf.getvalue(), encoding="utf-8")
+    with lock_for_rmw(path):
+        existing = read_observe_clock(trw_dir)
+        if existing is not None:
+            return existing
+
+        now = datetime.now(timezone.utc)
+        review_at = now + timedelta(days=window_days)
+        state = ObserveClockState(
+            started_at=now.isoformat(),
+            phase="observe",
+            promotion_review_at=review_at.isoformat(),
+            prd=prd,
+        )
+        write_yaml(path, dict(sorted(state.model_dump(mode="json").items())))
     _LOG.info(
         "observe_clock.started",
         prd=prd,

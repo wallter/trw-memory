@@ -1,4 +1,3 @@
-# ruff: noqa: F401
 """Tests for ``trw_memory.security.keys.rotate_master_key``."""
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ from trw_memory.security import (
     rotate_master_key,
 )
 
-from ._test_keys_support import _make_entry, clear_master_key_cache_fixture
+from ._test_keys_support import _make_entry
 
 
 class TestRotateMasterKey:

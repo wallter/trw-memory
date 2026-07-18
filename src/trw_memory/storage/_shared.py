@@ -161,9 +161,7 @@ def serialize_update_value(key: str, val: object) -> list[object] | dict[str, st
         return {str(k): str(v) for k, v in val.items()}
     if isinstance(val, datetime):
         return val.isoformat()
-    if isinstance(val, MemoryStatus):
-        return val.value
-    if isinstance(val, (MemoryType, Confidence, ProtectionTier)):
+    if isinstance(val, (MemoryStatus, MemoryType, Confidence, ProtectionTier)):
         return cast("str", val.value)
     # Validate raw strings assigned to enum-typed fields. Without this an invalid
     # value (e.g. status="acttive") persists verbatim and then makes the row

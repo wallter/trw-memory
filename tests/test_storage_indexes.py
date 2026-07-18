@@ -1,14 +1,12 @@
 """Tests that enterprise-scale composite indexes exist in the schema."""
-import sqlite3
+
 from pathlib import Path
-import pytest
+
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 
 def _get_index_names(backend: SQLiteBackend) -> set[str]:
-    rows = backend._conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='index'"
-    ).fetchall()
+    rows = backend._conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
     return {row[0] for row in rows}
 
 

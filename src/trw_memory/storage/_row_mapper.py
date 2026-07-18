@@ -132,6 +132,20 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
     created_at_val = parse_dt_safe(created_at_s, default=_now) or _now
     updated_at_val = parse_dt_safe(updated_at_s, default=_now) or _now
 
+    metadata = parse_json_dict_str(metadata_json)
+    type_value = str(type_ or "").strip()
+    confidence_value = str(confidence or "").strip()
+    try:
+        canonical_type = MemoryType(type_value)
+    except ValueError:
+        metadata.setdefault("legacy_memory_type", type_value)
+        canonical_type = MemoryType.INCIDENT if type_value == "gotcha" else MemoryType.PATTERN
+    try:
+        canonical_confidence = Confidence(confidence_value)
+    except ValueError:
+        metadata.setdefault("legacy_confidence", confidence_value)
+        canonical_confidence = Confidence.UNVERIFIED
+
     return MemoryEntry(
         id=str(id_),
         content=str(content),
@@ -163,7 +177,7 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         merged_from=parse_json_list(merged_json),
         consolidated_from=parse_json_list(cons_from_json),
         consolidated_into=str(consolidated_into) if consolidated_into else None,
-        metadata=parse_json_dict_str(metadata_json),
+        metadata=metadata,
         vector_clock=parse_json_dict_int(vector_clock_json),
         remote_id=str(remote_id) if remote_id else None,
         published_to_platform=bool(published_raw),
@@ -173,10 +187,10 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         assertions=assertions,
         anchors=parse_model_list(anchors_json, Anchor, strict=True),
         anchor_validity=parse_float(anchor_validity, default=1.0),
-        type=MemoryType(type_),
+        type=canonical_type,
         nudge_line=str(nudge_line) if nudge_line else "",
         expires=str(expires) if expires else "",
-        confidence=Confidence(confidence),
+        confidence=canonical_confidence,
         task_type=str(task_type) if task_type else "",
         domain=parse_json_list(domain_json),
         phase_origin=str(phase_origin) if phase_origin else "",

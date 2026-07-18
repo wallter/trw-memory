@@ -59,9 +59,7 @@ class TestDeleteByNamespaceGraphEdges:
         # endpoint in the deleted namespace are gone.
         rows = [
             (str(r[0]), str(r[1]))
-            for r in backend._conn.execute(
-                "SELECT source_id, target_id FROM memory_graph_edges"
-            ).fetchall()
+            for r in backend._conn.execute("SELECT source_id, target_id FROM memory_graph_edges").fetchall()
         ]
         assert rows == [("K", "K")]
 
@@ -73,6 +71,71 @@ class TestDeleteByNamespaceGraphEdges:
 
         assert deleted == 0
         assert self._edge_count(backend) == 1
+
+
+class TestDeleteRowGraphEdges:
+    """Per-row delete() must clean orphan memory_graph_edges too (shared purge)."""
+
+    @staticmethod
+    def _insert_edge(backend: SQLiteBackend, source_id: str, target_id: str) -> None:
+        backend._conn.execute(
+            "INSERT INTO memory_graph_edges (source_id, target_id, edge_type, weight, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (source_id, target_id, "similarity", 0.9, "2026-06-15T00:00:00+00:00"),
+        )
+        backend._conn.commit()
+
+    @staticmethod
+    def _edges(backend: SQLiteBackend) -> list[tuple[str, str]]:
+        return [
+            (str(r[0]), str(r[1]))
+            for r in backend._conn.execute(
+                "SELECT source_id, target_id FROM memory_graph_edges ORDER BY source_id, target_id"
+            ).fetchall()
+        ]
+
+    def test_delete_removes_edges_where_row_is_source_or_target(self, backend: SQLiteBackend) -> None:
+        backend.store(make_entry("A"))
+        backend.store(make_entry("K"))
+        self._insert_edge(backend, "A", "K")  # A is source -> purged
+        self._insert_edge(backend, "K", "A")  # A is target -> purged
+        self._insert_edge(backend, "K", "K")  # neither endpoint deleted -> survives
+        assert len(self._edges(backend)) == 3
+
+        assert backend.delete("A") is True
+
+        # Only the edge whose endpoints both survive remains; both edges that
+        # touched the deleted row A (as source or as target) are gone — proving
+        # per-row delete() does NOT orphan graph edges.
+        assert self._edges(backend) == [("K", "K")]
+
+    def test_delete_missing_row_leaves_edges_untouched(self, backend: SQLiteBackend) -> None:
+        backend.store(make_entry("K"))
+        self._insert_edge(backend, "K", "K")
+
+        # Deleting an id with no row must not touch edges (guarded on rowcount).
+        assert backend.delete("does-not-exist") is False
+        assert self._edges(backend) == [("K", "K")]
+
+    def test_purge_edges_for_chunks_beyond_variable_limit(self, backend: SQLiteBackend) -> None:
+        """purge_edges_for must handle id counts whose 2*N binds exceed SQLite's
+        older SQLITE_MAX_VARIABLE_NUMBER=999 floor by chunking, without dropping
+        any surviving edge."""
+        from trw_memory.storage._crud_ops import purge_edges_for
+        from trw_memory.storage._sql_utils import SQLITE_SAFE_BIND_LIMIT
+
+        edge_chunk_size = SQLITE_SAFE_BIND_LIMIT // 2
+        ids = [f"X{i}" for i in range(edge_chunk_size * 2 + 37)]  # forces 3 chunks
+        for entry_id in ids:
+            self._insert_edge(backend, entry_id, "KEEP")
+        self._insert_edge(backend, "KEEP", "KEEP")  # both endpoints survive
+
+        with backend._lock:
+            purge_edges_for(backend, ids)
+        backend._conn.commit()
+
+        # Every edge touching a purged id is gone; the wholly-surviving edge stays.
+        assert self._edges(backend) == [("KEEP", "KEEP")]
 
 
 class TestCrossThreadSafety:

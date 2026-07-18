@@ -18,20 +18,6 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-from typing import Protocol, runtime_checkable
-
-
-@runtime_checkable
-class AdapterClass(Protocol):
-    """Structural type for all integration adapter classes.
-
-    Any class that can be instantiated via keyword arguments satisfies this
-    protocol — it exists solely to give ``get_adapter`` a concrete return
-    type without importing framework-specific base classes.
-    """
-
-    def __init__(self, **kwargs: object) -> None: ...
-
 
 # Mapping of framework name -> (spec_check_module, adapter_module, adapter_class)
 _REGISTRY: dict[str, tuple[str | None, str, str]] = {

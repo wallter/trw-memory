@@ -137,7 +137,11 @@ class QuarantineUnreachableError(SecurityDependencyError):
     """Raised when the quarantine database cannot be reached."""
 
 
-class CanaryFixturesMissingError(SecurityDependencyError):
+class SecurityDefaultUnresolvableError(SecurityDependencyError):
+    """Raised when a SEC-001 default path or fixture cannot resolve at boot."""
+
+
+class CanaryFixturesMissingError(SecurityDefaultUnresolvableError):
     """Raised when canary fixtures cannot be resolved at startup/runtime."""
 
 
@@ -147,10 +151,6 @@ class ProvenanceKeyUnavailableError(SecurityDependencyError):
 
 class SecurityTelemetryUnavailableError(SecurityDependencyError):
     """Raised when required SEC-001 telemetry cannot be appended."""
-
-
-class SecurityDefaultUnresolvableError(SecurityDependencyError):
-    """Raised when a SEC-001 default path or fixture cannot resolve at boot."""
 
 
 class CanaryTamperError(SecurityDependencyError):

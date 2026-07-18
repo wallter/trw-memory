@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from structlog.testing import capture_logs
 
+from trw_memory.sync._remote_publish import _drain_retry_queue_with_ids
 from trw_memory.sync.remote import clear_retry_queue, drain_retry_queue
 from trw_memory.sync.retry_queue import MAX_QUEUE_BYTES, MAX_QUEUE_DEPTH, MAX_RETRIES, RetryQueue
 
@@ -125,8 +126,9 @@ class TestRetryQueue:
         queue_path.write_text(json.dumps(record) + "\n")
 
         queue = RetryQueue(queue_path)
-        result = queue.drain(lambda _: True)
+        result, published_ids = queue._drain_with_ids(lambda _: True)
         assert result == {"drained": 0, "failed": 0, "skipped": 1}
+        assert published_ids == []
         # Exhausted records are evicted (dead-letter drain) so that new failures
         # can be enqueued once the 500-entry cap would otherwise be full.
         assert queue.depth() == 0
@@ -441,8 +443,29 @@ class TestRetryQueue:
             _mock_httpx_client(mock_client_cls, status_code=200, json_data={"id": "42"})
             result = drain_retry_queue(queue, _make_config())
 
-        assert result == {"drained": 1, "failed": 0, "skipped": 0, "remote_ids": {"M-001": "42"}}
+        assert result == {
+            "drained": 1,
+            "failed": 0,
+            "skipped": 0,
+            "remote_ids": {"M-001": "42"},
+        }
         assert queue.depth() == 0
+
+    def test_drain_uses_queue_record_identity_for_success(self, tmp_path: Path) -> None:
+        """Payload metadata cannot redirect reconciliation to another local entry."""
+        queue_path = tmp_path / "queue.jsonl"
+        queue_path.write_text(
+            _record_line("M-canonical", {"summary": "test", "source_learning_id": "M-payload"}),
+            encoding="utf-8",
+        )
+        queue = RetryQueue(queue_path)
+
+        with patch("trw_memory.sync._remote_publish.httpx.Client") as mock_client_cls:
+            _mock_httpx_client(mock_client_cls, status_code=200, json_data={"id": "42"})
+            result, published_ids = _drain_retry_queue_with_ids(queue, _make_config())
+
+        assert published_ids == ["M-canonical"]
+        assert result["remote_ids"] == {"M-canonical": "42"}
 
     def test_drain_retry_queue_skips_when_sync_disabled(self, tmp_path: Path) -> None:
         """Drain helper leaves the queue intact when sync is disabled."""
@@ -451,7 +474,12 @@ class TestRetryQueue:
 
         result = drain_retry_queue(queue, _make_config(sync_enabled=False))
 
-        assert result == {"drained": 0, "failed": 0, "skipped": 1, "remote_ids": {}}
+        assert result == {
+            "drained": 0,
+            "failed": 0,
+            "skipped": 1,
+            "remote_ids": {},
+        }
         assert queue.depth() == 1
 
     def test_drain_retry_queue_skips_invalid_platform_url(self, tmp_path: Path) -> None:
@@ -461,7 +489,12 @@ class TestRetryQueue:
 
         result = drain_retry_queue(queue, _make_config(platform_url="file:///etc/passwd"))
 
-        assert result == {"drained": 0, "failed": 0, "skipped": 1, "remote_ids": {}}
+        assert result == {
+            "drained": 0,
+            "failed": 0,
+            "skipped": 1,
+            "remote_ids": {},
+        }
         assert queue.depth() == 1
 
     def test_clear_retry_queue_helper_empties_file(self, tmp_path: Path) -> None:
@@ -540,8 +573,7 @@ class TestDrainLockNotHeldDuringSleep:
         # `remaining` alone. This was previously an acknowledged JSONL limitation.
         surviving = {r["entry_id"] for r in queue.snapshot()}
         assert "M-concurrent" in surviving, (
-            "A record enqueued during the drain window must not be lost when drain "
-            "writes back its results"
+            "A record enqueued during the drain window must not be lost when drain writes back its results"
         )
 
     def test_depth_not_blocked_during_drain_publish(self, tmp_path: Path) -> None:
@@ -579,3 +611,92 @@ class TestDrainLockNotHeldDuringSleep:
             "lock must be released before calling publish_fn"
         )
         assert depth_during_publish, "depth() must return a value during drain"
+
+
+class TestCrossInstanceQueueLocking:
+    def test_distinct_instances_do_not_lose_concurrent_enqueues(self, tmp_path: Path) -> None:
+        queue_path = tmp_path / "shared.jsonl"
+        queues = [RetryQueue(queue_path) for _ in range(20)]
+        barrier = threading.Barrier(len(queues) + 1)
+        results: list[bool] = []
+
+        def enqueue(index: int) -> None:
+            barrier.wait()
+            results.append(queues[index].enqueue(f"M-{index}", {"index": index}))
+
+        threads = [threading.Thread(target=enqueue, args=(index,)) for index in range(len(queues))]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert results == [True] * len(queues)
+        assert {record["entry_id"] for record in RetryQueue(queue_path).snapshot()} == {
+            f"M-{index}" for index in range(len(queues))
+        }
+
+    def test_distinct_instance_enqueue_survives_drain_writeback(self, tmp_path: Path) -> None:
+        queue_path = tmp_path / "shared.jsonl"
+        drainer = RetryQueue(queue_path)
+        enqueuer = RetryQueue(queue_path)
+        drainer.enqueue("M-drain", {"kind": "drain"})
+        publishing = threading.Event()
+        release = threading.Event()
+
+        def publish(_payload: dict[str, object]) -> bool:
+            publishing.set()
+            assert release.wait(timeout=5)
+            return True
+
+        thread = threading.Thread(target=drainer.drain, args=(publish,))
+        thread.start()
+        assert publishing.wait(timeout=2)
+        assert enqueuer.enqueue("M-new", {"kind": "new"})
+        release.set()
+        thread.join(timeout=5)
+
+        assert not thread.is_alive()
+        assert [record["entry_id"] for record in enqueuer.snapshot()] == ["M-new"]
+
+    def test_distinct_instance_drains_are_serialized(self, tmp_path: Path) -> None:
+        queue_path = tmp_path / "shared.jsonl"
+        first = RetryQueue(queue_path)
+        second = RetryQueue(queue_path)
+        first.enqueue("M-once", {"kind": "once"})
+        first_publishing = threading.Event()
+        second_started = threading.Event()
+        release = threading.Event()
+        published: list[str] = []
+        results: list[dict[str, int]] = []
+
+        def first_publish(_payload: dict[str, object]) -> bool:
+            published.append("first")
+            first_publishing.set()
+            assert release.wait(timeout=5)
+            return True
+
+        def second_publish(_payload: dict[str, object]) -> bool:
+            published.append("second")
+            return True
+
+        def drain_second() -> None:
+            second_started.set()
+            results.append(second.drain(second_publish))
+
+        first_thread = threading.Thread(target=lambda: results.append(first.drain(first_publish)))
+        second_thread = threading.Thread(target=drain_second)
+        first_thread.start()
+        assert first_publishing.wait(timeout=2)
+        second_thread.start()
+        assert second_started.wait(timeout=2)
+        assert published == ["first"]
+        release.set()
+        first_thread.join(timeout=5)
+        second_thread.join(timeout=5)
+
+        assert not first_thread.is_alive()
+        assert not second_thread.is_alive()
+        assert published == ["first"]
+        assert sorted(result["drained"] for result in results) == [0, 1]

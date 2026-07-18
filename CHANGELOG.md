@@ -4,6 +4,120 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-07-12
+
+### Added
+
+- `estimate_serialized_entry_tokens` — token estimator over the FULL compact-JSON
+  serialization of an entry (~4 chars/token), plus an optional `estimator` kwarg
+  on `apply_token_budget`. The legacy `estimate_entry_tokens` counts only
+  `content`/`detail`/`tags` + a fixed overhead and undercounts real response
+  cost 2-3x, which let a "budgeted" recall balloon to ~22k real tokens.
+  Defaults unchanged; consumers opt in (trw-mcp's `trw_recall` does). (`d97ab3fee6`)
+
+### Changed
+
+- **Storage schema v2 — `impact` renamed to `importance` (`SCHEMA_VERSION` 1→2,
+  PRD-CORE-181).** A one-time, idempotent cutover rewrites active + cold YAML
+  entries from the legacy `impact` key to `importance`, with a mandatory pre-migration
+  backup snapshot (WAL-truncate checkpoint + SQLite backup-API copy) and a restore
+  path on failure. Readers are now `importance`-only; the external learning-API
+  `impact`/`min_impact` vocabulary is confined to the versioned `learning_api_v1`
+  encoder/decoder, so the publish/fetch wire contract is unchanged. Schema versions
+  above 2 are rejected before any DDL runs. (`c1b0b872ff`, `e15644cfe8`, `0b5a057c56`)
+
+### Security
+
+- **SEC-001 intake now scans and redacts the new evidence fields.** `evidence`
+  items and `Assertion.last_evidence` were persisted verbatim but skipped the
+  trust/poisoning scorer and PII detection, bypassing both. Intake now folds
+  content + detail + evidence + assertion-evidence into the trust-scored text, and
+  the PII policy detects and redacts PII in those fields (pipeline order and
+  observe-mode preserved). (`1036167cad`)
+
+### Fixed
+
+- **Cold-rebuild no longer silently resets `importance` to 0.5 on disaster recovery.**
+  The v2 `impact`→`importance` rename dropped the legacy fallback, but real cold
+  archives are still `impact`-keyed and `recover_db(rebuild_from_cold=True)`
+  auto-invokes cold-rebuild on a corrupt DB — so recovery wiped every entry's
+  importance. The reader now falls back to the legacy `impact` key when `importance`
+  is absent (`importance` stays primary). (`da30655d2f`)
+
+### Tests
+
+- **Restored the 5 `compute_calibration_accuracy` guard tests** deleted as "unused";
+  the function itself is load-bearing (cross-package import into trw-mcp) and remained,
+  so the tests are back to guard it. (`da30655d2f`)
+- **Restored the `starlette` security-floor downgrade guard** in the
+  `requirements.lock` floor test — its entry had been silently dropped while every
+  sibling pin was kept, removing the protective invariant. (`262c9b4b5c`)
+
+## [0.10.0] — 2026-07-12
+
+### Added
+
+- **Truthful recall-token accounting.** Recall results now report tokens from the
+  serialized values actually returned to callers, and the client exposes the same
+  estimate without reintroducing a heavyweight import path. (`104c60fb1f`,
+  `d97ab3fee6`)
+- **Durable evidence fields through every store path.** Assertions, anchors, and
+  grounding now survive client, tool, bulk-write, and persistence boundaries.
+  (`88b45b7f42`, `168dea2f65`, `f7b6025e4e`)
+- **Schema-version migrations with downgrade protection.** SQLite schema upgrades
+  use `PRAGMA user_version` and reject unsupported downgrades. (`d6f0cb4213`)
+
+### Security
+
+- **Hardened file-backed audit, provenance, quarantine, and storage lifecycle
+  paths.** Appends and compaction reject unsafe paths and symlinks, shared writers
+  are serialized, private storage directories are created safely, and WAL sidecars
+  receive explicit protection. (`5d813be46b`, `a7d9c341a9`, `abd139c3f8`,
+  `f33b215747`, `6a9b7aa173`, `1c13a260a6`)
+- **Stricter tenant and namespace boundaries.** RBAC inputs, team promotion,
+  graph permissions, FTS reads, and cross-namespace updates now validate and fail
+  safely rather than accepting spoofed or malformed values. (`d5684078a8`,
+  `044f316d91`, `2bd55c8af3`, `4b8b0d6b56`, `ab3d2b7e42`, `b9ec44a6e6`)
+
+### Fixed
+
+- **Storage recovery and atomicity.** Failed vector and batch writes roll back,
+  transactions and stale handles recover under bounded locking, malformed migration
+  metadata is isolated, and active-driver checkpoint failures are surfaced.
+  (`18406d8f78`, `5ed5b59040`, `d87bd81319`, `edebe0876a`, `8f30c8e10e`)
+- **Recall and bulk-write contracts remain intact under edge cases.** The package
+  preserves partial embeddings, bulk result order, SSE event types, and async RBAC
+  callables while rejecting non-string namespaces and unsupported client modes.
+  (`99e3692a3d`, `7202eb3075`, `9a705b9af2`, `94902b556b`, `d990c5a09d`,
+  `9bfe6f4feb`)
+
+### Changed
+
+- **Simplified the memory implementation without widening behavior.** Shared
+  result conversion, recall finalization, SQLite setup, config composition, code
+  indexing, and graph cleanup replace duplicate helpers and stale façade layers.
+  (`a27b434214`, `8ab6d8d50b`, `bdbec8f67b`, `e92796fa00`, `6ecef635bc`,
+  `664e81e0ef`)
+
+### Tests
+
+- **Pin the reranker module's OWN lazy-import layer, not just the package `__init__` deferral (round-2 adversarial audit, P2-1).** `test_lazy_imports.py` gained a subprocess-isolated guard asserting that importing `trw_memory.retrieval.reranker` DIRECTLY leaves `sentence_transformers`/`torch` out of `sys.modules`. The existing guards only import `trw_memory` / `trw_memory.retrieval`, which exercise the package-level PEP 562 `__getattr__`; a regression that moved `import sentence_transformers` back to the reranker module top would slip past them (they never touch the submodule) but is caught by a direct submodule import that bypasses the package hook.
+
+### Performance
+
+- **Lazy-import `sentence_transformers` in the cross-encoder reranker** — `import trw_memory`
+  (and `import trw_memory.retrieval`) no longer pays the ~3s torch import tax. Previously
+  `retrieval/__init__.py` eagerly re-exported `cross_encode_rerank`, whose module ran a
+  top-level `from sentence_transformers import CrossEncoder`, dragging `torch` into the import
+  graph of every consumer — including the `trw_mcp.server` boot path (`storage → sync →
+  retrieval.dense → retrieval.__init__`). Under contention this pushed MCP boot to ~9s and
+  exceeded Claude Code's 30s connect timeout. The import is now deferred to first reranker use
+  (cached so the import machinery runs at most once), and the package-level re-export is a
+  PEP 562 lazy `__getattr__`. Behavior is unchanged: `cross_encode_rerank` degrades identically
+  when `sentence_transformers` is absent, and `_CROSS_ENCODER_AVAILABLE` remains readable
+  (lazily resolved). Measured cold `import trw_memory.retrieval`: ~3.5s → ~0.29s.
+  Credit: production feedback.
+
 ## [0.9.12] — 2026-06-17
 
 ### Docs
@@ -11,10 +125,8 @@ All notable changes to the TRW Memory package.
 - Add a verified **Benchmarks** section to the README (hybrid-retrieval Recall@10/nDCG@10
   same-harness ablation, n=889 gold queries + LongMemEval_S n=500; Preventable Rediscovery
   Ratio with 95% CIs, n=175; and the H1-MEMORY-BENCH knowledge-compounding result, 58/58 vs
-  0/50, McNemar p=3.6×10⁻¹⁵ over 49 matched pairs). Every number is reconciled against the
-  canonical empirical sources (`docs/eval/iter-notes/CROSS-ITER-SYNTHESIS.md`,
-  `docs/research/memory-context-benchmarks/LOOP-REPORT-2026-06-12.md` and
-  `REDISCOVERY-READOUT-2026-06-14.md`) and matches the already-published public marketing set.
+  0/50, McNemar p=3.6×10⁻¹⁵ over 49 matched pairs). Every number is reconciled against TRW's
+  canonical internal empirical sources and matches the already-published public marketing set.
   The Plane-1 retrieval and Plane-2 rediscovery ablations were independently re-run locally and
   reproduce the published direction (hybrid ≫ bm25, disjoint CIs). Brittle per-query-type point
   figures that did not reproduce on the current retrieval surface were softened to a directional

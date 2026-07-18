@@ -40,5 +40,5 @@ from __future__ import annotations
 try:  # pragma: no cover - environment-dependent warm-up, intentionally silent
     import numpy  # noqa: F401  (load numpy's C extensions before the cov tracer)
     import sentence_transformers  # noqa: F401  (the transformers->numpy re-import path)
-except Exception:  # noqa: BLE001 - warm-up must never fail collection
+except Exception:
     pass

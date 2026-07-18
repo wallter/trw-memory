@@ -16,6 +16,7 @@ Covers:
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 from pathlib import Path
 from types import TracebackType
@@ -27,18 +28,36 @@ from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
+
+class _CommitFailingConn:
+    """Connection proxy that fails commits and records rollback cleanup."""
+
+    def __init__(self, real: sqlite3.Connection) -> None:
+        self._real = real
+        self.rolled_back = False
+
+    def commit(self) -> None:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    def rollback(self) -> None:
+        self.rolled_back = True
+        self._real.rollback()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
 # ---------------------------------------------------------------------------
 # S2 — depth gate raised under the BEGIN-IMMEDIATE lock (structural invariant)
 # ---------------------------------------------------------------------------
 
 
-def test_transaction_outer_bumps_depth_while_lock_held(tmp_path: Path) -> None:
-    """S2: in the outer case the depth increment happens while ``_lock`` is held.
+def test_transaction_outer_holds_lock_until_depth_is_restored(tmp_path: Path) -> None:
+    """The connection lock spans the complete outer depth lifecycle.
 
-    We wrap the real lock in a recording proxy and snapshot
-    ``_skip_commit_depth`` on every acquire/release. The window where the lock
-    is held during entry must include the depth transition 0 -> 1; if the bump
-    were outside the lock (the bug), the depth would still read 0 at release.
+    We wrap the real lock in a recording proxy and snapshot depth on release.
+    A single release at restored depth zero proves the lock was not dropped
+    between BEGIN and the final COMMIT/ROLLBACK cleanup.
     """
     backend = SQLiteBackend(tmp_path / "s2.db")
     real_lock = backend._lock  # bind before try so the finally can always restore it
@@ -64,9 +83,8 @@ def test_transaction_outer_bumps_depth_while_lock_held(tmp_path: Path) -> None:
         with backend.transaction():
             assert backend._skip_commit_depth == 1
 
-        # The first lock release inside transaction() is the BEGIN IMMEDIATE
-        # block — the depth must already be 1 at that release (bump was inside).
-        assert depth_at_release[0] == 1
+        assert depth_at_release
+        assert set(depth_at_release) == {0}
     finally:
         backend._lock = real_lock
         backend.close()
@@ -151,6 +169,50 @@ def test_store_standalone_commits_immediately(tmp_path: Path) -> None:
             assert count == 1
         finally:
             observer.close()
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("operation", ["store", "update", "delete"])
+def test_wiki_side_effect_failure_rolls_back_canonical_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """Canonical rows and their wiki references commit or roll back together."""
+    import sqlite3
+
+    from trw_memory.wiki import storage as wiki_storage
+
+    db_path = tmp_path / f"wiki_{operation}.db"
+    backend = SQLiteBackend(db_path)
+    try:
+        entry_id = f"M-wiki-{operation}"
+        if operation != "store":
+            backend.store(make_entry(entry_id=entry_id, content="before"))
+
+        helper = "purge_wiki_refs_for_entry" if operation == "delete" else "replace_wiki_refs_for_entry"
+
+        def fail_wiki_side_effect(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("wiki write failed")
+
+        monkeypatch.setattr(wiki_storage, helper, fail_wiki_side_effect)
+        with pytest.raises(RuntimeError, match="wiki write failed"):
+            if operation == "store":
+                backend.store(make_entry(entry_id=entry_id, content="new"))
+            elif operation == "update":
+                backend.update(entry_id, content="after", metadata={})
+            else:
+                backend.delete(entry_id)
+
+        observer = sqlite3.connect(str(db_path))
+        try:
+            row = observer.execute("SELECT content FROM memories WHERE id = ?", (entry_id,)).fetchone()
+        finally:
+            observer.close()
+
+        if operation == "store":
+            assert row is None
+        else:
+            assert row == ("before",)
     finally:
         backend.close()
 
@@ -267,30 +329,8 @@ def test_delete_rolls_back_on_commit_failure_outside_transaction(tmp_path: Path)
     raises, the partial multi-statement delete must be rolled back — not left
     dangling for a concurrent writer's commit to persist.
     """
-    import sqlite3
-
     db_path = tmp_path / "del_commit_fail.db"
     backend = SQLiteBackend(db_path)
-
-    class _CommitFailingConn:
-        """Proxy that fails the first commit() and tracks rollback()."""
-
-        def __init__(self, real: sqlite3.Connection) -> None:
-            self._real = real
-            self.rolled_back = False
-            self.fail_commit = True
-
-        def commit(self) -> None:
-            if self.fail_commit:
-                raise sqlite3.OperationalError("disk I/O error")
-            self._real.commit()
-
-        def rollback(self) -> None:
-            self.rolled_back = True
-            self._real.rollback()
-
-        def __getattr__(self, name: str) -> object:
-            return getattr(self._real, name)
 
     try:
         backend.store(make_entry(entry_id="M-keep", content="searchable content"))
@@ -480,6 +520,42 @@ def test_upsert_vector_standalone_still_commits(tmp_path: Path) -> None:
         backend.close()
 
 
+@pytest.mark.parametrize("operation", ["upsert", "delete", "delete_hype"])
+def test_standalone_vector_writes_roll_back_on_commit_failure(tmp_path: Path, operation: str) -> None:
+    """A failed standalone commit must not leak into a later transaction."""
+    pytest.importorskip("sqlite_vec")
+    backend = SQLiteBackend(tmp_path / f"{operation}_commit_failure.db")
+    if not backend._vec_available:
+        backend.close()
+        pytest.skip("sqlite-vec extension not available")
+
+    entry_id = "P#hype0" if operation == "delete_hype" else "M-vector"
+    embedding = [1.0] * backend._dim
+    initially_present = operation != "upsert"
+    try:
+        if initially_present:
+            backend.upsert_vector(entry_id, embedding)
+
+        real_conn = backend._conn
+        proxy = _CommitFailingConn(real_conn)
+        backend._conn = proxy  # type: ignore[assignment]
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+                if operation == "upsert":
+                    backend.upsert_vector(entry_id, embedding)
+                elif operation == "delete":
+                    backend.delete_vector(entry_id)
+                else:
+                    backend.delete_hype_siblings("P")
+            assert proxy.rolled_back
+        finally:
+            backend._conn = real_conn
+
+        assert backend.vector_exists(entry_id) is initially_present
+    finally:
+        backend.close()
+
+
 def test_transaction_commits_exactly_once(tmp_path: Path) -> None:
     """A store()+upsert batch inside transaction() issues exactly ONE commit.
 
@@ -655,7 +731,7 @@ def test_delete_by_namespace_empty_namespace_is_noop(tmp_path: Path) -> None:
         backend.close()
 
 
-def test_concurrent_outer_transactions_do_not_nest_begin(tmp_path: Path) -> None:
+def test_connection_lock_serializes_concurrent_outer_transactions(tmp_path: Path) -> None:
     """S8 follow-on: concurrent ``transaction()`` callers serialize, never nest BEGIN.
 
     Before the ``_txn_serializer`` guard, two threads could both issue
@@ -692,8 +768,8 @@ def test_concurrent_outer_transactions_do_not_nest_begin(tmp_path: Path) -> None
         backend.close()
 
 
-def test_nested_transaction_under_serializer_does_not_deadlock(tmp_path: Path) -> None:
-    """The serializer is re-entrant: same-thread nested transaction() never deadlocks."""
+def test_nested_transaction_under_connection_lock_does_not_deadlock(tmp_path: Path) -> None:
+    """The connection lock is re-entrant: same-thread nested transactions never deadlock."""
     db_path = tmp_path / "nested_serialized.db"
     backend = SQLiteBackend(db_path)
     try:
@@ -701,6 +777,100 @@ def test_nested_transaction_under_serializer_does_not_deadlock(tmp_path: Path) -
             with backend.transaction():
                 backend.store(make_entry(entry_id="M-nested-ok"))
         assert backend.get("M-nested-ok") is not None
+    finally:
+        backend.close()
+
+
+def test_standalone_mutator_cannot_join_rolling_back_transaction(tmp_path: Path) -> None:
+    backend = SQLiteBackend(tmp_path / "cross-thread-rollback.db")
+    transaction_open = threading.Event()
+    allow_rollback = threading.Event()
+    outsider_done = threading.Event()
+    outsider_results: list[int] = []
+    thread_errors: list[BaseException] = []
+    errors_lock = threading.Lock()
+    try:
+        backend.store(make_entry(entry_id="M-victim"))
+
+        def owner() -> None:
+            try:
+                with backend.transaction():
+                    backend.store(make_entry(entry_id="M-owner"))
+                    transaction_open.set()
+                    allow_rollback.wait(timeout=5)
+                    raise RuntimeError("rollback owner")
+            except RuntimeError:
+                pass
+            except BaseException as exc:
+                with errors_lock:
+                    thread_errors.append(exc)
+
+        def outsider() -> None:
+            transaction_open.wait(timeout=5)
+            try:
+                outsider_results.append(backend.increment_access_counts(["M-victim"]))
+            except BaseException as exc:
+                with errors_lock:
+                    thread_errors.append(exc)
+            finally:
+                outsider_done.set()
+
+        owner_thread = threading.Thread(target=owner)
+        outsider_thread = threading.Thread(target=outsider)
+        owner_thread.start()
+        assert transaction_open.wait(timeout=5)
+        outsider_thread.start()
+        assert not outsider_done.wait(timeout=0.1), "standalone write joined another thread's transaction"
+        allow_rollback.set()
+        owner_thread.join(timeout=5)
+        outsider_thread.join(timeout=5)
+
+        assert not owner_thread.is_alive()
+        assert not outsider_thread.is_alive()
+        assert thread_errors == []
+        assert outsider_results == [1]
+        assert backend.get("M-owner") is None
+        victim = backend.get("M-victim")
+        assert victim is not None
+        assert victim.access_count == 1
+    finally:
+        allow_rollback.set()
+        backend.close()
+
+
+def test_transaction_adopts_and_commits_existing_implicit_transaction(tmp_path: Path) -> None:
+    backend = SQLiteBackend(tmp_path / "adopt-commit.db")
+    try:
+        backend.store(make_entry(entry_id="M-victim"))
+        backend._conn.execute("UPDATE memories SET access_count = 5 WHERE id = ?", ("M-victim",))
+        assert backend._conn.in_transaction
+
+        with backend.transaction():
+            backend.increment_access_counts(["M-victim"])
+
+        victim = backend.get("M-victim")
+        assert victim is not None
+        assert victim.access_count == 6
+    finally:
+        backend.close()
+
+
+def test_transaction_adopts_and_rolls_back_existing_implicit_transaction(tmp_path: Path) -> None:
+    backend = SQLiteBackend(tmp_path / "adopt-rollback.db")
+    try:
+        backend.store(make_entry(entry_id="M-victim"))
+        backend._conn.execute("UPDATE memories SET access_count = 5 WHERE id = ?", ("M-victim",))
+        assert backend._conn.in_transaction
+
+        with pytest.raises(RuntimeError, match="rollback"):
+            with backend.transaction():
+                backend.store(make_entry(entry_id="M-owner"))
+                raise RuntimeError("rollback")
+
+        victim = backend.get("M-victim")
+        assert victim is not None
+        assert victim.access_count == 0
+        assert backend.get("M-owner") is None
     finally:
         backend.close()
 

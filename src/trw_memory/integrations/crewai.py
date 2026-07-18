@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import importlib.metadata
 import importlib.util
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING
+
+from typing_extensions import TypedDict
 
 # Verify crewai is available (but don't import heavy modules)
 try:

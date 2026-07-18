@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+
 import pytest
 
 from trw_memory.exceptions import AuthorizationError, ConfigError
@@ -174,6 +177,13 @@ class TestRequirePermissionStringRole:
         result = read_fn(role="reader")
         assert result == "ok"
 
+    def test_string_role_is_normalized_before_protected_function(self) -> None:
+        @require_permission(Permission.READ)
+        def read_fn(*, role: object) -> object:
+            return role
+
+        assert read_fn(role="reader") is Role.READER
+
     def test_string_writer_accepted(self) -> None:
         @require_permission(Permission.WRITE)
         def write_fn(*, role: object) -> str:
@@ -195,8 +205,33 @@ class TestRequirePermissionStringRole:
         def read_fn(*, role: object) -> None:
             pass
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ConfigError, match="Invalid 'role' value"):
             read_fn(role="superuser")
+
+    def test_arbitrary_object_cannot_self_promote_through_string_conversion(self) -> None:
+        called = False
+
+        class SpoofedAdmin:
+            def __str__(self) -> str:
+                return "admin"
+
+        @require_permission(Permission.ADMIN)
+        def admin_fn(*, role: object) -> None:
+            nonlocal called
+            called = True
+
+        with pytest.raises(ConfigError, match="Invalid 'role' type"):
+            admin_fn(role=SpoofedAdmin())
+        assert called is False
+
+    @pytest.mark.parametrize("role", [b"admin", ["admin"], {"role": "admin"}])
+    def test_non_string_role_values_are_rejected(self, role: object) -> None:
+        @require_permission(Permission.ADMIN)
+        def admin_fn(*, role: object) -> None:
+            pass
+
+        with pytest.raises(ConfigError, match="Invalid 'role' type"):
+            admin_fn(role=role)
 
     def test_string_reader_denied_write(self) -> None:
         @require_permission(Permission.WRITE)
@@ -208,6 +243,14 @@ class TestRequirePermissionStringRole:
 
 
 class TestRequirePermissionAsync:
+    def test_async_function_preserves_coroutine_identity(self) -> None:
+        @require_permission(Permission.READ)
+        async def async_read(*, role: Role) -> str:
+            return "async-data"
+
+        assert inspect.iscoroutinefunction(async_read)
+        assert asyncio.iscoroutinefunction(async_read)
+
     async def test_async_function_allowed(self) -> None:
         @require_permission(Permission.READ)
         async def async_read(*, role: Role) -> str:
@@ -215,6 +258,13 @@ class TestRequirePermissionAsync:
 
         result = await async_read(role=Role.READER)
         assert result == "async-data"
+
+    async def test_async_string_role_is_normalized_before_protected_function(self) -> None:
+        @require_permission(Permission.READ)
+        async def async_read(*, role: object) -> object:
+            return role
+
+        assert await async_read(role="reader") is Role.READER
 
     async def test_async_function_denied(self) -> None:
         @require_permission(Permission.WRITE)

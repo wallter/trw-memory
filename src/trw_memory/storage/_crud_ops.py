@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import json
 import sqlite3
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -43,7 +44,8 @@ from trw_memory.storage._shared import (
     serialize_update_value,
     validate_update_fields,
 )
-from trw_memory.storage._utf8_validator import validate_utf8_fields
+from trw_memory.storage._sql_utils import iter_bind_chunks
+from trw_memory.storage._utf8_validator import validate_entry_utf8, validate_utf8_fields
 from trw_memory.sync.delta import DeltaTracker
 
 if TYPE_CHECKING:
@@ -88,28 +90,7 @@ def store(
     entry: MemoryEntry,
 ) -> None:
     """INSERT OR REPLACE the entry into the memories table."""
-    validate_utf8_fields(
-        {
-            "id": entry.id,
-            "content": entry.content,
-            "detail": entry.detail,
-            "nudge_line": entry.nudge_line,
-            "type": entry.type,
-            "namespace": entry.namespace,
-            "source": entry.source,
-            "source_identity": entry.source_identity,
-            "client_profile": entry.client_profile,
-            "model_id": entry.model_id,
-            "consolidated_into": entry.consolidated_into,
-            "remote_id": entry.remote_id,
-            "expires_at": entry.expires,
-            "task_type": entry.task_type,
-            "phase_origin": entry.phase_origin,
-            "team_origin": entry.team_origin,
-            "outcome_correlation": entry.outcome_correlation,
-            "sync_hash": entry.sync_hash,
-        }
-    )
+    validate_entry_utf8(entry)
 
     entry.sync_seq = (entry.sync_seq or 0) + 1
     entry.sync_hash = DeltaTracker.compute_sync_hash(entry)
@@ -151,9 +132,7 @@ def store_many(
     """Bulk-insert a list of entries in one SQLite transaction using executemany.
 
     Returns the number of entries successfully stored. Uses ``INSERT OR REPLACE``
-    so duplicate ids overwrite existing rows — same semantics as :func:`store`
-    but batched for 90x throughput gain vs per-row stores (99K/sec vs 1.1K/sec
-    at 5K entries on WAL-mode SQLite).
+    so duplicate ids overwrite existing rows, matching :func:`store` semantics.
 
     Sync bookkeeping (sync_seq + sync_hash) is applied per-entry before the
     batch insert. FTS5 dual-write is done in two extra ``executemany`` calls so
@@ -161,6 +140,9 @@ def store_many(
     """
     if not entries:
         return 0
+
+    for entry in entries:
+        validate_entry_utf8(entry)
 
     placeholders = ", ".join(["?"] * len(columns))
     sql = f"INSERT OR REPLACE INTO memories ({insert_columns_sql}) VALUES ({placeholders})"  # noqa: S608
@@ -176,6 +158,9 @@ def store_many(
         entry.last_synced_at = None
 
     rows = [entry_to_row(e) for e in entries]
+    # INSERT OR REPLACE makes the last occurrence authoritative. Mirror that
+    # result in FTS5, whose virtual table does not enforce id uniqueness.
+    final_entries = list({entry.id: entry for entry in entries}.values())
 
     try:
         with backend._lock:
@@ -193,7 +178,7 @@ def store_many(
             if fts_batch:
                 backend._conn.executemany(
                     "DELETE FROM memories_fts WHERE id = ?",
-                    [(e.id,) for e in entries],
+                    [(entry.id,) for entry in final_entries],
                 )
                 backend._conn.executemany(
                     "INSERT INTO memories_fts(id, content, detail, tags) VALUES (?, ?, ?, ?)",
@@ -204,7 +189,7 @@ def store_many(
                             e.detail or "",
                             json.dumps(e.tags) if isinstance(e.tags, list) else (e.tags or "[]"),
                         )
-                        for e in entries
+                        for e in final_entries
                     ],
                 )
             # Merge FTS5 index segments after bulk load to prevent fragmentation.
@@ -221,8 +206,8 @@ def store_many(
         # reach here, so the rollback must RE-ACQUIRE the lock — otherwise a
         # concurrent writer can interleave on the single shared connection
         # between our failure and the ROLLBACK (mirrors _transaction.py's
-        # locked rollback). backend._lock is a non-reentrant threading.Lock and
-        # is NOT held at this point, so re-acquiring it cannot deadlock.
+        # locked rollback). The backend's RLock is no longer held at this point,
+        # so re-acquiring it keeps rollback serialized with other connection use.
         if backend._skip_commit_depth == 0:
             with backend._lock, contextlib.suppress(sqlite3.Error):
                 backend._conn.rollback()
@@ -289,6 +274,12 @@ def update(
                 f"Invalid update field: {ve.args[0]!r}",
                 path=str(backend._db_path),
             ) from None
+
+        utf8_fields = dict(field_dict)
+        if "expires" in utf8_fields:
+            utf8_fields["expires_at"] = utf8_fields.pop("expires")
+        utf8_fields["id"] = entry_id
+        validate_utf8_fields(utf8_fields)
 
         # Mark dirty for sync pipeline (PRD-INFRA-051)
         if not {"sync_seq", "sync_hash", "last_synced_at"} & field_dict.keys():
@@ -449,33 +440,60 @@ def increment_recall_access(
     unique_ids = list(dict.fromkeys(entry_ids))
     now = accessed_at or datetime.now(timezone.utc)
     now_iso = now.isoformat()
-    placeholders = ", ".join(["?"] * len(unique_ids))
-    sql = f"""
-        UPDATE memories
-        SET access_count = MIN(COALESCE(access_count, 0) + 1, {_MAX_COUNTER}),
-            recall_count = MIN(COALESCE(recall_count, 0) + 1, {_MAX_COUNTER}),
-            last_accessed_at = ?,
-            updated_at = ?,
-            sync_seq = COALESCE(sync_seq, 0) + 1,
-            last_synced_at = NULL
-        WHERE id IN ({placeholders})
-    """  # noqa: S608 — placeholders are positional binds; _MAX_COUNTER is an int constant.
-    params: list[object] = [now_iso, now_iso, *unique_ids]
     try:
-        with backend._lock:
+        with backend.transaction(), backend._lock:
             before = backend._conn.total_changes
-            backend._conn.execute(sql, params)
-            if backend._skip_commit_depth == 0:
-                backend._conn.commit()
+            for chunk in iter_bind_chunks(unique_ids, reserved_bindings=2):
+                placeholders = ", ".join(["?"] * len(chunk))
+                sql = f"""
+                    UPDATE memories
+                    SET access_count = MIN(COALESCE(access_count, 0) + 1, {_MAX_COUNTER}),
+                        recall_count = MIN(COALESCE(recall_count, 0) + 1, {_MAX_COUNTER}),
+                        last_accessed_at = ?,
+                        updated_at = ?,
+                        sync_seq = COALESCE(sync_seq, 0) + 1,
+                        last_synced_at = NULL
+                    WHERE id IN ({placeholders})
+                """  # noqa: S608
+                backend._conn.execute(sql, [now_iso, now_iso, *chunk])
             return int(backend._conn.total_changes - before)
     except sqlite3.Error as exc:
-        if backend._skip_commit_depth == 0:
-            with backend._lock, contextlib.suppress(sqlite3.Error):
-                backend._conn.rollback()
         raise StorageError(
             f"Failed to increment recall access: {exc}",
             path=str(backend._db_path),
         ) from exc
+
+
+# memory_graph_edges binds each purged id twice (source + target), so chunking
+# keeps each statement below SQLite's conservative bind ceiling. All deletes
+# run inside the caller's held lock and transaction, so the net effect remains
+# atomic.
+
+
+def purge_edges_for(backend: SQLiteBackend, entry_ids: Sequence[str]) -> None:
+    """Delete knowledge-graph edges referencing any of *entry_ids*.
+
+    ``memory_graph_edges`` declares no FK cascade (``PRAGMA foreign_keys`` is
+    off process-wide), so orphan edges must be pruned explicitly whenever their
+    endpoint rows are deleted. A single ``DELETE`` with ``OR`` covers both sides
+    of a directed edge. Shared by the per-row :func:`delete` and the bulk
+    ``delete_by_namespace`` paths — one source of truth for edge cleanup.
+
+    CONTRACT: the caller MUST already hold ``backend._lock`` and own the commit.
+    This helper neither acquires the lock nor commits, so the edge purge batches
+    into the caller's outermost ``COMMIT`` and preserves transaction atomicity
+    (test_storage_transaction_atomicity.py).
+    """
+    if not entry_ids:
+        return
+    ids = list(entry_ids)
+    for chunk in iter_bind_chunks(ids, bindings_per_item=2):
+        placeholders = ",".join("?" for _ in chunk)
+        backend._conn.execute(
+            f"DELETE FROM memory_graph_edges WHERE source_id IN ({placeholders}) "  # noqa: S608 — placeholders is ? repeated; ids are parameterized values
+            f"OR target_id IN ({placeholders})",
+            (*chunk, *chunk),
+        )
 
 
 def delete(backend: SQLiteBackend, entry_id: str) -> bool:
@@ -489,15 +507,10 @@ def delete(backend: SQLiteBackend, entry_id: str) -> bool:
             if deleted and getattr(backend, "_fts_available", False):
                 backend._conn.execute("DELETE FROM memories_fts WHERE id = ?", (entry_id,))
             # Remove knowledge-graph edges that reference the deleted entry as
-            # source or target. SQLite does not enforce FK cascades on
-            # memory_graph_edges (no FK pragma), so orphan edges must be
-            # cleaned up explicitly. A single DELETE with OR covers both sides
-            # of a directed edge in one statement.
+            # source or target (see purge_edges_for — one source of truth shared
+            # with delete_by_namespace's bulk cleanup).
             if deleted:
-                backend._conn.execute(
-                    "DELETE FROM memory_graph_edges WHERE source_id = ? OR target_id = ?",
-                    (entry_id, entry_id),
-                )
+                purge_edges_for(backend, (entry_id,))
             # Defer the commit inside a ``transaction()`` block so the row +
             # vector deletes batch into the caller's outermost COMMIT rather
             # than prematurely committing their open transaction.

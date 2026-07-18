@@ -34,6 +34,7 @@ from trw_memory.models.memory import (
 )
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
+
 class TestTagFilterAppliesBeforeLimit:
     """Pushing the tag predicate into SQL so LIMIT applies AFTER tag filtering.
 

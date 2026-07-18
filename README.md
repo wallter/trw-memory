@@ -1,58 +1,27 @@
 # trw-memory
 
-**AI agent memory engine** — persistent memory for AI agents with hybrid search (BM25 + vectors), Q-learning scoring, Ebbinghaus decay curves, tiered storage, and knowledge graph. The standalone memory backend powering [TRW Framework](https://trwframework.com).
+**Persistent memory engine for AI agents** — local-first storage, hybrid retrieval (BM25 + vectors), lifecycle scoring, tiered storage, and a knowledge graph. The standalone memory backend powering [TRW Framework](https://trwframework.com).
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-orange.svg)](https://trwframework.com/license)
 [![Docs](https://img.shields.io/badge/docs-trwframework.com-blue)](https://trwframework.com/docs)
 
-## Part of TRW Framework
+> **Release status:** Alpha and source-available under BSL 1.1. The public API may change before 1.0; evaluate upgrades in a test environment before production rollout.
+
+**[Quick start](#quick-start)** · **[Python API](#memoryclient-recommended)** · **[CLI](#cli)** · **[Benchmarks](#benchmarks)** · **[Security and network behavior](#telemetry--network-behavior)** · **[Development](#development)**
+
+## How it fits
 
 trw-memory is the standalone memory engine for [TRW (The Real Work)](https://trwframework.com) — a methodology layer for AI-assisted development that provides stateless agents with a persistent memory layer **designed to enable self-improvement across sessions** via [knowledge compounding](https://trwframework.com/docs). *The outcome effect of cross-session memory on coding tasks is an open empirical question; early SWE-bench single-shot runs (n≥40) produced null. See the [verification docs](https://trwframework.com/docs/verification) for the current methodology and evidence posture.* It works alongside [trw-mcp](https://github.com/wallter/trw-mcp), the MCP server that builds its tooling on this engine.
 
 - **trw-memory** (this repo): Standalone AI agent memory engine with hybrid retrieval, scoring, and lifecycle
 - **trw-mcp**: MCP server for AI coding agents — uses trw-memory as its backend
 
-## What It Does
+## What it does
 
 TRW-Memory is a standalone **persistent memory engine for AI agents** that gives coding agents searchable, long-lived knowledge storage. It stores learnings (patterns, gotchas, architecture decisions) in SQLite with optional YAML backup, and retrieves them using [hybrid search](https://trwframework.com/docs) that combines keyword matching (BM25) with dense vector similarity.
 
 Designed as the storage backend for [trw-mcp](https://github.com/wallter/trw-mcp) and [TRW Framework](https://trwframework.com), but usable independently by any AI agent framework that needs persistent memory with recall.
-
-## Benchmarks
-
-Every number below is a **same-harness ablation** — retrieval strategies compared on one fixed corpus and query set, each reported with its sample size and, where the claim is comparative, non-overlapping 95% confidence intervals or a paired test. These are **not** leaderboard claims against other systems. Methodology and raw readouts live in the [verification docs](https://trwframework.com/docs/verification).
-
-### Hybrid retrieval beats either ranker alone
-
-On a gold set of real engineering learnings (**n = 889** typed queries), Reciprocal Rank Fusion of BM25 + dense vectors outranks either single ranker — and the same direction replicates on a second, independent benchmark (LongMemEval_S, **n = 500** questions):
-
-| Retriever | Recall@10 | nDCG@10 |
-|-----------|:---------:|:-------:|
-| BM25 only | 0.869 | 0.771 |
-| Vector only | 0.914 | 0.806 |
-| **Hybrid (BM25 + vector, RRF)** | **0.938** | **0.839** |
-
-Fusion earns its keep on the hard questions: exact-match queries are near ceiling for every retriever, so the lift concentrates in the temporal / multi-session discrimination band.
-
-### Better recall prevents re-discovery
-
-On TRW's own active learning store (**n = 175** near-duplicate "rediscoveries"), the share of duplicates a recall *would have caught* before re-deriving them — the Preventable Rediscovery Ratio — is far higher for hybrid than for keyword search alone, with **non-overlapping 95% CIs**:
-
-| Retriever | Preventable Rediscovery Ratio (95% CI) |
-|-----------|:--------------------------------------:|
-| BM25 only | 0.720 [0.649, 0.781] |
-| **Hybrid** | **0.943 [0.898, 0.969]** |
-
-Direct evidence that retrieval quality — not just storage — is what keeps an agent from re-deriving what it already knows.
-
-### Knowledge compounding, measured
-
-On a controlled recall-dependent benchmark (H1-MEMORY-BENCH), agents **with** memory solved every task that required recalling a fact established in an earlier session — **58/58** — while agents **without** memory solved **0/50** (the fact is absent by construction). Paired McNemar **p = 3.6×10⁻¹⁵** across **49 matched pairs** (exceeds the pre-registered n ≥ 30), replicated on a second model family.
-
-> **Scope, honestly.** This demonstrates the *mechanism*: cross-session recall lets an agent complete work it otherwise cannot. Whether that compounds into broad, end-to-end coding-task improvement is a separate, still-open question — early SWE-bench single-shot runs (n ≥ 40) produced null. See the [verification docs](https://trwframework.com/docs/verification) for the full evidence posture.
-
-*Throughput (single-run baseline, not CI-backed): sub-millisecond store (p95 ≈ 0.31 ms) and ~116 ms hybrid recall p95 at 1,000 entries; on-disk footprint ≈ 1.2 MB per 1k entries.*
 
 ## Features
 
@@ -76,24 +45,23 @@ On a controlled recall-dependent benchmark (H1-MEMORY-BENCH), agents **with** me
 ## Quick Start
 
 ```bash
-# Install from PyPI
+# Core local engine (SQLite + built-in keyword search)
 pip install trw-memory
 
-# Or install from source
-git clone https://github.com/wallter/trw-memory.git
-cd trw-memory
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+# Recommended hybrid retrieval
+pip install "trw-memory[embeddings,vectors,bm25]"
 
-# With all optional features (embeddings, vectors, BM25, LLM)
-pip install -e ".[all]"
+# Retrieval stack + MCP + LLM-assisted consolidation
+pip install "trw-memory[all]"
 ```
 
 By default, memories are stored in `.memory/` relative to the current directory. Override with `MEMORY_STORAGE_PATH` env var.
 
+For source development, clone the repository and run `pip install -e ".[dev]"` from `trw-memory/`.
+
 ### Platform notes
 
-- **SQLite driver** — On Linux, `trw-memory` depends on `pysqlite3-binary`, which bundles a recent SQLite (≥3.51) wheel that includes the WAL-reset corruption fix. `pysqlite3-binary` publishes manylinux wheels only, so **macOS and Windows fall back to the interpreter's stdlib `sqlite3`** via the `storage/_dbapi.py` driver shim. Where the bundled SQLite predates the fix, a single-connection WAL-checkpoint window mitigates the concurrent-writer corruption path.
+- **SQLite driver** — On Linux, `trw-memory` depends on `pysqlite3-binary` and probes the bundled SQLite at runtime for the WAL-reset corruption fix (3.51.3, or a fixed backport). For example, the observed `0.5.4.post2` wheel reports SQLite 3.51.1 and therefore activates the single-connection WAL-checkpoint mitigation; the runtime probe, not the dependency name or package version, is authoritative. `pysqlite3-binary` publishes manylinux wheels only, so **macOS and Windows fall back to the interpreter's stdlib `sqlite3`** through the same driver shim and runtime safety probe.
 - **Vector search is optional** — `[vectors]` (sqlite-vec) and `[embeddings]` (sentence-transformers) are optional extras. When they are unavailable the retrieval pipeline degrades gracefully to BM25 and/or the backend's built-in keyword search rather than failing.
 
 ### MemoryClient (recommended)
@@ -102,44 +70,18 @@ By default, memories are stored in `.memory/` relative to the current directory.
 from trw_memory.client import MemoryClient
 
 async with MemoryClient(namespace="project:my-app") as client:
-    # Store a learning
-    await client.store(
+    stored = await client.store(
         "Pydantic v2 requires use_enum_values=True for YAML round-trip",
         tags=["pydantic", "gotcha"],
         importance=0.8,
     )
 
-    # Recall by keyword query (hybrid BM25 + vector search)
+    # Uses hybrid retrieval when optional rankers are installed.
     results = await client.recall("pydantic serialization", limit=10)
-
-    # Search with filters
     high_impact = await client.search(min_importance=0.7, tags=["gotcha"])
-
-    # Fast keyword-only lookup via SQLite FTS5 (no hybrid ranking)
-    fts_hits = await client.search_fts("BEGIN IMMEDIATE", top_k=10)
-
-    # Forget an entry
-    await client.forget(results[0]["memory_id"])
-
-    # Store many entries from plain store()-shaped dicts in one call
-    written = await client.store_many([
-        {"content": "Use BEGIN IMMEDIATE for write transactions", "tags": ["sqlite"]},
-        {"content": "RRF k is a configurable fusion constant", "tags": ["retrieval"]},
-    ])
-
-    # Or bulk-store with structured BulkStoreRequest objects (per-item error reporting)
-    from trw_memory.client import BulkStoreRequest
-    summary = await client.bulk_store([
-        BulkStoreRequest(content="Use BEGIN IMMEDIATE for write transactions", tags=["sqlite"]),
-        BulkStoreRequest(content="RRF k is a configurable fusion constant", tags=["retrieval"]),
-    ])
-
-    # Inspect provenance/lifecycle for one entry
-    audit = await client.audit_learning(results[0]["memory_id"])
-
-    # Review entries quarantined by the poisoning/PII defenses
-    quarantined = await client.review_quarantined()
 ```
+
+`MemoryClient` also provides `store_many()` and `bulk_store()` for batch writes, `search_fts()` for keyword-only lookup, `forget()` for deletion, and `audit_learning()` / `review_quarantined()` for lifecycle and security workflows.
 
 ### Agent Framework Integration
 
@@ -213,6 +155,41 @@ entry = MemoryEntry(id="M-abc12345", content="...", namespace="default", ...)
 backend.store(entry)
 results = backend.search("query", top_k=10, namespace="default")
 ```
+
+## Benchmarks
+
+Every number below is a **same-harness ablation** — retrieval strategies compared on one fixed corpus and query set, each reported with its sample size and, where the claim is comparative, non-overlapping 95% confidence intervals or a paired test. These are **not** leaderboard claims against other systems. Methodology and raw readouts live in the [verification docs](https://trwframework.com/docs/verification).
+
+### Hybrid retrieval beats either ranker alone
+
+On a gold set of real engineering learnings (**n = 889** typed queries), Reciprocal Rank Fusion of BM25 + dense vectors outranks either single ranker — and the same direction replicates on a second, independent benchmark (LongMemEval_S, **n = 500** questions):
+
+| Retriever | Recall@10 | nDCG@10 |
+|-----------|:---------:|:-------:|
+| BM25 only | 0.869 | 0.771 |
+| Vector only | 0.914 | 0.806 |
+| **Hybrid (BM25 + vector, RRF)** | **0.938** | **0.839** |
+
+Fusion earns its keep on the hard questions: exact-match queries are near ceiling for every retriever, so the lift concentrates in the temporal / multi-session discrimination band.
+
+### Better recall prevents re-discovery
+
+On TRW's own active learning store (**n = 175** near-duplicate "rediscoveries"), the share of duplicates a recall *would have caught* before re-deriving them — the Preventable Rediscovery Ratio — is far higher for hybrid than for keyword search alone, with **non-overlapping 95% CIs**:
+
+| Retriever | Preventable Rediscovery Ratio (95% CI) |
+|-----------|:--------------------------------------:|
+| BM25 only | 0.720 [0.649, 0.781] |
+| **Hybrid** | **0.943 [0.898, 0.969]** |
+
+Direct evidence that retrieval quality — not just storage — is what keeps an agent from re-deriving what it already knows.
+
+### Knowledge compounding, measured
+
+On a controlled recall-dependent benchmark (H1-MEMORY-BENCH), agents **with** memory solved every task that required recalling a fact established in an earlier session — **58/58** — while agents **without** memory solved **0/50** (the fact is absent by construction). Paired McNemar **p = 3.6×10⁻¹⁵** across **49 matched pairs** (exceeds the pre-registered n ≥ 30), replicated on a second model family.
+
+> **Scope, honestly.** This demonstrates the *mechanism*: cross-session recall lets an agent complete work it otherwise cannot. Whether that compounds into broad, end-to-end coding-task improvement is a separate, still-open question — early SWE-bench single-shot runs (n ≥ 40) produced null. See the [verification docs](https://trwframework.com/docs/verification) for the full evidence posture.
+
+*Throughput (single-run baseline, not CI-backed): sub-millisecond store (p95 ≈ 0.31 ms) and ~116 ms hybrid recall p95 at 1,000 entries; on-disk footprint ≈ 1.2 MB per 1k entries.*
 
 ## Architecture
 
@@ -421,9 +398,9 @@ python -m pytest tests/ -v --cov=trw_memory --cov-report=term-missing
 python -m mypy --strict src/trw_memory/
 
 # Targeted testing
-python -m pytest tests/test_client.py -v
+python -m pytest tests/test_client_*.py -v
 python -m pytest tests/test_retrieval_*.py -v
-python -m pytest tests/test_storage_sqlite.py -v
+python -m pytest tests/test_storage_sqlite_*.py -v
 ```
 
 **Quality bar**: a broad pytest suite, mypy `--strict` clean, and a coverage floor of 85% (`fail_under` in `pyproject.toml`).
@@ -442,7 +419,7 @@ python -m pytest tests/test_storage_sqlite.py -v
 | `[llamaindex]` | llama-index-core | LlamaIndex reader/writer |
 | `[crewai]` | crewai | CrewAI memory component |
 | `[all-integrations]` | langchain + llamaindex + crewai | All framework integrations |
-| `[all]` | mcp + embeddings + vectors + bm25 + llm | Full feature set |
+| `[all]` | mcp + embeddings + vectors + bm25 + llm | Retrieval stack, MCP server, and LLM consolidation |
 | `[dev]` | pytest, mypy, ruff, coverage, pip-audit, vulture, deptry | Testing and linting |
 
 ### Entry Points

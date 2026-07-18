@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -13,16 +12,16 @@ from trw_memory.exceptions import EncryptionUnavailableError
 
 
 class TestConstructor:
-    def test_local_mode_creates_backend(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_local_mode_creates_backend(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "s"))
-        c = MemoryClient(namespace="default", mode="local")
-        assert c.resolved_mode == "local"
-        assert c.namespace == "default"
+        async with MemoryClient(namespace="default", mode="local") as client:
+            assert client.resolved_mode == "local"
+            assert client.namespace == "default"
 
-    def test_auto_mode_resolves_to_local(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_auto_mode_resolves_to_local(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "s"))
-        c = MemoryClient(namespace="default", mode="auto")
-        assert c.resolved_mode == "local"
+        async with MemoryClient(namespace="default", mode="auto") as client:
+            assert client.resolved_mode == "local"
 
     def test_local_mode_raises_when_sqlite_encryption_requested(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -49,38 +48,59 @@ class TestConstructor:
         )
         monkeypatch.setattr(MemoryClient, "_get_embedder", lambda self: None)
 
-        client = MemoryClient(namespace="default", mode="local")
-        await client.store("encrypted runtime path")
-        results = await client.recall("encrypted")
+        async with MemoryClient(namespace="default", mode="local") as client:
+            await client.store("encrypted runtime path")
+            results = await client.recall("encrypted")
 
-        assert results
-        assert results[0]["content"] == "encrypted runtime path"
-        assert statements[0].startswith("PRAGMA key = \"x'")
-        assert "PRAGMA cipher = 'aes-256-cbc'" in statements
-        assert "PRAGMA cipher_page_size = 4096" in statements
-        assert "PRAGMA kdf_iter = 256000" in statements
-        assert (tmp_path / "storage" / "default" / "memory" / "warm.jsonl").exists() is False
+            assert results
+            assert results[0]["content"] == "encrypted runtime path"
+            assert statements[0].startswith("PRAGMA key = \"x'")
+            assert "PRAGMA cipher = 'aes-256-cbc'" in statements
+            assert "PRAGMA cipher_page_size = 4096" in statements
+            assert "PRAGMA kdf_iter = 256000" in statements
+            assert (tmp_path / "storage" / "default" / "memory" / "warm.jsonl").exists() is False
 
     def test_mcp_mode_raises_not_implemented(self) -> None:
         with pytest.raises(NotImplementedError, match="MCP mode"):
             MemoryClient(namespace="default", mode="mcp")
 
+    def test_invalid_mode_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unsupported memory client mode"):
+            MemoryClient(namespace="default", mode="bogus")  # type: ignore[arg-type]
+
     def test_invalid_namespace_raises(self) -> None:
         with pytest.raises(Exception):
             MemoryClient(namespace="invalid namespace!")
 
-    def test_project_namespace(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_project_namespace(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "s"))
-        c = MemoryClient(namespace="project:test-proj", mode="local")
-        assert c.namespace == "project:test-proj"
-        assert c.resolved_mode == "local"
+        async with MemoryClient(namespace="project:test-proj", mode="local") as client:
+            assert client.namespace == "project:test-proj"
+            assert client.resolved_mode == "local"
 
-    def test_timeout_stored(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_timeout_stored(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "s"))
-        c = MemoryClient(namespace="default", mode="local", timeout=10.0)
-        assert c._timeout == 10.0
+        async with MemoryClient(namespace="default", mode="local", timeout=10.0) as client:
+            assert client._timeout == 10.0
 
-    def test_sync_enabled_starts_sse_subscription(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_explicit_db_path_anchors_ancillary_state_outside_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        db_path = tmp_path / "isolated" / "memory.db"
+        monkeypatch.chdir(cwd)
+
+        client = MemoryClient(namespace="project:explicit-path", mode="local", db_path=db_path)
+        try:
+            assert client._config.storage_path == str(db_path.parent.resolve())
+            assert (cwd / ".memory").exists() is False
+            assert client._tier_manager is not None
+            assert client._tier_manager._base_dir == db_path.parent.resolve() / "project_explicit-path"
+        finally:
+            await client.close()
+
+    async def test_sync_enabled_starts_sse_subscription(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "s"))
         monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
         monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
@@ -93,9 +113,12 @@ class TestConstructor:
 
             client = MemoryClient(namespace="default", mode="local")
 
-        subscriber_cls.assert_called_once()
-        subscriber.start.assert_called_once()
-        asyncio.run(client.close())
+        try:
+            subscriber_cls.assert_called_once()
+            assert client._sse_subscriber is subscriber
+            subscriber.start.assert_called_once()
+        finally:
+            await client.close()
 
 
 class TestAutoRecallDecorator:

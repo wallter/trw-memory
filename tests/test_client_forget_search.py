@@ -63,11 +63,17 @@ class TestForget:
                 await asyncio.gather(*list(client._background_tasks))
 
         with patch("trw_memory.client.retire_remote_memory", return_value=True) as retire_mock:
-            await client.forget(stored["memory_id"])
+            forgotten = await client.forget(stored["memory_id"])
             if client._background_tasks:
                 await asyncio.gather(*list(client._background_tasks))
 
         retire_mock.assert_called_once_with("42", client._config)
+        assert forgotten == {
+            "memory_id": stored["memory_id"],
+            "status": "deleted",
+            "namespace": "default",
+            "entries_deleted": 1,
+        }
         await client.close()
 
 

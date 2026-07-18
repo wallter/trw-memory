@@ -156,7 +156,8 @@ def _sweep_cold_to_purge(
                     "purged_at": datetime.now(timezone.utc).isoformat(),
                     "days_idle": days,
                     "importance_score": utility_score,
-                    "importance": float(str(data.get("importance", data.get("impact", 0.5)))),
+                    # PRD-CORE-181 FR06: canonical importance only (no legacy fallback).
+                    "importance": float(str(data.get("importance", 0.5))),
                     "content": str(data.get("content", data.get("summary", ""))),
                 }
                 purge_audit_path.parent.mkdir(parents=True, exist_ok=True)

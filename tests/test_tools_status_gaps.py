@@ -1,11 +1,10 @@
 """Wave 12: targeted tests for uncovered branches in tools/status.py."""
+
 from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -21,6 +20,7 @@ def _ctx_factory(backend):
     @contextmanager
     def _cm(*args, **kwargs):
         yield backend
+
     return _cm
 
 

@@ -133,8 +133,9 @@ class TestHybridSearch:
         entries = self._entries()
         with patch("trw_memory.retrieval.pipeline.dense_search") as mock_dense:
             mock_dense.return_value = []
-            hybrid_search("pydantic", entries, embedder=embedder, stored_embeddings=None)
+            result = hybrid_search("pydantic", entries, embedder=embedder, stored_embeddings=None)
         mock_dense.assert_called_once()
+        assert result
 
     def test_entries_returned_are_original_objects(self) -> None:
         entries = self._entries()

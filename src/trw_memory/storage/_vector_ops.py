@@ -24,13 +24,16 @@ Extracted as PRD-DIST-245 Phase 1 batch 85.
 
 from __future__ import annotations
 
+import _thread
 import contextlib
 import sqlite3
 import struct
-import threading
 from typing import Any
 
 import structlog
+
+from trw_memory._hype_ids import parent_of_hype_id
+from trw_memory.storage._sql_utils import iter_bind_chunks
 
 logger = structlog.get_logger(__name__)
 
@@ -48,6 +51,13 @@ def _is_optional_vec_unavailable_error(exc: sqlite3.Error) -> bool:
     """Return True when SQLite cannot open sqlite-vec's ``vec0`` module."""
     message = str(exc).lower()
     return "no such module: vec0" in message or ("no such module" in message and "vec" in message)
+
+
+def _rollback_standalone_write(conn: Any, *, skip_commit: bool) -> None:
+    """Undo a failed write unless its surrounding transaction owns rollback."""
+    if not skip_commit:
+        with contextlib.suppress(sqlite3.Error):
+            conn.rollback()
 
 
 def delete_vector_internal(conn: Any, entry_id: str) -> None:
@@ -74,7 +84,7 @@ def delete_vector_internal(conn: Any, entry_id: str) -> None:
 
 def delete_vector(
     conn: Any,
-    lock: threading.Lock,
+    lock: _thread.LockType | _thread.RLock,
     *,
     vec_available: bool,
     entry_id: str,
@@ -91,12 +101,16 @@ def delete_vector(
     """
     if not vec_available:
         return False
-    with lock:
-        before = conn.total_changes
-        delete_vector_internal(conn, entry_id)
-        if not skip_commit:
-            conn.commit()
-        return bool(conn.total_changes > before)
+    try:
+        with lock:
+            before = conn.total_changes
+            delete_vector_internal(conn, entry_id)
+            if not skip_commit:
+                conn.commit()
+            return bool(conn.total_changes > before)
+    except sqlite3.Error:
+        _rollback_standalone_write(conn, skip_commit=skip_commit)
+        raise
 
 
 def vector_exists(conn: Any, *, vec_available: bool, entry_id: str) -> bool:
@@ -121,7 +135,7 @@ def vector_exists(conn: Any, *, vec_available: bool, entry_id: str) -> bool:
 
 def existing_vector_ids(
     conn: Any,
-    lock: threading.Lock,
+    lock: _thread.LockType | _thread.RLock,
     *,
     vec_available: bool,
     namespace: str | None = None,
@@ -165,17 +179,16 @@ def existing_vector_ids(
 def _hype_like_pattern(parent_id: str) -> str:
     """SQL LIKE pattern matching a parent's ``{parent_id}#hype{n}`` siblings.
 
-    ``#`` is not a LIKE wildcard, and ``%`` after it captures every ``hype{n}``
-    suffix. Parent ids are opaque app strings; a parent id that itself contained
-    LIKE wildcards (``%``/``_``) could over-match, but parent ids here are
-    engine-generated uuids/keys, so no ESCAPE clause is needed.
+    Parent ids are opaque caller-supplied strings, so escape every SQLite LIKE
+    metacharacter before appending the wildcard that captures ``hype{n}``.
     """
-    return f"{parent_id}#hype%"
+    escaped_parent_id = parent_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"{escaped_parent_id}#hype%"
 
 
 def hype_sibling_ids(
     conn: Any,
-    lock: threading.Lock,
+    lock: _thread.LockType | _thread.RLock,
     *,
     vec_available: bool,
     parent_id: str,
@@ -190,7 +203,9 @@ def hype_sibling_ids(
     try:
         with lock:
             rows = conn.execute(
-                "SELECT entry_id FROM vec_index WHERE entry_id LIKE ?",
+                "SELECT vi.entry_id FROM vec_index vi "
+                "WHERE vi.entry_id LIKE ? ESCAPE '\\' "
+                "AND NOT EXISTS (SELECT 1 FROM memories m WHERE m.id = vi.entry_id)",
                 (_hype_like_pattern(parent_id),),
             ).fetchall()
     except sqlite3.Error as exc:
@@ -199,12 +214,13 @@ def hype_sibling_ids(
         else:
             logger.warning("hype_sibling_ids_query_failed", exc_info=True)
         return []
-    return [str(row[0]) for row in rows]
+    candidate_ids = [str(row[0]) for row in rows]
+    return [entry_id for entry_id in candidate_ids if parent_of_hype_id(entry_id) == parent_id]
 
 
 def delete_hype_siblings(
     conn: Any,
-    lock: threading.Lock,
+    lock: _thread.LockType | _thread.RLock,
     *,
     vec_available: bool,
     parent_id: str,
@@ -223,17 +239,21 @@ def delete_hype_siblings(
     sibling_ids = hype_sibling_ids(conn, lock, vec_available=vec_available, parent_id=parent_id)
     if not sibling_ids:
         return 0
-    with lock:
-        for sibling_id in sibling_ids:
-            delete_vector_internal(conn, sibling_id)
-        if not skip_commit:
-            conn.commit()
+    try:
+        with lock:
+            for sibling_id in sibling_ids:
+                delete_vector_internal(conn, sibling_id)
+            if not skip_commit:
+                conn.commit()
+    except sqlite3.Error:
+        _rollback_standalone_write(conn, skip_commit=skip_commit)
+        raise
     return len(sibling_ids)
 
 
 def upsert_vector(
     conn: Any,
-    lock: threading.Lock,
+    lock: _thread.LockType | _thread.RLock,
     *,
     vec_available: bool,
     dim: int,
@@ -281,13 +301,8 @@ def upsert_vector(
             if not skip_commit:
                 conn.commit()
     except sqlite3.Error as exc:
+        _rollback_standalone_write(conn, skip_commit=skip_commit)
         if _is_optional_vec_unavailable_error(exc):
-            if not skip_commit:
-                # Standalone upsert: undo the partial vec writes. Inside a
-                # transaction we must NOT rollback — that would discard the
-                # owner's outer batch; leave cleanup to the outermost handler.
-                with contextlib.suppress(sqlite3.Error):
-                    conn.rollback()
             logger.warning(
                 "vector_index_unavailable",
                 op="upsert",
@@ -302,7 +317,7 @@ def upsert_vector(
 
 def search_vectors(
     conn: Any,
-    lock: threading.Lock,
+    lock: _thread.LockType | _thread.RLock,
     *,
     vec_available: bool,
     dim: int,
@@ -322,7 +337,7 @@ def search_vectors(
     the requested count met as long as the namespace holds enough near neighbours
     within the over-fetch window. ``namespace=None`` keeps the legacy behaviour.
     """
-    if not vec_available:
+    if not vec_available or top_k <= 0:
         return []
     if len(query_embedding) != dim:
         # A query vector whose length differs from the indexed dim (model swap)
@@ -379,7 +394,7 @@ def search_vectors(
 
 def get_stored_embeddings(
     conn: Any,
-    lock: threading.Lock,
+    lock: _thread.LockType | _thread.RLock,
     *,
     vec_available: bool,
     entry_ids: list[str],
@@ -387,16 +402,18 @@ def get_stored_embeddings(
     """Load stored vectors for the requested entry IDs."""
     if not vec_available or not entry_ids:
         return {}
-    placeholders = ", ".join(["?"] * len(entry_ids))
-    sql = f"""
-        SELECT vi.entry_id, vm.embedding
-        FROM vec_memories vm
-        JOIN vec_index vi ON vm.rowid = vi.rowid
-        WHERE vi.entry_id IN ({placeholders})
-    """  # noqa: S608 — placeholder count is derived from entry_ids length only; values bound separately
     try:
         with lock:
-            rows = conn.execute(sql, entry_ids).fetchall()
+            rows = []
+            for chunk in iter_bind_chunks(entry_ids):
+                placeholders = ", ".join(["?"] * len(chunk))
+                sql = f"""
+                    SELECT vi.entry_id, vm.embedding
+                    FROM vec_memories vm
+                    JOIN vec_index vi ON vm.rowid = vi.rowid
+                    WHERE vi.entry_id IN ({placeholders})
+                """  # noqa: S608
+                rows.extend(conn.execute(sql, chunk).fetchall())
     except sqlite3.Error as exc:
         # Match search_vectors: only the expected vec0-module-absent case stays
         # at debug. A REAL SQL error (corruption, I/O, locked DB) returns {} —

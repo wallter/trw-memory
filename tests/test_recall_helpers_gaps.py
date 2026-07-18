@@ -1,11 +1,12 @@
 """Wave 15: coverage gap-fill for tools/_recall_helpers.py (lines 32, 65, 68-70, 141, 150, 167, 169-170, 176-178, 185, 207)."""
+
 from __future__ import annotations
 
 import sqlite3
 from unittest.mock import MagicMock, patch
 
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.models.memory import MemoryEntry
 from trw_memory.tools._recall_helpers import (
     _apply_sec001_recall_policy,
     _entry_matches_query,

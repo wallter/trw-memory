@@ -21,6 +21,7 @@ from trw_memory.client import (
     BulkStoreSummary,
     MemoryClient,
 )
+from trw_memory.models.memory import Assertion, AssertionType
 
 
 @pytest.fixture
@@ -106,6 +107,27 @@ async def test_bulk_store_records_are_recallable(isolated_client: MemoryClient) 
     )
     hits = await isolated_client.recall(query="page hinkley", limit=10)
     assert any("page hinkley" in (h.get("content") or "").lower() for h in hits)
+
+
+async def test_bulk_store_preserves_expiry_and_assertions(isolated_client: MemoryClient) -> None:
+    assertion = Assertion(type=AssertionType.GLOB_EXISTS, target="src/**/*.py")
+    summary = await isolated_client.bulk_store(
+        [
+            BulkStoreRequest(
+                content="grounded bulk record",
+                evidence=["src/example.py:10-20"],
+                expires="when migration ships",
+                assertions=[assertion],
+            )
+        ]
+    )
+
+    stored = isolated_client._get_backend().get(summary.items[0].memory_id)
+
+    assert stored is not None
+    assert stored.evidence == ["src/example.py:10-20"]
+    assert stored.expires == "when migration ships"
+    assert stored.assertions == [assertion]
 
 
 # ---------------------------------------------------------------- quarantine path

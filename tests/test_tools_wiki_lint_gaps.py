@@ -1,14 +1,14 @@
 """Wave 14: coverage gap-fill for tools/wiki_lint.py (line 19) and wiki/lint.py (lines 156-158)."""
+
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import MagicMock
 
 from trw_memory.tools.wiki_lint import memory_wiki_lint_impl, register_wiki_lint_tool
 
 
 class TestRegisterWikiLintTool:
-    def test_registered_function_delegates_to_impl(self) -> None:
+    async def test_registered_function_delegates_to_impl(self) -> None:
         """register_wiki_lint_tool wires memory_wiki_lint to impl (line 19)."""
         registered: dict[str, object] = {}
         mock_mcp = MagicMock()
@@ -22,9 +22,7 @@ class TestRegisterWikiLintTool:
 
         assert "fn" in registered
 
-        result = asyncio.run(
-            registered["fn"]([], 20)  # type: ignore[operator]
-        )
+        result = await registered["fn"]([], 20)  # type: ignore[operator]
 
         assert isinstance(result, dict)
         assert "total" in result or "findings_count" in result or "status" in result

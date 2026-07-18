@@ -21,6 +21,7 @@ Extracted as PRD-DIST-245 Phase 2 batch 97.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -41,6 +42,9 @@ def create_co_anchored_edges(
     entry_id: str,
     anchor_files: list[str],
     max_per_file: int = 50,
+    *,
+    lock: threading.Lock | None = None,
+    min_shared_anchors: int = 1,
 ) -> int:
     """Create ``co_anchored`` edges for entries sharing anchor files.
 
@@ -49,23 +53,55 @@ def create_co_anchored_edges(
     g = _graph_module()
     now = datetime.now(timezone.utc).isoformat()
     created = 0
+    unique_anchor_files = list(dict.fromkeys(anchor_files))
+    if min_shared_anchors < 1:
+        raise ValueError("min_shared_anchors must be at least 1")
+    if len(unique_anchor_files) < min_shared_anchors:
+        return 0
 
-    for anchor_file in anchor_files:
-        rows = conn.execute(
-            "SELECT DISTINCT m.id FROM memories m, json_each(m.anchors) je "
-            "WHERE json_extract(je.value, '$.file') = ? "
-            "AND m.id != ? "
-            "LIMIT ?",
-            (anchor_file, entry_id, max_per_file),
-        ).fetchall()
+    with g._optional_lock(lock):
+        if min_shared_anchors > 1:
+            placeholders = ", ".join("?" for _ in unique_anchor_files)
+            query = (
+                "SELECT m.id, GROUP_CONCAT(DISTINCT json_extract(je.value, '$.file')) "  # noqa: S608 -- only '?' placeholders are interpolated
+                "FROM memories m, json_each(m.anchors) je "
+                f"WHERE json_extract(je.value, '$.file') IN ({placeholders}) "
+                "AND m.id != ? GROUP BY m.id "
+                "HAVING COUNT(DISTINCT json_extract(je.value, '$.file')) >= ? "
+                "LIMIT ?"
+            )
+            rows = conn.execute(
+                query,
+                (*unique_anchor_files, entry_id, min_shared_anchors, max_per_file),
+            ).fetchall()
+            for other_id, shared_csv in rows:
+                g._upsert_edge(
+                    conn,
+                    entry_id,
+                    other_id,
+                    "co_anchored",
+                    0.8,
+                    now,
+                    metadata={"anchor_files": str(shared_csv)},
+                )
+                created += 1
+        else:
+            for anchor_file in unique_anchor_files:
+                rows = conn.execute(
+                    "SELECT DISTINCT m.id FROM memories m, json_each(m.anchors) je "
+                    "WHERE json_extract(je.value, '$.file') = ? "
+                    "AND m.id != ? "
+                    "LIMIT ?",
+                    (anchor_file, entry_id, max_per_file),
+                ).fetchall()
 
-        for (other_id,) in rows:
-            meta = {"anchor_file": anchor_file}
-            g._upsert_edge(conn, entry_id, other_id, "co_anchored", 0.8, now, metadata=meta)
-            created += 1
+                for (other_id,) in rows:
+                    meta = {"anchor_file": anchor_file}
+                    g._upsert_edge(conn, entry_id, other_id, "co_anchored", 0.8, now, metadata=meta)
+                    created += 1
 
-    if created:
-        conn.commit()
+        if created:
+            conn.commit()
     logger.debug("co_anchored_edges_created", entry_id=entry_id, count=created)
     return created
 

@@ -12,6 +12,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
 from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -277,3 +278,56 @@ class TestLockForRmw:
             write_yaml(target, data)
         result = read_yaml(target)
         assert result["count"] == 1
+
+    def test_windows_locking_uses_one_byte_exclusive_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trw_memory.storage import persistence
+
+        class _FakeMsvcrt:
+            LK_LOCK = 1
+            LK_UNLCK = 2
+
+            def __init__(self) -> None:
+                self.calls: list[tuple[int, int]] = []
+
+            def locking(self, _fd: int, mode: int, count: int) -> None:
+                self.calls.append((mode, count))
+
+        fake = _FakeMsvcrt()
+        monkeypatch.setattr(persistence, "_FCNTL_AVAILABLE", False)
+        monkeypatch.setattr(persistence, "_MSVCRT_AVAILABLE", True)
+        monkeypatch.setattr(persistence, "_msvcrt", fake)
+
+        with lock_for_rmw(tmp_path / "data.yaml"):
+            pass
+
+        assert fake.calls == [(fake.LK_LOCK, 1), (fake.LK_UNLCK, 1)]
+
+    def test_windows_unlock_failure_still_closes_lock_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trw_memory.storage import persistence
+
+        class _FailingUnlockMsvcrt:
+            LK_LOCK = 1
+            LK_UNLCK = 2
+            fd: int | None = None
+
+            def locking(self, fd: int, mode: int, _count: int) -> None:
+                self.fd = fd
+                if mode == self.LK_UNLCK:
+                    raise OSError("unlock failed")
+
+        fake = _FailingUnlockMsvcrt()
+        monkeypatch.setattr(persistence, "_FCNTL_AVAILABLE", False)
+        monkeypatch.setattr(persistence, "_MSVCRT_AVAILABLE", True)
+        monkeypatch.setattr(persistence, "_msvcrt", fake)
+
+        with pytest.raises(OSError, match="unlock failed"):
+            with lock_for_rmw(tmp_path / "data.yaml"):
+                pass
+
+        assert fake.fd is not None
+        with pytest.raises(OSError):
+            os.fstat(fake.fd)

@@ -1,5 +1,6 @@
 """Lifecycle management — scoring, tiers, dedup, consolidation."""
 
+from trw_memory.lifecycle._recall import rank_by_utility, utility_based_prune_candidates
 from trw_memory.lifecycle.consolidation import (
     _redact_paths,
     complete_linkage_cluster,
@@ -20,9 +21,7 @@ from trw_memory.lifecycle.scoring import (
     enforce_tier_distribution,
     entry_utility,
     persist_tier_convergence,
-    rank_by_utility,
     update_q_value,
-    utility_based_prune_candidates,
 )
 from trw_memory.lifecycle.tiers import TierManager, TierSweepResult
 

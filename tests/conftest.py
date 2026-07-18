@@ -39,23 +39,23 @@ from trw_memory.graph import wait_for_graph_updates
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.security.keys import clear_key_cache
-from trw_memory.storage._resilient_fetch import reset_bytes_fallback_failures
+from trw_memory.storage._resilient_fetch import reset_bytes_fallback_failures, reset_schema_row_quarantines
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 
 @pytest.fixture(autouse=True)
 def reset_bytes_fallback_counter() -> Iterator[None]:
-    """Zero the process-global bytes-fallback failure counter before each test.
+    """Zero the process-global row-recovery counters before each test.
 
     ``_resilient_fetch._fallback_metrics.bytes_fallback_failures`` is a
     process-wide counter (it must survive across calls so monitoring can poll
-    it). Tests that trigger a hard bytes-mode fallback failure without first
-    calling ``reset_bytes_fallback_failures()`` would otherwise leak a non-zero
-    value into later tests, making counter assertions order-dependent. Resetting
-    *before* each test guarantees every test starts from a known 0 regardless of
-    collection order. Fast — a single integer assignment, no I/O.
+    it). Tests that trigger a hard bytes-mode fallback failure or a cleanly
+    decoded schema quarantine would otherwise leak a non-zero value into later
+    tests, making counter assertions order-dependent. Resetting *before* each
+    test guarantees a known baseline regardless of collection order.
     """
     reset_bytes_fallback_failures()
+    reset_schema_row_quarantines()
     yield
 
 

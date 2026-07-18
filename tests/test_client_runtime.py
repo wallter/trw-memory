@@ -46,6 +46,7 @@ class TestContextManager:
     async def test_close_idempotent(self, client: MemoryClient) -> None:
         await client.close()
         await client.close()
+        assert client._backend is None
 
     async def test_async_context_manager_drains_retry_queue(
         self,
@@ -134,6 +135,7 @@ class TestContextManager:
             await reopened.close()
 
         retire_mock.assert_called_once_with("42", reopened._config)
+        assert reopened._backend is None
 
 
 class TestRegisterTools:

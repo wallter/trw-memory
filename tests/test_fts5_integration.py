@@ -105,6 +105,11 @@ class TestSearchFtsBasic:
         results = backend.search_fts("matching", top_k=5)
         assert len(results) <= 5
 
+    @pytest.mark.parametrize("top_k", [0, -1])
+    def test_search_fts_non_positive_top_k_returns_empty(self, backend: SQLiteBackend, top_k: int) -> None:
+        backend.store(_entry(content="matching term"))
+        assert backend.search_fts("matching", top_k=top_k) == []
+
     def test_search_fts_returns_full_memory_entry(self, backend: SQLiteBackend) -> None:
         e = _entry(content="enterprise scale search", importance=0.9)
         backend.store(e)
@@ -183,6 +188,16 @@ class TestFtsFilers:
         assert a.id in ids
         assert b.id not in ids
 
+    def test_fts_namespace_filter_applies_before_candidate_limit(self, backend: SQLiteBackend) -> None:
+        for index in range(20):
+            backend.store(_entry(content="dominant shared term", namespace="other", entry_id=f"other-{index}"))
+        target = _entry(content="dominant shared term", namespace="target", entry_id="target")
+        backend.store(target)
+
+        results = backend.search_fts("dominant", namespace="target", top_k=1)
+
+        assert [entry.id for entry in results] == [target.id]
+
     def test_fts_min_importance_filter(self, backend: SQLiteBackend) -> None:
         low = _entry(content="importance_term", importance=0.2)
         high = _entry(content="importance_term", importance=0.9)
@@ -203,6 +218,7 @@ class TestFtsTableMigration:
     def test_ensure_fts_table_populates_existing_rows(self, tmp_path: Path) -> None:
         """Simulate adding FTS5 to a DB that already has entries (migration path)."""
         import sqlite3
+
         from trw_memory.storage._schema import ensure_schema
 
         db_path = tmp_path / "migration.db"
@@ -212,8 +228,7 @@ class TestFtsTableMigration:
 
         # Insert a row directly (bypass FTS)
         conn.execute(
-            "INSERT INTO memories (id, content, detail, tags, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO memories (id, content, detail, tags, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
             ("migrated_id", "legacy search term", "", "[]", "2024-01-01", "2024-01-01"),
         )
         conn.commit()
@@ -225,9 +240,7 @@ class TestFtsTableMigration:
         assert fts_count >= 1
 
         # Verify the migrated row is searchable
-        rows = conn.execute(
-            "SELECT id FROM memories_fts WHERE memories_fts MATCH ?", ('"legacy"',)
-        ).fetchall()
+        rows = conn.execute("SELECT id FROM memories_fts WHERE memories_fts MATCH ?", ('"legacy"',)).fetchall()
         assert any(r[0] == "migrated_id" for r in rows)
         conn.close()
 
@@ -288,10 +301,7 @@ class TestFtsScaleGuard:
         words = [f"word{i}" for i in range(500)]
         db = SQLiteBackend(tmp_path / "scale.db")
 
-        entries = [
-            _entry(content=" ".join(random.sample(words, 12)) + f" unique_rare_{i}")
-            for i in range(10_000)
-        ]
+        entries = [_entry(content=" ".join(random.sample(words, 12)) + f" unique_rare_{i}") for i in range(10_000)]
         for e in entries:
             db.store(e)
 
@@ -309,9 +319,7 @@ class TestFtsScaleGuard:
         like_ms = (time.perf_counter() - t0) / runs * 1000
 
         # FTS5 should be measurably faster than LIKE at 10K entries for rare terms
-        assert fts_ms < like_ms, (
-            f"FTS5 ({fts_ms:.2f}ms) should be faster than LIKE ({like_ms:.2f}ms) at 10K entries"
-        )
+        assert fts_ms < like_ms, f"FTS5 ({fts_ms:.2f}ms) should be faster than LIKE ({like_ms:.2f}ms) at 10K entries"
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,6 @@ Original entries are archived after consolidation.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import TypeVar
@@ -19,30 +18,19 @@ import structlog
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.exceptions import DimensionMismatchError, StorageError
 from trw_memory.graph import schedule_graph_update
+from trw_memory.lifecycle._consolidation_metrics import mean_pairwise_similarity as _mean_pairwise_similarity
+from trw_memory.lifecycle._redaction import redact_paths
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.retrieval.dense import cosine_similarity
 from trw_memory.storage.interface import StorageBackend
 
+# Compatibility re-export: consumers import ``_redact_paths`` from this facade.
+# A module-level assignment (vs. an aliased import) makes the name an explicitly
+# defined attribute under ``mypy --strict`` for downstream ``from … import``.
+_redact_paths = redact_paths
+
 logger = structlog.get_logger(__name__)
-
-# NFR06 — Path redaction pattern for LLM prompts.
-#
-# Matches absolute paths under common roots, Windows drive paths, the
-# home-relative ``~/`` form, and explicit relative ``./`` / ``../`` prefixes.
-# The ``~/`` and ``./``/``../`` alternatives carry their own trailing
-# separator so the shared body ``[^\s...]*`` consumes the rest of the path.
-# Order matters: ``\.\./`` must precede ``\./`` so ``../`` is not partially
-# matched as ``./``.
-_PATH_RE = re.compile(
-    r"(?:/home/|/Users/|/mnt/|/tmp/|/var/|[A-Z]:\\|~/|\.\./|\./)[^\s,;\"')\]}>]*",
-)
-
-
-def _redact_paths(text: str) -> str:
-    """Replace filesystem paths with [REDACTED_PATH] before sending to LLM."""
-    return _PATH_RE.sub("[REDACTED_PATH]", text)
-
 
 # ---------------------------------------------------------------------------
 # Shared clustering algorithm — used by both trw-memory and trw-mcp
@@ -372,7 +360,7 @@ def _archive_originals(
             half-open boundary: the superseding record opens exactly when the
             prior window closes).
     """
-    processed: list[str] = []
+    archived_count = 0
     # The window-close instant. One shared instant for the whole cluster so all
     # originals close at the same moment the consolidated entry opens (gap-free).
     close_at = invalid_from if invalid_from is not None else datetime.now(timezone.utc)
@@ -394,7 +382,7 @@ def _archive_originals(
                 updated = storage.update(entry.id, **close_fields)
                 if updated is None:
                     raise StorageError(f"failed to archive original entry {entry.id!r}")
-                processed.append(entry.id)
+                archived_count += 1
             except (
                 StorageError,
                 ValueError,
@@ -411,34 +399,13 @@ def _archive_originals(
     logger.info(
         "consolidation_archive_complete",
         consolidated_id=consolidated_id,
-        archived_count=len(processed),
+        archived_count=archived_count,
     )
 
 
 # ---------------------------------------------------------------------------
 # FR06 — Dry-Run Mode + Helper
 # ---------------------------------------------------------------------------
-
-
-def _mean_pairwise_similarity(
-    cluster: list[MemoryEntry],
-    embedder: EmbeddingProvider,
-) -> float:
-    """Compute mean pairwise cosine similarity for dry-run preview.
-
-    Returns 0.0 when cluster is too small or embeddings unavailable.
-    """
-    if len(cluster) < 2:
-        return 0.0
-
-    texts = [e.content + " " + e.detail for e in cluster]
-    vectors = embedder.embed_batch(texts)
-    valid: list[list[float]] = [v for v in vectors if v is not None]
-    if len(valid) < 2:
-        return 0.0
-
-    pairs = [cosine_similarity(valid[i], valid[j]) for i in range(len(valid)) for j in range(i + 1, len(valid))]
-    return sum(pairs) / len(pairs) if pairs else 0.0
 
 
 def _restore_originals(
@@ -471,10 +438,8 @@ def _rollback_consolidation(
     new-entry delete failure. This guarantees a partial consolidation never
     leaves originals archived alongside a surviving consolidated entry.
     """
-    deleted = storage.delete(new_entry.id)
-    # Always reinstate the originals, regardless of the delete outcome, so a
-    # failed delete cannot strand them in the archived state.
     _restore_originals(cluster, storage)
+    deleted = storage.delete(new_entry.id)
     if not deleted:
         raise StorageError(f"failed to delete partially consolidated entry {new_entry.id!r}")
 
@@ -577,6 +542,7 @@ def consolidate_cycle(
             )
         return {
             "dry_run": True,
+            "clusters_found": len(clusters),
             "clusters": cluster_previews,
             "consolidated_count": 0,
             "skipped_reason": "dry_run",

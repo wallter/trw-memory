@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 
 from trw_memory.client import MemoryClient
+from trw_memory.exceptions import AuthorizationError
+from trw_memory.models.memory import Assertion, AssertionType
 
 
 @pytest.fixture()
@@ -45,6 +47,13 @@ class TestClientSearchFts:
         results = await client.search_fts("zqxvmpw")
         assert results == []
 
+    async def test_search_fts_requires_read_permission(self, client: MemoryClient) -> None:
+        client._config.rbac_enabled = True
+        client._config.namespace_roles = {"default": "writer"}
+
+        with pytest.raises(AuthorizationError, match="search_fts permission"):
+            await client.search_fts("blocked")
+
 
 class TestClientStoreMany:
     async def test_store_many_returns_count(self, client: MemoryClient) -> None:
@@ -62,11 +71,26 @@ class TestClientStoreMany:
         assert len(results) >= 1
 
     async def test_store_many_honors_optional_fields(self, client: MemoryClient) -> None:
+        assertion = Assertion(type=AssertionType.GLOB_EXISTS, target="src/**/*.py")
         entries: list[dict[str, object]] = [
-            {"content": "tagged bulk record", "tags": ["alpha"], "importance": 0.9, "detail": "extra detail"}
+            {
+                "content": "tagged bulk record",
+                "tags": ["alpha"],
+                "importance": 0.9,
+                "detail": "extra detail",
+                "evidence": ["src/example.py:10-20"],
+                "expires": "when migration ships",
+                "assertions": [assertion],
+                "entry_id": "M-store-many-fields",
+            }
         ]
         count = await client.store_many(entries)
         assert count == 1
         results = await client.search_fts("tagged")
         assert len(results) >= 1
         assert results[0]["importance"] == pytest.approx(0.9)
+        stored = client._get_backend().get("M-store-many-fields")
+        assert stored is not None
+        assert stored.evidence == ["src/example.py:10-20"]
+        assert stored.expires == "when migration ships"
+        assert stored.assertions == [assertion]

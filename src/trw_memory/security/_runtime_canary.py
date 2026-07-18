@@ -20,23 +20,19 @@ State:
   path, backend identity)`` containing ``{seeded, recall_count,
   failed}``. Survives across module reloads only within a single
   process. The composite key is required so multiple memory
-  backends sharing one quarantine DB (the trw-distill lab pattern)
-  each get their canaries seeded and probed independently — cycle
-  121 surfaced ``CanaryTamperError`` on every recall when only the
+  backends sharing one quarantine DB each get their canaries seeded
+  and probed independently — a concurrent multi-backend audit
+  surfaced ``CanaryTamperError`` on every recall when only the
   quarantine path keyed the state.
 
 `_resolve_security_trace_context` is looked up lazily from the
 parent ``runtime`` module to break the import cycle.
-
-Extracted as PRD-DIST-245 Phase 3 batch 101.
 """
 
 from __future__ import annotations
 
 import hashlib
 from typing import Any
-
-import structlog
 
 from trw_memory.exceptions import CanaryTamperError
 from trw_memory.models.config import MemoryConfig
@@ -45,8 +41,6 @@ from trw_memory.security.canary import _CANARY_FIXTURES, PINNED_HASHES
 from trw_memory.security.startup import resolve_security_path
 from trw_memory.security.telemetry_emit import build_security_traceability, emit_security_event
 from trw_memory.storage.interface import StorageBackend
-
-logger = structlog.get_logger(__name__)
 
 CANARY_STATE: dict[str, dict[str, object]] = {}
 
@@ -74,6 +68,27 @@ def _state_key(config: MemoryConfig, backend: StorageBackend) -> str:
     return f"{quarantine_path}::{_backend_identity(backend)}"
 
 
+def _store_pinned_canary(
+    backend: StorageBackend,
+    *,
+    canary_id: str,
+    content: str,
+    expected_hash: str,
+) -> None:
+    """Store one trusted canary with its security metadata invariant."""
+    backend.store(
+        MemoryEntry(
+            id=canary_id,
+            content=content,
+            namespace="default",
+            metadata={
+                "system_canary": "true",
+                "provenance_content_hash": expected_hash,
+            },
+        )
+    )
+
+
 def initialize_canaries(config: MemoryConfig, *, backend: StorageBackend) -> None:
     state_key = _state_key(config, backend)
     if CANARY_STATE.get(state_key, {}).get("seeded"):
@@ -85,17 +100,7 @@ def initialize_canaries(config: MemoryConfig, *, backend: StorageBackend) -> Non
             seeded += 1
             continue
         content = fixture_map[canary_id]
-        backend.store(
-            MemoryEntry(
-                id=canary_id,
-                content=content,
-                namespace="default",
-                metadata={
-                    "system_canary": "true",
-                    "provenance_content_hash": expected_hash,
-                },
-            )
-        )
+        _store_pinned_canary(backend, canary_id=canary_id, content=content, expected_hash=expected_hash)
         seeded += 1
     CANARY_STATE[state_key] = {"seeded": True, "recall_count": 0, "failed": False}
     telemetry_session_id, telemetry_run_id = _trace_context(session_id="canary-bootstrap")
@@ -159,17 +164,7 @@ def probe_canaries(config: MemoryConfig, *, backend: StorageBackend) -> None:
                     },
                 )
                 raise CanaryTamperError(f"missing canary {canary_id}")
-            backend.store(
-                MemoryEntry(
-                    id=canary_id,
-                    content=content,
-                    namespace="default",
-                    metadata={
-                        "system_canary": "true",
-                        "provenance_content_hash": expected_hash,
-                    },
-                )
-            )
+            _store_pinned_canary(backend, canary_id=canary_id, content=content, expected_hash=expected_hash)
             emit_security_event(
                 config,
                 emitter="canary",

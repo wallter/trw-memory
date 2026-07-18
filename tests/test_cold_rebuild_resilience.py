@@ -76,6 +76,26 @@ def test_malformed_yaml_parse_error_skipped(tmp_path: Path) -> None:
         conn.close()
 
 
+@pytest.mark.parametrize("payload", ["- one\n- two\n", "plain scalar\n"])
+def test_non_mapping_yaml_is_skipped_without_aborting_rebuild(tmp_path: Path, payload: str) -> None:
+    """FR06: valid YAML with the wrong root shape is a per-file warning, not a rollback."""
+    _make_yaml(tmp_path, "L-GOOD")
+    bad = tmp_path / "memory" / "cold" / "2026" / "04" / "wrong-shape.yaml"
+    bad.write_text(payload, encoding="utf-8")
+
+    conn = _open_fresh_db(tmp_path / "memory.db")
+    try:
+        with capture_logs() as logs:
+            rebuilt = rebuild_from_cold(tmp_path, conn)
+        assert rebuilt == 1
+        warnings = [r for r in logs if r.get("event") == "cold_rebuild_skipped"]
+        assert any(r.get("reason") == "read_failed" for r in warnings)
+        completed = [r for r in logs if r.get("event") == "cold_rebuild_complete"]
+        assert completed[-1]["files_skipped"] == 1
+    finally:
+        conn.close()
+
+
 def test_symlink_traversal_skipped(tmp_path: Path) -> None:
     """FR07: a symlink inside cold dir pointing outside is rejected."""
     _make_yaml(tmp_path, "L-OK")

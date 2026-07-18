@@ -13,16 +13,16 @@ no-ops.
 from __future__ import annotations
 
 import contextlib
-import os
 import sqlite3
 import threading
 from collections.abc import Iterator, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
+from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage._shared import (
     ENTRY_COLUMNS,
@@ -46,38 +46,16 @@ from trw_memory.storage._wal_checkpoint import (
     CheckpointResult as CheckpointResult,
     run_checkpoint as run_checkpoint,
 )
+from trw_memory.storage.persistence import lock_for_rmw as lock_for_rmw
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.storage._sqlite_backend_mixins import SQLiteCheckpointVectorMixin
+from trw_memory.storage._permissions import harden_db_file_mode as _harden_db_file_mode
+from trw_memory.storage._permissions import prepare_db_file_mode as _prepare_db_file_mode
 
 if TYPE_CHECKING:
     from trw_memory.wiki.storage import StoredWikiReference
 
 logger = structlog.get_logger(__name__)
-
-# PRD-QUAL-110-FR02: mode for the secret-bearing on-disk SQLite store.
-_DB_FILE_MODE = 0o600
-
-
-def _harden_db_file_mode(db_path: Path) -> None:
-    """chmod a file-backed db to 0600, best-effort (PRD-QUAL-110-FR02).
-
-    Skips the in-memory (``:memory:``) and shared-cache URI cases (no file on
-    disk). A chmod failure (non-POSIX platform) logs ``db_chmod_failed`` at
-    WARNING and returns without raising, so backend construction is never
-    blocked by permission tightening.
-    """
-    name = str(db_path)
-    if name == ":memory:" or name.startswith("file::memory:") or not db_path.exists():
-        return
-    try:
-        os.chmod(db_path, _DB_FILE_MODE)
-    except OSError as exc:
-        logger.warning(
-            "db_chmod_failed",
-            path=name,
-            mode=oct(_DB_FILE_MODE),
-            error=type(exc).__name__,
-        )
-
 
 __all__ = [
     "CheckpointMode",
@@ -86,6 +64,7 @@ __all__ = [
     "_apply_sqlcipher_pragmas",
     "_import_sqlcipher_driver",
     "_resolve_cold_rebuild_base",
+    "lock_for_rmw",
     "run_checkpoint",
 ]
 # ---------------------------------------------------------------------------
@@ -134,17 +113,6 @@ from trw_memory.storage._resilient_fetch import (
 )
 
 # Vector operations extracted to _vector_ops.py (PRD-DIST-245 batch 85).
-from trw_memory.storage._vector_ops import (
-    delete_hype_siblings as _vec_ops_delete_hype_siblings,
-    delete_vector as _vec_ops_delete_vector,
-    delete_vector_internal as _vec_ops_delete_vector_internal,
-    existing_vector_ids as _vec_ops_existing_vector_ids,
-    get_stored_embeddings as _vec_ops_get_stored_embeddings,
-    hype_sibling_ids as _vec_ops_hype_sibling_ids,
-    search_vectors as _vec_ops_search_vectors,
-    upsert_vector as _vec_ops_upsert_vector,
-    vector_exists as _vec_ops_vector_exists,
-)
 
 # Query / list / namespace operations extracted to _query_ops.py
 # (PRD-DIST-245 batch 86).
@@ -166,6 +134,7 @@ from trw_memory.storage._crud_ops import (
     increment_access_counts as _crud_ops_increment_access_counts,
     increment_recall_access as _crud_ops_increment_recall_access,
     increment_session_counts as _crud_ops_increment_session_counts,
+    purge_edges_for as _crud_ops_purge_edges_for,
     store as _crud_ops_store,
     store_many as _crud_ops_store_many,
     update as _crud_ops_update,
@@ -183,6 +152,7 @@ from trw_memory.storage._init_helpers import (
 # (PRD-DIST-245 batch 89).
 from trw_memory.storage._stale_handle import (
     ensure_connection_fresh as _stale_handle_ensure_fresh,
+    fresh_connection as _stale_handle_fresh_connection,
     handle_integrity_regression as _stale_handle_integrity_regression,
     reconnect as _stale_handle_reconnect,
     run_integrity_check as _stale_handle_run_integrity_check,
@@ -195,7 +165,7 @@ from trw_memory.storage._transaction import transaction as _transaction_impl
 # ---------------------------------------------------------------------------
 
 
-class SQLiteBackend(StorageBackend):
+class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
     """SQLite-backed storage with optional sqlite-vec vector search.
 
     Args:
@@ -204,8 +174,6 @@ class SQLiteBackend(StorageBackend):
         dim: Embedding dimension for the vec_memories virtual table.
             Defaults to 384 (all-MiniLM-L6-v2).
     """
-
-    _DEFAULT_DIM: ClassVar[int] = 384
 
     def __init__(
         self,
@@ -222,19 +190,14 @@ class SQLiteBackend(StorageBackend):
     ) -> None:
         self._db_path = db_path
         self._dim = dim
-        self._lock = threading.Lock()
+        # Re-entrant because transaction() holds this lock for its full body;
+        # delegated operations re-acquire it on the same thread. Other threads
+        # block, so they cannot join or observe an open transaction.
+        self._lock = threading.RLock()
         # PRD-FIX-088 FR02: open-transaction depth — mutating methods skip
         # per-row commit when >0 so caller-controlled outer transaction
         # batches N writes into one BEGIN IMMEDIATE / COMMIT.
         self._skip_commit_depth: int = 0
-        # S8 follow-on: serialize OUTER transaction() bodies so two threads
-        # cannot both hold an open BEGIN IMMEDIATE on the single shared
-        # connection (which raises "cannot start a transaction within a
-        # transaction"). Re-entrant so same-thread nested transaction() calls
-        # do not self-deadlock; held only by the outermost transaction, and is
-        # a DIFFERENT lock from ``_lock`` (which inner delegated writes acquire),
-        # so no deadlock arises between the two.
-        self._txn_serializer = threading.RLock()
         self._dbapi: Any = _import_sqlcipher_driver() if sqlcipher_key_hex is not None else sqlite3
         self._sqlcipher_key_hex = sqlcipher_key_hex
         self._recovery_policy = recovery_policy
@@ -242,7 +205,8 @@ class SQLiteBackend(StorageBackend):
         self._rebuild_from_cold = rebuild_from_cold
         self._integrity_check_interval_minutes = integrity_check_interval_minutes
         self._concurrent_writer_warn_threshold = concurrent_writer_warn_threshold
-        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _prepare_db_file_mode(db_path)
 
         # P2 — per-row UTF-8 quarantine counter (incremented on each skipped row)
         self.quarantine_count_utf8: int = 0
@@ -316,13 +280,9 @@ class SQLiteBackend(StorageBackend):
         """Delegate to ``_stale_handle.handle_integrity_regression``."""
         _stale_handle_integrity_regression(self)
 
-    def _reconnect(self) -> None:
-        """Delegate to ``_stale_handle.reconnect``."""
-        _stale_handle_reconnect(self)
-
-    def _ensure_connection_fresh(self) -> None:
-        """Delegate to ``_stale_handle.ensure_connection_fresh``."""
-        _stale_handle_ensure_fresh(self)
+    _reconnect = _stale_handle_reconnect
+    _ensure_connection_fresh = _stale_handle_ensure_fresh
+    _fresh_connection = _stale_handle_fresh_connection
 
     # ------------------------------------------------------------------
     # Integrity & recovery
@@ -343,7 +303,8 @@ class SQLiteBackend(StorageBackend):
 
     def _run_integrity_check(self) -> bool:
         """Delegate to ``_stale_handle.run_integrity_check``."""
-        return _stale_handle_run_integrity_check(self)
+        with self._fresh_connection():
+            return _stale_handle_run_integrity_check(self)
 
     # Public integrity probe delegated to ``_connection.check_integrity``;
     # kept as a staticmethod alias so ``SQLiteBackend.check_integrity`` callers
@@ -475,41 +436,52 @@ class SQLiteBackend(StorageBackend):
 
     def store(self, entry: MemoryEntry) -> None:
         """INSERT OR REPLACE the entry into the memories table."""
-        _crud_ops_store(self, _INSERT_COLUMNS_SQL, _COLUMNS, entry)
         from trw_memory.wiki.storage import replace_wiki_refs_for_entry
 
-        replace_wiki_refs_for_entry(self, entry)
+        try:
+            with self.transaction():
+                _crud_ops_store(self, _INSERT_COLUMNS_SQL, _COLUMNS, entry)
+                replace_wiki_refs_for_entry(self, entry)
+        except self._dbapi.Error as exc:
+            raise StorageError(f"Failed to store entry {entry.id}: {exc}", path=str(self._db_path)) from exc
 
     def store_many(self, entries: list[MemoryEntry]) -> int:
         """Bulk-insert entries in a single transaction using executemany.
 
-        90x faster than per-row :meth:`store` calls at enterprise scale (99K/sec
-        vs 1.1K/sec at 5K entries). Does not update wiki_refs or schedule graph
-        updates — use this for bulk imports where those side-effects are
-        acceptable to defer. Returns the number of entries stored.
+        Does not update wiki_refs or schedule graph updates; use it for imports
+        where those side effects are acceptable to defer. Returns the number
+        of entries stored.
         """
-        return _crud_ops_store_many(self, _INSERT_COLUMNS_SQL, _COLUMNS, entries)
+        with self._fresh_connection():
+            return _crud_ops_store_many(self, _INSERT_COLUMNS_SQL, _COLUMNS, entries)
 
     def get(self, entry_id: str) -> MemoryEntry | None:
         """Retrieve an entry by id."""
-        return _crud_ops_get(self, _SELECT_COLUMNS_SQL, entry_id)
+        with self._fresh_connection():
+            return _crud_ops_get(self, _SELECT_COLUMNS_SQL, entry_id)
 
     def update(self, entry_id: str, **fields: object) -> MemoryEntry | None:
         """Apply a partial update to an existing entry."""
-        updated = _crud_ops_update(self, _SELECT_COLUMNS_SQL, _VALID_UPDATE_COLUMNS, entry_id, **fields)
-        if updated is not None and "metadata" in fields:
-            from trw_memory.wiki.storage import replace_wiki_refs_for_entry
+        from trw_memory.wiki.storage import replace_wiki_refs_for_entry
 
-            replace_wiki_refs_for_entry(self, updated)
+        try:
+            with self.transaction():
+                updated = _crud_ops_update(self, _SELECT_COLUMNS_SQL, _VALID_UPDATE_COLUMNS, entry_id, **fields)
+                if updated is not None and "metadata" in fields:
+                    replace_wiki_refs_for_entry(self, updated)
+        except self._dbapi.Error as exc:
+            raise StorageError(f"Failed to update entry {entry_id}: {exc}", path=str(self._db_path)) from exc
         return updated
 
     def increment_session_counts(self, entry_ids: list[str], *, updated_at: datetime | None = None) -> int:
         """Increment session_count for multiple entries in one transaction."""
-        return _crud_ops_increment_session_counts(self, entry_ids, updated_at=updated_at)
+        with self._fresh_connection():
+            return _crud_ops_increment_session_counts(self, entry_ids, updated_at=updated_at)
 
     def increment_access_counts(self, entry_ids: list[str], *, accessed_at: datetime | None = None) -> int:
         """Increment access_count and last_accessed_at in one transaction."""
-        return _crud_ops_increment_access_counts(self, entry_ids, accessed_at=accessed_at)
+        with self._fresh_connection():
+            return _crud_ops_increment_access_counts(self, entry_ids, accessed_at=accessed_at)
 
     def increment_recall_access(self, entry_ids: list[str], *, accessed_at: datetime | None = None) -> int:
         """F-008: increment access_count + recall_count + last_accessed_at in ONE commit."""
@@ -517,11 +489,15 @@ class SQLiteBackend(StorageBackend):
 
     def delete(self, entry_id: str) -> bool:
         """Remove an entry from memories (and vec_index when available)."""
-        deleted = _crud_ops_delete(self, entry_id)
-        if deleted:
-            from trw_memory.wiki.storage import purge_wiki_refs_for_entry
+        from trw_memory.wiki.storage import purge_wiki_refs_for_entry
 
-            purge_wiki_refs_for_entry(self, entry_id)
+        try:
+            with self.transaction():
+                deleted = _crud_ops_delete(self, entry_id)
+                if deleted:
+                    purge_wiki_refs_for_entry(self, entry_id)
+        except self._dbapi.Error as exc:
+            raise StorageError(f"Failed to delete entry {entry_id}: {exc}", path=str(self._db_path)) from exc
         return deleted
 
     @contextlib.contextmanager
@@ -532,7 +508,7 @@ class SQLiteBackend(StorageBackend):
         concurrency-sensitive transaction seam is local and testable while this
         backend remains the public adapter.
         """
-        with _transaction_impl(self) as txn:
+        with self._fresh_connection(), _transaction_impl(self) as txn:
             yield txn
 
     # ------------------------------------------------------------------
@@ -551,16 +527,17 @@ class SQLiteBackend(StorageBackend):
         namespace: str | None = None,
     ) -> list[MemoryEntry]:
         """Keyword LIKE search on content + detail + tags with filters."""
-        return _query_ops_search(
-            self,
-            _SELECT_COLUMNS_SQL,
-            query=query,
-            top_k=top_k,
-            tags=tags,
-            status=status,
-            min_importance=min_importance,
-            namespace=namespace,
-        )
+        with self._fresh_connection():
+            return _query_ops_search(
+                self,
+                _SELECT_COLUMNS_SQL,
+                query=query,
+                top_k=top_k,
+                tags=tags,
+                status=status,
+                min_importance=min_importance,
+                namespace=namespace,
+            )
 
     @property
     def fts_available(self) -> bool:
@@ -583,15 +560,16 @@ class SQLiteBackend(StorageBackend):
         """
         if not self._fts_available:
             return []
-        return _query_ops_search_fts(
-            self,
-            _SELECT_COLUMNS_SQL,
-            query=query,
-            top_k=top_k,
-            status=status,
-            min_importance=min_importance,
-            namespace=namespace,
-        )
+        with self._fresh_connection():
+            return _query_ops_search_fts(
+                self,
+                _SELECT_COLUMNS_SQL,
+                query=query,
+                top_k=top_k,
+                status=status,
+                min_importance=min_importance,
+                namespace=namespace,
+            )
 
     def find_active_by_content(
         self,
@@ -605,11 +583,13 @@ class SQLiteBackend(StorageBackend):
         Embedding-independent exact-content dedup lookup (PRD-CORE-042).
         Read-only; namespace-scoped. Returns None when no exact duplicate exists.
         """
-        return _query_ops_find_active_by_content(self, content, detail, namespace=namespace)
+        with self._fresh_connection():
+            return _query_ops_find_active_by_content(self, content, detail, namespace=namespace)
 
     def count(self, namespace: str | None = None) -> int:
         """Return the number of stored entries."""
-        return _query_ops_count(self, namespace)
+        with self._fresh_connection():
+            return _query_ops_count(self, namespace)
 
     def entries_with_assertions(
         self,
@@ -627,9 +607,10 @@ class SQLiteBackend(StorageBackend):
         caps the scan (default 500) so the summary never triggers an unbounded
         full-table scan on a large store.
         """
-        return _query_ops_entries_with_assertions(
-            self, _SELECT_COLUMNS_SQL, status=status, namespace=namespace, limit=limit
-        )
+        with self._fresh_connection():
+            return _query_ops_entries_with_assertions(
+                self, _SELECT_COLUMNS_SQL, status=status, namespace=namespace, limit=limit
+            )
 
     # Backward-compat alias for PRD-CORE-086 FR07 traceability.
     count_with_assertions = entries_with_assertions
@@ -650,16 +631,17 @@ class SQLiteBackend(StorageBackend):
         applies AFTER tag filtering — tagged entries past the row limit are not
         silently truncated away before the filter runs.
         """
-        return _query_ops_list_entries(
-            self,
-            _SELECT_COLUMNS_SQL,
-            status=status,
-            namespace=namespace,
-            min_importance=min_importance,
-            limit=limit,
-            exclude_superseded=exclude_superseded,
-            tags=tags,
-        )
+        with self._fresh_connection():
+            return _query_ops_list_entries(
+                self,
+                _SELECT_COLUMNS_SQL,
+                status=status,
+                namespace=namespace,
+                min_importance=min_importance,
+                limit=limit,
+                exclude_superseded=exclude_superseded,
+                tags=tags,
+            )
 
     def list_namespaces(self, required_namespaces: list[str] | None = None) -> list[str]:
         """Return distinct namespaces that have stored entries.
@@ -668,7 +650,8 @@ class SQLiteBackend(StorageBackend):
         authorized set so enumeration never leaks other tenants' namespaces
         (trw-memory-11). ``None`` returns every namespace (admin/single-tenant).
         """
-        return _query_ops_list_namespaces(self, required_namespaces)
+        with self._fresh_connection():
+            return _query_ops_list_namespaces(self, required_namespaces)
 
     def delete_by_namespace(self, namespace: str) -> int:
         """Delete all entries in a namespace atomically.
@@ -700,15 +683,10 @@ class SQLiteBackend(StorageBackend):
                 # Remove knowledge-graph edges that referenced any deleted row as
                 # source OR target. memory_graph_edges has no namespace column and
                 # SQLite enforces no FK cascade here, so the bulk namespace delete
-                # must clean edges explicitly — exactly as the per-row delete() in
-                # _crud_ops.py does — or orphan edges accumulate forever and a BFS
-                # follows them to ghost (deleted / foreign) node IDs.
-                placeholders = ",".join("?" for _ in entry_ids)
-                self._conn.execute(
-                    f"DELETE FROM memory_graph_edges WHERE source_id IN ({placeholders}) "  # noqa: S608 — placeholders is ? repeated; entry_ids are parameterized values
-                    f"OR target_id IN ({placeholders})",
-                    (*entry_ids, *entry_ids),
-                )
+                # must clean edges explicitly — via the same purge_edges_for helper
+                # the per-row delete() uses — or orphan edges accumulate forever and
+                # a BFS follows them to ghost (deleted / foreign) node IDs.
+                _crud_ops_purge_edges_for(self, entry_ids)
                 if self._vec_available:
                     for entry_id in entry_ids:
                         self._delete_vector(entry_id)
@@ -718,13 +696,15 @@ class SQLiteBackend(StorageBackend):
         """Return deterministic persisted outbound wiki refs for ``source_slug``."""
         from trw_memory.wiki.storage import query_wiki_outbound_refs
 
-        return list(query_wiki_outbound_refs(self, source_slug, namespace=namespace))
+        with self._fresh_connection():
+            return list(query_wiki_outbound_refs(self, source_slug, namespace=namespace))
 
     def query_wiki_inbound_refs(self, target_slug: str, *, namespace: str | None = None) -> list[StoredWikiReference]:
         """Return deterministic persisted inbound wiki refs for ``target_slug``."""
         from trw_memory.wiki.storage import query_wiki_inbound_refs
 
-        return list(query_wiki_inbound_refs(self, target_slug, namespace=namespace))
+        with self._fresh_connection():
+            return list(query_wiki_inbound_refs(self, target_slug, namespace=namespace))
 
     def close(self) -> None:
         """Stop integrity scheduler + writer registry, then close connection."""
@@ -736,7 +716,7 @@ class SQLiteBackend(StorageBackend):
             with contextlib.suppress(Exception):
                 self._writer_registry.close()
             self._writer_registry = None
-        with contextlib.suppress(sqlite3.Error):
+        with self._lock, contextlib.suppress(sqlite3.Error):
             self._conn.close()
         logger.debug("sqlite_backend_closed", db=str(self._db_path))
 
@@ -745,126 +725,3 @@ class SQLiteBackend(StorageBackend):
 
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
         self.close()
-
-    def checkpoint_wal(self, mode: str = "TRUNCATE") -> CheckpointResult:
-        """Checkpoint the WAL on the single owning connection under the lock.
-
-        This is the structural fix for the SQLite WAL-reset corruption bug
-        (sqlite.org/wal.html §walresetbug, fixed in 3.51.3): the bug requires
-        TWO OR MORE connections checkpointing the same WAL concurrently. By
-        routing every checkpoint through ``self._conn`` while holding
-        ``self._lock`` — the same connection and lock all writes use — there is
-        never a second checkpointer to race, so the bug cannot fire even on an
-        unpatched engine.
-
-        On an unsafe engine a resetting checkpoint (TRUNCATE/RESTART) is
-        downgraded to PASSIVE; otherwise TRUNCATE reclaims WAL file space and
-        falls back to PASSIVE when readers still hold pages (``busy=1``). The
-        mode coercion + fallback live in :mod:`_wal_checkpoint`; this method
-        only owns the connection + lock. Fail-open: never raises.
-
-        Returns:
-            A :class:`CheckpointResult` (a ``dict`` at runtime) — exported from
-            ``trw_memory.storage`` so consumers share a precise contract.
-        """
-        with self._lock:
-            return run_checkpoint(
-                lambda sql: self._conn.execute(sql).fetchone(),
-                mode,
-                wal_reset_safe=self.wal_reset_safe,
-                db_path=str(self._db_path),
-            )
-
-    # ------------------------------------------------------------------
-    # Vector operations (delegated to _vector_ops.py — PRD-DIST-245 batch 85)
-    # ------------------------------------------------------------------
-
-    def _delete_vector(self, entry_id: str) -> None:
-        """Internal vector deletion (caller holds the lock)."""
-        _vec_ops_delete_vector_internal(self._conn, entry_id)
-
-    def delete_vector(self, entry_id: str) -> bool:
-        """Public vector-row deletion.
-
-        Defers the commit when inside a ``transaction()`` block so the vector
-        delete batches into the caller's outermost COMMIT (atomicity parity with
-        ``delete()``/``store()``).
-        """
-        return _vec_ops_delete_vector(
-            self._conn,
-            self._lock,
-            vec_available=self._vec_available,
-            entry_id=entry_id,
-            skip_commit=self._skip_commit_depth != 0,
-        )
-
-    def vector_exists(self, entry_id: str) -> bool:
-        """Single-row vec_index probe."""
-        return _vec_ops_vector_exists(self._conn, vec_available=self._vec_available, entry_id=entry_id)
-
-    def existing_vector_ids(self, namespace: str | None = None) -> set[str]:
-        """Bulk set of entry IDs with stored vectors.
-
-        When *namespace* is provided the lookup is scoped to that namespace (via
-        a JOIN to the canonical memories rows) instead of scanning every
-        tenant's vector ids. ``None`` keeps the legacy full scan.
-        """
-        return _vec_ops_existing_vector_ids(
-            self._conn, self._lock, vec_available=self._vec_available, namespace=namespace
-        )
-
-    def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:
-        """Insert or update a vector in vec_memories."""
-        _vec_ops_upsert_vector(
-            self._conn,
-            self._lock,
-            vec_available=self._vec_available,
-            dim=self._dim,
-            entry_id=entry_id,
-            embedding=embedding,
-            skip_commit=self._skip_commit_depth != 0,
-        )
-
-    def search_vectors(
-        self, query_embedding: list[float], top_k: int = 25, namespace: str | None = None
-    ) -> list[tuple[str, float]]:
-        """KNN search in vec_memories.
-
-        When *namespace* is provided results are scoped to that namespace,
-        closing a cross-namespace isolation leak (vec_index has no namespace
-        column). ``None`` keeps the legacy unscoped behaviour.
-        """
-        return _vec_ops_search_vectors(
-            self._conn,
-            self._lock,
-            vec_available=self._vec_available,
-            dim=self._dim,
-            query_embedding=query_embedding,
-            top_k=top_k,
-            namespace=namespace,
-        )
-
-    def get_stored_embeddings(self, entry_ids: list[str]) -> dict[str, list[float]]:
-        """Bulk lookup of packed embedding blobs."""
-        return _vec_ops_get_stored_embeddings(
-            self._conn, self._lock, vec_available=self._vec_available, entry_ids=entry_ids
-        )
-
-    def hype_sibling_ids(self, parent_id: str) -> list[str]:
-        """PRD-CORE-195: stored ``{parent_id}#hype{n}`` sibling ids for a parent."""
-        return _vec_ops_hype_sibling_ids(self._conn, self._lock, vec_available=self._vec_available, parent_id=parent_id)
-
-    def delete_hype_siblings(self, parent_id: str) -> int:
-        """PRD-CORE-195: purge a parent's HyPE sibling vectors (idempotent).
-
-        Defers the commit when inside a ``transaction()`` block so the deletes
-        batch into the caller's outermost COMMIT (atomicity parity with
-        ``delete_vector``/``upsert_vector``).
-        """
-        return _vec_ops_delete_hype_siblings(
-            self._conn,
-            self._lock,
-            vec_available=self._vec_available,
-            parent_id=parent_id,
-            skip_commit=self._skip_commit_depth != 0,
-        )

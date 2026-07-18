@@ -9,11 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Literal
 
-import structlog
-
 from trw_memory.models.memory import MemoryEntry
-
-logger = structlog.get_logger(__name__)
 
 MAX_MERGED_DETAIL_LENGTH = 2000
 

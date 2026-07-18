@@ -2,20 +2,21 @@
 
 Target lines: 52-53, 68-69, 90, 129-149, 158, 167-208, 212-218, 226, 241-245.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 import httpx
+import pytest
 
 from trw_memory.exceptions import LocalOnlyViolationError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.sync._remote_publish import (
     _extract_remote_id,
     _hash_snapshot_file,
-    _publish_payload,
+    _publish_payload_result,
     clear_retry_queue,
     drain_retry_queue,
     publish_snapshot_hash,
@@ -46,6 +47,7 @@ def _mock_response(status: int = 200, json_body: object = None) -> MagicMock:
 # _extract_remote_id
 # ---------------------------------------------------------------------------
 
+
 class TestExtractRemoteId:
     def test_json_decode_error_returns_none(self) -> None:
         """Response.json() raises ValueError → return None (lines 52-53)."""
@@ -56,8 +58,9 @@ class TestExtractRemoteId:
 
 
 # ---------------------------------------------------------------------------
-# _publish_payload_result / _publish_payload
+# _publish_payload_result
 # ---------------------------------------------------------------------------
+
 
 class TestPublishPayload:
     def test_invalid_platform_url_returns_failure(self) -> None:
@@ -66,11 +69,10 @@ class TestPublishPayload:
         cfg.sync_enabled = True
         cfg.platform_url = "not-a-valid-url"
         cfg.local_only = False
-        result = _publish_payload({}, cfg)
-        assert result is False
+        result = _publish_payload_result({}, cfg)
+        assert result == {"success": False, "remote_id": None, "retryable": False}
 
-    def test_publish_payload_returns_bool_from_result(self) -> None:
-        """_publish_payload returns success bool from _publish_payload_result (line 90)."""
+    def test_publish_payload_result_includes_remote_id(self) -> None:
         cfg = _cfg_sync_enabled()
         mock_resp = _mock_response(status=201, json_body={"id": "R-001"})
         mock_client = MagicMock()
@@ -78,13 +80,14 @@ class TestPublishPayload:
         mock_client.__exit__ = MagicMock(return_value=False)
         mock_client.post.return_value = mock_resp
         with patch("trw_memory.sync._remote_publish.httpx.Client", return_value=mock_client):
-            result = _publish_payload({"source_learning_id": "M-001"}, cfg, entry_id="M-001")
-        assert result is True
+            result = _publish_payload_result({"source_learning_id": "M-001"}, cfg, entry_id="M-001")
+        assert result == {"success": True, "remote_id": "R-001", "retryable": False}
 
 
 # ---------------------------------------------------------------------------
 # drain_retry_queue
 # ---------------------------------------------------------------------------
+
 
 class TestDrainRetryQueue:
     def _mock_queue(self, depth: int = 0) -> MagicMock:
@@ -119,11 +122,12 @@ class TestDrainRetryQueue:
         cfg = _cfg_sync_enabled()
         q = self._mock_queue()
 
-        def fake_drain(fn: object) -> dict[str, object]:
+        def fake_drain(fn: object) -> tuple[dict[str, int], list[str]]:
             assert callable(fn)
-            return {"drained": 1, "failed": 0, "skipped": 0}
+            fn({"source_learning_id": "M-payload"})  # type: ignore[operator]
+            return {"drained": 1, "failed": 0, "skipped": 0}, ["M-1"]
 
-        q.drain.side_effect = fake_drain
+        q._drain_with_ids.side_effect = fake_drain
         mock_resp = _mock_response(status=201, json_body={"id": "REMOTE-1"})
         mock_client = MagicMock()
         mock_client.__enter__ = MagicMock(return_value=mock_client)
@@ -134,11 +138,13 @@ class TestDrainRetryQueue:
             result = drain_retry_queue(q, cfg)
 
         assert result["drained"] == 1
+        assert result["remote_ids"] == {"M-1": "REMOTE-1"}
 
 
 # ---------------------------------------------------------------------------
 # clear_retry_queue
 # ---------------------------------------------------------------------------
+
 
 class TestClearRetryQueue:
     def test_delegates_to_queue_clear(self) -> None:
@@ -151,6 +157,7 @@ class TestClearRetryQueue:
 # ---------------------------------------------------------------------------
 # publish_snapshot_hash
 # ---------------------------------------------------------------------------
+
 
 class TestPublishSnapshotHash:
     def test_sync_disabled_returns_failure(self, tmp_path: Path) -> None:
@@ -256,6 +263,7 @@ class TestPublishSnapshotHash:
 # _hash_snapshot_file
 # ---------------------------------------------------------------------------
 
+
 class TestHashSnapshotFile:
     def test_returns_sha256_digest_and_size(self, tmp_path: Path) -> None:
         """_hash_snapshot_file hashes file content and returns (digest, size) (lines 212-218)."""
@@ -270,6 +278,7 @@ class TestHashSnapshotFile:
 # ---------------------------------------------------------------------------
 # retire_remote_memory
 # ---------------------------------------------------------------------------
+
 
 class TestRetireRemoteMemory:
     def test_sync_disabled_returns_true(self) -> None:
@@ -308,6 +317,7 @@ class TestRetireRemoteMemory:
 # local_only gate tests
 # ---------------------------------------------------------------------------
 
+
 class TestLocalOnlyGates:
     def test_drain_retry_queue_local_only_raises(self) -> None:
         """drain_retry_queue with local_only=True → LocalOnlyViolationError (lines 130-131)."""
@@ -331,6 +341,7 @@ class TestLocalOnlyGates:
 # drain_retry_queue inner publish_payload closure
 # ---------------------------------------------------------------------------
 
+
 class TestDrainRetryQueueClosure:
     def test_inner_publish_payload_maps_remote_id(self) -> None:
         """Inner publish_payload closure maps remote_id when publish succeeds (lines 141-146)."""
@@ -339,16 +350,16 @@ class TestDrainRetryQueueClosure:
         # Use a queue mock that actually invokes the callback with a payload
         captured_fn: list[object] = []
 
-        def fake_drain(fn: object) -> dict[str, object]:
+        def fake_drain(fn: object) -> tuple[dict[str, int], list[str]]:
             captured_fn.append(fn)
             assert callable(fn)
             payload = {"source_learning_id": "M-closure"}
             fn(payload)  # type: ignore[operator]
-            return {"drained": 1, "failed": 0, "skipped": 0}
+            return {"drained": 1, "failed": 0, "skipped": 0}, ["M-canonical"]
 
         q = MagicMock()
         q.depth.return_value = 0
-        q.drain.side_effect = fake_drain
+        q._drain_with_ids.side_effect = fake_drain
 
         mock_resp = _mock_response(status=201, json_body={"id": "REMOTE-CLOSURE"})
         mock_client = MagicMock()
@@ -360,4 +371,4 @@ class TestDrainRetryQueueClosure:
             result = drain_retry_queue(q, cfg)
 
         assert result["drained"] == 1
-        assert result["remote_ids"].get("M-closure") == "REMOTE-CLOSURE"
+        assert result["remote_ids"].get("M-canonical") == "REMOTE-CLOSURE"

@@ -184,7 +184,8 @@ class TestStorageBackendDefaults:
         """FR-03: Default upsert_vector() must be a no-op (no error)."""
         backend = self._make_concrete_backend()
         # Should not raise
-        backend.upsert_vector("M-test", [0.1, 0.2, 0.3])
+        result = backend.upsert_vector("M-test", [0.1, 0.2, 0.3])
+        assert result is None
 
     def test_storage_backend_default_search_vectors(self) -> None:
         """FR-03: Default search_vectors() must return empty list."""

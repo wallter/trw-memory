@@ -8,7 +8,7 @@ from pathlib import Path
 
 import structlog
 
-from trw_memory.exceptions import SecurityDefaultUnresolvableError
+from trw_memory.exceptions import CanaryFixturesMissingError, SecurityDefaultUnresolvableError
 from trw_memory.models.config import MemoryConfig
 
 logger = structlog.get_logger(__name__)
@@ -40,6 +40,7 @@ def resolve_security_path(
     *,
     trw_dir: Path | None = None,
     create_parent: bool = False,
+    reject_leaf_symlink: bool = False,
 ) -> Path:
     """Resolve a SEC-001 path without depending on the current working directory."""
     raw_value = getattr(config, field_name)
@@ -50,11 +51,13 @@ def resolve_security_path(
         resolved = Path(str(package_root / _CANARY_FIXTURE_DIRNAME)).resolve()
     else:
         candidate = Path(raw_value).expanduser()
-        resolved = (
-            candidate.resolve()
-            if candidate.is_absolute()
-            else (_discover_anchor(config, trw_dir=trw_dir) / candidate).resolve()
-        )
+        anchored = candidate if candidate.is_absolute() else _discover_anchor(config, trw_dir=trw_dir) / candidate
+        if reject_leaf_symlink:
+            resolved = anchored.parent.resolve() / anchored.name
+            if resolved.is_symlink():
+                raise SecurityDefaultUnresolvableError(f"{field_name} must not be a symlink: {resolved}")
+        else:
+            resolved = anchored.resolve()
     if create_parent:
         resolved.parent.mkdir(parents=True, exist_ok=True)
     return resolved
@@ -64,7 +67,7 @@ def verify_defaults(config: MemoryConfig, *, trw_dir: Path | None = None) -> Non
     """Fail loud if SEC-001 defaults do not resolve to real writable artifacts."""
     canary_dir = resolve_security_path(config, "canary_fixtures_path", trw_dir=trw_dir)
     if not canary_dir.exists() or not canary_dir.is_dir():
-        raise SecurityDefaultUnresolvableError(f"canary fixtures missing at {canary_dir}")
+        raise CanaryFixturesMissingError(f"canary fixtures missing at {canary_dir}")
 
     quarantine_db = resolve_security_path(config, "quarantine_db_path", trw_dir=trw_dir, create_parent=True)
     try:
@@ -72,7 +75,13 @@ def verify_defaults(config: MemoryConfig, *, trw_dir: Path | None = None) -> Non
     except OSError as exc:
         raise SecurityDefaultUnresolvableError(f"quarantine DB path not creatable: {quarantine_db}") from exc
 
-    signing_key = resolve_security_path(config, "provenance_signing_key_path", trw_dir=trw_dir, create_parent=True)
+    signing_key = resolve_security_path(
+        config,
+        "provenance_signing_key_path",
+        trw_dir=trw_dir,
+        create_parent=True,
+        reject_leaf_symlink=True,
+    )
     try:
         signing_key.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:

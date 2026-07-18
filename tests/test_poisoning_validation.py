@@ -39,7 +39,8 @@ class TestWriteTimeValidation:
             entry = make_entry(content="A" * content_size)
 
         assert serialized_size(entry) == 10_240
-        validate_entry_payload(entry, max_chars=10_240)
+        result = validate_entry_payload(entry, max_chars=10_240)
+        assert result is None
 
     def test_validate_entry_payload_counts_serialized_metadata_size(self) -> None:
         entry = make_entry(content="tiny", metadata={"blob": "A" * 15_000})
@@ -151,9 +152,7 @@ class TestWriteTimeValidation:
 
         assert result is None
         skip_events = [
-            entry
-            for entry in logs
-            if entry.get("event") == "anomaly_detection_skipped_insufficient_baseline"
+            entry for entry in logs if entry.get("event") == "anomaly_detection_skipped_insufficient_baseline"
         ]
         assert len(skip_events) == 1
         assert skip_events[0]["sample_count"] == 5
@@ -169,8 +168,6 @@ class TestWriteTimeValidation:
             score_entry_anomaly(outlier, reference, z_threshold=3.0)
 
         skip_events = [
-            entry
-            for entry in logs
-            if entry.get("event") == "anomaly_detection_skipped_insufficient_baseline"
+            entry for entry in logs if entry.get("event") == "anomaly_detection_skipped_insufficient_baseline"
         ]
         assert skip_events == []

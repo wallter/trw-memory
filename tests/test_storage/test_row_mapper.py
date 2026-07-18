@@ -88,6 +88,33 @@ def test_old_hex_ids_still_load() -> None:
     assert restored.protection_tier == ProtectionTier.NORMAL  # default
 
 
+def test_legacy_enum_values_remain_readable_and_lossless() -> None:
+    """Historical producer values must not be mislabeled as bad UTF-8."""
+    row = list(_entry_to_full_row(MemoryEntry(id="L-legacy-enums", content="legacy")))
+    row[ENTRY_COLUMNS.index("type")] = "gotcha"
+    row[ENTRY_COLUMNS.index("confidence")] = "0.97"
+
+    restored = row_to_entry(tuple(row))
+
+    assert restored.type == MemoryType.INCIDENT
+    assert restored.confidence == Confidence.UNVERIFIED
+    assert restored.metadata["legacy_memory_type"] == "gotcha"
+    assert restored.metadata["legacy_confidence"] == "0.97"
+
+
+def test_unknown_future_enum_values_preserve_exact_strings() -> None:
+    row = list(_entry_to_full_row(MemoryEntry(id="L-future-enums", content="future")))
+    row[ENTRY_COLUMNS.index("type")] = "future_type"
+    row[ENTRY_COLUMNS.index("confidence")] = "future_confidence"
+
+    restored = row_to_entry(tuple(row))
+
+    assert restored.type == MemoryType.PATTERN
+    assert restored.confidence == Confidence.UNVERIFIED
+    assert restored.metadata["legacy_memory_type"] == "future_type"
+    assert restored.metadata["legacy_confidence"] == "future_confidence"
+
+
 def test_row_length_matches_entry_columns() -> None:
     """entry_to_row always produces a tuple with len == len(ENTRY_COLUMNS)."""
     entry = MemoryEntry(id="L-len1", content="length check")

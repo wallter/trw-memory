@@ -11,7 +11,7 @@ import sqlite3
 import threading
 from collections import deque
 from pathlib import Path
-from time import monotonic
+from typing import Any
 
 import structlog
 
@@ -36,10 +36,28 @@ __all__ = [
     "wait_for_graph_updates",
 ]
 
-from trw_memory.exceptions import StorageError
+from trw_memory.exceptions import AuthorizationError, StorageError
+from trw_memory._graph_config import derive_graph_config as _derive_graph_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.storage._sql_utils import iter_bind_chunks
+
+# Background graph-update thread registry extracted to _graph_threads.py.
+# Re-export the shims + join primitive so trw_memory.graph.<name> keeps working
+# for the 4 prod + 4 test importers of wait_for_graph_updates.
+from trw_memory._graph_threads import (
+    _REGISTRY as _GRAPH_THREAD_REGISTRY,
+    _track_graph_thread as _track_graph_thread,
+    _untrack_graph_thread as _untrack_graph_thread,
+    wait_for_graph_updates as wait_for_graph_updates,
+)
+
+# Back-compat aliases for the pre-extraction module globals. They point at the
+# registry's live internals (mutated in place by track/untrack), so any external
+# reader still observes the real registry state rather than a detached copy.
+_BACKGROUND_GRAPH_THREADS = _GRAPH_THREAD_REGISTRY._threads
+_BACKGROUND_GRAPH_THREADS_GUARD = _GRAPH_THREAD_REGISTRY._guard
 
 logger = structlog.get_logger(__name__)
 
@@ -74,8 +92,9 @@ VALID_EDGE_TYPES: frozenset[str] = frozenset(
 
 # _ENTRY_UPDATE_LOCKS / _ENTRY_UPDATE_LOCKS_GUARD are owned by
 # _graph_cross_project and re-imported below for back-compat; no local copy here.
-_BACKGROUND_GRAPH_THREADS: set[threading.Thread] = set()
-_BACKGROUND_GRAPH_THREADS_GUARD = threading.Lock()
+# Background graph-update thread tracking lives in _graph_threads.py (registry
+# class + singleton); the shims/aliases are re-exported near the bottom of this
+# module so trw_memory.graph.wait_for_graph_updates et al. keep working.
 
 
 def _optional_lock(lock: threading.Lock | None) -> contextlib.AbstractContextManager[bool]:
@@ -83,45 +102,6 @@ def _optional_lock(lock: threading.Lock | None) -> contextlib.AbstractContextMan
     if lock is not None:
         return lock
     return contextlib.nullcontext(True)
-
-
-def _track_graph_thread(thread: threading.Thread) -> None:
-    with _BACKGROUND_GRAPH_THREADS_GUARD:
-        _BACKGROUND_GRAPH_THREADS.add(thread)
-
-
-def _untrack_graph_thread(thread: threading.Thread) -> None:
-    with _BACKGROUND_GRAPH_THREADS_GUARD:
-        _BACKGROUND_GRAPH_THREADS.discard(thread)
-
-
-def _derive_graph_config(
-    backend: StorageBackend,
-    config: MemoryConfig | None,
-) -> MemoryConfig | None:
-    if config is not None:
-        return config
-
-    from trw_memory.storage.sqlite_backend import SQLiteBackend
-    from trw_memory.storage.yaml_backend import YAMLBackend
-
-    if isinstance(backend, SQLiteBackend):
-        db_path = Path(str(backend._db_path))
-        return MemoryConfig(
-            storage_backend="sqlite",
-            storage_path=str(db_path.parent.parent),
-            sqlite_db_name=db_path.name,
-            embedding_dim=backend._dim,
-        )
-
-    if isinstance(backend, YAMLBackend):
-        entries_dir = Path(str(backend._dir))
-        return MemoryConfig(
-            storage_backend="yaml",
-            storage_path=str(entries_dir.parent.parent),
-        )
-
-    return None
 
 
 def _run_scheduled_graph_update(
@@ -164,24 +144,13 @@ def schedule_graph_update(
         daemon=True,
     )
     _track_graph_thread(thread)
-    thread.start()
+    try:
+        thread.start()
+    except RuntimeError:
+        _untrack_graph_thread(thread)
+        logger.warning("graph_update_dispatch_failed", entry_id=entry.id, exc_info=True)
+        return False
     return True
-
-
-def wait_for_graph_updates(timeout: float = 5.0) -> None:
-    """Block until scheduled graph-update threads finish or *timeout* elapses."""
-    deadline = monotonic() + timeout
-    while True:
-        with _BACKGROUND_GRAPH_THREADS_GUARD:
-            threads = [thread for thread in _BACKGROUND_GRAPH_THREADS if thread.is_alive()]
-        if not threads:
-            return
-
-        remaining = deadline - monotonic()
-        if remaining <= 0:
-            raise TimeoutError("timed out waiting for background graph updates")
-
-        threads[0].join(min(0.05, remaining))
 
 
 def update_entry_graph(
@@ -197,10 +166,14 @@ def update_entry_graph(
     backend does not expose a SQLite connection, graph updates are skipped
     without affecting the primary write path.
     """
-    conn = getattr(backend, "_conn", None)
-    if not isinstance(conn, sqlite3.Connection):
+    raw_conn = getattr(backend, "_conn", None)
+    if not callable(getattr(raw_conn, "execute", None)) or not callable(getattr(raw_conn, "commit", None)):
         logger.debug("graph_update_skipped", entry_id=entry.id, reason="no_sqlite_connection")
         return {"similarity_edges": 0, "tag_edges": 0, "consolidation_edges": 0}
+    # Optional DB-API drivers are structurally compatible but have no shared
+    # nominal Connection base class. Capability checks above guard this narrow
+    # dynamic boundary before the SQLite graph helpers use it.
+    conn: Any = raw_conn
 
     candidate_entries = backend.list_entries(
         status=MemoryStatus.ACTIVE,
@@ -231,6 +204,13 @@ def update_entry_graph(
         conn,
         lock=lock,
     )
+    co_anchored_edges = create_co_anchored_edges(
+        conn,
+        entry.id,
+        list(dict.fromkeys(anchor.file for anchor in entry.anchors)),
+        lock=lock,
+        min_shared_anchors=3,
+    )
     cross_validated_projects = _apply_cross_project_validation(
         entry,
         backend,
@@ -242,6 +222,7 @@ def update_entry_graph(
         "similarity_edges": similarity_edges,
         "tag_edges": tag_edges,
         "consolidation_edges": consolidation_edges,
+        "co_anchored_edges": co_anchored_edges,
         "cross_validated_projects": cross_validated_projects,
     }
 
@@ -308,6 +289,7 @@ def list_org_shared_entries(
         return []
 
     from trw_memory.integrations._backend import discover_namespace_backends
+    from trw_memory.security.rbac import Permission, require_namespace_permission
 
     seen = set(exclude_keys or set())
     matches: list[MemoryEntry] = []
@@ -317,6 +299,10 @@ def list_org_shared_entries(
             for candidate_namespace in namespaces:
                 project_id = _project_scope_key(candidate_namespace)
                 if project_id is None or project_id == current_project:
+                    continue
+                try:
+                    require_namespace_permission(config, candidate_namespace, Permission.READ, "read")
+                except AuthorizationError:
                     continue
 
                 # Push status + min_importance into the storage layer so we
@@ -351,6 +337,7 @@ def graph_query(
     depth: int = 2,
     edge_types: list[str] | None = None,
     namespace: str | None = None,
+    max_nodes: int | None = None,
 ) -> list[dict[str, str | int | float]]:
     """BFS traversal from root nodes up to specified depth.
 
@@ -368,6 +355,8 @@ def graph_query(
             — a data-isolation leak. ``None`` keeps the legacy unscoped
             behaviour (mirrors the ``namespace`` scoping added to the
             vector-ops path).
+        max_nodes: Optional hard cap on discovered nodes. ``None`` preserves
+            the legacy internal traversal contract; public adapters set a cap.
 
     Returns:
         List of {"id": str, "depth": int, "edge_type": str, "weight": float}
@@ -375,10 +364,25 @@ def graph_query(
     """
     if not root_ids:
         return []
+    if max_nodes is not None and max_nodes < 1:
+        raise ValueError("max_nodes must be at least 1")
 
     if depth > MAX_TRAVERSAL_DEPTH:
         logger.debug("graph_query_depth_clamped", requested=depth, clamped=MAX_TRAVERSAL_DEPTH)
         depth = MAX_TRAVERSAL_DEPTH
+
+    if namespace is not None:
+        allowed_roots: set[str] = set()
+        for chunk in iter_bind_chunks(root_ids, reserved_bindings=1):
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"SELECT id FROM memories WHERE namespace = ? AND id IN ({placeholders})",  # noqa: S608
+                (namespace, *chunk),
+            ).fetchall()
+            allowed_roots.update(str(row[0]) for row in rows)
+        root_ids = [root_id for root_id in root_ids if root_id in allowed_roots]
+        if not root_ids:
+            return []
 
     visited: set[str] = set(root_ids)
     results: list[dict[str, str | int | float]] = []
@@ -403,22 +407,27 @@ def graph_query(
         if current_depth >= depth:
             continue
 
-        # Build query with optional edge type filter
+        remaining = max_nodes - len(results) if max_nodes is not None else None
+        limit_clause = " LIMIT ?" if remaining is not None else ""
+
+        # Build query with optional edge type filter. Public callers pass a
+        # node cap, so the storage query itself cannot materialize an unbounded
+        # high-fanout row set before Python applies the traversal budget.
         if edge_types:
             placeholders = ", ".join("?" for _ in edge_types)
             sql = (
                 f"SELECT target_id, edge_type, weight FROM memory_graph_edges "  # noqa: S608 — placeholders is ? repeated (no user input in SQL structure); values are parameterized
-                f"WHERE source_id = ? AND edge_type IN ({placeholders}){ns_clause}"
+                f"WHERE source_id = ? AND edge_type IN ({placeholders}){ns_clause}{limit_clause}"
             )
-            params: tuple[str, ...] = (node_id, *edge_types, *ns_param)
+            params: tuple[str | int, ...] = (node_id, *edge_types, *ns_param, *((remaining,) if remaining else ()))
         else:
             sql = (
                 f"SELECT target_id, edge_type, weight FROM memory_graph_edges "  # noqa: S608 — ns_clause uses a parameterized ? placeholder; no user input in SQL structure
-                f"WHERE source_id = ?{ns_clause}"
+                f"WHERE source_id = ?{ns_clause}{limit_clause}"
             )
-            params = (node_id, *ns_param)
+            params = (node_id, *ns_param, *((remaining,) if remaining else ()))
 
-        for row in conn.execute(sql, params).fetchall():
+        for row in conn.execute(sql, params):
             target_id, edge_type, weight = row
             if target_id not in visited:
                 visited.add(target_id)
@@ -430,6 +439,8 @@ def graph_query(
                         "weight": weight,
                     }
                 )
+                if max_nodes is not None and len(results) >= max_nodes:
+                    return results
                 queue.append((target_id, current_depth + 1))
 
     return results

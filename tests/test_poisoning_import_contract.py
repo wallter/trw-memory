@@ -7,13 +7,14 @@ from trw_memory.security.poisoning import validate_store_inputs
 
 
 def test_validate_store_inputs_accepts_valid_payload() -> None:
-    validate_store_inputs(
+    result = validate_store_inputs(
         content="valid content",
         detail="detail",
         tags=["tag"],
         metadata={"source": "test"},
         importance=0.5,
     )
+    assert result is None
 
 
 def test_validate_store_inputs_rejects_invalid_fields() -> None:

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import pytest
 
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.retrieval import reranker
 from trw_memory.retrieval.reranker import _CROSS_ENCODER_AVAILABLE, cross_encode_rerank
 
 
@@ -68,3 +69,36 @@ class TestCrossEncodeRerank:
         result = cross_encode_rerank("query", entries)
         assert len(result) == 1
         assert result[0].id == "e1"
+
+
+class TestLazyCrossEncoderImport:
+    """The sentence_transformers import is deferred to first use (behavior-preserving)."""
+
+    def test_import_cross_encoder_matches_availability_flag(self) -> None:
+        # The public lazy-resolved flag must agree with the probe helper.
+        assert reranker._import_cross_encoder() is _CROSS_ENCODER_AVAILABLE
+
+    def test_import_cross_encoder_is_cached(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # First real probe populates the cache; a subsequent call must NOT
+        # re-enter the import machinery. We assert idempotence of the flag.
+        first = reranker._import_cross_encoder()
+        # Corrupt the class cache but leave the availability flag: a cached
+        # probe must short-circuit and return the same answer without retrying.
+        monkeypatch.setattr(reranker, "_cross_encoder_cls", object())
+        assert reranker._import_cross_encoder() is first
+
+    def test_degrades_gracefully_when_dependency_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Simulate sentence_transformers being unavailable: cross_encode_rerank
+        # must preserve input order exactly (the fusion ranking is untouched).
+        monkeypatch.setattr(reranker, "_cross_encoder_available", False)
+        monkeypatch.setattr(reranker, "_cross_encoder_cls", None)
+        entries = [_entry(f"e{i}", f"content {i}") for i in range(4)]
+        result = cross_encode_rerank("test query", entries)
+        assert [e.id for e in result] == [e.id for e in entries]
+
+    def test_degraded_path_honors_top_k(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(reranker, "_cross_encoder_available", False)
+        monkeypatch.setattr(reranker, "_cross_encoder_cls", None)
+        entries = [_entry(f"e{i}", f"content {i}") for i in range(6)]
+        result = cross_encode_rerank("test query", entries, top_k=2)
+        assert [e.id for e in result] == ["e0", "e1"]

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
+from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.storage.persistence import read_yaml
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools.consolidate import memory_consolidate_impl
@@ -16,6 +18,24 @@ from trw_memory.tools.recall import memory_recall_impl
 from trw_memory.tools.store import memory_store_impl
 
 from ._test_team_memory_support import _make_entry
+
+
+def test_sqlite_team_lifecycle_supports_multiple_namespaces_without_yaml_sidecar(tmp_path: Path) -> None:
+    backend = SQLiteBackend(tmp_path / "memory.db")
+    manager = NamespaceManager(backend)
+    try:
+        manager.ensure_team_namespace("team:a")
+        manager.ensure_team_namespace("team:b")
+        manager.mark_team_namespace_completed("team:a", completed_at=datetime.now(timezone.utc))
+
+        rows = backend._conn.execute(
+            "SELECT namespace_id, status FROM memory_namespaces ORDER BY namespace_id"
+        ).fetchall()
+    finally:
+        backend.close()
+
+    assert [tuple(row) for row in rows] == [("team:a", "completed"), ("team:b", "active")]
+    assert not (tmp_path / "namespace_lifecycle.yaml").exists()
 
 
 def test_team_promotion_marks_namespace_expiry_in_sqlite_metadata(tmp_path: Path) -> None:

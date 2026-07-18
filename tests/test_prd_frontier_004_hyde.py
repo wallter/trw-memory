@@ -11,8 +11,7 @@ Callers with LLM access generate the expansion; callers without just omit it.
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -65,12 +64,8 @@ class TestQueryExpansionParameter:
                 pass
 
         # Both the original query and the expansion must be embedded for averaging
-        assert "original query" in embedded_texts, (
-            f"Expected original query to be embedded, got: {embedded_texts}"
-        )
-        assert expansion in embedded_texts, (
-            f"Expected expansion text to be embedded, got: {embedded_texts}"
-        )
+        assert "original query" in embedded_texts, f"Expected original query to be embedded, got: {embedded_texts}"
+        assert expansion in embedded_texts, f"Expected expansion text to be embedded, got: {embedded_texts}"
         await client.close()
 
     @pytest.mark.asyncio
@@ -128,6 +123,7 @@ class TestQueryExpansionParameter:
     async def test_query_expansion_in_client_recall_signature(self) -> None:
         """MemoryClient.recall() must expose query_expansion as a kwarg."""
         import inspect
+
         from trw_memory.client import MemoryClient
 
         sig = inspect.signature(MemoryClient.recall)
@@ -136,6 +132,7 @@ class TestQueryExpansionParameter:
     def test_recall_impl_has_query_expansion_param(self) -> None:
         """recall_impl() must expose query_expansion as a kwarg."""
         import inspect
+
         from trw_memory._client_recall import recall_impl
 
         sig = inspect.signature(recall_impl)

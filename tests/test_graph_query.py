@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from trw_memory.graph import graph_query
 
 from ._test_graph_support import _insert_edge, _insert_memory_row, _make_conn
@@ -97,6 +99,14 @@ class TestGraphQuery:
 
 
 class TestGraphQueryNamespaceIsolation:
+    def test_namespace_filter_rejects_foreign_root(self) -> None:
+        conn = _make_conn()
+        _insert_memory_row(conn, "foreign", namespace="project:b")
+        _insert_memory_row(conn, "local", namespace="project:a")
+        _insert_edge(conn, "foreign", "local", "similarity", 0.9)
+
+        assert graph_query(conn, ["foreign"], namespace="project:a") == []
+
     def test_namespace_filter_excludes_foreign_namespace_target(self) -> None:
         conn = _make_conn()
         # A and B(ns A) belong to namespace A; X belongs to namespace B.
@@ -181,6 +191,23 @@ class TestGraphQueryEdgeCases:
         conn = _make_conn()
         results = graph_query(conn, ["lonely"], depth=2)
         assert results == []
+
+    def test_graph_query_hard_caps_dense_frontier(self) -> None:
+        conn = _make_conn()
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        for index in range(10):
+            _insert_edge(conn, "root", f"node-{index}", "similarity", 0.9)
+
+        results = graph_query(conn, ["root"], depth=1, max_nodes=4)
+
+        assert len(results) == 4
+        assert any("LIMIT 4" in statement for statement in statements)
+
+    def test_graph_query_rejects_non_positive_node_cap(self) -> None:
+        conn = _make_conn()
+        with pytest.raises(ValueError, match="max_nodes"):
+            graph_query(conn, ["root"], max_nodes=0)
 
 
 class TestGraphQueryPerformance:

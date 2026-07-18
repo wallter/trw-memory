@@ -11,8 +11,11 @@ Target: p95 latency <=20ms for a 25-learning window (PRD-SEC-001 NFR-002).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import os
+import stat
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.pii import strip_pii
 from trw_memory.security.poisoning import _INJECTION_PATTERNS
+from trw_memory.storage.persistence import lock_for_rmw
 
 __all__ = ["RecallDecision", "RecallFilterResult", "filter_recall_window"]
 
@@ -123,9 +127,32 @@ def _shadow_quarantine(
             "shadowed_at": datetime.now(timezone.utc).isoformat(),
             "mode": "observe",
         }
-        with shadow_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
-            fh.flush()
+        payload = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        with lock_for_rmw(shadow_path):
+            if shadow_path.is_symlink():
+                raise OSError("refusing symlink quarantine shadow path")
+            flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+            flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(shadow_path, flags, stat.S_IRUSR | stat.S_IWUSR)
+            original_size = os.fstat(fd).st_size
+            try:
+                if shadow_path.is_symlink():
+                    raise OSError("quarantine shadow path became a symlink")
+                fchmod = getattr(os, "fchmod", None)
+                if fchmod is not None:
+                    fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+                remaining = memoryview(payload)
+                while remaining:
+                    written = os.write(fd, remaining)
+                    if written <= 0:
+                        raise OSError("failed to append quarantine shadow record")
+                    remaining = remaining[written:]
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.ftruncate(fd, original_size)
+                raise
+            finally:
+                os.close(fd)
         _LOG.info(
             "recall_filter.quarantine_shadow",
             action="quarantine_shadow",

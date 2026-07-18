@@ -256,6 +256,11 @@ class TestSearch:
         results = backend.search("python", top_k=3)
         assert len(results) <= 3
 
+    @pytest.mark.parametrize("top_k", [0, -1])
+    def test_search_non_positive_top_k_returns_empty(self, backend: YAMLBackend, top_k: int) -> None:
+        backend.store(make_entry("match", "python code"))
+        assert backend.search("python", top_k=top_k) == []
+
     def test_search_status_filter(self, backend: YAMLBackend) -> None:
         backend.store(make_entry("active_match", "pydantic thing", status=MemoryStatus.ACTIVE))
         backend.store(make_entry("resolved_match", "pydantic thing", status=MemoryStatus.RESOLVED))
@@ -311,6 +316,11 @@ class TestListEntries:
         results = backend.list_entries(limit=2)
         assert len(results) == 2
 
+    @pytest.mark.parametrize("limit", [0, -1])
+    def test_list_entries_non_positive_limit_returns_empty(self, backend: YAMLBackend, limit: int) -> None:
+        backend.store(make_entry("limited"))
+        assert backend.list_entries(limit=limit) == []
+
     def test_list_entries_filtered_by_status(self, backend: YAMLBackend) -> None:
         backend.store(make_entry("active1", status=MemoryStatus.ACTIVE))
         backend.store(make_entry("active2", status=MemoryStatus.ACTIVE))
@@ -337,3 +347,4 @@ class TestListEntries:
         # close() on YAMLBackend is a no-op — should not raise
         backend.close()
         backend.close()  # double-close also safe
+        assert backend.list_entries() == []

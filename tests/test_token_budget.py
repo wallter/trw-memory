@@ -326,3 +326,55 @@ class TestTokenBudgetPerformance:
         elapsed_ms = (time.perf_counter() - start) * 1000 / 10
 
         assert elapsed_ms < 5.0, f"apply_token_budget took {elapsed_ms:.1f}ms for 1000 entries (limit: 5ms)"
+
+
+# ---------------------------------------------------------------------------
+# estimate_serialized_entry_tokens + estimator kwarg (response-boundary truthfulness)
+# ---------------------------------------------------------------------------
+
+
+class TestEstimateSerializedEntryTokens:
+    def test_counts_full_serialized_form(self) -> None:
+        import json
+
+        from trw_memory.retrieval.token_budget import estimate_serialized_entry_tokens
+
+        entry: dict[str, object] = {
+            "id": "L-1",
+            "summary": "s" * 100,
+            "detail": "d" * 100,
+            "outcome_history": [{"outcome": "pass"}] * 5,
+        }
+        expected = len(json.dumps(entry, default=str, ensure_ascii=False, separators=(",", ":"))) // 4
+        assert estimate_serialized_entry_tokens(entry) == expected
+        # The content-field heuristic is blind to summary/outcome_history:
+        assert estimate_serialized_entry_tokens(entry) > estimate_entry_tokens(entry)
+
+    def test_fail_open_on_unserializable(self) -> None:
+        from trw_memory.retrieval.token_budget import estimate_serialized_entry_tokens
+
+        class Boom:
+            def __str__(self) -> str:
+                raise RuntimeError("not serializable")
+
+        entry: dict[str, object] = {"content": "hello world", "weird": Boom()}
+        assert estimate_serialized_entry_tokens(entry) == estimate_entry_tokens(entry)
+
+    def test_apply_token_budget_accepts_estimator(self) -> None:
+        results: list[dict[str, object]] = [
+            {"content": "small", "padding": "x" * 4000},
+            {"content": "small", "padding": "x" * 4000},
+        ]
+        # Default estimator is blind to "padding" -> both fit a 100-token budget.
+        default_filtered, _, default_truncated = apply_token_budget(results, token_budget=100)
+        assert len(default_filtered) == 2
+        assert default_truncated is False
+
+        from trw_memory.retrieval.token_budget import estimate_serialized_entry_tokens
+
+        filtered, used, truncated = apply_token_budget(
+            results, token_budget=100, estimator=estimate_serialized_entry_tokens
+        )
+        assert len(filtered) == 1, "serialized estimator must see the padding"
+        assert truncated is True
+        assert used >= 1000

@@ -138,3 +138,118 @@ def test_os_error_on_read_skips_anchor(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(Path, "read_text", _raise_on_mod)
     result = compute_anchor_validity(anchors, tmp_path)
     assert result == 0.0
+
+
+class TestMarkerBonus:
+    """FR03/FR05: inline comment marker adds 0.5 to valid_count, capped at 1.0."""
+
+    def test_marker_bonus_lifts_partial_validity(self, tmp_path: Path) -> None:
+        """A marker adds 0.5 to valid_count: 1 valid of 2 -> (1+0.5)/2 = 0.75."""
+        (tmp_path / "good.py").write_text("def present_fn(): pass")
+        # bad.py is missing -> 1 of 2 valid.
+        (tmp_path / "notes.md").write_text("See mcp.trw.recall(id=L-a3Fq) for context\n")
+        anchors = [
+            {"file": "good.py", "symbol_name": "present_fn"},
+            {"file": "bad.py", "symbol_name": "absent_fn"},
+        ]
+        # Without the id: raw 0.5.
+        assert compute_anchor_validity(anchors, tmp_path) == 0.5
+        # With the id and a marker present: (1.0 + 0.5) / 2 = 0.75.
+        assert compute_anchor_validity(anchors, tmp_path, learning_id="L-a3Fq") == 0.75
+
+    def test_marker_bonus_capped_at_one(self, tmp_path: Path) -> None:
+        """The 0.5 bonus never pushes validity above 1.0 (min cap).
+
+        2 valid of 2 -> 1.0 raw; +0.5 bonus -> 2.5/2 = 1.25 -> capped 1.0.
+        """
+        (tmp_path / "a.py").write_text("def foo(): pass")
+        (tmp_path / "b.py").write_text("class Bar: pass")
+        (tmp_path / "code.py").write_text("# mcp.trw.recall(id=L-a3Fq)\n")
+        anchors = [
+            {"file": "a.py", "symbol_name": "foo"},
+            {"file": "b.py", "symbol_name": "Bar"},
+        ]
+        assert compute_anchor_validity(anchors, tmp_path, learning_id="L-a3Fq") == 1.0
+
+    def test_marker_bonus_partial_boost(self, tmp_path: Path) -> None:
+        """Bonus is a genuine +0.5, not a jump straight to 1.0.
+
+        0 valid anchors of 3 -> 0.0 raw; a marker adds 0.5 -> 0.5/3 = 0.17.
+        """
+        (tmp_path / "notes.md").write_text("marker mcp.trw.recall(id=L-b2Xp) here\n")
+        anchors = [
+            {"file": "missing_a.py", "symbol_name": "foo"},
+            {"file": "missing_b.py", "symbol_name": "bar"},
+            {"file": "missing_c.py", "symbol_name": "baz"},
+        ]
+        assert compute_anchor_validity(anchors, tmp_path) == 0.0
+        result = compute_anchor_validity(anchors, tmp_path, learning_id="L-b2Xp")
+        assert result == pytest.approx(0.17, abs=0.01)
+
+    def test_no_marker_no_bonus(self, tmp_path: Path) -> None:
+        """learning_id supplied but no matching marker present -> no bonus."""
+        (tmp_path / "good.py").write_text("def present_fn(): pass")
+        (tmp_path / "notes.md").write_text("no marker here\n")
+        anchors = [
+            {"file": "good.py", "symbol_name": "present_fn"},
+            {"file": "bad.py", "symbol_name": "absent_fn"},
+        ]
+        assert compute_anchor_validity(anchors, tmp_path, learning_id="L-a3Fq") == 0.5
+
+    def test_marker_for_different_id_ignored(self, tmp_path: Path) -> None:
+        """A marker for a DIFFERENT learning id does not grant the bonus."""
+        (tmp_path / "good.py").write_text("def present_fn(): pass")
+        (tmp_path / "notes.md").write_text("mcp.trw.recall(id=L-zzzz)\n")
+        anchors = [
+            {"file": "good.py", "symbol_name": "present_fn"},
+            {"file": "bad.py", "symbol_name": "absent_fn"},
+        ]
+        assert compute_anchor_validity(anchors, tmp_path, learning_id="L-a3Fq") == 0.5
+
+    def test_multi_id_marker_matches_member(self, tmp_path: Path) -> None:
+        """A comma-separated multi-id marker grants the bonus to each member id."""
+        (tmp_path / "good.py").write_text("def present_fn(): pass")
+        (tmp_path / "code.py").write_text("# mcp.trw.recall(id=L-aaaa,L-a3Fq)\n")
+        anchors = [
+            {"file": "good.py", "symbol_name": "present_fn"},
+            {"file": "bad.py", "symbol_name": "absent_fn"},
+        ]
+        # (1 valid + 0.5 bonus) / 2 = 0.75.
+        assert compute_anchor_validity(anchors, tmp_path, learning_id="L-a3Fq") == 0.75
+
+
+def test_compute_anchor_validity_is_pure(tmp_path: Path) -> None:
+    """NFR02 (PRD :435): compute_anchor_validity performs no filesystem writes.
+
+    Snapshots the directory tree (paths + contents + mtimes) before and after a
+    call that exercises both anchor checks and the marker scan, and asserts the
+    tree is unchanged and its inputs are not mutated.
+    """
+    (tmp_path / "good.py").write_text("def present_fn(): pass")
+    (tmp_path / "notes.md").write_text("mcp.trw.recall(id=L-a3Fq)\n")
+
+    def snapshot(root: Path) -> dict[str, tuple[bytes, float]]:
+        state: dict[str, tuple[bytes, float]] = {}
+        for p in sorted(root.rglob("*")):
+            if p.is_file():
+                st = p.stat()
+                state[str(p.relative_to(root))] = (p.read_bytes(), st.st_mtime)
+        return state
+
+    anchors = [
+        {"file": "good.py", "symbol_name": "present_fn"},
+        {"file": "bad.py", "symbol_name": "absent_fn"},
+    ]
+
+    before = snapshot(tmp_path)
+    result = compute_anchor_validity(anchors, tmp_path, learning_id="L-a3Fq")
+    after = snapshot(tmp_path)
+
+    assert before == after, "compute_anchor_validity mutated the filesystem"
+    # Inputs must not be mutated either.
+    assert anchors == [
+        {"file": "good.py", "symbol_name": "present_fn"},
+        {"file": "bad.py", "symbol_name": "absent_fn"},
+    ]
+    # (1 valid + 0.5 marker bonus) / 2 = 0.75.
+    assert result == 0.75

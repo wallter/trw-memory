@@ -32,6 +32,9 @@ def validate_namespace(ns: str) -> str:
     Raises:
         ConfigError: If *ns* does not match one of the canonical patterns.
     """
+    if not isinstance(ns, str):
+        raise ConfigError("namespace must be a string")
+
     if not ns or not ns.strip():
         raise ConfigError("namespace must not be empty")
 

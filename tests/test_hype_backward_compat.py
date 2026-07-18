@@ -13,10 +13,10 @@ import pytest
 
 pytest.importorskip("sqlite_vec")
 
-from trw_memory.client import MemoryClient
-from trw_memory.retrieval.pipeline import hybrid_search
 from tests.conftest import make_entry
 from tests.test_hype_store import _FakeEmbedder, _ListGenerator
+from trw_memory.client import MemoryClient
+from trw_memory.retrieval.pipeline import hybrid_search
 
 
 async def test_disabled_store_writes_no_siblings(tmp_path: Path) -> None:

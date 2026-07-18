@@ -112,7 +112,8 @@ def test_on_regression_fires_when_corrupt(tmp_path: Path) -> None:
         captured.append((p, detail))
 
     sched = IntegrityScheduler(db, interval_minutes=0, on_regression=_capture)
-    sched.run_once()
+    result = sched.run_once()
+    assert result is False
     assert len(captured) == 1
     assert captured[0][0] == db
     # Detail should contain non-"ok" content.
@@ -163,6 +164,7 @@ def test_stop_before_start_is_safe(tmp_path: Path) -> None:
     _make_healthy_db(db)
     sched = IntegrityScheduler(db, interval_minutes=0)
     sched.stop()  # must not raise
+    assert sched._thread is None
 
 
 def test_stop_is_idempotent(tmp_path: Path) -> None:
@@ -172,6 +174,7 @@ def test_stop_is_idempotent(tmp_path: Path) -> None:
     sched.start()
     sched.stop(timeout=1.0)
     sched.stop(timeout=1.0)  # second stop is fine
+    assert sched._thread is None or not sched._thread.is_alive()
 
 
 def test_thread_is_daemon(tmp_path: Path) -> None:

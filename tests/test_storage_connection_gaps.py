@@ -1,4 +1,5 @@
 """Wave 12: targeted tests for uncovered branches in storage/_connection.py."""
+
 from __future__ import annotations
 
 import sqlite3
@@ -15,7 +16,6 @@ from trw_memory.storage._connection import (
     open_and_configure,
     open_without_integrity_check,
 )
-
 
 # ---------------------------------------------------------------------------
 # apply_open_pragmas — verify=True warning branches (lines 57, 60)
@@ -155,6 +155,7 @@ class TestOpenAndConfigureIntegrityFailure:
 
                 with pytest.raises(sqlite3.DatabaseError, match="malformed"):
                     open_and_configure(db_path)
+                mock_conn.close.assert_called_once()
 
         assert call_count == 0  # we used the mock, not the real counter
 
@@ -222,7 +223,6 @@ class TestCheckIntegrity:
 
 class TestDbHasData:
     def test_empty_db_returns_false(self, tmp_path: Path) -> None:
-        from trw_memory.models.memory import MemoryEntry
         from trw_memory.storage.sqlite_backend import SQLiteBackend
 
         db_path = tmp_path / "test.db"
@@ -312,8 +312,10 @@ class TestSqlcipherPaths:
         mock_conn = MagicMock()
         mock_conn.row_factory = None
 
-        with patch("trw_memory.storage._connection.sqlite3.connect", return_value=mock_conn), \
-             patch("trw_memory.storage._connection._apply_sqlcipher_pragmas_safe"):
+        with (
+            patch("trw_memory.storage._connection.sqlite3.connect", return_value=mock_conn),
+            patch("trw_memory.storage._connection._apply_sqlcipher_pragmas_safe"),
+        ):
             try:
                 connect(
                     tmp_path / "test.db",

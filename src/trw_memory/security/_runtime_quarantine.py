@@ -42,6 +42,7 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.startup import resolve_security_path
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.storage.persistence import lock_for_rmw
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 logger = structlog.get_logger(__name__)
@@ -240,26 +241,48 @@ def review_quarantined_entry(
     learning_id: str,
     decision: str,
     reviewer_id: str,
+    namespace: str | None = None,
 ) -> dict[str, str]:
     if decision not in {"approve", "reject"}:
         raise ValueError("decision must be approve or reject")
-    existing_history = get_status_history(config, learning_id)
-    resolved_status = next(
-        (item["status"] for item in existing_history if item.get("status") in {"active", "obsolete_poisoned"}),
-        "",
-    )
-    if resolved_status:
-        return {"learning_id": learning_id, "status": "already_resolved", "resolved_status": resolved_status}
+    review_state_path = resolve_security_path(config, "quarantine_db_path", create_parent=True)
+    with lock_for_rmw(review_state_path):
+        return _review_quarantined_entry_locked(
+            config,
+            active_backend=active_backend,
+            learning_id=learning_id,
+            decision=decision,
+            reviewer_id=reviewer_id,
+            namespace=namespace,
+        )
+
+
+def _review_quarantined_entry_locked(
+    config: MemoryConfig,
+    *,
+    active_backend: StorageBackend,
+    learning_id: str,
+    decision: str,
+    reviewer_id: str,
+    namespace: str | None,
+) -> dict[str, str]:
+    """Apply one review while the per-quarantine-store decision lock is held."""
+    active_entry = active_backend.get(learning_id)
+    if active_entry is not None and namespace is not None and active_entry.namespace != namespace:
+        return {"learning_id": learning_id, "status": "not_found"}
     with open_quarantine_backend(config) as quarantine_backend:
         entry = quarantine_backend.get(learning_id)
+        if entry is not None and namespace is not None and entry.namespace != namespace:
+            return {"learning_id": learning_id, "status": "not_found"}
+        existing_history = get_status_history(config, learning_id)
+        resolved_status = next(
+            (item["status"] for item in existing_history if item.get("status") in {"active", "obsolete_poisoned"}),
+            "",
+        )
+        if resolved_status:
+            return {"learning_id": learning_id, "status": "already_resolved", "resolved_status": resolved_status}
         if entry is None:
             return {"learning_id": learning_id, "status": "not_found"}
-        append_review_log(
-            config,
-            learning_id,
-            "active" if decision == "approve" else "obsolete_poisoned",
-            reviewer_id=reviewer_id,
-        )
         if decision == "approve":
             approved = entry.model_copy(
                 update={
@@ -273,6 +296,7 @@ def review_quarantined_entry(
             )
             active_backend.store(approved)
             quarantine_backend.delete(learning_id)
+            append_review_log(config, learning_id, "active", reviewer_id=reviewer_id)
             return {"learning_id": learning_id, "status": "approved"}
         rejected = entry.model_copy(
             update={
@@ -285,4 +309,5 @@ def review_quarantined_entry(
             }
         )
         quarantine_backend.store(rejected)
+        append_review_log(config, learning_id, "obsolete_poisoned", reviewer_id=reviewer_id)
         return {"learning_id": learning_id, "status": "rejected"}

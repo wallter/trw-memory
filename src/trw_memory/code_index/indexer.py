@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import fnmatch
+import os
+import stat
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -31,6 +33,7 @@ _DEFAULT_EXCLUDED_NAMES = frozenset({".env", ".env.local", "secrets.env"})
 _SECRET_LIKE_NAME_TOKENS = frozenset({"credential", "password", "secret", "token"})
 _BINARY_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".gz", ".tar", ".so", ".dll", ".exe"})
 _SOURCE_EXTENSIONS = frozenset({".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".md", ".txt"})
+_OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 
 
 class CodeIndexStats(BaseModel):
@@ -141,7 +144,7 @@ class CodeIndexer:
         chunker: CodeChunker | None = None,
         max_file_bytes: int = 1_000_000,
     ) -> None:
-        self._root = root
+        self._root = root.resolve()
         self._store = store
         self._namespace = namespace
         self._chunker = chunker or CodeChunker()
@@ -154,13 +157,25 @@ class CodeIndexer:
         skipped_unchanged = 0
         skipped_excluded = 0
         seen_paths: set[str] = set()
-        for source_path in sorted(path for path in self._root.rglob("*") if path.is_file()):
+        for source_path in sorted(self._root.rglob("*")):
+            if source_path.is_symlink():
+                skipped_excluded += 1
+                continue
+            try:
+                if not source_path.is_file():
+                    continue
+            except OSError:
+                skipped_excluded += 1
+                continue
             relative_path = source_path.relative_to(self._root).as_posix()
             if self._is_excluded(source_path, relative_path):
                 skipped_excluded += 1
                 continue
+            content = self._read_source(source_path)
+            if content is None:
+                skipped_excluded += 1
+                continue
             seen_paths.add(validate_code_path(relative_path))
-            content = source_path.read_text(encoding="utf-8")
             digest = content_sha256(content)
             existing = self._store.get_file(namespace=self._namespace, path=relative_path)
             if existing is not None and existing.content_hash == digest:
@@ -188,6 +203,59 @@ class CodeIndexer:
             return True
         if source_path.suffix.lower() in _BINARY_EXTENSIONS:
             return True
-        if source_path.suffix.lower() not in _SOURCE_EXTENSIONS:
-            return True
-        return source_path.stat().st_size > self._max_file_bytes
+        return source_path.suffix.lower() not in _SOURCE_EXTENSIONS
+
+    def _read_source(self, source_path: Path) -> str | None:
+        """Read one contained regular file without following a swapped leaf symlink."""
+        try:
+            source_path.resolve(strict=True).relative_to(self._root)
+        except (OSError, ValueError):
+            return None
+
+        fd = self._open_source_fd(source_path)
+        if fd is None:
+            return None
+        try:
+            opened = os.fstat(fd)
+            current = os.stat(source_path, follow_symlinks=False)
+            try:
+                source_path.resolve(strict=True).relative_to(self._root)
+            except (OSError, ValueError):
+                return None
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+                or opened.st_size > self._max_file_bytes
+            ):
+                return None
+            with os.fdopen(fd, "r", encoding="utf-8") as handle:
+                fd = -1
+                return handle.read()
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+    def _open_source_fd(self, source_path: Path) -> int | None:
+        """Open through no-follow directory descriptors when the platform supports them."""
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        directory = getattr(os, "O_DIRECTORY", 0)
+        cloexec = getattr(os, "O_CLOEXEC", 0)
+        if _OPEN_SUPPORTS_DIR_FD and nofollow and directory:
+            relative = source_path.relative_to(self._root)
+            dir_fd: int | None = None
+            try:
+                dir_fd = os.open(self._root, os.O_RDONLY | directory | nofollow | cloexec)
+                for part in relative.parts[:-1]:
+                    next_fd = os.open(part, os.O_RDONLY | directory | nofollow | cloexec, dir_fd=dir_fd)
+                    os.close(dir_fd)
+                    dir_fd = next_fd
+                return os.open(relative.name, os.O_RDONLY | nofollow | cloexec, dir_fd=dir_fd)
+            except OSError:
+                return None
+            finally:
+                if dir_fd is not None:
+                    os.close(dir_fd)
+        try:
+            return os.open(source_path, os.O_RDONLY | nofollow | cloexec)
+        except OSError:
+            return None

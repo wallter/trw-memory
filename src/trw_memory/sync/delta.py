@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+_FALLBACK_SCAN_ATTEMPTS = 3
+
 # Fields included in sync hash (content-bearing fields)
 _HASH_FIELDS = (
     "content",
@@ -103,8 +105,24 @@ class DeltaTracker:
             else:
                 rows = conn.execute(sql, (since_seq,)).fetchall()
             return [row_to_entry(tuple(r)) for r in rows]
-        # Fallback: list all and filter
-        all_entries = backend.list_entries(limit=10000)
+        # Fallback: hydrate a complete snapshot before filtering. Filtering
+        # after a fixed limit can permanently hide an older dirty row behind
+        # newer synced rows. Recount after each read so concurrent inserts that
+        # could displace the tail trigger a larger retry.
+        limit = max(1, backend.count() + 1)
+        all_entries: list[MemoryEntry] = []
+        for _ in range(_FALLBACK_SCAN_ATTEMPTS):
+            all_entries = backend.list_entries(limit=limit)
+            current_count = backend.count()
+            if current_count <= limit:
+                break
+            limit = current_count + 1
+        else:
+            # A stable, complete snapshot is impossible while writes outpace
+            # the scan. Return the newest bounded snapshot; the next sync pass
+            # can collect rows inserted concurrently without livelocking this
+            # one.
+            logger.warning("delta_fallback_scan_unstable", attempts=_FALLBACK_SCAN_ATTEMPTS)
         return [e for e in all_entries if e.sync_seq > since_seq and e.last_synced_at is None]
 
     @staticmethod

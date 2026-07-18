@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Barrier, Event, Thread
 
 import pytest
 
@@ -21,7 +22,7 @@ from trw_memory.security.trust_scorer import score_intake
 @pytest.fixture(autouse=True)
 def _reset_clock_flag() -> None:
     """Reset the module-level clock flag between tests."""
-    trust_scorer_mod._clock_started = False
+    trust_scorer_mod._clock_started_for.clear()
 
 
 def test_start_writes_sidecar(tmp_path: Path) -> None:
@@ -42,6 +43,55 @@ def test_start_is_idempotent(tmp_path: Path) -> None:
     second = start_observe_clock(tmp_path)
     assert first.started_at == second.started_at
     assert first.promotion_review_at == second.promotion_review_at
+
+
+def test_concurrent_starts_share_one_persisted_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from trw_memory.security import observe_clock
+
+    original_write = observe_clock.write_yaml
+    write_started = Event()
+    release_write = Event()
+    start = Barrier(3)
+    returned: list[str] = []
+
+    def _paused_write(path: Path, data: dict[str, object]) -> None:
+        write_started.set()
+        assert release_write.wait(timeout=2)
+        original_write(path, data)
+
+    monkeypatch.setattr(observe_clock, "write_yaml", _paused_write)
+
+    def _start() -> None:
+        start.wait()
+        returned.append(start_observe_clock(tmp_path).started_at)
+
+    threads = [Thread(target=_start) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    assert write_started.wait(timeout=2)
+    release_write.set()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    persisted = read_observe_clock(tmp_path)
+    assert persisted is not None
+    assert all(not thread.is_alive() for thread in threads)
+    assert returned == [persisted.started_at, persisted.started_at]
+
+
+def test_failed_atomic_write_does_not_publish_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from trw_memory.exceptions import StorageError
+    from trw_memory.security import observe_clock
+
+    def _fail_write(_path: Path, _data: dict[str, object]) -> None:
+        raise StorageError("simulated write failure")
+
+    monkeypatch.setattr(observe_clock, "write_yaml", _fail_write)
+    with pytest.raises(StorageError, match="simulated write failure"):
+        start_observe_clock(tmp_path)
+
+    assert read_observe_clock(tmp_path) is None
 
 
 def test_read_returns_none_when_unset(tmp_path: Path) -> None:
@@ -72,7 +122,7 @@ def test_score_intake_does_not_restart_clock(tmp_path: Path) -> None:
     first_state = read_observe_clock(tmp_path)
     assert first_state is not None
     # Simulate process restart -- reset the flag but keep the sidecar
-    trust_scorer_mod._clock_started = False
+    trust_scorer_mod._clock_started_for.clear()
     score_intake("second", {}, trw_dir=tmp_path)
     second_state = read_observe_clock(tmp_path)
     assert second_state is not None

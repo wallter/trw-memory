@@ -38,7 +38,7 @@ from sqlite3 import Connection
 import structlog
 
 from trw_memory.exceptions import StorageError
-from trw_memory.storage._shared import ENTRY_COLUMNS
+from trw_memory.storage._shared import DICT_FIELDS, ENTRY_COLUMNS, LIST_FIELDS
 from trw_memory.storage.persistence import read_yaml
 
 __all__ = ["rebuild_from_cold"]
@@ -48,22 +48,6 @@ logger = structlog.get_logger(__name__)
 # Matches bare ``YYYY-MM-DD`` (no 'T' separator). Used to detect date-only
 # timestamps that need normalisation to full ISO-8601 before insertion.
 _DATE_ONLY_RE: re.Pattern[str] = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-
-# YAML list-typed fields that round-trip as JSON arrays in the DB.
-_LIST_FIELDS: tuple[str, ...] = (
-    "tags",
-    "evidence",
-    "merged_from",
-    "consolidated_from",
-    "outcome_history",
-    "assertions",
-    "anchors",
-    "domain",
-    "phase_affinity",
-)
-
-# YAML dict-typed fields that round-trip as JSON objects in the DB.
-_DICT_FIELDS: tuple[str, ...] = ("metadata", "vector_clock")
 
 # Column order for the INSERT statement. Declared as the subset of
 # :data:`trw_memory.storage._shared.ENTRY_COLUMNS` that ``_hydrate_yaml``
@@ -95,6 +79,11 @@ _INSERT_COLUMNS: tuple[str, ...] = (
     "domain",
     "phase_affinity",
 )
+
+# Preserve the rebuild projection's order while sharing the canonical field
+# categories used by every storage backend.
+_LIST_FIELDS: tuple[str, ...] = tuple(column for column in _INSERT_COLUMNS if column in LIST_FIELDS)
+_DICT_FIELDS: tuple[str, ...] = tuple(column for column in _INSERT_COLUMNS if column in DICT_FIELDS)
 
 # PRD-CORE-140 audit finding 140-FR01-P2: enforce SSOT. If a future
 # canonical column rename breaks this invariant, fail at module import
@@ -218,11 +207,20 @@ def _hydrate_yaml(y: dict[str, object]) -> tuple[object, ...] | None:
 
     detail = str(y.get("detail") or "")
 
-    impact_raw = y.get("impact", 0.5)
+    # PRD-CORE-181 FR06: cold YAML is canonical ``importance`` after the
+    # memory_model_v2 cutover rewrites the archive. ``importance`` is primary and
+    # wins whenever present (no ambiguous guessing). But the YAML cutover
+    # (run_memory_model_v2_cutover) is a manual maintenance-window op with no
+    # automatic caller, while recover_db(rebuild_from_cold=True) auto-invokes this
+    # path on a corrupt DB — so pre-cutover archives still keyed only on legacy
+    # ``impact`` MUST NOT silently recover as 0.5 (silent data loss on the DR
+    # path). Fall back to ``impact`` ONLY when ``importance`` is entirely absent
+    # (unambiguous legacy entry). release-verify 2026-07-17 P0.
+    importance_raw = y.get("importance", y.get("impact", 0.5))
     try:
-        importance = float(impact_raw)  # type: ignore[arg-type]
+        importance = float(importance_raw)  # type: ignore[arg-type]
     except (TypeError, ValueError) as exc:
-        raise _HydrationError("impact") from exc
+        raise _HydrationError("importance") from exc
 
     recurrence_raw = y.get("recurrence", 1)
     try:
@@ -449,6 +447,7 @@ def rebuild_from_cold(base_dir: Path, new_conn: Connection) -> int:
         "cold_rebuild_complete",
         rebuilt=rebuilt,
         skipped=skipped,
+        files_skipped=skipped,
         cold_files=len(cold_files),
         base_dir=str(base_dir),
         duration_ms=duration_ms,

@@ -33,8 +33,8 @@ class TestDimensionMismatchError:
         try:
             cosine_similarity([1.0, 2.0, 3.0], [1.0, 2.0])
             pytest.fail("Should have raised DimensionMismatchError")
-        except DimensionMismatchError:
-            pass  # This is the expected path
+        except DimensionMismatchError as exc:
+            assert "Dimension mismatch" in str(exc)
         except Exception:
             pytest.fail("Caught generic Exception instead of DimensionMismatchError")
 

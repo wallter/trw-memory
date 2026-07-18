@@ -15,6 +15,8 @@ from trw_memory.sync._remote_common import (
     FETCH_TIMEOUT,
     _raise_local_only_violation,
     build_platform_headers,
+    decode_learning_api_v1_result,
+    encode_learning_api_v1_search,
     is_valid_platform_url,
 )
 
@@ -48,23 +50,33 @@ def _dedupe_shared_results(
         remote_candidates.append(result)
         remote_texts.append(f"{summary} {detail}".strip())
 
-    if not remote_candidates or embedder is None or not embedder.available():
+    if not remote_candidates or embedder is None:
         return remote_candidates
 
-    local_texts = [f"{entry.content} {entry.detail}".strip() for entry in local_entries]
-    vectors = embedder.embed_batch([*local_texts, *remote_texts])
-    local_vectors = [vector for vector in vectors[: len(local_entries)] if vector is not None]
-    remote_vectors = vectors[len(local_entries) :]
-    if not local_vectors:
-        return remote_candidates
+    try:
+        if not embedder.available():
+            return remote_candidates
 
-    for result, remote_vector in zip(remote_candidates, remote_vectors, strict=False):
-        if remote_vector is None:
+        local_texts = [f"{entry.content} {entry.detail}".strip() for entry in local_entries]
+        texts = [*local_texts, *remote_texts]
+        vectors = embedder.embed_batch(texts)
+        if len(vectors) != len(texts):
+            raise ValueError(f"embedding batch length mismatch: expected {len(texts)}, got {len(vectors)}")
+        local_vectors = [vector for vector in vectors[: len(local_entries)] if vector is not None]
+        remote_vectors = vectors[len(local_entries) :]
+        if not local_vectors:
+            return remote_candidates
+
+        for result, remote_vector in zip(remote_candidates, remote_vectors, strict=False):
+            if remote_vector is None:
+                filtered.append(result)
+                continue
+            if any(cosine_similarity(remote_vector, local_vector) > dedup_threshold for local_vector in local_vectors):
+                continue
             filtered.append(result)
-            continue
-        if any(cosine_similarity(remote_vector, local_vector) > dedup_threshold for local_vector in local_vectors):
-            continue
-        filtered.append(result)
+    except Exception:
+        logger.warning("memory_shared_semantic_dedup_failed", exc_info=True)
+        return remote_candidates
     return filtered
 
 
@@ -87,7 +99,11 @@ def fetch_shared_memories(
         logger.warning("memory_fetch_invalid_platform_url")
         return []
 
-    request_payload: dict[str, object] = {"query": query, "limit": limit, "min_impact": cfg.sync_min_importance}
+    # Encode the search request through the sole learning_api_v1 boundary
+    # (canonical importance -> external wire vocabulary); PRD-CORE-181-FR06.
+    request_payload: dict[str, object] = encode_learning_api_v1_search(
+        query=query, limit=limit, min_importance=cfg.sync_min_importance
+    )
     if embedding:
         request_payload["embedding"] = embedding
 
@@ -102,12 +118,14 @@ def fetch_shared_memories(
                 return []
             raw = resp.json()
             if isinstance(raw, list):
-                results = [item for item in raw if isinstance(item, dict)]
+                raw_results = [item for item in raw if isinstance(item, dict)]
             elif isinstance(raw, dict):
                 wrapped = raw.get("results", raw.get("items", []))
-                results = [item for item in wrapped if isinstance(item, dict)] if isinstance(wrapped, list) else []
+                raw_results = [item for item in wrapped if isinstance(item, dict)] if isinstance(wrapped, list) else []
             else:
                 return []
+            # Decode external wire vocabulary into canonical importance at the boundary.
+            results = [decode_learning_api_v1_result(item) for item in raw_results]
     except (httpx.HTTPError, OSError, ConnectionError, json.JSONDecodeError, ValueError):
         logger.debug("memory_fetch_error", exc_info=True)
         return []
