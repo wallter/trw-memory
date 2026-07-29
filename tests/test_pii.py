@@ -534,6 +534,34 @@ class TestStripPII:
         text = "This is a normal sentence with no secrets."
         assert strip_pii(text) == text
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "upgraded python 3.11.0.2 today",
+            "see docs/requirements-aare-f/PRD-INFRA-054.md",
+            "ran at 20260711T190521Z-150684bb",
+        ],
+    )
+    def test_technical_prose_survives_the_detector_driven_pass(self, text: str) -> None:
+        """strip_pii's IP/SSN/CC/phone pass runs through detect_pii (2026-07-25).
+
+        That is deliberate: it inherits the octet-range validation, the
+        version-context suppression and the structured-token shape guard, instead
+        of re-inlining weaker regexes at the boundary. A version string, a doc
+        path and a run id must all reach the platform intact.
+        """
+        assert strip_pii(text) == text
+
+    def test_high_entropy_tokens_are_not_masked_at_egress(self) -> None:
+        """The entropy backstop is NOT applied here — measured TPR on this corpus is 0.
+
+        Recognized credentials never reach egress at all: PIIType.API_KEY blocks
+        the store. Importing a zero-true-positive heuristic into published content
+        would cost fidelity for no measured protection.
+        """
+        token = "aB3cD9eF2gH5iJ8kL1mN4oP7qR6sT0uV3wX5yZ8b"
+        assert strip_pii(f"snapshot {token} recorded") == f"snapshot {token} recorded"
+
     def test_multiple_emails_all_replaced(self) -> None:
         """All email occurrences are replaced."""
         result = strip_pii("a@b.com and c@d.org")

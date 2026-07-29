@@ -5972,7 +5972,7 @@ wheels = [
 
 [[package]]
 name = "trw-memory"
-version = "0.11.0"
+version = "0.13.1"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },

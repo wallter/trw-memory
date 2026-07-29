@@ -39,7 +39,14 @@ from collections.abc import Callable
 # user_version 0 database normalises through the v1 bootstrap FIRST, then the
 # v2 delta. Bump this and register a delta in ``_MIGRATIONS`` for each future
 # forward-only migration.
-SCHEMA_VERSION = 3
+#
+# ``SCHEMA_VERSION`` == 4 is PRD-CORE-231-FR02's additive ``verification_status``
+# column. IMPORTANT: adding a column to ``_migrate_cols`` alone is NOT enough for
+# an already-stamped database — ``ensure_schema`` short-circuits on
+# ``user_version == SCHEMA_VERSION`` and never re-runs the backfill storm. Every
+# new column therefore needs BOTH the ``_migrate_cols`` entry (fresh/legacy
+# bootstrap) AND a registered ``_MIGRATIONS`` delta plus this bump.
+SCHEMA_VERSION = 4
 
 
 class SchemaDowngradeError(RuntimeError):
@@ -111,7 +118,8 @@ CREATE TABLE IF NOT EXISTS memories (
     last_synced_at    TEXT,
     recall_count      INTEGER DEFAULT 0,
     helpful_count     INTEGER DEFAULT 0,
-    unhelpful_count   INTEGER DEFAULT 0
+    unhelpful_count   INTEGER DEFAULT 0,
+    verification_status TEXT DEFAULT NULL
 )
 """
 
@@ -302,6 +310,12 @@ def _bootstrap_and_backfill(cursor: sqlite3.Cursor) -> None:
         ("invalid_from", "TEXT"),
         ("invalidated_by", "TEXT"),
     ]
+    # Migration: add PRD-CORE-231-FR02 persisted verification verdict.
+    # Additive-only, nullable; a pre-migration row reads back as
+    # ``verification_status=None`` (no adverse verdict recorded).
+    _migrate_cols += [
+        ("verification_status", "TEXT DEFAULT NULL"),
+    ]
     for col_name, col_def in _migrate_cols:
         with contextlib.suppress(sqlite3.OperationalError):
             cursor.execute(f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}")
@@ -373,6 +387,18 @@ def _migrate_v3_legacy_enums(cursor: sqlite3.Cursor) -> None:
         )
 
 
+def _migrate_v4_verification_status(cursor: sqlite3.Cursor) -> None:
+    """Add the PRD-CORE-231-FR02 ``verification_status`` column.
+
+    Additive-only and idempotent: existing rows keep every value they had and
+    read back with ``verification_status=None`` ("no adverse verdict recorded").
+    A database already carrying the column (fresh bootstrap) is a no-op.
+    """
+    columns = {str(row[1]) for row in cursor.execute("PRAGMA table_info(memories)").fetchall()}
+    if "verification_status" not in columns:
+        cursor.execute("ALTER TABLE memories ADD COLUMN verification_status TEXT DEFAULT NULL")
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """Create core tables, run column migrations, and build indexes.
 
@@ -436,6 +462,7 @@ from trw_memory.storage._memory_model_v2 import (  # noqa: E402
 
 _MIGRATIONS[2] = _migrate_v2_memory_model
 _MIGRATIONS[3] = _migrate_v3_legacy_enums
+_MIGRATIONS[4] = _migrate_v4_verification_status
 
 
 CREATE_MEMORIES_FTS = """

@@ -6,10 +6,25 @@ model module smaller while preserving the public ``MemoryEntry.to_dict`` seam.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from trw_memory.models.memory import MemoryEntry
+
+
+def _dumped(items: list[Any]) -> list[object]:
+    """Serialize model items, tolerating already-plain payloads.
+
+    ``update()`` reconstructs an entry by ``setattr``-ing caller-supplied values
+    before hashing it, so this can legitimately see raw dicts (or a JSON string)
+    where models are declared. Raising here loses the caller's whole write
+    inside a sync-hash computation, so degrade to the value as given instead.
+    """
+    out: list[object] = []
+    for item in items:
+        dump = getattr(item, "model_dump", None)
+        out.append(dump(mode="json") if callable(dump) else item)
+    return out
 
 
 def memory_entry_to_dict(entry: MemoryEntry, *, fields: set[str] | None = None) -> dict[str, object]:
@@ -65,9 +80,10 @@ def memory_entry_to_dict(entry: MemoryEntry, *, fields: set[str] | None = None) 
         "last_synced_at": entry.last_synced_at.isoformat() if entry.last_synced_at else None,
         "cross_validated": entry.cross_validated,
         "outcome_history": list(entry.outcome_history),
-        "assertions": [assertion.model_dump() for assertion in entry.assertions] if entry.assertions else [],
-        "anchors": [anchor.model_dump() for anchor in entry.anchors],
+        "assertions": _dumped(list(entry.assertions)) if entry.assertions else [],
+        "anchors": _dumped(list(entry.anchors)),
         "anchor_validity": entry.anchor_validity,
+        "verification_status": entry.verification_status,
         "sessions_surfaced": entry.sessions_surfaced,
         "avg_rework_delta": entry.avg_rework_delta,
         "outcome_correlation": entry.outcome_correlation,

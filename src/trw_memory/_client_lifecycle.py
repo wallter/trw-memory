@@ -68,7 +68,7 @@ def _client_logger() -> Any:
 def init_client(
     client: MemoryClient,
     namespace: str,
-    mode: Literal["local", "mcp", "auto"] = "auto",
+    mode: Literal["local", "auto"] = "auto",
     timeout: float = 5.0,
     db_path: Path | str | None = None,
 ) -> None:
@@ -80,7 +80,7 @@ def init_client(
     local/auto only). See ``MemoryClient.__init__`` for the use case.
     """
     validate_namespace(namespace)
-    if mode not in {"local", "mcp", "auto"}:
+    if mode not in {"local", "auto"}:
         raise ValueError(f"Unsupported memory client mode: {mode!r}")
     if not isfinite(timeout) or timeout <= 0:
         raise ValueError(f"timeout must be a positive finite value, got {timeout!r}")
@@ -108,39 +108,40 @@ def init_client(
     client._pending_remote_retirements_lock = threading.Lock()
     client._initialize_resource_state()
 
-    if mode == "mcp":
-        raise NotImplementedError("MCP mode is not yet implemented")
-
-    if mode in ("local", "auto"):
-        try:
-            client._backend = _create_local_backend(client._config, namespace, db_path_override=explicit_db_path)
-            verify_defaults(client._config)
-            initialize_canaries(client._config, backend=client._backend)
-            client._resolved_mode = "local"
-            _client_logger().debug(
-                "client_initialized",
-                op="init",
-                namespace=namespace,
-                mode=client._resolved_mode,
-                backend=client._config.storage_backend,
-            )
-            if tier_runtime_enabled(client._config):
-                client._tier_manager = warmup_tier_manager(client._config, namespace, client._backend)
-        except Exception as exc:
-            failed_backend = client._backend
-            client._backend = None
-            client._resolved_mode = ""
-            if failed_backend is not None:
-                try:
-                    failed_backend.close()
-                except Exception:
-                    _client_logger().warning("client_init_backend_close_failed", exc_info=True)
-            if isinstance(exc, SecurityDependencyError):
-                raise
-            if not isinstance(exc, (ImportError, OSError, ValueError)):
-                raise
-            if mode == "local":
-                raise MemoryConnectionError(f"Failed to create local backend: {exc}") from exc
+    # ``local`` and ``auto`` both open the local backend; they differ only in how
+    # a recoverable failure is surfaced (``local`` raises immediately, ``auto``
+    # falls through to the no-mode-available error below). There is no second
+    # transport to fall back to — see ``MemoryClient.__init__`` on the removed
+    # ``"mcp"`` value.
+    try:
+        client._backend = _create_local_backend(client._config, namespace, db_path_override=explicit_db_path)
+        verify_defaults(client._config)
+        initialize_canaries(client._config, backend=client._backend)
+        client._resolved_mode = "local"
+        _client_logger().debug(
+            "client_initialized",
+            op="init",
+            namespace=namespace,
+            mode=client._resolved_mode,
+            backend=client._config.storage_backend,
+        )
+        if tier_runtime_enabled(client._config):
+            client._tier_manager = warmup_tier_manager(client._config, namespace, client._backend)
+    except Exception as exc:
+        failed_backend = client._backend
+        client._backend = None
+        client._resolved_mode = ""
+        if failed_backend is not None:
+            try:
+                failed_backend.close()
+            except Exception:
+                _client_logger().warning("client_init_backend_close_failed", exc_info=True)
+        if isinstance(exc, SecurityDependencyError):
+            raise
+        if not isinstance(exc, (ImportError, OSError, ValueError)):
+            raise
+        if mode == "local":
+            raise MemoryConnectionError(f"Failed to create local backend: {exc}") from exc
 
     if mode == "auto" and client._backend is None:
         raise MemoryConnectionError("No connection mode available. Tried: local.")

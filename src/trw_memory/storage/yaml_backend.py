@@ -26,6 +26,7 @@ from trw_memory.storage._parsing import (
     parse_json_dict_str,
     parse_json_list,
 )
+from trw_memory.storage._row_mapper import parse_verification_status
 from trw_memory.storage._shared import (
     ENTRY_COLUMNS,
     IMMUTABLE_FIELDS,
@@ -168,6 +169,7 @@ def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
         invalid_from=parse_dt_safe(data.get("invalid_from"), default=None) if data.get("invalid_from") else None,
         invalidated_by=str(data["invalidated_by"]) if data.get("invalidated_by") else None,
         anchor_validity=_float("anchor_validity", 1.0),
+        verification_status=parse_verification_status(data.get("verification_status")),
         type=_str("type", "pattern"),
         nudge_line=_str("nudge_line", ""),
         expires=_str("expires", ""),

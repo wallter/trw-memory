@@ -153,6 +153,44 @@ _PII_PATTERNS: list[tuple[PIIType, re.Pattern[str], float]] = [
 _MIN_ENTROPY_TOKEN_LEN = 20
 _DEFAULT_ENTROPY_THRESHOLD = 4.5
 
+# ---------------------------------------------------------------------------
+# Shape guard for the high-entropy backstop
+# ---------------------------------------------------------------------------
+# The entropy branch is a BACKSTOP for credential shapes no detector recognises.
+# Recognised credentials are PIIType.API_KEY and BLOCK the store outright; EMAIL,
+# IP_ADDRESS, SSN, CREDIT_CARD and PHONE have their own detectors. So the entropy
+# branch's only job is unrecognised, high-randomness material — and its candidate
+# set should therefore exclude anything that is recognisably NOT random.
+#
+# Measured on this project's stored-learning corpus (6,197 entries, 2026-07-25),
+# the unguarded heuristic fired on 832 distinct tokens and every sampled one was a
+# technical identifier — relative repo paths, dotted module paths, snake_case and
+# SCREAMING_SNAKE symbols, kebab-case doc slugs, URLs, version ranges and ruff rule
+# lists. Those tokens ARE the substance of an engineering learning, and redacting
+# them destroyed the sentence the learning existed to record.
+#
+# The discriminator is internal structure. A real random secret is drawn uniformly
+# from its alphabet, so within any run of alphanumerics it mixes upper- and
+# lower-case at random. A human-authored identifier does not: split it on its
+# separators (``/``, ``.``, ``_``, ``-``, ``:``, punctuation) and every resulting
+# run is case-uniform — all-lower (``requirements``, ``py``, a git SHA), all-upper
+# (``PRD``, ``INFRA``, ``T190521Z``), or purely numeric (versions, line numbers).
+#
+# We therefore skip a token only when it decomposes into >= 2 alphanumeric runs
+# that are ALL case-uniform. Requiring >= 2 runs is what keeps the backstop honest:
+# a bare undelimited blob is never skipped, so a pasted secret in its native shape
+# still gets caught no matter what its alphabet is.
+#
+# Measured effect of this guard (see tests/test_pii_entropy_shape_guard.py):
+#   * corpus false positives 832 -> 92 distinct tokens (88.9% of the damage removed)
+#   * true positives 0 lost out of 97,702 detections across random base64, base64url,
+#     mixed alphanumeric, JWT and PEM-line families at 24/32/44/64/76/88 chars.
+# A CamelCase-tolerant variant was measured and REJECTED: it reached 95.6% FP
+# suppression but lost 13.7% of true positives, because a random mixed-case run is
+# frequently a valid CamelCase parse. Precision is not worth recall here.
+_ENTROPY_SEGMENT_SPLIT_RE = re.compile(r"[^A-Za-z0-9]+")
+_MIN_STRUCTURED_SEGMENTS = 2
+
 # Closure re-audit #3: a 4-segment dotted run whose octets are all in range is
 # ambiguous between a real IPv4 address and a software version string (e.g.
 # "3.11.0.2"). When the dotted run is introduced by a version-context word
@@ -312,6 +350,47 @@ def shannon_entropy(text: str) -> float:
     return entropy
 
 
+def _is_case_uniform(segment: str) -> bool:
+    """Return True when *segment* never mixes upper- and lower-case letters.
+
+    Segments come from ``_ENTROPY_SEGMENT_SPLIT_RE`` so they are ASCII
+    alphanumerics only. Digits are case-neutral and never disqualify a segment,
+    which is what lets ``T190521Z``, ``2149`` and ``0f2a9c`` read as identifier
+    material. Scans left to right and stops at the first mixed-case proof, so it
+    is linear in the segment length with no backtracking.
+    """
+    has_lower = False
+    has_upper = False
+    for char in segment:
+        if char.islower():
+            has_lower = True
+        elif char.isupper():
+            has_upper = True
+        if has_lower and has_upper:
+            return False
+    return True
+
+
+def _is_structured_technical_token(token: str) -> bool:
+    """Return True when *token* is recognisably a technical identifier.
+
+    Such tokens are excluded from the Shannon-entropy backstop before it fires —
+    see the shape-guard rationale above ``_ENTROPY_SEGMENT_SPLIT_RE``. This does
+    NOT relax any recognised-secret defence: API_KEY still blocks the store, and
+    EMAIL / IP_ADDRESS / SSN / CREDIT_CARD / PHONE keep their own detectors.
+
+    A token qualifies when it splits into at least ``_MIN_STRUCTURED_SEGMENTS``
+    alphanumeric runs on non-alphanumeric separators AND every run is
+    case-uniform. Covers filesystem paths, dotted module paths, snake_case,
+    SCREAMING_SNAKE, kebab-case slugs, URLs, git ranges and version strings.
+    An undelimited blob yields a single run and is therefore never excluded.
+    """
+    segments = [segment for segment in _ENTROPY_SEGMENT_SPLIT_RE.split(token) if segment]
+    if len(segments) < _MIN_STRUCTURED_SEGMENTS:
+        return False
+    return all(_is_case_uniform(segment) for segment in segments)
+
+
 def _is_version_context(text: str, ip_start: int) -> bool:
     """Return True when the dotted run at *ip_start* is preceded by a version word.
 
@@ -385,6 +464,12 @@ def detect_pii(
     for m in re.finditer(r"\S+", text):
         token = m.group()
         if len(token) < _MIN_ENTROPY_TOKEN_LEN:
+            continue
+        if _is_structured_technical_token(token):
+            # Shape guard: a path / dotted module / snake_case / kebab-case /
+            # URL / version token, not a secret. Skipping it here is candidate
+            # selection only — every recognised credential shape is matched by
+            # the regex passes above and is unaffected.
             continue
         # Skip tokens already matched by regex patterns
         token_start = m.start()
@@ -489,13 +574,34 @@ def check_entry_pii(
 # ---------------------------------------------------------------------------
 
 
+# Markers for the detector-driven second pass in strip_pii. EMAIL and API_KEY
+# are NOT listed here — they are handled by the dedicated re.sub calls below,
+# which must run first (see the ordering note in strip_pii).
+_EGRESS_MARKERS: dict[PIIType, str] = {
+    PIIType.PHONE: "<phone>",
+    PIIType.SSN: "<ssn>",
+    PIIType.CREDIT_CARD: "<credit_card>",
+    PIIType.IP_ADDRESS: "<ip>",
+}
+
+
 def strip_pii(text: str) -> str:
-    """Remove email addresses and API key patterns from text.
+    """Remove personal identifiers and credentials from text leaving the machine.
 
     Replaces recognised PII patterns with safe placeholders:
 
     * Email addresses -> ``<email>``
     * Common API key / token patterns -> ``<api_key>``
+    * Phone / SSN / credit-card / IPv4 shapes -> ``<phone>`` / ``<ssn>`` /
+      ``<credit_card>`` / ``<ip>``
+
+    This is an EGRESS helper — it runs at the publish boundary
+    (``sync/_remote_publish``) and on the shadow-quarantine record, never on the
+    stored row. The store path deliberately keeps the user's text verbatim
+    (see ``security/_runtime_pii``), so sanitizing here is reversible: the
+    unmasked original is still on the user's disk. The last four types were
+    added 2026-07-25 to keep egress coverage at parity with what the store path
+    used to mask, now that the store path no longer mutates anything.
     """
     # Email addresses
     text = re.sub(
@@ -521,6 +627,19 @@ def strip_pii(text: str) -> str:
         "<api_key>",
         text,
     )
+    # Second pass, detector-driven so it inherits detect_pii's quality guards
+    # (octet-validated IPv4 + version-context suppression) rather than re-inlining
+    # weaker regexes. It MUST run after the credential subs above: a long digit run
+    # inside an API key matches the SSN shape, and masking that first would break
+    # the credential into a fragment the api_key pattern no longer recognises,
+    # leaking the remainder. Scrubbing credentials first leaves no digits behind.
+    matches = [match for match in detect_pii(text) if match.pii_type in _EGRESS_MARKERS]
+    applied_start = len(text)
+    for match in sorted(matches, key=lambda item: item.start, reverse=True):
+        if match.end > applied_start:
+            continue  # overlaps an already-masked span; a second splice would corrupt it
+        text = text[: match.start] + _EGRESS_MARKERS[PIIType(match.pii_type)] + text[match.end :]
+        applied_start = match.start
     return text
 
 

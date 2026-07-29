@@ -28,6 +28,7 @@ from trw_memory.storage._parsing import (
     parse_json_dict_str,
     parse_json_list,
 )
+from trw_memory.storage._shared import VERIFICATION_STATUS_VALUES
 
 # Source provenance values accepted by MemoryEntry.
 _SourceType = Literal["human", "agent", "tool", "consolidated"]
@@ -53,6 +54,18 @@ def parse_model_list(raw: object, model: type[_ModelT], *, strict: bool) -> list
         return [model.model_validate(item, strict=strict) for item in items]
     except (json.JSONDecodeError, ValidationError, ValueError, TypeError):
         return []
+
+
+def parse_verification_status(raw: object) -> Literal["stale"] | None:
+    """Normalise a persisted ``verification_status`` value (PRD-CORE-231-FR02).
+
+    Only the in-contract literal survives; ``None``, empty strings, and any
+    unknown value read back as ``None`` ("no adverse verdict recorded") so a
+    legacy or hand-edited row can never make itself un-deserialisable.
+    """
+    if isinstance(raw, str) and raw.strip() in VERIFICATION_STATUS_VALUES:
+        return "stale"
+    return None
 
 
 def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
@@ -117,6 +130,7 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         recall_count_raw,
         helpful_count_raw,
         unhelpful_count_raw,
+        verification_status_raw,
     ) = row
 
     # Deserialise assertions from JSON (PRD-CORE-086).
@@ -206,6 +220,9 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         recall_count=int(str(recall_count_raw)) if recall_count_raw else 0,
         helpful_count=int(str(helpful_count_raw)) if helpful_count_raw else 0,
         unhelpful_count=int(str(unhelpful_count_raw)) if unhelpful_count_raw else 0,
+        # PRD-CORE-231-FR02: an unrecognised persisted literal degrades to None
+        # (no adverse verdict) rather than raising and quarantining the row.
+        verification_status=parse_verification_status(verification_status_raw),
     )
 
 
@@ -247,8 +264,11 @@ def entry_to_row(entry: MemoryEntry) -> tuple[object, ...]:
         int(entry.pending_delete),
         int(entry.cross_validated),
         json.dumps(entry.outcome_history),
-        json.dumps([a.model_dump() for a in entry.assertions]) if entry.assertions else "[]",
-        json.dumps([a.model_dump() for a in entry.anchors]) if entry.anchors else "[]",
+        # mode="json" is load-bearing: Assertion carries datetime fields
+        # (last_verified_at / first_failed_at) that a plain model_dump() leaves
+        # as objects, making json.dumps raise TypeError and the whole store fail.
+        json.dumps([a.model_dump(mode="json") for a in entry.assertions]) if entry.assertions else "[]",
+        json.dumps([a.model_dump(mode="json") for a in entry.anchors]) if entry.anchors else "[]",
         entry.anchor_validity,
         entry.type,
         entry.nudge_line or "",
@@ -269,4 +289,5 @@ def entry_to_row(entry: MemoryEntry) -> tuple[object, ...]:
         entry.recall_count,
         entry.helpful_count,
         entry.unhelpful_count,
+        entry.verification_status,
     )

@@ -136,12 +136,12 @@ def enforce_write_rate_limit(
         write_yaml(state_path, {"sessions": sessions})
 
 
-# PII redaction helpers extracted to _runtime_pii.py (PRD-DIST-245 batch 99).
+# PII policy helpers extracted to _runtime_pii.py (PRD-DIST-245 batch 99).
+# ``hash_path_components`` / ``redaction_marker`` were deleted with the
+# write-path redaction action (2026-07-25) — see _runtime_pii.REDACTED_PII_TYPES.
 from trw_memory.security._runtime_pii import (
     apply_runtime_pii_policy as _apply_runtime_pii_policy,
     flag_code_snippet as _flag_code_snippet,
-    hash_path_components as _hash_path_components,
-    redaction_marker as _redaction_marker,
     replace_pii as _replace_pii,
 )
 

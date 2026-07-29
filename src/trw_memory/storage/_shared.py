@@ -74,6 +74,7 @@ ENTRY_COLUMNS: tuple[str, ...] = (
     "recall_count",
     "helpful_count",
     "unhelpful_count",
+    "verification_status",
 )
 
 #: Fields that must never be changed via ``update()``.
@@ -108,6 +109,12 @@ ENUM_STRING_FIELDS: dict[str, type[MemoryStatus | Confidence | ProtectionTier | 
     "protection_tier": ProtectionTier,
     "type": MemoryType,
 }
+
+#: Values accepted for the ``verification_status`` column (PRD-CORE-231-FR02).
+#: ``None`` clears the verdict; ``"stale"`` records it. Anything else is a
+#: caller bug and is rejected at write time rather than quarantining the row on
+#: the next read.
+VERIFICATION_STATUS_VALUES: frozenset[str] = frozenset({"stale"})
 
 
 # ---------------------------------------------------------------------------
@@ -149,12 +156,15 @@ def serialize_update_value(key: str, val: object) -> list[object] | dict[str, st
     format-specific encoding (e.g. ``json.dumps`` for SQLite, plain
     list/dict for YAML).
     """
-    # Assertions need model_dump(), not str() — Pydantic models have complex structure
+    # Assertions need model_dump(), not str() — Pydantic models have complex
+    # structure. mode="json" is load-bearing: Assertion carries datetime fields
+    # that a plain dump leaves as objects, which then makes the caller's
+    # json.dumps raise TypeError and silently lose the write.
     if key == "assertions" and isinstance(val, list):
-        return [a.model_dump() if isinstance(a, Assertion) else a for a in val]
+        return [a.model_dump(mode="json") if isinstance(a, Assertion) else a for a in val]
     # Anchors are list[Anchor] and need JSON serialization with model_dump()
     if key == "anchors" and isinstance(val, list):
-        return [a.model_dump() if isinstance(a, Anchor) else a for a in val]
+        return [a.model_dump(mode="json") if isinstance(a, Anchor) else a for a in val]
     if key in LIST_FIELDS and isinstance(val, list):
         return [str(v) for v in val]
     if key in DICT_FIELDS and isinstance(val, dict):
@@ -171,4 +181,9 @@ def serialize_update_value(key: str, val: object) -> list[object] | dict[str, st
     # bad write up front. The stored value remains the canonical ``.value`` string.
     if key in ENUM_STRING_FIELDS and isinstance(val, str):
         return cast("str", ENUM_STRING_FIELDS[key](val).value)
+    # PRD-CORE-231-FR02: reject an out-of-contract verification_status up front
+    # (same rationale as the enum gate above — an unknown literal would fail the
+    # model's Literal constraint on the next deserialize).
+    if key == "verification_status" and isinstance(val, str) and val not in VERIFICATION_STATUS_VALUES:
+        raise ValueError(key)
     return cast("list[object] | dict[str, str] | str", val)

@@ -60,9 +60,21 @@ class TestConstructor:
             assert "PRAGMA kdf_iter = 256000" in statements
             assert (tmp_path / "storage" / "default" / "memory" / "warm.jsonl").exists() is False
 
-    def test_mcp_mode_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError, match="MCP mode"):
-            MemoryClient(namespace="default", mode="mcp")
+    def test_mcp_mode_is_no_longer_a_supported_value(self) -> None:
+        """UF-003 / DEAD-002: ``"mcp"`` was a type-advertised capability that
+        raised ``NotImplementedError`` unconditionally. It is gone from the
+        ``Literal`` and is now rejected like any other unsupported value —
+        mirroring the earlier ``mode="rest"`` removal (PRD-FIX-040).
+        """
+        with pytest.raises(ValueError, match=r"Unsupported memory client mode: 'mcp'"):
+            MemoryClient(namespace="default", mode="mcp")  # type: ignore[arg-type]
+
+    def test_supported_modes_literal_excludes_mcp(self) -> None:
+        """The public signature must not advertise a transport that does not exist."""
+        import typing
+
+        hints = typing.get_type_hints(MemoryClient.__init__)
+        assert typing.get_args(hints["mode"]) == ("local", "auto")
 
     def test_invalid_mode_raises(self) -> None:
         with pytest.raises(ValueError, match="Unsupported memory client mode"):

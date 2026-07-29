@@ -158,9 +158,12 @@ class TestFR02EntryToDict:
             "helpful_count",
             "unhelpful_count",
             "session_count",
+            "verification_status",
         }
         assert set(result.keys()) == expected_keys
-        assert len(result) == 55  # 52 + 3 bi-temporal fields (PRD-CORE-194)
+        # 52 + 3 bi-temporal fields (PRD-CORE-194) + verification_status
+        # (PRD-CORE-231-FR02)
+        assert len(result) == 56
 
         # Verify types of serialized values
         assert result["id"] == "M-TEST-001"
@@ -363,6 +366,7 @@ class TestFR05BooleanConversion:
             0,  # recall_count (PRD-CORE-132)
             0,  # helpful_count (PRD-CORE-132)
             0,  # unhelpful_count (PRD-CORE-132)
+            None,  # verification_status (PRD-CORE-231-FR02)
         )
 
         entry = row_to_entry(row)
@@ -431,6 +435,7 @@ class TestFR05BooleanConversion:
             0,  # recall_count (PRD-CORE-132)
             0,  # helpful_count (PRD-CORE-132)
             0,  # unhelpful_count (PRD-CORE-132)
+            None,  # verification_status (PRD-CORE-231-FR02)
         )
 
         entry = row_to_entry(row)

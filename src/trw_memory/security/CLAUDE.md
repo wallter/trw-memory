@@ -11,7 +11,7 @@ sub-CLAUDE.md row of PRD-SEC-001 exit criteria.
 | `keys.py` | Master-key storage, retrieval, rotation | Pre-SEC-001 |
 | `rbac.py` | Role-based access control, namespace permissions | Pre-SEC-001 |
 | `audit.py` | SHA-256 hash-chained immutable audit log | Pre-SEC-001 |
-| `pii.py` | PII detection + redaction (Shannon-entropy based) | Pre-SEC-001 |
+| `pii.py` | PII detection (Shannon-entropy based) + egress anonymization (`strip_pii`). The store path blocks API keys and records detections; it does not rewrite stored text — see `_runtime_pii.REDACTED_PII_TYPES` | Pre-SEC-001 |
 | `poisoning.py` | Anomaly detection for memory poisoning | SEC-001 FR-003 |
 | `trust_scorer.py` | Intake trust-score computation (observe-mode v1) | SEC-001 FR-001 |
 | `recall_filter.py` | Recall-time filter for quarantined entries | SEC-001 FR-004 |

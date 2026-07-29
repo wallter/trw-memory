@@ -36,12 +36,16 @@ logger = structlog.get_logger(__name__)
 def _anonymize_entry(entry: MemoryEntry, project_root: str = "") -> AnonymizedEntry:
     content = redact_paths(strip_pii(entry.content), project_root)
     detail = redact_paths(strip_pii(entry.detail), project_root)
+    # Tags are egressed content too. The write path stores them verbatim (see
+    # ``security/_runtime_pii``), so a credential or email pasted into a tag
+    # leaves the machine raw unless this boundary masks it.
+    tags = [strip_pii(tag) for tag in entry.tags[:MAX_TAGS_COUNT]]
     # Canonical ``importance`` -> external wire vocabulary via the sole
     # learning_api_v1 boundary encoder (PRD-CORE-181-FR06).
     return encode_learning_api_v1(
         summary=content[:MAX_SUMMARY_LENGTH],
         detail=detail[:MAX_DETAIL_LENGTH] if detail else None,
-        tags=entry.tags[:MAX_TAGS_COUNT],
+        tags=tags,
         importance=entry.importance,
         embedding=None,
         source_project=anonymize_installation_id(entry.metadata.get("installation_id", "")),

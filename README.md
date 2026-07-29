@@ -295,7 +295,7 @@ Store/recall operations keep Hot/Warm in sync, Cold-tier hits are promoted back 
 | Feature | Implementation |
 |---------|---------------|
 | Field encryption | AES-256-GCM with HKDF-SHA256 per-namespace key derivation |
-| PII detection | Regex patterns (email, phone, SSN, credit card, API keys) + Shannon entropy analysis. Store path **blocks** API-key/token writes and **redacts** email/IP/SSN/phone/credit-card |
+| PII detection | Regex patterns (email, phone, SSN, credit card, API keys) + Shannon entropy analysis. Store path **blocks** API-key/token writes and **records** every other detection as metadata — it does not rewrite your stored text. Masking happens at the publish boundary (`strip_pii`), where the local copy still holds the original |
 | Poisoning defense | Z-score anomaly detection on frequency, size, and content patterns — **observe mode by default** (records + telemetry, does not quarantine); `enforce` is opt-in |
 | Access control | Role-based (admin/editor/viewer) per namespace |
 | Audit trail | Append-only security event log |
@@ -329,7 +329,7 @@ With an offline switch engaged (`TRW_OFFLINE` / `HF_HUB_OFFLINE`) **or** `local_
 | Capability | Default | Notes |
 |-----------|---------|-------|
 | Field-level encryption | **off** (`encryption_enabled=False`) | opt-in (AES-256-GCM per-namespace keys) |
-| PII detection | **on** (`pii_enabled=True`) | always scans `content`/`detail`/`tags` on the store path; the configurable `pii_action` default is `warn` for the public `check_entry_pii` helper. The runtime store path is stricter: detected **API keys / tokens block the write** (`PIIBlockError`); emails, IPs, SSNs, phone numbers, and credit-card numbers are **redacted** in place |
+| PII detection | **on** (`pii_enabled=True`) | always scans `content`/`detail`/`tags`/`evidence[]`/`Assertion.last_evidence` on the store path; the configurable `pii_action` default is `warn` for the public `check_entry_pii` helper. On the runtime store path, detected **API keys / tokens block the write** (`PIIBlockError`); every other type is recorded in the `pii_types` metadata and stored **verbatim** — heuristic detectors do not get to irreversibly rewrite local text. Emails, IPs, SSNs, phone numbers and credit-card shapes are masked at the publish boundary instead. Set `pii_custom_patterns` to opt in to local masking with your own regexes |
 | Poisoning / size-anomaly detection | **observe** (`poisoning_detection_mode="observe"`) | the SEC-001 statistical size/tag-count detector records anomaly stats + telemetry but does **not** quarantine by default; `enforce` is opt-in. (As of `209a47853` the caller-controlled `metadata['source']` quarantine bypass was removed from the runtime — a spoofed source can no longer skip enforce-mode quarantine; `anomaly_bypass_source_prefixes` remains in `MemoryConfig` but no longer gates the runtime anomaly path.) |
 | Trust scoring | **observe** (`trust_scoring_mode="observe"`) | logs intake trust decisions; `enforce`/`strict` are opt-in |
 | Provenance signing | **required** (`provenance_required=True`) | persisted rows carry a signed provenance hash-chain |

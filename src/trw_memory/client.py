@@ -167,8 +167,8 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
 
     Args:
         namespace: Isolation scope (e.g. ``"project:my-app"``, ``"default"``).
-        mode: Transport mode — ``"local"`` (SQLite/YAML), ``"mcp"`` (stdio),
-            or ``"auto"`` (try local first).
+        mode: Transport mode — ``"local"`` (SQLite/YAML) or ``"auto"``
+            (resolve the local backend, raising if it is unavailable).
         timeout: Timeout in seconds for remote operations.
     """
 
@@ -202,7 +202,7 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
     def __init__(
         self,
         namespace: str,
-        mode: Literal["local", "mcp", "auto"] = "auto",
+        mode: Literal["local", "auto"] = "auto",
         timeout: float = 5.0,
         *,
         db_path: Path | str | None = None,
@@ -211,10 +211,17 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
         """Initialise a MemoryClient with namespace isolation and mode selection.
 
         Implementation lives in ``_client_lifecycle.init_client``
-        (PRD-DIST-246 batch 111). Mode is one of ``"local"`` / ``"mcp"``
-        / ``"auto"``. Sets up state, validates namespace, opens the
-        backend, runs security defaults verification, seeds canaries,
-        warms the tier manager, and starts the SSE subscription.
+        (PRD-DIST-246 batch 111). Mode is ``"local"`` or ``"auto"``; both
+        resolve to the local backend and differ only in error surfacing.
+        Sets up state, validates namespace, opens the backend, runs
+        security defaults verification, seeds canaries, warms the tier
+        manager, and starts the SSE subscription.
+
+        The ``"mcp"`` value was removed in 0.11.1 — it had never been
+        implemented and raised ``NotImplementedError`` unconditionally, so
+        no caller could have used it successfully. ``mode="mcp"`` now
+        raises ``ValueError`` alongside every other unsupported value.
+        This mirrors the earlier removal of ``mode="rest"`` (PRD-FIX-040).
 
         ``db_path`` (local/auto SQLite only) pins the backend to an explicit
         absolute file, bypassing the ``storage_path / namespace_dir /

@@ -231,7 +231,33 @@ def test_empty_eligible_raises() -> None:
 
 
 def test_floor_exploration_rate() -> None:
-    """Over 1000 selections with a dominant arm, exploration rate >= 10%."""
+    """Over 1000 selections with a dominant arm, exploration rate >= 10%.
+
+    SEEDED, and it has to be. ``floor_exploration`` is a PROBABILITY (0.12), so
+    an unseeded 1000-draw sample is Binomial(1000, 0.12): mean 120, sd ~10.3.
+    The ``>= 100`` threshold sits ~1.94 sd below that mean, which fails by pure
+    chance in roughly one run out of forty. Observed 2026-07-27: this failed in a
+    full-suite run (4245 passed, 1 failed) and passed in isolation moments later
+    — the signature of a statistical flake, not an ordering bug.
+
+    A CI failure rate of a few percent on a release-blocking suite is worse than
+    the test is worth unseeded, and two other tests in this file already seed for
+    the same reason (``test_selection_probability_tracks_policy_propensity``).
+    The threshold is deliberately unchanged: seeding removes the sampling noise
+    without weakening what is asserted.
+    """
+    state = random.getstate()
+    random.seed(20260727)
+    try:
+        _assert_floor_exploration_rate()
+    finally:
+        # Restore rather than leave the global RNG seeded: a fixed seed leaking
+        # into later tests would make THEIR randomness deterministic too, hiding
+        # exactly this class of flake elsewhere in the suite.
+        random.setstate(state)
+
+
+def _assert_floor_exploration_rate() -> None:
     selector = BanditSelector(tau=25, cold_start_min=3, floor_exploration=0.12)
     arms = ["dominant", "other1", "other2"]
 

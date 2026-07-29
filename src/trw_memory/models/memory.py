@@ -467,6 +467,15 @@ class MemoryEntry(BaseModel):
     anchors: list[Anchor] = Field(default_factory=list, description="Code symbol anchors for validation", max_length=3)
     anchor_validity: float = Field(ge=0.0, le=1.0, default=1.0, description="Computed validity score (0.0-1.0)")
 
+    # PRD-CORE-231-FR02: persisted assertion-staleness verdict. ``None`` means
+    # "no adverse verdict recorded" (the default for every pre-migration row);
+    # ``"stale"`` means every assertion has been failing for longer than the
+    # configured threshold (PRD-CORE-086-FR08). Scalar, last-write-wins.
+    verification_status: Literal["stale"] | None = Field(
+        default=None,
+        description="Persisted verification verdict ('stale' or None)",
+    )
+
     # PRD-CORE-132: Feedback lifecycle counters
     recall_count: int = Field(ge=0, default=0, description="Number of times this entry was returned by recall")
     helpful_count: int = Field(ge=0, default=0, description="Number of times marked helpful by the user")
