@@ -244,12 +244,22 @@ class TestSecurityConfig:
         # sync is opt-in OFF
         assert cfg.sync_enabled is False
 
-    def test_anomaly_bypass_prefixes_default(self) -> None:
-        cfg = _SecurityModel()
-        assert cfg.anomaly_bypass_source_prefixes == ["distilled:", "distilled-git:"]
-        # default_factory isolation
-        cfg.anomaly_bypass_source_prefixes.append("x:")
-        assert _SecurityModel().anomaly_bypass_source_prefixes == ["distilled:", "distilled-git:"]
+    def test_retired_anomaly_bypass_field_is_gone(self) -> None:
+        """``anomaly_bypass_source_prefixes`` was removed on 2026-07-30.
+
+        PRD-DIST-2045 shipped it as a per-source anomaly-quarantine carve-out;
+        ``209a47853`` then removed the carve-out from the runtime because
+        ``metadata['source']`` is caller-supplied and any caller could spoof it.
+        The FIELD was left behind "for compatibility", gating nothing — a settable
+        security-shaped knob that silently does nothing is worse than an absent
+        one, because an operator who sets it believes they have control they do
+        not have (wiring-defect P12, superseded-authority shape).
+
+        This test replaces two that asserted the field's default value and
+        default_factory isolation. Both were true of a field nothing consumed,
+        which is exactly why they stayed green while the control was dead.
+        """
+        assert "anomaly_bypass_source_prefixes" not in _SecurityModel.model_fields
 
     def test_z_threshold_must_be_positive(self) -> None:
         with pytest.raises(ValidationError):

@@ -53,6 +53,21 @@ def _is_optional_vec_unavailable_error(exc: sqlite3.Error) -> bool:
     return "no such module: vec0" in message or ("no such module" in message and "vec" in message)
 
 
+def _is_vec_table_dimension_error(exc: sqlite3.Error) -> bool:
+    """Return True when vec0 rejected a vector whose length the TABLE disagrees with.
+
+    Distinct from the ``len(embedding) != dim`` pre-check in ``upsert_vector``, which
+    compares against the backend's *configured* dim. A ``vec0`` table fixes its width
+    at CREATE time, so a store whose table was created under a different
+    ``embedding_dim`` — an embedding-model swap, or a database file shared with a
+    differently-configured process — passes that pre-check and is then rejected by
+    SQLite. Before this predicate existed the rejection propagated as an uncaught
+    ``OperationalError`` and failed the whole store, which is the exact outcome the
+    pre-check's own comment says it exists to prevent.
+    """
+    return "dimension mismatch" in str(exc).lower()
+
+
 def _rollback_standalone_write(conn: Any, *, skip_commit: bool) -> None:
     """Undo a failed write unless its surrounding transaction owns rollback."""
     if not skip_commit:
@@ -309,6 +324,21 @@ def upsert_vector(
                 entry_id=entry_id,
                 detail=str(exc),
                 hint="sqlite-vec virtual table unavailable; canonical memory write is preserved",
+            )
+            return
+        if _is_vec_table_dimension_error(exc):
+            logger.warning(
+                "vector_dimension_mismatch",
+                op="upsert",
+                entry_id=entry_id,
+                expected_dim=dim,
+                actual_dim=len(embedding),
+                detail=str(exc),
+                hint=(
+                    "vec0 table width disagrees with this embedding; the table was created under a "
+                    "different embedding_dim. Canonical memory write is preserved, vector skipped — "
+                    "rebuild the vector index to restore dense retrieval for this store"
+                ),
             )
             return
         raise

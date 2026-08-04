@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from trw_memory.storage._writer_registry import WriterRegistry
 
 
@@ -86,3 +88,56 @@ class TestPruneStaleGlobFails:
         ):
             reg._prune_stale_peers()  # should not raise
         assert dead_lock.exists()
+
+
+class TestInMemoryBackendDoesNotTouchDisk:
+    """An in-memory DB must not create a writer-registry sidecar.
+
+    ``WriterRegistry`` places its directory as a sibling of the DB file
+    (``<db_path>.writers/``). ``":memory:"`` has no parent, so ``db_path.parent``
+    resolved to ``"."`` and the registry created a literal ``./:memory:.writers/``
+    directory in whatever the process's CURRENT WORKING DIRECTORY happened to be.
+
+    It surfaced as an untracked ``trw-memory/:memory:.writers/`` in this repo after
+    a test run; in a user's project it litters their cwd the same way. The registry
+    is also meaningless there — it counts peer PROCESSES sharing one DB file, and
+    an in-memory database is private to its connection.
+    """
+
+    def test_in_memory_backend_creates_no_writer_registry_in_cwd(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from trw_memory.models.memory import MemoryEntry
+        from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+        monkeypatch.chdir(tmp_path)
+        backend = SQLiteBackend(Path(":memory:"))
+        backend.store(MemoryEntry(id="M-mem", content="in-memory entry"))
+
+        assert backend.get("M-mem") is not None, "the in-memory backend must still work"
+        assert not (tmp_path / ":memory:.writers").exists()
+        # Scoped to the registry deliberately. Writing this assertion as "the cwd
+        # is empty" surfaced a SECOND, unrelated cwd artifact (`_sec001_anchor`,
+        # from security-anchor discovery). That is a real observation and is
+        # recorded in the run's plan.md, but it is a different subsystem and
+        # folding it in here would make this test fail for a reason it does not
+        # describe.
+        assert not any(p.name.startswith(":memory:") for p in tmp_path.iterdir())
+
+    def test_on_disk_backend_still_registers(self, tmp_path: Path) -> None:
+        """Non-vacuity control: the skip must be scoped to ``:memory:`` only.
+
+        Without this, 'stop creating the sidecar' would pass by disabling the
+        writer registry everywhere — the concurrent-writer safety net this package
+        added in 0.9.5.
+        """
+        from trw_memory.models.memory import MemoryEntry
+        from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+        db_path = tmp_path / "m.db"
+        backend = SQLiteBackend(db_path)
+        backend.store(MemoryEntry(id="M-disk", content="on-disk entry"))
+
+        assert (tmp_path / "m.db.writers").is_dir()

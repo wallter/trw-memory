@@ -100,10 +100,11 @@ class TRWCrewStorage(BackendOwnerMixin):
         search_limit: int = 10,
         backend: StorageBackend | None = None,
     ) -> None:
-        from trw_memory.integrations._backend import resolve_backend
+        from trw_memory.integrations._backend import config_for_storage_path, resolve_backend
 
         self._namespace = namespace
         self._search_limit = search_limit
+        self._config = config_for_storage_path(storage_path)
         self._backend, self._owns_backend = resolve_backend(
             namespace,
             storage_path,
@@ -123,12 +124,25 @@ class TRWCrewStorage(BackendOwnerMixin):
     ) -> None:
         """Persist a memory entry.
 
+        The write goes through :func:`guarded_store_or_raise`, so crew output
+        carrying an injection payload is rejected instead of persisted and
+        replayed on every later ``search``. The rejection RAISES rather than
+        skipping: ``save`` is a single-item call whose only return channel is
+        ``None``, so a skip would be indistinguishable from success to CrewAI's
+        memory layer. A QUARANTINE raises for the same reason — until 2026-07-30
+        this discarded ``guarded_store``'s result, so a held entry was dropped
+        while ``save`` returned normally.
+
         Args:
             value: Content to store (converted to string).
             metadata: Arbitrary key-value pairs.
             agent: If provided, tags the entry with the agent name.
+
+        Raises:
+            PoisoningError, PIIBlockError, RateLimitError: from the store gate.
         """
         from trw_memory.integrations._backend import make_entry
+        from trw_memory.security.write_gate import guarded_store_or_raise
 
         tags: list[str] = [_TAG_PREFIX]
         if agent:
@@ -146,7 +160,7 @@ class TRWCrewStorage(BackendOwnerMixin):
             metadata=str_metadata,
             source="agent",
         )
-        self._backend.store(entry)
+        guarded_store_or_raise(self._backend, entry, config=self._config)
 
     def search(
         self,

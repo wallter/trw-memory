@@ -126,17 +126,23 @@ def format_export_summary(count: int, path: str | None) -> str:
     return f"Exported {count} entries to {dest}"
 
 
-def format_import_summary(imported: int, skipped: int) -> str:
+def format_import_summary(imported: int, skipped: int, rejected: int = 0) -> str:
     """Format import summary.
 
     Args:
         imported: Number of entries imported.
         skipped: Number of entries skipped (duplicates in merge mode).
+        rejected: Number of entries blocked by the store gate. Reported on its
+            own clause rather than folded into *skipped* so a blocked injection
+            payload is never mistaken for a benign duplicate.
 
     Returns:
         Human-readable summary.
     """
-    return f"Imported {imported} entries, skipped {skipped}"
+    base = f"Imported {imported} entries, skipped {skipped}"
+    if rejected:
+        return f"{base}, rejected {rejected} (blocked by store gate; see stderr)"
+    return base
 
 
 def entry_to_export_dict(entry: MemoryEntry) -> dict[str, object]:

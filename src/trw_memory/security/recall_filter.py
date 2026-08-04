@@ -12,7 +12,6 @@ Target: p95 latency <=20ms for a 25-learning window (PRD-SEC-001 NFR-002).
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import os
 import stat
@@ -26,7 +25,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.pii import strip_pii
-from trw_memory.security.poisoning import _INJECTION_PATTERNS
+from trw_memory.security.poisoning import _INJECTION_PATTERNS, scannable_text
+from trw_memory.security.provenance import entry_content_hash
 from trw_memory.storage.persistence import lock_for_rmw
 
 __all__ = ["RecallDecision", "RecallFilterResult", "filter_recall_window"]
@@ -66,29 +66,55 @@ class RecallFilterResult(BaseModel):
 def _inspect(entry: MemoryEntry) -> list[str]:
     """Return a list of recall-filter reasons; empty list = pass."""
     reasons: list[str] = []
-    combined = f"{entry.content}{entry.detail}"
+    # Was ``f"{entry.content}{entry.detail}"`` — bare concatenation over two of the
+    # five carrier fields. That welded the fields together, so an entry whose
+    # content ended in a word character and whose detail opened with the attack
+    # verb passed even in strict mode, and a payload parked in ``tags``,
+    # ``evidence`` or an assertion was never looked at. The store path had already
+    # fixed the weld on 2026-06-09; the fix was never copied here.
     for pattern in _INJECTION_PATTERNS:
-        if pattern.search(combined):
+        if pattern.search(scannable_text(entry)):
             reasons.append(f"injection_pattern:{pattern.pattern}")
             break
 
-    # Hash-pin drift: if metadata carries ``content_hash`` (provenance
-    # record), recompute and compare.
+    # Hash-pin drift: if metadata carries ``content_hash`` (provenance record),
+    # recompute and compare. This MUST hash the provenance basis (content+detail,
+    # bare), not the scan surface — the two were briefly the same string, and
+    # widening the scan surface to every carrier field made every signed row report
+    # drift, which `_decide` escalates to `block` even in redact mode. Recall went
+    # empty for every provenance-signed entry.
     pinned = entry.metadata.get("provenance_content_hash") or entry.metadata.get("content_hash")
-    if pinned:
-        current = hashlib.sha256(combined.encode("utf-8")).hexdigest()
-        if current != pinned:
-            reasons.append("hash_pin_drift")
+    if pinned and entry_content_hash(entry.content, entry.detail) != pinned:
+        reasons.append("hash_pin_drift")
     return reasons
 
 
-def _redact_entry(entry: MemoryEntry) -> MemoryEntry:
-    redacted_content = entry.content
-    redacted_detail = entry.detail
+def _redact(text: str) -> str:
     for pattern in _INJECTION_PATTERNS:
-        redacted_content = pattern.sub("[redacted]", redacted_content)
-        redacted_detail = pattern.sub("[redacted]", redacted_detail)
-    return entry.model_copy(update={"content": redacted_content, "detail": redacted_detail})
+        text = pattern.sub("[redacted]", text)
+    return text
+
+
+def _redact_entry(entry: MemoryEntry) -> MemoryEntry:
+    """Redact every field ``_inspect`` scans.
+
+    Redacting a subset is worse than not redacting: the caller is told the entry
+    was sanitised while the payload is handed back through whichever carrier the
+    redactor skipped. This covers all of ``SCANNED_ENTRY_FIELDS``.
+    """
+    return entry.model_copy(
+        update={
+            "content": _redact(entry.content),
+            "detail": _redact(entry.detail),
+            "nudge_line": _redact(entry.nudge_line),
+            "tags": [_redact(tag) for tag in entry.tags],
+            "evidence": [_redact(item) for item in entry.evidence],
+            "assertions": [
+                assertion.model_copy(update={"last_evidence": _redact(assertion.last_evidence)})
+                for assertion in entry.assertions
+            ],
+        }
+    )
 
 
 def _decide(entry: MemoryEntry, *, mode: Literal["strict", "redact", "observe"]) -> RecallDecision:

@@ -113,8 +113,18 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
         message: ChatMessage,
         idx: int | None = None,
     ) -> None:
-        """Append a message to *key*'s collection."""
-        from trw_memory.integrations._backend import ROLE_TAG_PREFIX, make_entry
+        """Append a message to *key*'s collection.
+
+        Routed through :func:`guarded_store_or_raise` so an injection payload
+        echoed by a jailbroken model is rejected at write time instead of replayed
+        on every later ``get_messages``. The rejection RAISES for the same reason
+        as the LangChain adapter: silently dropping a turn would make a censored
+        transcript indistinguishable from a complete one. A QUARANTINE raises too;
+        until 2026-07-30 this discarded the gate's result, so a held message was
+        dropped while ``add_message`` returned normally.
+        """
+        from trw_memory.integrations._backend import ROLE_TAG_PREFIX, config_for_storage_path, make_entry
+        from trw_memory.security.write_gate import guarded_store_or_raise
 
         role_value = message.role.value if isinstance(message.role, MessageRole) else str(message.role)
         entry = make_entry(
@@ -127,7 +137,7 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
             importance=0.5,
             source="agent",
         )
-        self._backend_or_raise.store(entry)
+        guarded_store_or_raise(self._backend_or_raise, entry, config=config_for_storage_path(self._storage_path))
 
     def delete_messages(self, key: str) -> list[ChatMessage] | None:
         """Remove all messages for *key*.  Returns the deleted messages."""

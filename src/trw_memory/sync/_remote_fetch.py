@@ -11,6 +11,7 @@ from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.dense import cosine_similarity
+from trw_memory.security.pii import mask_query_credentials
 from trw_memory.sync._remote_common import (
     FETCH_TIMEOUT,
     _raise_local_only_violation,
@@ -99,10 +100,8 @@ def fetch_shared_memories(
         logger.warning("memory_fetch_invalid_platform_url")
         return []
 
-    # Encode the search request through the sole learning_api_v1 boundary
-    # (canonical importance -> external wire vocabulary); PRD-CORE-181-FR06.
     request_payload: dict[str, object] = encode_learning_api_v1_search(
-        query=query, limit=limit, min_importance=cfg.sync_min_importance
+        query=mask_query_credentials(query), limit=limit, min_importance=cfg.sync_min_importance
     )
     if embedding:
         request_payload["embedding"] = embedding
@@ -114,7 +113,13 @@ def fetch_shared_memories(
                 json=request_payload,
                 headers=build_platform_headers(cfg.platform_api_key),
             )
+            # A failed fetch and an empty shared corpus both arrive as ``[]``, and
+            # the caller merges either one identically. Log the failure (status
+            # only — never the body) so "the platform is 401ing on a rotated key"
+            # is distinguishable from "nothing matched"; absence of a measurement
+            # is not a measurement of absence.
             if resp.status_code != 200:
+                logger.warning("memory_fetch_rejected", status_code=resp.status_code)
                 return []
             raw = resp.json()
             if isinstance(raw, list):
@@ -123,6 +128,7 @@ def fetch_shared_memories(
                 wrapped = raw.get("results", raw.get("items", []))
                 raw_results = [item for item in wrapped if isinstance(item, dict)] if isinstance(wrapped, list) else []
             else:
+                logger.warning("memory_fetch_malformed_body", body_type=type(raw).__name__)
                 return []
             # Decode external wire vocabulary into canonical importance at the boundary.
             results = [decode_learning_api_v1_result(item) for item in raw_results]

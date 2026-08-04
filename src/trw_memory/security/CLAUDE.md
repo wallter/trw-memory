@@ -18,6 +18,7 @@ sub-CLAUDE.md row of PRD-SEC-001 exit criteria.
 | `canary.py` | Canary learning injection + verification | SEC-001 FR-007 |
 | `provenance.py` | Ed25519 provenance hash-chain on writes | SEC-001 FR-002 |
 | `runtime.py` | Security runtime composition (bundled facade) | SEC-001 |
+| `write_gate.py` | `guarded_store` — the ONLY supported way to persist a caller-supplied entry from outside `security/`. Runs `prepare_entry_for_store` then `backend.store`, diverting a quarantine decision to the review store | SEC-001 |
 
 ## v1 Rollout: Observe-Mode Only
 
@@ -30,11 +31,32 @@ are deployed; threshold-lock promotion is a Sprint 97 decision gate
 (PRD-SEC-001 §8 Rollout Phase 1 → Phase 2).
 
 Do NOT promote to enforce mode in this package without the Sprint 97
-maintainer sign-off + operator kill-switch flag. The switch is
-`config.security.memory_poisoning_enforce` (default **false**).
+maintainer sign-off + operator kill-switch flag.
+
+The switches are the three below. This section previously named a single flag,
+`config.security.memory_poisoning_enforce`, which **has never existed in code** —
+a repo-wide grep returns only this document. An operator who followed it to flip
+enforce mode changed nothing, and an auditor who checked "is there a kill switch"
+against the doc got a false yes. Corrected 2026-07-30; verify a named switch
+against `models/_config_security.py` before trusting it here.
+
+| Control | Field | Default |
+|---|---|---|
+| Intake trust scoring | `trust_scoring_mode` | `observe` (log only) |
+| Anomaly quarantine | `poisoning_detection_mode` | `observe` (log only) |
+| Recall filtering | `recall_filter_mode` | `redact` |
+
+`enable_trust_scoring` and `poisoning_detection_enabled` are the hard off
+switches; `enable_recall_filter` is the recall-side equivalent.
 
 ## Editing Rules
 
+- **Any new surface that persists a caller-supplied `MemoryEntry` must call
+  `write_gate.guarded_store`, never `backend.store` directly.**
+  `tests/test_store_write_gate_totality.py` derives every `.store(...)` call
+  site in the production tree and fails on a new one that is neither guarded,
+  inside `security/`, nor in its documented exclusion set. Add to that exclusion
+  set only for an internal re-write of an already-gated entry, and say why.
 - All public API symbols are listed in `__init__.py` `__all__`. When
   adding a new symbol, re-export it there and update
   `docs/requirements-aare-f/prds/agentic-hpo/PRD-SEC-001-*.md` §5 FR

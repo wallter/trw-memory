@@ -117,9 +117,10 @@ class LocalMemoryAdapter(BackendOwnerMixin):
         storage_path: str | None = None,
         backend: StorageBackend | None = None,
     ) -> None:
-        from trw_memory.integrations._backend import resolve_backend
+        from trw_memory.integrations._backend import config_for_storage_path, resolve_backend
 
         self._namespace = namespace
+        self._config = config_for_storage_path(storage_path)
         self._backend, self._owns_backend = resolve_backend(
             namespace,
             storage_path,
@@ -153,8 +154,17 @@ class LocalMemoryAdapter(BackendOwnerMixin):
         file_path: str,
         tags: list[str],
     ) -> dict[str, str]:
-        """Store a code snippet or note from *file_path*."""
+        """Store a code snippet or note from *file_path*.
+
+        Routed through :func:`guarded_store`. A security rejection RAISES rather
+        than returning ``status="rejected"``: the declared return type is
+        ``dict[str, str]``, so an error-shaped dict would be read as a successful
+        store by any caller that only reads ``memory_id``. A *quarantine* is not
+        an error and is reported in ``status`` — the entry is durable in the
+        review store, just not in the active one.
+        """
         from trw_memory.integrations._backend import make_entry
+        from trw_memory.security.write_gate import guarded_store
 
         entry = make_entry(
             content=content,
@@ -163,8 +173,11 @@ class LocalMemoryAdapter(BackendOwnerMixin):
             importance=0.6,
             source="human",
         )
-        self._backend.store(entry)
-        return {"memory_id": entry.id, "status": "stored"}
+        result = guarded_store(self._backend, entry, config=self._config)
+        return {
+            "memory_id": result.entry.id,
+            "status": "quarantined" if result.quarantined else "stored",
+        }
 
     def search(
         self,

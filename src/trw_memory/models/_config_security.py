@@ -34,18 +34,18 @@ class _SecurityConfigMixin(BaseModel):
         ),
     )
     poisoning_z_threshold: float = Field(default=3.0, gt=0.0, description="Z-score threshold for anomaly detection")
-    anomaly_bypass_source_prefixes: list[str] = Field(
-        default_factory=lambda: ["distilled:", "distilled-git:"],
-        description=(
-            "Source-identifier prefixes (matched against metadata['source']) that "
-            "bypass anomaly-based quarantine in prepare_entry_for_store. Intended "
-            "for source-grounded automated ingestion paths whose producer pipeline "
-            "has already validated record provenance (e.g. trw-distill). The "
-            "PRD-SEC-001 anomaly defense remains active for all non-matching writes. "
-            "Set to [] to disable the bypass and apply anomaly quarantine to every "
-            "write."
-        ),
-    )
+    # `anomaly_bypass_source_prefixes` was REMOVED on 2026-07-30. PRD-DIST-2045
+    # shipped it as a per-source anomaly-quarantine carve-out; `209a47853` then
+    # removed the carve-out from the runtime because `metadata['source']` is
+    # caller-supplied, so any caller could spoof a `distilled:` source and slip a
+    # poisoned outlier past the detector. The FIELD was left behind "for
+    # compatibility" and gated nothing for two months, while its own description
+    # still told operators that setting it to [] would "apply anomaly quarantine to
+    # every write". A settable security-shaped knob that silently does nothing is
+    # worse than an absent one: the operator believes they have a control they do
+    # not have (wiring-defect P12, superseded-authority shape). Restoring the
+    # behaviour is NOT the fix — the carve-out is exactly the caller-controlled
+    # bypass class this package spent 2026-07-30 removing elsewhere.
     quarantine_path: str = Field(default="", description="Directory where quarantined entries are written")
     enable_trust_scoring: bool = Field(default=True, description="Enable SEC-001 trust scoring on all ingest paths")
     trust_score_threshold: float = Field(default=0.5, ge=0.0, le=1.0, description="SEC-001 quarantine threshold")

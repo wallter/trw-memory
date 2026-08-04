@@ -39,7 +39,7 @@ pip install -e ".[dev,vectors,bm25]"                         # With optional dep
 
 ## Package Info
 
-- Version: `0.9.7` (see `pyproject.toml` — do not hardcode elsewhere)
+- Version: <!-- inv:version_trw_memory -->0.15.0<!-- /inv --> (source: `pyproject.toml`, synced by `make inventory` — do not hardcode elsewhere)
 - ~170 source modules; 240 test files, 214 with test functions; coverage gate 85%
 - Valid namespace prefixes: `project:`, `global`, `default`, `team:`, `org:`, `user:` — the `user:` scope was added by PRD-CORE-185 and is live in `namespaces/validation.py`
 

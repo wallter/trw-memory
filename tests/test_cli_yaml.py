@@ -12,7 +12,7 @@ from ruamel.yaml import YAML
 
 from trw_memory.cli import main
 
-from ._test_cli_support import _CLI, _mock_entry
+from ._test_cli_support import _CLI, _mock_entry, _real_import_target, _reopen_import_target
 
 
 class TestYamlExport:
@@ -69,9 +69,9 @@ class TestYamlImport:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        mock_config_cls.return_value = MagicMock()
-        mock_backend = MagicMock()
-        mock_backend_fn.return_value = mock_backend
+        config, backend = _real_import_target(tmp_path)
+        mock_config_cls.return_value = config
+        mock_backend_fn.return_value = backend
 
         yaml = YAML()
         data = [
@@ -86,7 +86,9 @@ class TestYamlImport:
         assert ret == 0
         captured = capsys.readouterr()
         assert "Imported 2" in captured.out
-        assert mock_backend.store.call_count == 2
+        with _reopen_import_target(tmp_path) as reopened:
+            stored = {entry.content for entry in reopened.list_entries(namespace="default", limit=10)}
+        assert stored == {"YAML Entry 1", "YAML Entry 2"}
 
     @patch(f"{_CLI}._create_local_backend")
     @patch(f"{_CLI}.MemoryConfig")
@@ -97,9 +99,9 @@ class TestYamlImport:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        mock_config_cls.return_value = MagicMock()
-        mock_backend = MagicMock()
-        mock_backend_fn.return_value = mock_backend
+        config, backend = _real_import_target(tmp_path)
+        mock_config_cls.return_value = config
+        mock_backend_fn.return_value = backend
 
         yaml = YAML()
         fpath = tmp_path / "import.yml"
@@ -139,16 +141,19 @@ class TestExportImportRoundTrip:
 
         capsys.readouterr()
 
+        # The import half writes through the real store gate, so swap the mocked
+        # export backend for a real one before replaying the exported file.
+        import_config, import_backend = _real_import_target(tmp_path)
+        mock_config_cls.return_value = import_config
+        mock_backend_fn.return_value = import_backend
+
         ret = main(["import", out_path])
         assert ret == 0
         captured = capsys.readouterr()
         assert "Imported 1" in captured.out
-        store_calls = [
-            call
-            for call in mock_backend.store.call_args_list
-            if hasattr(call[0][0], "content") and call[0][0].content == "roundtrip test"
-        ]
-        assert len(store_calls) == 1
+        with _reopen_import_target(tmp_path) as reopened:
+            stored = [entry.content for entry in reopened.list_entries(namespace="default", limit=10)]
+        assert stored == ["roundtrip test"]
 
     @patch(f"{_CLI}._create_local_backend")
     @patch(f"{_CLI}.MemoryConfig")
@@ -175,7 +180,14 @@ class TestExportImportRoundTrip:
 
         capsys.readouterr()
 
+        import_config, import_backend = _real_import_target(tmp_path)
+        mock_config_cls.return_value = import_config
+        mock_backend_fn.return_value = import_backend
+
         ret = main(["import", out_path])
         assert ret == 0
         captured = capsys.readouterr()
         assert "Imported 1" in captured.out
+        with _reopen_import_target(tmp_path) as reopened:
+            stored = [entry.content for entry in reopened.list_entries(namespace="default", limit=10)]
+        assert stored == ["yaml roundtrip"]

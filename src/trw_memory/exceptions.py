@@ -84,6 +84,34 @@ class PoisoningError(MemoryError):
         self.reason = reason
 
 
+class MemoryQuarantinedError(MemoryError):
+    """Raised when a write was HELD for review rather than stored.
+
+    A quarantine is deliberately not a ``PoisoningError``: the entry is durable in
+    the review store and may be approved later, so reporting it as a rejection
+    would misstate what happened to the caller's data.
+
+    It exists because ``guarded_store`` reports a quarantine in its *return value*
+    (``stored=False, quarantined=True``) rather than by raising, and a caller
+    whose only return channel is ``None`` cannot pass that on. Three chat adapters
+    discarded that result while their docstrings promised the opposite — "a chat
+    history that silently dropped a turn would leave the caller unable to tell a
+    censored transcript from a complete one". They now raise this.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        path: str = "",
+        entry_id: str = "",
+        anomaly_dimension: str = "",
+    ) -> None:
+        super().__init__(message, path=path)
+        self.entry_id = entry_id
+        self.anomaly_dimension = anomaly_dimension
+
+
 class RateLimitError(MemoryError):
     """Raised when a caller exceeds the configured memory write rate limit."""
 

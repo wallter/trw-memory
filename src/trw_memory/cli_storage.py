@@ -127,6 +127,20 @@ def handle_import(
     make_entry: Callable[..., Any],
     import_summary: Callable[..., str],
 ) -> int:
+    """Bulk-load a JSON/YAML array of entries through the SEC-001 store gate.
+
+    Rejection policy — deliberately different from the single-entry surfaces:
+    a security rejection SKIPS the row and the import continues. Aborting a
+    1000-row file on row 900 leaves the operator with a half-loaded store and no
+    way to resume, which is worse than dropping the one hostile row. Rejections
+    are counted SEPARATELY from ``skipped`` (blank content / merge duplicates) so
+    a blocked injection payload is never reported as a benign duplicate, each one
+    prints its index and reason class to stderr, and a non-zero exit code makes
+    the outcome visible to a script that only checks status.
+    """
+    from trw_memory.exceptions import PIIBlockError, PoisoningError, RateLimitError, SchemaValidationError
+    from trw_memory.security.write_gate import guarded_store
+
     file_path = Path(args.path)
     try:
         if file_path.suffix in (".yaml", ".yml"):
@@ -145,8 +159,9 @@ def handle_import(
     namespace, backend = open_validated_backend(config, args.namespace, backend_factory=backend_factory)
     imported = 0
     skipped = 0
+    rejected = 0
     try:
-        for entry_data in data:
+        for index, entry_data in enumerate(data):
             if not isinstance(entry_data, dict):
                 continue
 
@@ -173,11 +188,22 @@ def handle_import(
                 importance=float(entry_data.get("importance", 0.5)),
                 detail=str(entry_data.get("detail", "")),
             )
-            backend.store(entry)
+            # Never echo the offending row: an injection payload printed to a
+            # terminal or CI log is the same payload, one hop further along.
+            try:
+                result = guarded_store(backend, entry, config=config)
+            except (PoisoningError, PIIBlockError, RateLimitError, SchemaValidationError) as exc:
+                rejected += 1
+                print(f"Rejected entry {index}: {type(exc).__name__}", file=sys.stderr)
+                continue
+            if not result.stored:
+                rejected += 1
+                print(f"Rejected entry {index}: quarantined for review", file=sys.stderr)
+                continue
             imported += 1
 
-        print(import_summary(imported, skipped))
-        return 0
+        print(import_summary(imported, skipped, rejected=rejected))
+        return 1 if rejected else 0
     finally:
         backend.close()
 

@@ -67,13 +67,47 @@ class PIIAction(str, Enum):
 # verbatim to the shadow-quarantine JSONL. Add a new credential shape HERE and
 # both paths stay in sync.
 
-# Generic ``<prefix>[-_]<20+ alnum>`` credential shape.
-_SECRET_PREFIX_PATTERN = r"(?:sk|pk|api|key|token|secret)[-_][a-zA-Z0-9]{20,}"  # noqa: S105 — regex, not a credential
+# Generic ``<prefix>[-_]<20+ alnum>`` credential shape, tolerating ONE optional
+# environment/scope segment between the prefix and the random body.
+#
+# That optional segment is why ``sk_live_…`` (Stripe) and ``sk-proj-…`` (OpenAI)
+# escaped until 2026-07-30. ``sk`` was already in the prefix list — the author
+# plainly intended to catch them — but requiring 20+ alnum IMMEDIATELY after the
+# separator meant the pattern died on ``live``/``proj``, which every real provider
+# key carries. The tokens were still *detected*, as HIGH_ENTROPY; but only
+# ``PIIType.API_KEY`` is in ``_runtime_pii.BLOCKING_PII_TYPES`` and only the regex
+# types are masked by ``strip_pii``. So a live Stripe key was persisted verbatim
+# AND published verbatim to the platform, while an AWS key in the identical
+# position was blocked and masked. Same threat class, opposite handling, decided
+# by which regex happened to match.
+#
+# The optional segment is a CLOSED SET of real provider scope words, not a generic
+# `[a-zA-Z0-9]{1,12}`. A generic segment is indistinguishable from an ordinary
+# snake_case identifier, and `PIIType.API_KEY` BLOCKS the write — so the first
+# draft of this fix rejected `pk_users_organizationmembership`,
+# `key_error_troubleshootingnotes` and `token_cache_invalidationstrategy`, losing
+# the learning outright. Every provider shape this exists to catch
+# (`sk_live_`, `sk_test_`, `rk_live_`, `sk-proj-`) is covered by the closed set.
+_SECRET_SCOPE_WORDS = "live|test|proj|prod|dev|sandbox|staging"  # noqa: S105 — regex alternation, not a credential
+# Word-anchored HERE, in the shared constant, so `detect_pii` and `strip_pii` apply
+# identical boundaries. `detect_pii` used to wrap it in `\b...\b` while `strip_pii`
+# applied it bare, so `strip_pii` masked mid-token substrings the detector would
+# not flag — a divergence in the one constant whose comment claims it exists to
+# prevent divergence.
+_SECRET_PREFIX_PATTERN = (
+    r"\b(?:sk|pk|rk|api|key|token|secret)[-_]"
+    rf"(?:(?:{_SECRET_SCOPE_WORDS})[-_])?[a-zA-Z0-9]{{20,}}\b"
+)
 # Provider-specific shapes that lack a "<prefix>[-_]" separator and fall below
-# the Shannon-entropy backstop (GitHub PATs, AWS access key IDs). Anchored +
-# bounded (no nested quantifiers) so they stay ReDoS-free.
+# the Shannon-entropy backstop (GitHub PATs, AWS access key IDs), plus shapes that
+# sit ABOVE it and were therefore mis-typed as HIGH_ENTROPY rather than API_KEY
+# (Slack, Google). Anchored + bounded (no nested quantifiers) so they stay
+# ReDoS-free.
 _PROVIDER_SECRET_PATTERN = (
-    r"\b(?:gh[posru]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,})\b|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"  # noqa: S105 — regex, not a credential
+    r"\b(?:gh[posru]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,})\b"  # noqa: S105 — regex, not a credential
+    r"|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"
+    r"|\bxox[baprs]-[A-Za-z0-9-]{20,}\b"
+    r"|\bAIza[A-Za-z0-9_-]{35}\b"
 )
 
 # ---------------------------------------------------------------------------
@@ -103,10 +137,7 @@ _PII_PATTERNS: list[tuple[PIIType, re.Pattern[str], float]] = [
     ),
     (
         PIIType.API_KEY,
-        re.compile(
-            r"\b" + _SECRET_PREFIX_PATTERN + r"\b",
-            re.IGNORECASE,
-        ),
+        re.compile(_SECRET_PREFIX_PATTERN, re.IGNORECASE),
         0.9,
     ),
     # Provider-specific secret shapes that lack a "<prefix>[-_]" separator and
@@ -322,6 +353,32 @@ def _validate_custom_pattern(raw_pattern: str) -> None:
 # ---------------------------------------------------------------------------
 # Core functions
 # ---------------------------------------------------------------------------
+
+
+def mask_query_credentials(text: str) -> str:
+    """Mask credentials and emails in an outbound SEARCH QUERY, nothing else.
+
+    A query is egressed content and must not carry a secret off the machine — the
+    2026-07-25 pass (``6cf5b97f29``) covered the publish direction only, so
+    ``recall("why did sk_live_… start 401ing")`` shipped a live credential to the
+    platform. But a query is also the caller's *search intent*, so this is
+    deliberately narrower than :func:`strip_pii`, which additionally masks
+    ``_EGRESS_MARKERS`` (PHONE, SSN, CREDIT_CARD, IP_ADDRESS). Those carry real
+    search value and their detectors are shape-based:
+
+      ``recall("scheduler stalled at 1753833600")`` -> the bare 10-digit run
+      matches the PHONE shape, so the whole query becomes ``"stalled at <phone>"``
+      and no remote hit is possible.
+      ``recall("why does 10.0.0.5 refuse connections")`` -> ``"<ip>"``, same.
+
+    Credentials and emails have no such cost: a search of the shared corpus FOR
+    your own secret has no legitimate hit. Publish-direction egress keeps the full
+    :func:`strip_pii` treatment — the asymmetry is intentional, because a published
+    learning is durable and a query is not.
+    """
+    text = re.sub(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", "<email>", text)
+    text = re.sub(_SECRET_PREFIX_PATTERN, "<api_key>", text, flags=re.IGNORECASE)
+    return re.sub(_PROVIDER_SECRET_PATTERN, "<api_key>", text)
 
 
 def shannon_entropy(text: str) -> float:

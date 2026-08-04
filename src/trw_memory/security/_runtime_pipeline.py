@@ -46,7 +46,12 @@ from trw_memory.exceptions import ProvenanceKeyUnavailableError, ScorerUnavailab
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.pii import PIIMatch
-from trw_memory.security.poisoning import MIN_ANOMALY_BASELINE, quarantine_entry, validate_entry_payload
+from trw_memory.security.poisoning import (
+    MIN_ANOMALY_BASELINE,
+    quarantine_entry,
+    scannable_text,
+    validate_entry_payload,
+)
 from trw_memory.security.provenance import build_entry_provenance
 from trw_memory.security.startup import _discover_anchor, resolve_security_path, verify_defaults
 from trw_memory.security.telemetry_emit import build_security_traceability, emit_security_event
@@ -110,19 +115,15 @@ def _actor_for_entry(entry: MemoryEntry) -> str:
 
 
 def _intake_scannable_text(entry: MemoryEntry) -> str:
-    """Concatenate every free-form user-writable text field SEC-001 intake must scan.
+    """Alias for the canonical scan surface — see ``poisoning.scannable_text``.
 
-    Beyond ``content`` + ``detail`` this folds in each ``entry.evidence`` item and
-    each ``Assertion.last_evidence`` string. These fields are publicly reachable via
-    ``memory_store`` and are persisted verbatim, so without folding them in here a
-    caller could smuggle poisoning-pattern text past the trust scorer (release-blocker
-    SEC-001). The PII stage covers the same surface independently (see
-    ``_runtime_pii.apply_runtime_pii_policy``).
+    This used to be a second, independent definition that omitted ``tags``, while
+    ``validate_entry_payload`` had a third that omitted ``evidence`` and assertion
+    evidence. Every field one copy missed was a live bypass on that copy's path, so
+    the derivation now lives in exactly one place. Kept as a named alias because the
+    trust-scorer stage and its tests import it.
     """
-    parts: list[str] = [entry.content, entry.detail]
-    parts.extend(entry.evidence)
-    parts.extend(assertion.last_evidence for assertion in entry.assertions)
-    return "\n".join(part for part in parts if part)
+    return scannable_text(entry)
 
 
 def _resolve_provenance_session_id(entry: MemoryEntry, session_id: str | None) -> str:

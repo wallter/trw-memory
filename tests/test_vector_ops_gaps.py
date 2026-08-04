@@ -122,6 +122,34 @@ class TestUpsertVectorUnavailable:
             upsert_vector(conn, _lock(), vec_available=True, dim=3, entry_id="M-001", embedding=[0.1, 0.2, 0.3])
 
 
+class TestUpsertVectorTableDimensionMismatch:
+    """A vec0 table narrower than the configured dim degrades, it does not raise.
+
+    The ``len(embedding) != dim`` pre-check compares the embedding against the
+    backend's CONFIGURED dim, so it passes whenever the two agree. The vec0 table
+    fixes its own width at CREATE time, so a store whose table was built under a
+    different ``embedding_dim`` — an embedding-model swap, or a database file shared
+    with a differently-configured process — reaches the INSERT and is rejected by
+    SQLite. That rejection used to propagate and fail the whole store.
+    """
+
+    def test_table_width_disagreement_is_degraded_not_raised(self) -> None:
+        conn = _mock_conn()
+        conn.execute.side_effect = sqlite3.OperationalError(
+            'Dimension mismatch for inserted vector for the "embedding" column. Expected 2 dimensions but received 384.'
+        )
+
+        # Must not raise: the canonical row + BM25 still provide retrieval.
+        upsert_vector(conn, _lock(), vec_available=True, dim=384, entry_id="M-001", embedding=[0.1] * 384)
+
+    def test_a_genuine_dimension_free_error_still_raises(self) -> None:
+        """The predicate must not swallow unrelated OperationalErrors."""
+        conn = _mock_conn()
+        conn.execute.side_effect = sqlite3.OperationalError("database is locked")
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            upsert_vector(conn, _lock(), vec_available=True, dim=384, entry_id="M-001", embedding=[0.1] * 384)
+
+
 # ---------------------------------------------------------------------------
 # search_vectors
 # ---------------------------------------------------------------------------

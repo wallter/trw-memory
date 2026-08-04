@@ -65,12 +65,13 @@ class TRWChatMessageHistory(BackendOwnerMixin, BaseChatMessageHistory):  # type:
         storage_path: str | None = None,
         backend: StorageBackend | None = None,
     ) -> None:
-        from trw_memory.integrations._backend import resolve_backend
+        from trw_memory.integrations._backend import config_for_storage_path, resolve_backend
 
         self._session_id = session_id
         self._namespace = namespace
         self._max_results = max_results
         self._session_tag = f"{_TAG_PREFIX}{session_id}"
+        self._config = config_for_storage_path(storage_path)
         self._backend, self._owns_backend = resolve_backend(
             namespace,
             storage_path,
@@ -109,8 +110,26 @@ class TRWChatMessageHistory(BackendOwnerMixin, BaseChatMessageHistory):  # type:
         return result
 
     def add_messages(self, messages: Sequence[BaseMessage]) -> None:
-        """Store messages in trw-memory."""
+        """Store messages in trw-memory.
+
+        Every message goes through :func:`guarded_store_or_raise`, so a jailbroken
+        model echoing an injection payload back into the transcript is rejected
+        here rather than replayed verbatim on every later ``messages`` read. The
+        rejection RAISES: a chat history that silently dropped a turn would
+        leave the caller unable to tell a censored transcript from a complete
+        one, which is the more dangerous failure for a conversational contract.
+        Messages earlier in the batch stay stored, matching the existing
+        partial-failure behaviour of a mid-batch backend error.
+
+        A QUARANTINE decision raises too, via the ``_or_raise`` seam. Until
+        2026-07-30 this method called ``guarded_store`` and discarded its result,
+        so a held turn was dropped while ``add_messages`` returned normally —
+        precisely the silent-drop this docstring already said was unacceptable.
+        The gate reports a quarantine in its return value rather than by raising,
+        and ``None`` is not a channel that can carry it.
+        """
         from trw_memory.integrations._backend import ROLE_TAG_PREFIX, make_entry
+        from trw_memory.security.write_gate import guarded_store_or_raise
 
         for msg in messages:
             role = getattr(msg, "type", "human")
@@ -121,7 +140,7 @@ class TRWChatMessageHistory(BackendOwnerMixin, BaseChatMessageHistory):  # type:
                 importance=0.5,
                 source="agent",
             )
-            self._backend.store(entry)
+            guarded_store_or_raise(self._backend, entry, config=self._config)
 
     def clear(self) -> None:
         """Remove all messages for this session."""

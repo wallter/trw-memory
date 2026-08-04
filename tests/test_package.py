@@ -155,6 +155,7 @@ def test_all_exports_complete() -> None:
         "MemoryEvent",
         "MemoryEventType",
         "MemoryIndex",
+        "MemoryQuarantinedError",
         "MemoryNotFoundError",
         "MemoryStatus",
         "NoOpQuestionGenerator",

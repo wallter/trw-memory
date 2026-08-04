@@ -10,7 +10,7 @@ import pytest
 
 from trw_memory.cli import main
 
-from ._test_cli_support import _CLI, _mock_entry
+from ._test_cli_support import _CLI, _mock_entry, _real_import_target, _reopen_import_target
 
 
 class TestExportCommand:
@@ -93,9 +93,11 @@ class TestImportCommand:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        mock_config_cls.return_value = MagicMock()
-        mock_backend = MagicMock()
-        mock_backend_fn.return_value = mock_backend
+        config, backend = _real_import_target(tmp_path)
+        close_spy = MagicMock(wraps=backend.close)
+        backend.close = close_spy  # type: ignore[method-assign]
+        mock_config_cls.return_value = config
+        mock_backend_fn.return_value = backend
 
         data = [
             {"content": "Entry 1", "tags": ["a"], "importance": 0.7},
@@ -108,8 +110,10 @@ class TestImportCommand:
         assert ret == 0
         captured = capsys.readouterr()
         assert "Imported 2" in captured.out
-        assert mock_backend.store.call_count == 2
-        mock_backend.close.assert_called_once()
+        close_spy.assert_called_once()
+        with _reopen_import_target(tmp_path) as reopened:
+            stored = {entry.content for entry in reopened.list_entries(namespace="default", limit=10)}
+        assert stored == {"Entry 1", "Entry 2"}
 
     @patch(f"{_CLI}._create_local_backend")
     @patch(f"{_CLI}.MemoryConfig")
@@ -120,9 +124,9 @@ class TestImportCommand:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        mock_config_cls.return_value = MagicMock()
-        mock_backend = MagicMock()
-        mock_backend_fn.return_value = mock_backend
+        config, backend = _real_import_target(tmp_path)
+        mock_config_cls.return_value = config
+        mock_backend_fn.return_value = backend
 
         data = [{"content": ""}, {"content": "valid"}]
         fpath = tmp_path / "import.json"
@@ -183,10 +187,12 @@ class TestImportCommand:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        mock_config_cls.return_value = MagicMock()
-        mock_backend = MagicMock()
-        mock_backend.get.side_effect = lambda eid: _mock_entry() if eid == "M-existing" else None
-        mock_backend_fn.return_value = mock_backend
+        config, backend = _real_import_target(tmp_path)
+        mock_config_cls.return_value = config
+        mock_backend_fn.return_value = backend
+        from trw_memory.integrations._backend import make_entry
+
+        backend.store(make_entry(content="already here", namespace="default").model_copy(update={"id": "M-existing"}))
 
         data = [
             {"id": "M-existing", "content": "old"},
@@ -209,9 +215,9 @@ class TestImportCommand:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        mock_config_cls.return_value = MagicMock()
-        mock_backend = MagicMock()
-        mock_backend_fn.return_value = mock_backend
+        config, backend = _real_import_target(tmp_path)
+        mock_config_cls.return_value = config
+        mock_backend_fn.return_value = backend
 
         data = [{"content": "no id entry"}]
         fpath = tmp_path / "import.json"
@@ -231,9 +237,9 @@ class TestImportCommand:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        mock_config_cls.return_value = MagicMock()
-        mock_backend = MagicMock()
-        mock_backend_fn.return_value = mock_backend
+        config, backend = _real_import_target(tmp_path)
+        mock_config_cls.return_value = config
+        mock_backend_fn.return_value = backend
 
         data = ["not a dict", {"content": "valid"}]
         fpath = tmp_path / "import.json"
@@ -305,9 +311,9 @@ class TestImportCommand:
         mock_backend_fn: MagicMock,
         tmp_path: Path,
     ) -> None:
-        mock_config_cls.return_value = MagicMock()
-        mock_backend = MagicMock()
-        mock_backend_fn.return_value = mock_backend
+        config, backend = _real_import_target(tmp_path)
+        mock_config_cls.return_value = config
+        mock_backend_fn.return_value = backend
 
         data = [{"content": "test", "tags": "not-a-list"}]
         fpath = tmp_path / "import.json"
@@ -315,7 +321,6 @@ class TestImportCommand:
 
         ret = main(["import", str(fpath)])
         assert ret == 0
-        call_args = mock_backend.store.call_args
-        assert call_args is not None
-        stored_entry = call_args[0][0]
-        assert list(stored_entry.tags) == []
+        with _reopen_import_target(tmp_path) as reopened:
+            entries = reopened.list_entries(namespace="default", limit=10)
+        assert [list(entry.tags) for entry in entries] == [[]]

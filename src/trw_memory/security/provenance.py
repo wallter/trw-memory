@@ -247,6 +247,20 @@ def _sign_message(learning_id: str, content_hash: str, prev_hash: str) -> bytes:
     return f"{learning_id}|{content_hash}|{prev_hash}".encode()
 
 
+def entry_content_hash(content: str, detail: str) -> str:
+    """Hash the bytes ``provenance_content_hash`` pins: ``content`` + ``detail``, bare.
+
+    Exported so the recall-time drift check hashes the SAME basis rather than
+    re-deriving it. ``recall_filter._inspect`` used to build one string for both its
+    pattern scan and this comparison; widening the scan surface to every carrier
+    field silently changed the hash basis too, so every provenance-signed row
+    reported ``hash_pin_drift`` and recall returned nothing. The two concerns look
+    alike and are not — the scan surface may grow, this basis may not without a
+    migration.
+    """
+    return hashlib.sha256(f"{content}{detail}".encode()).hexdigest()
+
+
 def build_entry_provenance(
     *,
     learning_id: str,
@@ -258,7 +272,7 @@ def build_entry_provenance(
     signing_key: Any,
 ) -> dict[str, str]:
     """Build signed per-row provenance metadata for a memory entry."""
-    content_hash = hashlib.sha256(f"{content}{detail}".encode()).hexdigest()
+    content_hash = entry_content_hash(content, detail)
     payload = f"{learning_id}|{author}|{session_id}|{ts}|{content_hash}".encode()
     signature = ""
     if signing_key is not None:

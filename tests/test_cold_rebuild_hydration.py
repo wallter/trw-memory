@@ -94,9 +94,7 @@ def test_hydrate_yaml_legacy_impact_key_preserves_value() -> None:
     """
     from trw_memory.storage._cold_rebuild import _INSERT_COLUMNS
 
-    row = _hydrate_yaml(
-        {"id": "L-IMP", "summary": "x", "created": "2026-05-09", "impact": 0.92}
-    )
+    row = _hydrate_yaml({"id": "L-IMP", "summary": "x", "created": "2026-05-09", "impact": 0.92})
     assert row is not None
     assert row[_INSERT_COLUMNS.index("importance")] == 0.92
 
@@ -105,9 +103,7 @@ def test_hydrate_yaml_importance_wins_over_legacy_impact() -> None:
     """When both keys exist, canonical 'importance' is primary (no ambiguous guess)."""
     from trw_memory.storage._cold_rebuild import _INSERT_COLUMNS
 
-    row = _hydrate_yaml(
-        {"id": "L-BOTH", "summary": "x", "created": "2026-05-09", "importance": 0.7, "impact": 0.1}
-    )
+    row = _hydrate_yaml({"id": "L-BOTH", "summary": "x", "created": "2026-05-09", "importance": 0.7, "impact": 0.1})
     assert row is not None
     assert row[_INSERT_COLUMNS.index("importance")] == 0.7
 

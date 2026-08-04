@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_LIST_LIMIT",
     "ROLE_TAG_PREFIX",
+    "config_for_storage_path",
     "create_backend",
     "create_backend_from_config",
     "discover_namespace_backends",
@@ -100,6 +101,19 @@ def _create_sqlite_backend(
     )
 
 
+def config_for_storage_path(storage_path: str | None = None) -> MemoryConfig:
+    """Build the config an adapter's backend would be created from.
+
+    Adapters need this beyond backend creation: ``security.write_gate`` anchors
+    the audit log, quarantine store and provenance key off the same config, so
+    an adapter pointed at a custom ``storage_path`` must not scatter its security
+    artifacts into the default location.
+    """
+    if storage_path is not None:
+        return MemoryConfig(storage_path=storage_path)
+    return MemoryConfig()
+
+
 def resolve_backend(
     namespace: str,
     storage_path: str | None,
@@ -144,11 +158,7 @@ def create_backend(
     Returns:
         A ready-to-use :class:`StorageBackend` instance.
     """
-    if storage_path is not None:
-        config = MemoryConfig(storage_path=storage_path)
-    else:
-        config = MemoryConfig()
-
+    config = config_for_storage_path(storage_path)
     return create_backend_from_config(config, namespace, db_path_override=db_path_override)
 
 

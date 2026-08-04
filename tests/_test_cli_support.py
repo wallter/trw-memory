@@ -1,10 +1,42 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 _CLI = "trw_memory.cli"
+
+
+def _real_import_target(tmp_path: Path) -> tuple[Any, Any]:
+    """Return a ``(config, backend)`` pair the ``import`` command can really write to.
+
+    ``handle_import`` runs the SEC-001 store gate, which reads real config fields
+    and reference entries off the backend. A ``MagicMock`` config/backend cannot
+    stand in for that any more, and substituting one would only re-create the
+    bypass these tests are meant to cover.
+    """
+    from trw_memory.models.config import MemoryConfig
+    from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+    storage_root = tmp_path / "cli_import_store"
+    config = MemoryConfig(storage_path=str(storage_root))
+    backend = SQLiteBackend(db_path=storage_root / "default" / "memory.db", dim=config.embedding_dim)
+    return config, backend
+
+
+def _reopen_import_target(tmp_path: Path) -> Any:
+    """Reopen the store :func:`_real_import_target` wrote to.
+
+    ``handle_import`` closes the backend in its ``finally``, so assertions about
+    what landed must run against a fresh handle.
+    """
+    from trw_memory.models.config import MemoryConfig
+    from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+    storage_root = tmp_path / "cli_import_store"
+    config = MemoryConfig(storage_path=str(storage_root))
+    return SQLiteBackend(db_path=storage_root / "default" / "memory.db", dim=config.embedding_dim)
 
 
 def _make_store_result(

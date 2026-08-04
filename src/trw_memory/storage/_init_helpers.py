@@ -183,7 +183,20 @@ def load_vec_extension(conn: Any, db_path: Path, dim: int) -> bool:
 
 
 def register_writer_registry(db_path: Path, warn_threshold: int) -> Any:
-    """PRD-INFRA-064 advisory writer registry (fail-open)."""
+    """PRD-INFRA-064 advisory writer registry (fail-open).
+
+    Skipped for an in-memory database. The registry is a directory sibling of the
+    DB file (``<db_path>.writers/``), and ``":memory:"`` has no parent — so it
+    resolved against the CURRENT WORKING DIRECTORY and created a literal
+    ``./:memory:.writers/`` directory wherever the process happened to be running.
+    That polluted this repo (the stray directory is what surfaced it) and would
+    litter a user's project the same way.
+
+    It is also meaningless work: the registry exists to count peer *processes*
+    sharing one DB file, and an in-memory database is private to its connection.
+    """
+    if str(db_path) == ":memory:":
+        return None
     try:
         from trw_memory.storage._writer_registry import WriterRegistry
 
