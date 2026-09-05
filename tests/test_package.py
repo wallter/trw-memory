@@ -285,7 +285,7 @@ def test_pyproject_declares_current_optional_extras_and_scripts() -> None:
     assert optional["all-integrations"] == ["trw-memory[langchain,llamaindex,crewai]"]
     assert "chromadb<1.0" in optional["crewai"]
     assert "litellm>=1.84.0" in optional["crewai"]
-    assert optional["mcp"] == ["fastmcp>=3.2.0,<4.0.0"]
+    assert "fastmcp>=3.2.0,<4.0.0" in optional["mcp"]
     assert scripts["trw-memory"] == "trw_memory.cli:main"
     assert scripts["trw-memory-server"] == "trw_memory.server:main"
 

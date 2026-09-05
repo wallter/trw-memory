@@ -13,6 +13,56 @@ All notable changes to the TRW Memory package.
   `PYTEST_WORKERS ?= 4` default. Override with `TRW_PYTEST_ALLOW_WIDE_XDIST=1`.
   The same cap applies to every package suite this monorepo runs.
 
+## [0.16.2] — 2026-09-05
+
+### Security
+
+GitHub's dependency graph reported 57 open dependabot alerts on the public
+mirror (2 critical, 34 high, 15 moderate, 6 low), all against `uv.lock`. None
+were in trw-memory's own runtime `[project.dependencies]` — they arrived
+transitively through optional extras (`mcp`, `embeddings`, `langchain`,
+`llamaindex`, `crewai`, `dev`). 53 of 57 are fixed by raising floors:
+
+- **`cryptography` (direct runtime + `encryption` extra) `>=48.0.1` →
+  `>=50.0.0`** — trw-memory imports it directly in
+  `security/encryption.py`; GHSA-g6cj-pr64-35w5 (Bleichenbacher oracle in
+  PKCS#7 EnvelopedData decryption).
+- **`mcp` extra**: added explicit floors past fastmcp's transitive advisories
+  — `mcp>=1.28.1`, `python-multipart>=0.0.31`, `starlette>=1.3.1`,
+  `joserfc>=1.6.8` (11 alerts: session-auth bypass, WebSocket Host/Origin
+  validation, quadratic-time parsing, request-path/form-limit bypass,
+  HMAC empty-key acceptance).
+- **`embeddings` extra**: added `torch>=2.13.0`, `transformers>=5.10.0`,
+  `setuptools>=83.0.0` past sentence-transformers' transitive floors (3
+  alerts: memory corruption, path traversal, sdist exclusion bypass).
+- **`llamaindex` extra**: added `nltk>=3.10.3` (12 of 13 nltk alerts — path
+  traversal, SSRF, ReDoS, JVM-argument injection, resource exhaustion),
+  `banks>=2.4.5` (path traversal), `pillow>=12.3.0` (13 alerts — heap
+  out-of-bounds writes/reads, decompression-bomb DoS, command injection),
+  `setuptools>=83.0.0`.
+- **`crewai` extra**: added `aiohttp>=3.14.3` (heap read, request smuggling,
+  WebSocket compression), `json-repair>=0.60.1` (unbounded-CPU DoS via
+  circular `$ref`).
+- **`langchain` extra**: added `langsmith>=0.8.18` (arbitrary server-side
+  file read via `TracingMiddleware`).
+- **`dev` extra**: added `msgpack>=1.2.1`, `pip>=26.2.0` (pulled via
+  `pip-audit`'s own transitive deps).
+
+Two classes remain **unfixed upstream, accepted as documented risk**:
+
+- **`chromadb` (critical + 2 high, `crewai` extra)** — GHSA-36p7-vc44-83pf
+  (code injection, CVE-2026-45833), GHSA-2wm9-hf6c-p5cr and
+  GHSA-xph7-9rjv-w5fr (tenant/RBAC isolation bypasses). No published version
+  in the `>=0.4.17,<=1.5.9` range is patched — the prior `chromadb<1.0`
+  comment's premise (that pinning below 1.0 avoided the exposure) was
+  incorrect; 0.6.x is affected too. trw-memory's own code never imports
+  chromadb; only the optional, lazily-imported `crewai` adapter reaches it
+  when a caller opts into CrewAI-backed storage.
+- **`nltk` (1 high of 13, `llamaindex` extra)** — GHSA-8mgp-746c-j5xp
+  (model-artifact APIs bypass pathsec, CVE-2026-81726) has no patched
+  release. trw-memory never calls nltk directly or invokes its model-download
+  APIs.
+
 ## [0.16.1] — 2026-09-05
 
 ### Fixed
