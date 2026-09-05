@@ -48,7 +48,7 @@ class TestSyncE2E:
             await client.close()
 
         reopened = MemoryClient(namespace="default", mode="local")
-        entry = reopened._get_backend().get(stored["memory_id"])
+        entry = reopened._get_backend().get(stored["memory_id"], namespace="default")
         assert entry is not None
         assert entry.published_to_platform is True
         await reopened.close()

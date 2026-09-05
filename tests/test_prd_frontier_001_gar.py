@@ -49,7 +49,7 @@ class TestGraphExpandResults:
         backend.store(MemoryEntry(id="M-A", content="alpha topic"))
         backend.store(MemoryEntry(id="M-B", content="related to alpha"))
         # Add a graph edge A -> B (weight 0.8) using a valid edge type.
-        _upsert_edge(backend._conn, "M-A", "M-B", "related_to", 0.8, _now())
+        _upsert_edge(backend._conn, "M-A", "M-B", "related_to", 0.8, _now(), namespace="default")
 
         class FakeClient:
             _backend = backend
@@ -124,7 +124,7 @@ class TestGraphExpandResults:
         backend = SQLiteBackend(tmp_path / "test.db")
         backend.store(MemoryEntry(id="M-A2", content="a2"))
         backend.store(MemoryEntry(id="M-B2", content="b2"))
-        _upsert_edge(backend._conn, "M-A2", "M-B2", "related_to", 1.0, _now())
+        _upsert_edge(backend._conn, "M-A2", "M-B2", "related_to", 1.0, _now(), namespace="default")
 
         class FakeClient:
             _backend = backend
@@ -147,7 +147,7 @@ class TestGraphExpandResults:
         backend = SQLiteBackend(tmp_path / "test.db")
         backend.store(MemoryEntry(id="M-src", content="source"))
         backend.store(MemoryEntry(id="M-archived", content="archived", status=MemoryStatus.ARCHIVED))
-        _upsert_edge(backend._conn, "M-src", "M-archived", "related_to", 1.0, _now())
+        _upsert_edge(backend._conn, "M-src", "M-archived", "related_to", 1.0, _now(), namespace="default")
 
         class FakeClient:
             _backend = backend
@@ -166,7 +166,7 @@ class TestGraphExpandResults:
         backend.store(MemoryEntry(id="M-r1", content="root one"))
         backend.store(MemoryEntry(id="M-r2", content="root two"))
         backend.store(MemoryEntry(id="M-n", content="neighbour"))
-        _upsert_edge(backend._conn, "M-r2", "M-n", "related_to", 0.5, _now())
+        _upsert_edge(backend._conn, "M-r2", "M-n", "related_to", 0.5, _now(), namespace="default")
 
         class FakeClient:
             _backend = backend
@@ -210,7 +210,7 @@ class TestMemoryClientRecallGraphExpansion:
             e.id for e in backend.list_entries(namespace=memory_client._namespace) if "zzqqxx" in e.content
         )
         other_id = next(i for i in ids if i != anchor_id)
-        _upsert_edge(backend._conn, anchor_id, other_id, "related_to", 1.0, _now())
+        _upsert_edge(backend._conn, anchor_id, other_id, "related_to", 1.0, _now(), namespace="default")
 
         with_expansion = await memory_client.recall("zzqqxx", include_graph_expansion=True)
         ids_with = {r["memory_id"] for r in with_expansion}

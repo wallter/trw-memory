@@ -55,9 +55,9 @@ def test_team_wildcard_promotes_all_discovered_team_namespaces(tmp_path: Path) -
 
     project_backend = create_backend_from_config(cfg, "project:default")
     try:
-        assert project_backend.get("promoted-e1") is not None
-        assert project_backend.get("promoted-e2") is not None
-        assert project_backend.get("promoted-e3") is None
+        assert project_backend.get("promoted-e1", namespace="project:default") is not None
+        assert project_backend.get("promoted-e2", namespace="project:default") is not None
+        assert project_backend.get("promoted-e3", namespace="project:default") is None
     finally:
         project_backend.close()
 

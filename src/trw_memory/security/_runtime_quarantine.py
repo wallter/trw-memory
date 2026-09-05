@@ -40,6 +40,7 @@ import structlog
 from trw_memory.exceptions import QuarantineUnreachableError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.namespaces.validation import DEFAULT_NAMESPACE
 from trw_memory.security.startup import resolve_security_path
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.persistence import lock_for_rmw
@@ -154,27 +155,25 @@ def delete_quarantined_entries(
     with open_quarantine_backend(config) as backend:
         if memory_id is not None:
             # Closure re-audit #1 + #6: the quarantine DB is a single SQLite
-            # store keyed on config (NOT per-namespace), so a blind
-            # ``backend.delete(memory_id)`` would let a caller scoped to one
-            # namespace delete another namespace's row by id — and would also
-            # delete a non-quarantined row that happens to live in the
-            # quarantine DB. Fetch first and gate on both namespace match and
-            # the ``quarantined=true`` flag (same flag set by
-            # ``store_quarantined_entry``).
-            entry = backend.get(memory_id)
+            # store keyed on config (NOT per-namespace), so an unqualified
+            # delete would let a caller scoped to one namespace delete another
+            # namespace's row by id — and would also delete a non-quarantined
+            # row that happens to live in the quarantine DB. Under PRD-CORE-245
+            # FR03 the namespace predicate is carried by the read and the
+            # delete themselves; the ``quarantined=true`` flag (same flag set
+            # by ``store_quarantined_entry``) is still gated here.
+            entry = backend.get(memory_id, namespace=namespace)
             if entry is None:
-                return 0
-            if entry.namespace != namespace:
                 return 0
             if entry.metadata.get("quarantined") != "true":
                 return 0
-            return 1 if backend.delete(memory_id) else 0
+            return 1 if backend.delete(memory_id, namespace=namespace) else 0
         for entry in backend.list_entries(namespace=namespace, limit=10_000):
             if actor is not None and entry.source_identity != actor:
                 continue
             if entry.metadata.get("quarantined") != "true":
                 continue
-            if backend.delete(entry.id):
+            if backend.delete(entry.id, namespace=entry.namespace):
                 deleted += 1
     return deleted
 
@@ -267,13 +266,15 @@ def _review_quarantined_entry_locked(
     namespace: str | None,
 ) -> dict[str, str]:
     """Apply one review while the per-quarantine-store decision lock is held."""
-    active_entry = active_backend.get(learning_id)
-    if active_entry is not None and namespace is not None and active_entry.namespace != namespace:
-        return {"learning_id": learning_id, "status": "not_found"}
+    # PRD-CORE-245 FR03: ``None`` here means "the caller named no namespace",
+    # which resolves to the default namespace rather than an unscoped read —
+    # there is no unqualified read path left. The old pre-check that fetched
+    # the ACTIVE row purely to reject a cross-namespace id is gone: the
+    # quarantine read below is namespace-qualified, so it can no longer match a
+    # foreign row in the first place.
+    effective_namespace = namespace if namespace is not None else DEFAULT_NAMESPACE
     with open_quarantine_backend(config) as quarantine_backend:
-        entry = quarantine_backend.get(learning_id)
-        if entry is not None and namespace is not None and entry.namespace != namespace:
-            return {"learning_id": learning_id, "status": "not_found"}
+        entry = quarantine_backend.get(learning_id, namespace=effective_namespace)
         existing_history = get_status_history(config, learning_id)
         resolved_status = next(
             (item["status"] for item in existing_history if item.get("status") in {"active", "obsolete_poisoned"}),
@@ -295,7 +296,7 @@ def _review_quarantined_entry_locked(
                 }
             )
             active_backend.store(approved)
-            quarantine_backend.delete(learning_id)
+            quarantine_backend.delete(learning_id, namespace=effective_namespace)
             append_review_log(config, learning_id, "active", reviewer_id=reviewer_id)
             return {"learning_id": learning_id, "status": "approved"}
         rejected = entry.model_copy(

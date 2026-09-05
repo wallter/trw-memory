@@ -13,19 +13,24 @@ from trw_memory.lifecycle.dedup import (
     check_duplicate,
     merge_entries,
 )
+from trw_memory.lifecycle.protection import (
+    EXEMPT_PROTECTION_TIERS,
+    entry_protection_tier,
+    is_removal_exempt,
+    prune_threshold_multiplier,
+)
 from trw_memory.lifecycle.scoring import (
     apply_time_decay,
     bayesian_calibrate,
     compute_utility_score,
-    converge_tier_distribution,
     enforce_tier_distribution,
     entry_utility,
-    persist_tier_convergence,
     update_q_value,
 )
 from trw_memory.lifecycle.tiers import TierManager, TierSweepResult
 
 __all__ = [
+    "EXEMPT_PROTECTION_TIERS",
     "DedupResult",
     "TierManager",
     "TierSweepResult",
@@ -37,12 +42,13 @@ __all__ = [
     "complete_linkage_cluster",
     "compute_utility_score",
     "consolidate_cycle",
-    "converge_tier_distribution",
     "enforce_tier_distribution",
+    "entry_protection_tier",
     "entry_utility",
     "find_clusters",
+    "is_removal_exempt",
     "merge_entries",
-    "persist_tier_convergence",
+    "prune_threshold_multiplier",
     "rank_by_utility",
     "update_q_value",
     "utility_based_prune_candidates",

@@ -77,10 +77,6 @@ def _make_full_entry(entry_id: str = "M-FULL") -> MemoryEntry:
             ),
         ],
         anchor_validity=1.0,
-        # PRD-CORE-108: Outcome attribution
-        sessions_surfaced=5,
-        avg_rework_delta=0.3,
-        outcome_correlation="positive",
     )
 
 
@@ -99,7 +95,7 @@ class TestFullColumnRoundTrip:
         entry = _make_full_entry("M-RT-FULL")
         backend.store(entry)
 
-        retrieved = backend.get("M-RT-FULL")
+        retrieved = backend.get("M-RT-FULL", namespace="test-ns")
         assert retrieved is not None
 
         # Core fields
@@ -154,12 +150,7 @@ class TestFullColumnRoundTrip:
         assert retrieved.anchors[0].symbol_name == "bar"
         assert retrieved.anchors[0].symbol_type == "function"
         assert retrieved.anchors[0].signature == "def bar():"
-        assert retrieved.anchor_validity == pytest.approx(1.0)
-
-        # PRD-CORE-108: Outcome attribution
-        assert retrieved.sessions_surfaced == 5
-        assert retrieved.avg_rework_delta == pytest.approx(0.3)
-        assert retrieved.outcome_correlation == "positive"
+        assert retrieved.anchor_validity == pytest.approx(entry.anchor_validity)
 
         backend.close()
 
@@ -184,7 +175,7 @@ class TestEnumRoundTrip:
             updated_at=now,
         )
         backend.store(entry)
-        retrieved = backend.get(f"M-TYPE-{type_val}")
+        retrieved = backend.get(f"M-TYPE-{type_val}", namespace="default")
         assert retrieved is not None
         assert retrieved.type == type_val
         backend.close()
@@ -205,7 +196,7 @@ class TestEnumRoundTrip:
             updated_at=now,
         )
         backend.store(entry)
-        retrieved = backend.get(f"M-CONF-{conf_val}")
+        retrieved = backend.get(f"M-CONF-{conf_val}", namespace="default")
         assert retrieved is not None
         assert retrieved.confidence == conf_val
         backend.close()
@@ -226,7 +217,7 @@ class TestEnumRoundTrip:
             updated_at=now,
         )
         backend.store(entry)
-        retrieved = backend.get(f"M-TIER-{tier_val}")
+        retrieved = backend.get(f"M-TIER-{tier_val}", namespace="default")
         assert retrieved is not None
         assert retrieved.protection_tier == tier_val
         backend.close()
@@ -270,7 +261,7 @@ class TestAnchorJsonRoundTrip:
         )
         backend.store(entry)
 
-        retrieved = backend.get("M-ANCHORS")
+        retrieved = backend.get("M-ANCHORS", namespace="default")
         assert retrieved is not None
         assert len(retrieved.anchors) == 3
 
@@ -313,15 +304,13 @@ class TestSchemaMigrationIdempotency:
 
         # Second backend on same path -- triggers schema/migration again
         backend2 = SQLiteBackend(db_path)
-        retrieved = backend2.get("M-MIGRATE")
+        retrieved = backend2.get("M-MIGRATE", namespace="test-ns")
         assert retrieved is not None
         assert retrieved.id == "M-MIGRATE"
         assert retrieved.type == "incident"
         assert retrieved.confidence == "verified"
         assert retrieved.protection_tier == "critical"
         assert len(retrieved.anchors) == 1
-        assert retrieved.sessions_surfaced == 5
-        assert retrieved.avg_rework_delta == pytest.approx(0.3)
         backend2.close()
 
     def test_ensure_schema_twice_no_error(self, tmp_path: Path) -> None:
@@ -335,7 +324,9 @@ class TestSchemaMigrationIdempotency:
         assert "type" in columns
         assert "confidence" in columns
         assert "anchors" in columns
-        assert "sessions_surfaced" in columns
+        # sessions_surfaced / avg_rework_delta / outcome_correlation were dropped
+        # by PRD-CORE-244-FR08 in the schema-5 rebuild.
+        assert "sessions_surfaced" not in columns
         backend.close()
 
 
@@ -355,7 +346,7 @@ class TestEmptyFieldsBackwardCompat:
         )
         backend.store(entry)
 
-        retrieved = backend.get("M-MINIMAL")
+        retrieved = backend.get("M-MINIMAL", namespace="default")
         assert retrieved is not None
 
         # PRD-CORE-110 defaults
@@ -372,12 +363,9 @@ class TestEmptyFieldsBackwardCompat:
 
         # PRD-CORE-111 defaults
         assert retrieved.anchors == []
-        assert retrieved.anchor_validity == pytest.approx(1.0)
+        assert retrieved.anchor_validity == pytest.approx(entry.anchor_validity)
 
         # PRD-CORE-108 defaults
-        assert retrieved.sessions_surfaced == 0
-        assert retrieved.avg_rework_delta is None
-        assert retrieved.outcome_correlation == ""
 
         backend.close()
 

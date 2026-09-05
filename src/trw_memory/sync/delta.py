@@ -71,14 +71,14 @@ class DeltaTracker:
         return hashlib.sha256(raw.encode()).hexdigest()
 
     @staticmethod
-    def mark_dirty(entry_id: str, backend: StorageBackend) -> None:
-        """Mark a single entry as dirty (needs re-sync)."""
-        entry = backend.get(entry_id)
+    def mark_dirty(entry_id: str, backend: StorageBackend, *, namespace: str) -> None:
+        """Mark the ``(namespace, entry_id)`` entry as dirty (needs re-sync)."""
+        entry = backend.get(entry_id, namespace=namespace)
         if entry is None:
             return
         new_seq = entry.sync_seq + 1
         new_hash = DeltaTracker.compute_sync_hash(entry)
-        backend.update(entry_id, sync_seq=new_seq, sync_hash=new_hash, last_synced_at=None)
+        backend.update(entry_id, namespace=namespace, sync_seq=new_seq, sync_hash=new_hash, last_synced_at=None)
 
     @staticmethod
     def get_dirty_entries(backend: StorageBackend, since_seq: int = 0) -> list[MemoryEntry]:
@@ -126,13 +126,13 @@ class DeltaTracker:
         return [e for e in all_entries if e.sync_seq > since_seq and e.last_synced_at is None]
 
     @staticmethod
-    def mark_synced(entry_ids: list[str], backend: StorageBackend) -> int:
-        """Set last_synced_at = now() on successfully pushed entries."""
+    def mark_synced(entry_ids: list[str], backend: StorageBackend, *, namespace: str) -> int:
+        """Set last_synced_at = now() on successfully pushed entries in *namespace*."""
         now = datetime.now(tz=timezone.utc)
         count = 0
         for eid in entry_ids:
             try:
-                result = backend.update(eid, last_synced_at=now)
+                result = backend.update(eid, namespace=namespace, last_synced_at=now)
                 if result is not None:
                     count += 1
             except Exception:

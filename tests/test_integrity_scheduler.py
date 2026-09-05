@@ -108,7 +108,7 @@ def test_on_regression_fires_when_corrupt(tmp_path: Path) -> None:
 
     captured: list[tuple[Path, str]] = []
 
-    def _capture(p: Path, detail: str) -> None:
+    def _capture(p: Path, detail: str, **_kwargs) -> None:
         captured.append((p, detail))
 
     sched = IntegrityScheduler(db, interval_minutes=0, on_regression=_capture)

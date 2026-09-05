@@ -38,8 +38,8 @@ class TestEntryColumnsCount:
         # 56 = 52 prior + 3 bi-temporal validity columns (valid_from,
         # invalid_from, invalidated_by) from PRD-CORE-194 (commit 59439beb6)
         # + verification_status from PRD-CORE-231-FR02.
-        assert len(ENTRY_COLUMNS) == 56
-        assert ENTRY_COLUMNS[-1] == "verification_status"
+        assert len(ENTRY_COLUMNS) == 54
+        assert ENTRY_COLUMNS[-1] == "verification_checked_at"
 
 
 class TestFreshDbSchema:
@@ -54,7 +54,7 @@ class TestFreshDbSchema:
             ]
         )
         backend.store(entry)
-        retrieved = backend.get("M-001")
+        retrieved = backend.get("M-001", namespace="default")
         assert retrieved is not None
         assert len(retrieved.assertions) == 1
         backend.close()
@@ -148,7 +148,7 @@ class TestAssertionsRoundTrip:
         entry = _make_entry(entry_id="M-RT", assertions=assertions)
         backend.store(entry)
 
-        retrieved = backend.get("M-RT")
+        retrieved = backend.get("M-RT", namespace="default")
         assert retrieved is not None
         assert len(retrieved.assertions) == 3
         assert retrieved.assertions[0].type == "grep_present"
@@ -165,7 +165,7 @@ class TestAssertionsRoundTrip:
         entry = _make_entry(entry_id="M-EMPTY")
         backend.store(entry)
 
-        retrieved = backend.get("M-EMPTY")
+        retrieved = backend.get("M-EMPTY", namespace="default")
         assert retrieved is not None
         assert retrieved.assertions == []
         backend.close()
@@ -180,7 +180,7 @@ class TestAssertionsRoundTrip:
         backend.store(entry)
 
         # Retrieve and verify all fields survived
-        retrieved = backend.get("M-TUPLE")
+        retrieved = backend.get("M-TUPLE", namespace="default")
         assert retrieved is not None
         assert retrieved.id == "M-TUPLE"
         assert retrieved.content == "test content"
@@ -235,7 +235,7 @@ class TestAssertionsRoundTrip:
 
         # Open with SQLiteBackend (triggers migration)
         backend = SQLiteBackend(db_path)
-        retrieved = backend.get("M-OLD")
+        retrieved = backend.get("M-OLD", namespace="default")
         assert retrieved is not None
         assert retrieved.assertions == []  # Default empty list
         backend.close()

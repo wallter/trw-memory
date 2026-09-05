@@ -26,6 +26,7 @@ from trw_memory.cli_formatters import (
     format_store_result,
 )
 from trw_memory.cli_json_input import JsonInputError, json_type_name, load_json_array
+from trw_memory.cli_namespace import handle_namespace
 from trw_memory.cli_parser import build_parser
 from trw_memory.cli_storage import (
     handle_consolidate,
@@ -201,6 +202,11 @@ def _handle_snapshot(args: argparse.Namespace) -> int:
 
 
 @_cli_error_boundary
+async def _handle_namespace(args: argparse.Namespace) -> int:
+    return await handle_namespace(args)
+
+
+@_cli_error_boundary
 def _handle_wiki_lint(args: argparse.Namespace) -> int:
     try:
         raw_pages = load_json_array(Path(args.path), source=args.path)
@@ -259,6 +265,7 @@ async def _dispatch(args: argparse.Namespace) -> int:
         "forget": _handle_forget,
         "restore": _handle_restore,
         "snapshot": _handle_snapshot,
+        "namespace": _handle_namespace,
         "wiki-lint": _handle_wiki_lint,
         "code-index": _handle_code_index,
         "code-search": _handle_code_search,

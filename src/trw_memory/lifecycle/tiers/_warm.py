@@ -13,12 +13,21 @@ from typing import TYPE_CHECKING, cast
 
 import structlog
 
+from trw_memory.namespaces.validation import DEFAULT_NAMESPACE
 from trw_memory.storage.persistence import lock_for_rmw
 
 if TYPE_CHECKING:
     from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 logger = structlog.get_logger(__name__)
+
+#: The warm tier is a single-tenant sidecar store: it holds demoted vectors and
+#: a JSONL keyword sidecar for ONE project's hot set, and its rows are never
+#: partitioned by namespace. Schema 5 keys ``vec_index`` on
+#: ``(namespace, entry_id)`` (PRD-CORE-245 FR02), so every warm read and write
+#: uses this one constant — the value is arbitrary but must be identical on
+#: both sides or a demoted vector becomes unreachable.
+WARM_TIER_NAMESPACE = DEFAULT_NAMESPACE
 
 
 class WarmTierStore:
@@ -162,7 +171,7 @@ class WarmTierStore:
             try:
                 backend = self._get_warm_backend(dim=len(embedding))
                 if backend is not None:
-                    backend.upsert_vector(entry_id, embedding)
+                    backend.upsert_vector(entry_id, embedding, namespace=WARM_TIER_NAMESPACE)
             except (OSError, ValueError):
                 logger.debug("warm_tier_vec_upsert_failed", entry_id=entry_id, exc_info=True)
 
@@ -238,8 +247,8 @@ class WarmTierStore:
             backend = self._get_warm_backend()
             if backend is not None:
                 backend_present = True
-                backend.delete(entry_id)
-                vector_deleted = backend.delete_vector(entry_id)
+                backend.delete(entry_id, namespace=WARM_TIER_NAMESPACE)
+                vector_deleted = backend.delete_vector(entry_id, namespace=WARM_TIER_NAMESPACE)
                 vector_removed = vector_deleted or vector_removed
         except (OSError, ValueError):
             logger.debug("warm_tier_db_remove_failed", entry_id=entry_id, exc_info=True)
@@ -252,7 +261,11 @@ class WarmTierStore:
                 backend = self._get_warm_backend()
                 if backend is not None:
                     vector_exists = getattr(backend, "vector_exists", None)
-                    vector_still_present = bool(vector_exists(entry_id)) if callable(vector_exists) else False
+                    vector_still_present = (
+                        bool(vector_exists(entry_id, namespace=WARM_TIER_NAMESPACE))
+                        if callable(vector_exists)
+                        else False
+                    )
                 else:
                     vector_still_present = False
             except (OSError, ValueError):

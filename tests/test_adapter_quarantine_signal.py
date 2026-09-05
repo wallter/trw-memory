@@ -105,7 +105,7 @@ class TestGuardedStoreOrRaise:
         result = guarded_store_or_raise(backend, MemoryEntry(id="M-ok", content="a routine note"), config=gate_config)
         assert isinstance(result, GuardedStoreResult)
         assert result.stored is True
-        assert backend.get("M-ok") is not None
+        assert backend.get("M-ok", namespace="default") is not None
 
 
 class TestAdaptersDoNotSwallowAQuarantine:

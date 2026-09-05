@@ -28,7 +28,7 @@ def test_default_is_none(tmp_path: Path) -> None:
     """A freshly-stored entry records no adverse verdict."""
     backend = SQLiteBackend(tmp_path / "m.db")
     backend.store(_entry())
-    stored = backend.get("M-VS-100")
+    stored = backend.get("M-VS-100", namespace="default")
     assert stored is not None
     assert stored.verification_status is None
 
@@ -39,14 +39,14 @@ def test_persists_stale_on_threshold(tmp_path: Path) -> None:
     backend = SQLiteBackend(db_path)
     backend.store(_entry())
 
-    updated = backend.update("M-VS-100", verification_status="stale")
+    updated = backend.update("M-VS-100", verification_status="stale", namespace="default")
     assert updated is not None
     assert updated.verification_status == "stale"
     backend.close()
 
     # Fresh connection == process restart: the verdict must still be there.
     reopened = SQLiteBackend(db_path)
-    reread = reopened.get("M-VS-100")
+    reread = reopened.get("M-VS-100", namespace="default")
     assert reread is not None
     assert reread.verification_status == "stale"
 
@@ -56,15 +56,15 @@ def test_clearing_writes_null(tmp_path: Path) -> None:
     db_path = tmp_path / "m.db"
     backend = SQLiteBackend(db_path)
     backend.store(_entry())
-    backend.update("M-VS-100", verification_status="stale")
+    backend.update("M-VS-100", verification_status="stale", namespace="default")
 
-    cleared = backend.update("M-VS-100", verification_status=None)
+    cleared = backend.update("M-VS-100", verification_status=None, namespace="default")
     assert cleared is not None
     assert cleared.verification_status is None
     backend.close()
 
     reopened = SQLiteBackend(db_path)
-    reread = reopened.get("M-VS-100")
+    reread = reopened.get("M-VS-100", namespace="default")
     assert reread is not None
     assert reread.verification_status is None
 
@@ -75,9 +75,9 @@ def test_out_of_contract_value_is_rejected(tmp_path: Path) -> None:
     backend.store(_entry())
 
     with pytest.raises(StorageError):
-        backend.update("M-VS-100", verification_status="bogus")
+        backend.update("M-VS-100", verification_status="bogus", namespace="default")
 
-    stored = backend.get("M-VS-100")
+    stored = backend.get("M-VS-100", namespace="default")
     assert stored is not None
     assert stored.verification_status is None
 
@@ -90,7 +90,7 @@ def test_hand_edited_column_degrades_to_none(tmp_path: Path) -> None:
         backend._conn.execute("UPDATE memories SET verification_status = 'wat' WHERE id = ?", ("M-VS-100",))
         backend._conn.commit()
 
-    stored = backend.get("M-VS-100")
+    stored = backend.get("M-VS-100", namespace="default")
     assert stored is not None
     assert stored.verification_status is None
 
@@ -100,7 +100,7 @@ def test_yaml_backend_round_trips_verification_status(tmp_path: Path) -> None:
     backend = YAMLBackend(tmp_path / "entries")
     backend.store(_entry("M-VS-YAML"))
 
-    backend.update("M-VS-YAML", verification_status="stale")
-    reread = YAMLBackend(tmp_path / "entries").get("M-VS-YAML")
+    backend.update("M-VS-YAML", verification_status="stale", namespace="default")
+    reread = YAMLBackend(tmp_path / "entries").get("M-VS-YAML", namespace="default")
     assert reread is not None
     assert reread.verification_status == "stale"

@@ -114,7 +114,7 @@ class TestGraphRelated:
     def test_no_conn_and_backend_has_no_conn_returns_empty(self) -> None:
         """conn=None and backend has no _conn → skip and return [] (lines 167, 169-170)."""
         backend = MagicMock(spec=[])  # no _conn attribute
-        result = _graph_related([{"id": "M-001"}], depth=1, backend=backend, conn=None)
+        result = _graph_related([{"id": "M-001"}], depth=1, backend=backend, conn=None, namespace="default")
         assert result == []
 
     def test_graph_query_sqlite_error_returns_empty(self) -> None:
@@ -123,7 +123,7 @@ class TestGraphRelated:
         mock_conn = MagicMock(spec=sqlite3.Connection)
 
         with patch("trw_memory.tools._recall_helpers.graph_query", side_effect=sqlite3.Error("locked")):
-            result = _graph_related([{"id": "M-001"}], depth=1, backend=backend, conn=mock_conn)
+            result = _graph_related([{"id": "M-001"}], depth=1, backend=backend, conn=mock_conn, namespace="default")
 
         assert result == []
 
@@ -134,7 +134,7 @@ class TestGraphRelated:
         mock_conn = MagicMock(spec=sqlite3.Connection)
 
         with patch("trw_memory.tools._recall_helpers.graph_query", return_value=[{"id": "M-deleted"}]):
-            result = _graph_related([{"id": "M-001"}], depth=1, backend=backend, conn=mock_conn)
+            result = _graph_related([{"id": "M-001"}], depth=1, backend=backend, conn=mock_conn, namespace="default")
 
         assert result == []
 

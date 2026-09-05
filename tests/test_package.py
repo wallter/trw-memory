@@ -244,7 +244,10 @@ def test_pyproject_declares_current_package_contract() -> None:
     classifiers = project["classifiers"]
     assert isinstance(classifiers, list)
 
-    assert pyproject["build-system"] == {"requires": ["hatchling"], "build-backend": "hatchling.build"}
+    assert pyproject["build-system"] == {
+        "requires": ["hatchling>=1.27,<1.29"],
+        "build-backend": "hatchling.build",
+    }
     assert project["name"] == "trw-memory"
     assert project["license"] == "BUSL-1.1"
     assert project["requires-python"] == ">=3.10"

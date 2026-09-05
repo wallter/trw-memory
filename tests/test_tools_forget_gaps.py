@@ -13,7 +13,7 @@ from ._test_tools_support import _make_entry, _mock_backend
 
 class TestForgetStorageErrorPaths:
     def test_storage_error_on_get_logs_warning_and_returns_not_found(self) -> None:
-        """StorageError during backend.get() → warning logged, nothing deleted.
+        """StorageError during backend.get(namespace="default") → warning logged, nothing deleted.
 
         trw-memory-5: a 0-delete now surfaces as not_found rather than a silent
         ok, so the caller can tell nothing was removed.
@@ -87,7 +87,7 @@ class TestRegisterForgetTool:
         registered: dict[str, object] = {}
         mock_mcp = MagicMock()
 
-        def _capture(f):
+        def _capture(f, **_kwargs):
             registered["fn"] = f
             return f
 

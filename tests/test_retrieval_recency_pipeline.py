@@ -8,6 +8,8 @@ from unittest.mock import patch
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.pipeline import hybrid_search
 
+from ._test_scope_support import DEFAULT_SCOPE
+
 
 def _entry(id: str, content: str, days_ago: float = 0.0) -> MemoryEntry:
     now = datetime.now(timezone.utc)
@@ -25,8 +27,8 @@ def _entry(id: str, content: str, days_ago: float = 0.0) -> MemoryEntry:
 class TestRecencyWeightInPipeline:
     def test_recency_weight_zero_is_default_behaviour(self) -> None:
         entries = [_entry(f"e{i}", f"topic {i}") for i in range(10)]
-        result_default = hybrid_search("topic", entries)
-        result_zero = hybrid_search("topic", entries, recency_weight=0.0)
+        result_default = hybrid_search("topic", entries, scope=DEFAULT_SCOPE)
+        result_zero = hybrid_search("topic", entries, recency_weight=0.0, scope=DEFAULT_SCOPE)
         # Both should return same ids (order may vary but count must match)
         assert len(result_default) == len(result_zero)
 
@@ -38,7 +40,7 @@ class TestRecencyWeightInPipeline:
         entries = [old_match, new_match]
         # Without recency: old_match may rank first (better BM25 due to "exact")
         # With high recency: new_match should be boosted
-        result = hybrid_search("target query term", entries, recency_weight=0.9)
+        result = hybrid_search("target query term", entries, recency_weight=0.9, scope=DEFAULT_SCOPE)
         assert len(result) == 2
 
     def test_recency_weight_one_boosts_newest_entry(self) -> None:
@@ -46,26 +48,21 @@ class TestRecencyWeightInPipeline:
         fresh = _entry("fresh", "important knowledge pattern", days_ago=1.0)
         entries = [ancient, fresh]
         # With strong recency, fresh should outrank ancient despite identical text
-        result = hybrid_search("important knowledge", entries, recency_weight=0.9)
+        result = hybrid_search("important knowledge", entries, recency_weight=0.9, scope=DEFAULT_SCOPE)
         assert result[0].id == "fresh"
 
     def test_recency_weight_works_without_embedder(self) -> None:
         entries = [_entry(f"e{i}", f"query content {i}", days_ago=i * 10) for i in range(5)]
-        result = hybrid_search("query content", entries, recency_weight=0.5)
+        result = hybrid_search("query content", entries, recency_weight=0.5, scope=DEFAULT_SCOPE)
         assert len(result) > 0
 
     def test_recency_halflife_parameter_accepted(self) -> None:
         entries = [_entry(f"e{i}", f"content {i}", days_ago=i * 5) for i in range(5)]
-        result = hybrid_search(
-            "content",
-            entries,
-            recency_weight=0.3,
-            recency_halflife_days=7.0,
-        )
+        result = hybrid_search("content", entries, recency_weight=0.3, recency_halflife_days=7.0, scope=DEFAULT_SCOPE)
         assert len(result) > 0
 
     def test_empty_entries_returns_empty_with_recency(self) -> None:
-        result = hybrid_search("query", [], recency_weight=0.5)
+        result = hybrid_search("query", [], recency_weight=0.5, scope=DEFAULT_SCOPE)
         assert result == []
 
     def test_recency_blend_ties_use_deterministic_relevance_order(self) -> None:
@@ -79,7 +76,7 @@ class TestRecencyWeightInPipeline:
             patch("trw_memory.retrieval.pipeline.rrf_fuse", return_value=[("b", 1.0), ("a", 1.0)]),
             patch("trw_memory.retrieval.pipeline.recency_rank", return_value=[("a", 1.0), ("b", 1.0)]),
         ):
-            result = hybrid_search("same topic", entries, recency_weight=0.5)
+            result = hybrid_search("same topic", entries, recency_weight=0.5, scope=DEFAULT_SCOPE)
 
         assert [entry.id for entry in result] == ["b", "a"]
 
@@ -87,30 +84,25 @@ class TestRecencyWeightInPipeline:
 class TestRerankInPipeline:
     def test_rerank_false_default_unchanged_behaviour(self) -> None:
         entries = [_entry(f"e{i}", f"content {i}") for i in range(5)]
-        result = hybrid_search("content", entries, rerank=False)
+        result = hybrid_search("content", entries, rerank=False, scope=DEFAULT_SCOPE)
         assert len(result) > 0
 
     def test_rerank_true_returns_same_count(self) -> None:
         entries = [_entry(f"e{i}", f"content {i}") for i in range(5)]
-        result_no_rerank = hybrid_search("content", entries, rerank=False)
-        result_rerank = hybrid_search("content", entries, rerank=True)
+        result_no_rerank = hybrid_search("content", entries, rerank=False, scope=DEFAULT_SCOPE)
+        result_rerank = hybrid_search("content", entries, rerank=True, scope=DEFAULT_SCOPE)
         assert len(result_rerank) == len(result_no_rerank)
 
     def test_rerank_candidates_limits_reranked_set(self) -> None:
         entries = [_entry(f"e{i}", f"content {i}") for i in range(20)]
         # Should not raise even with rerank_candidates < len(entries)
-        result = hybrid_search("content", entries, rerank=True, rerank_candidates=5, top_k=10)
+        result = hybrid_search("content", entries, rerank=True, rerank_candidates=5, top_k=10, scope=DEFAULT_SCOPE)
         assert len(result) <= 10
 
     def test_rerank_combined_with_recency(self) -> None:
         entries = [_entry(f"e{i}", f"content {i}", days_ago=i * 7) for i in range(6)]
         result = hybrid_search(
-            "content",
-            entries,
-            recency_weight=0.3,
-            rerank=True,
-            rerank_candidates=4,
-            top_k=3,
+            "content", entries, recency_weight=0.3, rerank=True, rerank_candidates=4, top_k=3, scope=DEFAULT_SCOPE
         )
         assert len(result) <= 3
 
@@ -125,23 +117,20 @@ class TestRecencyNowParameter:
         entry_new = MemoryEntry(id="new", content="kitchen appliance purchase", valid_from=base - timedelta(days=400))
         # With recency_now=base: entry_old (3 days before base) should outrank entry_new (400 days before base)
         result = hybrid_search(
-            "kitchen appliance",
-            [entry_old, entry_new],
-            recency_weight=0.9,
-            recency_now=base,
+            "kitchen appliance", [entry_old, entry_new], recency_weight=0.9, recency_now=base, scope=DEFAULT_SCOPE
         )
         ids = [e.id for e in result]
         assert ids[0] == "old", f"Expected 'old' first but got {ids}"
 
     def test_recency_now_none_defaults_to_wall_clock(self) -> None:
         entries = [_entry(f"e{i}", f"content {i}", days_ago=i * 10) for i in range(5)]
-        result_default = hybrid_search("content", entries, recency_weight=0.3, recency_now=None)
-        result_explicit = hybrid_search("content", entries, recency_weight=0.3)
+        result_default = hybrid_search("content", entries, recency_weight=0.3, recency_now=None, scope=DEFAULT_SCOPE)
+        result_explicit = hybrid_search("content", entries, recency_weight=0.3, scope=DEFAULT_SCOPE)
         assert len(result_default) == len(result_explicit)
 
     def test_recency_now_ignored_when_recency_weight_zero(self) -> None:
         base = datetime(2020, 1, 1, tzinfo=timezone.utc)
         entries = [_entry(f"e{i}", f"content {i}") for i in range(5)]
-        result_now = hybrid_search("content", entries, recency_weight=0.0, recency_now=base)
-        result_no_now = hybrid_search("content", entries, recency_weight=0.0)
+        result_now = hybrid_search("content", entries, recency_weight=0.0, recency_now=base, scope=DEFAULT_SCOPE)
+        result_no_now = hybrid_search("content", entries, recency_weight=0.0, scope=DEFAULT_SCOPE)
         assert len(result_now) == len(result_no_now)

@@ -20,9 +20,7 @@ from trw_memory.storage.sqlite_backend import SQLiteBackend
 # ---------------------------------------------------------------------------
 
 
-def precision_at_k(
-    retrieved_ids: list[str], relevant_ids: set[str], k: int
-) -> float:
+def precision_at_k(retrieved_ids: list[str], relevant_ids: set[str], k: int) -> float:
     """Precision@K: fraction of top-K results that are relevant.
 
     Args:
@@ -42,9 +40,7 @@ def precision_at_k(
     return relevant_count / len(top_k)
 
 
-def recall_at_k(
-    retrieved_ids: list[str], relevant_ids: set[str], k: int
-) -> float:
+def recall_at_k(retrieved_ids: list[str], relevant_ids: set[str], k: int) -> float:
     """Recall@K: fraction of relevant docs found in top-K.
 
     Args:
@@ -91,15 +87,11 @@ def mean_reciprocal_rank(
     """
     if not queries_results:
         return 0.0
-    total = sum(
-        reciprocal_rank(ret, rel) for ret, rel in queries_results
-    )
+    total = sum(reciprocal_rank(ret, rel) for ret, rel in queries_results)
     return total / len(queries_results)
 
 
-def ndcg_at_k(
-    retrieved_ids: list[str], relevant_ids: set[str], k: int
-) -> float:
+def ndcg_at_k(retrieved_ids: list[str], relevant_ids: set[str], k: int) -> float:
     """NDCG@K: Normalized Discounted Cumulative Gain.
 
     Uses binary relevance: 1 if in relevant_ids, 0 otherwise.
@@ -177,7 +169,7 @@ class QualityBenchmark:
                     content=str(ge["content"]),
                     tags=[str(t) for t in ge["tags"]],
                     importance=float(ge["importance"]),
-                    namespace="golden",
+                    namespace="project:golden",
                     created_at=now,
                     updated_at=now,
                     source="golden-set",
@@ -203,35 +195,21 @@ class QualityBenchmark:
                     results = search_backend_entries(
                         backend,
                         query_str,
-                        namespace="golden",
+                        namespace="project:golden",
                         candidate_limit=len(golden_entries),
                         top_k=10,
                     )
                     retrieved_ids = [r.id for r in results]
                     relevant_set = {entry_id}
 
-                    all_precisions.append(
-                        precision_at_k(retrieved_ids, relevant_set, 5)
-                    )
-                    all_recalls.append(
-                        recall_at_k(retrieved_ids, relevant_set, 10)
-                    )
-                    all_ndcgs.append(
-                        ndcg_at_k(retrieved_ids, relevant_set, 10)
-                    )
+                    all_precisions.append(precision_at_k(retrieved_ids, relevant_set, 5))
+                    all_recalls.append(recall_at_k(retrieved_ids, relevant_set, 10))
+                    all_ndcgs.append(ndcg_at_k(retrieved_ids, relevant_set, 10))
                     mrr_data.append((retrieved_ids, relevant_set))
 
-            avg_precision = (
-                sum(all_precisions) / len(all_precisions)
-                if all_precisions
-                else 0.0
-            )
-            avg_recall = (
-                sum(all_recalls) / len(all_recalls) if all_recalls else 0.0
-            )
-            avg_ndcg = (
-                sum(all_ndcgs) / len(all_ndcgs) if all_ndcgs else 0.0
-            )
+            avg_precision = sum(all_precisions) / len(all_precisions) if all_precisions else 0.0
+            avg_recall = sum(all_recalls) / len(all_recalls) if all_recalls else 0.0
+            avg_ndcg = sum(all_ndcgs) / len(all_ndcgs) if all_ndcgs else 0.0
             mrr_val = mean_reciprocal_rank(mrr_data)
 
             return {

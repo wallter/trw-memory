@@ -75,18 +75,18 @@ class TestBulkStoreUpdatePath:
         """entry_id matches existing entry → model_copy update path (line 194)."""
         store_result = await isolated_client.store("original content", detail="original", evidence=["proof"])
         memory_id = store_result["memory_id"]
-        original = isolated_client._get_backend().get(memory_id)
+        original = isolated_client._get_backend().get(memory_id, namespace=isolated_client._namespace)
         assert original is not None
         req = BulkStoreRequest(content="updated content", detail="new detail", entry_id=memory_id)
         summary = await isolated_client.bulk_store([req])
         assert summary.updated == 1
-        updated = isolated_client._get_backend().get(memory_id)
+        updated = isolated_client._get_backend().get(memory_id, namespace=isolated_client._namespace)
         assert updated is not None
         assert updated.content == "updated content"
         assert updated.evidence == ["proof"]
         assert updated.vector_clock != original.vector_clock
 
-    async def test_update_rejects_entry_in_another_namespace(self, tmp_path) -> None:
+    async def test_store_of_a_colliding_id_creates_a_second_row(self, tmp_path) -> None:
         from trw_memory.models.memory import MemoryEntry
 
         db_path = tmp_path / "shared.db"
@@ -97,12 +97,20 @@ class TestBulkStoreUpdatePath:
             with patch.object(other, "_get_embedder", return_value=MagicMock()):
                 summary = await other.bulk_store([BulkStoreRequest(content="other content", entry_id="M-shared")])
 
-            assert summary.rejected == 1
-            assert summary.items[0].skipped_reason == "entry_not_found"
-            stored = owner._get_backend().get("M-shared")
+            # PRD-CORE-245 FR01: identity is (namespace, id). The same id in a
+            # second namespace is a DIFFERENT row, so this stores rather than
+            # rejecting — and, critically, the owner's row is untouched. Before
+            # schema 5 this same call replaced the owner's row outright, which is
+            # the silent data loss the composite key exists to remove.
+            assert summary.rejected == 0
+            assert summary.stored == 1
+            stored = owner._get_backend().get("M-shared", namespace="project:owner")
             assert stored is not None
             assert stored.content == "owner content"
             assert stored.namespace == "project:owner"
+            other_row = other._get_backend().get("M-shared", namespace="project:other")
+            assert other_row is not None
+            assert other_row.content == "other content"
         finally:
             await owner.close()
             await other.close()

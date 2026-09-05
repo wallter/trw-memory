@@ -75,6 +75,25 @@ class _SecurityConfigMixin(BaseModel):
     )
     rate_limit_state_path: str = Field(default="", description="Path to the persisted write-rate limiter state file")
 
+    # Embedding remote-code consent (PRD-SEC-014-FR02)
+    embedding_trust_remote_code: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "embedding_trust_remote_code",
+            "memory_embedding_trust_remote_code",
+        ),
+        description=(
+            "Permit the embedding loader to execute Python modules shipped by the "
+            "model repository (sentence-transformers' trust_remote_code). Default "
+            "False, and the shipped default model needs no remote code, so the "
+            "secure default is also the working default. This is the ONLY input to "
+            "that decision: until PRD-SEC-014 a model-name substring test opted a "
+            "deployment into arbitrary Hub-fetched code execution, so a config edit "
+            "naming a vendor model was sufficient. Setting it True executes code "
+            "downloaded from huggingface.co with your process's privileges."
+        ),
+    )
+
     # Recovery policy (PRD-CORE-138)
     memory_recovery_policy: Literal["strict", "empty_ok"] = Field(
         default="strict",

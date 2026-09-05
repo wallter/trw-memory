@@ -229,3 +229,50 @@ def test_store_round_trip_then_recall_filter(tmp_path: Path) -> None:
     entries = backend.list_entries(limit=100)
     kept = apply_validity_prior(entries)
     assert {e.id for e in kept} == {"B"}
+
+
+# ---------------------------------------------------------------------------
+# PRD-CORE-244 FR05 — an expired record demotes exactly like a superseded one
+# ---------------------------------------------------------------------------
+
+
+def _expiring(entry_id: str, expires: str) -> MemoryEntry:
+    return MemoryEntry(id=entry_id, content=f"c {entry_id}", created_at=T0, valid_from=T0, expires=expires)
+
+
+class TestExpiryDemotesLikeSupersession:
+    """``expires`` was measured non-empty on 0 of 9,366 rows, and the two ranking
+    paths disagreed about what it means: ``trw_mcp.scoring._decay`` floored an
+    expired entry's utility at 0.01 while ``_is_open_at`` still called it an open
+    record. They now agree."""
+
+    def test_expired_state_learning_demoted_below_open(self) -> None:
+        expired = _expiring("m-expired", "2020-01-01")
+        open_record = _open("m-open")
+
+        # Default: excluded outright, exactly like a superseded record.
+        assert apply_validity_prior([expired, open_record]) == [open_record]
+
+        # include_superseded: appended AFTER every open record, even though it
+        # was ranked FIRST by fusion.
+        assert apply_validity_prior([expired, open_record], include_superseded=True) == [open_record, expired]
+
+    def test_entry_expiring_today_is_still_open(self) -> None:
+        """Day-exclusive boundary, matching ``today > expires_date`` exactly."""
+        today = datetime.now(timezone.utc).date().isoformat()
+        entry = _expiring("m-today", today)
+        assert apply_validity_prior([entry]) == [entry]
+
+    def test_expiry_is_evaluated_against_as_of_not_now(self) -> None:
+        """OQ-04: a caller asking what was believed at T gets what was unexpired at T."""
+        entry = _expiring("m-window", "2026-01-02")
+        assert apply_validity_prior([entry], as_of=T0) == [entry]
+        assert apply_validity_prior([entry], as_of=T2) == []
+
+    def test_datetime_shaped_expires_is_parsed(self) -> None:
+        assert apply_validity_prior([_expiring("m-dt", "2020-01-01T00:00:00+00:00")]) == []
+
+    def test_empty_or_unparseable_expires_never_expires(self) -> None:
+        """A value nobody can read must not silently retire a record."""
+        assert apply_validity_prior([_expiring("m-blank", "")]) != []
+        assert apply_validity_prior([_expiring("m-junk", "when the migration lands")]) != []

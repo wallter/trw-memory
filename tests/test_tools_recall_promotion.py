@@ -42,7 +42,7 @@ class TestMemoryRecallImpl:
             memories = cast("list[dict[str, object]]", result["memories"])
             assert any(memory["id"] == "M-tool-cold" for memory in memories)
             assert not cold_file.exists()
-            assert backend.get("M-tool-cold") is not None
+            assert backend.get("M-tool-cold", namespace="project:default") is not None
             warm_ids = [str(item["id"]) for item in manager.warm_search(["tool"], None)]
             assert "M-tool-cold" in warm_ids
 
@@ -54,7 +54,7 @@ class TestMemoryRecallImpl:
             def __init__(self) -> None:
                 self.vectors: dict[str, list[float]] = {}
 
-            def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:
+            def upsert_vector(self, entry_id: str, embedding: list[float], *, namespace: str = "default") -> None:
                 self.vectors[entry_id] = embedding
 
         cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
@@ -124,7 +124,7 @@ class TestMemoryRecallImpl:
             memories = cast("list[dict[str, object]]", result["memories"])
             assert not any(memory["id"] == "M-tool-cold-fail" for memory in memories)
             assert cold_file.exists()
-            assert backend.get("M-tool-cold-fail") is None
+            assert backend.get("M-tool-cold-fail", namespace="default") is None
 
     def test_recall_does_not_leave_sqlite_canonical_copy_when_promotion_fails(self, tmp_path: Path) -> None:
         from trw_memory.lifecycle.tiers._runtime import get_tier_manager
@@ -165,7 +165,7 @@ class TestMemoryRecallImpl:
             memories = cast("list[dict[str, object]]", result["memories"])
             assert not any(memory["id"] == "M-tool-cold-sqlite-fail" for memory in memories)
             assert cold_file.exists()
-            assert backend.get("M-tool-cold-sqlite-fail") is None
+            assert backend.get("M-tool-cold-sqlite-fail", namespace="default") is None
 
     def test_recall_does_not_leave_sqlite_canonical_copy_when_archive_delete_fails(
         self,
@@ -193,7 +193,7 @@ class TestMemoryRecallImpl:
 
             original_unlink = Path.unlink
 
-            def _fail_archive_delete(path: Path, *, missing_ok: bool = False) -> None:
+            def _fail_archive_delete(path: Path, *, missing_ok: bool = False, **_kwargs) -> None:
                 if path == cold_file:
                     raise OSError("archive delete failed")
                 original_unlink(path, missing_ok=missing_ok)
@@ -212,7 +212,7 @@ class TestMemoryRecallImpl:
             memories = cast("list[dict[str, object]]", result["memories"])
             assert not any(memory["id"] == "M-tool-cold-sqlite-unlink-fail" for memory in memories)
             assert cold_file.exists()
-            assert backend.get("M-tool-cold-sqlite-unlink-fail") is None
+            assert backend.get("M-tool-cold-sqlite-unlink-fail", namespace="default") is None
 
     def test_recall_force_deletes_yaml_canonical_copy_when_primary_rollback_delete_fails(
         self,
@@ -240,12 +240,12 @@ class TestMemoryRecallImpl:
 
             original_unlink = Path.unlink
 
-            def _fail_archive_delete(path: Path, *, missing_ok: bool = False) -> None:
+            def _fail_archive_delete(path: Path, *, missing_ok: bool = False, **_kwargs) -> None:
                 if path == cold_file:
                     raise OSError("archive delete failed")
                 original_unlink(path, missing_ok=missing_ok)
 
-            def _fail_primary_delete(_entry_id: str) -> bool:
+            def _fail_primary_delete(_entry_id: str, **_kwargs) -> bool:
                 raise OSError("primary rollback delete failed")
 
             monkeypatch.setattr(Path, "unlink", _fail_archive_delete)
@@ -263,7 +263,7 @@ class TestMemoryRecallImpl:
             memories = cast("list[dict[str, object]]", result["memories"])
             assert not any(memory["id"] == "M-tool-cold-yaml-double-fail" for memory in memories)
             assert cold_file.exists()
-            assert backend.get("M-tool-cold-yaml-double-fail") is None
+            assert backend.get("M-tool-cold-yaml-double-fail", namespace="default") is None
 
     def test_recall_force_deletes_sqlite_canonical_copy_when_primary_rollback_delete_fails(
         self,
@@ -291,12 +291,12 @@ class TestMemoryRecallImpl:
 
             original_unlink = Path.unlink
 
-            def _fail_archive_delete(path: Path, *, missing_ok: bool = False) -> None:
+            def _fail_archive_delete(path: Path, *, missing_ok: bool = False, **_kwargs) -> None:
                 if path == cold_file:
                     raise OSError("archive delete failed")
                 original_unlink(path, missing_ok=missing_ok)
 
-            def _fail_primary_delete(_entry_id: str) -> bool:
+            def _fail_primary_delete(_entry_id: str, **_kwargs) -> bool:
                 raise OSError("primary rollback delete failed")
 
             monkeypatch.setattr(Path, "unlink", _fail_archive_delete)
@@ -314,4 +314,4 @@ class TestMemoryRecallImpl:
             memories = cast("list[dict[str, object]]", result["memories"])
             assert not any(memory["id"] == "M-tool-cold-sqlite-double-fail" for memory in memories)
             assert cold_file.exists()
-            assert backend.get("M-tool-cold-sqlite-double-fail") is None
+            assert backend.get("M-tool-cold-sqlite-double-fail", namespace="default") is None

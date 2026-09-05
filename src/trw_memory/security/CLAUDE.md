@@ -120,4 +120,4 @@ cd trw-memory
 
 - PRD: `docs/requirements-aare-f/prds/agentic-hpo/PRD-SEC-001-memory-poisoning-defense.md`
 - Sprint: `docs/requirements-aare-f/sprints/active/sprint-96-agentic-hpo-foundation.md`
-- Governance: `docs/research/agentic-hpo/governance-mapping-2026.md`
+- Governance: the agentic-HPO governance mapping (2026) in the TRW monorepo research notes

@@ -210,7 +210,7 @@ def test_regression_healthy_db_open_unchanged(tmp_path: Path) -> None:
     backend2 = SQLiteBackend(db_path)
     assert backend2.recovered is False
     assert backend2.integrity_warning is False
-    entry = backend2.get("L-ok")
+    entry = backend2.get("L-ok", namespace="default")
     assert entry is not None
     assert entry.content == "healthy"
     backend2.close()

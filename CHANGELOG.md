@@ -2,6 +2,464 @@
 
 All notable changes to the TRW Memory package.
 
+## [Unreleased]
+
+### Added
+
+- **`pytest -n auto`/`-n logical`/`-n >4` now refuses to run** (`tests/conftest.py`
+  `pytest_configure`, exit code 3) instead of silently fanning out — a 2026-09-05
+  kernel OOM (191 pytest workers across several packages, ~109GB RSS) was caused
+  by a direct `pytest -n auto` invocation bypassing the Makefile's
+  `PYTEST_WORKERS ?= 4` default. Override with `TRW_PYTEST_ALLOW_WIDE_XDIST=1`.
+  The same cap applies to every package suite this monorepo runs.
+
+## [0.16.0] — 2026-09-03
+
+### Fixed
+
+- **A CUDA failure at embedding-model load now retries on CPU.** With another process holding the GPU (a vLLM server, measured at 96.8 of 97.9 GB), `SentenceTransformer` raised `CUDA error: out of memory` and the provider reported embeddings unavailable for the whole session, silently degrading recall to keyword-only. The load now catches CUDA runtime errors, logs `embedding_model_cuda_fallback_cpu`, and constructs the encoder with `device="cpu"`; non-CUDA runtime errors keep the old failure path.
+- **Build backend pinned to `hatchling>=1.27,<1.29`.** The 2026-09-05 release rehearsal found an unpinned build resolving hatchling 1.32.0, which stamps `Metadata-Version: 2.5` — rejected by twine 7.0 / packaging 26.3 (`'2.5' is not a valid metadata version`) while every previously published wheel carries 2.4. Pinned so the published artifacts match what the upload validators accept.
+- **Tag-neighbour derivation no longer hides storage failures.** Only a pre-schema-5 missing `memory_tags` table degrades to "no neighbours"; a locked or drifted store now raises instead of reading as an empty graph.
+- **Remote fetch reports why it returned nothing.** `fetch_shared_memories` returns `SharedFetchResult` (`status`, `fetched`, `refused`); "nothing matched", "sync disabled", "the platform did not answer" and "the admission gate refused everything" are no longer the same empty list. **Breaking**: the return type changed from `list[dict]`.
+- **Recall says when its scope was narrowed.** A refused or expired additional namespace adds `partial: true` and `namespaces_omitted` counts to the recall payload.
+- **A YAML row with unparseable verification evidence is no longer silent.** One malformed anchor no longer discards the rest; partial parses log at WARNING and `update()` refuses to rewrite the row rather than erasing the evidence.
+- **A broken git no longer re-keys a worktree's namespace.** Identity falls back to the repository's on-disk evidence, and `memory_namespace_diagnose` / `trw-memory namespace doctor` report `identity_degraded` when even that is unreadable.
+- **Concurrent openers no longer each re-run the whole schema-5 rebuild.** `ensure_schema` read `PRAGMA user_version` *before* taking its `BEGIN IMMEDIATE` write lock, so every process that sampled the pre-migration version went on to run the full migration storm — six stdio servers booting against one store right after an upgrade measured six rebuilds (three for three), converging only because the rebuild happens to be idempotent. The version is now re-read inside the transaction and the rebuild is skipped when another opener already applied it; the read outside stays as a fast path that never decides alone. A write lock that cannot be acquired within the connection's `busy_timeout` now raises the new `SchemaLockError` instead of falling through to "assume current". The pre-migration snapshot moved inside the same lock (copying through a sibling read handle, since the online-backup API hangs on a connection holding a write transaction), so exactly one restore point is written per migration rather than one per racing opener, all to the same second-stamped filename. Measured on a 9,434-row / 237 MB store with six concurrent openers: cold-open median 27.8 s → 4.7 s, rebuild invocations 6 → 1; re-measured after the fix was restored from a lost session (a full test suite running concurrently): rebuilds 1, snapshots 1, median open 7.3 s, max 8.4 s, zero errors. (PRD-CORE-244 NFR02)
+- **A store whose rows cannot be counted is no longer migrated without a snapshot.** The pre-migration row probe swallowed every SQLite error and answered "empty", so a locked store, a disk fault or a corrupt page looked identical to a fresh bootstrap, and the destructive schema-5 delta then rewrote a populated store with no way back. Only "no such table" counts as empty now; anything else refuses the migration and names the cause. (PRD-CORE-245 NFR02)
+- **A daemon record or token that cannot be read is no longer treated as absent.** An unparseable `daemon.json` let a second daemon bind a port over a live one (two writers on one `memory.db`), and an unreadable `daemon-token` (a planted symlink, a permission change, non-UTF-8 bytes) was silently replaced, locking every client out of the running daemon. Discovery reads are now three-valued and the claimant and client refuse on the middle value; token generation happens only when the file genuinely does not exist. (PRD-CORE-253 FR03/FR08)
+- **`verification_status` gained a positive value.** The column accepted only
+  `"stale"`, so a `None` meant both "checked and healthy" and "never checked" —
+  the state of all 9,366 rows in the reference store. `MemoryEntry`,
+  `VERIFICATION_STATUS_VALUES` and `parse_verification_status` now round-trip
+  `"verified"` as well; paired with `verification_checked_at`, the three states
+  are finally distinguishable. Any value outside the vocabulary is still
+  rejected at write time and read back as `None`. (PRD-CORE-244 FR03)
+
+- **`anchor_validity` round-trips a NULL as "never assessed".** The column,
+  model default and row mapper already agreed on `None`; this release pins that
+  contract with a real store round trip, so an entry stored with no anchors can
+  never regain the old `1.0` default that reported a perfect anchor score for
+  code nothing had ever verified. (PRD-CORE-244 FR01)
+
+- **A namespace merge no longer strands rows behind a window of conflicts.**
+  `merge_namespace` paged its source with a plain `list_entries(limit=...)`
+  window and de-duplicated in memory. Because a skipped conflict stays in the
+  source, any pass that moved nothing re-read the identical window, emptied it
+  against the seen-set, and broke out of the loop — leaving every movable row
+  ranked below that window behind while still returning `status="merged"`.
+  `list_entries` now takes a typed `after=EntryCursor` keyset position and
+  orders by `updated_at DESC, id DESC`, so the window advances past conflicts on
+  its own; and a merge verifies the source holds exactly the rows it skipped,
+  rolling back and raising `StorageError` rather than reporting a partial merge
+  as a success.
+
+- **A whole-namespace delete now purges vectors in bind chunks instead of one
+  entry at a time.** `delete_namespace` looped `delete_vector_internal` per
+  entry — a SELECT plus two DELETEs each, 3N statements — while every other
+  sidecar cleanup in the same transaction (`purge_edges_for`,
+  `purge_tag_postings_for`) already issued one chunked `IN`-clause DELETE. The
+  new `_vector_ops.purge_vectors_for` matches its siblings: two statements per
+  bind chunk, same lock and same deferred COMMIT, so the S8 atomicity invariant
+  is unchanged.
+
+- **The pre-migration snapshot no longer leaves its destination connection
+  open.** `with sqlite3.connect(...)` is a *transaction* context manager, not a
+  closing one: it commits and leaves the connection alive. On the path that
+  matters — a snapshot that fails, where the module raises `SchemaBackupError`
+  `from` the original error — the chained traceback pins the frame that still
+  references that connection, so a descriptor on a half-written backup file
+  outlives the refused migration. `contextlib.closing` now closes it on every
+  path.
+
+### Changed
+
+- **A resetting WAL checkpoint is now refused outright on SQLite below 3.51.3,
+  and the refusal says why.** `normalize_mode` already downgraded
+  `TRUNCATE`/`RESTART` to `PASSIVE` on an engine carrying the WAL-reset bug;
+  what changes is that there is now no way for a caller to opt out of that, and
+  that the coercion is no longer silent. An earlier iteration of PRD-CORE-248
+  added a `sole_writer` certification plus a bounded `BEGIN EXCLUSIVE` probe to
+  permit a reset; review reversed it, because SQLite refuses
+  `PRAGMA wal_checkpoint` inside a transaction, so the probe proves exclusivity
+  at acquisition and cannot hold it across the reset — leaving a real
+  two-connection window against a corruption class this project has already
+  suffered once. `normalize_mode`, `run_checkpoint` and
+  `SQLiteBackend.checkpoint_wal` therefore take no permit parameter of any kind,
+  and a resetting request on an unsafe engine emits
+  `wal_reset_refused_unsafe_engine` naming the remedy (upgrade to SQLite
+  >= 3.51.3, e.g. a `pysqlite3` wheel bundling it). The cost is stated rather
+  than hidden: `PASSIVE` writes frames back but never truncates, so on such an
+  engine the WAL settles at `journal_size_limit` (64 MiB) while trw-mcp's 10 MB
+  checkpoint trigger keeps firing — the two numbers now cross-reference each
+  other in `_connection.py` and `_wal_checkpoint.py` so the gap reads as the
+  documented consequence it is. (PRD-CORE-248 FR04, OQ-1 closed by refusal)
+
+### Changed (BREAKING)
+
+- **A namespace is now part of a memory row's identity, not a label attached
+  after the fact.** One database file already held two namespaces, so a bare id
+  never identified a row: `INSERT OR REPLACE` let a store of a colliding id in a
+  second namespace replace the first row outright, taking its full-text row and
+  its vector with it. Schema 5 re-keys `memories` on `PRIMARY KEY (namespace,
+  id)` and gives every id-referencing sidecar the same discriminator, so the
+  same id in two namespaces is two rows. The migration is forward-only,
+  idempotent, and runs in one transaction; it snapshots the store first and
+  refuses to run if the snapshot cannot be written. Measured on a 9,375-row
+  186 MB store: 2.1 s including the snapshot, identical row count and namespace
+  census either side. (PRD-CORE-245 FR01/FR02, PRD-CORE-244 FR01/FR03/FR08)
+- **The schema-5 rebuild's self-check now also covers `vec_index`,
+  `memory_graph_edges` and `wiki_refs`, not just `memories`.** The three
+  sidecar rebuilds use `INSERT OR IGNORE` (or a plain `INSERT`) and had no
+  independent row-count check, so a future uniqueness collision or rebuild bug
+  could have dropped a sidecar row with no operator-visible signal — the
+  `memories` census would still match. No drop is possible today (v4's
+  uniqueness constraints already dominate the new composite keys), but the
+  extended census is defense in depth against a future reuse of
+  `INSERT OR IGNORE`; a mismatch now raises `MigrationCensusMismatchError` with
+  the table name and before/after counts, rolling the whole migration back.
+- **`get`, `delete` and `delete_vector` require the namespace they mean.** No
+  default is offered: a default would silently reinstate the ambiguity the
+  composite key exists to remove. The same applies to `upsert_vector` and
+  `vector_exists`, whose index is now keyed `(namespace, entry_id)`.
+  (PRD-CORE-245 FR03)
+- **`hybrid_search` requires an authorizer-minted `NamespaceScope`.** It used to
+  take a pre-selected entry list and no principal, so isolation was a property of
+  how carefully each caller assembled that list — and the guarantee callers were
+  assumed to inherit does not exist, because the RBAC check returns early while
+  `rbac_enabled` is false, which it is by default. A candidate outside the scope
+  now raises rather than being quietly dropped, because a caller that assembled
+  such a list has a bug. The ordinary `NamespaceScope` constructor refuses; the
+  only producer is `authorize_namespaces`. This is an anti-accidental-misuse
+  boundary, not a sandbox — reflective construction still defeats it, and that is
+  documented and tested. (PRD-CORE-245 FR04/FR05)
+- **Peer content passes the admission gate before any caller sees it.** Fetched
+  shared memories used to go straight into the recall response — the agent's
+  context — without any admission check, which is worse than an ungated write:
+  content that never lands in the store is content no later audit or quarantine
+  sweep can reach. `fetch_shared_memories` now requires a backend and runs every
+  result through `prepare_entry_for_store`; a refusal is dropped and quarantined,
+  and a gate error is treated as a refusal, never a pass. (PRD-CORE-245 FR06)
+- **`tag_cooccurrence` edges are derived, not materialised.** They were 98,288 of
+  the reference store's 102,428 edges and 99.7% of what a depth-1 expansion
+  walked, while holding a mean 19.1 neighbours per root against the 573.3 the
+  same predicate yields over the corpus — 3.3% of the relation they claimed to
+  store. They are replaced by a `memory_tags` inverted index plus a bounded
+  single-root derivation (net −8.2 MiB on the reference store). `graph_query`
+  walks only materialised types; `tag_cooccurrence` remains a valid
+  `edge_types` argument and is served by derivation. `create_tag_cooccurrence_edges`
+  is removed. (PRD-CORE-245 FR07)
+- **`anchor_validity` reads back as `None` when nothing was anchored**, instead
+  of the perfect `1.0` that 7,541 unanchored rows reported but never earned.
+  `sessions_surfaced`, `avg_rework_delta` and `outcome_correlation` are removed
+  from the model and the schema — three fields with no producer and no consumer,
+  identical on every row ever written. `verification_checked_at` is added.
+  (PRD-CORE-244 FR01/FR03/FR08, carried by the PRD-CORE-245 rebuild)
+
+### Fixed
+
+- **Every writer now stamps the vector clock the conflict resolver reads.** Two
+  of the three production writers built entries by hand and left it empty, so 55
+  of 9,366 rows carried one. The consumer is live: on an org-shared pull the
+  remote side always has a clock, so an empty local clock resolves to "remote
+  wins" and **a local edit that strictly postdates the remote one was discarded,
+  not merged, with no error.** All writers now go through one construction
+  helper, and an AST test refuses a bare `MemoryEntry(` outside it.
+  (PRD-CORE-245 FR08)
+- **The dedup fast path ran an unscoped vector search**, so a duplicate verdict
+  could be computed against a row belonging to another namespace. Both the KNN
+  and the row read are now namespace-scoped.
+- **An older build opening a migrated store now says what to do about it.** The
+  downgrade error names the schema version and tells the operator to restart the
+  process (or reconnect the MCP server), instead of leaving a running server to
+  fail later with a raw SQLite "no such column" error.
+- **The benchmark corpus used namespaces the product rejects.** `benchmark` and
+  `golden` do not match `validate_namespace`, so the retrieval harness was
+  grading a policy the product cannot run.
+
+### Added
+
+- **One loopback daemon can now serve the memory store, so a consumer no longer
+  has to be a Python process sitting on the same filesystem.**
+  `trw-memory-server serve http` binds `127.0.0.1` on an operating-system
+  assigned port, authenticates every request with a per-user 32-byte token, and
+  serves the same registered tools the stdio mode does. `serve stdio` remains
+  the default and is unchanged, so a client that spawns the server itself is
+  unaffected. Clients find the daemon through `<user_memory_dir>/daemon.json`
+  (mode 0600, carrying pid, URL, token, start time and version) rather than a
+  hardcoded port; a second start refuses to bind while a live one holds the
+  claim, and the daemon exits after its idle window, removing its discovery
+  file. The bind host is a module constant, not a configuration field: a
+  configurable host would turn one typo into a network-reachable memory store,
+  so a container reaches the daemon by sharing the host network namespace.
+  Three new typed settings: `memory_daemon_port` (default 0 = ephemeral),
+  `memory_daemon_idle_shutdown_seconds` (default 1800) and
+  `memory_daemon_startup_timeout_seconds` (default 10.0). (PRD-CORE-253 FR03)
+
+- **`memory_single_store_path`: every namespace in ONE SQLite file.** The daemon
+  pins it to `<user_memory_dir>/memory.db` for its whole process, so "one
+  memory.db per user account" is a fact the integration test asserts rather than
+  a claim — before this, each namespace still got its own file under the user
+  directory and the single-store path was one no write path ever opened. Safe
+  because a row is keyed on `(namespace, id)`. Left empty the per-namespace
+  layout is unchanged, which is what pre-daemon consumers still read until the
+  migration retires it. (PRD-CORE-253 FR01)
+
+### Fixed
+
+- **Field-level encryption and a single store are now refused instead of
+  silently producing an unopenable database.** SQLCipher keys a whole file,
+  while this package derives a *per-namespace* key — so with both set, the first
+  namespace to open the shared store set the key to its own derived value and
+  every other namespace could no longer decrypt the file it was meant to share.
+  Silent at configuration time, fatal at the second namespace. The combination
+  now raises at config construction, again at the point where the key would
+  reach SQLCipher, and at daemon startup so an operator learns at start rather
+  than inside a served tool call. Each alone is unaffected. The per-file key
+  redesign that lifts the restriction is PRD-CORE-253 FR09. (PRD-CORE-253 FR09)
+
+- **A project namespace is now `project:<slug>-<digest8>` over the checkout's
+  canonical root, so a gotcha learned in one checkout is not filed under a key
+  that another can collide with.** The previous identity was a bare basename,
+  which is not unique on a filesystem; a git-remote-derived key is no better
+  (measured on this box, one of seven checkouts had an `origin` remote and two
+  distinct checkouts carried byte-identical remote sets). The digest input is
+  the realpath of `git rev-parse --git-common-dir`, so **every linked worktree
+  of one repository resolves to one namespace** while a second clone stays
+  distinct by design. Non-git directories and symlinked checkouts both resolve
+  without error. (PRD-CORE-253 FR01)
+
+- **`trw-memory namespace rename|merge|doctor`, the repair path for a moved or
+  renamed checkout.** Because the identity is keyed on the path, moving a
+  directory orphans its rows; `doctor` reports that (empty current identity plus
+  a populated same-slug sibling) and names the exact repair, `rename` re-labels
+  every row, and `merge` is the deliberate gesture for making two clones share
+  memory. Nothing runs automatically -- a silent auto-merge on a path change is
+  indistinguishable from two different projects that occupied the same path over
+  time. `rename` refuses a populated destination (that case is a `merge`, and
+  the caller has to say so), `merge` keeps the destination row on an id
+  collision and reports the count it skipped, and both carry each row's dense
+  vector across so a re-key does not quietly demote moved rows to keyword-only
+  retrieval. All three verbs travel over the daemon, so a CLI invocation is no
+  longer an extra writer on the store. (PRD-CORE-253 FR01/FR05)
+
+- **`memory_quarantine_list`, so the review queue is a queue rather than a hole
+  rows fall into.** `list_quarantined_entries` has existed since SEC-001 with no
+  tool calling it, which meant `memory_review` could only resolve an id some
+  other channel had already handed the maintainer. The new verb requires the
+  same ADMIN permission `memory_review` does and returns only rows in namespaces
+  the caller holds it on. (PRD-CORE-253 FR06)
+
+- **`DaemonClient` fails closed -- on reads as well as writes -- when the store
+  cannot be reached.** No read-only snapshot fallback: an agent that recalls
+  from a stale view then writes a conclusion derived from it is split-brain with
+  extra steps, and truthfulness outranks velocity. The error names the discovery
+  file, the start command and the underlying error class; a connect failure is
+  retried exactly once; a missing token is generated at 0600 (first run is not
+  an error) and a **rejected** token is never regenerated, because automatic
+  rotation would let any local process force one by corrupting the file. A
+  failed attach creates no store file anywhere. (PRD-CORE-253 FR08)
+
+### Fixed
+
+- **Security state no longer lands in a nested `.trw` directory under an XDG
+  base.** The derivation recognised only the home-fallback layout, so a config
+  built against `XDG_DATA_HOME` put quarantine, audit, provenance and
+  rate-limit state at `<xdg>/trw/.trw/security/` -- detached from the store it
+  describes. It is now the `security` sibling of the resolved store directory
+  under every precedence branch. (PRD-CORE-253 FR01)
+
+### Changed
+
+- **The user-space memory directory resolver now lives here**
+  (`trw_memory.user_paths.resolve_user_memory_dir`), promoted from
+  `trw_mcp.state._user_paths` so the daemon can resolve its store, token, lock
+  and discovery file without importing trw-mcp. trw-mcp re-exports it, so there
+  is one resolver rather than two that can drift. Precedence is unchanged:
+  `TRW_USER_DIR` > `$XDG_DATA_HOME` > `~/.trw`. (PRD-CORE-253 FR01)
+
+- **The token, discovery and secret files are created, never opened.** Each is
+  written to a fresh `O_CREAT|O_EXCL|O_NOFOLLOW` temporary in the same directory
+  and moved into place with an atomic rename, so a local attacker cannot
+  pre-plant a symlink at the destination and have a secret written through it,
+  and a reader never parses a half-written record. (PRD-CORE-253 NFR03)
+
+- **`protection_tier` now protects.** The field has been advertised by
+  `trw_learn` for its entire life with six tier names, and every *destructive*
+  path ignored it — a learning an agent marked `permanent` was nominated for
+  removal on exactly the same schedule as a `normal` one. `lifecycle/protection.py`
+  is the single place that turns the vocabulary into a decision: `protected` and
+  `permanent` are never auto-removed, and every other tier multiplies the
+  threshold a candidate must fall below via `MemoryConfig.protection_tier_prune_discount`
+  (default `critical` 0.25, `high` 0.5, `normal` 1.0, `low` 1.5), so a `critical`
+  entry must be four times less useful than a `normal` one. Wired into the
+  warm-to-cold and cold-purge sweeps **and into
+  `lifecycle.utility_based_prune_candidates`**, the publicly exported native
+  prune that `lifecycle.scoring` delegates into — it was the fifth named path and
+  the one still nominating `permanent` entries after the others were fixed.
+  Manual `forget` is deliberately untouched: this governs *automatic* removal
+  only. (PRD-CORE-244-FR10)
+
+- **A `confidence='verified'` write without a basis is now refused.** 409 of 584
+  `verified` rows carried an empty `evidence` field, so nothing separated a
+  learning checked against the repository from one the writing agent simply
+  believed — locally a quality problem, an integrity problem the moment a store
+  is shared. The rule lives in `validate_entry_payload`, the single chokepoint
+  every store surface passes through, so the LangChain, CrewAI, LlamaIndex,
+  VSCode and CLI-import paths inherit it rather than only `trw_learn`. An entry
+  is substantiated by non-whitespace evidence, a non-empty assertions list, or a
+  non-empty anchors list; `MemoryConfig.min_evidence_items_for_verified` bounds
+  how many are demanded and cannot express "demand none".
+  `SchemaValidationError` now carries a machine-readable `reason`
+  (`unsubstantiated_verified`), and the rejection logs the entry id and reason
+  code only — never the body, which has not yet passed the PII stage.
+  **Breaking**: a caller passing `confidence="verified"` with no artifact now
+  raises instead of storing. `min_evidence_items_for_verified` is capped at 3 —
+  the number of artifact kinds that exist — because 4-8 was configurable and
+  unsatisfiable, so it silently refused *every* verified write rather than
+  tightening the rule. (PRD-CORE-244-FR02)
+
+### Changed
+
+- **An expired record is now ineligible, not merely low-scoring.** The two
+  ranking paths disagreed: `trw_mcp.scoring._decay` floored an expired entry's
+  utility at 0.01 while `retrieval/validity_prior._is_open_at` read only
+  `invalid_from` and still called it an open record. `_is_open_at` now also
+  treats a past `expires` date as closing the window, so expired records reuse
+  the demotion superseded records already get — excluded by default, appended
+  after every open record under `include_superseded`. The boundary matches the
+  existing implementation exactly (an entry expiring *today* is still current)
+  and an unparseable or empty value never expires. Under `as_of` time travel the
+  predicate is evaluated against the `as_of` instant, so asking what was believed
+  at T returns what was unexpired at T. (PRD-CORE-244-FR05)
+
+- **One entry-utility implementation instead of two.** `lifecycle/scoring.entry_utility`
+  is now the only one, and the live `trw_recall` ranker calls it. It is the
+  union of what the two implementations did, not a swap: it keeps the
+  feedback-aware decay term from this package and absorbs the expiry floor,
+  unverified-incident preservation (a postmortem is not decayed away before the
+  fix is confirmed), per-type half-lives, and the access-count and source-type
+  terms from the trw-mcp copy. Field names are read alias-tolerantly
+  (`importance`/`impact`, `source`/`source_type`) so a LearningEntry dict and a
+  MemoryEntry dump score identically. Tuning moves to the typed
+  `lifecycle/_utility_params.UtilityParams`, which also names the 3 / 0.15 / 0.1
+  literals this module used to carry.
+
+  `feedback_decay_score` now takes a floor (`MemoryConfig.feedback_decay_min_factor`,
+  default 0.5). Its exponent is `recall_count / max(1, helpful_count)` and
+  `helpful_count` is 0 on 100% of the corpus, so in practice the term was not
+  feedback-aware decay at all but an unbounded `0.95 ** recall_count` — a pure
+  retrieval-FREQUENCY penalty on a counter PRD-QUAL-032/D1 established is not
+  evidence of use, capable of reducing an entry surfaced 100 times to 0.6% of its
+  importance. The floor bounds what a *missing* rating can cost while leaving the
+  rating's effect intact; 0.0 restores the previous behaviour exactly.
+  (PRD-CORE-244-FR11)
+
+- **Importance decay can now match rows.** `memory_decay_pass` selected
+  `WHERE cross_validated = 1`, re-measured at **0 of 9,366 rows**, so the sweep
+  would have reported success while decaying nothing had anything ever called
+  it. Decay is a function of disuse, not of cross-project validation; the
+  conjunct is removed and the remaining predicate is a single named constant
+  shared by the batch SELECT and its COUNT so the two can never drift.
+  (PRD-CORE-244-FR09)
+
+### Added
+
+- **`trw_memory.tools` is now a typed, contract-tested interface instead of a flat
+  list of exports.** A new `MemoryToolSurface` Protocol (`tools/_contract.py`,
+  exported from `trw_memory.tools`) declares the full call shape of every
+  `memory_*_impl` callable a downstream package depends on — store, recall,
+  search, forget, consolidate, status, review and audit. `mypy --strict` binds
+  each implementation to its member, so a renamed or removed parameter now fails
+  in this package rather than at a consumer's first tool call, and a runtime
+  contract test (`tests/test_server.py::test_every_impl_satisfies_the_protocol`)
+  catches the same drift without a type checker in the loop. `memory_update_impl`
+  is deliberately NOT a member yet: the tool does not exist, and a Protocol member
+  that resolves to nothing is a contract that proves nothing. It arrives with the
+  implementation. (PRD-CORE-251 FR01)
+
+### Removed
+
+- **`namespaces.curate.namespace_census()` is gone.** A second census that answered
+  for one open backend, so under the default split layout it under-counted every
+  namespace held in another file. `store_census()` is the single source of truth.
+- **BREAKING — `converge_tier_distribution` and `persist_tier_convergence` are
+  gone.** Both were exported, documented and covered by five test functions, and
+  both had ZERO callers — not in this package, not in trw-mcp (measured
+  2026-09-03 by a per-symbol production-consumer census across both source
+  trees). Two public functions a reader had to consider when reasoning about tier
+  convergence, that nothing ever ran. `enforce_tier_distribution` is unaffected
+  and still demotes at most one entry per tier per call; a caller that needs a
+  cluster brought fully within its caps re-invokes until the returned list is
+  empty. (PRD-CORE-251 FR02)
+
+### Security
+
+- **A warm cache still phoned home on the most basic write.** The loader resolved
+  `local_files_only` from `local_only` and the two offline switches and never looked
+  at the disk, so a machine holding the entire model snapshot still permitted a
+  huggingface.co revision check on the first embed — an operator reported two
+  unauthenticated-request warnings for a model that was already cached. The local
+  Hugging Face cache is now probed first (new `embeddings/_hf_cache.py`): a complete
+  snapshot forces `local_files_only=True` unconditionally, and a fetch is attempted
+  only when the snapshot is incomplete or absent **and** neither offline switch is
+  set. A dangling blob counts as incomplete, never complete. The probe fails open —
+  if it cannot answer, the previous config/env resolution stands and one degradation
+  line is logged — so it can never fail a load that used to succeed.
+
+  Passing `local_files_only=True` was **not** enough on its own, which is why the
+  warm cache still produced two Hub warnings: transformers' `AutoProcessor` rebuilds
+  its hub kwargs from `inspect.signature(cached_file).parameters`, and that signature
+  is `(path_or_repo_id, filename, **kwargs)` — so the flag is silently discarded and
+  the processor/feature-extractor probes go out anyway. When the snapshot is complete
+  the loader now hands sentence-transformers the resolved **snapshot directory**,
+  which takes the local-directory branch and cannot make a request; the flag is still
+  passed as a second layer. A real end-to-end load of the default model with both
+  switches unset and every socket blocked now completes with zero connection
+  attempts.
+- **Executing model code fetched from the Hub was gated by a substring.**
+  `trust_remote_code` was computed from `"nomic-ai/" in model_name`, so any model
+  identifier carrying that vendor prefix opted the deployment into arbitrary
+  Hub-fetched code execution, reachable by a `.trw/config.yaml` edit alone. The
+  substring test is **deleted**. The one input is now the typed, documented,
+  default-`False` `embedding_trust_remote_code` field (settable as
+  `embedding_trust_remote_code` / `memory_embedding_trust_remote_code` in
+  `.trw/config.yaml`, or `MEMORY_EMBEDDING_TRUST_REMOTE_CODE`). A repository that
+  ships Python modules is refused with a new `RemoteCodeNotPermittedError` naming
+  the field, the model, and how to set it — including when the refusal comes from
+  the loader itself rather than from pre-load detection.
+
+  **Breaking**: a deployment that relied on the implicit vendor-prefix gate must now
+  set `embedding_trust_remote_code: true`. There is no compatibility shim. The
+  shipped default model needs no remote code, so the secure default is also the
+  working default — now pinned by an executable test rather than left as an
+  observation.
+
+### Documented
+
+- The README's network-behavior table said the model downloads on the *first*
+  embedding operation, which the warm-cache measurement falsified. It now states the
+  warm-cache invariant and, explicitly, that embedding egress is **not** governed by
+  `learning_sharing_enabled` or `platform_telemetry_enabled` — those govern learning
+  content and telemetry; the cache, the offline switches, and `local_only` govern
+  this. `embedding_trust_remote_code` is in the security-defaults table with its
+  default and its consequence.
+
+### Tests
+
+- **PRD-CORE-244-NFR02/NFR04 (schema-5 rebuild concurrency + copied-live-store
+  backfill) now have real tests, and NFR02 exposed a defect.**
+  `tests/test_schema_v244_nfr02_concurrent_rebuild.py` proves the interrupted-
+  mid-rebuild rollback holds, but also pins (`xfail(strict=True)`) a real
+  TOCTOU race in `ensure_schema`: three concurrent openers each observe the
+  pre-migration `user_version` before any commits, so all three re-run the
+  full schema-5 rebuild instead of exactly one — data still converges
+  correctly today only because the rebuild happens to be idempotent, not
+  because the race is closed. `tests/test_schema_v244_nfr04_copy_backfill.py`
+  pins the 60s budget and the copied-live-store contract ("never against the
+  live file") against a portable synthetic store, corroborated ad hoc against
+  this environment's real 186MB/9,375-row pre-schema-5 snapshot (7.10s,
+  row-count invariant, no-op second run).
+
 ## [0.15.0] — 2026-07-30
 
 A security release. Every finding below was reproduced end to end against the real

@@ -44,7 +44,7 @@ class TestDeleteVectorInternalRaise:
         conn = _mock_conn()
         conn.execute.side_effect = sqlite3.OperationalError("disk I/O error")
         with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
-            delete_vector_internal(conn, "M-001")
+            delete_vector_internal(conn, "M-001", namespace="default")
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +56,7 @@ class TestDeleteVectorUnavailable:
     def test_vec_unavailable_returns_false(self) -> None:
         """delete_vector with vec_available=False → return False immediately (line 84)."""
         conn = _mock_conn()
-        result = delete_vector(conn, _lock(), vec_available=False, entry_id="M-001")
+        result = delete_vector(conn, _lock(), vec_available=False, entry_id="M-001", namespace="default")
         assert result is False
         conn.execute.assert_not_called()
 
@@ -70,7 +70,7 @@ class TestVectorExistsUnavailable:
     def test_vec_unavailable_returns_false(self) -> None:
         """vector_exists with vec_available=False → return False (line 96)."""
         conn = _mock_conn()
-        result = vector_exists(conn, vec_available=False, entry_id="M-001")
+        result = vector_exists(conn, vec_available=False, entry_id="M-001", namespace="default")
         assert result is False
         conn.execute.assert_not_called()
 
@@ -111,7 +111,9 @@ class TestUpsertVectorUnavailable:
     def test_vec_unavailable_returns_early(self) -> None:
         """upsert_vector with vec_available=False → return without touching conn (line 160)."""
         conn = _mock_conn()
-        upsert_vector(conn, _lock(), vec_available=False, dim=3, entry_id="M-001", embedding=[0.1, 0.2, 0.3])
+        upsert_vector(
+            conn, _lock(), vec_available=False, dim=3, entry_id="M-001", embedding=[0.1, 0.2, 0.3], namespace="default"
+        )
         conn.execute.assert_not_called()
 
     def test_non_vec_sqlite_error_is_reraised(self) -> None:
@@ -119,7 +121,15 @@ class TestUpsertVectorUnavailable:
         conn = _mock_conn()
         conn.execute.side_effect = sqlite3.OperationalError("disk I/O error")
         with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
-            upsert_vector(conn, _lock(), vec_available=True, dim=3, entry_id="M-001", embedding=[0.1, 0.2, 0.3])
+            upsert_vector(
+                conn,
+                _lock(),
+                vec_available=True,
+                dim=3,
+                entry_id="M-001",
+                embedding=[0.1, 0.2, 0.3],
+                namespace="default",
+            )
 
 
 class TestUpsertVectorTableDimensionMismatch:
@@ -140,14 +150,18 @@ class TestUpsertVectorTableDimensionMismatch:
         )
 
         # Must not raise: the canonical row + BM25 still provide retrieval.
-        upsert_vector(conn, _lock(), vec_available=True, dim=384, entry_id="M-001", embedding=[0.1] * 384)
+        upsert_vector(
+            conn, _lock(), vec_available=True, dim=384, entry_id="M-001", embedding=[0.1] * 384, namespace="default"
+        )
 
     def test_a_genuine_dimension_free_error_still_raises(self) -> None:
         """The predicate must not swallow unrelated OperationalErrors."""
         conn = _mock_conn()
         conn.execute.side_effect = sqlite3.OperationalError("database is locked")
         with pytest.raises(sqlite3.OperationalError, match="database is locked"):
-            upsert_vector(conn, _lock(), vec_available=True, dim=384, entry_id="M-001", embedding=[0.1] * 384)
+            upsert_vector(
+                conn, _lock(), vec_available=True, dim=384, entry_id="M-001", embedding=[0.1] * 384, namespace="default"
+            )
 
 
 # ---------------------------------------------------------------------------

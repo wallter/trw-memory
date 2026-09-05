@@ -153,7 +153,7 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
                         role = MessageRole(tag[len(ROLE_TAG_PREFIX) :])
                     break
             deleted.append(ChatMessage(role=role, content=entry.content))
-            self._backend_or_raise.delete(entry.id)
+            self._backend_or_raise.delete(entry.id, namespace=entry.namespace)
         return deleted or None
 
     def delete_message(self, key: str, idx: int) -> ChatMessage | None:
@@ -169,7 +169,7 @@ class TRWChatStore(BaseChatStore):  # type: ignore[misc]
         removed = ChatMessage(role=self._message_role(target), content=target.content)
         # Delete the selected entry in place so bounded reads do not rewrite and
         # silently truncate older history outside the visible message window.
-        self._backend_or_raise.delete(target.id)
+        self._backend_or_raise.delete(target.id, namespace=target.namespace)
         return removed
 
     def delete_last_message(self, key: str) -> ChatMessage | None:

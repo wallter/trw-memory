@@ -28,12 +28,12 @@ class TestUpdatePreservesNewFields:
             assertions=[Assertion(type=AssertionType.GREP_PRESENT, pattern="def test_", target="tests/**/*.py")],
         )
         backend.store(entry)
-        result = backend.update("M-upd-vc", importance=0.9)
+        result = backend.update("M-upd-vc", importance=0.9, namespace="default")
         assert result is not None
         assert result.vector_clock == {"node1": 10}
         assert result.published_to_platform is True
         assert len(result.assertions) == 1
-        loaded = backend.get("M-upd-vc")
+        loaded = backend.get("M-upd-vc", namespace="default")
         assert loaded is not None
         assert loaded.vector_clock == {"node1": 10}
         assert loaded.published_to_platform is True
@@ -48,12 +48,14 @@ class TestUpdatePreservesNewFields:
         )
         backend.store(entry)
         result = backend.update(
-            "M-upd-assert", assertions=[Assertion(type=AssertionType.GLOB_EXISTS, pattern="", target="src/**/*.py")]
+            "M-upd-assert",
+            assertions=[Assertion(type=AssertionType.GLOB_EXISTS, pattern="", target="src/**/*.py")],
+            namespace="default",
         )
         assert result is not None
         assert len(result.assertions) == 1
         assert result.assertions[0].target == "src/**/*.py"
-        loaded = backend.get("M-upd-assert")
+        loaded = backend.get("M-upd-assert", namespace="default")
         assert loaded is not None
         assert len(loaded.assertions) == 1
         assert loaded.assertions[0].target == "src/**/*.py"
@@ -70,7 +72,7 @@ class TestMalformedAssertions:
             "assertions": ["not_a_dict", 42, None],
         }
         write_entry_yaml(backend, "M-bad-assert", data)
-        loaded = backend.get("M-bad-assert")
+        loaded = backend.get("M-bad-assert", namespace="default")
         assert loaded is not None and loaded.assertions == []
 
     def test_assertions_with_invalid_dict(self, backend: YAMLBackend) -> None:
@@ -85,7 +87,7 @@ class TestMalformedAssertions:
             ],
         }
         write_entry_yaml(backend, "M-mixed-assert", data)
-        loaded = backend.get("M-mixed-assert")
+        loaded = backend.get("M-mixed-assert", namespace="default")
         assert loaded is not None
         assert len(loaded.assertions) == 1
         assert loaded.assertions[0].pattern == "valid"
@@ -105,7 +107,7 @@ class TestMalformedVectorClock:
             "vector_clock": {"node1": "not-an-int"},
         }
         write_entry_yaml(backend, "M-bad-vc", data)
-        loaded = backend.get("M-bad-vc")
+        loaded = backend.get("M-bad-vc", namespace="default")
         assert loaded is not None
         assert loaded.vector_clock == {}
 
@@ -118,7 +120,7 @@ class TestMalformedVectorClock:
             "vector_clock": {"node1": None},
         }
         write_entry_yaml(backend, "M-null-vc", data)
-        loaded = backend.get("M-null-vc")
+        loaded = backend.get("M-null-vc", namespace="default")
         assert loaded is not None
         assert loaded.vector_clock == {}
 
@@ -131,7 +133,7 @@ class TestMalformedVectorClock:
             "vector_clock": {"node1": 7},
         }
         write_entry_yaml(backend, "M-good-vc", data)
-        loaded = backend.get("M-good-vc")
+        loaded = backend.get("M-good-vc", namespace="default")
         assert loaded is not None
         assert loaded.vector_clock == {"node1": 7}
 
@@ -150,7 +152,7 @@ class TestAnchorValidity:
             "anchor_validity": 0.0,
         }
         write_entry_yaml(backend, "M-anc-zero", data)
-        loaded = backend.get("M-anc-zero")
+        loaded = backend.get("M-anc-zero", namespace="default")
         assert loaded is not None
         assert loaded.anchor_validity == 0.0
 
@@ -163,9 +165,11 @@ class TestAnchorValidity:
             "anchor_validity": "not-a-number",
         }
         write_entry_yaml(backend, "M-anc-bad", data)
-        loaded = backend.get("M-anc-bad")
+        loaded = backend.get("M-anc-bad", namespace="default")
         assert loaded is not None
-        assert loaded.anchor_validity == 1.0
+        # PRD-CORE-244-FR01: an unparseable score is "never assessed", not a
+        # perfect 1.0 the entry never earned.
+        assert loaded.anchor_validity is None
 
     def test_missing_validity_uses_default(self, backend: YAMLBackend) -> None:
         data: dict[str, object] = {
@@ -175,9 +179,9 @@ class TestAnchorValidity:
             "updated_at": "2026-01-15T10:00:00+00:00",
         }
         write_entry_yaml(backend, "M-anc-missing", data)
-        loaded = backend.get("M-anc-missing")
+        loaded = backend.get("M-anc-missing", namespace="default")
         assert loaded is not None
-        assert loaded.anchor_validity == 1.0
+        assert loaded.anchor_validity is None
 
 
 @pytest.mark.unit
@@ -203,7 +207,7 @@ class TestCorruptTimestampDegrades:
             "updated_at": "2026-04-13T00:00:00+00:00",
         }
         write_entry_yaml(backend, "M-ts-bad-created", data)
-        loaded = backend.get("M-ts-bad-created")
+        loaded = backend.get("M-ts-bad-created", namespace="default")
         # Entry survives (no crash); the corrupt field degrades to a usable
         # tz-aware datetime rather than raising.
         assert loaded is not None
@@ -219,7 +223,7 @@ class TestCorruptTimestampDegrades:
             "updated_at": self._BAD_TS,
         }
         write_entry_yaml(backend, "M-ts-bad-updated", data)
-        loaded = backend.get("M-ts-bad-updated")
+        loaded = backend.get("M-ts-bad-updated", namespace="default")
         assert loaded is not None
         assert loaded.updated_at.tzinfo is not None
 
@@ -232,7 +236,7 @@ class TestCorruptTimestampDegrades:
             "last_accessed_at": self._BAD_TS,
         }
         write_entry_yaml(backend, "M-ts-bad-accessed", data)
-        loaded = backend.get("M-ts-bad-accessed")
+        loaded = backend.get("M-ts-bad-accessed", namespace="default")
         assert loaded is not None
         # An unparseable optional timestamp degrades to None, not a crash.
         assert loaded.last_accessed_at is None
@@ -272,12 +276,14 @@ class TestSQLiteAssertionsUpdate:
         )
         db.store(entry)
         result = db.update(
-            "M-sql-assert", assertions=[Assertion(type=AssertionType.GLOB_EXISTS, pattern="", target="src/**/*.py")]
+            "M-sql-assert",
+            assertions=[Assertion(type=AssertionType.GLOB_EXISTS, pattern="", target="src/**/*.py")],
+            namespace="default",
         )
         assert result is not None
         assert len(result.assertions) == 1
         assert result.assertions[0].target == "src/**/*.py"
-        loaded = db.get("M-sql-assert")
+        loaded = db.get("M-sql-assert", namespace="default")
         assert loaded is not None
         assert len(loaded.assertions) == 1
         db.close()
@@ -315,7 +321,7 @@ class TestSQLiteCorruptTimestampDegrades:
         )
         db._conn.commit()
 
-        loaded = db.get("M-sql-ts-bad")
+        loaded = db.get("M-sql-ts-bad", namespace="default")
 
         assert loaded is not None  # no ValueError / crash
         assert loaded.created_at.tzinfo is not None  # degraded to a usable tz-aware datetime

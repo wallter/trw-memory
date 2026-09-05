@@ -15,7 +15,8 @@ that pass the backend handle.
 - ``entries_with_assertions`` — PRD-CORE-086 FR07 query for
   ``trw_session_start`` assertion-health summary.
 - ``count_with_assertions`` — backward-compat alias.
-- ``list_entries`` — filter-clause + ORDER BY updated_at DESC.
+- ``list_entries`` — filter-clause + ORDER BY updated_at DESC, id DESC,
+  with optional keyset (``after=``) paging.
 - ``list_namespaces`` — distinct namespace query.
 - ``delete_by_namespace`` — DELETE WHERE namespace = ?.
 
@@ -37,6 +38,7 @@ from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage._resilient_fetch import FetchQuery, is_utf8_decode_error
 from trw_memory.storage._sql_utils import iter_bind_chunks
+from trw_memory.storage.interface import EntryCursor
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -179,13 +181,19 @@ def search_fts(
     filter_sql, filter_params = backend._build_filter_clause(
         status=status, namespace=namespace, min_importance=min_importance
     )
+    # The candidate query joins memories to memories_fts, and both now declare a
+    # ``namespace`` column, so its copy of the filter must be table-qualified.
+    memories_filter_sql, _ = backend._build_filter_clause(
+        status=status, namespace=namespace, min_importance=min_importance, column_prefix="memories."
+    )
     over_fetch = min(top_k * 4, 500)
     try:
         with backend._lock:
             candidate_sql = f"""
                 SELECT memories_fts.id FROM memories_fts
                 JOIN memories ON memories.id = memories_fts.id
-                WHERE memories_fts MATCH ? AND {filter_sql}
+                    AND memories.namespace = memories_fts.namespace
+                WHERE memories_fts MATCH ? AND {memories_filter_sql}
                 ORDER BY rank LIMIT ?
             """  # noqa: S608 - filter_sql is built only from fixed internal clauses.
             fts_rows = backend._conn.execute(candidate_sql, (fts_query, *filter_params, over_fetch)).fetchall()
@@ -326,6 +334,7 @@ def list_entries(
     limit: int = 100,
     exclude_superseded: bool = False,
     tags: list[str] | None = None,
+    after: EntryCursor | None = None,
 ) -> list[MemoryEntry]:
     """Return entries with optional filters, ordered by updated_at desc.
 
@@ -343,6 +352,11 @@ def list_entries(
     silent-drop bug). JSON1 array membership preserves exact values without
     coupling the query to JSON string serialization. An exact ``issubset``
     re-check below remains authoritative.
+
+    When *after* is provided the page resumes strictly below that keyset
+    position. The ORDER BY carries an ``id`` tiebreak so the listing order is
+    TOTAL; without it, rows sharing an ``updated_at`` could be re-ordered
+    between pages and be returned twice or not at all.
     """
     if limit <= 0:
         return []
@@ -350,7 +364,13 @@ def list_entries(
     if exclude_superseded:
         where_sql = f"({where_sql}) AND (invalid_from IS NULL OR invalid_from = '')"
     where_sql = _append_exact_tag_filters(where_sql, params, tags)
-    order_by = "updated_at DESC"
+    if after is not None:
+        # The expanded form of the row-value predicate ``(updated_at, id) <
+        # (?, ?)``. Written out because it needs no SQLite version floor and
+        # still uses idx_memories_ns_updated for the leading column.
+        where_sql = f"({where_sql}) AND (updated_at < ? OR (updated_at = ? AND id < ?))"
+        params.extend([after.updated_at, after.updated_at, after.entry_id])
+    order_by = "updated_at DESC, id DESC"
     sql = (
         f"SELECT {select_columns_sql} FROM memories WHERE {where_sql} "  # noqa: S608
         f"ORDER BY {order_by} LIMIT ?"
@@ -428,7 +448,11 @@ def delete_by_namespace(backend: SQLiteBackend, namespace: str) -> int:
             # Anti-join against the remaining memories table removes exactly
             # the rows that were just deleted, regardless of namespace.
             if getattr(backend, "_fts_available", False) and deleted > 0:
-                backend._conn.execute("DELETE FROM memories_fts WHERE id NOT IN (SELECT id FROM memories)")
+                backend._conn.execute(
+                    "DELETE FROM memories_fts WHERE NOT EXISTS "
+                    "(SELECT 1 FROM memories m WHERE m.id = memories_fts.id "
+                    "AND m.namespace = memories_fts.namespace)"
+                )
             if backend._skip_commit_depth == 0:
                 backend._conn.commit()
         logger.debug("namespace_deleted", namespace=namespace, entries_deleted=deleted)

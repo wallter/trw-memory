@@ -240,7 +240,7 @@ class TestInitAutoRecovery:
             assert backend2.integrity_warning is False
 
             # Data should still be accessible after primary salvage.
-            result = backend2.get("L-preserve")
+            result = backend2.get("L-preserve", namespace="default")
             assert result is not None
             assert result.content == "must not be lost"
             backend2.close()

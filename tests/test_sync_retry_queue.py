@@ -305,7 +305,7 @@ class TestRetryQueue:
         # publish the one surviving valid record.
         published: list[dict[str, object]] = []
 
-        def _capture(payload: dict[str, object]) -> bool:
+        def _capture(payload: dict[str, object], **_kwargs) -> bool:
             published.append(payload)
             return True
 
@@ -372,7 +372,7 @@ class TestRetryQueue:
         # drain must not raise and must publish the two surviving records.
         published: list[dict[str, object]] = []
 
-        def _capture(payload: dict[str, object]) -> bool:
+        def _capture(payload: dict[str, object], **_kwargs) -> bool:
             published.append(payload)
             return True
 

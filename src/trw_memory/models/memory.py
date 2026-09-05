@@ -455,25 +455,38 @@ class MemoryEntry(BaseModel):
     team_origin: str = Field(default="", description="Team identifier")
     protection_tier: ProtectionTier = Field(default=ProtectionTier.NORMAL, description="Protection level")
 
-    # PRD-CORE-108: Outcome attribution fields
-    sessions_surfaced: int = Field(ge=0, default=0, description="Sessions this entry was surfaced in")
-    avg_rework_delta: float | None = Field(default=None, description="Rolling average rework impact delta")
-    outcome_correlation: str = Field(default="", description="Causal outcome attribution category")
-
     # Executable assertions (PRD-CORE-086)
     assertions: list[Assertion] = Field(default_factory=list, description="Machine-verifiable assertions")
 
     # PRD-CORE-111: Code-grounded anchors
     anchors: list[Anchor] = Field(default_factory=list, description="Code symbol anchors for validation", max_length=3)
-    anchor_validity: float = Field(ge=0.0, le=1.0, default=1.0, description="Computed validity score (0.0-1.0)")
+    # PRD-CORE-244-FR01: ``None`` means "no anchor assessment has ever run on
+    # this entry" and is the default; a float is only present when
+    # ``compute_anchor_validity`` actually scored real anchors. The old
+    # ``1.0`` default reported a perfect score 7,541 unanchored rows never earned.
+    anchor_validity: float | None = Field(
+        ge=0.0, le=1.0, default=None, description="Computed validity score (0.0-1.0), None when never assessed"
+    )
 
-    # PRD-CORE-231-FR02: persisted assertion-staleness verdict. ``None`` means
-    # "no adverse verdict recorded" (the default for every pre-migration row);
-    # ``"stale"`` means every assertion has been failing for longer than the
-    # configured threshold (PRD-CORE-086-FR08). Scalar, last-write-wins.
-    verification_status: Literal["stale"] | None = Field(
+    # PRD-CORE-231-FR02, widened by PRD-CORE-244-FR03: the persisted verdict.
+    # ``"verified"`` means a pass examined this entry and found no failing
+    # assertion and no anchor score under the configured floor; ``"stale"``
+    # means every assertion has been failing for longer than the configured
+    # threshold (PRD-CORE-086-FR08); ``None`` means no verdict was reached.
+    # Before FR03 there was no positive value at all, so ``None`` meant both
+    # "healthy" and "never examined" on all 9,366 rows. Scalar, last-write-wins;
+    # pair it with ``verification_checked_at`` to separate the two Nones.
+    verification_status: Literal["verified", "stale"] | None = Field(
         default=None,
-        description="Persisted verification verdict ('stale' or None)",
+        description="Persisted verification verdict ('verified', 'stale', or None)",
+    )
+    # PRD-CORE-244-FR03: when the last verification pass examined this entry.
+    # "" means no pass has ever examined it, which is what makes a positive
+    # verdict distinguishable from "never checked" (and makes the pass
+    # cacheable). Carried by the PRD-CORE-245 schema-5 rebuild.
+    verification_checked_at: str = Field(
+        default="",
+        description="ISO-8601 timestamp of the last verification pass ('' = never checked)",
     )
 
     # PRD-CORE-132: Feedback lifecycle counters

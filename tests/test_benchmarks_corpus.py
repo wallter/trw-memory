@@ -53,7 +53,11 @@ class TestCorpusGeneration:
             assert len(entry.detail) > 0
             assert len(entry.tags) >= 2
             assert 0.1 <= entry.importance <= 1.0
-            assert entry.namespace == "benchmark"
+            # PRD-CORE-245 FR04/FR05: the corpus used ``benchmark``, which
+            # ``validate_namespace`` rejects -- so the authorizer granted nothing
+            # and the harness was grading a retrieval policy the product cannot
+            # run. It now uses a namespace in the shipped grammar.
+            assert entry.namespace == "project:benchmark"
             assert entry.source == "agent"
             assert entry.recurrence >= 1
 
@@ -183,7 +187,7 @@ class TestBenchmarkRetrieval:
                 detail="",
                 tags=[str(tag) for tag in entry["tags"]],
                 importance=float(entry["importance"]),
-                namespace="golden",
+                namespace="project:golden",
                 created_at=now,
                 updated_at=now,
                 source="agent",

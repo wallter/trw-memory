@@ -160,13 +160,15 @@ def _graph_related(
     depth: int,
     backend: StorageBackend,
     conn: sqlite3.Connection | None,
-    namespace: str | None = None,
+    *,
+    namespace: str,
 ) -> list[dict[str, object]]:
     """Query the knowledge graph for entries related to the recall results.
 
-    ``namespace`` scopes BFS traversal so related entries never leak across
-    namespaces (memory_graph_edges has no namespace column). ``None`` keeps
-    the legacy unscoped behaviour for back-compat.
+    ``namespace`` scopes BFS traversal AND the hydration read, so related
+    entries never leak across namespaces. It is required rather than optional:
+    PRD-CORE-245 NFR03 leaves no unscoped retrieval path, and hydrating a node
+    through the composite key needs a namespace regardless.
     """
     effective_conn = conn
     if effective_conn is None:
@@ -185,7 +187,7 @@ def _graph_related(
 
     hydrated: list[dict[str, object]] = []
     for node in related_nodes:
-        entry = backend.get(str(node["id"]))
+        entry = backend.get(str(node["id"]), namespace=namespace)
         if entry is None:
             # Dangling edge -- the target row was deleted; skip without crashing.
             continue

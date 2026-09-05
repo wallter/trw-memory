@@ -154,7 +154,7 @@ class TestMemoryStoreImpl:
                     tags=["python", "async", "sqlite"],
                 )
             )
-            backend.upsert_vector("M-existing", [1.0, 0.0, 0.0, 0.0])
+            backend.upsert_vector("M-existing", [1.0, 0.0, 0.0, 0.0], namespace="default")
 
             fake_embedder = MagicMock()
             fake_embedder.embed.return_value = [1.0, 0.0, 0.0, 0.0]
@@ -173,9 +173,8 @@ class TestMemoryStoreImpl:
             edge_rows = backend._conn.execute(
                 "SELECT edge_type, COUNT(*) FROM memory_graph_edges GROUP BY edge_type ORDER BY edge_type"
             ).fetchall()
-            expected = [("tag_cooccurrence", 2)]
-            if backend._vec_available:
-                expected.insert(0, ("similarity", 2))
+            # PRD-CORE-245 FR07: tag_cooccurrence is derived, never written.
+            expected = [("similarity", 2)] if backend._vec_available else []
             assert [tuple(row) for row in edge_rows] == expected
 
     def test_team_namespace_store_registers_lifecycle_row(self, tmp_path: Path) -> None:
@@ -241,8 +240,8 @@ class TestMemoryStoreImpl:
                 wait_for_graph_updates()
 
             assert result["status"] == "stored"
-            stored_entry = current_backend.get(cast("str", result["memory_id"]))
-            remote_entry = remote_backend.get("M-remote")
+            stored_entry = current_backend.get(cast("str", result["memory_id"]), namespace="project:default")
+            remote_entry = remote_backend.get("M-remote", namespace="project:other")
             assert stored_entry is not None
             assert remote_entry is not None
             assert stored_entry.cross_validated is True

@@ -14,6 +14,7 @@ import pytest
 
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.storage._yaml_row_mapper import ParsedRow
 from trw_memory.storage.yaml_backend import YAMLBackend, _dict_to_entry
 
 
@@ -30,20 +31,27 @@ def _base_data(**overrides: object) -> dict[str, object]:
 class TestDictToEntryHelpers:
     def test_int_helper_falls_back_on_bad_value(self) -> None:
         """_int() TypeError/ValueError → default (lines 87-88)."""
-        entry = _dict_to_entry(_base_data(access_count=None))
-        assert entry.access_count == 0  # None cannot be parsed by int(), falls back to 0
+        row = _dict_to_entry(_base_data(access_count=None))
+        assert row.entry.access_count == 0  # None cannot be parsed by int(), falls back to 0
+        assert row.partial is False
 
     def test_invalid_status_falls_back_to_active(self) -> None:
         """Invalid MemoryStatus string → MemoryStatus.ACTIVE (lines 119-120)."""
-        entry = _dict_to_entry(_base_data(status="not_a_valid_status"))
+        row = _dict_to_entry(_base_data(status="not_a_valid_status"))
         from trw_memory.models.memory import MemoryStatus
 
-        assert entry.status == MemoryStatus.ACTIVE
+        assert row.entry.status == MemoryStatus.ACTIVE
 
-    def test_bad_anchors_list_is_skipped(self) -> None:
-        """Anchor.model_validate error → debug logged, anchors=[] (lines 128-132)."""
-        entry = _dict_to_entry(_base_data(anchors=[{"bad_key": "value"}]))
-        assert entry.anchors == []
+    def test_bad_anchors_list_is_reported_not_just_skipped(self) -> None:
+        """A malformed anchor is still dropped, but the row now says so (W15).
+
+        This used to assert only ``entry.anchors == []`` -- which a row written
+        with no anchors at all satisfies just as well. The drop count is what
+        separates the two.
+        """
+        row = _dict_to_entry(_base_data(anchors=[{"bad_key": "value"}]))
+        assert row.entry.anchors == []
+        assert (row.dropped_anchors, row.partial) == (1, True)
 
 
 class TestYAMLBackendRepr:
@@ -78,13 +86,13 @@ class TestYAMLBackendPathTraversal:
             backend.store(MemoryEntry(id="alias/../victim", content="overwrite", namespace="project:default"))
 
         assert backend.count() == 1
-        assert backend.get("victim").content == "original"  # type: ignore[union-attr]
+        assert backend.get("victim", namespace="project:default").content == "original"  # type: ignore[union-attr]
 
     @pytest.mark.parametrize("entry_id", ["percent%", "under_score", "parent#hype0", "space id", "café"])
     def test_safe_opaque_ids_round_trip(self, tmp_path: Path, entry_id: str) -> None:
         backend = YAMLBackend(tmp_path / "entries")
         backend.store(MemoryEntry(id=entry_id, content="safe", namespace="project:default"))
-        assert backend.get(entry_id).id == entry_id  # type: ignore[union-attr]
+        assert backend.get(entry_id, namespace="project:default").id == entry_id  # type: ignore[union-attr]
         assert backend.count() == 1
 
 
@@ -109,7 +117,7 @@ class TestYAMLBackendGetDeserializeError:
         backend.store(entry)
         with patch("trw_memory.storage.yaml_backend._dict_to_entry", side_effect=ValueError("bad")):
             with pytest.raises(StorageError):
-                backend.get("M-get")
+                backend.get("M-get", namespace="project:default")
 
     def test_get_storage_error_is_reraised(self, tmp_path: Path) -> None:
         """get() StorageError from read_yaml → re-raised directly (line 274)."""
@@ -118,7 +126,7 @@ class TestYAMLBackendGetDeserializeError:
         backend.store(entry)
         with patch("trw_memory.storage.yaml_backend.read_yaml", side_effect=StorageError("disk")):
             with pytest.raises(StorageError, match="disk"):
-                backend.get("M-se")
+                backend.get("M-se", namespace="project:default")
 
 
 class TestYAMLBackendUpdateErrors:
@@ -129,7 +137,7 @@ class TestYAMLBackendUpdateErrors:
         backend.store(entry)
         with patch("trw_memory.storage.yaml_backend.read_yaml", side_effect=OSError("disk err")):
             with pytest.raises(StorageError):
-                backend.update("M-upd", content="new")
+                backend.update("M-upd", content="new", namespace="default")
 
     def test_update_storage_error_from_read_yaml_is_reraised(self, tmp_path: Path) -> None:
         """update() StorageError from read_yaml inside lock → re-raised (line 302)."""
@@ -138,7 +146,7 @@ class TestYAMLBackendUpdateErrors:
         backend.store(entry)
         with patch("trw_memory.storage.yaml_backend.read_yaml", side_effect=StorageError("lock")):
             with pytest.raises(StorageError, match="lock"):
-                backend.update("M-upd2", content="new")
+                backend.update("M-upd2", content="new", namespace="default")
 
     def test_update_invalid_field_raises_storage_error(self, tmp_path: Path) -> None:
         """update() invalid field → StorageError (lines 313-314)."""
@@ -146,7 +154,7 @@ class TestYAMLBackendUpdateErrors:
         entry = MemoryEntry(id="M-inv", content="hello", namespace="project:default")
         backend.store(entry)
         with pytest.raises(StorageError):
-            backend.update("M-inv", _invalid_field="oops")
+            backend.update("M-inv", _invalid_field="oops", namespace="default")
 
     def test_update_deserialize_failure_raises_storage_error(self, tmp_path: Path) -> None:
         """update() final _dict_to_entry error → StorageError (lines 336-337)."""
@@ -156,16 +164,16 @@ class TestYAMLBackendUpdateErrors:
 
         call_count = 0
 
-        def _mock_dict_to_entry(data: dict[str, object]) -> MemoryEntry:
+        def _mock_dict_to_entry(data: dict[str, object]) -> ParsedRow:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return entry  # first call (inside lock) succeeds
+                return ParsedRow(entry, 0, 0)  # first call (inside lock) succeeds
             raise ValueError("corrupt on final deserialize")
 
         with patch("trw_memory.storage.yaml_backend._dict_to_entry", side_effect=_mock_dict_to_entry):
             with pytest.raises(StorageError):
-                backend.update("M-de", content="updated")
+                backend.update("M-de", content="updated", namespace="default")
 
 
 class TestYAMLBackendDeleteOsError:
@@ -176,7 +184,7 @@ class TestYAMLBackendDeleteOsError:
         backend.store(entry)
         with patch("trw_memory.storage.yaml_backend.Path.unlink", side_effect=OSError("busy")):
             with pytest.raises(StorageError):
-                backend.delete("M-del")
+                backend.delete("M-del", namespace="project:default")
 
 
 class TestYAMLBackendListEntries:
@@ -209,9 +217,9 @@ class TestYAMLBackendNamespaceOps:
         backend.store(MemoryEntry(id="M-del2", content="del2", namespace="project:delete"))
         deleted = backend.delete_by_namespace("project:delete")
         assert deleted == 2
-        assert backend.get("M-keep") is not None
-        assert backend.get("M-del1") is None
-        assert backend.get("M-del2") is None
+        assert backend.get("M-keep", namespace="project:keep") is not None
+        assert backend.get("M-del1", namespace="project:delete") is None
+        assert backend.get("M-del2", namespace="project:delete") is None
 
     def test_delete_by_namespace_oserror_raises_storage_error(self, tmp_path: Path) -> None:
         """delete_by_namespace() OSError on unlink → StorageError (lines 525-529)."""

@@ -99,7 +99,7 @@ def test_store_increments_sync_seq(tmp_path: Path) -> None:
     entry = MemoryEntry(id="M-store", content="store test")
     assert entry.sync_seq == 0  # default before store
     backend.store(entry)
-    result = backend.get("M-store")
+    result = backend.get("M-store", namespace="default")
     assert result is not None
     assert result.sync_seq >= 1
     assert result.sync_hash != ""
@@ -114,7 +114,7 @@ def test_store_yaml_increments_sync_seq(tmp_path: Path) -> None:
     backend = YAMLBackend(tmp_path / "yaml_entries")
     entry = MemoryEntry(id="M-yaml-store", content="yaml store test")
     backend.store(entry)
-    result = backend.get("M-yaml-store")
+    result = backend.get("M-yaml-store", namespace="default")
     assert result is not None
     assert result.sync_seq >= 1
     assert result.sync_hash != ""
@@ -163,7 +163,7 @@ def test_get_dirty_entries_respects_since_seq(tmp_path: Path) -> None:
     assert len(dirty_none) == 0
 
     # Update e2 to increment its sync_seq to 2
-    backend.update("M-seq2", content="seq two updated")
+    backend.update("M-seq2", content="seq two updated", namespace="default")
     # Now since_seq=1 should return only M-seq2
     dirty_one = DeltaTracker.get_dirty_entries(backend, since_seq=1)
     ids = {e.id for e in dirty_one}
@@ -230,13 +230,13 @@ def test_sqlite_update_recomputes_sync_hash(tmp_path: Path) -> None:
     backend = SQLiteBackend(tmp_path / "test.db")
     entry = MemoryEntry(id="M-update", content="before")
     backend.store(entry)
-    DeltaTracker.mark_synced(["M-update"], backend)
-    before = backend.get("M-update")
+    DeltaTracker.mark_synced(["M-update"], backend, namespace="default")
+    before = backend.get("M-update", namespace="default")
     assert before is not None
 
-    backend.update("M-update", content="after")
+    backend.update("M-update", content="after", namespace="default")
 
-    after = backend.get("M-update")
+    after = backend.get("M-update", namespace="default")
     assert after is not None
     assert after.sync_seq == before.sync_seq + 1
     assert after.sync_hash != before.sync_hash
@@ -251,13 +251,13 @@ def test_yaml_update_recomputes_sync_hash(tmp_path: Path) -> None:
     backend = YAMLBackend(tmp_path / "yaml_entries")
     entry = MemoryEntry(id="M-yaml-update", content="before")
     backend.store(entry)
-    DeltaTracker.mark_synced(["M-yaml-update"], backend)
-    before = backend.get("M-yaml-update")
+    DeltaTracker.mark_synced(["M-yaml-update"], backend, namespace="default")
+    before = backend.get("M-yaml-update", namespace="default")
     assert before is not None
 
-    backend.update("M-yaml-update", content="after")
+    backend.update("M-yaml-update", content="after", namespace="default")
 
-    after = backend.get("M-yaml-update")
+    after = backend.get("M-yaml-update", namespace="default")
     assert after is not None
     assert after.sync_seq == before.sync_seq + 1
     assert after.sync_hash != before.sync_hash
@@ -278,11 +278,11 @@ def test_mark_synced_sets_timestamp(tmp_path: Path) -> None:
     backend.store(e1)
     backend.store(e2)
 
-    count = DeltaTracker.mark_synced(["M-sync1", "M-sync2"], backend)
+    count = DeltaTracker.mark_synced(["M-sync1", "M-sync2"], backend, namespace="default")
     assert count == 2
 
-    r1 = backend.get("M-sync1")
-    r2 = backend.get("M-sync2")
+    r1 = backend.get("M-sync1", namespace="default")
+    r2 = backend.get("M-sync2", namespace="default")
     assert r1 is not None and r1.last_synced_at is not None
     assert r2 is not None and r2.last_synced_at is not None
     backend.close()
@@ -291,7 +291,7 @@ def test_mark_synced_sets_timestamp(tmp_path: Path) -> None:
 def test_mark_synced_nonexistent_entry(tmp_path: Path) -> None:
     """FR05: mark_synced silently skips non-existent entries."""
     backend = SQLiteBackend(tmp_path / "test.db")
-    count = DeltaTracker.mark_synced(["M-nonexist"], backend)
+    count = DeltaTracker.mark_synced(["M-nonexist"], backend, namespace="default")
     # Depending on backend behavior, this may be 0 (entry not found)
     # or raise no error
     assert count == 0
@@ -309,7 +309,7 @@ def test_mark_synced_removes_from_dirty(tmp_path: Path) -> None:
     assert any(e.id == "M-clean" for e in dirty_before)
 
     # Mark synced
-    DeltaTracker.mark_synced(["M-clean"], backend)
+    DeltaTracker.mark_synced(["M-clean"], backend, namespace="default")
 
     # Should no longer be dirty
     dirty_after = DeltaTracker.get_dirty_entries(backend, since_seq=0)
@@ -335,7 +335,7 @@ def test_sqlite_roundtrip_sync_fields(tmp_path: Path) -> None:
     )
     # Store with pre-set values (FR06 will overwrite sync_seq/hash)
     backend.store(entry)
-    result = backend.get("M-rt")
+    result = backend.get("M-rt", namespace="default")
     assert result is not None
     # FR06 auto-marks dirty, so sync_seq will be incremented and hash recomputed
     assert result.sync_seq >= 1
@@ -360,7 +360,7 @@ def test_yaml_roundtrip_sync_fields(tmp_path: Path) -> None:
         content="yaml roundtrip",
     )
     backend.store(entry)
-    result = backend.get("M-yaml-rt")
+    result = backend.get("M-yaml-rt", namespace="default")
     assert result is not None
     # FR06: auto dirty-marked
     assert result.sync_seq >= 1
@@ -438,13 +438,13 @@ def test_mark_dirty_existing_entry_increments_seq(tmp_path: Path) -> None:
     """mark_dirty on an existing entry increments sync_seq and recomputes hash."""
     backend = SQLiteBackend(tmp_path / "test.db")
     backend.store(MemoryEntry(id="M-dirty-1", content="initial content"))
-    entry_before = backend.get("M-dirty-1")
+    entry_before = backend.get("M-dirty-1", namespace="default")
     assert entry_before is not None
     seq_before = entry_before.sync_seq
 
-    DeltaTracker.mark_dirty("M-dirty-1", backend)
+    DeltaTracker.mark_dirty("M-dirty-1", backend, namespace="default")
 
-    entry_after = backend.get("M-dirty-1")
+    entry_after = backend.get("M-dirty-1", namespace="default")
     assert entry_after is not None
     assert entry_after.sync_seq == seq_before + 1
     assert entry_after.sync_hash != ""
@@ -454,7 +454,7 @@ def test_mark_dirty_existing_entry_increments_seq(tmp_path: Path) -> None:
 def test_mark_dirty_nonexistent_entry_is_noop(tmp_path: Path) -> None:
     """mark_dirty on a missing entry returns early without error (line 76)."""
     backend = SQLiteBackend(tmp_path / "test.db")
-    DeltaTracker.mark_dirty("DOES-NOT-EXIST", backend)
+    DeltaTracker.mark_dirty("DOES-NOT-EXIST", backend, namespace="default")
     backend.close()
 
 
@@ -502,7 +502,7 @@ def test_mark_synced_exception_logs_warning_and_continues(tmp_path: Path) -> Non
     backend.update = _raise_on_first  # type: ignore[method-assign]
 
     with structlog.testing.capture_logs() as logs:
-        count = DeltaTracker.mark_synced(["M-ok-1", "M-ok-2"], backend)
+        count = DeltaTracker.mark_synced(["M-ok-1", "M-ok-2"], backend, namespace="default")
 
     assert count == 1
     warning_events = [l["event"] for l in logs if l.get("log_level") == "warning"]

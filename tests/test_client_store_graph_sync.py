@@ -55,15 +55,21 @@ class TestDbapiGraphCompatibility:
             result = update_entry_graph(target, backend)
             backend._conn = real_connection
 
-            assert result["tag_edges"] == 2
+            # PRD-CORE-245 FR07: tag co-occurrence is derived, not materialised,
+            # so the graph pass reports no tag edge count at all.
+            assert "tag_edges" not in result
             rows = real_connection.execute(
                 "SELECT source_id, target_id FROM memory_graph_edges WHERE edge_type = 'tag_cooccurrence' "
                 "ORDER BY source_id, target_id"
             ).fetchall()
-            assert [tuple(row) for row in rows] == [
+            assert [tuple(row) for row in rows] == []
+            # The relation still exists — it is an inverted-index lookup now, and
+            # the proxy connection is what proves the write path reached SQLite.
+            postings = real_connection.execute(
+                "SELECT COUNT(*) FROM memory_tags WHERE entry_id IN (?, ?)",
                 ("M-proxy-candidate", "M-proxy-target"),
-                ("M-proxy-target", "M-proxy-candidate"),
-            ]
+            ).fetchone()[0]
+            assert postings > 0
         finally:
             backend._conn = real_connection
             backend.close()
@@ -81,7 +87,7 @@ class TestRbacEnforcement:
                 tags=["python", "async", "sqlite"],
             )
         )
-        backend.upsert_vector("M-existing", vector)
+        backend.upsert_vector("M-existing", vector, namespace="default")
 
         fake_embedder = MagicMock()
         fake_embedder.embed.return_value = vector
@@ -95,9 +101,8 @@ class TestRbacEnforcement:
             "GROUP BY edge_type ORDER BY edge_type",
             (stored["memory_id"], "M-existing", stored["memory_id"], "M-existing"),
         ).fetchall()
-        expected = [("tag_cooccurrence", 2)]
-        if backend._vec_available:
-            expected.insert(0, ("similarity", 2))
+        # PRD-CORE-245 FR07: no tag_cooccurrence row is ever written now.
+        expected = [("similarity", 2)] if backend._vec_available else []
         assert [tuple(row) for row in edge_rows] == expected
 
     async def test_store_without_embedder_still_populates_tag_edges(self, client: MemoryClient) -> None:
@@ -120,7 +125,14 @@ class TestRbacEnforcement:
             "GROUP BY edge_type ORDER BY edge_type",
             (stored["memory_id"], "M-existing-tags", stored["memory_id"], "M-existing-tags"),
         ).fetchall()
-        assert [tuple(row) for row in edge_rows] == [("tag_cooccurrence", 2)]
+        # PRD-CORE-245 FR07: the tag relation lives in memory_tags now, so the
+        # edge table stays empty and the inverted index carries the postings.
+        assert [tuple(row) for row in edge_rows] == []
+        tag_rows = backend._conn.execute(
+            "SELECT COUNT(*) FROM memory_tags WHERE entry_id IN (?, ?)",
+            (stored["memory_id"], "M-existing-tags"),
+        ).fetchone()[0]
+        assert tag_rows == 6
 
     async def test_store_registers_team_namespace_lifecycle_row(
         self,
@@ -207,8 +219,8 @@ class TestRbacEnforcement:
                 await asyncio.to_thread(wait_for_graph_updates)
 
             backend = cast("SQLiteBackend", client._get_backend())
-            current_entry = backend.get(stored["memory_id"])
-            remote_entry = remote_backend.get("M-remote")
+            current_entry = backend.get(stored["memory_id"], namespace="project:default")
+            remote_entry = remote_backend.get("M-remote", namespace="project:other")
             assert current_entry is not None
             assert remote_entry is not None
             assert current_entry.cross_validated is True
@@ -241,7 +253,7 @@ class TestRbacEnforcement:
             await client.close()
 
         reopened = MemoryClient(namespace="default", mode="local")
-        entry = reopened._get_backend().get(stored["memory_id"])
+        entry = reopened._get_backend().get(stored["memory_id"], namespace="default")
         assert entry is not None
         assert entry.published_to_platform is True
         assert entry.remote_id == "42"
@@ -318,7 +330,7 @@ class TestRbacEnforcement:
         await client.close()
 
         reopened = MemoryClient(namespace="default", mode="local")
-        entry = reopened._get_backend().get(stored["memory_id"])
+        entry = reopened._get_backend().get(stored["memory_id"], namespace="default")
         assert entry is not None
         assert entry.published_to_platform is False
         assert entry.remote_id is None

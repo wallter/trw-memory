@@ -8,9 +8,24 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 __all__ = ["_LifecycleConfigMixin"]
+
+#: Inclusive bounds for every value of ``protection_tier_prune_discount``.
+#: 0.0 means "never nominated"; 4.0 means "four times easier to nominate than
+#: normal". An operator-supplied ``.trw/config.yaml`` cannot escape this band.
+PROTECTION_DISCOUNT_MIN = 0.0
+PROTECTION_DISCOUNT_MAX = 4.0
+
+#: Number of distinct artifact kinds that can substantiate a ``verified`` claim
+#: — a non-whitespace evidence string, a non-empty assertions list, a non-empty
+#: anchors list. It is the hard ceiling on
+#: ``min_evidence_items_for_verified``: demanding 4 of 3 is not a stricter rule,
+#: it is an unsatisfiable one, and an unsatisfiable gate that reads like a
+#: configured threshold is precisely the defect class PRD-CORE-244 exists to
+#: remove. Kept in lockstep with ``security.poisoning._count_substantiation``.
+MAX_SUBSTANTIATION_ITEMS = 3
 
 
 class _LifecycleConfigMixin(BaseModel):
@@ -63,6 +78,46 @@ class _LifecycleConfigMixin(BaseModel):
         description="Maximum fraction of active entries allowed in the high importance tier (0.7-0.89)",
     )
 
+    # Automatic-removal protection (PRD-CORE-244 FR10)
+    protection_tier_prune_discount: dict[str, float] = Field(
+        default_factory=lambda: {"critical": 0.25, "high": 0.5, "normal": 1.0, "low": 1.5},
+        description=(
+            "Multiplier applied to the utility threshold an entry must fall BELOW before an "
+            "automatic prune, tier demotion or purge may nominate it. A 'critical' entry at 0.25 "
+            "must therefore be four times less useful than a 'normal' one before it is a "
+            "candidate. The 'protected' and 'permanent' tiers are not listed because they are "
+            "exempt outright, not discounted (PRD-CORE-244 FR10). Mirrors the trw-mcp "
+            "TRWConfig field of the same name."
+        ),
+    )
+
+    @field_validator("protection_tier_prune_discount")
+    @classmethod
+    def _bound_protection_discounts(cls, value: dict[str, float]) -> dict[str, float]:
+        for tier, discount in value.items():
+            if not PROTECTION_DISCOUNT_MIN <= discount <= PROTECTION_DISCOUNT_MAX:
+                raise ValueError(
+                    f"protection_tier_prune_discount[{tier!r}]={discount} is outside "
+                    f"[{PROTECTION_DISCOUNT_MIN}, {PROTECTION_DISCOUNT_MAX}]"
+                )
+        return value
+
+    # Write-time substantiation (PRD-CORE-244 FR02)
+    min_evidence_items_for_verified: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_SUBSTANTIATION_ITEMS,
+        description=(
+            "How many substantiating artifacts a confidence='verified' write must carry — "
+            "counting a non-whitespace evidence string, a non-empty assertions list and a "
+            "non-empty anchors list as one each. It bounds HOW MUCH substantiation is demanded; "
+            "it cannot express 'demand none', so it is a tunable and not an off switch. "
+            "The ceiling is the number of artifact KINDS that exist (3): a higher value could "
+            "never be satisfied by any entry, so it would silently lock out every verified "
+            "write instead of tightening the rule."
+        ),
+    )
+
     # Scoring
     decay_half_life_days: float = Field(default=14.0, gt=0.0, description="Half-life in days for recency decay")
     decay_use_exponent: float = Field(default=0.6, ge=0.0, le=1.0, description="Exponent for utility-based decay")
@@ -74,6 +129,17 @@ class _LifecycleConfigMixin(BaseModel):
             "(R(t,S)=(1+FACTOR*t/S)^DECAY) instead of the Ebbinghaus exponential. "
             "FSRS models spaced-repetition dynamics more accurately for entries "
             "that have been recalled multiple times."
+        ),
+    )
+    feedback_decay_min_factor: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Floor on the PRD-CORE-132 feedback-decay factor (PRD-CORE-244 FR11 residual). "
+            "With helpful_count at 0 corpus-wide the term is a pure recall-frequency penalty "
+            "of 0.95**recall_count with no lower bound, which buries whatever the retriever "
+            "keeps finding. 0.0 restores the unbounded pre-floor behaviour."
         ),
     )
     q_learning_rate: float = Field(default=0.15, ge=0.0, le=1.0, description="Q-learning update rate")

@@ -7,7 +7,7 @@ back-compat — the public API surface (``SQLiteBackend._connect``,
 ``SQLiteBackend._db_has_data``) is preserved by parent re-export
 delegators.
 
-4 helpers:
+5 helpers:
 
 - ``connect`` — base ``dbapi.connect`` with WAL/synchronous defaults
   + sqlcipher key-pragma application when ``sqlcipher_key_hex`` is
@@ -16,6 +16,8 @@ delegators.
 - ``open_without_integrity_check`` — open without quick_check (reserved
   for explicit SQLite lock/busy contention; structural quick_check failures
   must recover instead of continuing against a damaged B-tree).
+- ``open_probe`` — short-lived open for the two probes below, carrying the
+  same PRAGMA profile as every other open path.
 - ``db_has_data`` — non-destructive row-count probe.
 
 Extracted as PRD-DIST-245 Phase 1 batch 82.
@@ -35,6 +37,17 @@ logger = structlog.get_logger(__name__)
 
 # Cap WAL file growth so a stalled checkpoint cannot let the WAL grow unbounded
 # (a large stale WAL widens the window for WAL-reset inconsistency). 64 MiB.
+#
+# Read this together with trw-mcp's ``wal_checkpoint_threshold_mb`` (default
+# 10 MB), which is the size at which trw-mcp DECIDES a checkpoint is due. The
+# two numbers are 6.4x apart and mean different things, and the gap is exactly
+# what an operator sees on an engine below SQLite 3.51.3: PASSIVE is the only
+# permitted mode there (``_wal_checkpoint.normalize_mode``), PASSIVE writes
+# frames back but never truncates, so the file climbs to THIS cap and stays,
+# while the 10 MB trigger keeps firing to no visible effect. That is not drift
+# between the two constants — it is the documented consequence of the engine
+# gate, and the remedy is the engine upgrade named in
+# ``_wal_checkpoint.WAL_RESET_UNSAFE_REMEDY``.
 WAL_JOURNAL_SIZE_LIMIT_BYTES = 67108864
 # Lock-wait window applied to every open path so a transient checkpoint/writer
 # does not raise "database is locked" immediately.
@@ -186,6 +199,44 @@ def open_without_integrity_check(
     return conn
 
 
+#: Lock-wait for the short-lived probe opens below. Deliberately shorter than
+#: the 30 s the full open paths allow: a probe that cannot get in promptly
+#: should report that, not stall a caller's boot.
+_PROBE_TIMEOUT_SECONDS = 5.0
+
+
+def open_probe(
+    db_path: Path,
+    *,
+    dbapi: Any = sqlite3,
+    sqlcipher_key_hex: str | None = None,
+) -> Any:
+    """Open a short-lived probe connection with the standard PRAGMA profile.
+
+    The shared open path for :func:`check_integrity` and :func:`db_has_data`.
+    Both used to call :func:`connect` directly and skip
+    :func:`apply_open_pragmas`, so a probe connection ran without
+    ``journal_size_limit``: it could append WAL frames (a probe still runs the
+    recovery/checkpoint machinery of the engine) with the 64 MiB cap that every
+    other open path sets left unset. A per-callsite PRAGMA list is exactly how
+    that cap gets opted out of by accident, so there is one open path instead.
+    """
+    conn = connect(
+        db_path,
+        dbapi=dbapi,
+        timeout=_PROBE_TIMEOUT_SECONDS,
+        check_same_thread=True,
+        sqlcipher_key_hex=sqlcipher_key_hex,
+    )
+    try:
+        apply_open_pragmas(conn)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            conn.close()
+        raise
+    return conn
+
+
 def check_integrity(
     db_path: Path,
     *,
@@ -201,13 +252,7 @@ def check_integrity(
     """
     conn: Any = None
     try:
-        conn = connect(
-            db_path,
-            dbapi=dbapi,
-            timeout=5.0,
-            check_same_thread=True,
-            sqlcipher_key_hex=sqlcipher_key_hex,
-        )
+        conn = open_probe(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
         rows = conn.execute("PRAGMA quick_check").fetchall()
         healthy = len(rows) == 1 and rows[0][0] == "ok"
         return {"ok": healthy, "detail": rows[0][0] if rows else "empty", "db_path": str(db_path)}
@@ -234,13 +279,7 @@ def db_has_data(
     """
     conn: Any = None
     try:
-        conn = connect(
-            db_path,
-            dbapi=dbapi,
-            timeout=5.0,
-            check_same_thread=True,
-            sqlcipher_key_hex=sqlcipher_key_hex,
-        )
+        conn = open_probe(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
         count = conn.execute("SELECT count(*) FROM memories").fetchone()[0]
         return bool(count > 0)
     except sqlite3.Error:

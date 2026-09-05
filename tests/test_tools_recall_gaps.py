@@ -88,7 +88,10 @@ class TestRecallTagsExpandTopK:
         """Tags + entries hits effective_top_k expansion (line 179)."""
         from trw_memory.models.memory import MemoryEntry
 
-        entries = [MemoryEntry(id=f"M-{i:03d}", content=f"content {i}", tags=["important"]) for i in range(3)]
+        entries = [
+            MemoryEntry(id=f"M-{i:03d}", content=f"content {i}", tags=["important"], namespace="project:default")
+            for i in range(3)
+        ]
         backend = _mock_backend(entries)
         backend.list_entries.return_value = entries
         backend.get_stored_embeddings.return_value = {}
@@ -112,7 +115,14 @@ class TestRecallTokenBudget:
         """token_budget not None → apply_token_budget called (line 313)."""
         from trw_memory.models.memory import MemoryEntry
 
-        entries = [MemoryEntry(id=f"M-{i:03d}", content=f"memory content item number {i} " * 10) for i in range(5)]
+        entries = [
+            MemoryEntry(
+                id=f"M-{i:03d}",
+                content=f"memory content item number {i} " * 10,
+                namespace="project:default",
+            )
+            for i in range(5)
+        ]
         backend = _mock_backend(entries)
         backend.list_entries.return_value = entries
         backend.get_stored_embeddings.return_value = {}

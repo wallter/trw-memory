@@ -74,7 +74,7 @@ async def forget_impl(
                 ):
                     if candidate.source_identity != actor:
                         continue
-                    if backend.delete(candidate.id):
+                    if backend.delete(candidate.id, namespace=candidate.namespace):
                         local_deleted += 1
                         # PRD-CORE-195 FR05: purge the parent's HyPE sibling
                         # vectors so they cannot linger as orphan dense hits.
@@ -106,7 +106,7 @@ async def forget_impl(
             return actor_forget_result
 
         assert memory_id is not None  # noqa: S101
-        existing = backend.get(memory_id)
+        existing = backend.get(memory_id, namespace=client._namespace)
         if existing is None:
             quarantined_deleted = _c.delete_quarantined_entries(
                 client._config,
@@ -130,10 +130,13 @@ async def forget_impl(
                 "entries_deleted": quarantined_deleted,
             }
             return quarantined_forget_result
+        # Defence in depth: see ``_existing_entry_for_namespace``. The read above
+        # is already namespace-qualified (PRD-CORE-245 FR03); this refuses to
+        # delete anything a non-conforming backend hands back from elsewhere.
         if existing.namespace != client._namespace:
             raise MemoryNotFoundError(f"Memory entry {memory_id!r} not found in namespace {client._namespace!r}")
         remote_id = existing.remote_id
-        backend.delete(memory_id)
+        backend.delete(memory_id, namespace=client._namespace)
         # PRD-CORE-195 FR05: purge the parent's HyPE sibling vectors on forget.
         backend.delete_hype_siblings(memory_id)
         _c.remove_entry_from_tiers(client._config, client._namespace, memory_id)

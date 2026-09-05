@@ -28,6 +28,7 @@ from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.retrieval import hybrid_search
 from trw_memory.retrieval.admission_policy import apply_admission_filter
 from trw_memory.retrieval.source_policy import apply_source_policy
+from trw_memory.security.namespace_scope import authorize_namespaces
 from trw_memory.security.rbac import Permission, require_namespace_permission
 from trw_memory.security.runtime import append_audit_event, initialize_canaries, probe_canaries, should_halt_recalls
 from trw_memory.storage.interface import StorageBackend
@@ -91,7 +92,11 @@ def memory_recall_impl(
         {"memories": list[dict], "total_matches": int, "query": str,
          "tokens_used": int, "tokens_budget": int | None,
          "tokens_truncated": bool,
-         "related": list[dict] (when graph_depth > 0)}
+         "related": list[dict] (when graph_depth > 0),
+         "partial": True and "namespaces_omitted": {"denied": int,
+         "expired": int} when one of the requested namespaces was refused by
+         the authorizer or skipped as an expired team namespace -- present ONLY
+         when something was omitted, so a complete answer keeps its shape}
         or {"error": str, "status": "invalid"} on validation failure.
 
     Raises:
@@ -125,16 +130,17 @@ def memory_recall_impl(
             "namespace_expired": True,
         }
 
-    # Validate any additional namespaces
-    extra_ns: list[str] = []
-    for ns in include_namespaces or []:
-        try:
-            validate_namespace(ns)
-            extra_ns.append(ns)
-        except ConfigError:  # per-item error handling: skip invalid namespaces, continue with valid ones
-            logger.debug("recall_invalid_namespace_skipped", namespace=ns)
-
-    all_namespaces = [namespace, *extra_ns]
+    # PRD-CORE-245 FR05: the permission result IS the scope. Previously the
+    # check above ran and its outcome was discarded by the time the loop below
+    # opened backends; now the scope decides which namespaces may be opened at
+    # all, so a namespace that fails the check is never read from disk rather
+    # than read and later filtered.
+    scope = authorize_namespaces(cfg, [namespace, *(include_namespaces or [])], Permission.READ, "recall")
+    all_namespaces = [ns for ns in [namespace, *(include_namespaces or [])] if ns in scope]
+    # A namespace dropped here (refused, or expired below) narrows the corpus the
+    # answer was computed over. The counts ride out on the response so the caller
+    # reads a narrowed result as narrowed instead of as a complete one.
+    expired_skipped = 0
     # Namespace-scoped local backends can only see one store at a time, so
     # cross-namespace recall must reopen the requested namespaces explicitly.
     all_entries = []
@@ -152,6 +158,11 @@ def memory_recall_impl(
 
             if ns.startswith("team:") and NamespaceManager(ns_backend).team_namespace_expired(ns):
                 logger.debug("recall_expired_namespace_skipped", namespace=ns)
+                expired_skipped += 1
+                # Drop it from the scope too, so an expired team namespace
+                # cannot satisfy the pipeline's membership assertion via some
+                # other path (FR05).
+                scope = scope.without(ns)
                 continue
 
             # Push the tag predicate into SQL so the row LIMIT applies AFTER the
@@ -216,6 +227,7 @@ def memory_recall_impl(
         ranked = hybrid_search(
             query=retrieval_query,
             entries=all_entries,
+            scope=scope,
             embedder=embedder,
             query_embedding=query_embedding,
             stored_embeddings=stored_embeddings or None,
@@ -382,6 +394,18 @@ def memory_recall_impl(
         "tokens_budget": token_budget,
         "tokens_truncated": tokens_truncated,
     }
+    if scope.denied or expired_skipped:
+        # Counts only, never the refused names: a namespace label is
+        # operator-chosen but still user data (PRD-CORE-245 NFR03).
+        logger.warning(
+            "memory_recall_scope_narrowed",
+            namespace=namespace,
+            denied=scope.denied,
+            expired=expired_skipped,
+            searched=len(seen_namespaces) - expired_skipped,
+        )
+        response["partial"] = True
+        response["namespaces_omitted"] = {"denied": scope.denied, "expired": expired_skipped}
 
     # Graph traversal for related entries
     if graph_depth > 0 and result_dicts:
@@ -443,7 +467,9 @@ def register_recall_tool(mcp: McpServer) -> None:
             {"memories": [...], "total_matches": int, "query": str,
              "tokens_used": int, "tokens_budget": int | None,
              "tokens_truncated": bool,
-             "related": [...] (when graph_depth > 0)}
+             "related": [...] (when graph_depth > 0),
+             "partial": true + "namespaces_omitted" counts when a requested
+             namespace was refused or had expired}
         """
         cfg = MemoryConfig()
         with create_backend_from_config(cfg, namespace) as backend:

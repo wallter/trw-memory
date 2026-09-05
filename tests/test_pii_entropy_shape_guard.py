@@ -57,7 +57,7 @@ DESTROYED_SAMPLES: list[tuple[str, str]] = [
     ),
     (
         "{token} items #1-#9, #12, #13, #16a/b, #24 shipped across v0.3.0-v0.6.1",
-        "docs/research/trw-distill/TRW-DISTILL-ROADMAP-SUPERVISOR-2026-05-25.md#35",
+        "docs/research/trw-distill/TRW-DISTILL-ROADMAP-SUPERVISOR-2026-05-25.md#35",  # trw-leak-allow: internal_docs synthetic fixture string, not a real location
     ),
     (
         "-> _update_agents at all - meaning _is_user_modified {token} was dead",
@@ -158,12 +158,12 @@ class TestStructuredTokenShapes:
     @pytest.mark.parametrize(
         "token",
         [
-            "/home/wallter/projects/trw-framework/trw-memory/src/trw_memory/security/pii.py",
+            "/home/dev/projects/example-repo/trw-memory/src/trw_memory/security/pii.py",  # trw-leak-allow: machine_path synthetic fixture string, not a real location
             "docs/requirements-aare-f/prds/PRD-INFRA-054.md",
             "trw_memory.security._runtime_pii.apply_runtime_pii_policy",
             "HIGH_ENTROPY_ELISION_PREFIX_LEN",
             "_is_structured_technical_token",
-            "docs/research/trw-distill/SC2-C806-PRESERVE-HYBRID-ORDER-2026-05-19.md",
+            "docs/research/trw-distill/SC2-C806-PRESERVE-HYBRID-ORDER-2026-05-19.md",  # trw-leak-allow: internal_docs synthetic fixture string, not a real location
             "https://github.com/wallter/trw-framework/blob/357e6e163b5d/.github/workflows/eval-ci.yml",
             "357e6e163b5d0d5c1158e14d606d425058620f5e..9fe8bcfd7fc109e66294798052cc21bda3dbc667",
             "v0.3.0-v0.6.1",
@@ -177,7 +177,7 @@ class TestStructuredTokenShapes:
         "token",
         [
             "C:\\Users\\Tyler\\Desktop\\trw-framework\\docs\\index.md",
-            "platform/src/app/(marketing)/about/AboutContent.tsx:98-104",
+            "platform/src/app/(marketing)/about/AboutContent.tsx:98-104",  # trw-leak-allow: proprietary_path synthetic fixture string, not a real location
             "OllamaSynthesisClient(SynthesisConfig(primary_model='qwen3.6:35b-a3b')))",
         ],
     )

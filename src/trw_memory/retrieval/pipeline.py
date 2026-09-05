@@ -27,6 +27,7 @@ from trw_memory.retrieval.dense import dense_search
 from trw_memory.retrieval.fusion import blend_recency, combmax_fuse, rrf_fuse
 from trw_memory.retrieval.recency import recency_rank
 from trw_memory.retrieval.validity_prior import apply_validity_prior
+from trw_memory.security.namespace_scope import NamespaceScope, NamespaceScopeError
 
 logger = structlog.get_logger(__name__)
 
@@ -35,6 +36,7 @@ def hybrid_search(
     query: str,
     entries: list[MemoryEntry],
     *,
+    scope: NamespaceScope,
     embedder: EmbeddingProvider | None = None,
     query_embedding: list[float] | None = None,
     stored_embeddings: dict[str, list[float]] | None = None,
@@ -81,6 +83,13 @@ def hybrid_search(
         entries: Candidate :class:`~trw_memory.models.memory.MemoryEntry`
             objects to rank.  Typically the full active entry set from the
             storage backend.
+        scope: The namespaces this call is cleared to rank, minted by
+            :func:`~trw_memory.security.namespace_scope.authorize_namespaces`.
+            Required with no default (PRD-CORE-245 FR04): a default would put
+            isolation back where it was, in each caller's discipline. Every
+            candidate must belong to it, and a candidate that does not raises
+            :class:`~trw_memory.security.namespace_scope.NamespaceScopeError`
+            BEFORE any retrieval step runs, rather than being quietly dropped.
         embedder: Optional embedding provider used for dense search.  When
             ``None`` or unavailable the dense path is skipped (unless
             *query_embedding* is supplied).
@@ -157,6 +166,18 @@ def hybrid_search(
     """
     if not entries:
         return []
+
+    # PRD-CORE-245 FR04: assert containment BEFORE any retrieval step. It
+    # asserts rather than filters -- a caller that assembled a list spanning
+    # namespaces it was not cleared for has a bug, and truncating the list here
+    # would hide it. An empty scope therefore admits nothing, which is the
+    # fail-closed behaviour NFR03 asks for.
+    outside = {entry.namespace for entry in entries} - scope.namespaces
+    if outside:
+        raise NamespaceScopeError(
+            f"hybrid_search received {len(outside)} namespace(s) outside the authorized scope "
+            f"(scope holds {len(scope.namespaces)}); the caller assembled candidates it was not cleared to rank"
+        )
 
     # Index entries by id for fast lookup after fusion
     entry_map: dict[str, MemoryEntry] = {e.id: e for e in entries}

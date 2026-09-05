@@ -21,16 +21,13 @@ created_at vs created).
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from datetime import date, datetime, timezone
 
 import structlog
 
+from trw_memory.lifecycle._utility_params import UtilityParams
 from trw_memory.lifecycle._utils import days_since_access as _days_since_access
 from trw_memory.models.config import MemoryConfig
-
-if TYPE_CHECKING:
-    from trw_memory.storage.interface import StorageBackend
 
 logger = structlog.get_logger(__name__)
 
@@ -48,6 +45,49 @@ def _float_field(entry: dict[str, object], key: str, default: float) -> float:
 def _int_field(entry: dict[str, object], key: str, default: int) -> int:
     """Extract an int from an entry dict, coercing through str for safety."""
     return int(str(entry.get(key, default)))
+
+
+#: Floor on the feedback-decay FACTOR. With ``helpful_count`` at 0 corpus-wide
+#: the term degenerates to ``0.95 ** recall_count``, which is unbounded below;
+#: 0.5 caps the worst case at halving importance. Chosen as the largest penalty
+#: that is still recoverable by a single round of real feedback rather than by a
+#: measured optimum — no calibration data exists, because the signal it bounds
+#: has never once been supplied. Overridable per call and via
+#: ``MemoryConfig.feedback_decay_min_factor``.
+_DEFAULT_FEEDBACK_DECAY_MIN_FACTOR = 0.5
+
+#: Days assumed when an entry carries no parseable timestamp at all. Preserves
+#: the literal the pre-FR11 trw_memory implementation used; the trw-mcp caller
+#: overrides it with ``TRWConfig.scoring_default_days_unused``.
+_DEFAULT_FALLBACK_DAYS = 30
+
+
+def _parse_expires(raw: str) -> date | None:
+    """Parse an ``expires`` field to a date, or ``None`` when it never expires.
+
+    Accepts a bare ISO date and a full ISO datetime. An empty or unparseable
+    value never expires — matching ``trw_memory.retrieval.validity_prior`` so the
+    ranking and the eligibility paths agree about the same string.
+    """
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+    except ValueError:
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            return None
+
+
+def utility_params_from_config(config: MemoryConfig) -> UtilityParams:
+    """Bind the trw-memory tuning surface to the shared knob bundle."""
+    return UtilityParams(
+        half_life_days=config.decay_half_life_days,
+        use_exponent=config.decay_use_exponent,
+        use_fsrs=config.lifecycle_use_fsrs,
+        feedback_decay_min_factor=config.feedback_decay_min_factor,
+    )
 
 
 def _clamp01(value: float) -> float:
@@ -201,98 +241,152 @@ def feedback_decay_score(
     importance: float,
     recall_count: int,
     helpful_count: int,
+    *,
+    min_factor: float = _DEFAULT_FEEDBACK_DECAY_MIN_FACTOR,
 ) -> float:
     """Compute feedback-aware decay score.
 
     Learnings recalled often but never marked helpful decay faster.
     Helpful feedback counteracts decay.
 
-    Formula: importance * (0.95 ** (recall_count / max(1, helpful_count)))
+    Formula: ``importance * max(min_factor, 0.95 ** (recall_count / max(1, helpful_count)))``
+
+    **Why the floor exists (PRD-CORE-244 FR11 residual).** The exponent is
+    ``recall_count / max(1, helpful_count)`` and ``helpful_count`` is 0 on 100%
+    of the 9,366-row corpus, so in practice the term is not "feedback-aware
+    decay" at all — it is a *pure recall-count penalty*, ``0.95 ** recall_count``,
+    unbounded below. An entry surfaced 100 times decays to 0.6% of its
+    importance on retrieval frequency alone, and PRD-QUAL-032/D1 already
+    established that being surfaced in a result set is not evidence of use. That
+    turns the one term crediting feedback into a mechanism that buries whatever
+    the retriever keeps finding — the same "optimises the wrong objective"
+    failure FR04 exists to correct, arriving from the opposite direction.
+
+    ``min_factor`` bounds the damage a *missing* signal can do while leaving the
+    signal itself intact: helpful feedback still lifts an entry above a
+    same-recall sibling at every count (the factor is monotone in
+    ``helpful_count`` until it saturates), so the incentive the formula encodes
+    is unchanged. The default halves importance at worst, which is a large
+    penalty for an unrated entry and a recoverable one.
 
     Args:
         importance: Base importance/impact score (0.0-1.0).
         recall_count: Number of times this entry was recalled.
         helpful_count: Number of times this entry was marked helpful.
+        min_factor: Lower bound on the decay FACTOR (not the score). 0.0
+            restores the pre-floor behaviour exactly.
 
     Returns:
         Decayed score in [0.0, 1.0].
     """
     exponent = recall_count / max(1, helpful_count)
-    return _clamp01(importance * (0.95**exponent))
+    return _clamp01(importance * max(min_factor, 0.95**exponent))
 
 
 def entry_utility(
     entry: dict[str, object],
     config: MemoryConfig | None = None,
     fallback_days: int | None = None,
+    *,
+    params: UtilityParams | None = None,
+    today: date | None = None,
 ) -> float:
-    """Compute utility score for a MemoryEntry dict using config defaults.
+    """Compute the utility score for one serialized entry — the ONLY implementation.
 
-    Extracts scoring fields from the entry dict and delegates to
-    compute_utility_score. Applies time decay to both importance and q_value
-    at query time (not written to disk).
+    PRD-CORE-244 FR11 collapsed two independent implementations into this one and
+    repointed the live ``trw_recall`` ranker at it. It is therefore the UNION of
+    what both did, and each retained behaviour is asserted individually so a
+    future merge cannot silently drop one:
 
-    MemoryEntry field mapping vs LearningEntry:
-    - importance (was impact)
-    - source (was source_type)
-    - created_at (was created) — ISO datetime string with time component
+    * the **expiry floor** (PRD-CORE-110, from the trw-mcp side) — an entry past
+      its author-set ``expires`` date scores ``params.expired_utility_floor``.
+      Day-exclusive: an entry expiring today is still current.
+    * **unverified-incident preservation** (from the trw-mcp side) — an
+      unverified incident gets an effectively infinite half-life so a postmortem
+      is not decayed away before the fix is confirmed.
+    * **per-type half-life, access-count and source-type terms** (from the
+      trw-mcp side).
+    * **feedback-aware decay** (PRD-CORE-132, from the trw-memory side) — the
+      term ``trw_learn``'s own docstring credits ``feedback`` with, which the
+      live ranker ignored for its entire life.
+
+    Field names are read alias-tolerantly because the two callers serialize
+    different models: ``importance``/``impact``, ``source``/``source_type``.
+    Neither vocabulary is privileged, so a LearningEntry dict and a MemoryEntry
+    dump score identically.
 
     Args:
-        entry: Serialised MemoryEntry dict.
-        config: MemoryConfig instance. Defaults to MemoryConfig() if None.
-        fallback_days: Days to assume when timestamps are missing.
+        entry: Serialized entry dict (YAML, SQLite row, or ``model_dump()``).
+        config: ``MemoryConfig`` used to derive *params* when it is not supplied.
+        fallback_days: Days to assume when no timestamp is parseable.
+        params: Pre-bound knob bundle. Callers ranking many entries build it ONCE
+            (``MemoryConfig`` is a BaseSettings that reads config.yaml, so
+            constructing it per entry is a filesystem read per row).
+        today: Injectable reference date; defaults to today in UTC.
 
     Returns:
         Composite utility score in [0.0, 1.0].
     """
-    cfg = config or MemoryConfig()
-    effective_fallback = fallback_days if fallback_days is not None else 30
-    today = datetime.now(tz=timezone.utc).date()
+    effective_params = params if params is not None else utility_params_from_config(config or MemoryConfig())
+    effective_fallback = fallback_days if fallback_days is not None else _DEFAULT_FALLBACK_DAYS
+    reference_day = today or datetime.now(tz=timezone.utc).date()
 
-    # MemoryEntry uses 'importance' (was 'impact' in LearningEntry)
-    q_value = _float_field(entry, "q_value", _float_field(entry, "importance", 0.5))
-    base_impact = _float_field(entry, "importance", 0.5)
+    # Expiry short-circuits every other term: a record whose validity window has
+    # closed is not "slightly less useful", it is out of date.
+    expires_date = _parse_expires(str(entry.get("expires", "")))
+    if expires_date is not None and reference_day > expires_date:
+        return effective_params.expired_utility_floor
+
+    base_impact = _float_field(entry, "importance", _float_field(entry, "impact", 0.5))
+    q_value = _float_field(entry, "q_value", base_impact)
     q_observations = _int_field(entry, "q_observations", 0)
     recurrence = _int_field(entry, "recurrence", 1)
     access_count = _int_field(entry, "access_count", 0)
-    # MemoryEntry uses 'source' (was 'source_type' in LearningEntry)
-    source_type = str(entry.get("source", "agent"))
-    days_unused = _days_since_access(entry, today, fallback_days=effective_fallback)
+    source_type = str(entry.get("source", entry.get("source_type", "agent")))
+    days_unused = _days_since_access(entry, reference_day, fallback_days=effective_fallback)
 
     # Double-decay fix (PRD-QUAL-032-FR03): apply_time_decay was removed here
     # because compute_utility_score() already applies Ebbinghaus exponential
     # decay internally via retention = exp(-decay_rate * days).
 
-    # PRD-CORE-132 FR04: Apply feedback-aware decay to base_impact
+    # PRD-CORE-132 FR04: feedback-aware decay of base_impact.
     recall_ct = _int_field(entry, "recall_count", 0)
     helpful_ct = _int_field(entry, "helpful_count", 0)
     if recall_ct > 0:
-        base_impact = feedback_decay_score(base_impact, recall_ct, helpful_ct)
+        base_impact = feedback_decay_score(
+            base_impact,
+            recall_ct,
+            helpful_ct,
+            min_factor=effective_params.feedback_decay_min_factor,
+        )
 
-    if cfg.lifecycle_use_fsrs:
+    if effective_params.use_fsrs:
         # FSRS measures retrieval practice count; recall_count (incremented by
         # the recall API) is more accurate than recurrence (re-store count).
         # Fall back to recurrence when recall_count is zero (cold-start entry).
-        fsrs_practice = max(recall_ct, recurrence)
         return compute_fsrs_utility_score(
             importance=base_impact,
             elapsed_days=float(days_unused),
-            recurrence=fsrs_practice,
+            recurrence=max(recall_ct, recurrence),
         )
 
+    half_life = effective_params.half_life_for(
+        str(entry.get("type", "")),
+        str(entry.get("confidence", "unverified")),
+    )
     return compute_utility_score(
         q_value=q_value,
         days_since_last_access=days_unused,
         recurrence_count=recurrence,
         base_impact=base_impact,
         q_observations=q_observations,
-        half_life_days=cfg.decay_half_life_days,
-        use_exponent=cfg.decay_use_exponent,
-        cold_start_threshold=3,
+        half_life_days=half_life,
+        use_exponent=effective_params.use_exponent,
+        cold_start_threshold=effective_params.cold_start_threshold,
         access_count=access_count,
         source_type=source_type,
-        access_count_boost_cap=0.15,
-        source_human_boost=0.1,
+        access_count_boost_cap=effective_params.access_count_boost_cap,
+        source_human_boost=effective_params.source_human_boost,
     )
 
 
@@ -363,8 +457,8 @@ def enforce_tier_distribution(
 
     When a tier exceeds its cap (critical >5%, high >20% by default), demotes
     the lowest-scored entry in that tier to the next tier down. Only one
-    demotion per tier per call — callers may iterate to convergence via
-    :func:`converge_tier_distribution`.
+    demotion per tier per call — a caller that needs a cluster brought fully
+    within its caps re-invokes until the returned list is empty.
 
     Caps are config-driven (mirrors trw-mcp ``enforce_tier_distribution``):
     an explicit ``critical_cap``/``high_cap`` wins when provided, otherwise the
@@ -465,123 +559,6 @@ def enforce_tier_distribution(
             )
 
     return demotions
-
-
-def converge_tier_distribution(
-    entries: list[tuple[str, float]],
-    *,
-    critical_cap: float | None = None,
-    high_cap: float | None = None,
-    entry_dates: dict[str, str] | None = None,
-    config: MemoryConfig | None = None,
-    max_iterations: int = 1000,
-) -> list[tuple[str, float]]:
-    """Batch-converge an over-cap tier cluster to within its caps.
-
-    ``enforce_tier_distribution`` demotes at most one entry per tier per call,
-    so a cluster that is many entries over a cap never heals at write time
-    (R-RANK-003). This helper iterates that single-step enforcement on an
-    in-memory working set until no further demotion is produced, then returns
-    the *net* score change per entry (one tuple per entry that ended below its
-    starting tier, carrying its final score).
-
-    This is a pure function — it does not touch storage. Use
-    :func:`persist_tier_convergence` to apply the result atomically.
-
-    Args:
-        entries: List of (memory_id, importance_score) tuples.
-        critical_cap: See :func:`enforce_tier_distribution`.
-        high_cap: See :func:`enforce_tier_distribution`.
-        entry_dates: Optional decay-aware classification dates.
-        config: MemoryConfig used to source caps when not given explicitly.
-        max_iterations: Hard ceiling on convergence steps (safety bound).
-
-    Returns:
-        List of (memory_id, final_importance) tuples for every entry whose
-        score changed from its starting value. Empty when already within caps.
-    """
-    if not entries:
-        return []
-
-    # Working set keyed by id so repeated demotions compound on the same entry.
-    working: dict[str, float] = {}
-    order: list[str] = []
-    original: dict[str, float] = {}
-    for mid, score in entries:
-        if mid not in working:
-            order.append(mid)
-        working[mid] = score
-        original.setdefault(mid, score)
-
-    for _ in range(max(1, max_iterations)):
-        snapshot = [(mid, working[mid]) for mid in order]
-        step = enforce_tier_distribution(
-            snapshot,
-            critical_cap=critical_cap,
-            high_cap=high_cap,
-            entry_dates=entry_dates,
-            config=config,
-        )
-        if not step:
-            break
-        working.update(dict(step))
-
-    changed: list[tuple[str, float]] = [(mid, working[mid]) for mid in order if working[mid] != original[mid]]
-
-    if changed:
-        logger.info(
-            "tier_convergence",
-            n_changed=len(changed),
-            total=len(order),
-        )
-    return changed
-
-
-def persist_tier_convergence(
-    backend: StorageBackend,
-    entries: list[tuple[str, float]],
-    *,
-    critical_cap: float | None = None,
-    high_cap: float | None = None,
-    entry_dates: dict[str, str] | None = None,
-    config: MemoryConfig | None = None,
-) -> list[tuple[str, float]]:
-    """Converge a tier cluster and persist the demotions atomically.
-
-    Wraps :func:`converge_tier_distribution` and writes every resulting score
-    change inside a single ``backend.transaction()`` so the cluster either
-    converges fully or not at all — no partially-demoted intermediate state is
-    ever committed. Uses the committed thread-safe ``transaction()`` (PRD-FIX-088
-    FR02), so concurrent writers cannot observe a half-applied convergence.
-
-    Args:
-        backend: Storage backend exposing ``transaction()`` and ``update()``.
-        entries: List of (memory_id, importance_score) tuples.
-        critical_cap: See :func:`enforce_tier_distribution`.
-        high_cap: See :func:`enforce_tier_distribution`.
-        entry_dates: Optional decay-aware classification dates.
-        config: MemoryConfig used to source caps when not given explicitly.
-
-    Returns:
-        The list of (memory_id, final_importance) changes that were persisted.
-        Empty when the cluster was already within caps (no transaction opened).
-    """
-    changes = converge_tier_distribution(
-        entries,
-        critical_cap=critical_cap,
-        high_cap=high_cap,
-        entry_dates=entry_dates,
-        config=config,
-    )
-    if not changes:
-        return []
-
-    with backend.transaction() as txn:
-        for mid, new_score in changes:
-            txn.update(mid, importance=new_score)
-
-    logger.info("tier_convergence_persisted", n_persisted=len(changes))
-    return changes
 
 
 # ---------------------------------------------------------------------------

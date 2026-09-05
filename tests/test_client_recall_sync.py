@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from trw_memory.client import SHARED_EVENT_CACHE_MAX, MemoryClient
+from trw_memory.sync import SharedFetchResult
 
 
 class TestRecall:
@@ -25,7 +26,7 @@ class TestRecall:
 
         client._handle_sse_event({"type": "learning_published", "id": 42, "summary": "deployment rollback guide"})
 
-        with patch("trw_memory.client.fetch_shared_memories", return_value=[]):
+        with patch("trw_memory.client.fetch_shared_memories", return_value=SharedFetchResult([], "ok", 0, 0)):
             results = await client.recall("deployment", include_shared=True)
 
         assert any(result["memory_id"] == "42" and result["source"] == "shared" for result in results)
@@ -54,7 +55,7 @@ class TestRecall:
         embedder.embed_batch.return_value = [[1.0, 0.0], [0.99, 0.01]]
 
         with (
-            patch("trw_memory.client.fetch_shared_memories", return_value=[]),
+            patch("trw_memory.client.fetch_shared_memories", return_value=SharedFetchResult([], "ok", 0, 0)),
             patch.object(client, "_get_embedder", return_value=embedder),
         ):
             results = await client.recall("deployment", include_shared=True)
@@ -107,10 +108,10 @@ class TestRecall:
 
         client._handle_sse_event({"type": "learning_retired", "id": 42})
 
-        with patch("trw_memory.client.fetch_shared_memories", return_value=[]):
+        with patch("trw_memory.client.fetch_shared_memories", return_value=SharedFetchResult([], "ok", 0, 0)):
             await client.recall("published", include_shared=True)
 
-        entry = client._get_backend().get(stored["memory_id"])
+        entry = client._get_backend().get(stored["memory_id"], namespace="default")
         assert entry is not None
         assert entry.pending_delete is True
         await client.close()

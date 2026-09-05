@@ -80,8 +80,7 @@ def _inject_bad_utf8_row(
             assertions, anchors, anchor_validity,
             type, nudge_line, expires_at, confidence,
             task_type, domain, phase_origin, phase_affinity,
-            team_origin, protection_tier, sessions_surfaced,
-            outcome_correlation, sync_hash, sync_seq,
+            team_origin, protection_tier, sync_hash, sync_seq,
             recall_count, helpful_count, unhelpful_count,
             vector_clock, metadata,
             published_to_platform, pending_delete, cross_validated
@@ -97,8 +96,8 @@ def _inject_bad_utf8_row(
             '[]', '[]', 1.0,
             'fact', '', '', 'medium',
             '', '[]', '', '[]',
-            '', 'standard', 0,
-            '', '', 0,
+            '', 'standard',
+            '', 0,
             0, 0, 0,
             '{}', '{}',
             0, 0, 0
@@ -477,8 +476,7 @@ def _inject_malformed_status_row(db_path: Path | str, entry_id: str) -> None:
             assertions, anchors, anchor_validity,
             type, nudge_line, expires_at, confidence,
             task_type, domain, phase_origin, phase_affinity,
-            team_origin, protection_tier, sessions_surfaced,
-            outcome_correlation, sync_hash, sync_seq,
+            team_origin, protection_tier, sync_hash, sync_seq,
             recall_count, helpful_count, unhelpful_count,
             vector_clock, metadata,
             published_to_platform, pending_delete, cross_validated
@@ -488,7 +486,7 @@ def _inject_malformed_status_row(db_path: Path | str, entry_id: str) -> None:
             0, 0.5, 0, 'agent', '', '', '',
             '[]', '[]', '[]', '[]', '[]', 1.0,
             'fact', '', '', 'medium', '', '[]', '', '[]',
-            '', 'standard', 0, '', '', 0, 0, 0, 0,
+            '', 'standard', '', 0, 0, 0, 0,
             '{}', '{}', 0, 0, 0
         )
         """,
@@ -768,8 +766,7 @@ def test_entries_with_assertions_survives_bad_utf8_row(tmp_path: Path) -> None:
             assertions, anchors, anchor_validity,
             type, nudge_line, expires_at, confidence,
             task_type, domain, phase_origin, phase_affinity,
-            team_origin, protection_tier, sessions_surfaced,
-            outcome_correlation, sync_hash, sync_seq,
+            team_origin, protection_tier, sync_hash, sync_seq,
             recall_count, helpful_count, unhelpful_count,
             vector_clock, metadata,
             published_to_platform, pending_delete, cross_validated
@@ -782,7 +779,7 @@ def test_entries_with_assertions_survives_bad_utf8_row(tmp_path: Path) -> None:
             0, 0.5, 0, 'agent', '', '', '',
             '[]', '[]', '[]', '[{"kind":"file_exists","value":"x"}]', '[]', 1.0,
             'fact', '', '', 'medium', '', '[]', '', '[]',
-            '', 'standard', 0, '', '', 0, 0, 0, 0,
+            '', 'standard', '', 0, 0, 0, 0,
             '{}', '{}', 0, 0, 0
         )
         """,

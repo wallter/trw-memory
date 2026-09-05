@@ -53,7 +53,7 @@ def _entry(**kwargs: object) -> MemoryEntry:
 def _gate(entry: MemoryEntry) -> str:
     """Run the entry through flag-then-validate exactly as the store pipeline does."""
     try:
-        validate_entry_payload(flag_code_snippet(entry), max_chars=MAX)
+        validate_entry_payload(flag_code_snippet(entry), max_chars=MAX, min_evidence_items_for_verified=1)
         return "stored"
     except PoisoningError as exc:
         return exc.reason
@@ -381,7 +381,7 @@ EXCLUDED_FROM_INJECTION_SCAN: dict[str, str] = {
     "domain": "taxonomy list: short domain labels",
     "team_origin": "taxonomy: team label",
     "outcome_history": "structured: outcome tokens appended by the lifecycle layer",
-    "outcome_correlation": "derived: correlation summary computed from stored rows",
+    "verification_checked_at": "derived: ISO timestamp written by the verification pass, never by a caller",
 }
 
 

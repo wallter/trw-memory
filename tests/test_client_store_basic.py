@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from trw_memory.client import MemoryClient
-from trw_memory.exceptions import AuthorizationError, MemoryNotFoundError, PIIBlockError, SchemaValidationError
+from trw_memory.exceptions import AuthorizationError, PIIBlockError, SchemaValidationError
 from trw_memory.models.memory import Assertion, AssertionType, MemoryEntry
 from trw_memory.security.audit import AuditLog
 
@@ -138,7 +138,7 @@ class TestRbacEnforcement:
         )
         await client.store("grounded update", entry_id="M-grounded")
 
-        stored = client._get_backend().get("M-grounded")
+        stored = client._get_backend().get("M-grounded", namespace="default")
 
         assert stored is not None
         assert stored.evidence == ["src/example.py:10-20"]
@@ -163,20 +163,24 @@ class TestRbacEnforcement:
         assert [result["memory_id"] for result in results] == ["M-fixed"]
         assert any(record.op == "update" and record.id == "M-fixed" for record in audit_records)
 
-    async def test_store_cannot_update_entry_in_another_namespace(self, tmp_path: Path) -> None:
+    async def test_store_of_a_colliding_id_creates_a_second_row(self, tmp_path: Path) -> None:
         db_path = tmp_path / "shared.db"
         owner = MemoryClient("project:owner", db_path=db_path)
         other = MemoryClient("project:other", db_path=db_path)
         try:
             with patch("trw_memory._client_store.embedding_has_consumer", return_value=False):
                 await owner.store("owner content", entry_id="M-shared")
-                with pytest.raises(MemoryNotFoundError, match="not found in namespace"):
-                    await other.store("other content", entry_id="M-shared")
+                # PRD-CORE-245 FR01: a colliding id in a second namespace is a
+                # second row, not a rejection and not a replacement.
+                await other.store("other content", entry_id="M-shared")
 
-            stored = owner._get_backend().get("M-shared")
+            stored = owner._get_backend().get("M-shared", namespace="project:owner")
             assert stored is not None
             assert stored.content == "owner content"
             assert stored.namespace == "project:owner"
+            other_row = other._get_backend().get("M-shared", namespace="project:other")
+            assert other_row is not None
+            assert other_row.content == "other content"
         finally:
             await owner.close()
             await other.close()
@@ -247,7 +251,7 @@ class TestRbacEnforcement:
         backend.list_entries.side_effect = lambda **kwargs: [entry for entry in entries if entry.id not in deleted_ids][
             : int(kwargs["limit"])
         ]
-        backend.delete.side_effect = lambda entry_id: deleted_ids.add(entry_id) is None
+        backend.delete.side_effect = lambda entry_id, **_kwargs: deleted_ids.add(entry_id) is None
         monkeypatch.setattr(client, "_get_backend", lambda: backend)
         monkeypatch.setattr("trw_memory.client.remove_entry_from_tiers", lambda *args, **kwargs: None)
         monkeypatch.setattr("trw_memory.client.delete_quarantined_entries", lambda *args, **kwargs: 0)

@@ -220,7 +220,7 @@ class TestRemoveEntryFromTiersErasesCold:
 
         original_unlink = Path.unlink
 
-        def _fail_archive_delete(path: Path, *, missing_ok: bool = False) -> None:
+        def _fail_archive_delete(path: Path, *, missing_ok: bool = False, **_kwargs) -> None:
             if path == yaml_file:
                 raise OSError("archive delete failed")
             original_unlink(path, missing_ok=missing_ok)

@@ -38,7 +38,7 @@ class TestRotateMasterKey:
 
             assert count == 1
 
-            stored = backend.get("rotate-1")
+            stored = backend.get("rotate-1", namespace="default")
             assert stored is not None
             ns_key_new = derive_namespace_key_bytes(new_key, stored.namespace)
             decrypted = decrypt_entry_fields(stored, ns_key_new)
@@ -117,7 +117,7 @@ class TestRotateMasterKey:
             assert count == len(namespaces)
 
             for entry in entries:
-                stored = backend.get(entry.id)
+                stored = backend.get(entry.id, namespace=entry.namespace)
                 assert stored is not None
                 ns_key_new = derive_namespace_key_bytes(new_key, stored.namespace)
                 decrypted = decrypt_entry_fields(stored, ns_key_new)
@@ -157,7 +157,7 @@ class TestRotateMasterKey:
                 ("bulk-0000", "content 0"),
                 (f"bulk-{n_entries - 1:04d}", f"content {n_entries - 1}"),
             ):
-                stored = backend.get(entry_id)
+                stored = backend.get(entry_id, namespace="default")
                 assert stored is not None
                 ns_key_new = derive_namespace_key_bytes(new_key, stored.namespace)
                 assert decrypt_entry_fields(stored, ns_key_new).content == expected
@@ -227,7 +227,7 @@ class TestRotateMasterKey:
             count = rotate_master_key(old_key, new_key, backend)
             assert count == 2  # base + the concurrently-inserted row
 
-            stored = backend.get("late-1")
+            stored = backend.get("late-1", namespace="default")
             assert stored is not None
             ns_key_new = derive_namespace_key_bytes(new_key, stored.namespace)
             assert decrypt_entry_fields(stored, ns_key_new).content == "late content"
@@ -251,7 +251,7 @@ class TestRotateMasterKey:
         with SQLiteBackend(tmp_path / "old_fail.db") as backend:
             backend.store(enc)
             rotate_master_key(old_key, new_key, backend)
-            stored = backend.get("after-rotate")
+            stored = backend.get("after-rotate", namespace="default")
             assert stored is not None
             ns_key_old_again = derive_namespace_key_bytes(old_key, stored.namespace)
             with pytest.raises(InvalidTag):

@@ -6,7 +6,7 @@ Covers:
   the outer transaction prematurely. Asserted structurally (lock-held during
   the depth bump) — not via a flaky timing race.
 - S9: ``store()`` suppresses its commit while inside a ``transaction()`` block.
-- S3: ``upsert_vector()`` suppresses its commit while inside a transaction
+- S3: ``upsert_vector(namespace="default")`` suppresses its commit while inside a transaction
   (``skip_commit`` flag) so the vector lands at the outermost COMMIT.
 - S1: a row + its vector written inside ``transaction()`` commit exactly once
   and are atomic — both present on success, neither on a mid-transaction error.
@@ -116,7 +116,7 @@ def test_transaction_depth_restored_after_exception(tmp_path: Path) -> None:
         assert backend._skip_commit_depth == 0
         # Backend is still usable after the rollback.
         backend.store(make_entry(entry_id="M-after-err"))
-        assert backend.get("M-after-err") is not None
+        assert backend.get("M-after-err", namespace="default") is not None
     finally:
         backend.close()
 
@@ -199,9 +199,9 @@ def test_wiki_side_effect_failure_rolls_back_canonical_write(
             if operation == "store":
                 backend.store(make_entry(entry_id=entry_id, content="new"))
             elif operation == "update":
-                backend.update(entry_id, content="after", metadata={})
+                backend.update(entry_id, content="after", metadata={}, namespace="default")
             else:
-                backend.delete(entry_id)
+                backend.delete(entry_id, namespace="default")
 
         observer = sqlite3.connect(str(db_path))
         try:
@@ -291,7 +291,7 @@ def test_delete_inside_transaction_defers_commit(tmp_path: Path) -> None:
         observer = sqlite3.connect(str(db_path))
         try:
             with backend.transaction():
-                backend.delete("M-del")
+                backend.delete("M-del", namespace="default")
                 seen_mid = observer.execute("SELECT COUNT(*) FROM memories WHERE id = ?", ("M-del",)).fetchone()[0]
                 assert seen_mid == 1, "delete() committed prematurely inside transaction()"
             seen_after = observer.execute("SELECT COUNT(*) FROM memories WHERE id = ?", ("M-del",)).fetchone()[0]
@@ -314,7 +314,7 @@ def test_delete_rolls_back_with_transaction_on_error(tmp_path: Path) -> None:
         try:
             with pytest.raises(RuntimeError):
                 with backend.transaction():
-                    backend.delete("M-keep")
+                    backend.delete("M-keep", namespace="default")
                     raise RuntimeError("boom")
             seen_after = observer.execute("SELECT COUNT(*) FROM memories WHERE id = ?", ("M-keep",)).fetchone()[0]
             assert seen_after == 1, "delete() persisted despite transaction rollback"
@@ -340,7 +340,7 @@ def test_delete_rolls_back_on_commit_failure_outside_transaction(tmp_path: Path)
         backend._conn = proxy  # type: ignore[assignment]
 
         with pytest.raises(StorageError):
-            backend.delete("M-keep")
+            backend.delete("M-keep", namespace="default")
 
         # The except path rolled back the staged (uncommitted) delete.
         assert proxy.rolled_back, "delete() did not roll back after commit failure"
@@ -348,7 +348,7 @@ def test_delete_rolls_back_on_commit_failure_outside_transaction(tmp_path: Path)
         # Restore the real connection and verify the row survived (delete
         # reverted) — no FTS/vec/graph orphan was committed.
         backend._conn = real_conn  # type: ignore[assignment]
-        assert backend.get("M-keep") is not None
+        assert backend.get("M-keep", namespace="default") is not None
     finally:
         backend.close()
 
@@ -404,9 +404,9 @@ def test_store_and_vector_in_transaction_are_atomic_on_success(tmp_path: Path) -
         entry = _vec_entry("M-atomic")
         with backend.transaction():
             backend.store(entry)
-            backend.upsert_vector(entry.id, emb)
-        assert backend.get("M-atomic") is not None
-        assert backend.vector_exists("M-atomic") is True
+            backend.upsert_vector(entry.id, emb, namespace="default")
+        assert backend.get("M-atomic", namespace="default") is not None
+        assert backend.vector_exists("M-atomic", namespace="default") is True
     finally:
         backend.close()
 
@@ -431,7 +431,7 @@ def test_store_and_vector_rollback_leaves_neither(tmp_path: Path) -> None:
         with pytest.raises(RuntimeError, match="mid-tx"):
             with backend.transaction():
                 backend.store(entry)
-                backend.upsert_vector(entry.id, emb)
+                backend.upsert_vector(entry.id, emb, namespace="default")
                 # Simulate a crash/error AFTER both writes but BEFORE COMMIT.
                 raise RuntimeError("mid-tx")
 
@@ -443,16 +443,16 @@ def test_store_and_vector_rollback_leaves_neither(tmp_path: Path) -> None:
             assert row_count == 0, "row survived a rolled-back transaction"
         finally:
             observer.close()
-        assert backend.get("M-rollback") is None
-        assert backend.vector_exists("M-rollback") is False
+        assert backend.get("M-rollback", namespace="default") is None
+        assert backend.vector_exists("M-rollback", namespace="default") is False
     finally:
         backend.close()
 
 
 def test_delete_vector_inside_transaction_defers_commit(tmp_path: Path) -> None:
-    """v0.9.2: delete_vector() inside transaction() rolls back with the tx.
+    """v0.9.2: delete_vector(namespace="default") inside transaction() rolls back with the tx.
 
-    The public delete_vector() previously committed unconditionally — the same
+    The public delete_vector(namespace="default") previously committed unconditionally — the same
     premature-commit bug class fixed in _crud_ops for v0.9.1 but missed here. If
     it still committed eagerly, the vector delete would survive a rolled-back
     transaction. We assert the vector is restored after rollback.
@@ -467,24 +467,26 @@ def test_delete_vector_inside_transaction_defers_commit(tmp_path: Path) -> None:
         emb = [1.0] * backend._dim
         entry = _vec_entry("M-delvec")
         backend.store(entry)
-        backend.upsert_vector(entry.id, emb)
-        assert backend.vector_exists("M-delvec") is True
+        backend.upsert_vector(entry.id, emb, namespace="default")
+        assert backend.vector_exists("M-delvec", namespace="default") is True
 
         with pytest.raises(RuntimeError, match="mid-tx"):
             with backend.transaction():
-                deleted = backend.delete_vector("M-delvec")
+                deleted = backend.delete_vector("M-delvec", namespace="default")
                 assert deleted is True
                 raise RuntimeError("mid-tx")
 
         # The vector delete was staged in the rolled-back transaction, so the
         # vector must still be present. An eager commit would have removed it.
-        assert backend.vector_exists("M-delvec") is True, "delete_vector() committed prematurely inside transaction()"
+        assert backend.vector_exists("M-delvec", namespace="default") is True, (
+            "delete_vector() committed prematurely inside transaction()"
+        )
     finally:
         backend.close()
 
 
 def test_delete_vector_standalone_still_commits(tmp_path: Path) -> None:
-    """v0.9.2 regression: outside a transaction, delete_vector() commits now."""
+    """v0.9.2 regression: outside a transaction, delete_vector(namespace="default") commits now."""
     pytest.importorskip("sqlite_vec")
     db_path = tmp_path / "delvec_standalone.db"
     backend = SQLiteBackend(db_path)
@@ -495,15 +497,15 @@ def test_delete_vector_standalone_still_commits(tmp_path: Path) -> None:
         emb = [1.0] * backend._dim
         entry = _vec_entry("M-delvec-now")
         backend.store(entry)
-        backend.upsert_vector(entry.id, emb)
-        assert backend.delete_vector("M-delvec-now") is True
-        assert backend.vector_exists("M-delvec-now") is False
+        backend.upsert_vector(entry.id, emb, namespace="default")
+        assert backend.delete_vector("M-delvec-now", namespace="default") is True
+        assert backend.vector_exists("M-delvec-now", namespace="default") is False
     finally:
         backend.close()
 
 
 def test_upsert_vector_standalone_still_commits(tmp_path: Path) -> None:
-    """S3 regression: outside a transaction, upsert_vector() commits immediately."""
+    """S3 regression: outside a transaction, upsert_vector(namespace="default") commits immediately."""
     pytest.importorskip("sqlite_vec")
     db_path = tmp_path / "s3standalone.db"
     backend = SQLiteBackend(db_path)
@@ -514,8 +516,8 @@ def test_upsert_vector_standalone_still_commits(tmp_path: Path) -> None:
         emb = [1.0] * backend._dim
         entry = _vec_entry("M-vec-now")
         backend.store(entry)
-        backend.upsert_vector(entry.id, emb)
-        assert backend.vector_exists("M-vec-now") is True
+        backend.upsert_vector(entry.id, emb, namespace="default")
+        assert backend.vector_exists("M-vec-now", namespace="default") is True
     finally:
         backend.close()
 
@@ -534,7 +536,7 @@ def test_standalone_vector_writes_roll_back_on_commit_failure(tmp_path: Path, op
     initially_present = operation != "upsert"
     try:
         if initially_present:
-            backend.upsert_vector(entry_id, embedding)
+            backend.upsert_vector(entry_id, embedding, namespace="default")
 
         real_conn = backend._conn
         proxy = _CommitFailingConn(real_conn)
@@ -542,16 +544,16 @@ def test_standalone_vector_writes_roll_back_on_commit_failure(tmp_path: Path, op
         try:
             with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
                 if operation == "upsert":
-                    backend.upsert_vector(entry_id, embedding)
+                    backend.upsert_vector(entry_id, embedding, namespace="default")
                 elif operation == "delete":
-                    backend.delete_vector(entry_id)
+                    backend.delete_vector(entry_id, namespace="default")
                 else:
                     backend.delete_hype_siblings("P")
             assert proxy.rolled_back
         finally:
             backend._conn = real_conn
 
-        assert backend.vector_exists(entry_id) is initially_present
+        assert backend.vector_exists(entry_id, namespace="default") is initially_present
     finally:
         backend.close()
 
@@ -561,7 +563,7 @@ def test_transaction_commits_exactly_once(tmp_path: Path) -> None:
 
     Counts commit() calls on the live connection via a thin delegating proxy
     (the C-extension Connection's ``commit`` attribute is read-only, so it
-    cannot be patched in place): store() (S9) and upsert_vector() (S3) both
+    cannot be patched in place): store() (S9) and upsert_vector(namespace="default") (S3) both
     defer, so only the outermost transaction COMMIT fires — proving the writes
     are coalesced rather than triple-committed.
     """
@@ -589,7 +591,7 @@ def test_transaction_commits_exactly_once(tmp_path: Path) -> None:
             entry = _vec_entry("M-once")
             with backend.transaction():
                 backend.store(entry)
-                backend.upsert_vector(entry.id, emb)
+                backend.upsert_vector(entry.id, emb, namespace="default")
         finally:
             backend._conn = real_conn
 
@@ -715,8 +717,8 @@ def test_delete_by_namespace_rollback_leaves_entries_and_wiki_refs_intact(tmp_pa
         finally:
             observer.close()
         # Backend's own connection agrees the entries are still live.
-        assert backend.get("M-rb1") is not None
-        assert backend.get("M-rb2") is not None
+        assert backend.get("M-rb1", namespace="doomed") is not None
+        assert backend.get("M-rb2", namespace="doomed") is not None
     finally:
         backend.close()
 
@@ -776,7 +778,7 @@ def test_nested_transaction_under_connection_lock_does_not_deadlock(tmp_path: Pa
         with backend.transaction():
             with backend.transaction():
                 backend.store(make_entry(entry_id="M-nested-ok"))
-        assert backend.get("M-nested-ok") is not None
+        assert backend.get("M-nested-ok", namespace="default") is not None
     finally:
         backend.close()
 
@@ -829,8 +831,8 @@ def test_standalone_mutator_cannot_join_rolling_back_transaction(tmp_path: Path)
         assert not outsider_thread.is_alive()
         assert thread_errors == []
         assert outsider_results == [1]
-        assert backend.get("M-owner") is None
-        victim = backend.get("M-victim")
+        assert backend.get("M-owner", namespace="default") is None
+        victim = backend.get("M-victim", namespace="default")
         assert victim is not None
         assert victim.access_count == 1
     finally:
@@ -848,7 +850,7 @@ def test_transaction_adopts_and_commits_existing_implicit_transaction(tmp_path: 
         with backend.transaction():
             backend.increment_access_counts(["M-victim"])
 
-        victim = backend.get("M-victim")
+        victim = backend.get("M-victim", namespace="default")
         assert victim is not None
         assert victim.access_count == 6
     finally:
@@ -867,10 +869,10 @@ def test_transaction_adopts_and_rolls_back_existing_implicit_transaction(tmp_pat
                 backend.store(make_entry(entry_id="M-owner"))
                 raise RuntimeError("rollback")
 
-        victim = backend.get("M-victim")
+        victim = backend.get("M-victim", namespace="default")
         assert victim is not None
         assert victim.access_count == 0
-        assert backend.get("M-owner") is None
+        assert backend.get("M-owner", namespace="default") is None
     finally:
         backend.close()
 
@@ -886,12 +888,12 @@ def test_delete_by_namespace_removes_vectors_atomically(tmp_path: Path) -> None:
     try:
         emb = [1.0] * backend._dim
         backend.store(make_entry(entry_id="M-vec-ns", namespace="doomed"))
-        backend.upsert_vector("M-vec-ns", emb)
-        assert backend.vector_exists("M-vec-ns") is True
+        backend.upsert_vector("M-vec-ns", emb, namespace="doomed")
+        assert backend.vector_exists("M-vec-ns", namespace="doomed") is True
 
         backend.delete_by_namespace("doomed")
 
-        assert backend.get("M-vec-ns") is None
-        assert backend.vector_exists("M-vec-ns") is False
+        assert backend.get("M-vec-ns", namespace="doomed") is None
+        assert backend.vector_exists("M-vec-ns", namespace="doomed") is False
     finally:
         backend.close()

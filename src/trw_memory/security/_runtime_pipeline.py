@@ -277,8 +277,14 @@ def _stage_queue_drain(ctx: _StoreContext) -> None:
 def _stage_classify(ctx: _StoreContext) -> None:
     # Reads pre-mutation backend state; MUST precede any model_copy below.
     ctx.actor = _actor_for_entry(ctx.entry)
-    existing = ctx.backend.get(ctx.entry.id)
-    ctx.op = "update" if existing is not None and existing.namespace == ctx.entry.namespace else "store"
+    # PRD-CORE-245 FR03: the namespace predicate now lives in the read, so a
+    # row with the same id in another namespace is not a candidate "update".
+    existing = ctx.backend.get(ctx.entry.id, namespace=ctx.entry.namespace)
+    # ``isinstance`` rather than ``is not None``: a backend that returns a
+    # placeholder (a test double, a partially-initialised adapter) must not be
+    # read as "this entry already exists" and silently downgrade a store to an
+    # update. Mirrors ``_existing_entry_for_namespace``.
+    ctx.op = "update" if isinstance(existing, MemoryEntry) else "store"
 
 
 def _stage_flag_code(ctx: _StoreContext) -> None:
@@ -308,7 +314,11 @@ def _stage_rate_limit(ctx: _StoreContext) -> None:
 
 
 def _stage_validate_payload(ctx: _StoreContext) -> None:
-    validate_entry_payload(ctx.entry, max_chars=ctx.config.max_entry_chars)
+    validate_entry_payload(
+        ctx.entry,
+        max_chars=ctx.config.max_entry_chars,
+        min_evidence_items_for_verified=ctx.config.min_evidence_items_for_verified,
+    )
 
 
 def _stage_pii_policy(ctx: _StoreContext) -> None:

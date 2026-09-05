@@ -64,7 +64,7 @@ async def test_client_store_rolls_back_when_vector_upsert_fails(client: MemoryCl
 
     Post S1/S3/S9: the row + vector write share a single ``backend.transaction()``
     that ROLLS BACK on any exception — replacing the old compensating
-    ``backend.delete()``. We assert the store + upsert run inside the
+    ``backend.delete(namespace="default")``. We assert the store + upsert run inside the
     transaction context and that the failure surfaces as a rolled-back
     StorageError.
     """
@@ -151,8 +151,8 @@ async def test_client_recall_updates_access_metadata_only_for_returned_entries(c
 
     backend = client._backend
     assert backend is not None
-    touched = backend.get(stored_target["memory_id"])
-    untouched = backend.get(stored_other["memory_id"])
+    touched = backend.get(stored_target["memory_id"], namespace="default")
+    untouched = backend.get(stored_other["memory_id"], namespace="default")
 
     assert results[0]["memory_id"] == stored_target["memory_id"]
     assert touched is not None
@@ -178,9 +178,9 @@ def test_memory_store_impl_rolls_back_when_vector_upsert_fails() -> None:
     """Tool store reports a transaction rollback on vector failure.
 
     Post S1/S3/S9: ``memory_store_impl`` wraps ``backend.store()`` +
-    ``backend.upsert_vector()`` in a single ``backend.transaction()`` that
+    ``backend.upsert_vector(namespace="default")`` in a single ``backend.transaction()`` that
     rolls back on any exception — replacing the old compensating
-    ``backend.delete()`` path so the tool seam shares one atomicity model
+    ``backend.delete(namespace="default")`` path so the tool seam shares one atomicity model
     with ``MemoryClient.store()``. We assert the store + upsert run inside
     the transaction and that the failure surfaces as a rolled-back error
     rather than a manual delete.
@@ -342,8 +342,8 @@ def test_memory_recall_impl_updates_access_metadata_only_for_returned_entries(tm
 
         result = memory_recall_impl("", "project:default", backend=backend, limit=1, config=config)
 
-        touched = backend.get(target_entry.id)
-        untouched = backend.get(other_entry.id)
+        touched = backend.get(target_entry.id, namespace=target_entry.namespace)
+        untouched = backend.get(other_entry.id, namespace=other_entry.namespace)
 
     memories = cast("list[dict[str, object]]", result["memories"])
     assert result["total_matches"] == 1

@@ -28,7 +28,7 @@ class TestColdTier:
         original_unlink = Path.unlink
         original_warm_remove = mgr._warm_store.warm_remove
 
-        def _fail_archive_delete(path: Path, *, missing_ok: bool = False) -> None:
+        def _fail_archive_delete(path: Path, *, missing_ok: bool = False, **_kwargs) -> None:
             if path == yaml_file:
                 raise OSError("archive delete failed")
             original_unlink(path, missing_ok=missing_ok)
@@ -76,7 +76,7 @@ class TestColdTier:
             def __init__(self) -> None:
                 self.vectors: dict[str, list[float]] = {}
 
-            def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:
+            def upsert_vector(self, entry_id: str, embedding: list[float], *, namespace: str = "default") -> None:
                 self.vectors[entry_id] = embedding
 
         cold_partition = mgr._cold_dir() / "2026" / "04"

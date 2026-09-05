@@ -377,10 +377,10 @@ class TestWarmTier:
             def __init__(self) -> None:
                 self.vector_deleted = False
 
-            def delete(self, _entry_id: str) -> bool:
+            def delete(self, _entry_id: str, *, namespace: str = "default") -> bool:
                 return False
 
-            def delete_vector(self, _entry_id: str) -> bool:
+            def delete_vector(self, _entry_id: str, *, namespace: str = "default") -> bool:
                 self.vector_deleted = True
                 return True
 

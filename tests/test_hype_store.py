@@ -72,7 +72,7 @@ async def test_siblings_written_for_each_question(tmp_path: Path) -> None:
         siblings = backend.hype_sibling_ids("E1")
         assert set(siblings) == {hype_sibling_id("E1", 0), hype_sibling_id("E1", 1)}
         # The primary vector for the parent is still present.
-        assert backend.vector_exists("E1")
+        assert backend.vector_exists("E1", namespace="default")
     finally:
         await client.close()
 
@@ -129,7 +129,7 @@ async def test_fail_open_when_generator_raises(tmp_path: Path) -> None:
         result = await client.store("Pydantic v2 strict mode", entry_id="E6")
         assert result["status"] == "stored"
         backend = client._get_backend()
-        assert backend.vector_exists("E6")  # primary vector committed
+        assert backend.vector_exists("E6", namespace="default")  # primary vector committed
         assert backend.hype_sibling_ids("E6") == []  # no siblings
     finally:
         await client.close()

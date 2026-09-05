@@ -196,7 +196,7 @@ class TestMemoryStoreImpl:
         backend.list_entries.side_effect = lambda **kwargs: [entry for entry in entries if entry.id not in deleted_ids][
             : int(kwargs["limit"])
         ]
-        backend.delete.side_effect = lambda entry_id: deleted_ids.add(entry_id) is None
+        backend.delete.side_effect = lambda entry_id, **_kwargs: deleted_ids.add(entry_id) is None
 
         result = memory_forget_impl(None, None, "project:default", backend=backend, config=cfg, actor="alice")
 
@@ -281,7 +281,7 @@ class TestMemoryStoreImpl:
         cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
 
         class _VectorFailBackend(SQLiteBackend):
-            def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:
+            def upsert_vector(self, entry_id: str, embedding: list[float], *, namespace: str = "default") -> None:
                 raise RuntimeError("simulated vector backend failure")
 
         class _StubEmbedder:
@@ -305,7 +305,7 @@ class TestMemoryStoreImpl:
 
             assert result["status"] == "error"
             # The row must NOT survive the failed vector write — no orphan.
-            assert backend.get("M-atomic-tool") is None
+            assert backend.get("M-atomic-tool", namespace="default") is None
         finally:
             backend.close()
 
@@ -340,7 +340,7 @@ class TestMemoryStoreImpl:
             )
 
             assert result["status"] == "stored"
-            assert backend.get("M-with-vector") is not None
-            assert backend.vector_exists("M-with-vector") is True
+            assert backend.get("M-with-vector", namespace="project:default") is not None
+            assert backend.vector_exists("M-with-vector", namespace="project:default") is True
         finally:
             backend.close()

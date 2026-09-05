@@ -173,7 +173,7 @@ def test_namespace_isolation_holds_across_store_recall_delete_and_consolidate(tm
         assert "project-entry" in project_ids
         assert "team-entry" not in project_ids
 
-        assert team_backend.delete("team-entry") is True
+        assert team_backend.delete("team-entry", namespace="team:sprint-37") is True
         post_delete = memory_recall_impl("", "project:default", backend=project_backend, config=cfg)
         post_delete_ids = {str(item["id"]) for item in cast("list[dict[str, object]]", post_delete["memories"])}
         assert "project-entry" in post_delete_ids

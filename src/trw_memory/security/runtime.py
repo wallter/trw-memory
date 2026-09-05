@@ -14,6 +14,7 @@ import structlog
 
 from trw_memory.exceptions import RateLimitError
 from trw_memory.models.config import MemoryConfig
+from trw_memory.namespaces.validation import DEFAULT_NAMESPACE
 from trw_memory.security.audit import AuditLog
 from trw_memory.security.provenance import derive_verify_key, verify_entry_provenance
 from trw_memory.security.startup import resolve_security_path
@@ -238,9 +239,7 @@ def audit_entry(
     active_backend: StorageBackend,
     namespace: str | None = None,
 ) -> dict[str, object]:
-    entry = active_backend.get(learning_id)
-    if entry is not None and namespace is not None and entry.namespace != namespace:
-        entry = None
+    entry = active_backend.get(learning_id, namespace=namespace if namespace is not None else DEFAULT_NAMESPACE)
     current_status = "active"
     if entry is None:
         quarantined = list_quarantined_entries(config, namespace=namespace, limit=10_000)

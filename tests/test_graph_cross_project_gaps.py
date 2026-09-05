@@ -129,7 +129,7 @@ class TestMergeCrossValidatedEntryNotFound:
         mock_backend = MagicMock()
         mock_backend.get.return_value = None
 
-        result, applied = merge_cross_validated_entry(mock_backend, "M-missing", "beta", 0.95)
+        result, applied = merge_cross_validated_entry(mock_backend, "M-missing", "beta", 0.95, namespace="default")
         assert result is None
         assert applied is False
 
@@ -147,7 +147,7 @@ class TestMergeCrossValidatedEntryAlreadyValidated:
         entry_with_validation = append_cross_validation(entry, "beta", 0.95)
         backend.store(entry_with_validation)
 
-        result, applied = merge_cross_validated_entry(backend, entry.id, "beta", 0.95)
+        result, applied = merge_cross_validated_entry(backend, entry.id, "beta", 0.95, namespace=entry.namespace)
         assert result is not None
         assert applied is False
 

@@ -67,7 +67,7 @@ class TestStoreManyBasic:
         count = backend.store_many([e])
         assert count == 1
         assert backend.count() == 1
-        retrieved = backend.get(e.id)
+        retrieved = backend.get(e.id, namespace=e.namespace)
         assert retrieved is not None
         assert retrieved.content == "single entry"
 
@@ -80,7 +80,7 @@ class TestStoreManyBasic:
         entries = [_entry(content=f"retrievable {i}") for i in range(20)]
         backend.store_many(entries)
         for e in entries:
-            retrieved = backend.get(e.id)
+            retrieved = backend.get(e.id, namespace=e.namespace)
             assert retrieved is not None
             assert retrieved.id == e.id
 
@@ -94,7 +94,7 @@ class TestStoreManyBasic:
             status=MemoryStatus.OBSOLETE,
         )
         backend.store_many([e])
-        retrieved = backend.get(e.id)
+        retrieved = backend.get(e.id, namespace="custom:ns")
         assert retrieved is not None
         assert retrieved.content == "field test"
         assert retrieved.detail == "detailed info"
@@ -112,7 +112,7 @@ class TestStoreManyDuplicates:
         backend.store_many([e1])
         backend.store_many([e2])
         assert backend.count() == 1
-        retrieved = backend.get(eid)
+        retrieved = backend.get(eid, namespace="default")
         assert retrieved is not None
         assert retrieved.content == "second version"
 
@@ -123,7 +123,7 @@ class TestStoreManyDuplicates:
         updated = _entry(entry_id=existing.id, content="updated content")
         backend.store_many([new_entry, updated])
         assert backend.count() == 2
-        assert backend.get(existing.id).content == "updated content"  # type: ignore[union-attr]
+        assert backend.get(existing.id, namespace="default").content == "updated content"  # type: ignore[union-attr]
 
     def test_same_batch_duplicate_id_indexes_only_last_entry(self, backend: SQLiteBackend) -> None:
         if not backend.fts_available:
@@ -133,7 +133,7 @@ class TestStoreManyDuplicates:
         final = _entry(entry_id=entry_id, content="current_unique_term")
 
         assert backend.store_many([first, final]) == 2
-        assert backend.get(entry_id).content == "current_unique_term"  # type: ignore[union-attr]
+        assert backend.get(entry_id, namespace="default").content == "current_unique_term"  # type: ignore[union-attr]
         assert backend.search_fts("obsolete_unique_term") == []
         assert [entry.id for entry in backend.search_fts("current_unique_term")] == [entry_id]
         assert backend._conn.execute("SELECT COUNT(*) FROM memories_fts WHERE id = ?", (entry_id,)).fetchone()[0] == 1
@@ -240,8 +240,8 @@ class TestStoreManyRollbackLocking:
         assert lock_held_during_rollback == [True]
         # The failed batch left no partial rows; the pre-existing row survives.
         assert backend.count() == 1
-        assert backend.get("FAIL") is None
-        assert backend.get("KEEP") is not None
+        assert backend.get("FAIL", namespace="default") is None
+        assert backend.get("KEEP", namespace="default") is not None
 
 
 class TestStoreManyThroughput:

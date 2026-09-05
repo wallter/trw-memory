@@ -12,9 +12,38 @@ from __future__ import annotations
 import contextlib
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from datetime import datetime
 
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+
+
+@dataclass(frozen=True)
+class EntryCursor:
+    """A keyset position in the ``(updated_at DESC, id DESC)`` listing order.
+
+    ``list_entries`` pages with ``after=`` rather than an OFFSET because its
+    callers MUTATE the rows they page over. A namespace merge deletes what it
+    moved and leaves what it skipped, so an offset window either re-reads the
+    skipped rows forever or -- if the caller de-duplicates in memory -- stops
+    advancing the moment a whole window is skipped, silently stranding every
+    row ranked below it. A cursor is a position, not a count, so the window
+    advances regardless of what the caller did to the rows it just saw.
+
+    ``updated_at`` is the STORED text encoding (``datetime.isoformat()``, the
+    same encoder every write path uses), not a ``datetime``: the ORDER BY
+    compares that column as TEXT, so the cursor has to compare in the same
+    space. Re-encoding a parsed ``datetime`` at query time would let a format
+    difference put the cursor on the wrong side of its own boundary row.
+    """
+
+    updated_at: str
+    entry_id: str
+
+    @classmethod
+    def from_entry(cls, entry: MemoryEntry) -> EntryCursor:
+        """Return the cursor that resumes listing immediately AFTER *entry*."""
+        return cls(updated_at=entry.updated_at.isoformat(), entry_id=entry.id)
 
 
 class StorageBackend(ABC):
@@ -38,11 +67,17 @@ class StorageBackend(ABC):
         ...
 
     @abstractmethod
-    def get(self, entry_id: str) -> MemoryEntry | None:
-        """Retrieve an entry by its unique identifier.
+    def get(self, entry_id: str, *, namespace: str) -> MemoryEntry | None:
+        """Retrieve the entry identified by ``(namespace, entry_id)``.
+
+        PRD-CORE-245 FR03: a memory row's identity is composite, so *namespace*
+        is required and has no default. A default would silently reinstate the
+        ambiguity the composite key exists to remove: one database file holds
+        many namespaces, and an id is only unique within one of them.
 
         Args:
             entry_id: The entry's ``id`` field.
+            namespace: The namespace that owns the entry.
 
         Returns:
             The :class:`MemoryEntry`, or ``None`` if not found.
@@ -53,11 +88,14 @@ class StorageBackend(ABC):
         ...
 
     @abstractmethod
-    def update(self, entry_id: str, **fields: object) -> MemoryEntry | None:
-        """Apply a partial update to an existing entry.
+    def update(self, entry_id: str, *, namespace: str, **fields: object) -> MemoryEntry | None:
+        """Apply a partial update to the ``(namespace, entry_id)``-identified entry.
+
+        PRD-CORE-245 FR03: required, not defaulted — see :meth:`get`.
 
         Args:
             entry_id: Target entry identifier.
+            namespace: The namespace that owns the entry.
             **fields: Field names and new values.  Only supplied fields are
                 changed; all others retain their current values.
 
@@ -70,11 +108,14 @@ class StorageBackend(ABC):
         ...
 
     @abstractmethod
-    def delete(self, entry_id: str) -> bool:
-        """Remove an entry from storage.
+    def delete(self, entry_id: str, *, namespace: str) -> bool:
+        """Remove the ``(namespace, entry_id)``-identified entry from storage.
+
+        PRD-CORE-245 FR03: required, not defaulted — see :meth:`get`.
 
         Args:
             entry_id: The entry to remove.
+            namespace: The namespace that owns the entry.
 
         Returns:
             ``True`` if the entry existed and was deleted, ``False`` otherwise.
@@ -138,6 +179,7 @@ class StorageBackend(ABC):
         limit: int = 100,
         exclude_superseded: bool = False,
         tags: list[str] | None = None,
+        after: EntryCursor | None = None,
     ) -> list[MemoryEntry]:
         """Return entries with optional filters.
 
@@ -159,9 +201,15 @@ class StorageBackend(ABC):
                 The predicate is applied BEFORE the limit so tagged entries past
                 the row limit are not truncated away (the recall silent-drop
                 bug). When omitted the legacy behaviour (no tag filter) holds.
+            after: Keyset position from a previous page — only entries ranked
+                strictly BELOW it are returned. This is the only safe way to
+                page over rows the caller is mutating; see :class:`EntryCursor`.
 
         Returns:
-            Up to *limit* entries ordered by ``updated_at`` descending.
+            Up to *limit* entries ordered by ``updated_at`` descending, ``id``
+            descending. The ``id`` tiebreak makes the order TOTAL, which is
+            what lets consecutive ``after=`` pages be disjoint and complete
+            even when many rows share an ``updated_at``.
 
         Raises:
             StorageError: If the query fails.
@@ -228,6 +276,17 @@ class StorageBackend(ABC):
         """
         return 0
 
+    def _locate_unscoped(self, entry_id: str) -> MemoryEntry | None:
+        """Namespace-blind lookup used ONLY by the bulk-counter fallback below.
+
+        :meth:`get` requires a namespace (PRD-CORE-245 FR03) because a bare id
+        does not identify a row. The counter fallback is handed a flat id list
+        that an already namespace-scoped recall produced, so it resolves the
+        row by id and lets :meth:`update` re-qualify the write from the row it
+        found. Deliberately protected: this is not part of the read surface.
+        """
+        return None
+
     def increment_recall_access(self, entry_ids: list[str], *, accessed_at: datetime | None = None) -> int:
         """Increment ``access_count`` and ``recall_count`` for recalled entries.
 
@@ -249,11 +308,12 @@ class StorageBackend(ABC):
             if entry_id in seen:
                 continue
             seen.add(entry_id)
-            entry = self.get(entry_id)
+            entry = self._locate_unscoped(entry_id)
             if entry is None:
                 continue
             self.update(
                 entry_id,
+                namespace=entry.namespace,
                 access_count=entry.access_count + 1,
                 recall_count=entry.recall_count + 1,
                 last_accessed_at=accessed_at,
@@ -318,8 +378,8 @@ class StorageBackend(ABC):
         """
         return False
 
-    def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:  # noqa: B027
-        """Insert or update a dense vector associated with *entry_id*.
+    def upsert_vector(self, entry_id: str, embedding: list[float], *, namespace: str) -> None:  # noqa: B027
+        """Insert or update the dense vector for ``(namespace, entry_id)``.
 
         Backends that support vector search (e.g. via ``sqlite-vec``) should
         override this.  The default is a silent no-op so that callers do not
@@ -329,20 +389,24 @@ class StorageBackend(ABC):
             entry_id: The memory entry id to associate the vector with.
             embedding: Dense float vector.  Length must match the backend's
                 configured dimensionality.
+            namespace: The namespace that owns the entry. ``vec_index`` is keyed
+                ``UNIQUE (namespace, entry_id)`` under schema 5 (PRD-CORE-245
+                FR02), so a bare id no longer identifies one vector.
 
         Raises:
             StorageError: If the upsert fails (only in overriding backends).
         """
 
-    def delete_vector(self, entry_id: str) -> bool:
-        """Delete the dense vector associated with *entry_id*.
+    def delete_vector(self, entry_id: str, *, namespace: str) -> bool:
+        """Delete the dense vector for ``(namespace, entry_id)``.
 
+        PRD-CORE-245 FR03: required, not defaulted — see :meth:`get`.
         Backends without vector support return ``False``.
         """
         return False
 
-    def vector_exists(self, entry_id: str) -> bool:
-        """Return whether a dense vector currently exists for *entry_id*."""
+    def vector_exists(self, entry_id: str, *, namespace: str) -> bool:
+        """Return whether a dense vector currently exists for ``(namespace, entry_id)``."""
         return False
 
     def existing_vector_ids(self, namespace: str | None = None) -> set[str]:

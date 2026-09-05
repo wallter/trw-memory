@@ -147,7 +147,7 @@ class TRWChatMessageHistory(BackendOwnerMixin, BaseChatMessageHistory):  # type:
         entries = self._list_namespace_entries()
         for entry in entries:
             if self._session_tag in entry.tags:
-                self._backend.delete(entry.id)
+                self._backend.delete(entry.id, namespace=entry.namespace)
 
     def _list_namespace_entries(self) -> list[MemoryEntry]:
         """Return a full namespace snapshot for adapter-local filtering.

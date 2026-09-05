@@ -89,7 +89,7 @@ class TestClientStoreMany:
         results = await client.search_fts("tagged")
         assert len(results) >= 1
         assert results[0]["importance"] == pytest.approx(0.9)
-        stored = client._get_backend().get("M-store-many-fields")
+        stored = client._get_backend().get("M-store-many-fields", namespace="default")
         assert stored is not None
         assert stored.evidence == ["src/example.py:10-20"]
         assert stored.expires == "when migration ships"

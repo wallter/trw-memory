@@ -64,6 +64,18 @@ JUSTIFIED_INTERNAL_STORES: dict[tuple[str, str], str] = {
         "derived_from_gated_entries: republishes a stored team entry into the "
         "project namespace via model_copy; content is unchanged."
     ),
+    ("namespaces/curate.py", "_move_rows"): (
+        "rewrite_of_persisted_entry: PRD-CORE-253 namespace rename/merge re-labels "
+        "a row that already passed the gate on its way in via model_copy(update="
+        "{'namespace': ...}); content is unchanged, only the namespace field moves. "
+        "Re-running prepare_entry_for_store here would be wrong, not just "
+        "redundant: it would apply the write RATE LIMIT and anomaly scoring to a "
+        "bulk maintenance operation over already-vetted rows (quarantining or "
+        "rejecting entries that were accepted long ago), for content nobody is "
+        "re-supplying. test_namespace_curate.py::"
+        "test_rename_moves_rows_byte_identical proves the exemption cannot hide a "
+        "content-changing write."
+    ),
 }
 
 

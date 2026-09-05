@@ -19,8 +19,8 @@ def test_copies_high_impact_entries_to_project_namespace() -> None:
     result = _promote_team_memories("team:sprint-37", backend)
 
     assert result["promoted_count"] == 2
-    promoted_e1 = backend.get("promoted-e1")
-    promoted_e2 = backend.get("promoted-e2")
+    promoted_e1 = backend.get("promoted-e1", namespace="default")
+    promoted_e2 = backend.get("promoted-e2", namespace="default")
     assert promoted_e1 is not None
     assert promoted_e2 is not None
     assert promoted_e1.namespace == "project:default"
@@ -37,9 +37,9 @@ def test_skips_low_impact_entries() -> None:
 
     assert result["promoted_count"] == 1
     assert result["discarded_count"] == 2
-    assert backend.get("promoted-e3") is not None
-    assert backend.get("promoted-e1") is None
-    assert backend.get("promoted-e2") is None
+    assert backend.get("promoted-e3", namespace="default") is not None
+    assert backend.get("promoted-e1", namespace="default") is None
+    assert backend.get("promoted-e2", namespace="default") is None
 
 
 def test_preserves_source_identity() -> None:
@@ -48,7 +48,7 @@ def test_preserves_source_identity() -> None:
 
     _promote_team_memories("team:sprint-37", backend)
 
-    promoted = backend.get("promoted-e1")
+    promoted = backend.get("promoted-e1", namespace="default")
     assert promoted is not None
     assert promoted.source_identity == "team:sprint-37"
 
@@ -59,7 +59,7 @@ def test_records_promoted_from_in_outcome_history() -> None:
 
     _promote_team_memories("team:sprint-37", backend)
 
-    promoted = backend.get("promoted-e1")
+    promoted = backend.get("promoted-e1", namespace="default")
     assert promoted is not None
     assert len(promoted.outcome_history) == 2
     assert promoted.outcome_history[0] == "previous_event"
@@ -126,13 +126,13 @@ def test_team_namespace_promotion_writes_to_project_backend(tmp_path: Path) -> N
         )
 
         assert result["promoted_count"] == 1
-        assert team_backend.get("promoted-e1") is None
+        assert team_backend.get("promoted-e1", namespace="default") is None
     finally:
         team_backend.close()
 
     project_backend = create_backend_from_config(cfg, "project:default")
     try:
-        promoted = project_backend.get("promoted-e1")
+        promoted = project_backend.get("promoted-e1", namespace="project:default")
         assert promoted is not None
         assert promoted.namespace == "project:default"
         assert promoted.source_identity == "team:sprint-37"

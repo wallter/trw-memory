@@ -1,7 +1,7 @@
 """Status-filtering tests for the graph ``related`` recall path.
 
 The main recall path lists only ``MemoryStatus.ACTIVE`` entries. The graph
-traversal ``related`` path hydrates neighbour nodes via ``backend.get()``,
+traversal ``related`` path hydrates neighbour nodes via ``backend.get(namespace="default")``,
 which returns an entry regardless of status. Without an explicit filter the
 ``related`` block re-introduces the obsolete-leak bug (obsolete / archived /
 poisoned / resolved learnings surfaced to the caller).
@@ -37,7 +37,7 @@ class TestGraphRelatedStatusFilter:
         backend.store(make_entry(entry_id="ghost", content="obsolete neighbour", status=MemoryStatus.OBSOLETE))
         _link(backend, "seed", "ghost")
 
-        related = _graph_related([{"id": "seed"}], depth=2, backend=backend, conn=backend._conn)
+        related = _graph_related([{"id": "seed"}], depth=2, backend=backend, conn=backend._conn, namespace="default")
 
         ids = {str(item["id"]) for item in related}
         assert "ghost" not in ids, "obsolete neighbour leaked into graph related results"
@@ -48,7 +48,7 @@ class TestGraphRelatedStatusFilter:
         backend.store(make_entry(entry_id="kin", content="active neighbour", status=MemoryStatus.ACTIVE))
         _link(backend, "seed", "kin")
 
-        related = _graph_related([{"id": "seed"}], depth=2, backend=backend, conn=backend._conn)
+        related = _graph_related([{"id": "seed"}], depth=2, backend=backend, conn=backend._conn, namespace="default")
 
         ids = {str(item["id"]) for item in related}
         assert "kin" in ids, "active neighbour should be surfaced via graph traversal"
@@ -63,7 +63,7 @@ class TestGraphRelatedStatusFilter:
         _link(backend, "seed", "poison")
         _link(backend, "seed", "kin")
 
-        related = _graph_related([{"id": "seed"}], depth=2, backend=backend, conn=backend._conn)
+        related = _graph_related([{"id": "seed"}], depth=2, backend=backend, conn=backend._conn, namespace="default")
 
         ids = {str(item["id"]) for item in related}
         assert ids == {"kin"}

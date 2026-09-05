@@ -47,7 +47,7 @@ def _store(backend: SQLiteBackend, entry_id: str, namespace: str, embedding: lis
             updated_at=now,
         )
     )
-    backend.upsert_vector(entry_id, embedding)
+    backend.upsert_vector(entry_id, embedding, namespace=namespace)
 
 
 class TestExistingVectorIdsNamespaceScope:

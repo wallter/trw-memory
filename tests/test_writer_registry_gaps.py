@@ -116,7 +116,7 @@ class TestInMemoryBackendDoesNotTouchDisk:
         backend = SQLiteBackend(Path(":memory:"))
         backend.store(MemoryEntry(id="M-mem", content="in-memory entry"))
 
-        assert backend.get("M-mem") is not None, "the in-memory backend must still work"
+        assert backend.get("M-mem", namespace="default") is not None, "the in-memory backend must still work"
         assert not (tmp_path / ":memory:.writers").exists()
         # Scoped to the registry deliberately. Writing this assertion as "the cwd
         # is empty" surfaced a SECOND, unrelated cwd artifact (`_sec001_anchor`,

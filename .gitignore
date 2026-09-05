@@ -43,3 +43,10 @@ scratch/
 .memory/
 coverage.json
 .trw/distill/anon_salt
+
+# PRD-CORE-253 FR01 derives security state as the `security` SIBLING of the
+# resolved store directory (it used to be a nested `.trw/security`, which was
+# wrong under an XDG base). With the default relative storage_path (".memory"),
+# a test run in this package root drops audit/anomaly state here. Runtime state,
+# never source.
+/security/

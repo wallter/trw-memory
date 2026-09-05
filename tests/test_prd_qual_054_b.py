@@ -222,7 +222,9 @@ class TestCodeQuality:
         # Must include the main public functions
         assert "graph_query" in all_exports
         assert "create_similarity_edges" in all_exports
-        assert "create_tag_cooccurrence_edges" in all_exports
+        # PRD-CORE-245 FR07 removed ``create_tag_cooccurrence_edges``: the
+        # relation is derived, not materialised, so there is no writer to export.
+        assert "create_tag_cooccurrence_edges" not in all_exports
 
     def test_memory_config_repr(self) -> None:
         """MemoryConfig must have a concise __repr__."""

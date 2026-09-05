@@ -87,7 +87,7 @@ class TestConcurrentAccess:
         assert not errors, f"Thread errors: {errors}"
         assert shared_backend.count() == num_threads
         for i in range(num_threads):
-            result = shared_backend.get(f"conc-{i}")
+            result = shared_backend.get(f"conc-{i}", namespace="default")
             assert result is not None, f"Entry conc-{i} missing"
 
     def test_concurrent_update_same_entry(self, shared_backend: SQLiteBackend) -> None:
@@ -103,10 +103,7 @@ class TestConcurrentAccess:
         def worker(thread_id: int) -> None:
             try:
                 barrier.wait(timeout=5)
-                shared_backend.update(
-                    "shared-update",
-                    tags=[f"tag-from-thread-{thread_id}"],
-                )
+                shared_backend.update("shared-update", tags=[f"tag-from-thread-{thread_id}"], namespace="default")
             except Exception as exc:
                 with errors_lock:
                     errors.append(exc)
@@ -118,7 +115,7 @@ class TestConcurrentAccess:
             t.join(timeout=10)
 
         assert not errors, f"Thread errors: {errors}"
-        result = shared_backend.get("shared-update")
+        result = shared_backend.get("shared-update", namespace="default")
         assert result is not None
         # Tags will be from whichever thread committed last — just verify no crash
         assert isinstance(result.tags, list)
@@ -177,7 +174,7 @@ class TestConcurrentAccess:
         def deleter() -> None:
             try:
                 barrier.wait(timeout=5)
-                shared_backend.delete("delete-target")
+                shared_backend.delete("delete-target", namespace="default")
             except Exception as exc:
                 with errors_lock:
                     errors.append(exc)
@@ -186,7 +183,7 @@ class TestConcurrentAccess:
             try:
                 barrier.wait(timeout=5)
                 # May return the entry or None depending on timing — both are valid
-                shared_backend.get("delete-target")
+                shared_backend.get("delete-target", namespace="default")
             except Exception as exc:
                 with errors_lock:
                     errors.append(exc)

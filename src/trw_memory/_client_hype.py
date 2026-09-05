@@ -101,13 +101,13 @@ def expand_hype_siblings(
         stored = 0
         for index, question in enumerate(kept):
             sibling_id = hype_sibling_id(entry.id, index)
-            if backend.get(sibling_id) is not None:
+            if backend.get(sibling_id, namespace=entry.namespace) is not None:
                 logger.warning("hype_sibling_id_collision", op="store", parent_id=entry.id, sibling_id=sibling_id)
                 continue
             q_embedding = embedder.embed(question)
             if q_embedding is None:
                 continue
-            backend.upsert_vector(sibling_id, q_embedding)
+            backend.upsert_vector(sibling_id, q_embedding, namespace=entry.namespace)
             stored += 1
         logger.debug(
             "hype_expansion_complete",

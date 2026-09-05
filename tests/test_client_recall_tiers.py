@@ -60,7 +60,7 @@ class TestRecall:
 
         assert any(result["memory_id"] == "M-cold" for result in results)
         assert not cold_file.exists()
-        assert client._get_backend().get("M-cold") is not None
+        assert client._get_backend().get("M-cold", namespace="default") is not None
         warm_ids = [str(item["id"]) for item in client._tier_manager.warm_search(["archived"], None)]
         assert "M-cold" in warm_ids
         await client.close()
@@ -76,7 +76,7 @@ class TestRecall:
             def __init__(self) -> None:
                 self.vectors: dict[str, list[float]] = {}
 
-            def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:
+            def upsert_vector(self, entry_id: str, embedding: list[float], *, namespace: str = "default") -> None:
                 self.vectors[entry_id] = embedding
 
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
@@ -145,7 +145,7 @@ class TestRecall:
 
         assert not any(result["memory_id"] == "M-cold-fail" for result in results)
         assert cold_file.exists()
-        assert client._get_backend().get("M-cold-fail") is None
+        assert client._get_backend().get("M-cold-fail", namespace="default") is None
         await client.close()
 
     async def test_recall_does_not_leave_sqlite_canonical_copy_when_promotion_fails(
@@ -188,7 +188,7 @@ class TestRecall:
 
         assert not any(result["memory_id"] == "M-cold-sqlite-fail" for result in results)
         assert cold_file.exists()
-        assert client._get_backend().get("M-cold-sqlite-fail") is None
+        assert client._get_backend().get("M-cold-sqlite-fail", namespace="default") is None
         await client.close()
 
     async def test_recall_does_not_leave_sqlite_canonical_copy_when_archive_delete_fails(
@@ -218,7 +218,7 @@ class TestRecall:
 
         original_unlink = Path.unlink
 
-        def _fail_archive_delete(path: Path, *, missing_ok: bool = False) -> None:
+        def _fail_archive_delete(path: Path, *, missing_ok: bool = False, **_kwargs) -> None:
             if path == cold_file:
                 raise OSError("archive delete failed")
             original_unlink(path, missing_ok=missing_ok)
@@ -232,7 +232,7 @@ class TestRecall:
 
         assert not any(result["memory_id"] == "M-cold-sqlite-unlink-fail" for result in results)
         assert cold_file.exists()
-        assert client._get_backend().get("M-cold-sqlite-unlink-fail") is None
+        assert client._get_backend().get("M-cold-sqlite-unlink-fail", namespace="default") is None
         await client.close()
 
     async def test_recall_force_deletes_yaml_canonical_copy_when_primary_rollback_delete_fails(
@@ -263,12 +263,12 @@ class TestRecall:
         backend = client._get_backend()
         original_unlink = Path.unlink
 
-        def _fail_archive_delete(path: Path, *, missing_ok: bool = False) -> None:
+        def _fail_archive_delete(path: Path, *, missing_ok: bool = False, **_kwargs) -> None:
             if path == cold_file:
                 raise OSError("archive delete failed")
             original_unlink(path, missing_ok=missing_ok)
 
-        def _fail_primary_delete(_entry_id: str) -> bool:
+        def _fail_primary_delete(_entry_id: str, **_kwargs) -> bool:
             raise OSError("primary rollback delete failed")
 
         monkeypatch.setattr(Path, "unlink", _fail_archive_delete)
@@ -281,5 +281,5 @@ class TestRecall:
 
         assert not any(result["memory_id"] == "M-cold-yaml-double-fail" for result in results)
         assert cold_file.exists()
-        assert client._get_backend().get("M-cold-yaml-double-fail") is None
+        assert client._get_backend().get("M-cold-yaml-double-fail", namespace="default") is None
         await client.close()

@@ -242,12 +242,15 @@ class TierManager:
 
     def cold_archive_entry(self, entry_id: str, entry_data: dict[str, object]) -> None:
         """Archive an active canonical entry into the cold tier."""
+        namespace = self._namespace
         with self._open_canonical_backend(self._config) as backend:
             self._cold_store.cold_archive_entry(
                 entry_id,
                 entry_data,
-                delete_source_entry_fn=backend.delete,
-                verify_source_entry_removed_fn=lambda archived_entry_id: backend.get(archived_entry_id) is None,
+                delete_source_entry_fn=lambda archived_entry_id: backend.delete(archived_entry_id, namespace=namespace),
+                verify_source_entry_removed_fn=lambda archived_entry_id: (
+                    backend.get(archived_entry_id, namespace=namespace) is None
+                ),
             )
 
     def cold_promote(

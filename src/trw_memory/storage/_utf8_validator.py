@@ -38,7 +38,6 @@ _ENTRY_TEXT_FIELDS: tuple[tuple[str, str], ...] = (
     ("task_type", "task_type"),
     ("phase_origin", "phase_origin"),
     ("team_origin", "team_origin"),
-    ("outcome_correlation", "outcome_correlation"),
     ("sync_hash", "sync_hash"),
     ("invalidated_by", "invalidated_by"),
 )

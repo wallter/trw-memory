@@ -270,7 +270,7 @@ async def bulk_store_impl(
                 with backend.transaction():
                     backend.store(entry)
                     if embedding is not None:
-                        backend.upsert_vector(entry.id, embedding)
+                        backend.upsert_vector(entry.id, embedding, namespace=entry.namespace)
             except Exception as exc:
                 raise StorageError(f"failed to persist entry+vector for {entry.id!r}; transaction rolled back") from exc
 

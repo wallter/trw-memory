@@ -28,6 +28,7 @@ from trw_memory._client_hype import expand_hype_siblings
 from trw_memory.exceptions import MemoryNotFoundError, SchemaValidationError, StorageError
 from trw_memory.graph import schedule_graph_update
 from trw_memory.lifecycle.tiers._runtime import embedding_has_consumer, remember_entry_in_tiers
+from trw_memory.models.entry_factory import new_entry, revise_entry
 from trw_memory.models.memory import Assertion, MemoryEntry
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.security.poisoning import validate_store_inputs
@@ -37,7 +38,6 @@ from trw_memory.security.runtime import (
     prepare_entry_for_store,
     store_quarantined_entry,
 )
-from trw_memory.sync.conflict import increment_clock, init_clock
 
 if TYPE_CHECKING:
     from trw_memory.client import MemoryClient, StoreResultDict
@@ -46,9 +46,13 @@ if TYPE_CHECKING:
 
 def _existing_entry_for_namespace(backend: StorageBackend, entry_id: str, namespace: str) -> MemoryEntry | None:
     """Resolve an update target without exposing or mutating another namespace."""
-    existing = backend.get(entry_id)
+    existing = backend.get(entry_id, namespace=namespace)
     if not isinstance(existing, MemoryEntry):
         return None
+    # Defence in depth. Containment is enforced by the query itself under
+    # PRD-CORE-245 FR03, so this can only fire for a backend implementation that
+    # ignores its own namespace predicate — in which case failing loudly beats
+    # handing another namespace's row to an update path.
     if existing.namespace != namespace:
         raise MemoryNotFoundError(f"Memory entry {entry_id!r} not found in namespace {namespace!r}")
     return existing
@@ -93,41 +97,41 @@ def _build_store_entry(
     entry_expires = expires or (existing.expires if existing is not None else "")
 
     if existing is None:
-        return MemoryEntry(
-            id=memory_id,
+        return new_entry(
+            entry_id=memory_id,
             content=content.strip(),
-            detail=detail,
-            tags=tags or [],
-            evidence=list(evidence or []),
-            importance=importance,
             namespace=namespace,
-            metadata=entry_metadata,
-            created_at=now,
-            updated_at=now,
-            expires=entry_expires,
-            assertions=list(assertions or []),
-            source=source,
-            source_identity=source_identity,
-            vector_clock=init_clock(local_node_id),
+            local_node_id=local_node_id,
+            now=now,
+            fields={
+                "detail": detail,
+                "tags": tags or [],
+                "evidence": list(evidence or []),
+                "importance": importance,
+                "metadata": entry_metadata,
+                "expires": entry_expires,
+                "assertions": list(assertions or []),
+                "source": source,
+                "source_identity": source_identity,
+            },
         )
 
-    return existing.model_copy(
-        update={
+    return revise_entry(
+        existing,
+        local_node_id=local_node_id,
+        now=now,
+        fields={
             "content": content.strip(),
             "detail": detail,
             "tags": tags or [],
             "evidence": list(evidence) if evidence is not None else existing.evidence,
             "importance": importance,
             "metadata": entry_metadata,
-            "updated_at": now,
             "expires": entry_expires,
             "assertions": list(assertions) if assertions is not None else existing.assertions,
             "source": source,
             "source_identity": source_identity or existing.source_identity,
-            # Advance local causality; resetting the clock makes a newer local
-            # update appear concurrent with its stale snapshot.
-            "vector_clock": increment_clock(existing.vector_clock, local_node_id),
-        }
+        },
     )
 
 
@@ -244,7 +248,7 @@ async def store_impl(
             with backend.transaction():
                 backend.store(entry)
                 if embedding is not None:
-                    backend.upsert_vector(entry.id, embedding)
+                    backend.upsert_vector(entry.id, embedding, namespace=entry.namespace)
                 # PRD-CORE-195 FR03/FR05: generate + store HyPE sibling vectors
                 # inside the SAME transaction (purge-then-regenerate on UPDATE).
                 # Gated on hype_enabled; fail-open so the canonical row + primary

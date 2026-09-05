@@ -30,7 +30,8 @@ from trw_memory.lifecycle.tiers._runtime import (
     supports_tier_runtime,
 )
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import Assertion, MemoryEntry, MemoryStatus
+from trw_memory.models.entry_factory import local_node_id_for, new_entry, revise_entry
+from trw_memory.models.memory import Assertion, MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.security.poisoning import validate_store_inputs
@@ -110,27 +111,37 @@ def memory_store_impl(
     entry_metadata = dict(existing.metadata) if existing is not None else {}
     entry_metadata.update(metadata or {})
     entry_expires = expires or (existing.expires if existing is not None else "")
+    # PRD-CORE-245 FR08: through the shared factory, not a bare constructor.
+    # This surface is what ``trw-memory-server`` writes through, and it used to
+    # leave ``vector_clock`` at its ``{}`` default -- which makes an org-shared
+    # pull discard a newer local edit rather than merge it.
+    local_node_id = local_node_id_for(cfg.storage_path)
     if existing is None:
-        entry = MemoryEntry(
-            id=entry_id,
+        entry = new_entry(
+            entry_id=entry_id,
             content=content.strip(),
-            detail=detail,
-            tags=tags or [],
-            evidence=list(evidence or []),
-            importance=importance,
-            metadata=entry_metadata,
-            expires=entry_expires,
-            assertions=list(assertions or []),
             namespace=namespace,
-            status=MemoryStatus.ACTIVE,
-            created_at=now,
-            updated_at=now,
-            source=source,
-            source_identity=source_identity,
+            local_node_id=local_node_id,
+            now=now,
+            fields={
+                "detail": detail,
+                "tags": tags or [],
+                "evidence": list(evidence or []),
+                "importance": importance,
+                "metadata": entry_metadata,
+                "expires": entry_expires,
+                "assertions": list(assertions or []),
+                "status": MemoryStatus.ACTIVE,
+                "source": source,
+                "source_identity": source_identity,
+            },
         )
     else:
-        entry = existing.model_copy(
-            update={
+        entry = revise_entry(
+            existing,
+            local_node_id=local_node_id,
+            now=now,
+            fields={
                 "content": content.strip(),
                 "detail": detail,
                 "tags": tags or [],
@@ -139,10 +150,9 @@ def memory_store_impl(
                 "metadata": entry_metadata,
                 "expires": entry_expires,
                 "assertions": list(assertions) if assertions is not None else existing.assertions,
-                "updated_at": now,
                 "source": source,
                 "source_identity": source_identity or existing.source_identity,
-            }
+            },
         )
 
     try:
@@ -201,7 +211,7 @@ def memory_store_impl(
             with backend.transaction():
                 backend.store(entry)
                 if embedding is not None:
-                    backend.upsert_vector(entry.id, embedding)
+                    backend.upsert_vector(entry.id, embedding, namespace=entry.namespace)
         except Exception as exc:
             raise StorageError(f"failed to persist entry+vector for {entry_id!r}; transaction rolled back") from exc
         try:

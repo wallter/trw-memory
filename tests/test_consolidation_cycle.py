@@ -88,7 +88,7 @@ class TestConsolidateCycle:
         assert result["consolidated_count"] == 1
 
         for i in range(3):
-            entry = storage.get(f"e{i}")
+            entry = storage.get(f"e{i}", namespace="default")
             assert entry is not None
             assert str(entry.status) == "archived"
             assert entry.consolidated_into is not None
@@ -178,7 +178,7 @@ class TestConsolidateCycle:
         consolidated = [entry for entry in storage.list_entries() if entry.source == "consolidated"]
         assert consolidated == []
         for i in range(3):
-            entry = storage.get(f"e{i}")
+            entry = storage.get(f"e{i}", namespace="default")
             assert entry is not None
             assert str(entry.status) == "active"
             assert entry.consolidated_into is None
@@ -397,7 +397,7 @@ class TestConsolidateCycle:
             # recurse). Mirrors _InMemoryBackend.update's non-override branch.
             prev, storage.update_override = storage.update_override, None
             try:
-                return storage.update(entry_id, **fields)
+                return storage.update(entry_id, **fields, namespace="default")
             finally:
                 storage.update_override = prev
 
@@ -433,7 +433,7 @@ class TestConsolidateCycle:
         # Despite the failed delete, every original is restored to ACTIVE with
         # consolidated_into cleared — including the one archived before failure.
         for i in range(3):
-            entry = storage.get(f"e{i}")
+            entry = storage.get(f"e{i}", namespace="default")
             assert entry is not None, f"e{i} was lost"
             assert str(entry.status) == "active", f"e{i} left archived after rollback"
             assert entry.consolidated_into is None

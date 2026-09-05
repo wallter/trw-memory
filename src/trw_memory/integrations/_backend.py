@@ -10,13 +10,14 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
 
+from trw_memory.exceptions import ConfigError
 from trw_memory.models.config import MemoryConfig
+from trw_memory.models.entry_factory import local_node_id_for, new_entry
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.encryption import derive_namespace_key
 from trw_memory.security.keys import get_master_key
@@ -33,6 +34,8 @@ __all__ = [
     "discover_namespace_backends",
     "make_entry",
     "resolve_backend",
+    "resolve_backend_db_path",
+    "resolve_backend_location",
 ]
 
 #: Default limit for ``list_entries`` calls across all adapters.
@@ -114,6 +117,57 @@ def config_for_storage_path(storage_path: str | None = None) -> MemoryConfig:
     return MemoryConfig()
 
 
+def resolve_backend_db_path(config: MemoryConfig, namespace: str) -> Path:
+    """Return the SQLite file a namespace's backend resolves to.
+
+    ``memory_single_store_path`` wins when set: every namespace then resolves to
+    ONE file, which is what makes PRD-CORE-253 FR01's "one memory.db per user
+    account" true rather than aspirational. It is safe because PRD-CORE-245 FR01
+    keys a row on ``(namespace, id)``. Otherwise the historical
+    ``base / namespace_dir / sqlite_db_name`` join applies.
+
+    The join lived only inside :func:`create_backend_from_config`, so a caller
+    that needed to know whether TWO namespaces share one file had no way to ask
+    (FR05: a namespace rename is a single-file transaction when they do and a
+    two-store move when they do not). One join, one source of truth.
+    """
+    if config.memory_single_store_path:
+        return Path(config.memory_single_store_path)
+    return Path(config.storage_path) / namespace.replace(":", "_") / config.sqlite_db_name
+
+
+def _refuse_encrypted_single_store(config: MemoryConfig) -> None:
+    """Re-assert the config-level refusal at the point of use.
+
+    :class:`~trw_memory.models.config.MemoryConfig` already rejects
+    ``encryption_enabled`` together with ``memory_single_store_path``, but a
+    caller can mutate a validated model afterwards (pydantic does not validate
+    on assignment here), and this module is where the wrong key would actually
+    be handed to SQLCipher. The cost is one boolean; the failure it prevents is
+    an unopenable store.
+    """
+    if config.encryption_enabled and config.memory_single_store_path:
+        raise ConfigError(
+            "refusing to open a single shared store with per-namespace encryption: "
+            "encryption_enabled and memory_single_store_path are mutually exclusive until "
+            "PRD-CORE-253 FR09 ships a per-file key."
+        )
+
+
+def resolve_backend_location(config: MemoryConfig, namespace: str) -> Path:
+    """Return the on-disk location a namespace's rows live in, per backend.
+
+    SQLite namespaces share a location when they resolve to the same FILE; YAML
+    namespaces share one when they resolve to the same ENTRIES DIRECTORY. The
+    two are different questions, and answering the YAML one with the SQLite rule
+    is how a cross-namespace move can silently become a no-op against the wrong
+    store.
+    """
+    if config.storage_backend == "sqlite":
+        return resolve_backend_db_path(config, namespace)
+    return Path(config.storage_path) / namespace.replace(":", "_") / "entries"
+
+
 def resolve_backend(
     namespace: str,
     storage_path: str | None,
@@ -181,13 +235,22 @@ def create_backend_from_config(
     if config.storage_backend == "sqlite":
         if db_path_override is not None:
             db_path = Path(db_path_override)
-            namespace_dir = db_path.parent
         else:
-            namespace_dir = base / ns_dir
-            db_path = namespace_dir / config.sqlite_db_name
-        _write_namespace_metadata(namespace_dir, namespace)
+            db_path = resolve_backend_db_path(config, namespace)
+        if config.memory_single_store_path:
+            # One file holds every namespace, so a per-directory ``namespace.txt``
+            # would be N namespaces overwriting one sidecar with the last writer's
+            # name. The namespace is the row's own column; discovery reads it from
+            # the store (``list_namespaces``) rather than from a filename.
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            _write_namespace_metadata(db_path.parent, namespace)
         sqlcipher_key_hex: str | None = None
         if config.encryption_enabled:
+            # A per-NAMESPACE key against a shared FILE is unopenable for every
+            # namespace after the first, so the combination is refused rather
+            # than written (PRD-CORE-253 FR09 owns the redesign).
+            _refuse_encrypted_single_store(config)
             master_key = get_master_key(config)
             sqlcipher_key_hex = derive_namespace_key(master_key, namespace)
         return _create_sqlite_backend(config, db_path, sqlcipher_key_hex=sqlcipher_key_hex)
@@ -214,6 +277,27 @@ def discover_namespace_backends(
     from contextlib import ExitStack
 
     base = Path(config.storage_path)
+
+    if config.memory_single_store_path:
+        # One file, every namespace. Directory scanning finds nothing here (the
+        # store is a FILE in ``base``, not a subdirectory), so discovery has to
+        # ask the store which namespaces it holds -- which is the truthful
+        # source anyway, since the namespace is a column and not a filename.
+        _refuse_encrypted_single_store(config)
+        single = Path(config.memory_single_store_path)
+        if not single.exists():
+            yield []
+            return
+        with ExitStack() as stack:
+            # Keyless is only correct because the guard above proved the store is
+            # not encrypted. Passing None to an ENCRYPTED store would not read
+            # plaintext -- it would fail to open, which is a confusing way to
+            # report a configuration that should never have been accepted.
+            store = stack.enter_context(_create_sqlite_backend(config, single, sqlcipher_key_hex=None))
+            namespaces = store.list_namespaces()
+            yield [(namespaces, store)] if namespaces else []
+        return
+
     if not base.exists():
         yield []
         return
@@ -266,17 +350,21 @@ def make_entry(
     metadata: dict[str, str] | None = None,
     source: str = "agent",
 ) -> MemoryEntry:
-    """Create a new :class:`MemoryEntry` with generated ID and timestamps."""
-    now = datetime.now(timezone.utc)
-    return MemoryEntry(
-        id=_make_id(),
+    """Create a new :class:`MemoryEntry` with generated ID and timestamps.
+
+    PRD-CORE-245 FR08: through the shared factory, so this convenience
+    constructor stamps the same causality fields every other writer does.
+    """
+    return new_entry(
+        entry_id=_make_id(),
         content=content,
-        detail=detail,
-        tags=tags or [],
-        importance=importance,
         namespace=namespace,
-        metadata=metadata or {},
-        created_at=now,
-        updated_at=now,
-        source=source,
+        local_node_id=local_node_id_for(namespace),
+        fields={
+            "detail": detail,
+            "tags": tags or [],
+            "importance": importance,
+            "metadata": metadata or {},
+            "source": source,
+        },
     )

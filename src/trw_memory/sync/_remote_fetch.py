@@ -1,8 +1,17 @@
-"""Remote fetch helpers for memory sync."""
+"""Remote fetch helpers for memory sync.
+
+A fetch has more outcomes than "here are the results". Sync switched off, an
+unusable platform URL, a 401 on a rotated key, a body that did not parse, and a
+peer that returned ten items the admission gate refused ALL previously left this
+module by the same door: an empty list, identical to "the shared corpus held
+nothing for this query". :class:`SharedFetchResult` keeps them apart so a caller
+can say which one happened instead of reporting silence as absence.
+"""
 
 from __future__ import annotations
 
 import json
+from typing import Literal, NamedTuple
 
 import httpx
 import structlog
@@ -12,6 +21,8 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.dense import cosine_similarity
 from trw_memory.security.pii import mask_query_credentials
+from trw_memory.storage.interface import StorageBackend
+from trw_memory.sync._remote_admission import admit_remote_results
 from trw_memory.sync._remote_common import (
     FETCH_TIMEOUT,
     _raise_local_only_violation,
@@ -22,6 +33,40 @@ from trw_memory.sync._remote_common import (
 )
 
 logger = structlog.get_logger(__name__)
+
+#: Why a fetch returned what it returned.
+#:
+#: ``ok``
+#:     The platform answered and every returned item was admitted.
+#: ``partial``
+#:     The platform answered and the gate refused some of what it returned.
+#: ``refused``
+#:     The platform returned items and the gate refused every one of them --
+#:     an empty result that is NOT an empty corpus.
+#: ``disabled``
+#:     Sync is off or no platform is configured. Nothing was asked.
+#: ``invalid_config``
+#:     A platform URL that cannot be fetched from. Nothing was asked.
+#: ``fetch_failed``
+#:     The platform was asked and did not usefully answer (non-200, unparseable
+#:     body, transport error).
+FetchStatus = Literal["ok", "partial", "refused", "disabled", "invalid_config", "fetch_failed"]
+
+
+class SharedFetchResult(NamedTuple):
+    """Admitted shared results plus what happened to everything else."""
+
+    results: list[dict[str, object]]
+    status: FetchStatus
+    #: Items the platform returned, before dedup and before admission.
+    fetched: int
+    #: Items the admission gate refused (see
+    #: :class:`~trw_memory.sync._remote_admission.AdmissionOutcome`).
+    refused: int
+
+    def __bool__(self) -> bool:
+        """Truthy exactly when results were returned, as the old list was."""
+        return bool(self.results)
 
 
 def _dedupe_shared_results(
@@ -85,20 +130,35 @@ def fetch_shared_memories(
     query: str,
     cfg: MemoryConfig,
     *,
+    backend: StorageBackend,
     embedding: list[float] | None = None,
     limit: int = 10,
     local_entries: list[MemoryEntry] | None = None,
     embedder: EmbeddingProvider | None = None,
     dedup_threshold: float = 0.92,
-) -> list[dict[str, object]]:
+) -> SharedFetchResult:
+    """Fetch shared memories from the platform, admitting only what the gate passes.
+
+    ``backend`` is required, not optional: it is what the admission gate needs to
+    evaluate a candidate, and a fetch that cannot be gated must not happen at all
+    (PRD-CORE-245 FR06, NFR03 fail-closed). This is the ONE path to
+    ``/v1/learnings/search`` in either package; the duplicate client in
+    ``trw_mcp.telemetry.remote_recall`` was deleted with the same change.
+
+    Returns:
+        A :class:`SharedFetchResult`. ``results`` is what a caller merges;
+        ``status`` says whether an empty ``results`` means "nothing matched",
+        "nothing was asked", "the platform did not answer" or "everything was
+        refused".
+    """
     if cfg.local_only:
         logger.warning("memory_fetch_blocked_local_only")
         _raise_local_only_violation()
     if not cfg.sync_enabled or not cfg.platform_url:
-        return []
+        return SharedFetchResult([], "disabled", 0, 0)
     if not is_valid_platform_url(cfg.platform_url):
         logger.warning("memory_fetch_invalid_platform_url")
-        return []
+        return SharedFetchResult([], "invalid_config", 0, 0)
 
     request_payload: dict[str, object] = encode_learning_api_v1_search(
         query=mask_query_credentials(query), limit=limit, min_importance=cfg.sync_min_importance
@@ -120,7 +180,7 @@ def fetch_shared_memories(
             # is not a measurement of absence.
             if resp.status_code != 200:
                 logger.warning("memory_fetch_rejected", status_code=resp.status_code)
-                return []
+                return SharedFetchResult([], "fetch_failed", 0, 0)
             raw = resp.json()
             if isinstance(raw, list):
                 raw_results = [item for item in raw if isinstance(item, dict)]
@@ -129,12 +189,12 @@ def fetch_shared_memories(
                 raw_results = [item for item in wrapped if isinstance(item, dict)] if isinstance(wrapped, list) else []
             else:
                 logger.warning("memory_fetch_malformed_body", body_type=type(raw).__name__)
-                return []
+                return SharedFetchResult([], "fetch_failed", 0, 0)
             # Decode external wire vocabulary into canonical importance at the boundary.
             results = [decode_learning_api_v1_result(item) for item in raw_results]
     except (httpx.HTTPError, OSError, ConnectionError, json.JSONDecodeError, ValueError):
         logger.debug("memory_fetch_error", exc_info=True)
-        return []
+        return SharedFetchResult([], "fetch_failed", 0, 0)
 
     deduped = _dedupe_shared_results(
         results,
@@ -142,8 +202,12 @@ def fetch_shared_memories(
         embedder=embedder,
         dedup_threshold=dedup_threshold,
     )
+    # PRD-CORE-245 FR06: the admission gate runs BEFORE the [shared] prefix and
+    # before anything is returned, so a refused item never reaches the recall
+    # response, and therefore never reaches an agent's context.
+    outcome = admit_remote_results(deduped, config=cfg, backend=backend)
     shared: list[dict[str, object]] = []
-    for result in deduped:
+    for result in outcome.admitted:
         summary = result.get("summary", result.get("content", ""))
         content = str(summary) if summary is not None else ""
         result["summary"] = f"[shared] {content}"
@@ -151,5 +215,18 @@ def fetch_shared_memories(
         result["source"] = "shared"
         shared.append(result)
 
-    logger.debug("memory_fetch_complete", fetched=len(results), after_dedup=len(shared))
-    return shared
+    if outcome.refused and not shared:
+        status: FetchStatus = "refused"
+    elif outcome.refused:
+        status = "partial"
+    else:
+        status = "ok"
+    logger.debug(
+        "memory_fetch_complete",
+        fetched=len(results),
+        after_dedup=len(deduped),
+        after_admission=len(shared),
+        refused=outcome.refused,
+        status=status,
+    )
+    return SharedFetchResult(shared, status, len(results), outcome.refused)

@@ -62,7 +62,7 @@ class TestSQLiteBackend:
         )
         backend.store(entry)
 
-        retrieved = backend.get("no-vec-1")
+        retrieved = backend.get("no-vec-1", namespace="default")
         assert retrieved is not None
         assert retrieved.content == "test without vectors"
 

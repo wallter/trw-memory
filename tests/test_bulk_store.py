@@ -122,7 +122,7 @@ async def test_bulk_store_preserves_expiry_and_assertions(isolated_client: Memor
         ]
     )
 
-    stored = isolated_client._get_backend().get(summary.items[0].memory_id)
+    stored = isolated_client._get_backend().get(summary.items[0].memory_id, namespace=isolated_client._namespace)
 
     assert stored is not None
     assert stored.evidence == ["src/example.py:10-20"]

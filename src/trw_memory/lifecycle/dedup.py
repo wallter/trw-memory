@@ -290,8 +290,8 @@ def merge_entries(
     # Accumulation fields — mirror consolidation._create_consolidated_entry so
     # merges don't silently discard Q-learning history or feedback counters:
     #   q_value: max (best observed signal survives)
-    #   q_observations / access_count / recall_count / helpful_count /
-    #     sessions_surfaced: sum (cumulative counters)
+    #   q_observations / access_count / recall_count / helpful_count: sum
+    #     (cumulative counters)
     #   protection_tier: keep the stronger tier
     #   assertions: union by (type, pattern, target)
     merged_q_value = max(existing.q_value, new_entry.q_value)
@@ -299,7 +299,6 @@ def merge_entries(
     merged_access_count = existing.access_count + new_entry.access_count
     merged_recall_count = existing.recall_count + new_entry.recall_count
     merged_helpful_count = existing.helpful_count + new_entry.helpful_count
-    merged_sessions_surfaced = existing.sessions_surfaced + new_entry.sessions_surfaced
     merged_protection_tier = _stronger_protection_tier(existing.protection_tier, new_entry.protection_tier)
     merged_assertions = _union_assertions(existing.assertions, new_entry.assertions)
 
@@ -323,7 +322,6 @@ def merge_entries(
             "access_count": merged_access_count,
             "recall_count": merged_recall_count,
             "helpful_count": merged_helpful_count,
-            "sessions_surfaced": merged_sessions_surfaced,
             "protection_tier": merged_protection_tier,
             "assertions": merged_assertions,
             "updated_at": datetime.now(timezone.utc),

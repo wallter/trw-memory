@@ -21,6 +21,7 @@ from trw_memory.graph import schedule_graph_update
 from trw_memory.lifecycle._consolidation_metrics import mean_pairwise_similarity as _mean_pairwise_similarity
 from trw_memory.lifecycle._redaction import redact_paths
 from trw_memory.models.config import MemoryConfig
+from trw_memory.models.entry_factory import local_node_id_for, new_entry
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.retrieval.dense import cosine_similarity
 from trw_memory.storage.interface import StorageBackend
@@ -253,24 +254,26 @@ def _create_consolidated_entry(
     best_source = max(cluster, key=lambda e: e.importance)
 
     now = datetime.now(timezone.utc)
-    entry = MemoryEntry(
-        id=entry_id,
+    entry = new_entry(
+        entry_id=entry_id,
         content=content,
-        detail=detail,
-        source="consolidated",
-        source_identity=best_source.source_identity,
-        client_profile=best_source.client_profile,
-        model_id=best_source.model_id,
-        consolidated_from=[e.id for e in cluster],
-        importance=max(e.importance for e in cluster),
-        tags=sorted({t for e in cluster for t in e.tags}),
-        evidence=list(dict.fromkeys(ev for e in cluster for ev in e.evidence)),
-        recurrence=sum(e.recurrence for e in cluster),
-        q_value=max(e.q_value for e in cluster),
-        status=MemoryStatus.ACTIVE,
         namespace=namespace,
-        created_at=now,
-        updated_at=now,
+        local_node_id=local_node_id_for(namespace),
+        now=now,
+        fields={
+            "detail": detail,
+            "source": "consolidated",
+            "source_identity": best_source.source_identity,
+            "client_profile": best_source.client_profile,
+            "model_id": best_source.model_id,
+            "consolidated_from": [e.id for e in cluster],
+            "importance": max(e.importance for e in cluster),
+            "tags": sorted({t for e in cluster for t in e.tags}),
+            "evidence": list(dict.fromkeys(ev for e in cluster for ev in e.evidence)),
+            "recurrence": sum(e.recurrence for e in cluster),
+            "q_value": max(e.q_value for e in cluster),
+            "status": MemoryStatus.ACTIVE,
+        },
     )
 
     # Compute the embedding before opening the write transaction — pure CPU work
@@ -293,7 +296,7 @@ def _create_consolidated_entry(
         with storage.transaction():
             storage.store(entry)
             if embedding is not None:
-                storage.upsert_vector(entry.id, embedding)
+                storage.upsert_vector(entry.id, embedding, namespace=entry.namespace)
     except Exception as exc:
         raise StorageError(f"failed to persist entry+vector for {entry.id!r}; transaction rolled back") from exc
     try:
@@ -379,7 +382,7 @@ def _archive_originals(
                 if entry.invalid_from is None:
                     close_fields["invalid_from"] = close_at
                     close_fields["invalidated_by"] = consolidated_id
-                updated = storage.update(entry.id, **close_fields)
+                updated = storage.update(entry.id, namespace=entry.namespace, **close_fields)
                 if updated is None:
                     raise StorageError(f"failed to archive original entry {entry.id!r}")
                 archived_count += 1
@@ -439,7 +442,7 @@ def _rollback_consolidation(
     leaves originals archived alongside a surviving consolidated entry.
     """
     _restore_originals(cluster, storage)
-    deleted = storage.delete(new_entry.id)
+    deleted = storage.delete(new_entry.id, namespace=new_entry.namespace)
     if not deleted:
         raise StorageError(f"failed to delete partially consolidated entry {new_entry.id!r}")
 

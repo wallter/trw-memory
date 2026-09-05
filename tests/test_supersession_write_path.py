@@ -37,8 +37,8 @@ def test_consolidation_closes_window_not_delete(tmp_path: Path) -> None:
     consolidated = _create_consolidated_entry(cluster, "merged content", "merged detail", backend, namespace="default")
     _archive_originals(cluster, consolidated.id, backend, invalid_from=consolidated.valid_from)
 
-    a = backend.get("M-a")
-    b = backend.get("M-b")
+    a = backend.get("M-a", namespace="default")
+    b = backend.get("M-b", namespace="default")
     assert a is not None and b is not None
 
     # Window closed: invalid_from set + invalidated_by == consolidated id.
@@ -66,8 +66,8 @@ def test_consolidated_valid_from_equals_close_instant_gap_free(tmp_path: Path) -
     consolidated = _create_consolidated_entry(cluster, "merged content", "merged detail", backend, namespace="default")
     _archive_originals(cluster, consolidated.id, backend, invalid_from=consolidated.valid_from)
 
-    a = backend.get("M-a")
-    new = backend.get(consolidated.id)
+    a = backend.get("M-a", namespace="default")
+    new = backend.get(consolidated.id, namespace="default")
     assert a is not None and new is not None
     # Gap-free: the superseding record opens exactly when the prior window closed.
     assert new.valid_from == a.invalid_from
@@ -91,17 +91,17 @@ def test_sync_hash_validity(tmp_path: Path) -> None:
     created = datetime(2026, 1, 1, tzinfo=timezone.utc)
     entry = MemoryEntry(id="M-x", content="c", created_at=created)
     backend.store(entry)
-    before = backend.get("M-x")
+    before = backend.get("M-x", namespace="default")
     assert before is not None
     hash_before = DeltaTracker.compute_sync_hash(before)
 
     close = datetime(2026, 1, 2, tzinfo=timezone.utc)
-    backend.update("M-x", invalid_from=close, invalidated_by="M-y")
-    after = backend.get("M-x")
+    backend.update("M-x", invalid_from=close, invalidated_by="M-y", namespace="default")
+    after = backend.get("M-x", namespace="default")
     assert after is not None
     hash_after = DeltaTracker.compute_sync_hash(after)
 
     assert hash_before != hash_after
-    # The backend.update() also persists a recomputed sync_hash on the row.
+    # The backend.update(namespace="default") also persists a recomputed sync_hash on the row.
     assert after.sync_hash == hash_after
     assert after.sync_hash != before.sync_hash

@@ -21,6 +21,7 @@ from trw_memory.sync.remote import (
     retire_remote_memory,
 )
 
+from ._test_scope_support import gate_backend
 from ._test_sync_support import (
     make_sync_config as _make_config,
 )
@@ -240,25 +241,28 @@ class TestFetchSharedMemories:
     """FR02: fetch_shared_memories retrieves and deduplicates remote results."""
 
     def test_returns_empty_when_sync_disabled(self) -> None:
-        """Returns [] when sync_enabled=False."""
+        """No results, and the reason is "nothing was asked" (W13)."""
         cfg = _make_config(sync_enabled=False)
-        assert fetch_shared_memories("query", cfg) == []
+        fetched = fetch_shared_memories("query", cfg, backend=gate_backend())
+        assert (fetched.results, fetched.status) == ([], "disabled")
 
     def test_raises_when_local_only_enabled(self) -> None:
         """Local-only mode blocks remote fetch entrypoints explicitly."""
         cfg = _make_config(local_only=True)
         with pytest.raises(LocalOnlyViolationError, match="memory_local_only=True"):
-            fetch_shared_memories("query", cfg)
+            fetch_shared_memories("query", cfg, backend=gate_backend())
 
     def test_returns_empty_when_platform_url_empty(self) -> None:
-        """Returns [] when platform_url is empty."""
+        """No platform configured is "disabled", not an empty corpus (W13)."""
         cfg = _make_config(platform_url="")
-        assert fetch_shared_memories("query", cfg) == []
+        fetched = fetch_shared_memories("query", cfg, backend=gate_backend())
+        assert (fetched.results, fetched.status) == ([], "disabled")
 
     def test_returns_empty_when_platform_url_scheme_invalid(self) -> None:
-        """Invalid URL schemes are rejected before any fetch."""
+        """Invalid URL schemes are rejected before any fetch, and reported as such."""
         cfg = _make_config(platform_url="file:///etc/passwd")
-        assert fetch_shared_memories("query", cfg) == []
+        fetched = fetch_shared_memories("query", cfg, backend=gate_backend())
+        assert (fetched.results, fetched.status) == ([], "invalid_config")
 
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_returns_empty_on_connection_error(self, mock_client_cls: MagicMock) -> None:
@@ -266,15 +270,17 @@ class TestFetchSharedMemories:
         _mock_httpx_client(mock_client_cls, side_effect=ConnectionError("refused"))
 
         cfg = _make_config()
-        assert fetch_shared_memories("query", cfg) == []
+        fetched = fetch_shared_memories("query", cfg, backend=gate_backend())
+        assert (fetched.results, fetched.status) == ([], "fetch_failed")
 
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_returns_empty_on_timeout(self, mock_client_cls: MagicMock) -> None:
-        """Timeouts fall back to local-only results."""
+        """Timeouts fall back to local-only results, reported as a failed fetch."""
         _mock_httpx_client(mock_client_cls, side_effect=httpx.ReadTimeout("timed out"))
 
         cfg = _make_config()
-        assert fetch_shared_memories("query", cfg) == []
+        fetched = fetch_shared_memories("query", cfg, backend=gate_backend())
+        assert (fetched.results, fetched.status) == ([], "fetch_failed")
 
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_returns_results_with_shared_prefix(self, mock_client_cls: MagicMock) -> None:
@@ -286,7 +292,7 @@ class TestFetchSharedMemories:
         )
 
         cfg = _make_config()
-        results = fetch_shared_memories("query", cfg)
+        results = fetch_shared_memories("query", cfg, backend=gate_backend()).results
         assert len(results) == 2
         assert str(results[0]["content"]).startswith("[shared] ")
         assert str(results[0]["summary"]).startswith("[shared] ")
@@ -304,7 +310,7 @@ class TestFetchSharedMemories:
 
         cfg = _make_config()
         local = [_make_entry(content="Existing local knowledge")]
-        results = fetch_shared_memories("query", cfg, local_entries=local)
+        results = fetch_shared_memories("query", cfg, local_entries=local, backend=gate_backend()).results
         assert len(results) == 1
         assert "Use caching" in str(results[0]["content"])
 
@@ -314,7 +320,7 @@ class TestFetchSharedMemories:
         mock_client = _mock_httpx_client(mock_client_cls, status_code=200, json_data=[])
 
         cfg = _make_config()
-        fetch_shared_memories("query", cfg, limit=5)
+        fetch_shared_memories("query", cfg, limit=5, backend=gate_backend())
 
         call_args = mock_client.post.call_args
         payload = call_args[1]["json"]
@@ -326,7 +332,7 @@ class TestFetchSharedMemories:
         mock_client = _mock_httpx_client(mock_client_cls, status_code=200, json_data=[])
 
         cfg = _make_config(platform_url="https://api.test.com")
-        fetch_shared_memories("test query", cfg)
+        fetch_shared_memories("test query", cfg, backend=gate_backend())
 
         call_args = mock_client.post.call_args
         assert call_args[0][0] == "https://api.test.com/v1/learnings/search"
@@ -337,7 +343,7 @@ class TestFetchSharedMemories:
         _mock_httpx_client(mock_client_cls, status_code=500)
 
         cfg = _make_config()
-        assert fetch_shared_memories("query", cfg) == []
+        assert fetch_shared_memories("query", cfg, backend=gate_backend()) == ([], "fetch_failed", 0, 0)
 
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_handles_results_wrapper_dict(self, mock_client_cls: MagicMock) -> None:
@@ -345,7 +351,7 @@ class TestFetchSharedMemories:
         _mock_httpx_client(mock_client_cls, status_code=200, json_data={"results": [{"summary": "A finding"}]})
 
         cfg = _make_config()
-        results = fetch_shared_memories("query", cfg)
+        results = fetch_shared_memories("query", cfg, backend=gate_backend()).results
         assert len(results) == 1
         assert results[0]["content"] == "[shared] A finding"
 
@@ -359,7 +365,7 @@ class TestFetchSharedMemories:
         )
 
         cfg = _make_config()
-        results = fetch_shared_memories("query", cfg)
+        results = fetch_shared_memories("query", cfg, backend=gate_backend()).results
         assert len(results) == 1
         assert results[0]["content"] == "[shared] A finding from items"
 
@@ -378,7 +384,9 @@ class TestFetchSharedMemories:
         embedder.available.return_value = True
         embedder.embed_batch.return_value = [[1.0, 0.0], [0.99, 0.01]]
 
-        results = fetch_shared_memories("query", cfg, local_entries=local, embedder=embedder)
+        results = fetch_shared_memories(
+            "query", cfg, local_entries=local, embedder=embedder, backend=gate_backend()
+        ).results
         assert results == []
 
     @pytest.mark.parametrize("failure", ["available", "embed_batch", "dimension", "truncated_batch"])
@@ -406,14 +414,16 @@ class TestFetchSharedMemories:
         else:
             embedder.embed_batch.return_value = [[1.0, 0.0]]
 
-        results = fetch_shared_memories(
+        fetched = fetch_shared_memories(
             "query",
             _make_config(),
             local_entries=[_make_entry(content="Different local knowledge")],
             embedder=embedder,
+            backend=gate_backend(),
         )
 
-        assert [result["content"] for result in results] == ["[shared] Unique remote guidance"]
+        assert [result["content"] for result in fetched.results] == ["[shared] Unique remote guidance"]
+        assert fetched.status == "ok"
 
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_returns_empty_on_invalid_json(self, mock_client_cls: MagicMock) -> None:
@@ -427,7 +437,7 @@ class TestFetchSharedMemories:
         mock_client_cls.return_value = mock_client
 
         cfg = _make_config()
-        assert fetch_shared_memories("query", cfg) == []
+        assert fetch_shared_memories("query", cfg, backend=gate_backend()) == ([], "fetch_failed", 0, 0)
 
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_returns_empty_on_unexpected_json_shape(self, mock_client_cls: MagicMock) -> None:
@@ -435,7 +445,7 @@ class TestFetchSharedMemories:
         _mock_httpx_client(mock_client_cls, status_code=200, json_data="not-a-result-list")
 
         cfg = _make_config()
-        assert fetch_shared_memories("query", cfg) == []
+        assert fetch_shared_memories("query", cfg, backend=gate_backend()) == ([], "fetch_failed", 0, 0)
 
 
 class TestRetireRemoteMemory:

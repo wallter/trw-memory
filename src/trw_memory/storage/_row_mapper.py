@@ -23,10 +23,10 @@ from trw_memory.models.memory import (
 )
 from trw_memory.storage._parsing import (
     parse_dt_safe,
-    parse_float,
     parse_json_dict_int,
     parse_json_dict_str,
     parse_json_list,
+    parse_optional_float,
 )
 from trw_memory.storage._shared import VERIFICATION_STATUS_VALUES
 
@@ -56,15 +56,21 @@ def parse_model_list(raw: object, model: type[_ModelT], *, strict: bool) -> list
         return []
 
 
-def parse_verification_status(raw: object) -> Literal["stale"] | None:
+def parse_verification_status(raw: object) -> Literal["verified", "stale"] | None:
     """Normalise a persisted ``verification_status`` value (PRD-CORE-231-FR02).
 
-    Only the in-contract literal survives; ``None``, empty strings, and any
-    unknown value read back as ``None`` ("no adverse verdict recorded") so a
-    legacy or hand-edited row can never make itself un-deserialisable.
+    Only the in-contract literals survive — ``"verified"`` and ``"stale"``
+    (PRD-CORE-244-FR03). ``None``, empty strings, and any unknown value read
+    back as ``None`` ("no verdict reached") so a legacy or hand-edited row can
+    never make itself un-deserialisable.
     """
-    if isinstance(raw, str) and raw.strip() in VERIFICATION_STATUS_VALUES:
-        return "stale"
+    if isinstance(raw, str):
+        value = raw.strip()
+        if value in VERIFICATION_STATUS_VALUES:
+            # VERIFICATION_STATUS_VALUES is the single source of the vocabulary
+            # (the write guard reads the same set), so the cast cannot drift
+            # from the Literal without failing the write guard first.
+            return cast('Literal["verified", "stale"]', value)
     return None
 
 
@@ -121,9 +127,6 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         phase_affinity_json,
         team_origin,
         protection_tier,
-        sessions_surfaced,
-        avg_rework_delta_raw,
-        outcome_correlation_raw,
         sync_hash_raw,
         sync_seq_raw,
         last_synced_at_raw,
@@ -131,6 +134,7 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         helpful_count_raw,
         unhelpful_count_raw,
         verification_status_raw,
+        verification_checked_at_raw,
     ) = row
 
     # Deserialise assertions from JSON (PRD-CORE-086).
@@ -200,7 +204,9 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         outcome_history=parse_json_list(outcome_json),
         assertions=assertions,
         anchors=parse_model_list(anchors_json, Anchor, strict=True),
-        anchor_validity=parse_float(anchor_validity, default=1.0),
+        # PRD-CORE-244-FR01: a SQL NULL is "never assessed" and stays None; it
+        # is NOT coerced to a perfect 1.0.
+        anchor_validity=parse_optional_float(anchor_validity),
         type=canonical_type,
         nudge_line=str(nudge_line) if nudge_line else "",
         expires=str(expires) if expires else "",
@@ -211,9 +217,6 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         phase_affinity=parse_json_list(phase_affinity_json),
         team_origin=str(team_origin) if team_origin else "",
         protection_tier=ProtectionTier(protection_tier),
-        sessions_surfaced=int(str(sessions_surfaced)) if sessions_surfaced else 0,
-        avg_rework_delta=float(str(avg_rework_delta_raw)) if avg_rework_delta_raw else None,
-        outcome_correlation=str(outcome_correlation_raw) if outcome_correlation_raw else "",
         sync_hash=str(sync_hash_raw) if sync_hash_raw else "",
         sync_seq=int(str(sync_seq_raw)) if sync_seq_raw else 0,
         last_synced_at=parse_dt_safe(last_synced_at_raw, default=None) if last_synced_at_raw else None,
@@ -223,6 +226,7 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         # PRD-CORE-231-FR02: an unrecognised persisted literal degrades to None
         # (no adverse verdict) rather than raising and quarantining the row.
         verification_status=parse_verification_status(verification_status_raw),
+        verification_checked_at=str(verification_checked_at_raw) if verification_checked_at_raw else "",
     )
 
 
@@ -280,9 +284,6 @@ def entry_to_row(entry: MemoryEntry) -> tuple[object, ...]:
         json.dumps(entry.phase_affinity),
         entry.team_origin or "",
         entry.protection_tier,
-        entry.sessions_surfaced,
-        str(entry.avg_rework_delta) if entry.avg_rework_delta is not None else None,
-        entry.outcome_correlation or "",
         entry.sync_hash or "",
         entry.sync_seq,
         entry.last_synced_at.isoformat() if entry.last_synced_at else None,
@@ -290,4 +291,5 @@ def entry_to_row(entry: MemoryEntry) -> tuple[object, ...]:
         entry.helpful_count,
         entry.unhelpful_count,
         entry.verification_status,
+        entry.verification_checked_at or "",
     )

@@ -11,6 +11,13 @@ import contextlib
 import json
 import sqlite3
 from collections.abc import Callable
+from pathlib import Path
+
+import structlog
+
+from trw_memory.storage._schema_backup import _main_database_path, snapshot_before_migration
+
+logger = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Schema versioning
@@ -46,7 +53,22 @@ from collections.abc import Callable
 # ``user_version == SCHEMA_VERSION`` and never re-runs the backfill storm. Every
 # new column therefore needs BOTH the ``_migrate_cols`` entry (fresh/legacy
 # bootstrap) AND a registered ``_MIGRATIONS`` delta plus this bump.
-SCHEMA_VERSION = 4
+#
+# ``SCHEMA_VERSION`` == 5 is PRD-CORE-245: namespace becomes a containment
+# boundary. ``memories`` is re-keyed on ``PRIMARY KEY (namespace, id)``, every
+# id-referencing sidecar (``memories_fts``, ``vec_index``,
+# ``memory_graph_edges``) gains the namespace discriminator, the inverted tag
+# index ``memory_tags`` replaces the materialised ``tag_cooccurrence`` edges,
+# and PRD-CORE-244's column changes ride the same rebuild (``anchor_validity``
+# becomes nullable, ``verification_checked_at`` is added, and
+# ``sessions_surfaced`` / ``avg_rework_delta`` / ``outcome_correlation`` are
+# dropped). It is registered ONCE, in :mod:`trw_memory.storage._schema_v5`.
+SCHEMA_VERSION = 5
+
+#: The highest schema version whose delta DROPS or RENAMES rather than adding.
+#: ``ensure_schema`` snapshots the store before migrating a database below this
+#: and not above it, so an additive delta does not pay for a whole-file copy.
+_LAST_DESTRUCTIVE_SCHEMA_VERSION = 5
 
 
 class SchemaDowngradeError(RuntimeError):
@@ -58,13 +80,26 @@ class SchemaDowngradeError(RuntimeError):
     """
 
 
+class SchemaLockError(RuntimeError):
+    """The migration write lock could not be taken, so nothing was migrated.
+
+    ``ensure_schema`` decides whether to migrate from a ``PRAGMA user_version``
+    read taken INSIDE a ``BEGIN IMMEDIATE`` transaction, because that read is
+    only authoritative while no other opener can commit. When the lock cannot
+    be acquired within the connection's ``busy_timeout`` the version is simply
+    unknown — and "unknown" must never be resolved to "already current", which
+    would hand back a connection whose schema this build has not verified. The
+    open is refused instead, with no writes and ``user_version`` unchanged.
+    """
+
+
 # ---------------------------------------------------------------------------
 # DDL
 # ---------------------------------------------------------------------------
 
 CREATE_MEMORIES = """
 CREATE TABLE IF NOT EXISTS memories (
-    id                TEXT PRIMARY KEY,
+    id                TEXT NOT NULL,
     content           TEXT NOT NULL,
     detail            TEXT DEFAULT '',
     tags              TEXT DEFAULT '[]',
@@ -72,7 +107,7 @@ CREATE TABLE IF NOT EXISTS memories (
     importance        REAL DEFAULT 0.5,
     status            TEXT DEFAULT 'active',
     recurrence        INTEGER DEFAULT 1,
-    namespace         TEXT DEFAULT 'default',
+    namespace         TEXT NOT NULL DEFAULT 'default',
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL,
     last_accessed_at  TEXT,
@@ -99,7 +134,7 @@ CREATE TABLE IF NOT EXISTS memories (
     outcome_history   TEXT DEFAULT '[]',
     assertions        TEXT DEFAULT '[]',
     anchors           TEXT DEFAULT '[]',
-    anchor_validity   REAL DEFAULT 1.0,
+    anchor_validity   REAL DEFAULT NULL,
     type              TEXT DEFAULT 'pattern',
     nudge_line        TEXT DEFAULT '',
     expires_at        TEXT DEFAULT '',
@@ -110,16 +145,15 @@ CREATE TABLE IF NOT EXISTS memories (
     phase_affinity    TEXT DEFAULT '[]',
     team_origin       TEXT DEFAULT '',
     protection_tier   TEXT DEFAULT 'normal',
-    sessions_surfaced INTEGER DEFAULT 0,
-    avg_rework_delta  TEXT DEFAULT NULL,
-    outcome_correlation TEXT DEFAULT '',
     sync_hash         TEXT DEFAULT '',
     sync_seq          INTEGER DEFAULT 0,
     last_synced_at    TEXT,
     recall_count      INTEGER DEFAULT 0,
     helpful_count     INTEGER DEFAULT 0,
     unhelpful_count   INTEGER DEFAULT 0,
-    verification_status TEXT DEFAULT NULL
+    verification_status TEXT DEFAULT NULL,
+    verification_checked_at TEXT DEFAULT '',
+    PRIMARY KEY (namespace, id)
 )
 """
 
@@ -147,17 +181,34 @@ CREATE_IDX_NS_STATUS_IMP = (
     "CREATE INDEX IF NOT EXISTS idx_memories_ns_status_imp ON memories(namespace, status, importance)"
 )
 CREATE_IDX_STATUS_UPDATED = "CREATE INDEX IF NOT EXISTS idx_memories_status_updated ON memories(status, updated_at)"
+CREATE_IDX_SYNC_SEQ = "CREATE INDEX IF NOT EXISTS idx_memories_sync_seq ON memories(sync_seq)"
+
+#: Every index declared over ``memories``. The v5 rebuild drops and renames the
+#: table, which drops its indexes with it, so both the bootstrap storm and
+#: :mod:`trw_memory.storage._schema_v5` replay this ONE list — a new index added
+#: here is automatically recreated by the migration.
+MEMORIES_INDEXES: tuple[str, ...] = (
+    CREATE_IDX_NAMESPACE,
+    CREATE_IDX_STATUS,
+    CREATE_IDX_NS_UPDATED,
+    CREATE_IDX_NS_IMPORTANCE,
+    CREATE_IDX_NS_STATUS,
+    CREATE_IDX_NS_STATUS_IMP,
+    CREATE_IDX_STATUS_UPDATED,
+    CREATE_IDX_SYNC_SEQ,
+)
 
 CREATE_GRAPH_EDGES = """
 CREATE TABLE IF NOT EXISTS memory_graph_edges (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    namespace       TEXT NOT NULL DEFAULT 'default',
     source_id       TEXT NOT NULL,
     target_id       TEXT NOT NULL,
     edge_type       TEXT NOT NULL,
     weight          REAL NOT NULL CHECK (weight >= 0.0 AND weight <= 1.0),
     created_at      TEXT NOT NULL,
     edge_metadata   TEXT DEFAULT '{}',
-    UNIQUE (source_id, target_id, edge_type)
+    UNIQUE (namespace, source_id, target_id, edge_type)
 )
 """
 
@@ -175,7 +226,7 @@ CREATE TABLE IF NOT EXISTS wiki_refs (
     namespace       TEXT NOT NULL DEFAULT 'default',
     updated_at      TEXT NOT NULL,
     PRIMARY KEY (source_entry_id, target_slug, ref_type),
-    FOREIGN KEY (source_entry_id) REFERENCES memories(id) ON DELETE CASCADE
+    FOREIGN KEY (namespace, source_entry_id) REFERENCES memories(namespace, id) ON DELETE CASCADE
 )
 """
 
@@ -193,6 +244,34 @@ CREATE TABLE IF NOT EXISTS memory_namespaces (
 """
 
 CREATE_IDX_MN_STATUS = "CREATE INDEX IF NOT EXISTS idx_mn_status ON memory_namespaces(status, expires_at)"
+
+# PRD-CORE-245 FR02: one vector per (namespace, entry_id), not per bare id —
+# a single-column UNIQUE would let a store in namespace B destroy the vector
+# of namespace A's row with the same id.
+CREATE_VEC_INDEX = """
+CREATE TABLE IF NOT EXISTS vec_index (
+    rowid     INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_id  TEXT NOT NULL,
+    namespace TEXT NOT NULL DEFAULT 'default',
+    UNIQUE (namespace, entry_id)
+)
+"""
+
+# PRD-CORE-245 FR07: inverted tag index. Replaces the 98,288 materialised
+# ``tag_cooccurrence`` edges with a (namespace, tag, entry_id) posting list the
+# bounded derivation in :mod:`trw_memory.retrieval.tag_derivation` queries on
+# demand. ``WITHOUT ROWID`` because the whole row IS the key — measured 7.80 MiB
+# against the 16.04 MiB of edge rows it replaces.
+CREATE_MEMORY_TAGS = """
+CREATE TABLE IF NOT EXISTS memory_tags (
+    namespace  TEXT NOT NULL,
+    tag        TEXT NOT NULL,
+    entry_id   TEXT NOT NULL,
+    PRIMARY KEY (namespace, tag, entry_id)
+) WITHOUT ROWID
+"""
+
+CREATE_IDX_MEMORY_TAGS_ENTRY = "CREATE INDEX IF NOT EXISTS idx_memory_tags_entry ON memory_tags(namespace, entry_id)"
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +292,7 @@ def _bootstrap_and_backfill(cursor: sqlite3.Cursor) -> None:
     cursor.execute(CREATE_GRAPH_EDGES)
     cursor.execute(CREATE_WIKI_REFS)
     cursor.execute(CREATE_NAMESPACES)
+    cursor.execute(CREATE_MEMORY_TAGS)
 
     # Migration: rename columns from older schema versions.
     # Must run BEFORE index creation since indexes reference new names.
@@ -225,13 +305,6 @@ def _bootstrap_and_backfill(cursor: sqlite3.Cursor) -> None:
         with contextlib.suppress(sqlite3.OperationalError):
             cursor.execute(f"ALTER TABLE {table} RENAME COLUMN {old_name} TO {new_name}")
 
-    cursor.execute(CREATE_IDX_NAMESPACE)
-    cursor.execute(CREATE_IDX_STATUS)
-    cursor.execute(CREATE_IDX_NS_UPDATED)
-    cursor.execute(CREATE_IDX_NS_IMPORTANCE)
-    cursor.execute(CREATE_IDX_NS_STATUS)
-    cursor.execute(CREATE_IDX_NS_STATUS_IMP)
-    cursor.execute(CREATE_IDX_STATUS_UPDATED)
     cursor.execute(CREATE_IDX_MGE_SOURCE)
     cursor.execute(CREATE_IDX_MGE_TARGET)
     cursor.execute(CREATE_IDX_WIKI_REFS_SOURCE)
@@ -247,6 +320,7 @@ def _bootstrap_and_backfill(cursor: sqlite3.Cursor) -> None:
             cursor.execute(f"ALTER TABLE memory_namespaces ADD COLUMN {col_name} {col_def}")
 
     cursor.execute(CREATE_IDX_MN_STATUS)
+    cursor.execute(CREATE_IDX_MEMORY_TAGS_ENTRY)
 
     # Migration: add new columns for sync + graph (Sprint 37)
     _migrate_cols = [
@@ -281,13 +355,7 @@ def _bootstrap_and_backfill(cursor: sqlite3.Cursor) -> None:
     # Migration: add PRD-CORE-111 anchor fields
     _migrate_cols += [
         ("anchors", "TEXT DEFAULT '[]'"),
-        ("anchor_validity", "REAL DEFAULT 1.0"),
-    ]
-    # Migration: add PRD-CORE-108 outcome attribution fields
-    _migrate_cols += [
-        ("sessions_surfaced", "INTEGER DEFAULT 0"),
-        ("avg_rework_delta", "TEXT DEFAULT NULL"),
-        ("outcome_correlation", "TEXT DEFAULT ''"),
+        ("anchor_validity", "REAL DEFAULT NULL"),
     ]
     # Migration: add PRD-INFRA-051 sync pipeline delta tracking
     _migrate_cols += [
@@ -313,15 +381,23 @@ def _bootstrap_and_backfill(cursor: sqlite3.Cursor) -> None:
     # Migration: add PRD-CORE-231-FR02 persisted verification verdict.
     # Additive-only, nullable; a pre-migration row reads back as
     # ``verification_status=None`` (no adverse verdict recorded).
+    # PRD-CORE-244-FR03 adds the companion ``verification_checked_at`` stamp;
+    # "" means no verification pass has ever examined this entry.
     _migrate_cols += [
         ("verification_status", "TEXT DEFAULT NULL"),
+        ("verification_checked_at", "TEXT DEFAULT ''"),
     ]
     for col_name, col_def in _migrate_cols:
         with contextlib.suppress(sqlite3.OperationalError):
             cursor.execute(f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}")
 
-    with contextlib.suppress(sqlite3.OperationalError):
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_sync_seq ON memories(sync_seq)")
+    # Indexes over ``memories`` are built LAST: several of them name a column
+    # that the backfill above is what adds to a legacy table (idx_memories_sync_seq
+    # over ``sync_seq``), so creating them earlier fails on exactly the databases
+    # the backfill exists to normalise.
+    for statement in MEMORIES_INDEXES:
+        with contextlib.suppress(sqlite3.OperationalError):
+            cursor.execute(statement)
 
     # Migration: add edge_metadata column for PRD-CORE-107 typed edges
     with contextlib.suppress(sqlite3.OperationalError):
@@ -399,17 +475,129 @@ def _migrate_v4_verification_status(cursor: sqlite3.Cursor) -> None:
         cursor.execute("ALTER TABLE memories ADD COLUMN verification_status TEXT DEFAULT NULL")
 
 
+def _log_migration_applied(
+    conn: sqlite3.Connection,
+    *,
+    from_version: int,
+    backup_path: Path | None,
+) -> None:
+    """Emit the one operator-facing record that a store was rewritten.
+
+    Names the file, the version transition, the snapshot that can restore it,
+    and the row census — enough for an operator to reconcile "why did my MCP
+    server start failing" against "which file changed, and where is the copy".
+    Namespace NAMES are deliberately absent (NFR03): the census is logged as
+    shape, never as labels.
+    """
+    try:
+        rows = int(conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0])
+        namespaces = int(conn.execute("SELECT COUNT(DISTINCT namespace) FROM memories").fetchone()[0])
+    except sqlite3.Error:
+        rows, namespaces = -1, -1
+    logger.info(
+        "schema_migration_applied",
+        database=str(_main_database_path(conn) or ":memory:"),
+        from_version=from_version,
+        to_version=SCHEMA_VERSION,
+        backup=str(backup_path) if backup_path is not None else None,
+        rows=rows,
+        namespaces=namespaces,
+        detail=(
+            "Other processes holding this file open are still running the "
+            "previous trw-memory build and will fail on write until they are "
+            "restarted."
+        ),
+    )
+
+
+def _user_version(conn: sqlite3.Connection) -> int:
+    """Read ``PRAGMA user_version`` off *conn* as an int."""
+    return int(conn.execute("PRAGMA user_version").fetchone()[0])
+
+
+def _guard_downgrade(current: int) -> None:
+    """Refuse a store written by a build newer than this one.
+
+    Migrations are forward-only, so a version above :data:`SCHEMA_VERSION` can
+    never become readable by waiting: it is checked on the cheap pre-read (so
+    an upgrade race fails fast with the actionable message instead of blocking
+    on a write lock) and again under the lock (so a newer build that migrates
+    the file while this one waits is still refused rather than rebuilt over).
+    """
+    if current <= SCHEMA_VERSION:
+        return
+    raise SchemaDowngradeError(
+        f"this store is at schema {current}; this trw-memory build only "
+        f"understands schema {SCHEMA_VERSION}. A newer build has already "
+        "migrated the file. Restart this process (for an MCP client, "
+        "restart the MCP server or run /mcp to reconnect) so it loads the "
+        "newer trw-memory, or upgrade trw-memory. Refusing to open the "
+        "store to avoid silent mis-reads."
+    )
+
+
+def _acquire_migration_lock(conn: sqlite3.Connection) -> bool:
+    """Take the store's single write lock before the migration decision is made.
+
+    Returns whether THIS call opened the transaction, so the caller only ends a
+    transaction it owns. A caller that already holds one keeps it: the lock
+    cannot be taken twice, and stealing the caller's transaction boundary would
+    commit its work early.
+
+    ``BEGIN IMMEDIATE`` blocks for the connection's ``busy_timeout`` (30 s on
+    the standard open profile) and then fails. That failure is surfaced as
+    :class:`SchemaLockError`, never absorbed: falling through would leave the
+    caller deciding the migration from a version read that another process is
+    concurrently invalidating, which is the whole defect this lock exists to
+    close.
+    """
+    if conn.in_transaction:
+        logger.warning(
+            "schema_migration_lock_delegated",
+            database=str(_main_database_path(conn) or ":memory:"),
+            detail=(
+                "ensure_schema was called inside a caller-owned transaction, so it "
+                "could not take the migration write lock itself; exactly-once "
+                "application depends on that transaction being a write transaction."
+            ),
+        )
+        return False
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+    except sqlite3.Error as exc:
+        database = str(_main_database_path(conn) or ":memory:")
+        logger.warning("schema_migration_lock_unavailable", database=database, error=str(exc))
+        raise SchemaLockError(
+            f"could not take the migration write lock on {database} within this "
+            f"connection's busy_timeout ({exc}); refusing to open the store, because "
+            f"whether it still needs the schema {SCHEMA_VERSION} migration cannot be "
+            "established while another process holds the lock. Retry the open once "
+            "the concurrent writer finishes."
+        ) from exc
+    return True
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """Create core tables, run column migrations, and build indexes.
 
     Gated by ``PRAGMA user_version`` so the idempotent DDL/migration storm runs
     exactly once per database and is skipped (fast path) on every later open.
 
+    The gate is double-checked at the SQLite level. ``user_version`` is read
+    once OUTSIDE any transaction as a cheap filter, and — when that read says a
+    migration may be due — again INSIDE a ``BEGIN IMMEDIATE`` transaction,
+    which is the only read that decides anything. Without the second read every
+    concurrent opener that sampled the pre-migration version re-runs the whole
+    storm: six stdio servers booting against one store right after an upgrade
+    measured six full schema-5 rebuilds, converging only because the rebuild
+    happens to be idempotent (PRD-CORE-244-NFR02).
+
     * ``user_version > SCHEMA_VERSION`` -> :class:`SchemaDowngradeError` raised
       BEFORE any DDL (older build must not silently mis-read a newer db).
     * ``user_version == SCHEMA_VERSION`` -> return immediately (fast path).
-    * otherwise -> bootstrap/backfill to v1, apply any registered
-      ``_MIGRATIONS`` deltas up to ``SCHEMA_VERSION``, then stamp the version.
+    * otherwise -> take the write lock, re-read the version, and either return
+      (another opener already migrated) or bootstrap/backfill to v1, apply any
+      registered ``_MIGRATIONS`` deltas up to ``SCHEMA_VERSION``, and stamp it.
 
     Safe to call multiple times (all operations are idempotent).
 
@@ -418,19 +606,68 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
     Raises:
         SchemaDowngradeError: the database was written by a newer trw-memory.
+        SchemaLockError: the migration write lock could not be acquired, so
+            whether a migration is due is unknown. Nothing was migrated.
+        SchemaBackupError: a destructive delta was due but the pre-migration
+            snapshot could not be written -- or whether one was needed could
+            not even be established. Nothing was migrated and ``user_version``
+            is unchanged.
     """
-    current = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    if current > SCHEMA_VERSION:
-        raise SchemaDowngradeError(
-            f"database schema user_version={current} is newer than this "
-            f"trw-memory build supports (max {SCHEMA_VERSION}); refusing to "
-            "open it to avoid silent mis-reads — upgrade trw-memory."
-        )
-    if current == SCHEMA_VERSION:
+    precheck = _user_version(conn)
+    _guard_downgrade(precheck)
+    if precheck == SCHEMA_VERSION:
         return
 
+    owns_lock = _acquire_migration_lock(conn)
     cursor = conn.cursor()
     try:
+        # The authoritative read. Everything the pre-check said is re-derived
+        # here, under the write lock, where no other opener can commit between
+        # the read and the rebuild it authorises.
+        current = _user_version(conn)
+        _guard_downgrade(current)
+        if current == SCHEMA_VERSION:
+            if owns_lock:
+                conn.rollback()
+            logger.info(
+                "schema_migration_already_applied",
+                database=str(_main_database_path(conn) or ":memory:"),
+                version=current,
+                detail="another opener applied the migration while this one waited for the write lock",
+            )
+            return
+
+        # PRD-CORE-245-NFR02/NFR04: schema 5 is the first delta that drops and
+        # renames tables, and ``ensure_schema`` runs it automatically on the
+        # first open by a new build — on a store other processes may still hold
+        # open. Snapshot the pre-migration bytes before the storm, and refuse
+        # the migration outright if the snapshot cannot be written — or if
+        # whether one is needed cannot be read at all. The refusal raises from
+        # inside the transaction, which rolls back below, so it still leaves
+        # ``user_version`` and every row exactly as they were.
+        #
+        # The snapshot runs while this connection HOLDS the write lock, which
+        # is why it reads through a sibling handle (see
+        # ``_schema_backup._open_snapshot_source``) and why exactly one is
+        # written per migration rather than one per racing opener.
+        #
+        # Gated on the DESTRUCTIVE deltas specifically. A snapshot copies the
+        # whole database (2.1 s for 186 MB), which is the right price to pay
+        # once for a rebuild-and-rename and the wrong price to pay on every
+        # future additive ALTER. Raise this bound when a later delta is
+        # destructive too.
+        needs_snapshot = current < _LAST_DESTRUCTIVE_SCHEMA_VERSION
+        backup_path = (
+            snapshot_before_migration(conn, from_version=current, to_version=SCHEMA_VERSION) if needs_snapshot else None
+        )
+
+        # The whole storm — bootstrap, every registered delta, and the version
+        # stamp — is ONE transaction, so an interruption leaves user_version at
+        # its previous value with every original row intact rather than a
+        # half-rebuilt store. Under WAL a concurrent reader on another
+        # connection sees either the full pre- or the full post-migration
+        # schema, never an intermediate one (NFR04).
+        #
         # v0 -> v1: normalise any legacy shape via the idempotent storm. Also
         # runs for an already-fully-migrated wild db (user_version=0) — every
         # statement is a no-op there, so it is stamped, never rewritten.
@@ -442,6 +679,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         # PRAGMA cannot bind parameters; SCHEMA_VERSION is a trusted int literal.
         cursor.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
+        _log_migration_applied(conn, from_version=current, backup_path=backup_path)
     except Exception:
         # A blocked migration (e.g. MigrationBlocked from the v2 delta) must
         # leave NO partial writes and NO version bump — roll the whole DDL /
@@ -459,15 +697,20 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 from trw_memory.storage._memory_model_v2 import (  # noqa: E402
     migrate_sqlite_importance_type as _migrate_v2_memory_model,
 )
+from trw_memory.storage._schema_v5 import (  # noqa: E402
+    migrate_v5_namespace_boundary as _migrate_v5_namespace_boundary,
+)
 
 _MIGRATIONS[2] = _migrate_v2_memory_model
 _MIGRATIONS[3] = _migrate_v3_legacy_enums
 _MIGRATIONS[4] = _migrate_v4_verification_status
+_MIGRATIONS[5] = _migrate_v5_namespace_boundary
 
 
 CREATE_MEMORIES_FTS = """
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     id UNINDEXED,
+    namespace UNINDEXED,
     content,
     detail,
     tags,
@@ -488,8 +731,8 @@ def ensure_fts_table(conn: sqlite3.Connection) -> bool:
         row = conn.execute("SELECT COUNT(*) FROM memories_fts").fetchone()
         if row is not None and int(row[0]) == 0:
             conn.execute(
-                "INSERT INTO memories_fts(id, content, detail, tags) "
-                "SELECT id, content, COALESCE(detail, ''), COALESCE(tags, '[]') FROM memories"
+                "INSERT INTO memories_fts(id, namespace, content, detail, tags) "
+                "SELECT id, namespace, content, COALESCE(detail, ''), COALESCE(tags, '[]') FROM memories"
             )
         conn.commit()
         return True
@@ -506,7 +749,5 @@ def ensure_vec_table(conn: sqlite3.Connection, dim: int) -> None:
     """
     conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(embedding float[{dim}])")
     # Companion table to map rowid <-> entry_id
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS vec_index (rowid INTEGER PRIMARY KEY AUTOINCREMENT, entry_id TEXT UNIQUE NOT NULL)"
-    )
+    conn.execute(CREATE_VEC_INDEX)
     conn.commit()

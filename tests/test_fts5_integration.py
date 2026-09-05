@@ -134,14 +134,14 @@ class TestFtsSyncCorrectness:
     def test_fts_updated_after_content_change(self, backend: SQLiteBackend) -> None:
         e = _entry(content="original_content_xyz")
         backend.store(e)
-        backend.update(e.id, content="updated_content_pqr")
+        backend.update(e.id, content="updated_content_pqr", namespace="default")
         assert backend.search_fts("original_content_xyz") == []
         assert any(r.id == e.id for r in backend.search_fts("updated_content_pqr"))
 
     def test_fts_updated_after_detail_change(self, backend: SQLiteBackend) -> None:
         e = _entry(content="fixed content", detail="old_detail_lmn")
         backend.store(e)
-        backend.update(e.id, detail="new_detail_opq")
+        backend.update(e.id, detail="new_detail_opq", namespace="default")
         assert backend.search_fts("old_detail_lmn") == []
         assert any(r.id == e.id for r in backend.search_fts("new_detail_opq"))
 
@@ -149,7 +149,7 @@ class TestFtsSyncCorrectness:
         e = _entry(content="to_be_deleted_uvw")
         backend.store(e)
         assert any(r.id == e.id for r in backend.search_fts("to_be_deleted_uvw"))
-        backend.delete(e.id)
+        backend.delete(e.id, namespace="default")
         assert backend.search_fts("to_be_deleted_uvw") == []
 
     def test_store_overwrite_keeps_fts_in_sync(self, backend: SQLiteBackend) -> None:

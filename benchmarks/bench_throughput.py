@@ -33,9 +33,7 @@ class ThroughputBenchmark:
         self.db_dir.mkdir(parents=True, exist_ok=True)
         self.results: dict[str, dict[str, float]] = {}
 
-    def run(
-        self, sizes: list[int] | None = None
-    ) -> dict[str, dict[str, float]]:
+    def run(self, sizes: list[int] | None = None) -> dict[str, dict[str, float]]:
         """Run all throughput benchmarks across specified corpus sizes.
 
         Args:
@@ -111,16 +109,14 @@ class ThroughputBenchmark:
                 search_backend_entries(
                     backend,
                     query_str,
-                    namespace="benchmark",
+                    namespace="project:benchmark",
                     candidate_limit=size,
                     top_k=10,
                 )
             total_sec = time.perf_counter() - start
 
             query_count = len(queries)
-            queries_per_sec = (
-                query_count / total_sec if total_sec > 0 else 0.0
-            )
+            queries_per_sec = query_count / total_sec if total_sec > 0 else 0.0
 
             return {
                 "queries_per_sec": round(queries_per_sec, 2),

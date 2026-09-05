@@ -21,12 +21,7 @@ def test_recall_conflict_filter_suppresses_lower_importance_result(tmp_path: Pat
         backend.store(MemoryEntry(id="M-high", content="current", importance=0.9))
         backend.store(MemoryEntry(id="M-low", content="obsolete", importance=0.4))
         _upsert_edge(
-            backend._conn,
-            "M-high",
-            "M-low",
-            "conflicts_with",
-            1.0,
-            "2026-07-12T00:00:00+00:00",
+            backend._conn, "M-high", "M-low", "conflicts_with", 1.0, "2026-07-12T00:00:00+00:00", namespace="default"
         )
         backend._conn.commit()
 

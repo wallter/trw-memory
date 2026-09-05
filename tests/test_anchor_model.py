@@ -151,7 +151,8 @@ def test_zero_anchors_ok() -> None:
 def test_anchor_validity_default() -> None:
     """MemoryEntry has anchor_validity=1.0 by default."""
     entry = MemoryEntry(id="M-av1", content="test")
-    assert entry.anchor_validity == 1.0
+    # PRD-CORE-244-FR01: unassessed is None, not a perfect score.
+    assert entry.anchor_validity is None
 
 
 def test_anchor_validity_custom() -> None:
@@ -203,4 +204,4 @@ def test_anchors_empty_in_to_dict() -> None:
     entry = MemoryEntry(id="M-dict2", content="no anchors")
     d = entry.to_dict()
     assert d["anchors"] == []
-    assert d["anchor_validity"] == 1.0
+    assert d["anchor_validity"] is None

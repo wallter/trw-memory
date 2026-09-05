@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel, ValidationError
 
+from trw_memory.models._config_daemon import _DaemonConfigMixin
 from trw_memory.models._config_lifecycle import _LifecycleConfigMixin
 from trw_memory.models._config_retrieval import _RetrievalConfigMixin
 from trw_memory.models._config_security import _SecurityConfigMixin
@@ -44,13 +45,27 @@ class _StorageModel(_StorageConfigMixin, BaseModel):
     pass
 
 
+class _DaemonModel(_DaemonConfigMixin, BaseModel):
+    """PRD-CORE-253 FR03/FR01: the loopback daemon's port, idle window, startup
+    deadline and single-store path."""
+
+
 def test_memory_config_composes_every_mixin_field_once() -> None:
     mixin_fields: set[str] = set()
-    for mixin in (_LifecycleModel, _RetrievalModel, _SecurityModel, _StorageModel):
+    for mixin in (_DaemonModel, _LifecycleModel, _RetrievalModel, _SecurityModel, _StorageModel):
         mixin_fields.update(mixin.model_fields)
 
     assert mixin_fields == set(MemoryConfig.model_fields)
-    assert not (set(MemoryConfig.__annotations__) & mixin_fields)
+    # Read the class's OWN annotations, not the attribute. ``MemoryConfig``
+    # declares no fields in its body, and ``cls.__annotations__`` is both
+    # inherited-through and writable — ``unittest.mock.patch("...MemoryConfig")``
+    # (test_cli_maintenance.py, and this package's own server tests) leaves the
+    # security mixin's annotations visible there, which made this assertion fail
+    # depending on which OTHER test file ran first. ``__dict__`` asks the
+    # question the assertion actually means: does MemoryConfig declare a field of
+    # its own instead of composing one from a mixin?
+    own_annotations = set(MemoryConfig.__dict__.get("__annotations__", {}))
+    assert not (own_annotations & mixin_fields)
 
 
 def test_recent_fields_live_in_their_owning_mixins() -> None:

@@ -91,7 +91,7 @@ class LatencyBenchmark:
                 search_backend_entries(
                     backend,
                     query_str,
-                    namespace="benchmark",
+                    namespace="project:benchmark",
                     candidate_limit=size,
                     top_k=10,
                 )
@@ -137,9 +137,7 @@ class LatencyBenchmark:
                 "p99_ms": round(_percentile(latencies, 0.99), 3),
                 "mean_ms": round(statistics.mean(latencies), 3),
                 "total_ms": round(total_ms, 3),
-                "entries_per_sec": round(
-                    len(latencies) / (total_ms / 1000) if total_ms > 0 else 0, 2
-                ),
+                "entries_per_sec": round(len(latencies) / (total_ms / 1000) if total_ms > 0 else 0, 2),
             }
         finally:
             backend.close()

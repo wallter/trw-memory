@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import re
 
+from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.pipeline import hybrid_search
+from trw_memory.security.namespace_scope import authorize_namespaces
+from trw_memory.security.rbac import Permission
 from trw_memory.storage.interface import StorageBackend
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -31,7 +34,11 @@ def rank_entries(
     if not query.strip() or not entries:
         return []
 
-    ranked = hybrid_search(query=query, entries=entries, top_k=top_k)
+    # The benchmark corpus is single-namespace; the scope is minted through the
+    # authorizer like any other caller so the harness cannot silently grade a
+    # retrieval policy the product cannot run (PRD-CORE-245 FR04).
+    scope = authorize_namespaces(MemoryConfig(), {entry.namespace for entry in entries}, Permission.READ, "benchmark")
+    ranked = hybrid_search(query=query, entries=entries, scope=scope, top_k=top_k)
     if ranked:
         return ranked[:top_k]
 
@@ -44,9 +51,7 @@ def rank_entries(
     scored: list[tuple[float, float, str, MemoryEntry]] = []
 
     for entry in entries:
-        normalized_text = " ".join(
-            _tokenize(f"{entry.content} {entry.detail} {' '.join(entry.tags)}")
-        )
+        normalized_text = " ".join(_tokenize(f"{entry.content} {entry.detail} {' '.join(entry.tags)}"))
         if not normalized_text:
             continue
 

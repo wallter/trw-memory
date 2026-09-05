@@ -65,9 +65,6 @@ ENTRY_COLUMNS: tuple[str, ...] = (
     "phase_affinity",
     "team_origin",
     "protection_tier",
-    "sessions_surfaced",
-    "avg_rework_delta",
-    "outcome_correlation",
     "sync_hash",
     "sync_seq",
     "last_synced_at",
@@ -75,6 +72,7 @@ ENTRY_COLUMNS: tuple[str, ...] = (
     "helpful_count",
     "unhelpful_count",
     "verification_status",
+    "verification_checked_at",
 )
 
 #: Fields that must never be changed via ``update()``.
@@ -110,11 +108,15 @@ ENUM_STRING_FIELDS: dict[str, type[MemoryStatus | Confidence | ProtectionTier | 
     "type": MemoryType,
 }
 
-#: Values accepted for the ``verification_status`` column (PRD-CORE-231-FR02).
-#: ``None`` clears the verdict; ``"stale"`` records it. Anything else is a
+#: Values accepted for the ``verification_status`` column (PRD-CORE-231-FR02,
+#: widened by PRD-CORE-244-FR03). Three states, all distinguishable:
+#: ``"verified"`` (a pass examined the entry and found it clean), ``"stale"``
+#: (every assertion has been failing past the threshold), and ``None``
+#: (no pass has ever reached a verdict — read ``verification_checked_at`` to
+#: tell "never examined" from "examined, inconclusive"). Anything else is a
 #: caller bug and is rejected at write time rather than quarantining the row on
 #: the next read.
-VERIFICATION_STATUS_VALUES: frozenset[str] = frozenset({"stale"})
+VERIFICATION_STATUS_VALUES: frozenset[str] = frozenset({"verified", "stale"})
 
 
 # ---------------------------------------------------------------------------

@@ -43,12 +43,16 @@ def create_co_anchored_edges(
     anchor_files: list[str],
     max_per_file: int = 50,
     *,
+    namespace: str,
     lock: threading.Lock | None = None,
     min_shared_anchors: int = 1,
 ) -> int:
     """Create ``co_anchored`` edges for entries sharing anchor files.
 
     Capped at *max_per_file* per anchor file to prevent explosion.
+    ``namespace`` scopes the candidate scan AND the edge it writes: without it
+    the anchor-file join spans every namespace in the file and mints edges
+    between rows that were never meant to see each other (PRD-CORE-245 FR02).
     """
     g = _graph_module()
     now = datetime.now(timezone.utc).isoformat()
@@ -66,13 +70,13 @@ def create_co_anchored_edges(
                 "SELECT m.id, GROUP_CONCAT(DISTINCT json_extract(je.value, '$.file')) "  # noqa: S608 -- only '?' placeholders are interpolated
                 "FROM memories m, json_each(m.anchors) je "
                 f"WHERE json_extract(je.value, '$.file') IN ({placeholders}) "
-                "AND m.id != ? GROUP BY m.id "
+                "AND m.namespace = ? AND m.id != ? GROUP BY m.id "
                 "HAVING COUNT(DISTINCT json_extract(je.value, '$.file')) >= ? "
                 "LIMIT ?"
             )
             rows = conn.execute(
                 query,
-                (*unique_anchor_files, entry_id, min_shared_anchors, max_per_file),
+                (*unique_anchor_files, namespace, entry_id, min_shared_anchors, max_per_file),
             ).fetchall()
             for other_id, shared_csv in rows:
                 g._upsert_edge(
@@ -82,6 +86,7 @@ def create_co_anchored_edges(
                     "co_anchored",
                     0.8,
                     now,
+                    namespace=namespace,
                     metadata={"anchor_files": str(shared_csv)},
                 )
                 created += 1
@@ -90,14 +95,16 @@ def create_co_anchored_edges(
                 rows = conn.execute(
                     "SELECT DISTINCT m.id FROM memories m, json_each(m.anchors) je "
                     "WHERE json_extract(je.value, '$.file') = ? "
-                    "AND m.id != ? "
+                    "AND m.namespace = ? AND m.id != ? "
                     "LIMIT ?",
-                    (anchor_file, entry_id, max_per_file),
+                    (anchor_file, namespace, entry_id, max_per_file),
                 ).fetchall()
 
                 for (other_id,) in rows:
                     meta = {"anchor_file": anchor_file}
-                    g._upsert_edge(conn, entry_id, other_id, "co_anchored", 0.8, now, metadata=meta)
+                    g._upsert_edge(
+                        conn, entry_id, other_id, "co_anchored", 0.8, now, namespace=namespace, metadata=meta
+                    )
                     created += 1
 
         if created:

@@ -55,6 +55,29 @@ def parse_dt_safe(val: object, *, default: datetime | None) -> datetime | None:
         return default
 
 
+def parse_optional_float(raw: object) -> float | None:
+    """Coerce a persisted value to ``float``, or ``None`` when absent/unparseable.
+
+    The nullable twin of :func:`parse_float`, for columns where SQL ``NULL``
+    carries meaning of its own — ``anchor_validity`` reads ``None`` as "never
+    assessed" (PRD-CORE-244-FR01), which is a different statement from any
+    score including ``0.0``. A legitimately falsy ``0.0`` survives.
+
+    >>> parse_optional_float(0.0)
+    0.0
+    >>> parse_optional_float(None) is None
+    True
+    >>> parse_optional_float("nope") is None
+    True
+    """
+    if raw is None:
+        return None
+    try:
+        return float(str(raw))
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_float(raw: object, *, default: float) -> float:
     """Coerce a persisted value to ``float``, falling back to *default*.
 

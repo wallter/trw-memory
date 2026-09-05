@@ -55,11 +55,16 @@ def _upsert_edge(
     weight: float,
     created_at: str,
     *,
+    namespace: str,
     metadata: dict[str, str] | None = None,
 ) -> None:
     """Insert or update an edge in the graph.
 
     Args:
+        namespace: The namespace both endpoints belong to. Schema 5 keys edge
+            uniqueness on ``(namespace, source_id, target_id, edge_type)``
+            (PRD-CORE-245 FR02), so an edge cannot be written without saying
+            which namespace it lives in.
         metadata: Optional key-value metadata stored as JSON alongside the edge.
 
     Raises:
@@ -74,11 +79,14 @@ def _upsert_edge(
     meta_json = json.dumps(metadata) if metadata else "{}"
     if len(meta_json) > 4096:
         raise ValueError(f"edge metadata exceeds 4096 byte limit ({len(meta_json)} bytes)")
+    # PRD-CORE-245 FR02: the uniqueness constraint is namespace-qualified under
+    # schema 5, so the ON CONFLICT target must name the same columns or SQLite
+    # rejects the statement outright.
     conn.execute(
         "INSERT INTO memory_graph_edges "
-        "(source_id, target_id, edge_type, weight, created_at, edge_metadata) "
-        "VALUES (?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT (source_id, target_id, edge_type) "
+        "(namespace, source_id, target_id, edge_type, weight, created_at, edge_metadata) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (namespace, source_id, target_id, edge_type) "
         "DO UPDATE SET weight = ?, edge_metadata = ?",
-        (source_id, target_id, edge_type, weight, created_at, meta_json, weight, meta_json),
+        (namespace, source_id, target_id, edge_type, weight, created_at, meta_json, weight, meta_json),
     )

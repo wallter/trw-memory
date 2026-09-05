@@ -9,6 +9,7 @@ Helpers covering vec_index/vec_memories CRUD + KNN search:
 - ``delete_vector_internal`` — internal "remove if present" used by both
   the public delete + by store/update flows that re-write a vector.
 - ``delete_vector`` — public delete with vec-availability gate.
+- ``purge_vectors_for`` — chunked bulk delete for whole-namespace purges.
 - ``vector_exists`` — single-row probe.
 - ``existing_vector_ids`` — bulk set lookup for backfill skip.
 - ``upsert_vector`` — INSERT OR IGNORE into vec_index, then DELETE +
@@ -28,6 +29,7 @@ import _thread
 import contextlib
 import sqlite3
 import struct
+from collections.abc import Sequence
 from typing import Any
 
 import structlog
@@ -75,10 +77,17 @@ def _rollback_standalone_write(conn: Any, *, skip_commit: bool) -> None:
             conn.rollback()
 
 
-def delete_vector_internal(conn: Any, entry_id: str) -> None:
-    """Remove the vector row for *entry_id* (no-op if absent). Caller holds the lock."""
+def delete_vector_internal(conn: Any, entry_id: str, namespace: str) -> None:
+    """Remove the ``(namespace, entry_id)`` vector row (no-op if absent).
+
+    PRD-CORE-245 FR02/FR03: ``vec_index`` is keyed ``UNIQUE (namespace,
+    entry_id)`` under schema 5, so a bare id can address two rows. Caller holds
+    the lock.
+    """
     try:
-        row = conn.execute("SELECT rowid FROM vec_index WHERE entry_id = ?", (entry_id,)).fetchone()
+        row = conn.execute(
+            "SELECT rowid FROM vec_index WHERE namespace = ? AND entry_id = ?", (namespace, entry_id)
+        ).fetchone()
         if row is None:
             return
         rowid: int = row[0]
@@ -97,12 +106,44 @@ def delete_vector_internal(conn: Any, entry_id: str) -> None:
         raise
 
 
+def purge_vectors_for(conn: Any, namespace: str, entry_ids: Sequence[str]) -> None:
+    """Bulk-remove the vectors of *entry_ids* within *namespace*.
+
+    The chunked counterpart to :func:`delete_vector_internal`, and the sibling
+    of ``_crud_ops.purge_edges_for`` / ``purge_tag_postings_for``: the whole-
+    namespace purge used to call ``delete_vector_internal`` once per entry,
+    which is one SELECT plus two DELETEs per row — 3N statements where the
+    other sidecar cleanups on the same code path issue one per bind chunk.
+    ``vec_memories`` is addressed by rowid, so the rowids come from a subquery
+    on ``vec_index`` and ``vec_index`` is then deleted by the same predicate.
+
+    CONTRACT: mirrors its siblings — the caller MUST already hold
+    ``backend._lock`` and own the commit, so the purge batches into the
+    caller's outermost ``COMMIT`` and the whole namespace delete stays atomic.
+    Callers gate on ``vec_available`` themselves.
+    """
+    if not entry_ids:
+        return
+    for chunk in iter_bind_chunks(list(entry_ids), reserved_bindings=1):
+        placeholders = ",".join("?" for _ in chunk)
+        conn.execute(
+            "DELETE FROM vec_memories WHERE rowid IN ("  # noqa: S608 — placeholders is ? repeated; ids are parameterised
+            f"SELECT rowid FROM vec_index WHERE namespace = ? AND entry_id IN ({placeholders}))",
+            (namespace, *chunk),
+        )
+        conn.execute(
+            f"DELETE FROM vec_index WHERE namespace = ? AND entry_id IN ({placeholders})",  # noqa: S608 — placeholders is ? repeated; ids are parameterised
+            (namespace, *chunk),
+        )
+
+
 def delete_vector(
     conn: Any,
     lock: _thread.LockType | _thread.RLock,
     *,
     vec_available: bool,
     entry_id: str,
+    namespace: str,
     skip_commit: bool = False,
 ) -> bool:
     """Public vector-row deletion helper for warm-tier maintenance.
@@ -119,7 +160,7 @@ def delete_vector(
     try:
         with lock:
             before = conn.total_changes
-            delete_vector_internal(conn, entry_id)
+            delete_vector_internal(conn, entry_id, namespace)
             if not skip_commit:
                 conn.commit()
             return bool(conn.total_changes > before)
@@ -128,12 +169,14 @@ def delete_vector(
         raise
 
 
-def vector_exists(conn: Any, *, vec_available: bool, entry_id: str) -> bool:
-    """Return whether vec_index currently contains *entry_id*."""
+def vector_exists(conn: Any, *, vec_available: bool, entry_id: str, namespace: str) -> bool:
+    """Return whether vec_index currently contains ``(namespace, entry_id)``."""
     if not vec_available:
         return False
     try:
-        row = conn.execute("SELECT 1 FROM vec_index WHERE entry_id = ?", (entry_id,)).fetchone()
+        row = conn.execute(
+            "SELECT 1 FROM vec_index WHERE namespace = ? AND entry_id = ?", (namespace, entry_id)
+        ).fetchone()
         return row is not None
     except sqlite3.Error as exc:
         if _is_optional_vec_unavailable_error(exc):
@@ -159,11 +202,11 @@ def existing_vector_ids(
 
     Empty set when sqlite-vec is unavailable. Single-query bulk lookup.
 
-    When *namespace* is provided the lookup is scoped to that namespace by
-    joining ``vec_index`` to the canonical ``memories`` rows (vec_index itself
-    carries no namespace column). This avoids a full-table scan that would load
-    every tenant's vector ids — a backfill caller only needs the ids in its own
-    namespace. ``namespace=None`` keeps the legacy unscoped full scan.
+    When *namespace* is provided the lookup reads ``vec_index``'s own namespace
+    column directly (PRD-CORE-245 FR02 added it), avoiding both the join to
+    ``memories`` the old implementation needed and the full-table scan that
+    would load every tenant's vector ids. ``namespace=None`` keeps the unscoped
+    full scan used by the coverage probe.
     """
     if not vec_available:
         return set()
@@ -176,7 +219,7 @@ def existing_vector_ids(
                 # canonical memory row is in another namespace (or absent) are
                 # excluded, so the result never spans tenants.
                 rows = conn.execute(
-                    "SELECT vi.entry_id FROM vec_index vi JOIN memories m ON m.id = vi.entry_id WHERE m.namespace = ?",
+                    "SELECT entry_id FROM vec_index WHERE namespace = ?",
                     (namespace,),
                 ).fetchall()
     except sqlite3.Error as exc:
@@ -257,7 +300,14 @@ def delete_hype_siblings(
     try:
         with lock:
             for sibling_id in sibling_ids:
-                delete_vector_internal(conn, sibling_id)
+                # PRD-CORE-245 open question 5 keeps ``delete_hype_siblings``
+                # addressed by a bare parent id, so each sibling's own
+                # namespace is read back from vec_index before the qualified
+                # delete rather than being guessed.
+                for (sibling_namespace,) in conn.execute(
+                    "SELECT namespace FROM vec_index WHERE entry_id = ?", (sibling_id,)
+                ).fetchall():
+                    delete_vector_internal(conn, sibling_id, str(sibling_namespace))
             if not skip_commit:
                 conn.commit()
     except sqlite3.Error:
@@ -273,10 +323,11 @@ def upsert_vector(
     vec_available: bool,
     dim: int,
     entry_id: str,
+    namespace: str,
     embedding: list[float],
     skip_commit: bool = False,
 ) -> None:
-    """Insert or update a vector in vec_memories. No-op when sqlite-vec absent.
+    """Insert or update the ``(namespace, entry_id)`` vector. No-op when sqlite-vec absent.
 
     When ``skip_commit`` is True the write is staged but NOT committed — used
     when the caller is inside a backend ``transaction()`` block so the vector
@@ -305,8 +356,10 @@ def upsert_vector(
     emb_bytes = struct.pack(f"{dim}f", *embedding)
     try:
         with lock:
-            conn.execute("INSERT OR IGNORE INTO vec_index(entry_id) VALUES(?)", (entry_id,))
-            row = conn.execute("SELECT rowid FROM vec_index WHERE entry_id = ?", (entry_id,)).fetchone()
+            conn.execute("INSERT OR IGNORE INTO vec_index(entry_id, namespace) VALUES(?, ?)", (entry_id, namespace))
+            row = conn.execute(
+                "SELECT rowid FROM vec_index WHERE namespace = ? AND entry_id = ?", (namespace, entry_id)
+            ).fetchone()
             rowid: int = row[0]
             conn.execute("DELETE FROM vec_memories WHERE rowid = ?", (rowid,))
             conn.execute(

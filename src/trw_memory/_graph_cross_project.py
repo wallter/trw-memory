@@ -87,6 +87,7 @@ def persist_cross_validated_entry(
         return
     backend.update(
         original.id,
+        namespace=original.namespace,
         cross_validated=updated.cross_validated,
         importance=updated.importance,
         outcome_history=updated.outcome_history,
@@ -122,6 +123,8 @@ def merge_cross_validated_entry(
     entry_id: str,
     project_id: str,
     similarity: float,
+    *,
+    namespace: str,
 ) -> tuple[MemoryEntry | None, bool]:
     """Atomically append a single project's validation and boost once.
 
@@ -133,7 +136,7 @@ def merge_cross_validated_entry(
     from trw_memory import graph as _graph_module
 
     with entry_update_lock(backend, entry_id), backend_update_guard(backend):
-        current = backend.get(entry_id)
+        current = backend.get(entry_id, namespace=namespace)
         if current is None:
             return None, False
         if entry_has_cross_validation(current, project_id):
@@ -142,7 +145,7 @@ def merge_cross_validated_entry(
         updated = append_cross_validation(current, project_id, similarity)
         updated = _graph_module.apply_importance_boost(updated)
         persist_cross_validated_entry(backend, current, updated)
-        reloaded = backend.get(entry_id)
+        reloaded = backend.get(entry_id, namespace=namespace)
         return (reloaded or updated), True
 
 
@@ -225,6 +228,7 @@ def apply_cross_project_validation(
                         entry.id,
                         project_id,
                         similarity,
+                        namespace=entry.namespace,
                     )
                     if merged_entry is not None:
                         current_entry = merged_entry
@@ -236,6 +240,7 @@ def apply_cross_project_validation(
                         remote_entry.id,
                         current_project,
                         similarity,
+                        namespace=remote_entry.namespace,
                     )
 
     return matched_projects

@@ -200,7 +200,7 @@ class TestProvenanceYamlBackend:
             model_id="claude-opus-4-6",
         )
         backend.store(entry)
-        restored = backend.get("yaml-prov-001")
+        restored = backend.get("yaml-prov-001", namespace="default")
         assert restored is not None
         assert restored.client_profile == "claude-code"
         assert restored.model_id == "claude-opus-4-6"
@@ -217,7 +217,7 @@ class TestProvenanceYamlBackend:
             updated_at=_NOW,
         )
         backend.store(entry)
-        restored = backend.get("yaml-prov-002")
+        restored = backend.get("yaml-prov-002", namespace="default")
         assert restored is not None
         assert restored.client_profile == ""
         assert restored.model_id == ""

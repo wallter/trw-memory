@@ -71,17 +71,30 @@ async def merge_shared_results(
         from trw_memory import client as _client_module
 
         _fetch = _client_module.fetch_shared_memories
-        shared = await asyncio.to_thread(
+        fetched = await asyncio.to_thread(
             functools.partial(
                 _fetch,
                 query,
                 client._config,
+                backend=client._get_backend(),
                 embedding=query_embedding,
                 limit=limit,
                 local_entries=local_entries,
                 embedder=embedder,
             )
         )
+        shared = fetched.results
+        if fetched.status not in {"ok", "disabled"}:
+            # An empty ``shared`` here is not necessarily an empty shared
+            # corpus. Say which it was, at a level an operator will see.
+            _client_logger().warning(
+                "memory_shared_fetch_degraded",
+                op="recall",
+                outcome=fetched.status,
+                namespace=client._namespace,
+                fetched=fetched.fetched,
+                refused=fetched.refused,
+            )
     except Exception:
         _client_logger().debug(
             "memory_shared_recall_failed",
@@ -109,7 +122,7 @@ async def load_entries_for_results(
         backend = client._get_backend()
         loaded: list[MemoryEntry] = []
         for entry_id in result_ids:
-            entry = backend.get(entry_id)
+            entry = backend.get(entry_id, namespace=client._namespace)
             if entry is not None:
                 loaded.append(entry)
         return loaded

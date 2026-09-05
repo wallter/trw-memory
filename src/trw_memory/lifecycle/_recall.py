@@ -13,6 +13,7 @@ from datetime import date, datetime, timezone
 
 import structlog
 
+from trw_memory.lifecycle.protection import prune_threshold_multiplier
 from trw_memory.lifecycle.scoring import entry_utility
 from trw_memory.models.config import MemoryConfig
 from trw_memory.storage.interface import StorageBackend
@@ -189,6 +190,15 @@ def utility_based_prune_candidates(
     2. Delete candidates: utility < delete_threshold
     3. Obsolete candidates: utility < prune_threshold and age > 14 days
 
+    PRD-CORE-244 FR10: every tier honours ``protection_tier``. This is the fifth
+    of the five destructive paths the FR names and the one an independent review
+    caught still uncovered — it is publicly exported from ``lifecycle`` and
+    ``lifecycle.scoring.utility_based_prune_candidates`` delegates into it, so a
+    ``permanent`` entry was nominated here even after the trw-mcp twin was fixed.
+    ``protected`` and ``permanent`` are never nominated, including by the status
+    tier, because "already marked obsolete" is still automatic removal. Every
+    other tier multiplies both thresholds by its configured discount.
+
     Args:
         entries: List of serialised MemoryEntry dicts.
         config: MemoryConfig for utility calculation.
@@ -202,10 +212,21 @@ def utility_based_prune_candidates(
     seen_ids: set[str] = set()
     today = datetime.now(tz=timezone.utc).date()
 
+    discounts = (config or MemoryConfig()).protection_tier_prune_discount
+
     for data in entries:
         entry_id = str(data.get("id", ""))
         if entry_id in seen_ids:
             continue
+
+        # Read the tier BEFORE any nomination branch, so the exemption cannot be
+        # reached around by an earlier tier.
+        multiplier = prune_threshold_multiplier(data, discounts)
+        if multiplier is None:
+            seen_ids.add(entry_id)
+            continue
+        entry_delete_threshold = delete_threshold * multiplier
+        entry_prune_threshold = prune_threshold * multiplier
 
         created_raw = data.get("created_at")
         created_str = str(created_raw) if created_raw is not None else ""
@@ -237,7 +258,7 @@ def utility_based_prune_candidates(
         utility = entry_utility(data, config=config, fallback_days=age_days)
 
         # Tier 2: Delete-level utility
-        if utility < delete_threshold:
+        if utility < entry_delete_threshold:
             candidates.append(
                 {
                     "id": entry_id,
@@ -246,7 +267,7 @@ def utility_based_prune_candidates(
                     "utility": round(utility, 3),
                     "suggested_status": "obsolete",
                     "reason": (
-                        f"Utility {utility:.3f} below delete threshold ({delete_threshold:.3f}). age={age_days}d"
+                        f"Utility {utility:.3f} below delete threshold ({entry_delete_threshold:.3f}). age={age_days}d"
                     ),
                 }
             )
@@ -254,7 +275,7 @@ def utility_based_prune_candidates(
             continue
 
         # Tier 3: Prune-level utility (fading, older than 14 days)
-        if utility < prune_threshold and age_days > 14:
+        if utility < entry_prune_threshold and age_days > 14:
             candidates.append(
                 {
                     "id": entry_id,
@@ -263,7 +284,7 @@ def utility_based_prune_candidates(
                     "utility": round(utility, 3),
                     "suggested_status": "obsolete",
                     "reason": (
-                        f"Utility {utility:.3f} below prune threshold ({prune_threshold:.3f}) and age {age_days}d > 14d"
+                        f"Utility {utility:.3f} below prune threshold ({entry_prune_threshold:.3f}) and age {age_days}d > 14d"
                     ),
                 }
             )

@@ -23,7 +23,7 @@ def test_reviews_are_serialized_per_quarantine_store(tmp_path: Path) -> None:
     max_active_calls = 0
     counter_lock = threading.Lock()
 
-    def get_entry(_learning_id: str) -> MemoryEntry:
+    def get_entry(_learning_id: str, **_kwargs) -> MemoryEntry:
         nonlocal active_calls, max_active_calls
         with counter_lock:
             active_calls += 1

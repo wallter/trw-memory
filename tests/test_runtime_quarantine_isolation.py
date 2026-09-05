@@ -77,7 +77,7 @@ class TestQuarantineRequiresQuarantinedFlag:
         from trw_memory.security._runtime_quarantine import open_quarantine_backend
 
         with open_quarantine_backend(cfg) as backend:
-            assert backend.get("N-1") is not None
+            assert backend.get("N-1", namespace="project:a") is not None
 
 
 class TestQuarantineListNoTruncation:

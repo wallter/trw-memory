@@ -269,14 +269,14 @@ class TestF11VectorPruneOnTerminalStatus:
         backend = self._backend()
         try:
             backend.store(MemoryEntry(id="v-1", content="vector entry"))
-            backend.upsert_vector("v-1", [0.1] * backend._dim)
-            assert backend.vector_exists("v-1") is True
+            backend.upsert_vector("v-1", [0.1] * backend._dim, namespace="default")
+            assert backend.vector_exists("v-1", namespace="default") is True
 
-            backend.update("v-1", status="obsolete")
+            backend.update("v-1", status="obsolete", namespace="default")
 
             # Vector pruned, but the entry row is preserved for audit.
-            assert backend.vector_exists("v-1") is False
-            row = backend.get("v-1")
+            assert backend.vector_exists("v-1", namespace="default") is False
+            row = backend.get("v-1", namespace="default")
             assert row is not None
             assert row.status == MemoryStatus.OBSOLETE
         finally:
@@ -288,11 +288,13 @@ class TestF11VectorPruneOnTerminalStatus:
             try:
                 eid = f"v-term-{idx}"
                 backend.store(MemoryEntry(id=eid, content="entry"))
-                backend.upsert_vector(eid, [0.2] * backend._dim)
-                assert backend.vector_exists(eid) is True
+                backend.upsert_vector(eid, [0.2] * backend._dim, namespace="default")
+                assert backend.vector_exists(eid, namespace="default") is True
 
-                backend.update(eid, status=terminal)
-                assert backend.vector_exists(eid) is False, f"vector should be pruned for {terminal}"
+                backend.update(eid, status=terminal, namespace="default")
+                assert backend.vector_exists(eid, namespace="default") is False, (
+                    f"vector should be pruned for {terminal}"
+                )
             finally:
                 backend.close()
 
@@ -300,11 +302,11 @@ class TestF11VectorPruneOnTerminalStatus:
         backend = self._backend()
         try:
             backend.store(MemoryEntry(id="v-2", content="keep vector"))
-            backend.upsert_vector("v-2", [0.3] * backend._dim)
+            backend.upsert_vector("v-2", [0.3] * backend._dim, namespace="default")
 
-            backend.update("v-2", importance=0.9)
+            backend.update("v-2", importance=0.9, namespace="default")
 
-            assert backend.vector_exists("v-2") is True
+            assert backend.vector_exists("v-2", namespace="default") is True
         finally:
             backend.close()
 
@@ -312,11 +314,11 @@ class TestF11VectorPruneOnTerminalStatus:
         backend = self._backend()
         try:
             backend.store(MemoryEntry(id="v-3", content="still active"))
-            backend.upsert_vector("v-3", [0.4] * backend._dim)
+            backend.upsert_vector("v-3", [0.4] * backend._dim, namespace="default")
 
-            backend.update("v-3", status="active")
+            backend.update("v-3", status="active", namespace="default")
 
-            assert backend.vector_exists("v-3") is True
+            assert backend.vector_exists("v-3", namespace="default") is True
         finally:
             backend.close()
 
@@ -376,7 +378,7 @@ class TestF008BatchedRecallAccess:
             record_recall_access(backend, ["r-a", "r-b"])
 
             for eid in ["r-a", "r-b"]:
-                loaded = backend.get(eid)
+                loaded = backend.get(eid, namespace="default")
                 assert loaded is not None
                 assert loaded.recall_count == 1
                 assert loaded.access_count == 1
@@ -391,7 +393,7 @@ class TestF008BatchedRecallAccess:
 
             record_recall_access(backend, ["r-dup", "r-dup", "r-dup"])
 
-            loaded = backend.get("r-dup")
+            loaded = backend.get("r-dup", namespace="default")
             assert loaded is not None
             assert loaded.recall_count == 1
             assert loaded.access_count == 1
@@ -406,7 +408,7 @@ class TestF008BatchedRecallAccess:
             for _ in range(3):
                 record_recall_access(backend, ["r-acc"])
 
-            loaded = backend.get("r-acc")
+            loaded = backend.get("r-acc", namespace="default")
             assert loaded is not None
             assert loaded.recall_count == 3
             assert loaded.access_count == 3

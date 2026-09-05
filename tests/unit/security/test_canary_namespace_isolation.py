@@ -53,8 +53,10 @@ def test_initialize_canaries_seeds_each_backend_under_shared_quarantine(
     ):
         initialize_canaries(config, backend=backend_a)
         initialize_canaries(config, backend=backend_b)
-        assert backend_a.get("canary-001") is not None, "backend A missing canary"
-        assert backend_b.get("canary-001") is not None, "backend B canary not seeded — state-key collision regressed"
+        assert backend_a.get("canary-001", namespace="default") is not None, "backend A missing canary"
+        assert backend_b.get("canary-001", namespace="default") is not None, (
+            "backend B canary not seeded — state-key collision regressed"
+        )
 
 
 def test_probe_canaries_per_backend_does_not_cross_pollute(tmp_path: Path) -> None:
@@ -73,7 +75,7 @@ def test_probe_canaries_per_backend_does_not_cross_pollute(tmp_path: Path) -> No
         initialize_canaries(config, backend=backend_a)
         initialize_canaries(config, backend=backend_b)
 
-        canary_a = backend_a.get("canary-001")
+        canary_a = backend_a.get("canary-001", namespace="default")
         assert canary_a is not None
         backend_a.store(canary_a.model_copy(update={"content": "tampered"}))
 
@@ -100,7 +102,7 @@ def test_should_halt_recalls_per_backend(tmp_path: Path) -> None:
         initialize_canaries(config, backend=backend_a)
         initialize_canaries(config, backend=backend_b)
 
-        canary_a = backend_a.get("canary-001")
+        canary_a = backend_a.get("canary-001", namespace="default")
         assert canary_a is not None
         backend_a.store(canary_a.model_copy(update={"content": "tampered"}))
         with pytest.raises(CanaryTamperError):

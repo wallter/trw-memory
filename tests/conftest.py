@@ -19,6 +19,7 @@ To classify a test file:
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +42,54 @@ from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.security.keys import clear_key_cache
 from trw_memory.storage._resilient_fetch import reset_bytes_fallback_failures, reset_schema_row_quarantines
 from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+# --------------------------------------------------------------------------
+# xdist fan-out cap (2026-09-05 OOM incident)
+# --------------------------------------------------------------------------
+# A 2026-09-05 kernel OOM (191 pytest workers, ~109GB RSS) traced to delegated
+# agents running `pytest -n auto` directly in several packages at once,
+# bypassing the Makefile's `PYTEST_WORKERS ?= 4` default (which only guards
+# `make test-parallel`/`make test-release`, not a raw `pytest` invocation).
+# This guard is duplicated verbatim in every package conftest of the
+# monorepo it is developed in — no shared test-support module exists across
+# these independently-distributed packages (trw-mcp and trw-memory ship to
+# PyPI; a new cross-package test dependency is not worth it for 15 lines).
+_MAX_XDIST_WORKERS = 4
+_ALLOW_WIDE_XDIST_ENV = "TRW_PYTEST_ALLOW_WIDE_XDIST"
+
+
+def _xdist_fanout_violation(numprocesses: object, allow_wide: bool) -> str | None:
+    """Return a violation reason if ``numprocesses`` exceeds the workstation
+    cap, else ``None``.
+
+    ``numprocesses`` is ``config.option.numprocesses`` as pytest-xdist sets
+    it: ``None`` when ``-n`` was not passed, the literal string ``"auto"`` or
+    ``"logical"`` when the caller asked xdist to size itself off the CPU core
+    count, or an ``int``/int-like value from an explicit ``-n N``.
+    """
+    if allow_wide or numprocesses is None:
+        return None
+    if isinstance(numprocesses, str):
+        return f"xdist fan-out -n {numprocesses!r} is uncapped"
+    if not isinstance(numprocesses, int):
+        return None
+    worker_count = numprocesses
+    if worker_count > _MAX_XDIST_WORKERS:
+        return f"xdist fan-out -n {worker_count} exceeds the cap of {_MAX_XDIST_WORKERS}"
+    return None
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Refuse a wide xdist fan-out before it OOMs the workstation again."""
+    allow_wide = os.environ.get(_ALLOW_WIDE_XDIST_ENV) == "1"
+    violation = _xdist_fanout_violation(getattr(config.option, "numprocesses", None), allow_wide)
+    if violation is not None:
+        pytest.exit(
+            f"{violation}. xdist fan-out capped at 4 workers on this "
+            "workstation (2026-09-05 OOM); use -n 4 or set "
+            "TRW_PYTEST_ALLOW_WIDE_XDIST=1",
+            returncode=3,
+        )
 
 
 @pytest.fixture(autouse=True)

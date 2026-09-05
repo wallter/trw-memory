@@ -18,6 +18,8 @@ from tests.test_hype_store import _FakeEmbedder, _ListGenerator
 from trw_memory.client import MemoryClient
 from trw_memory.retrieval.pipeline import hybrid_search
 
+from ._test_scope_support import DEFAULT_SCOPE
+
 
 async def test_disabled_store_writes_no_siblings(tmp_path: Path) -> None:
     # Even with a question generator wired, hype_enabled=False stores nothing.
@@ -47,8 +49,8 @@ def test_hybrid_search_collapse_off_matches_default() -> None:
         make_entry(entry_id="b", content="beta gamma delta"),
         make_entry(entry_id="c", content="gamma delta epsilon"),
     ]
-    baseline = hybrid_search("beta gamma", entries, top_k=10)
-    with_flag_off = hybrid_search("beta gamma", entries, top_k=10, collapse_hype=False)
+    baseline = hybrid_search("beta gamma", entries, top_k=10, scope=DEFAULT_SCOPE)
+    with_flag_off = hybrid_search("beta gamma", entries, top_k=10, collapse_hype=False, scope=DEFAULT_SCOPE)
     assert [e.id for e in baseline] == [e.id for e in with_flag_off]
 
 
@@ -58,10 +60,6 @@ def test_hybrid_search_collapse_off_ignores_sibling_embeddings() -> None:
     entries = [make_entry(entry_id="a", content="alpha beta")]
     stored = {"a": [0.1] * 384, "a#hype0": [0.1] * 384}
     result = hybrid_search(
-        "alpha",
-        entries,
-        stored_embeddings=stored,
-        collapse_hype=False,
-        top_k=10,
+        "alpha", entries, stored_embeddings=stored, collapse_hype=False, top_k=10, scope=DEFAULT_SCOPE
     )
     assert all("#hype" not in e.id for e in result)

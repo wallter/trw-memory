@@ -19,6 +19,12 @@ _NS_PATTERN = re.compile(
 
 _MAX_LENGTH = 128
 
+#: The namespace a memory row carries when its writer named none. Under schema 5
+#: identity is ``(namespace, id)`` (PRD-CORE-245 FR01), so every read and write
+#: must name a namespace; this is the canonical name for "the unnamed one" and
+#: exists so that fact is one constant rather than a literal at each call site.
+DEFAULT_NAMESPACE = "default"
+
 
 def validate_namespace(ns: str) -> str:
     """Validate a namespace string and return it unchanged.

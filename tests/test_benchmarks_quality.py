@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -17,6 +18,17 @@ from benchmarks.bench_quality import (
 )
 from benchmarks.corpus import create_golden_set
 from benchmarks.runner import check_thresholds, run_benchmarks
+
+# The threshold gate includes wall-clock throughput SLOs (read_queries_per_sec
+# >= 100) measured against whatever else the box is doing right now. Verified
+# 2026-09-03: a standalone run (no pytest parallelism) failed with
+# read_100=88.1 qps while the shared dev box's load average was 24 on 12
+# cores (concurrent agent sessions per this repo's shared-tree convention),
+# then passed seconds later once load dropped -- not test-order state leakage.
+# Retrying keeps the assertion honest: a genuine regression drags every
+# attempt over budget, so it still fails; only transient contention is
+# absorbed.
+_MAX_THRESHOLD_ATTEMPTS = 3
 
 
 class TestQualityMetrics:
@@ -149,13 +161,20 @@ class TestQualityBenchmarkIntegration:
         ),
     )
     def test_run_benchmarks_meets_thresholds_with_bundled_fixtures(self, tmp_path: Path) -> None:
-        """Bundled benchmark fixtures clear the default threshold gate."""
+        """Bundled benchmark fixtures clear the default threshold gate.
+
+        See ``_MAX_THRESHOLD_ATTEMPTS`` above for why this retries: the gate
+        includes wall-clock throughput, which a single measurement can miss
+        under transient box contention with no code regression involved.
+        """
         golden_path = tmp_path / "golden.json"
         create_golden_set(golden_path)
 
-        report = run_benchmarks(
-            sizes=[100],
-            golden_set_path=golden_path,
-        )
+        violations: list[dict[str, Any]] = []
+        for _attempt in range(_MAX_THRESHOLD_ATTEMPTS):
+            report = run_benchmarks(sizes=[100], golden_set_path=golden_path)
+            violations = check_thresholds(report)
+            if not violations:
+                return
 
-        assert check_thresholds(report) == []
+        pytest.fail(f"threshold violations persisted across {_MAX_THRESHOLD_ATTEMPTS} attempts: {violations}")

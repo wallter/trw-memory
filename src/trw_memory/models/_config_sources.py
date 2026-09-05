@@ -56,6 +56,10 @@ def _map_trw_config_yaml_to_memory_settings(raw: dict[str, object]) -> dict[str,
         ("sync_namespace", ("sync_namespace",)),
         ("platform_api_key", ("platform_api_key",)),
         ("local_only", ("local_only", "memory_local_only")),
+        (
+            "embedding_trust_remote_code",
+            ("embedding_trust_remote_code", "memory_embedding_trust_remote_code"),
+        ),
         ("hot_max_entries", ("hot_max_entries", "memory_hot_max_entries")),
         ("hot_ttl_days", ("hot_ttl_days", "memory_hot_ttl_days")),
         ("cold_threshold_days", ("cold_threshold_days", "memory_cold_threshold_days")),
@@ -94,6 +98,18 @@ def _map_trw_config_yaml_to_memory_settings(raw: dict[str, object]) -> dict[str,
         ("memory_snapshot_daily_keep", ("memory_snapshot_daily_keep", "snapshot_daily_keep")),
         ("memory_snapshot_weekly_keep", ("memory_snapshot_weekly_keep", "snapshot_weekly_keep")),
         ("memory_snapshot_publish_hash", ("memory_snapshot_publish_hash", "snapshot_publish_hash")),
+        # PRD-CORE-253 FR03 loopback daemon. There is deliberately no bind-host
+        # key: the host is a module constant, so it cannot be mistyped into a
+        # network-reachable listener.
+        ("memory_daemon_port", ("memory_daemon_port", "daemon_port")),
+        (
+            "memory_daemon_idle_shutdown_seconds",
+            ("memory_daemon_idle_shutdown_seconds", "daemon_idle_shutdown_seconds"),
+        ),
+        (
+            "memory_daemon_startup_timeout_seconds",
+            ("memory_daemon_startup_timeout_seconds", "daemon_startup_timeout_seconds"),
+        ),
     ):
         if (value := _first_non_none(raw, *aliases)) is not None:
             mapped[target] = value

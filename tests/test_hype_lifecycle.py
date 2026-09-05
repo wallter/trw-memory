@@ -75,8 +75,8 @@ async def test_delete_hype_siblings_treats_parent_like_wildcards_literally(tmp_p
     client = _client(tmp_path, _ListGenerator(["a good question about strict mode"]))
     try:
         backend = client._get_backend()
-        backend.upsert_vector(f"{parent_id}#hype0", [0.0] * 384)
-        backend.upsert_vector("P1#hype0", [0.0] * 384)
+        backend.upsert_vector(f"{parent_id}#hype0", [0.0] * 384, namespace="default")
+        backend.upsert_vector("P1#hype0", [0.0] * 384, namespace="default")
 
         assert backend.hype_sibling_ids(parent_id) == [f"{parent_id}#hype0"]
         assert backend.delete_hype_siblings(parent_id) == 1
@@ -102,15 +102,15 @@ async def test_delete_hype_siblings_preserves_canonical_and_nested_foreign_ids(t
         embedding = [0.0] * 384
         backend.store(make_entry(entry_id="foo#hypevictim"))
         backend.store(make_entry(entry_id="foo#hype0"))
-        backend.upsert_vector("foo#hypevictim", embedding)
-        backend.upsert_vector("foo#hypevictim#hype0", embedding)
-        backend.upsert_vector("foo#hype0", embedding)
+        backend.upsert_vector("foo#hypevictim", embedding, namespace="default")
+        backend.upsert_vector("foo#hypevictim#hype0", embedding, namespace="default")
+        backend.upsert_vector("foo#hype0", embedding, namespace="default")
 
         assert backend.hype_sibling_ids("foo") == []
         assert backend.delete_hype_siblings("foo") == 0
-        assert backend.vector_exists("foo#hypevictim")
-        assert backend.vector_exists("foo#hypevictim#hype0")
-        assert backend.vector_exists("foo#hype0")
+        assert backend.vector_exists("foo#hypevictim", namespace="default")
+        assert backend.vector_exists("foo#hypevictim#hype0", namespace="default")
+        assert backend.vector_exists("foo#hype0", namespace="default")
     finally:
         await client.close()
 

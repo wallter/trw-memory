@@ -38,7 +38,7 @@ class TestValidEdgeTypes:
         now = datetime.now(timezone.utc).isoformat()
         metadata = {"anchor_file": "src/graph.py", "reason": "shared_anchor"}
 
-        _upsert_edge(conn, "e1", "e2", "co_anchored", 0.8, now, metadata=metadata)
+        _upsert_edge(conn, "e1", "e2", "co_anchored", 0.8, now, metadata=metadata, namespace="default")
         conn.commit()
 
         parsed = _get_edge_metadata(conn, "e1", "e2", "co_anchored")
@@ -49,7 +49,7 @@ class TestValidEdgeTypes:
         conn = _make_conn()
         now = datetime.now(timezone.utc).isoformat()
 
-        _upsert_edge(conn, "e1", "e2", "similarity", 0.9, now)
+        _upsert_edge(conn, "e1", "e2", "similarity", 0.9, now, namespace="default")
         conn.commit()
 
         assert _get_edge_metadata(conn, "e1", "e2", "similarity") == {}
@@ -59,14 +59,14 @@ class TestValidEdgeTypes:
         now = datetime.now(timezone.utc).isoformat()
 
         with pytest.raises(ValueError, match="Invalid edge type"):
-            _upsert_edge(conn, "e1", "e2", "nonexistent_type", 0.5, now)
+            _upsert_edge(conn, "e1", "e2", "nonexistent_type", 0.5, now, namespace="default")
 
     def test_upsert_edge_all_valid_types_accepted(self) -> None:
         conn = _make_conn()
         now = datetime.now(timezone.utc).isoformat()
 
         for i, edge_type in enumerate(sorted(VALID_EDGE_TYPES)):
-            _upsert_edge(conn, f"src-{i}", f"tgt-{i}", edge_type, 0.5, now)
+            _upsert_edge(conn, f"src-{i}", f"tgt-{i}", edge_type, 0.5, now, namespace="default")
         conn.commit()
 
         assert _count_edges(conn) == 13
@@ -84,14 +84,14 @@ class TestValidEdgeTypes:
         large_metadata = {"key": "x" * 5000}
 
         with pytest.raises(ValueError, match="exceeds 4096 byte limit"):
-            _upsert_edge(conn, "e1", "e2", "related_to", 0.5, now, metadata=large_metadata)
+            _upsert_edge(conn, "e1", "e2", "related_to", 0.5, now, metadata=large_metadata, namespace="default")
 
     def test_upsert_edge_metadata_within_limit(self) -> None:
         conn = _make_conn()
         now = datetime.now(timezone.utc).isoformat()
         ok_metadata = {"key": "x" * 100}
 
-        _upsert_edge(conn, "e1", "e2", "related_to", 0.5, now, metadata=ok_metadata)
+        _upsert_edge(conn, "e1", "e2", "related_to", 0.5, now, metadata=ok_metadata, namespace="default")
         conn.commit()
 
         assert _count_edges(conn) == 1

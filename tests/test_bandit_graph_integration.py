@@ -220,7 +220,7 @@ class TestCoAnchoredEdgesFromStoredEntries:
         _insert_memory_row(conn, "e1", anchors_json=json.dumps(anchor_a))
         _insert_memory_row(conn, "e2", anchors_json=json.dumps(anchor_b))
 
-        count = create_co_anchored_edges(conn, "e1", ["src/auth.py"])
+        count = create_co_anchored_edges(conn, "e1", ["src/auth.py"], namespace="default")
         assert count >= 1
 
         # Verify edge exists
@@ -244,7 +244,7 @@ class TestCoAnchoredEdgesFromStoredEntries:
         _insert_memory_row(conn, "e1", anchors_json=json.dumps(anchor_a))
         _insert_memory_row(conn, "e2", anchors_json=json.dumps(anchor_b))
 
-        count = create_co_anchored_edges(conn, "e1", ["src/auth.py"])
+        count = create_co_anchored_edges(conn, "e1", ["src/auth.py"], namespace="default")
         assert count == 0
 
 

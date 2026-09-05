@@ -60,6 +60,7 @@ class TestApplyImportanceBoost:
                 threading.Thread(
                     target=_merge_cross_validated_entry,
                     args=(backend, "e1", project_id, 0.97),
+                    kwargs={"namespace": "default"},
                 )
                 for project_id in ("project-a", "project-b")
             ]
@@ -68,7 +69,7 @@ class TestApplyImportanceBoost:
             for thread in threads:
                 thread.join()
 
-            updated = backend.get("e1")
+            updated = backend.get("e1", namespace="default")
             assert updated is not None
             assert updated.importance == 0.6
             assert updated.cross_validated is True
@@ -96,7 +97,7 @@ class TestApplyImportanceBoost:
             assert process.exitcode == 0
 
         with create_backend_from_config(cfg, "project:default") as storage:
-            updated = storage.get("e1")
+            updated = storage.get("e1", namespace="default")
             assert updated is not None
             assert updated.importance == 0.6
             assert updated.cross_validated is True
@@ -111,7 +112,9 @@ class TestApplyImportanceBoost:
             observed: list[float] = []
 
             for idx in range(20):
-                updated, applied = _merge_cross_validated_entry(storage, "e1", f"project-{idx}", 0.97)
+                updated, applied = _merge_cross_validated_entry(
+                    storage, "e1", f"project-{idx}", 0.97, namespace="default"
+                )
                 assert applied is True
                 assert updated is not None
                 observed.append(updated.importance)

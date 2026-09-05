@@ -92,8 +92,8 @@ class TestToolForgetActorAtomicity:
             assert all(spy.count_in_txn), spy.count_in_txn
             assert spy.list_in_txn and all(spy.list_in_txn), spy.list_in_txn
             # bob's entry survives.
-            assert inner.get("B-1") is not None
-            assert inner.get("A-1") is None
+            assert inner.get("B-1", namespace="project:a") is not None
+            assert inner.get("A-1", namespace="project:a") is None
         finally:
             inner.close()
 

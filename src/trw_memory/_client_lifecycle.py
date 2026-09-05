@@ -200,6 +200,7 @@ async def publish_entry(
             backend = client._get_backend()
             backend.update(
                 entry.id,
+                namespace=entry.namespace,
                 published_to_platform=True,
                 remote_id=publish_result["remote_id"],
                 last_synced_at=datetime.now(timezone.utc),
@@ -318,6 +319,7 @@ async def _drain_retry_queue_once(client: MemoryClient) -> None:
                 if remote_id is not None:
                     backend.update(
                         entry_id,
+                        namespace=client._namespace,
                         published_to_platform=True,
                         remote_id=remote_id,
                         last_synced_at=synced_at,
@@ -325,6 +327,7 @@ async def _drain_retry_queue_once(client: MemoryClient) -> None:
                 else:
                     backend.update(
                         entry_id,
+                        namespace=client._namespace,
                         published_to_platform=True,
                         last_synced_at=synced_at,
                     )
@@ -463,7 +466,7 @@ async def apply_pending_remote_retirements(client: MemoryClient) -> None:
                     continue
                 if entry.last_synced_at is None:
                     continue
-                updated = backend.update(entry.id, pending_delete=True)
+                updated = backend.update(entry.id, namespace=entry.namespace, pending_delete=True)
                 if updated is not None:
                     unresolved.discard(str(entry.remote_id))
     finally:

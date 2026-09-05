@@ -76,7 +76,7 @@ def test_upsert_accepts_valid_unicode_including_emoji() -> None:
         detail="✓ 🚀 日本語",
     )
     backend.store(entry)
-    result = backend.get("M-utf8-002")
+    result = backend.get("M-utf8-002", namespace="default")
     assert result is not None
     assert result.detail == "✓ 🚀 日本語"
     backend.close()
@@ -118,10 +118,10 @@ def test_update_rejects_lone_surrogate(field: str) -> None:
     backend.store(entry)
 
     with pytest.raises(Utf8ValidationError) as exc_info:
-        backend.update(entry.id, **{field: "\ud83d"})
+        backend.update(entry.id, **{field: "\ud83d"}, namespace="default")
 
     assert exc_info.value.failed_fields == [field]
-    assert backend.get(entry.id) == entry
+    assert backend.get(entry.id, namespace="default") == entry
     backend.close()
 
 
@@ -131,10 +131,10 @@ def test_update_validates_invalidated_by() -> None:
     backend.store(entry)
 
     with pytest.raises(Utf8ValidationError) as exc_info:
-        backend.update(entry.id, invalid_from=datetime.now(timezone.utc), invalidated_by="\ud83d")
+        backend.update(entry.id, invalid_from=datetime.now(timezone.utc), invalidated_by="\ud83d", namespace="default")
 
     assert exc_info.value.failed_fields == ["invalidated_by"]
-    assert backend.get(entry.id) == entry
+    assert backend.get(entry.id, namespace="default") == entry
     backend.close()
 
 
@@ -143,7 +143,7 @@ def test_store_many_accepts_valid_unicode() -> None:
     entry = _make_entry(entry_id="M-batch-unicode", detail="✓ 🚀 日本語")
 
     assert backend.store_many([entry]) == 1
-    assert backend.get(entry.id) == entry
+    assert backend.get(entry.id, namespace="default") == entry
     backend.close()
 
 

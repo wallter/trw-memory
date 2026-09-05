@@ -76,7 +76,7 @@ class TestStoreAndGet:
             namespace="proj",
         )
         backend.store(entry)
-        result = backend.get("e1")
+        result = backend.get("e1", namespace="proj")
 
         assert result is not None
         assert result.id == "e1"
@@ -99,7 +99,7 @@ class TestStoreAndGet:
 
     def test_get_preserves_status(self, backend: YAMLBackend) -> None:
         backend.store(make_entry("e2", status=MemoryStatus.ARCHIVED))
-        result = backend.get("e2")
+        result = backend.get("e2", namespace="default")
         assert result is not None
         assert result.status == MemoryStatus.ARCHIVED
 
@@ -107,12 +107,12 @@ class TestStoreAndGet:
         entry = make_entry("e3")
         entry = entry.model_copy(update={"evidence": ["ref1", "ref2"]})
         backend.store(entry)
-        result = backend.get("e3")
+        result = backend.get("e3", namespace="default")
         assert result is not None
         assert result.evidence == ["ref1", "ref2"]
 
     def test_get_nonexistent_returns_none(self, backend: YAMLBackend) -> None:
-        assert backend.get("does-not-exist") is None
+        assert backend.get("does-not-exist", namespace="default") is None
 
 
 # ---------------------------------------------------------------------------
@@ -123,25 +123,25 @@ class TestStoreAndGet:
 class TestDelete:
     def test_delete_removes_file(self, backend: YAMLBackend, tmp_path: Path) -> None:
         backend.store(make_entry("del1"))
-        backend.delete("del1")
+        backend.delete("del1", namespace="default")
         assert not (tmp_path / "entries" / "del1.yaml").exists()
 
     def test_delete_returns_true_when_existed(self, backend: YAMLBackend) -> None:
         backend.store(make_entry("del2"))
-        assert backend.delete("del2")
+        assert backend.delete("del2", namespace="default")
 
     def test_delete_get_returns_none_after_delete(self, backend: YAMLBackend) -> None:
         backend.store(make_entry("del3"))
-        backend.delete("del3")
-        assert backend.get("del3") is None
+        backend.delete("del3", namespace="default")
+        assert backend.get("del3", namespace="default") is None
 
     def test_delete_nonexistent_returns_false(self, backend: YAMLBackend) -> None:
-        assert backend.delete("not-here") is False
+        assert backend.delete("not-here", namespace="default") is False
 
     def test_double_delete_returns_false_second_time(self, backend: YAMLBackend) -> None:
         backend.store(make_entry("del4"))
-        backend.delete("del4")
-        assert backend.delete("del4") is False
+        backend.delete("del4", namespace="default")
+        assert backend.delete("del4", namespace="default") is False
 
 
 # ---------------------------------------------------------------------------
@@ -152,31 +152,31 @@ class TestDelete:
 class TestUpdate:
     def test_update_importance(self, backend: YAMLBackend) -> None:
         backend.store(make_entry("u1", importance=0.3))
-        result = backend.update("u1", importance=0.9)
+        result = backend.update("u1", importance=0.9, namespace="default")
         assert result is not None
         assert result.importance == pytest.approx(0.9)
 
     def test_update_status(self, backend: YAMLBackend) -> None:
         backend.store(make_entry("u2", status=MemoryStatus.ACTIVE))
-        result = backend.update("u2", status=MemoryStatus.RESOLVED)
+        result = backend.update("u2", status=MemoryStatus.RESOLVED, namespace="default")
         assert result is not None
         assert result.status == MemoryStatus.RESOLVED
 
     def test_update_tags(self, backend: YAMLBackend) -> None:
         backend.store(make_entry("u3", tags=["old"]))
-        result = backend.update("u3", tags=["new", "updated"])
+        result = backend.update("u3", tags=["new", "updated"], namespace="default")
         assert result is not None
         assert result.tags == ["new", "updated"]
 
     def test_update_nonexistent_returns_none(self, backend: YAMLBackend) -> None:
-        result = backend.update("no-such-id", importance=0.8)
+        result = backend.update("no-such-id", importance=0.8, namespace="default")
         assert result is None
 
     def test_update_persists_to_disk(self, backend: YAMLBackend, tmp_path: Path) -> None:
         backend.store(make_entry("persist", importance=0.2))
-        backend.update("persist", importance=0.95)
+        backend.update("persist", importance=0.95, namespace="default")
         # Re-read from disk to verify persistence
-        result = backend.get("persist")
+        result = backend.get("persist", namespace="default")
         assert result is not None
         assert result.importance == pytest.approx(0.95)
 
@@ -206,7 +206,7 @@ class TestCount:
     def test_count_decrements_after_delete(self, backend: YAMLBackend) -> None:
         backend.store(make_entry("d1"))
         backend.store(make_entry("d2"))
-        backend.delete("d1")
+        backend.delete("d1", namespace="default")
         assert backend.count() == 1
 
 

@@ -309,8 +309,10 @@ trw-memory is **local-first**: with the default configuration all data lives in 
 
 | Surface | When | Default | Opt-out / control |
 |---------|------|---------|-------------------|
-| **Embedding model download** | First embedding operation downloads `all-MiniLM-L6-v2` from huggingface.co (only with the `[embeddings]` extra installed) | enabled when the extra is present | `TRW_OFFLINE=1` / `HF_HUB_OFFLINE=1`, or `local_only: true` (alias `memory_local_only`) — forces `local_files_only` so no download is attempted; a disclosure log line precedes any network-capable load |
+| **Embedding model download** | Only when `all-MiniLM-L6-v2` is **not** already complete in your local Hugging Face cache. A complete cached snapshot makes **zero** huggingface.co requests — the loader probes the cache before deciding, and forces `local_files_only=True` unconditionally when the snapshot is complete (only with the `[embeddings]` extra installed) | enabled when the extra is present | `TRW_OFFLINE=1` / `HF_HUB_OFFLINE=1`, or `local_only: true` (alias `memory_local_only`) — forces `local_files_only` so no download is attempted; a disclosure log line precedes any network-capable load |
 | **Remote sync / publish** | Only when `sync_enabled=true` AND `local_only=false` | **off** (`sync_enabled` defaults `false`) | leave sync disabled, or set `local_only: true` to hard-block all egress |
+
+**A warm cache performs no Hub request, and embedding egress is independent of the consent flags.** A fetch is attempted only when the cached snapshot is incomplete or absent **and** no offline switch is engaged; in exactly that case one structured disclosure log names the host and the switch that would block it. `learning_sharing_enabled` and `platform_telemetry_enabled` govern learning-content publishing and usage telemetry respectively — **neither gates the embedding model fetch**. Embedding egress is governed by the local cache, the offline switches, and `local_only`.
 
 `sync_enabled` defaults `false`, so the engine performs no remote sync out of the box even though `local_only` itself defaults `false`. Setting `local_only: true` is the hard-block: an `@model_validator` forces `sync_enabled=False`, clears `sync_namespace`/`platform_url`, and pins `rbac_mode="local"`, so no remote-capable surface can be re-enabled while it is set.
 
@@ -322,7 +324,7 @@ With an offline switch engaged (`TRW_OFFLINE` / `HF_HUB_OFFLINE`) **or** `local_
 |----------|---------|---------|
 | `TRW_OFFLINE` | Master offline switch — blocks the huggingface.co embedding-model download | unset |
 | `HF_HUB_OFFLINE` | Upstream huggingface_hub offline switch — also honored | unset |
-| `MEMORY_*` | Engine knobs validated by `MemoryConfig` (e.g. `MEMORY_LOCAL_ONLY`, retrieval + lifecycle tuning) | per-field |
+| `MEMORY_*` | Engine knobs validated by `MemoryConfig` (e.g. `MEMORY_LOCAL_ONLY`, `MEMORY_EMBEDDING_TRUST_REMOTE_CODE`, retrieval + lifecycle tuning) | per-field |
 
 ### Security defaults
 
@@ -335,6 +337,7 @@ With an offline switch engaged (`TRW_OFFLINE` / `HF_HUB_OFFLINE`) **or** `local_
 | Provenance signing | **required** (`provenance_required=True`) | persisted rows carry a signed provenance hash-chain |
 | Canary tamper response | **halt** (`canary_fail_mode="halt"`) | seeded canaries are probed on recall; tamper detection halts by default (`degrade`/`log-only` opt-in) |
 | Remote sync / publishing | **off** (`sync_enabled=False`) | no remote sync out of the box; `local_only=True` hard-blocks it via a validator |
+| Model remote-code execution | **off** (`embedding_trust_remote_code=False`) | the ONLY input to sentence-transformers' `trust_remote_code`. Left False, a model repository that ships its own Python modules is refused with `RemoteCodeNotPermittedError` naming this field; set it `true` only for a repository you trust, because its code then runs with your process's privileges. The shipped default model needs no remote code, so the secure default is also the working default |
 | `memory.db` permissions | `0600` | the file-backed store is `chmod 0600` (owner-only) on creation; a non-POSIX platform degrades to a `db_chmod_failed` warning |
 
 ### Enterprise hardening recipe

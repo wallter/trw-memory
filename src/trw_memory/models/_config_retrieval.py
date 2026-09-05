@@ -261,3 +261,41 @@ class _RetrievalConfigMixin(BaseModel):
             "cached entry holds the deserialized YAML + search text for one file."
         ),
     )
+    graph_tag_min_shared_tags: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        validation_alias=AliasChoices("graph_tag_min_shared_tags", "memory_graph_tag_min_shared_tags"),
+        description=(
+            "PRD-CORE-245 FR07: how many tags two entries must share before the "
+            "derived tag relation links them. Two is the predicate the deleted "
+            "materialised tag_cooccurrence edges claimed to encode; one makes "
+            "every entry sharing a single common tag a neighbour, which on the "
+            "reference corpus means 3,467 neighbours for 'documentation' alone."
+        ),
+    )
+    graph_tag_max_tag_postings: int = Field(
+        default=500,
+        ge=1,
+        le=100_000,
+        validation_alias=AliasChoices("graph_tag_max_tag_postings", "memory_graph_tag_max_tag_postings"),
+        description=(
+            "PRD-CORE-245 FR07: a tag with more postings than this is treated as "
+            "noise and excluded from the derivation. Measured on the reference "
+            "corpus (2026-09-03): the top tags are 'documentation' 3,467, "
+            "'architecture' 2,915, 'testing' 2,612 — labels that say nothing "
+            "about which two entries belong together. 500 measured 7.80 ms per "
+            "root at 13.2 neighbours; 1000 measured 7.91 ms at 14.9."
+        ),
+    )
+    graph_tag_derive_top_k: int = Field(
+        default=25,
+        ge=1,
+        le=200,
+        validation_alias=AliasChoices("graph_tag_derive_top_k", "memory_graph_tag_derive_top_k"),
+        description=(
+            "PRD-CORE-245 FR07: maximum derived tag neighbours returned for one "
+            "root. Unbounded derivation returns a mean 573.3 neighbours per root "
+            "on the reference corpus, which is a result set no caller can use."
+        ),
+    )

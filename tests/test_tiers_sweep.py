@@ -108,7 +108,7 @@ class TestSweep:
         assert cold_file.exists()
         assert result.demoted >= 1
         with SQLiteBackend(mem_dir / sqlite_cfg.sqlite_db_name, dim=sqlite_cfg.embedding_dim) as backend:
-            assert backend.get(entry.id) is None
+            assert backend.get(entry.id, namespace="default") is None
 
     def test_sweep_warm_to_cold_skips_non_active(self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig) -> None:
         from trw_memory.storage.persistence import write_yaml
@@ -280,3 +280,84 @@ class TestSweep:
 
         assert result.purged >= 1
         assert not cold_file.exists()
+
+
+class TestProtectionTierBlocksPurge:
+    """PRD-CORE-244 FR10 — ``protected``/``permanent`` are never auto-removed.
+
+    Each test pairs a protected entry with a byte-identical ``normal`` one in the
+    SAME sweep, so a passing result cannot be credited to the fixture being too
+    fresh or too important to purge.
+    """
+
+    @staticmethod
+    def _write_cold(
+        mgr: TierManager,
+        cfg: MemoryConfig,
+        entry_id: str,
+        tier: str,
+        importance: float = 0.05,
+    ) -> Path:
+        from trw_memory.storage.persistence import write_yaml
+
+        cold_partition = mgr._cold_dir() / "2024" / "01"
+        cold_partition.mkdir(parents=True, exist_ok=True)
+        target = cold_partition / f"{entry_id}.yaml"
+        write_yaml(
+            target,
+            {
+                "id": entry_id,
+                "content": "long forgotten",
+                "importance": importance,
+                "protection_tier": tier,
+                "last_accessed_at": (datetime.now(timezone.utc) - timedelta(days=cfg.retention_days + 10)).isoformat(),
+                "tags": [],
+            },
+        )
+        return target
+
+    @pytest.mark.parametrize("tier", ["protected", "permanent"])
+    def test_protected_cold_entry_is_never_purged(self, mgr: TierManager, cfg: MemoryConfig, tier: str) -> None:
+        protected = self._write_cold(mgr, cfg, f"{tier}-entry", tier)
+        normal = self._write_cold(mgr, cfg, "normal-entry", "normal")
+
+        result = mgr.sweep()
+
+        assert protected.exists(), f"a {tier} entry was auto-purged"
+        assert not normal.exists(), "the paired normal entry survived — the fixture proves nothing"
+        assert result.purged == 1
+
+    def test_critical_tier_is_discounted_not_exempt(self, mgr: TierManager, cfg: MemoryConfig) -> None:
+        """A composite score inside [ceiling * 0.25, ceiling) separates the tiers.
+
+        importance=0.2 scores 0.06 composite, which is below the 0.1 purge
+        ceiling (so ``normal`` is purged) and above the 0.025 critical-discounted
+        ceiling (so ``critical`` is not). Neither outcome is an exemption.
+        """
+        critical = self._write_cold(mgr, cfg, "critical-entry", "critical", importance=0.2)
+        normal = self._write_cold(mgr, cfg, "normal-entry", "normal", importance=0.2)
+
+        mgr.sweep()
+
+        assert critical.exists()
+        assert not normal.exists()
+
+    def test_an_unmarked_entry_is_purged_exactly_as_before(self, mgr: TierManager, cfg: MemoryConfig) -> None:
+        from trw_memory.storage.persistence import write_yaml
+
+        cold_partition = mgr._cold_dir() / "2024" / "01"
+        cold_partition.mkdir(parents=True, exist_ok=True)
+        target = cold_partition / "unmarked.yaml"
+        write_yaml(
+            target,
+            {
+                "id": "unmarked",
+                "content": "long forgotten",
+                "importance": 0.05,
+                "last_accessed_at": (datetime.now(timezone.utc) - timedelta(days=cfg.retention_days + 10)).isoformat(),
+                "tags": [],
+            },
+        )
+
+        assert mgr.sweep().purged == 1
+        assert not target.exists()

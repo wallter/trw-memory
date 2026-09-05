@@ -18,15 +18,15 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from itertools import pairwise
 
+import pytest
+
 from trw_memory.lifecycle.scoring import (
     apply_time_decay,
     bayesian_calibrate,
     compute_calibration_accuracy,
     compute_utility_score,
-    converge_tier_distribution,
     enforce_tier_distribution,
     entry_utility,
-    persist_tier_convergence,
     rank_by_utility,
     update_q_value,
     utility_based_prune_candidates,
@@ -415,7 +415,14 @@ def test_enforce_tier_default_config_matches_legacy_caps() -> None:
 
 
 # ---------------------------------------------------------------------------
-# R-RANK-003: converge_tier_distribution heals over-cap clusters in one pass
+# PRD-CORE-251 FR02: converge_tier_distribution and persist_tier_convergence
+# were RETIRED (2026-09-03). Both had zero production consumers in either
+# package; the five test functions that pinned them
+# (test_converge_brings_critical_within_cap, test_converge_no_op_within_caps,
+# test_converge_empty_input, test_persist_tier_convergence_atomic,
+# test_persist_tier_convergence_no_op_within_caps) were removed with them.
+# test_single_enforce_leaves_cluster_over_cap survives below because it
+# exercises enforce_tier_distribution directly, which FR08 keeps.
 # ---------------------------------------------------------------------------
 
 
@@ -437,9 +444,10 @@ def _over_cap_critical_cluster() -> list[tuple[str, float]]:
 
 
 def test_single_enforce_leaves_cluster_over_cap() -> None:
-    # Baseline: a single enforce call demotes at most one per tier — the
-    # cluster is STILL over the critical cap afterwards. This is what
-    # converge_tier_distribution must fix.
+    # A single enforce call demotes at most one entry per tier, so an 8-over-cap
+    # cluster is STILL over the critical cap afterwards. That is the documented
+    # contract of the function, not a defect: the caller re-invokes until the
+    # returned list is empty.
     entries = _over_cap_critical_cluster()
     one_step = enforce_tier_distribution(entries)
     # only one critical demotion in a single call
@@ -450,83 +458,20 @@ def test_single_enforce_leaves_cluster_over_cap() -> None:
     assert remaining_critical / len(entries) > 0.05  # STILL over cap
 
 
-def test_converge_brings_critical_within_cap() -> None:
-    # FAILS without converge_tier_distribution: a single enforce pass cannot
-    # heal an 8-over-cap cluster.
-    entries = _over_cap_critical_cluster()
-    changes = converge_tier_distribution(entries)
-    final = dict(entries)
-    final.update(dict(changes))
-    critical_count = sum(1 for sc in final.values() if sc >= 0.9)
-    # critical cap is 0.05 => at most floor(0.05 * 10) = 0 may remain
-    assert critical_count / len(entries) <= 0.05
+def test_retired_symbols_are_absent() -> None:
+    """FR02 — the two retired functions are gone from source AND from the exports.
 
+    An import that still resolves would mean the deletion only reached the
+    ``__all__`` list, leaving the body reachable by anyone who imports the
+    module directly.
+    """
+    import trw_memory.lifecycle as lifecycle
+    from trw_memory.lifecycle import scoring
 
-def test_converge_no_op_within_caps() -> None:
-    entries = [
-        ("M-001", 0.95),  # 1/20 = 5% critical — within cap
-        *[(f"M-{i:03d}", 0.5) for i in range(2, 21)],
-    ]
-    assert converge_tier_distribution(entries) == []
-
-
-def test_converge_empty_input() -> None:
-    assert converge_tier_distribution([]) == []
-
-
-# ---------------------------------------------------------------------------
-# R-RANK-003 persistence: atomic convergence via backend.transaction()
-# ---------------------------------------------------------------------------
-
-
-def test_persist_tier_convergence_atomic(tmp_path: object) -> None:
-    from pathlib import Path
-
-    from trw_memory.models.memory import MemoryEntry
-    from trw_memory.storage.sqlite_backend import SQLiteBackend
-
-    assert isinstance(tmp_path, Path)
-    backend = SQLiteBackend(tmp_path / "converge.db")
-    ids: list[str] = []
-    for mid, score in _over_cap_critical_cluster():
-        backend.store(MemoryEntry(id=mid, content="c", importance=score))
-        ids.append(mid)
-
-    entries = [(mid, score) for mid, score in _over_cap_critical_cluster()]
-    persisted = persist_tier_convergence(backend, entries)
-    assert persisted  # something was demoted
-
-    # All persisted changes are visible in the backend (committed).
-    for mid, new_score in persisted:
-        stored = backend.get(mid)
-        assert stored is not None
-        assert abs(stored.importance - new_score) < 1e-6
-
-    # Cluster is within cap after persistence.
-    final_critical = sum(1 for mid in ids if (e := backend.get(mid)) and e.importance >= 0.9)
-    assert final_critical / len(ids) <= 0.05
-
-
-def test_persist_tier_convergence_no_op_within_caps(tmp_path: object) -> None:
-    from pathlib import Path
-
-    from trw_memory.models.memory import MemoryEntry
-    from trw_memory.storage.sqlite_backend import SQLiteBackend
-
-    assert isinstance(tmp_path, Path)
-    backend = SQLiteBackend(tmp_path / "noop.db")
-    entries: list[tuple[str, float]] = []
-    backend.store(MemoryEntry(id="M-001", content="c", importance=0.95))
-    entries.append(("M-001", 0.95))
-    for i in range(2, 21):
-        mid = f"M-{i:03d}"
-        backend.store(MemoryEntry(id=mid, content="c", importance=0.5))
-        entries.append((mid, 0.5))
-
-    assert persist_tier_convergence(backend, entries) == []
-    # unchanged
-    e = backend.get("M-001")
-    assert e is not None and abs(e.importance - 0.95) < 1e-6
+    for name in ("converge_tier_distribution", "persist_tier_convergence"):
+        assert not hasattr(scoring, name), f"{name} is still defined in trw_memory.lifecycle.scoring"
+        assert not hasattr(lifecycle, name), f"{name} is still exported by trw_memory.lifecycle"
+        assert name not in lifecycle.__all__, f"{name} is still listed in trw_memory.lifecycle.__all__"
 
 
 # ---------------------------------------------------------------------------
@@ -704,3 +649,135 @@ def test_prune_candidates_deduplicates_by_id() -> None:
     e2 = _entry(status="resolved", entry_id="M-DUP")
     candidates = utility_based_prune_candidates([e1, e2])
     assert len(candidates) == 1
+
+
+class TestFeedbackDecayFloor:
+    """PRD-CORE-244 FR11 residual — a missing signal must not bury an entry.
+
+    ``helpful_count`` is 0 on 100% of the 9,366-row corpus, so the exponent
+    ``recall_count / max(1, helpful_count)`` degenerates to ``recall_count`` and
+    the term becomes a pure recall-FREQUENCY penalty with no lower bound — on a
+    counter PRD-QUAL-032/D1 established is not evidence of use. The floor bounds
+    what an ABSENT rating can cost without weakening the rating itself.
+    """
+
+    def test_heavily_recalled_unrated_entry_does_not_sink_below_the_floor(self) -> None:
+        from trw_memory.lifecycle.scoring import feedback_decay_score
+
+        importance = 0.8
+        for recalls in (10, 50, 100, 1000):
+            score = feedback_decay_score(importance, recalls, 0)
+            assert score >= importance * 0.5 - 1e-9, f"{recalls} recalls sank it to {score}"
+
+    def test_the_floor_is_what_bounds_it_not_the_clamp(self) -> None:
+        """Without the floor the same entry collapses to under 1% of importance."""
+        from trw_memory.lifecycle.scoring import feedback_decay_score
+
+        assert feedback_decay_score(0.8, 100, 0, min_factor=0.0) < 0.01
+        assert feedback_decay_score(0.8, 100, 0) == pytest.approx(0.4)
+
+    def test_helpful_feedback_still_lifts_an_entry_above_its_sibling(self) -> None:
+        """The floor must not flatten the signal it bounds."""
+        from trw_memory.lifecycle.scoring import feedback_decay_score
+
+        rated = feedback_decay_score(0.8, 40, 20)
+        unrated = feedback_decay_score(0.8, 40, 0)
+        assert rated > unrated
+
+    def test_a_cold_start_entry_survives_pure_recall_frequency_on_the_live_path(self) -> None:
+        """End to end through entry_utility: heavy recall, no ratings, no observations."""
+        from datetime import date
+
+        from trw_memory.lifecycle.scoring import entry_utility
+
+        today = date(2026, 9, 3)
+        base: dict[str, object] = {
+            "id": "L-hot",
+            "importance": 0.9,
+            "q_value": 0.9,
+            "q_observations": 0,
+            "recurrence": 1,
+            "access_count": 0,
+            "helpful_count": 0,
+            "created_at": "2026-09-01",
+            "last_accessed_at": "2026-09-03",
+            "type": "pattern",
+            "confidence": "verified",
+        }
+        surfaced = entry_utility({**base, "recall_count": 200}, today=today)
+        never = entry_utility({**base, "recall_count": 0}, today=today)
+
+        # It is allowed to rank lower, but not to be effectively erased.
+        assert surfaced >= never * 0.5 - 1e-9
+        assert surfaced > 0.4
+
+    def test_zero_floor_restores_the_previous_behaviour_exactly(self) -> None:
+        from trw_memory.lifecycle.scoring import feedback_decay_score
+
+        for recalls, helpful in ((5, 0), (5, 5), (100, 3)):
+            expected = 0.8 * (0.95 ** (recalls / max(1, helpful)))
+            assert feedback_decay_score(0.8, recalls, helpful, min_factor=0.0) == pytest.approx(expected)
+
+
+class TestNativePruneHonoursProtectionTier:
+    """PRD-CORE-244 FR10 on the FIFTH destructive path.
+
+    ``lifecycle._recall.utility_based_prune_candidates`` is publicly exported
+    from ``lifecycle`` and ``lifecycle.scoring.utility_based_prune_candidates``
+    delegates into it, so it nominated a ``permanent`` entry even after the
+    trw-mcp twin was fixed. Found by independent review.
+    """
+
+    @staticmethod
+    def _worthless(entry_id: str, tier: str, importance: float = 0.01) -> dict[str, object]:
+        return {
+            "id": entry_id,
+            "content": "a forgotten entry",
+            "importance": importance,
+            "q_value": importance,
+            "q_observations": 10,
+            "recurrence": 1,
+            "access_count": 0,
+            "recall_count": 0,
+            "helpful_count": 0,
+            "status": "active",
+            "created_at": "2023-01-01",
+            "last_accessed_at": "2023-01-01",
+            "protection_tier": tier,
+        }
+
+    def _nominated(self, tier: str, **kwargs: object) -> bool:
+        from trw_memory.lifecycle import utility_based_prune_candidates
+
+        entry = self._worthless(f"m-{tier}", tier, **kwargs)  # type: ignore[arg-type]
+        return any(c["id"] == f"m-{tier}" for c in utility_based_prune_candidates([entry]))
+
+    def test_permanent_entry_is_never_nominated(self) -> None:
+        assert self._nominated("permanent") is False
+
+    def test_protected_entry_is_never_nominated(self) -> None:
+        assert self._nominated("protected") is False
+
+    def test_the_same_entry_marked_normal_is_nominated(self) -> None:
+        """Proves the exemption came from the TIER, not from the fixture."""
+        assert self._nominated("normal") is True
+
+    def test_status_tier_cleanup_also_honours_the_exemption(self) -> None:
+        """'Already marked obsolete' is still automatic removal."""
+        from trw_memory.lifecycle import utility_based_prune_candidates
+
+        permanent = {**self._worthless("m-obs-permanent", "permanent"), "status": "obsolete"}
+        normal = {**self._worthless("m-obs-normal", "normal"), "status": "obsolete"}
+
+        ids = {c["id"] for c in utility_based_prune_candidates([permanent, normal])}
+        assert ids == {"m-obs-normal"}
+
+    def test_the_scoring_facade_delegate_inherits_the_exemption(self) -> None:
+        """lifecycle.scoring.utility_based_prune_candidates delegates into the same code."""
+        from trw_memory.lifecycle.scoring import utility_based_prune_candidates as facade
+
+        permanent = self._worthless("m-facade-permanent", "permanent")
+        normal = self._worthless("m-facade-normal", "normal")
+
+        ids = {c["id"] for c in facade([permanent, normal])}
+        assert ids == {"m-facade-normal"}

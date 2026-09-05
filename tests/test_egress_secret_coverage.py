@@ -33,6 +33,8 @@ from trw_memory.security.write_gate import guarded_store
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.sync._remote_fetch import fetch_shared_memories
 
+from ._test_scope_support import gate_backend
+
 #: Canonical published shapes, one per provider. ``aws``/``github`` are the
 #: controls that were already handled — they pin that this file's assertions are
 #: about *parity*, not about the two shapes that always worked.
@@ -168,7 +170,7 @@ class TestSearchQueryIsSanitizedOnTheWire:
         secret = PROVIDER_SECRETS["stripe_live"]
         with patch("trw_memory.sync._remote_fetch.httpx.Client") as mock_cls:
             client = _mock_client(mock_cls)
-            fetch_shared_memories(f"why did {secret} start 401ing", SYNC_CONFIG)
+            fetch_shared_memories(f"why did {secret} start 401ing", SYNC_CONFIG, backend=gate_backend())
 
         body = json.dumps(client.post.call_args.kwargs["json"])
         assert secret not in body
@@ -177,7 +179,7 @@ class TestSearchQueryIsSanitizedOnTheWire:
     def test_email_in_the_query_never_reaches_the_request_body(self) -> None:
         with patch("trw_memory.sync._remote_fetch.httpx.Client") as mock_cls:
             client = _mock_client(mock_cls)
-            fetch_shared_memories("ask alice@example.com about the retry budget", SYNC_CONFIG)
+            fetch_shared_memories("ask alice@example.com about the retry budget", SYNC_CONFIG, backend=gate_backend())
 
         body = json.dumps(client.post.call_args.kwargs["json"])
         assert "alice@example.com" not in body
@@ -202,24 +204,27 @@ class TestSearchQueryIsSanitizedOnTheWire:
     def test_a_legitimate_search_term_is_transmitted_unchanged(self, query: str) -> None:
         with patch("trw_memory.sync._remote_fetch.httpx.Client") as mock_cls:
             client = _mock_client(mock_cls)
-            fetch_shared_memories(query, SYNC_CONFIG)
+            fetch_shared_memories(query, SYNC_CONFIG, backend=gate_backend())
 
         assert client.post.call_args.kwargs["json"]["query"] == query
 
 
 class TestFailedFetchIsDistinguishableFromAnEmptyCorpus:
-    """P5: a failed fetch and 'nothing matched' both return ``[]``.
+    """P5: a failed fetch and 'nothing matched' used to both return ``[]``.
 
-    The caller merges either identically, so without a log an operator cannot tell
-    a rotated API key from a quiet corpus.
+    The log was the only place the difference existed, so a caller merging the
+    result could not tell a rotated API key from a quiet corpus. W13 put the
+    distinction in the RETURN as well; the log assertions stay because an
+    operator reading logs is the other half of the same requirement.
     """
 
     def test_non_200_emits_a_warning_with_the_status(self) -> None:
         with patch("trw_memory.sync._remote_fetch.httpx.Client") as mock_cls:
             _mock_client(mock_cls, status_code=401)
             with patch("trw_memory.sync._remote_fetch.logger") as mock_logger:
-                assert fetch_shared_memories("anything", SYNC_CONFIG) == []
+                fetched = fetch_shared_memories("anything", SYNC_CONFIG, backend=gate_backend())
 
+        assert (fetched.results, fetched.status) == ([], "fetch_failed")
         mock_logger.warning.assert_called_once()
         assert mock_logger.warning.call_args.kwargs["status_code"] == 401
 
@@ -227,8 +232,9 @@ class TestFailedFetchIsDistinguishableFromAnEmptyCorpus:
         with patch("trw_memory.sync._remote_fetch.httpx.Client") as mock_cls:
             _mock_client(mock_cls, payload="not-a-container")
             with patch("trw_memory.sync._remote_fetch.logger") as mock_logger:
-                assert fetch_shared_memories("anything", SYNC_CONFIG) == []
+                fetched = fetch_shared_memories("anything", SYNC_CONFIG, backend=gate_backend())
 
+        assert (fetched.results, fetched.status) == ([], "fetch_failed")
         mock_logger.warning.assert_called_once()
 
     def test_a_genuinely_empty_corpus_logs_nothing(self) -> None:
@@ -236,6 +242,8 @@ class TestFailedFetchIsDistinguishableFromAnEmptyCorpus:
         with patch("trw_memory.sync._remote_fetch.httpx.Client") as mock_cls:
             _mock_client(mock_cls, payload=[])
             with patch("trw_memory.sync._remote_fetch.logger") as mock_logger:
-                assert fetch_shared_memories("anything", SYNC_CONFIG) == []
+                fetched = fetch_shared_memories("anything", SYNC_CONFIG, backend=gate_backend())
 
+        # Same empty list as the two failures above, and now a different status.
+        assert (fetched.results, fetched.status) == ([], "ok")
         mock_logger.warning.assert_not_called()

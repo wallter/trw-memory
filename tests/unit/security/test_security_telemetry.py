@@ -133,7 +133,7 @@ def test_probe_canaries_emits_canary_hash_drift_event(
 
     with SQLiteBackend(tmp_path / "memory.db", dim=config.embedding_dim) as backend:
         initialize_canaries(config, backend=backend)
-        canary = backend.get("canary-001")
+        canary = backend.get("canary-001", namespace="default")
         assert canary is not None
         backend.store(canary.model_copy(update={"content": "tampered canary"}))
 
@@ -165,11 +165,11 @@ def test_probe_canaries_self_heals_missing_canary(
 
     with SQLiteBackend(tmp_path / "memory.db", dim=config.embedding_dim) as backend:
         initialize_canaries(config, backend=backend)
-        assert backend.delete("canary-001") is True  # simulate the salvage/loss
-        assert backend.get("canary-001") is None
+        assert backend.delete("canary-001", namespace="default") is True  # simulate the salvage/loss
+        assert backend.get("canary-001", namespace="default") is None
         # MUST NOT raise — self-heals instead of halting recall.
         probe_canaries(config, backend=backend)
-        restored = backend.get("canary-001")
+        restored = backend.get("canary-001", namespace="default")
         assert restored is not None
         # Restored content is the trusted pin (FR-3: attacker cannot inject via this path).
         assert hashlib.sha256(restored.content.encode("utf-8")).hexdigest() == PINNED_HASHES["canary-001"]
@@ -195,7 +195,7 @@ def test_probe_canaries_drift_log_only_does_not_raise(
 
     with SQLiteBackend(tmp_path / "memory.db", dim=config.embedding_dim) as backend:
         initialize_canaries(config, backend=backend)
-        canary = backend.get("canary-001")
+        canary = backend.get("canary-001", namespace="default")
         assert canary is not None
         backend.store(canary.model_copy(update={"content": "tampered canary"}))
         # log-only: drift is recorded but recall is NOT halted (no raise).
@@ -241,7 +241,7 @@ def test_should_halt_stays_on_confirmed_drift(
     monkeypatch.setenv("TRW_SURFACE_SNAPSHOT_ID", "snap-drift-halt")
     with SQLiteBackend(tmp_path / "memory.db", dim=config.embedding_dim) as backend:
         initialize_canaries(config, backend=backend)
-        canary = backend.get("canary-001")
+        canary = backend.get("canary-001", namespace="default")
         assert canary is not None
         backend.store(canary.model_copy(update={"content": "tampered"}))  # persistent drift
         CANARY_STATE[_state_key(config, backend)]["failed"] = True
@@ -260,7 +260,7 @@ def test_should_halt_unsticks_on_missing_canary(
     config = MemoryConfig(storage_path=str(tmp_path / "storage"), canary_fail_mode="halt")
     with SQLiteBackend(tmp_path / "memory.db", dim=config.embedding_dim) as backend:
         initialize_canaries(config, backend=backend)
-        assert backend.delete("canary-001") is True  # lost to a salvage
+        assert backend.delete("canary-001", namespace="default") is True  # lost to a salvage
         CANARY_STATE[_state_key(config, backend)]["failed"] = True
         # missing != drift -> un-stick (probe will self-heal on the next recall).
         assert should_halt_recalls(config, backend=backend) is False

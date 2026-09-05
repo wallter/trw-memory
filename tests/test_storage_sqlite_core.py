@@ -24,7 +24,7 @@ class TestStoreAndGet:
             namespace="proj",
         )
         backend.store(entry)
-        result = backend.get("e1")
+        result = backend.get("e1", namespace="proj")
 
         assert result is not None
         assert result.id == "e1"
@@ -37,7 +37,7 @@ class TestStoreAndGet:
     def test_get_preserves_status(self, backend: SQLiteBackend) -> None:
         entry = make_entry("e2", status=MemoryStatus.RESOLVED)
         backend.store(entry)
-        result = backend.get("e2")
+        result = backend.get("e2", namespace="default")
         assert result is not None
         assert result.status == MemoryStatus.RESOLVED
 
@@ -45,7 +45,7 @@ class TestStoreAndGet:
         entry = make_entry("e3")
         entry = entry.model_copy(update={"metadata": {"sprint": "31", "pr": "42"}})
         backend.store(entry)
-        result = backend.get("e3")
+        result = backend.get("e3", namespace="default")
         assert result is not None
         assert result.metadata == {"sprint": "31", "pr": "42"}
 
@@ -53,18 +53,18 @@ class TestStoreAndGet:
         entry = make_entry("e4")
         entry = entry.model_copy(update={"evidence": ["log1", "log2"]})
         backend.store(entry)
-        result = backend.get("e4")
+        result = backend.get("e4", namespace="default")
         assert result is not None
         assert result.evidence == ["log1", "log2"]
 
 
 class TestGetNonexistent:
     def test_get_nonexistent_returns_none(self, backend: SQLiteBackend) -> None:
-        result = backend.get("does-not-exist")
+        result = backend.get("does-not-exist", namespace="default")
         assert result is None
 
     def test_get_empty_string_returns_none(self, backend: SQLiteBackend) -> None:
-        result = backend.get("")
+        result = backend.get("", namespace="default")
         assert result is None
 
 
@@ -76,14 +76,14 @@ class TestStoreOverwrite:
         entry_v2 = make_entry("dup", "second version — updated")
         backend.store(entry_v2)
 
-        result = backend.get("dup")
+        result = backend.get("dup", namespace="default")
         assert result is not None
         assert result.content == "second version — updated"
 
     def test_overwrite_preserves_new_fields(self, backend: SQLiteBackend) -> None:
         backend.store(make_entry("dup2", importance=0.3))
         backend.store(make_entry("dup2", importance=0.9))
-        result = backend.get("dup2")
+        result = backend.get("dup2", namespace="default")
         assert result is not None
         assert result.importance == pytest.approx(0.9)
 
@@ -91,20 +91,20 @@ class TestStoreOverwrite:
 class TestDelete:
     def test_delete_removes_entry(self, backend: SQLiteBackend) -> None:
         backend.store(make_entry("del1"))
-        assert backend.delete("del1")
-        assert backend.get("del1") is None
+        assert backend.delete("del1", namespace="default")
+        assert backend.get("del1", namespace="default") is None
 
     def test_delete_returns_true_when_existed(self, backend: SQLiteBackend) -> None:
         backend.store(make_entry("del2"))
-        assert backend.delete("del2")
+        assert backend.delete("del2", namespace="default")
 
     def test_delete_nonexistent_returns_false(self, backend: SQLiteBackend) -> None:
-        assert not backend.delete("no-such-entry")
+        assert not backend.delete("no-such-entry", namespace="default")
 
     def test_double_delete_returns_false_second_time(self, backend: SQLiteBackend) -> None:
         backend.store(make_entry("del3"))
-        backend.delete("del3")
-        assert backend.delete("del3") is False
+        backend.delete("del3", namespace="default")
+        assert backend.delete("del3", namespace="default") is False
 
 
 class TestCount:
@@ -131,7 +131,7 @@ class TestCount:
     def test_count_decrements_after_delete(self, backend: SQLiteBackend) -> None:
         backend.store(make_entry("d1"))
         backend.store(make_entry("d2"))
-        backend.delete("d1")
+        backend.delete("d1", namespace="default")
         assert backend.count() == 1
 
 
@@ -233,8 +233,8 @@ class TestIncrementSessionCounts:
         updated = backend.increment_session_counts(["L-sess001", "L-sess002"])
 
         assert updated == 2
-        first = backend.get("L-sess001")
-        second = backend.get("L-sess002")
+        first = backend.get("L-sess001", namespace="default")
+        second = backend.get("L-sess002", namespace="default")
         assert first is not None
         assert first.session_count == 1
         assert second is not None

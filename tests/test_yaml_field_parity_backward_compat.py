@@ -23,7 +23,7 @@ class TestBackwardCompatDefaults:
             updated_at=datetime.now(timezone.utc),
         )
         backend.store(entry)
-        loaded = backend.get("M-old-1")
+        loaded = backend.get("M-old-1", namespace="default")
         assert loaded is not None
         assert loaded.vector_clock == {}
         assert loaded.remote_id is None
@@ -42,7 +42,7 @@ class TestBackwardCompatDefaults:
             remote_id=None,
         )
         backend.store(entry)
-        loaded = backend.get("M-none-rid")
+        loaded = backend.get("M-none-rid", namespace="default")
         assert loaded is not None and loaded.remote_id is None
 
 
@@ -73,7 +73,7 @@ class TestTrueLegacyYAML:
             "metadata": {},
         }
         write_entry_yaml(backend, "M-legacy-1", legacy_data)
-        loaded = backend.get("M-legacy-1")
+        loaded = backend.get("M-legacy-1", namespace="default")
         assert loaded is not None
         assert loaded.content == "legacy entry from v0.4.0"
         assert loaded.vector_clock == {}

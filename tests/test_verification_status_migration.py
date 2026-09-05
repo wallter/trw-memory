@@ -28,7 +28,7 @@ def test_fresh_db_has_verification_status_column(tmp_path: Path) -> None:
 
     now = datetime.now(timezone.utc)
     backend.store(MemoryEntry(id="M-VS-001", content="fresh", created_at=now, updated_at=now))
-    stored = backend.get("M-VS-001")
+    stored = backend.get("M-VS-001", namespace="default")
     assert stored is not None
     assert stored.verification_status is None
 
@@ -67,6 +67,6 @@ def test_pre_migration_rows_read_as_none(tmp_path: Path) -> None:
     # Reopening runs the idempotent migration, which re-adds the column.
     backend = SQLiteBackend(db_path)
     assert "verification_status" in _column_names(backend._conn)
-    entry = backend.get("M-LEGACY-001")
+    entry = backend.get("M-LEGACY-001", namespace="default")
     assert entry is not None
     assert entry.verification_status is None

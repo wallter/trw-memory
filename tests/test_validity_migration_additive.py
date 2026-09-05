@@ -61,7 +61,7 @@ def test_migration_is_additive_and_backfills_open_validity(tmp_path: Path) -> No
 
     # Open with the new schema — ensure_schema runs the additive ALTER migration.
     backend = SQLiteBackend(db_path)
-    loaded = backend.get(entry_id)
+    loaded = backend.get(entry_id, namespace="default")
 
     assert loaded is not None
     # Open-validity defaults: absent valid_from back-fills to created_at.
@@ -113,8 +113,54 @@ def test_round_trip_closed_window_survives_store_get(tmp_path: Path) -> None:
         invalidated_by="M-new",
     )
     backend.store(entry)
-    got = backend.get("M-closed")
+    got = backend.get("M-closed", namespace="default")
     assert got is not None
     assert got.invalid_from == close
     assert got.invalidated_by == "M-new"
     assert got.validity_state() == "superseded"
+
+
+def test_anchor_validity_null_when_no_anchors(tmp_path: Path) -> None:
+    """PRD-CORE-244 FR01 — an unanchored entry stores SQL NULL, and reads back None.
+
+    The old ``1.0`` default made "nothing was ever assessed" identical to "every
+    anchor still resolves", which is the score that feeds the recall ranking
+    boost. The round trip has to hold at every layer: the model default, the
+    column, and the row mapper that reads it back.
+    """
+    backend = SQLiteBackend(tmp_path / "m.db")
+    backend.store(MemoryEntry(id="M-unanchored", content="no anchors here", namespace="default"))
+
+    loaded = backend.get("M-unanchored", namespace="default")
+    assert loaded is not None
+    assert loaded.anchors == []
+    assert loaded.anchor_validity is None
+
+    # The column itself is NULL — not 1.0, and not 0.0 (which would be a real,
+    # and false, "every anchor is broken" claim).
+    conn = sqlite3.connect(str(tmp_path / "m.db"))
+    try:
+        stored = conn.execute("SELECT anchor_validity FROM memories WHERE id = ?", ("M-unanchored",)).fetchone()
+    finally:
+        conn.close()
+    assert stored == (None,)
+
+
+def test_anchor_validity_survives_when_a_score_was_actually_computed(tmp_path: Path) -> None:
+    """The falsification: a real score is still persisted and read back verbatim."""
+    from trw_memory.models.memory import Anchor
+
+    backend = SQLiteBackend(tmp_path / "m.db")
+    backend.store(
+        MemoryEntry(
+            id="M-anchored",
+            content="anchored",
+            namespace="default",
+            anchors=[Anchor(file="src/main.py", symbol_name="my_func")],
+            anchor_validity=0.5,
+        )
+    )
+
+    loaded = backend.get("M-anchored", namespace="default")
+    assert loaded is not None
+    assert loaded.anchor_validity == 0.5

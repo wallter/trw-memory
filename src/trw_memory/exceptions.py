@@ -48,6 +48,18 @@ class LocalOnlyViolationError(MemoryError):
     """Raised when a network-capable operation is attempted in local-only mode."""
 
 
+class RemoteCodeNotPermittedError(MemoryError):
+    """Raised when loading a model would execute repo-supplied code without consent.
+
+    PRD-SEC-014-FR02: ``trust_remote_code`` is reachable only through the typed
+    ``embedding_trust_remote_code`` config field (default ``False``). Before this
+    error existed, a model-name substring test opted a deployment into executing
+    Hub-fetched code, so a ``.trw/config.yaml`` edit was sufficient to enable
+    arbitrary code execution. The message names the field so the fail-closed path
+    is actionable rather than merely refusing.
+    """
+
+
 class MasterKeyNotFoundError(MemoryError):
     """Raised when no usable master key exists in any configured source."""
 
@@ -63,9 +75,21 @@ class KeyRotationError(MemoryError):
 class SchemaValidationError(MemoryError):
     """Raised when a memory entry fails the write-time schema/policy contract."""
 
-    def __init__(self, message: str, *, path: str = "", failed_fields: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        path: str = "",
+        failed_fields: list[str] | None = None,
+        reason: str = "",
+    ) -> None:
         super().__init__(message, path=path)
         self.failed_fields = failed_fields or []
+        #: Machine-readable rejection code (PRD-CORE-244 FR02 uses
+        #: ``"unsubstantiated_verified"``). Empty for the historical
+        #: field-shape rejections, which are fully described by
+        #: ``failed_fields``.
+        self.reason = reason
 
 
 class PIIBlockError(MemoryError):
@@ -183,3 +207,66 @@ class SecurityTelemetryUnavailableError(SecurityDependencyError):
 
 class CanaryTamperError(SecurityDependencyError):
     """Raised when a pinned canary hash drifts from the stored row."""
+
+
+class DaemonError(MemoryError):
+    """Base class for loopback memory-daemon failures (PRD-CORE-253 FR03)."""
+
+
+class DaemonAlreadyRunningError(DaemonError):
+    """Raised when a start is attempted while a live daemon holds the claim.
+
+    Not a fault: it is the expected outcome of the second start, and the reason
+    that start exits WITHOUT binding a port or rewriting the discovery file.
+    """
+
+
+class DaemonUnreachableError(DaemonError):
+    """Raised when the store cannot be reached (PRD-CORE-253 FR08).
+
+    Both reads and writes fail closed with this rather than degrading to a
+    local snapshot: an agent that recalls from a stale view then writes a
+    conclusion derived from it is split-brain with extra steps. The message
+    carries the discovery-file path and the start command so the failure names
+    its own remedy.
+    """
+
+
+class DaemonAuthError(DaemonError):
+    """Raised when the daemon rejects the client's token (FR08 clause 3).
+
+    Deliberately distinct from :class:`DaemonUnreachableError`: a rejection is
+    never retried and never triggers token regeneration, because automatic
+    rotation would let any local process force one by corrupting the file.
+    """
+
+
+class DaemonSecretUnreadableError(DaemonError):
+    """Raised when a 0600 daemon secret exists but cannot be read.
+
+    Deliberately distinct from "absent". Absent is first run and is answered by
+    creating the file; unreadable is a symlink someone planted at the path, a
+    permission change, or a file that is not UTF-8 — and creating over it would
+    destroy the secret a live daemon is still authenticating against.
+    """
+
+
+class TokenUnreadableError(DaemonSecretUnreadableError):
+    """Raised when the bearer-token file exists but cannot be read.
+
+    Minting a replacement here would ROTATE the token out from under a running
+    daemon, so every subsequent client call is rejected: the automatic rotation
+    FR08 clause 3 forbids, arrived at from the other direction. The message
+    names the file and why it could not be read.
+    """
+
+
+class DaemonRecordInvalidError(DaemonError):
+    """Raised when ``daemon.json`` exists but cannot be trusted.
+
+    A record that will not parse, names an unknown schema, or fails field
+    validation proves nothing about whether a daemon is serving. Reading it as
+    "no daemon" is what lets a second daemon bind a port and overwrite the
+    record while the first is still live — two writers on one store. The remedy
+    is an operator inspecting or removing the named file.
+    """

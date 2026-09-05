@@ -111,13 +111,13 @@ class TestStorageBackendDefaults:
             def store(self, entry: MemoryEntry) -> None:
                 pass
 
-            def get(self, entry_id: str) -> MemoryEntry | None:
+            def get(self, entry_id: str, *, namespace: str = "default") -> MemoryEntry | None:
                 return None
 
             def update(self, entry_id: str, **fields: object) -> MemoryEntry | None:
                 return None
 
-            def delete(self, entry_id: str) -> bool:
+            def delete(self, entry_id: str, *, namespace: str = "default") -> bool:
                 return False
 
             def search(
@@ -181,10 +181,10 @@ class TestStorageBackendDefaults:
         assert result == 0
 
     def test_storage_backend_default_upsert_vector(self) -> None:
-        """FR-03: Default upsert_vector() must be a no-op (no error)."""
+        """FR-03: Default upsert_vector(namespace="default") must be a no-op (no error)."""
         backend = self._make_concrete_backend()
         # Should not raise
-        result = backend.upsert_vector("M-test", [0.1, 0.2, 0.3])
+        result = backend.upsert_vector("M-test", [0.1, 0.2, 0.3], namespace="default")
         assert result is None
 
     def test_storage_backend_default_search_vectors(self) -> None:

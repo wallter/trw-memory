@@ -27,11 +27,11 @@ class TestDeleteByNamespaceGraphEdges:
     """delete_by_namespace must clean orphan memory_graph_edges (GDPR/integrity)."""
 
     @staticmethod
-    def _insert_edge(backend: SQLiteBackend, source_id: str, target_id: str) -> None:
+    def _insert_edge(backend: SQLiteBackend, source_id: str, target_id: str, namespace: str = "default") -> None:
         backend._conn.execute(
-            "INSERT INTO memory_graph_edges (source_id, target_id, edge_type, weight, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (source_id, target_id, "similarity", 0.9, "2026-06-15T00:00:00+00:00"),
+            "INSERT INTO memory_graph_edges (namespace, source_id, target_id, edge_type, weight, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (namespace, source_id, target_id, "similarity", 0.9, "2026-06-15T00:00:00+00:00"),
         )
         backend._conn.commit()
 
@@ -46,10 +46,10 @@ class TestDeleteByNamespaceGraphEdges:
         backend.store(make_entry("K", namespace="project:keep"))
         # edge fully inside the deleted ns, plus edges crossing into/out of it,
         # plus one edge entirely within the surviving ns.
-        self._insert_edge(backend, "A", "B")  # both deleted
-        self._insert_edge(backend, "A", "K")  # source deleted, target kept
-        self._insert_edge(backend, "K", "B")  # source kept, target deleted
-        self._insert_edge(backend, "K", "K")  # both kept (must survive)
+        self._insert_edge(backend, "A", "B", "project:gone")  # both deleted
+        self._insert_edge(backend, "A", "K", "project:gone")  # source deleted, target kept
+        self._insert_edge(backend, "K", "B", "project:keep")  # source kept, target deleted
+        self._insert_edge(backend, "K", "K", "project:keep")  # both kept (must survive)
         assert self._edge_count(backend) == 4
 
         deleted = backend.delete_by_namespace("project:gone")
@@ -77,11 +77,11 @@ class TestDeleteRowGraphEdges:
     """Per-row delete() must clean orphan memory_graph_edges too (shared purge)."""
 
     @staticmethod
-    def _insert_edge(backend: SQLiteBackend, source_id: str, target_id: str) -> None:
+    def _insert_edge(backend: SQLiteBackend, source_id: str, target_id: str, namespace: str = "default") -> None:
         backend._conn.execute(
-            "INSERT INTO memory_graph_edges (source_id, target_id, edge_type, weight, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (source_id, target_id, "similarity", 0.9, "2026-06-15T00:00:00+00:00"),
+            "INSERT INTO memory_graph_edges (namespace, source_id, target_id, edge_type, weight, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (namespace, source_id, target_id, "similarity", 0.9, "2026-06-15T00:00:00+00:00"),
         )
         backend._conn.commit()
 
@@ -102,7 +102,7 @@ class TestDeleteRowGraphEdges:
         self._insert_edge(backend, "K", "K")  # neither endpoint deleted -> survives
         assert len(self._edges(backend)) == 3
 
-        assert backend.delete("A") is True
+        assert backend.delete("A", namespace="default") is True
 
         # Only the edge whose endpoints both survive remains; both edges that
         # touched the deleted row A (as source or as target) are gone — proving
@@ -114,7 +114,7 @@ class TestDeleteRowGraphEdges:
         self._insert_edge(backend, "K", "K")
 
         # Deleting an id with no row must not touch edges (guarded on rowcount).
-        assert backend.delete("does-not-exist") is False
+        assert backend.delete("does-not-exist", namespace="default") is False
         assert self._edges(backend) == [("K", "K")]
 
     def test_purge_edges_for_chunks_beyond_variable_limit(self, backend: SQLiteBackend) -> None:
@@ -131,7 +131,7 @@ class TestDeleteRowGraphEdges:
         self._insert_edge(backend, "KEEP", "KEEP")  # both endpoints survive
 
         with backend._lock:
-            purge_edges_for(backend, ids)
+            purge_edges_for(backend, ids, namespace="default")
         backend._conn.commit()
 
         # Every edge touching a purged id is gone; the wholly-surviving edge stays.
@@ -149,7 +149,7 @@ class TestCrossThreadSafety:
         result_holder: list[MemoryEntry | None] = [None]
 
         def worker() -> None:
-            result_holder[0] = backend.get("cross-1")
+            result_holder[0] = backend.get("cross-1", namespace="default")
 
         thread = threading.Thread(target=worker)
         thread.start()
@@ -192,12 +192,13 @@ class TestDeleteVectorAbsentRow:
             backend._conn.execute(
                 "CREATE TABLE IF NOT EXISTS vec_index ("
                 "rowid INTEGER PRIMARY KEY AUTOINCREMENT, "
-                "entry_id TEXT UNIQUE NOT NULL)"
+                "entry_id TEXT NOT NULL, namespace TEXT NOT NULL DEFAULT 'default', "
+                "UNIQUE (namespace, entry_id))"
             )
             backend._conn.commit()
 
-        backend._delete_vector("no-vec")
-        preserved = backend.get("no-vec")
+        backend._delete_vector("no-vec", "default")
+        preserved = backend.get("no-vec", namespace="default")
         assert preserved is not None
         assert preserved.id == "no-vec"
         assert preserved.content == "test content"
@@ -213,7 +214,7 @@ class TestStoredEmbeddings:
         pytest.importorskip("sqlite_vec")
         entry = make_entry("vec-entry", "vector content")
         backend.store(entry)
-        backend.upsert_vector(entry.id, [0.1] * backend._dim)
+        backend.upsert_vector(entry.id, [0.1] * backend._dim, namespace="default")
 
         embeddings = backend.get_stored_embeddings([entry.id, "missing"])
 
@@ -264,8 +265,8 @@ class TestExistingVectorIds:
         c = make_entry("vec-c", "charlie")
         for entry in (a, b, c):
             backend.store(entry)
-        backend.upsert_vector(a.id, [0.1] * backend._dim)
-        backend.upsert_vector(b.id, [0.2] * backend._dim)
+        backend.upsert_vector(a.id, [0.1] * backend._dim, namespace="default")
+        backend.upsert_vector(b.id, [0.2] * backend._dim, namespace="default")
         # c intentionally has no vector
 
         ids = backend.existing_vector_ids()
@@ -322,6 +323,7 @@ class TestOptionalVecModuleUnavailable:
             dim=2,
             entry_id="vec-missing",
             embedding=[0.1, 0.2],
+            namespace="default",
         )
 
         assert conn.rollback_called is True
@@ -331,20 +333,20 @@ class TestOptionalVecModuleUnavailable:
     def test_delete_vector_internal_ignores_missing_optional_vec0_module(self) -> None:
         conn = _Vec0MissingConn()
 
-        delete_vector_internal(conn, "vec-missing")
+        delete_vector_internal(conn, "vec-missing", namespace="default")
 
         assert any("vec_memories" in statement for statement in conn.statements)
 
     def test_vector_exists_treats_missing_optional_vec0_module_as_absent(self) -> None:
         conn = _AlwaysFailConn(sqlite3.OperationalError("no such module: vec0"))
 
-        assert vector_exists(conn, vec_available=True, entry_id="vec-missing") is False
+        assert vector_exists(conn, vec_available=True, entry_id="vec-missing", namespace="default") is False
 
     def test_vector_exists_still_raises_non_optional_sqlite_errors(self) -> None:
         conn = _AlwaysFailConn(sqlite3.DatabaseError("database disk image is malformed"))
 
         with pytest.raises(sqlite3.DatabaseError, match="malformed"):
-            vector_exists(conn, vec_available=True, entry_id="still-bad")
+            vector_exists(conn, vec_available=True, entry_id="still-bad", namespace="default")
 
 
 class _RecordingConn:
@@ -394,6 +396,7 @@ class TestVectorDimensionMismatch:
             dim=384,
             entry_id="dim-mismatch",
             embedding=[0.1, 0.2, 0.3],
+            namespace="default",
         )
 
         assert conn.statements == []
@@ -410,6 +413,7 @@ class TestVectorDimensionMismatch:
             dim=4,
             entry_id="too-long",
             embedding=[0.1] * 768,
+            namespace="default",
         )
 
         assert conn.statements == []
@@ -428,6 +432,7 @@ class TestVectorDimensionMismatch:
             entry_id="in-txn",
             embedding=[0.5, 0.6],
             skip_commit=True,
+            namespace="default",
         )
 
         assert conn.rollback_called is False
@@ -457,9 +462,9 @@ class TestVectorDimensionMismatch:
         entry = make_entry("e2e-dim", "content that must survive")
         be.store(entry)
         # Wrong-length vector (config drift). Must not raise; row must persist.
-        be.upsert_vector(entry.id, [0.1] * 768)
+        be.upsert_vector(entry.id, [0.1] * 768, namespace="default")
 
-        preserved = be.get(entry.id)
+        preserved = be.get(entry.id, namespace="default")
         assert preserved is not None
         assert preserved.content == "content that must survive"
         # No vector was stored, so the id is absent from the index.
@@ -552,7 +557,7 @@ class TestSqliteVecExtensionLoadFailure:
         assert sqlite_backend._vec_available is False
         entry = make_entry("no-ext-1", content="should persist without vec")
         sqlite_backend.store(entry)
-        got = sqlite_backend.get("no-ext-1")
+        got = sqlite_backend.get("no-ext-1", namespace="default")
         assert got is not None
         assert got.content == "should persist without vec"
 
@@ -566,4 +571,4 @@ class TestSqliteVecExtensionLoadFailure:
 
         assert sqlite_backend._vec_available is False
         sqlite_backend.store(make_entry("op-1", content="fallback works"))
-        assert sqlite_backend.get("op-1") is not None
+        assert sqlite_backend.get("op-1", namespace="default") is not None

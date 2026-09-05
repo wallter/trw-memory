@@ -34,7 +34,7 @@ class _InMemoryBackend(StorageBackend):
     def store(self, entry: MemoryEntry) -> None:
         self._data[entry.id] = entry
 
-    def get(self, entry_id: str) -> MemoryEntry | None:
+    def get(self, entry_id: str, *, namespace: str = "default") -> MemoryEntry | None:
         return self._data.get(entry_id)
 
     def update(self, entry_id: str, **fields: object) -> MemoryEntry | None:
@@ -56,7 +56,7 @@ class _InMemoryBackend(StorageBackend):
         self._data[entry_id] = MemoryEntry(**data)
         return self._data[entry_id]
 
-    def delete(self, entry_id: str) -> bool:
+    def delete(self, entry_id: str, *, namespace: str = "default") -> bool:
         if self.delete_override is not None:
             return self.delete_override(entry_id)
         if entry_id not in self._data:
@@ -119,7 +119,7 @@ class _InMemoryBackend(StorageBackend):
     def supports_vectors(self) -> bool:
         return True
 
-    def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:
+    def upsert_vector(self, entry_id: str, embedding: list[float], *, namespace: str = "default") -> None:
         if self.upsert_vector_override is not None:
             self.upsert_vector_override(entry_id, embedding)
             return

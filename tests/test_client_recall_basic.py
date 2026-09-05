@@ -13,6 +13,7 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.storage.sqlite_backend import SQLiteBackend
+from trw_memory.sync import SharedFetchResult
 
 
 class TestRecall:
@@ -90,9 +91,9 @@ class TestRecall:
         assert results[0]["source"] == "local"
         assert any(result["namespace"] == "project:other" for result in results)
         backend = cast("SQLiteBackend", client._get_backend())
-        current_entry = backend.get(results[0]["memory_id"])
+        current_entry = backend.get(results[0]["memory_id"], namespace="project:default")
         with create_backend_from_config(cfg, "project:other") as reopened_storage:
-            remote_entry = cast("SQLiteBackend", reopened_storage).get("M-org")
+            remote_entry = cast("SQLiteBackend", reopened_storage).get("M-org", namespace="project:other")
         assert current_entry is not None
         assert remote_entry is not None
         assert current_entry.access_count == 1
@@ -167,7 +168,8 @@ class TestRecall:
             "source": "shared",
         }
 
-        with patch("trw_memory.client.fetch_shared_memories", return_value=[shared_result]) as fetch_mock:
+        fetched = SharedFetchResult([shared_result], "ok", 1, 0)
+        with patch("trw_memory.client.fetch_shared_memories", return_value=fetched) as fetch_mock:
             results = await client.recall("entry", include_shared=True)
 
         assert fetch_mock.called

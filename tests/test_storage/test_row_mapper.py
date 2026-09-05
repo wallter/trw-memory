@@ -195,7 +195,9 @@ def test_anchor_empty_list_default() -> None:
     row = _entry_to_full_row(entry)
     restored = row_to_entry(row)
     assert restored.anchors == []
-    assert restored.anchor_validity == 1.0
+    # PRD-CORE-244-FR01: an unanchored row reads back as None ('never assessed'),
+    # not as a perfect 1.0 it never earned.
+    assert restored.anchor_validity is None
 
 
 def test_anchor_json_round_trip() -> None:
@@ -255,7 +257,9 @@ def test_corrupt_anchor_validity_degrades_to_default() -> None:
 
     restored = row_to_entry(tuple(row))
 
-    assert restored.anchor_validity == 1.0
+    # PRD-CORE-244-FR01: an unanchored row reads back as None ('never assessed'),
+    # not as a perfect 1.0 it never earned.
+    assert restored.anchor_validity is None
     assert restored.id == "L-anc-val-bad"
 
 
@@ -267,7 +271,9 @@ def test_null_anchor_validity_uses_default() -> None:
 
     restored = row_to_entry(tuple(row))
 
-    assert restored.anchor_validity == 1.0
+    # PRD-CORE-244-FR01: an unanchored row reads back as None ('never assessed'),
+    # not as a perfect 1.0 it never earned.
+    assert restored.anchor_validity is None
 
 
 def test_corrupt_anchors_json_degrades_to_empty() -> None:

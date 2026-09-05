@@ -47,7 +47,7 @@ def _stored_row(storage_path: Path, memory_id: str) -> Any:
     """Read the persisted row straight from the SQLite file the client wrote."""
     db_path = next(storage_path.rglob("*.db"))
     with SQLiteBackend(db_path) as backend:
-        return backend.get(memory_id)
+        return backend.get(memory_id, namespace="default")
 
 
 @pytest.fixture()

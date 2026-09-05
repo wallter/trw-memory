@@ -31,13 +31,13 @@ class _MinimalBackend(StorageBackend):
     def store(self, entry: MemoryEntry) -> None:  # pragma: no cover - trivial
         return None
 
-    def get(self, entry_id: str) -> MemoryEntry | None:  # pragma: no cover
+    def get(self, entry_id: str, *, namespace: str = "default") -> MemoryEntry | None:  # pragma: no cover
         return None
 
     def update(self, entry_id: str, **fields: object) -> MemoryEntry | None:  # pragma: no cover
         return None
 
-    def delete(self, entry_id: str) -> bool:  # pragma: no cover
+    def delete(self, entry_id: str, *, namespace: str = "default") -> bool:  # pragma: no cover
         return False
 
     def search(self, query: str, **kwargs: object) -> list[MemoryEntry]:  # pragma: no cover
@@ -62,7 +62,7 @@ class _RecordingVectorBackend(_MinimalBackend):
     def supports_vectors(self) -> bool:
         return True
 
-    def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:
+    def upsert_vector(self, entry_id: str, embedding: list[float], *, namespace: str = "default") -> None:
         self.upserts.append((entry_id, embedding))
 
 
@@ -205,9 +205,9 @@ async def test_store_embeds_and_upserts_when_backend_supports_vectors(
     upserts: list[tuple[str, list[float]]] = []
     real_upsert = backend.upsert_vector
 
-    def _record(entry_id: str, embedding: list[float]) -> None:
+    def _record(entry_id: str, embedding: list[float], *, namespace: str) -> None:
         upserts.append((entry_id, embedding))
-        real_upsert(entry_id, embedding)
+        real_upsert(entry_id, embedding, namespace=namespace)
 
     monkeypatch.setattr(backend, "upsert_vector", _record)
 
@@ -218,7 +218,7 @@ async def test_store_embeds_and_upserts_when_backend_supports_vectors(
 
     assert spy.embed_calls, "embedder should run when backend supports vectors"
     assert [eid for eid, _ in upserts] == [result["memory_id"]]
-    assert backend.vector_exists(result["memory_id"]) is True
+    assert backend.vector_exists(result["memory_id"], namespace="default") is True
 
 
 async def test_bulk_store_skips_batch_embed_when_no_vector_sink(

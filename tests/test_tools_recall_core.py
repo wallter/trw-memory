@@ -285,7 +285,7 @@ class TestMemoryRecallImpl:
         root = _make_entry("M-root", content="root entry")
         related = _make_entry("M-related", content="related entry")
         backend = _mock_backend([root])
-        backend.get.side_effect = lambda entry_id: {"M-root": root, "M-related": related}.get(entry_id)
+        backend.get.side_effect = lambda entry_id, **_kwargs: {"M-root": root, "M-related": related}.get(entry_id)
 
         conn = sqlite3.connect(":memory:")
         conn.execute("CREATE TABLE memory_graph_edges (source_id TEXT, target_id TEXT, edge_type TEXT, weight REAL)")
@@ -318,7 +318,7 @@ class TestMemoryRecallImpl:
 
         root = _make_entry("M-root", content="root entry")
         backend = _mock_backend([root])
-        backend.get.side_effect = lambda entry_id: {"M-root": root}.get(entry_id)
+        backend.get.side_effect = lambda entry_id, **_kwargs: {"M-root": root}.get(entry_id)
 
         conn = sqlite3.connect(":memory:")
         conn.execute("CREATE TABLE memory_graph_edges (source_id TEXT, target_id TEXT, edge_type TEXT, weight REAL)")
@@ -386,8 +386,8 @@ class TestMemoryRecallImpl:
             assert memories[0]["namespace"] == "project:default"
             assert memories[1]["namespace"] == "project:other"
             assert memories[1]["scope"] == "org"
-            local_entry = current_backend.get("M-local")
-            remote_entry = remote_backend.get("M-org")
+            local_entry = current_backend.get("M-local", namespace="project:default")
+            remote_entry = remote_backend.get("M-org", namespace="project:other")
             assert local_entry is not None
             assert remote_entry is not None
             assert local_entry.access_count == 1

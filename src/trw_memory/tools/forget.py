@@ -78,7 +78,7 @@ def memory_forget_impl(
                 for candidate in entries:
                     if candidate.source_identity != actor:
                         continue
-                    if backend.delete(candidate.id):
+                    if backend.delete(candidate.id, namespace=candidate.namespace):
                         deleted_count += 1
                         if supports_tier_runtime(backend):
                             remove_entry_from_tiers(cfg, namespace, candidate.id)
@@ -87,7 +87,7 @@ def memory_forget_impl(
             for candidate in entries:
                 if candidate.source_identity != actor:
                     continue
-                if backend.delete(candidate.id):
+                if backend.delete(candidate.id, namespace=candidate.namespace):
                     deleted_count += 1
                     if supports_tier_runtime(backend):
                         remove_entry_from_tiers(cfg, namespace, candidate.id)
@@ -113,7 +113,12 @@ def memory_forget_impl(
         # (trw-memory-5). Resolve the namespace match FIRST.
         in_namespace = False
         try:
-            entry = backend.get(memory_id)
+            entry = backend.get(memory_id, namespace=namespace)
+            # Defence in depth: the read is already namespace-qualified under
+            # PRD-CORE-245 FR03, so this second predicate only fires for a
+            # backend that ignores it. Keeping it preserves the trw-memory-5
+            # property that a cross-namespace id is indistinguishable from a
+            # missing one, whatever the backend hands back.
             in_namespace = entry is not None and entry.namespace == namespace
             if in_namespace and entry is not None and entry.metadata.get("system_canary") == "true":
                 # Canary refusal only fires for an entry in the caller's own
@@ -122,7 +127,7 @@ def memory_forget_impl(
                     f"Refusing to delete system canary entry '{memory_id}': deleting canaries is a security violation."
                 )
             if in_namespace:
-                was_deleted = backend.delete(memory_id)
+                was_deleted = backend.delete(memory_id, namespace=namespace)
                 deleted_count = 1 if was_deleted else 0
                 if was_deleted and supports_tier_runtime(backend):
                     remove_entry_from_tiers(cfg, namespace, memory_id)
@@ -176,7 +181,7 @@ def memory_forget_impl(
     deleted_count = 0
     for entry in matches:
         try:
-            if backend.delete(entry.id):
+            if backend.delete(entry.id, namespace=entry.namespace):
                 deleted_count += 1
                 if supports_tier_runtime(backend):
                     remove_entry_from_tiers(cfg, namespace, entry.id)

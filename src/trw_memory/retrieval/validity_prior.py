@@ -18,9 +18,48 @@ an in-memory field compare, no extra DB query). It:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import date, datetime, timezone
 
 from trw_memory.models.memory import MemoryEntry
+
+
+def _parse_expires_date(raw: str) -> date | None:
+    """Parse an ``expires`` field to a UTC date, or ``None`` if it never expires.
+
+    Accepts the two shapes the field is written in — a bare ISO date
+    (``"2026-07-01"``) and a full ISO datetime (``"2026-07-01T00:00:00+00:00"``).
+    An empty or unparseable value returns ``None``, matching the existing
+    fallback in ``trw_mcp.scoring._decay`` rather than inventing a second
+    convention: a value nobody can read must not silently retire a record.
+    """
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+    except ValueError:
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            return None
+
+
+def _is_expired_at(entry: MemoryEntry, as_of: datetime | None) -> bool:
+    """PRD-CORE-244 FR05 — has *entry*'s author-set validity window closed?
+
+    Boundary semantics are day-exclusive and chosen to match
+    ``trw_mcp.scoring._decay`` exactly (``today > expires_date``): an entry whose
+    ``expires`` date IS the evaluation date is still valid, and expiry takes
+    effect at the start of the following UTC day.
+
+    Under ``as_of`` time travel the predicate is evaluated against the ``as_of``
+    instant, so a caller asking what was believed at time T gets a record that
+    was unexpired at T (resolves OQ-04).
+    """
+    expires_date = _parse_expires_date(entry.expires)
+    if expires_date is None:
+        return False
+    reference = (as_of or datetime.now(timezone.utc)).date()
+    return reference > expires_date
 
 
 def _is_open_at(entry: MemoryEntry, as_of: datetime | None) -> bool:
@@ -30,7 +69,17 @@ def _is_open_at(entry: MemoryEntry, as_of: datetime | None) -> bool:
     (``invalid_from is None``). ``as_of=T``: eligible iff its window contained T
     — half-open ``valid_from <= T < invalid_from`` (treating ``invalid_from is
     None`` as ``+inf``).
+
+    PRD-CORE-244 FR05: a past ``expires`` date also closes the window. Before
+    this, ``trw_mcp.scoring._decay`` floored an expired entry's utility at 0.01
+    while THIS path still called it an open record, so the two ranking paths
+    disagreed about what an expired record means. Reusing ineligibility is what
+    gives expired records the demotion superseded records already get — the
+    default-exclude and the ``include_superseded`` append-after-open behaviour —
+    with no new ranking code.
     """
+    if _is_expired_at(entry, as_of):
+        return False
     if as_of is None:
         return entry.invalid_from is None
     if entry.valid_from > as_of:

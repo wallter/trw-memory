@@ -22,7 +22,6 @@ __all__ = [
     "create_co_anchored_edges",
     "create_consolidation_edges",
     "create_similarity_edges",
-    "create_tag_cooccurrence_edges",
     "detect_clusters",
     "detect_cross_validation",
     "filter_conflicts",
@@ -61,10 +60,8 @@ _BACKGROUND_GRAPH_THREADS_GUARD = _GRAPH_THREAD_REGISTRY._guard
 
 logger = structlog.get_logger(__name__)
 
-MAX_TRAVERSAL_DEPTH = 3
 SIMILARITY_THRESHOLD = 0.75
 CROSS_VALIDATION_THRESHOLD = 0.92
-TAG_COOCCURRENCE_MIN_SHARED = 2
 CANDIDATE_LIMIT = 500
 IMPORTANCE_BOOST = 0.05
 DECAY_DELTA = 0.1
@@ -193,12 +190,6 @@ def update_entry_graph(
         candidate_embeddings=candidate_embeddings,
         lock=lock,
     )
-    tag_edges = create_tag_cooccurrence_edges(
-        entry,
-        conn,
-        candidate_entries=candidate_entries,
-        lock=lock,
-    )
     consolidation_edges = create_consolidation_edges(
         entry,
         conn,
@@ -208,6 +199,7 @@ def update_entry_graph(
         conn,
         entry.id,
         list(dict.fromkeys(anchor.file for anchor in entry.anchors)),
+        namespace=entry.namespace,
         lock=lock,
         min_shared_anchors=3,
     )
@@ -220,7 +212,10 @@ def update_entry_graph(
     )
     return {
         "similarity_edges": similarity_edges,
-        "tag_edges": tag_edges,
+        # PRD-CORE-245 FR07: tag co-occurrence is no longer materialised. The
+        # inverted index behind the derivation is maintained by the write path
+        # in ``storage/_crud_ops.py``, so there is nothing for this pass to do
+        # and nothing to count.
         "consolidation_edges": consolidation_edges,
         "co_anchored_edges": co_anchored_edges,
         "cross_validated_projects": cross_validated_projects,
@@ -255,7 +250,6 @@ from trw_memory._graph_decay import (  # noqa: E402
 from trw_memory._graph_edges import (  # noqa: E402
     create_consolidation_edges as create_consolidation_edges,
     create_similarity_edges as create_similarity_edges,
-    create_tag_cooccurrence_edges as create_tag_cooccurrence_edges,
 )
 
 # Cluster detection + impact propagation extracted to _graph_clusters.py
@@ -264,6 +258,14 @@ from trw_memory._graph_clusters import (  # noqa: E402
     _propose_domain_name as _propose_domain_name,
     detect_clusters as detect_clusters,
     propagate_impact as propagate_impact,
+)
+
+# BFS traversal + derived tag neighbours extracted to _graph_traversal.py
+# (PRD-CORE-245 FR07 — the facade had 8 effective LOC of headroom).
+from trw_memory._graph_traversal import (  # noqa: E402
+    DERIVED_EDGE_TYPE as DERIVED_EDGE_TYPE,
+    MAX_TRAVERSAL_DEPTH as MAX_TRAVERSAL_DEPTH,
+    graph_query as graph_query,
 )
 
 # Conflict detection + co-anchored edges extracted to _graph_conflicts.py
@@ -329,121 +331,6 @@ def list_org_shared_entries(
 
     matches.sort(key=lambda entry: (entry.importance, entry.updated_at), reverse=True)
     return matches[:limit]
-
-
-def graph_query(
-    conn: sqlite3.Connection,
-    root_ids: list[str],
-    depth: int = 2,
-    edge_types: list[str] | None = None,
-    namespace: str | None = None,
-    max_nodes: int | None = None,
-) -> list[dict[str, str | int | float]]:
-    """BFS traversal from root nodes up to specified depth.
-
-    Args:
-        conn: SQLite connection.
-        root_ids: Starting node IDs.
-        depth: Max traversal depth (clamped to 3).
-        edge_types: Filter by edge type(s). None = all types.
-        namespace: When provided, restrict traversal to edges whose
-            ``target_id`` resolves to a ``memories`` row in this namespace.
-            ``memory_graph_edges`` has no namespace column and a single
-            SQLite DB holds many namespaces, so without this predicate a
-            root from namespace A can follow cross-namespace edges and
-            surface (and recurse into) node IDs that belong to namespace B
-            — a data-isolation leak. ``None`` keeps the legacy unscoped
-            behaviour (mirrors the ``namespace`` scoping added to the
-            vector-ops path).
-        max_nodes: Optional hard cap on discovered nodes. ``None`` preserves
-            the legacy internal traversal contract; public adapters set a cap.
-
-    Returns:
-        List of {"id": str, "depth": int, "edge_type": str, "weight": float}
-        for each discovered node, excluding root nodes.
-    """
-    if not root_ids:
-        return []
-    if max_nodes is not None and max_nodes < 1:
-        raise ValueError("max_nodes must be at least 1")
-
-    if depth > MAX_TRAVERSAL_DEPTH:
-        logger.debug("graph_query_depth_clamped", requested=depth, clamped=MAX_TRAVERSAL_DEPTH)
-        depth = MAX_TRAVERSAL_DEPTH
-
-    if namespace is not None:
-        allowed_roots: set[str] = set()
-        for chunk in iter_bind_chunks(root_ids, reserved_bindings=1):
-            placeholders = ", ".join("?" for _ in chunk)
-            rows = conn.execute(
-                f"SELECT id FROM memories WHERE namespace = ? AND id IN ({placeholders})",  # noqa: S608
-                (namespace, *chunk),
-            ).fetchall()
-            allowed_roots.update(str(row[0]) for row in rows)
-        root_ids = [root_id for root_id in root_ids if root_id in allowed_roots]
-        if not root_ids:
-            return []
-
-    visited: set[str] = set(root_ids)
-    results: list[dict[str, str | int | float]] = []
-    queue: deque[tuple[str, int]] = deque()
-
-    for rid in root_ids:
-        queue.append((rid, 0))
-
-    # Namespace scoping is applied as a correlated EXISTS against `memories`
-    # so the target row's namespace must match — edges pointing at foreign
-    # namespaces (or at deleted rows) are skipped entirely.
-    ns_clause = ""
-    ns_param: tuple[str, ...] = ()
-    if namespace is not None:
-        ns_clause = (
-            " AND EXISTS (SELECT 1 FROM memories m WHERE m.id = memory_graph_edges.target_id AND m.namespace = ?)"
-        )
-        ns_param = (namespace,)
-
-    while queue:
-        node_id, current_depth = queue.popleft()
-        if current_depth >= depth:
-            continue
-
-        remaining = max_nodes - len(results) if max_nodes is not None else None
-        limit_clause = " LIMIT ?" if remaining is not None else ""
-
-        # Build query with optional edge type filter. Public callers pass a
-        # node cap, so the storage query itself cannot materialize an unbounded
-        # high-fanout row set before Python applies the traversal budget.
-        if edge_types:
-            placeholders = ", ".join("?" for _ in edge_types)
-            sql = (
-                f"SELECT target_id, edge_type, weight FROM memory_graph_edges "  # noqa: S608 — placeholders is ? repeated (no user input in SQL structure); values are parameterized
-                f"WHERE source_id = ? AND edge_type IN ({placeholders}){ns_clause}{limit_clause}"
-            )
-            params: tuple[str | int, ...] = (node_id, *edge_types, *ns_param, *((remaining,) if remaining else ()))
-        else:
-            sql = (
-                f"SELECT target_id, edge_type, weight FROM memory_graph_edges "  # noqa: S608 — ns_clause uses a parameterized ? placeholder; no user input in SQL structure
-                f"WHERE source_id = ?{ns_clause}{limit_clause}"
-            )
-            params = (node_id, *ns_param, *((remaining,) if remaining else ()))
-
-        for row in conn.execute(sql, params):
-            target_id, edge_type, weight = row
-            if target_id not in visited:
-                visited.add(target_id)
-                results.append(
-                    {
-                        "id": target_id,
-                        "depth": current_depth + 1,
-                        "edge_type": edge_type,
-                        "weight": weight,
-                    }
-                )
-                if max_nodes is not None and len(results) >= max_nodes:
-                    return results
-                queue.append((target_id, current_depth + 1))
-
-    return results
 
 
 def detect_cross_validation(

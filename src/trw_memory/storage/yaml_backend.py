@@ -14,26 +14,27 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, cast
 
 import structlog
 
 from trw_memory.exceptions import StorageError
-from trw_memory.models.memory import Anchor, Assertion, MemoryEntry, MemoryStatus
-from trw_memory.storage._parsing import (
-    parse_dt_safe,
-    parse_json_dict_int,
-    parse_json_dict_str,
-    parse_json_list,
-)
-from trw_memory.storage._row_mapper import parse_verification_status
+from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage._shared import (
     ENTRY_COLUMNS,
     IMMUTABLE_FIELDS,
     serialize_update_value,
     validate_update_fields,
 )
-from trw_memory.storage.interface import StorageBackend
+from trw_memory.storage._yaml_row_mapper import (
+    ParsedRow,
+)
+from trw_memory.storage._yaml_row_mapper import (
+    dict_to_entry as _dict_to_entry,
+)
+from trw_memory.storage._yaml_row_mapper import (
+    entry_to_dict as _entry_to_dict,
+)
+from trw_memory.storage.interface import EntryCursor, StorageBackend
 from trw_memory.storage.persistence import lock_for_rmw, read_yaml, write_yaml
 from trw_memory.sync.delta import DeltaTracker
 
@@ -43,151 +44,28 @@ logger = structlog.get_logger(__name__)
 _VALID_UPDATE_FIELDS: frozenset[str] = (frozenset(ENTRY_COLUMNS) - IMMUTABLE_FIELDS) | frozenset({"expires"})
 
 
+def _read_row(path: Path, data: dict[str, object]) -> ParsedRow:
+    """Deserialise *data* and log any evidence the mapper had to drop.
+
+    A row whose assertions or anchors did not parse still reads back as a usable
+    entry -- availability beats a hard failure on a corrupt file -- but it is
+    logged at WARNING rather than left indistinguishable from a row that simply
+    carries no verification evidence.
+    """
+    row = _dict_to_entry(data)
+    if row.partial:
+        logger.warning(
+            "yaml_row_partial_parse",
+            path=str(path),
+            entry_id=row.entry.id,
+            dropped_assertions=row.dropped_assertions,
+            dropped_anchors=row.dropped_anchors,
+        )
+    return row
+
+
 # ---------------------------------------------------------------------------
 # Serialisation helpers
-# ---------------------------------------------------------------------------
-
-
-def _parse_assertions(raw: object) -> list[Assertion]:
-    """Deserialise assertions from YAML data.
-
-    Skips malformed items with a debug log rather than failing the entire entry.
-    """
-    if not raw or not isinstance(raw, list):
-        return []
-    result: list[Assertion] = []
-    for item in raw:
-        if isinstance(item, dict):
-            try:
-                result.append(Assertion.model_validate(item, strict=False))
-            except (ValueError, KeyError):
-                logger.debug("yaml_assertion_parse_skipped", item=item)
-                continue
-    return result
-
-
-def _entry_to_dict(entry: MemoryEntry) -> dict[str, object]:
-    """Serialise a :class:`MemoryEntry` to a plain dict suitable for YAML."""
-    return entry.to_dict()
-
-
-def _dict_to_entry(data: dict[str, object]) -> MemoryEntry:
-    """Deserialise a YAML dict back into a :class:`MemoryEntry`.
-
-    All fields are cast explicitly to satisfy Pydantic strict mode.
-    """
-
-    def _str(key: str, default: str = "") -> str:
-        val = data.get(key, default)
-        return str(val) if val is not None else default
-
-    def _int(key: str, default: int = 0) -> int:
-        val = data.get(key, default)
-        try:
-            return int(str(val))
-        except (TypeError, ValueError):
-            return default
-
-    def _float(key: str, default: float = 0.5) -> float:
-        val = data.get(key, default)
-        try:
-            return float(str(val))
-        except (TypeError, ValueError):
-            return default
-
-    def _str_list(key: str) -> list[str]:
-        return parse_json_list(data.get(key, []))
-
-    def _str_dict(key: str) -> dict[str, str]:
-        return parse_json_dict_str(data.get(key, {}))
-
-    # Timestamps are parsed fail-open: a malformed value (e.g. the WAL-reset
-    # byte-shift '026-04-13T00:00:00+00:002') degrades the single field to a
-    # usable default instead of raising and collapsing the whole listing —
-    # matching how this mapper already fail-opens status / anchors / floats.
-    now = datetime.now(timezone.utc)
-    created_at_raw = data.get("created_at")
-    updated_at_raw = data.get("updated_at")
-    created_at = parse_dt_safe(created_at_raw, default=now) or now if created_at_raw else now
-    updated_at = parse_dt_safe(updated_at_raw, default=now) or now if updated_at_raw else now
-
-    last_accessed_raw = data.get("last_accessed_at")
-    last_accessed_at: datetime | None = parse_dt_safe(last_accessed_raw, default=None) if last_accessed_raw else None
-
-    status_raw = _str("status", "active")
-    try:
-        status = MemoryStatus(status_raw)
-    except ValueError:
-        status = MemoryStatus.ACTIVE
-
-    consolidated_into_raw = data.get("consolidated_into")
-    consolidated_into: str | None = str(consolidated_into_raw) if consolidated_into_raw else None
-
-    anchors_raw = data.get("anchors")
-    anchors: list[Anchor] = []
-    if anchors_raw:
-        try:
-            anchors = [Anchor.model_validate(a) for a in anchors_raw] if isinstance(anchors_raw, list) else []
-        except (ValueError, KeyError):
-            logger.debug("yaml_anchor_parse_skipped", anchors=anchors_raw)
-            anchors = []
-
-    return MemoryEntry(
-        id=_str("id"),
-        content=_str("content"),
-        detail=_str("detail"),
-        tags=_str_list("tags"),
-        evidence=_str_list("evidence"),
-        importance=_float("importance", 0.5),
-        status=status,
-        recurrence=_int("recurrence", 1),
-        namespace=_str("namespace", "default"),
-        created_at=created_at,
-        updated_at=updated_at,
-        last_accessed_at=last_accessed_at,
-        access_count=_int("access_count", 0),
-        session_count=_int("session_count", 0),
-        q_value=_float("q_value", 0.5),
-        q_observations=_int("q_observations", 0),
-        source=cast("Literal['human', 'agent', 'tool', 'consolidated']", _str("source", "agent")),
-        source_identity=_str("source_identity"),
-        client_profile=_str("client_profile"),
-        model_id=_str("model_id"),
-        merged_from=_str_list("merged_from"),
-        consolidated_from=_str_list("consolidated_from"),
-        consolidated_into=consolidated_into,
-        metadata=_str_dict("metadata"),
-        vector_clock=parse_json_dict_int(data.get("vector_clock", {})),
-        remote_id=str(remote_id_raw) if (remote_id_raw := data.get("remote_id")) else None,
-        published_to_platform=bool(data.get("published_to_platform", False)),
-        pending_delete=bool(data.get("pending_delete", False)),
-        cross_validated=bool(data.get("cross_validated", False)),
-        outcome_history=_str_list("outcome_history"),
-        assertions=_parse_assertions(data.get("assertions", [])),
-        anchors=anchors,
-        valid_from=parse_dt_safe(data.get("valid_from"), default=created_at) or created_at,
-        invalid_from=parse_dt_safe(data.get("invalid_from"), default=None) if data.get("invalid_from") else None,
-        invalidated_by=str(data["invalidated_by"]) if data.get("invalidated_by") else None,
-        anchor_validity=_float("anchor_validity", 1.0),
-        verification_status=parse_verification_status(data.get("verification_status")),
-        type=_str("type", "pattern"),
-        nudge_line=_str("nudge_line", ""),
-        expires=_str("expires", ""),
-        confidence=_str("confidence", "unverified"),
-        task_type=_str("task_type", ""),
-        domain=_str_list("domain"),
-        phase_origin=_str("phase_origin", ""),
-        phase_affinity=_str_list("phase_affinity"),
-        team_origin=_str("team_origin", ""),
-        protection_tier=_str("protection_tier", "normal"),
-        sync_hash=_str("sync_hash", ""),
-        sync_seq=_int("sync_seq", 0),
-        last_synced_at=parse_dt_safe(data.get("last_synced_at"), default=None) if data.get("last_synced_at") else None,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Backend
 # ---------------------------------------------------------------------------
 
 
@@ -233,7 +111,7 @@ class YAMLBackend(StorageBackend):
         for yaml_file in self._dir.glob("*.yaml"):
             try:
                 data = read_yaml(yaml_file)
-                entries.append(_dict_to_entry(data))
+                entries.append(_read_row(yaml_file, data).entry)
             except (
                 OSError,
                 StorageError,
@@ -265,24 +143,35 @@ class YAMLBackend(StorageBackend):
         write_yaml(path, _entry_to_dict(entry))
         logger.debug("yaml_entry_stored", entry_id=entry.id)
 
-    def get(self, entry_id: str) -> MemoryEntry | None:
-        """Read ``{id}.yaml`` and deserialise.
+    def get(self, entry_id: str, *, namespace: str) -> MemoryEntry | None:
+        """Read ``{id}.yaml`` and deserialise, enforcing namespace containment.
+
+        PRD-CORE-245 FR03: a row is identified by ``(namespace, id)``. This
+        backend stores one file per id, so containment is enforced on the
+        deserialised value — a row belonging to another namespace reads back as
+        ``None``, exactly as it would from the composite-keyed SQLite backend.
 
         Args:
             entry_id: Target entry id.
+            namespace: The namespace that must own the entry.
 
         Returns:
-            :class:`MemoryEntry` or ``None`` if the file does not exist.
+            :class:`MemoryEntry` or ``None`` if absent or foreign.
 
         Raises:
             StorageError: If the file exists but cannot be parsed.
         """
+        entry = self._locate_unscoped(entry_id)
+        return entry if entry is not None and entry.namespace == namespace else None
+
+    def _locate_unscoped(self, entry_id: str) -> MemoryEntry | None:
+        """Read ``{id}.yaml`` without applying the namespace predicate."""
         path = self._path(entry_id)
         if not path.exists():
             return None
         try:
             data = read_yaml(path)
-            return _dict_to_entry(data)
+            return _read_row(path, data).entry
         except StorageError:
             raise
         except (ValueError, KeyError, TypeError) as exc:
@@ -302,7 +191,9 @@ class YAMLBackend(StorageBackend):
             Updated :class:`MemoryEntry` or ``None`` if not found.
 
         Raises:
-            StorageError: If the update fails.
+            StorageError: If the update fails, or if the stored row carries
+                verification evidence the mapper could not parse -- rewriting it
+                would drop that evidence from disk.
         """
         path = self._path(entry_id)
         if not path.exists():
@@ -330,7 +221,19 @@ class YAMLBackend(StorageBackend):
                 ) from None
             if "updated_at" not in field_dict:
                 field_dict["updated_at"] = datetime.now(timezone.utc)
-            entry = _dict_to_entry(data)
+            row = _read_row(path, data)
+            if row.partial:
+                # Read-modify-write: everything below serialises the PARSED
+                # entry back over the file. Rewriting a row whose assertions or
+                # anchors did not parse would delete that evidence permanently,
+                # so the update is refused while the file is still intact.
+                raise StorageError(
+                    f"Refusing to rewrite entry {entry_id}: "
+                    f"{row.dropped_assertions} assertion(s) and {row.dropped_anchors} anchor(s) "
+                    "did not parse, and this update would drop them from the stored row",
+                    path=str(path),
+                )
+            entry = row.entry
             for key, val in field_dict.items():
                 setattr(entry, key, val)
 
@@ -345,25 +248,31 @@ class YAMLBackend(StorageBackend):
             write_yaml(path, data)
 
         try:
-            return _dict_to_entry(data)
+            return _read_row(path, data).entry
         except (ValueError, KeyError, TypeError) as exc:
             raise StorageError(
                 f"Failed to deserialise updated entry {entry_id}: {exc}",
                 path=str(path),
             ) from exc
 
-    def delete(self, entry_id: str) -> bool:
-        """Remove the ``{id}.yaml`` file.
+    def delete(self, entry_id: str, *, namespace: str) -> bool:
+        """Remove the ``{id}.yaml`` file owned by *namespace*.
+
+        PRD-CORE-245 FR03: a delete addressed at another namespace's row is a
+        miss, not a deletion.
 
         Args:
             entry_id: Target entry id.
+            namespace: The namespace that must own the entry.
 
         Returns:
-            ``True`` if deleted, ``False`` if not found.
+            ``True`` if deleted, ``False`` if not found or foreign.
 
         Raises:
             StorageError: If deletion fails for a reason other than not-found.
         """
+        if self.get(entry_id, namespace=namespace) is None:
+            return False
         path = self._path(entry_id)
         if not path.exists():
             return False
@@ -464,6 +373,7 @@ class YAMLBackend(StorageBackend):
         limit: int = 100,
         exclude_superseded: bool = False,
         tags: list[str] | None = None,
+        after: EntryCursor | None = None,
     ) -> list[MemoryEntry]:
         """Return entries with optional filters.
 
@@ -479,9 +389,15 @@ class YAMLBackend(StorageBackend):
             tags: If provided, only return entries containing ALL of these tags.
                 Applied BEFORE the limit so tagged entries past the row limit
                 are not truncated away (parity with the SQLite backend).
+            after: Keyset position from a previous page; only entries ranked
+                strictly below it are returned (parity with the SQLite
+                backend, which a namespace merge across two YAML stores
+                depends on).
 
         Returns:
-            Up to *limit* matching entries ordered by updated_at descending.
+            Up to *limit* matching entries ordered by updated_at descending,
+            id descending. The id tiebreak makes the order total, which is what
+            makes consecutive ``after=`` pages disjoint and complete.
         """
         if limit <= 0:
             return []
@@ -503,9 +419,11 @@ class YAMLBackend(StorageBackend):
                 continue
             if required_tags is not None and not required_tags.issubset(set(entry.tags)):
                 continue
+            if after is not None and (entry.updated_at.isoformat(), entry.id) >= (after.updated_at, after.entry_id):
+                continue
             results.append(entry)
 
-        results.sort(key=lambda e: e.updated_at.isoformat(), reverse=True)
+        results.sort(key=lambda e: (e.updated_at.isoformat(), e.id), reverse=True)
         return results[:limit]
 
     # ------------------------------------------------------------------

@@ -9,6 +9,7 @@ from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.pipeline import hybrid_search
 
 from ._test_retrieval_support import StubEmbedder, make_entry, stored_embeddings_for
+from ._test_scope_support import DEFAULT_SCOPE
 
 
 class TestHybridSearch:
@@ -23,12 +24,12 @@ class TestHybridSearch:
 
     def test_returns_memory_entries(self) -> None:
         entries = self._entries()
-        results = hybrid_search("pydantic", entries)
+        results = hybrid_search("pydantic", entries, scope=DEFAULT_SCOPE)
         assert all(isinstance(result, MemoryEntry) for result in results)
 
     def test_bm25_only_no_embedder(self) -> None:
         entries = self._entries()
-        results = hybrid_search("pydantic", entries, embedder=None, stored_embeddings=None)
+        results = hybrid_search("pydantic", entries, embedder=None, stored_embeddings=None, scope=DEFAULT_SCOPE)
         assert len(results) >= 1
         assert "e1" in [entry.id for entry in results]
 
@@ -37,47 +38,44 @@ class TestHybridSearch:
         entries = self._entries()
         stored = stored_embeddings_for([entry.id for entry in entries], embedder)
         with patch("trw_memory.retrieval.pipeline.bm25_search", return_value=[]):
-            results = hybrid_search("e1", entries, embedder=embedder, stored_embeddings=stored)
+            results = hybrid_search("e1", entries, embedder=embedder, stored_embeddings=stored, scope=DEFAULT_SCOPE)
         assert len(results) >= 1
 
     def test_both_sources_produce_results(self) -> None:
         embedder = StubEmbedder()
         entries = self._entries()
         stored = stored_embeddings_for([entry.id for entry in entries], embedder)
-        results = hybrid_search("pydantic model", entries, embedder=embedder, stored_embeddings=stored)
+        results = hybrid_search(
+            "pydantic model", entries, embedder=embedder, stored_embeddings=stored, scope=DEFAULT_SCOPE
+        )
         assert len(results) >= 1
 
     def test_neither_source_returns_empty(self) -> None:
         entries = self._entries()
         with patch("trw_memory.retrieval.pipeline.bm25_search", return_value=[]):
             with patch("trw_memory.retrieval.pipeline.dense_search", return_value=[]):
-                results = hybrid_search("anything", entries)
+                results = hybrid_search("anything", entries, scope=DEFAULT_SCOPE)
         assert results == []
 
     def test_empty_entries_returns_empty(self) -> None:
-        assert hybrid_search("query", []) == []
+        assert hybrid_search("query", [], scope=DEFAULT_SCOPE) == []
 
     def test_top_k_limits_results(self) -> None:
         entries = [make_entry(f"e{i}", f"python item {i}") for i in range(20)]
-        results = hybrid_search("python", entries, top_k=3)
+        results = hybrid_search("python", entries, top_k=3, scope=DEFAULT_SCOPE)
         assert len(results) <= 3
 
     def test_result_ids_are_subset_of_input_ids(self) -> None:
         entries = self._entries()
         input_ids = {entry.id for entry in entries}
-        results = hybrid_search("retrieval", entries)
+        results = hybrid_search("retrieval", entries, scope=DEFAULT_SCOPE)
         for result in results:
             assert result.id in input_ids
 
     def test_uses_config_parameters(self) -> None:
         entries = self._entries()
         results = hybrid_search(
-            "pydantic",
-            entries,
-            bm25_candidates=5,
-            vector_candidates=5,
-            rrf_k=30,
-            top_k=2,
+            "pydantic", entries, bm25_candidates=5, vector_candidates=5, rrf_k=30, top_k=2, scope=DEFAULT_SCOPE
         )
         assert len(results) <= 2
 
@@ -100,7 +98,9 @@ class TestHybridSearch:
         with patch("trw_memory.retrieval.pipeline.bm25_search", return_value=[("e1", 1.0)]):
             with patch("trw_memory.retrieval.pipeline.dense_search", return_value=[("e2", 1.0)]):
                 with patch("trw_memory.retrieval.pipeline.rrf_fuse", side_effect=fake_rrf_fuse):
-                    results = hybrid_search("pydantic", entries, stored_embeddings={"e2": [0.1, 0.2, 0.3]})
+                    results = hybrid_search(
+                        "pydantic", entries, stored_embeddings={"e2": [0.1, 0.2, 0.3]}, scope=DEFAULT_SCOPE
+                    )
 
         assert captured["k"] == MemoryConfig().rrf_k == 5
         assert [entry.id for entry in results] == ["e1"]
@@ -122,7 +122,7 @@ class TestHybridSearch:
         with patch("trw_memory.retrieval.pipeline.bm25_search", return_value=[("e1", 1.0)]):
             with patch("trw_memory.retrieval.pipeline.dense_search", return_value=[]):
                 with patch("trw_memory.retrieval.pipeline.recency_rank", side_effect=fake_recency_rank):
-                    results = hybrid_search("recent pydantic", entries, recency_weight=0.3)
+                    results = hybrid_search("recent pydantic", entries, recency_weight=0.3, scope=DEFAULT_SCOPE)
 
         assert captured["halflife_days"] == MemoryConfig().recall_recency_halflife_days == 14.0
         assert captured["now"] is None
@@ -133,13 +133,13 @@ class TestHybridSearch:
         entries = self._entries()
         with patch("trw_memory.retrieval.pipeline.dense_search") as mock_dense:
             mock_dense.return_value = []
-            result = hybrid_search("pydantic", entries, embedder=embedder, stored_embeddings=None)
+            result = hybrid_search("pydantic", entries, embedder=embedder, stored_embeddings=None, scope=DEFAULT_SCOPE)
         mock_dense.assert_called_once()
         assert result
 
     def test_entries_returned_are_original_objects(self) -> None:
         entries = self._entries()
-        results = hybrid_search("pydantic fastmcp", entries)
+        results = hybrid_search("pydantic fastmcp", entries, scope=DEFAULT_SCOPE)
         entry_map = {entry.id: entry for entry in entries}
         for result in results:
             assert result is entry_map[result.id]
@@ -148,22 +148,22 @@ class TestHybridSearch:
         embedder = StubEmbedder()
         entries = self._entries()
         stored = stored_embeddings_for([entry.id for entry in entries], embedder)
-        results = hybrid_search("pydantic", entries, embedder=embedder, stored_embeddings=stored)
+        results = hybrid_search("pydantic", entries, embedder=embedder, stored_embeddings=stored, scope=DEFAULT_SCOPE)
         assert len(results) >= 1
 
     def test_hybrid_search_empty_entries(self) -> None:
-        assert hybrid_search("query", []) == []
+        assert hybrid_search("query", [], scope=DEFAULT_SCOPE) == []
 
     def test_hybrid_search_embedder_none_with_stored_embeddings(self) -> None:
         entries = self._entries()
         stored = {"e1": [0.1, 0.2, 0.3]}
-        results = hybrid_search("pydantic", entries, embedder=None, stored_embeddings=stored)
+        results = hybrid_search("pydantic", entries, embedder=None, stored_embeddings=stored, scope=DEFAULT_SCOPE)
         assert len(results) >= 1
         assert "e1" in [entry.id for entry in results]
 
     def test_hybrid_search_query_empty_string(self) -> None:
         entries = self._entries()
-        results = hybrid_search("", entries)
+        results = hybrid_search("", entries, scope=DEFAULT_SCOPE)
         assert len(results) >= 0
 
 
@@ -181,12 +181,14 @@ class TestHybridSearchDegradation:
         stored = stored_embeddings_for([entry.id for entry in entries], embedder)
 
         with patch("trw_memory.retrieval.bm25._BM25_AVAILABLE", False):
-            results = hybrid_search("pydantic", entries, embedder=embedder, stored_embeddings=stored)
+            results = hybrid_search(
+                "pydantic", entries, embedder=embedder, stored_embeddings=stored, scope=DEFAULT_SCOPE
+            )
         assert len(results) >= 1
 
     def test_hybrid_search_embedder_none(self) -> None:
         entries = self._entries()
-        results = hybrid_search("pydantic", entries, embedder=None, stored_embeddings=None)
+        results = hybrid_search("pydantic", entries, embedder=None, stored_embeddings=None, scope=DEFAULT_SCOPE)
         assert len(results) >= 1
         assert "e1" in [entry.id for entry in results]
 
@@ -194,20 +196,20 @@ class TestHybridSearchDegradation:
         embedder = StubEmbedder(available=False)
         entries = self._entries()
         stored = {"e1": [0.1, 0.2, 0.3]}
-        results = hybrid_search("pydantic", entries, embedder=embedder, stored_embeddings=stored)
+        results = hybrid_search("pydantic", entries, embedder=embedder, stored_embeddings=stored, scope=DEFAULT_SCOPE)
         assert len(results) >= 1
         assert "e1" in [entry.id for entry in results]
 
     def test_hybrid_search_both_unavailable(self) -> None:
         entries = self._entries()
         with patch("trw_memory.retrieval.bm25._BM25_AVAILABLE", False):
-            results = hybrid_search("pydantic", entries, embedder=None, stored_embeddings=None)
+            results = hybrid_search("pydantic", entries, embedder=None, stored_embeddings=None, scope=DEFAULT_SCOPE)
         assert results == []
 
     def test_hybrid_search_single_source_passthrough(self) -> None:
         entries = self._entries()
         with patch("trw_memory.retrieval.pipeline.dense_search", return_value=[]):
-            results = hybrid_search("pydantic", entries, embedder=None)
+            results = hybrid_search("pydantic", entries, embedder=None, scope=DEFAULT_SCOPE)
         assert len(results) >= 1
 
 
@@ -251,6 +253,7 @@ class TestHybridSearchPrecomputedQueryEmbedding:
             embedder=embedder,
             query_embedding=precomputed,
             stored_embeddings=stored,
+            scope=DEFAULT_SCOPE,
         )
         assert embedder.embed_calls == 0, "query must not be re-embedded when precomputed vector is supplied"
 
@@ -260,7 +263,7 @@ class TestHybridSearchPrecomputedQueryEmbedding:
         stored = stored_embeddings_for([e.id for e in entries], embedder)
         embedder.embed_calls = 0
 
-        hybrid_search("pydantic", entries, embedder=embedder, stored_embeddings=stored)
+        hybrid_search("pydantic", entries, embedder=embedder, stored_embeddings=stored, scope=DEFAULT_SCOPE)
         assert embedder.embed_calls == 1, "legacy path must embed the query inside the dense step"
 
     def test_precomputed_matches_internal_embedding_ranking(self) -> None:
@@ -270,9 +273,14 @@ class TestHybridSearchPrecomputedQueryEmbedding:
         precomputed = embedder.embed("pydantic")
 
         with_precomputed = hybrid_search(
-            "pydantic", entries, embedder=embedder, query_embedding=precomputed, stored_embeddings=stored
+            "pydantic",
+            entries,
+            embedder=embedder,
+            query_embedding=precomputed,
+            stored_embeddings=stored,
+            scope=DEFAULT_SCOPE,
         )
-        internal = hybrid_search("pydantic", entries, embedder=embedder, stored_embeddings=stored)
+        internal = hybrid_search("pydantic", entries, embedder=embedder, stored_embeddings=stored, scope=DEFAULT_SCOPE)
         assert [e.id for e in with_precomputed] == [e.id for e in internal]
 
     def test_precomputed_embedding_forwarded_to_dense_search(self) -> None:
@@ -281,7 +289,14 @@ class TestHybridSearchPrecomputedQueryEmbedding:
         stored = stored_embeddings_for([e.id for e in entries], embedder)
         precomputed = [0.5, 0.25, 0.125]
         with patch("trw_memory.retrieval.pipeline.dense_search", return_value=[]) as mock_dense:
-            hybrid_search("pydantic", entries, embedder=embedder, query_embedding=precomputed, stored_embeddings=stored)
+            hybrid_search(
+                "pydantic",
+                entries,
+                embedder=embedder,
+                query_embedding=precomputed,
+                stored_embeddings=stored,
+                scope=DEFAULT_SCOPE,
+            )
         mock_dense.assert_called_once()
         assert mock_dense.call_args.kwargs["query_embedding"] == precomputed
 
@@ -291,11 +306,7 @@ class TestHybridSearchPrecomputedQueryEmbedding:
         stored = stored_embeddings_for([e.id for e in entries], embedder)
         precomputed = embedder.embed("e2")  # aligns with entry e2's stored vector
         results = hybrid_search(
-            "e2",
-            entries,
-            embedder=None,
-            query_embedding=precomputed,
-            stored_embeddings=stored,
+            "e2", entries, embedder=None, query_embedding=precomputed, stored_embeddings=stored, scope=DEFAULT_SCOPE
         )
         assert "e2" in [e.id for e in results]
 
@@ -320,13 +331,14 @@ class TestHybridSearchFusionModes:
             embedder=embedder,
             stored_embeddings=stored,
             fusion_mode="combmax",
+            scope=DEFAULT_SCOPE,
         )
         assert len(results) >= 1
         assert all(e.id in {"m1", "m2", "m3"} for e in results)
 
     def test_unknown_fusion_mode_falls_back_to_rrf(self) -> None:
         entries = self._entries()
-        results = hybrid_search("asyncio", entries, fusion_mode="bogus_mode")
+        results = hybrid_search("asyncio", entries, fusion_mode="bogus_mode", scope=DEFAULT_SCOPE)
         assert len(results) >= 1
 
     def test_rerank_true_called_with_mock(self) -> None:
@@ -340,7 +352,7 @@ class TestHybridSearchFusionModes:
             "trw_memory.retrieval.reranker.cross_encode_rerank",
             return_value=sentinel,
         ) as mock_rerank:
-            results = hybrid_search("asyncio", entries, rerank=True, rerank_candidates=5)
+            results = hybrid_search("asyncio", entries, rerank=True, rerank_candidates=5, scope=DEFAULT_SCOPE)
 
         mock_rerank.assert_called_once()
         assert results[0].id == entries[0].id
@@ -360,6 +372,7 @@ class TestHybridSearchFusionModes:
                 entries,
                 rerank=True,
                 rerank_query="original full query",
+                scope=DEFAULT_SCOPE,
             )
 
         mock_rerank.assert_called_once()
@@ -409,6 +422,7 @@ class TestHybridSearchImportanceBlend:
                 entries,
                 embedder=StubEmbedder(),
                 stored_embeddings={"low": [0.1, 0.2, 0.3], "high": [0.1, 0.2, 0.3]},
+                scope=DEFAULT_SCOPE,
             )
         ids = [e.id for e in results]
         # Both present; impact 0.95 'high' does NOT get promoted above 'low'
@@ -426,6 +440,7 @@ class TestHybridSearchImportanceBlend:
                 embedder=StubEmbedder(),
                 stored_embeddings={"low": [0.1, 0.2, 0.3], "high": [0.1, 0.2, 0.3]},
                 importance_alpha=0.7,
+                scope=DEFAULT_SCOPE,
             )
         ids = [e.id for e in results]
         assert ids[0] == "high", "importance_alpha must promote the 0.95-impact entry"

@@ -47,7 +47,7 @@ from trw_memory.storage._wal_checkpoint import (
     run_checkpoint as run_checkpoint,
 )
 from trw_memory.storage.persistence import lock_for_rmw as lock_for_rmw
-from trw_memory.storage.interface import StorageBackend
+from trw_memory.storage.interface import EntryCursor, StorageBackend
 from trw_memory.storage._sqlite_backend_mixins import SQLiteCheckpointVectorMixin
 from trw_memory.storage._permissions import harden_db_file_mode as _harden_db_file_mode
 from trw_memory.storage._permissions import prepare_db_file_mode as _prepare_db_file_mode
@@ -116,9 +116,9 @@ from trw_memory.storage._resilient_fetch import (
 
 # Query / list / namespace operations extracted to _query_ops.py
 # (PRD-DIST-245 batch 86).
+from trw_memory.storage._namespace_purge import delete_namespace as _namespace_purge_delete
 from trw_memory.storage._query_ops import (
     count as _query_ops_count,
-    delete_by_namespace as _query_ops_delete_by_namespace,
     entries_with_assertions as _query_ops_entries_with_assertions,
     find_active_by_content as _query_ops_find_active_by_content,
     list_entries as _query_ops_list_entries,
@@ -134,7 +134,6 @@ from trw_memory.storage._crud_ops import (
     increment_access_counts as _crud_ops_increment_access_counts,
     increment_recall_access as _crud_ops_increment_recall_access,
     increment_session_counts as _crud_ops_increment_session_counts,
-    purge_edges_for as _crud_ops_purge_edges_for,
     store as _crud_ops_store,
     store_many as _crud_ops_store_many,
     update as _crud_ops_update,
@@ -404,8 +403,19 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         status: MemoryStatus | None = None,
         namespace: str | None = None,
         min_importance: float = 0.0,
+        column_prefix: str = "",
     ) -> tuple[str, list[object]]:
         """Build a WHERE clause fragment from common filter parameters.
+
+        Args:
+            status: Optional status equality filter.
+            namespace: Optional namespace equality filter.
+            min_importance: Optional importance lower bound.
+            column_prefix: Qualifier to prepend to each column, e.g.
+                ``"memories."``. Required whenever the clause is spliced into a
+                statement that joins ``memories`` to ``memories_fts``: schema 5
+                gave the FTS table its own ``namespace`` column (PRD-CORE-245
+                FR02), so a bare ``namespace = ?`` is ambiguous there.
 
         Returns:
             A ``(where_sql, params)`` tuple.  *where_sql* is ``"1"`` when no
@@ -415,15 +425,15 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         params: list[object] = []
 
         if status is not None:
-            clauses.append("status = ?")
+            clauses.append(f"{column_prefix}status = ?")
             params.append(status.value)
 
         if min_importance > 0.0:
-            clauses.append("importance >= ?")
+            clauses.append(f"{column_prefix}importance >= ?")
             params.append(min_importance)
 
         if namespace is not None:
-            clauses.append("namespace = ?")
+            clauses.append(f"{column_prefix}namespace = ?")
             params.append(namespace)
 
         where_sql = " AND ".join(clauses) if clauses else "1"
@@ -455,18 +465,20 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         with self._fresh_connection():
             return _crud_ops_store_many(self, _INSERT_COLUMNS_SQL, _COLUMNS, entries)
 
-    def get(self, entry_id: str) -> MemoryEntry | None:
-        """Retrieve an entry by id."""
+    def get(self, entry_id: str, *, namespace: str) -> MemoryEntry | None:
+        """Retrieve the ``(namespace, entry_id)``-identified entry (PRD-CORE-245 FR03)."""
         with self._fresh_connection():
-            return _crud_ops_get(self, _SELECT_COLUMNS_SQL, entry_id)
+            return _crud_ops_get(self, _SELECT_COLUMNS_SQL, entry_id, namespace)
 
-    def update(self, entry_id: str, **fields: object) -> MemoryEntry | None:
-        """Apply a partial update to an existing entry."""
+    def update(self, entry_id: str, *, namespace: str, **fields: object) -> MemoryEntry | None:
+        """Apply a partial update to the ``(namespace, entry_id)``-identified entry."""
         from trw_memory.wiki.storage import replace_wiki_refs_for_entry
 
         try:
             with self.transaction():
-                updated = _crud_ops_update(self, _SELECT_COLUMNS_SQL, _VALID_UPDATE_COLUMNS, entry_id, **fields)
+                updated = _crud_ops_update(
+                    self, _SELECT_COLUMNS_SQL, _VALID_UPDATE_COLUMNS, entry_id, namespace, **fields
+                )
                 if updated is not None and "metadata" in fields:
                     replace_wiki_refs_for_entry(self, updated)
         except self._dbapi.Error as exc:
@@ -487,13 +499,13 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         """F-008: increment access_count + recall_count + last_accessed_at in ONE commit."""
         return _crud_ops_increment_recall_access(self, entry_ids, accessed_at=accessed_at)
 
-    def delete(self, entry_id: str) -> bool:
-        """Remove an entry from memories (and vec_index when available)."""
+    def delete(self, entry_id: str, *, namespace: str) -> bool:
+        """Remove the ``(namespace, entry_id)`` entry and every sidecar row it owns."""
         from trw_memory.wiki.storage import purge_wiki_refs_for_entry
 
         try:
             with self.transaction():
-                deleted = _crud_ops_delete(self, entry_id)
+                deleted = _crud_ops_delete(self, entry_id, namespace)
                 if deleted:
                     purge_wiki_refs_for_entry(self, entry_id)
         except self._dbapi.Error as exc:
@@ -624,12 +636,16 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         limit: int = 100,
         exclude_superseded: bool = False,
         tags: list[str] | None = None,
+        after: EntryCursor | None = None,
     ) -> list[MemoryEntry]:
-        """Return entries with optional filters, ordered by updated_at desc.
+        """Return entries ordered by ``updated_at`` desc, ``id`` desc.
 
         When *tags* is provided the predicate is pushed into SQL so the LIMIT
         applies AFTER tag filtering — tagged entries past the row limit are not
         silently truncated away before the filter runs.
+
+        *after* resumes from a previous page's keyset position, which is the
+        only correct way to page over rows the caller is deleting or skipping.
         """
         with self._fresh_connection():
             return _query_ops_list_entries(
@@ -641,6 +657,7 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
                 limit=limit,
                 exclude_superseded=exclude_superseded,
                 tags=tags,
+                after=after,
             )
 
     def list_namespaces(self, required_namespaces: list[str] | None = None) -> list[str]:
@@ -654,43 +671,8 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
             return _query_ops_list_namespaces(self, required_namespaces)
 
     def delete_by_namespace(self, namespace: str) -> int:
-        """Delete all entries in a namespace atomically.
-
-        S8 fix: the entry-row DELETE, the companion ``wiki_refs`` cleanup, and
-        per-entry vector removal all run inside ONE ``transaction()`` so a crash
-        can never leave orphan wiki refs or vector rows pointing at deleted
-        entries — it is all-or-nothing.
-        """
-        with self.transaction():
-            # Snapshot the namespace's entry IDs INSIDE the BEGIN IMMEDIATE txn so
-            # vec_index rows (keyed on entry_id, not namespace) are cleaned up for
-            # exactly the rows the DELETE removes. Reading the IDs before the txn
-            # left a TOCTOU: a concurrent INSERT between the SELECT and BEGIN got
-            # deleted from `memories` (DELETE WHERE namespace) but its vec rows
-            # were missed (stale id list) → orphan vec hits. The write lock here
-            # blocks concurrent writers, so the snapshot matches the delete.
-            with self._lock:
-                rows = self._conn.execute(
-                    "SELECT id FROM memories WHERE namespace = ?",
-                    (namespace,),
-                ).fetchall()
-            entry_ids = [str(row[0]) for row in rows]
-            if not entry_ids:
-                return 0
-            deleted = _query_ops_delete_by_namespace(self, namespace)
-            with self._lock:
-                self._conn.execute("DELETE FROM wiki_refs WHERE namespace = ?", (namespace,))
-                # Remove knowledge-graph edges that referenced any deleted row as
-                # source OR target. memory_graph_edges has no namespace column and
-                # SQLite enforces no FK cascade here, so the bulk namespace delete
-                # must clean edges explicitly — via the same purge_edges_for helper
-                # the per-row delete() uses — or orphan edges accumulate forever and
-                # a BFS follows them to ghost (deleted / foreign) node IDs.
-                _crud_ops_purge_edges_for(self, entry_ids)
-                if self._vec_available:
-                    for entry_id in entry_ids:
-                        self._delete_vector(entry_id)
-        return deleted
+        """Delete every entry in a namespace atomically (see :mod:`_namespace_purge`)."""
+        return _namespace_purge_delete(self, namespace)
 
     def query_wiki_outbound_refs(self, source_slug: str, *, namespace: str | None = None) -> list[StoredWikiReference]:
         """Return deterministic persisted outbound wiki refs for ``source_slug``."""

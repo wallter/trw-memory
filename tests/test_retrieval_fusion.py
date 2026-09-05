@@ -6,6 +6,8 @@ import pytest
 
 from trw_memory.retrieval.fusion import blend_recency, combmax_fuse, rrf_fuse
 
+from ._test_scope_support import DEFAULT_SCOPE
+
 
 class TestRRFFuse:
     def test_empty_rankings_returns_empty(self) -> None:
@@ -276,7 +278,7 @@ class TestHybridSearchFusionMode:
         from trw_memory.retrieval.pipeline import hybrid_search
 
         entries = [MemoryEntry(id=f"e{i}", content=f"entry {i}", namespace="default") for i in range(3)]
-        result = hybrid_search("entry", entries, fusion_mode="combmax")
+        result = hybrid_search("entry", entries, fusion_mode="combmax", scope=DEFAULT_SCOPE)
         # Must return MemoryEntry objects, not crash
         assert all(isinstance(e, MemoryEntry) for e in result)
 
@@ -298,7 +300,7 @@ class TestHybridSearchFusionMode:
             patch("trw_memory.retrieval.pipeline.bm25_search", return_value=fake_bm25),
             structlog.testing.capture_logs() as logs,
         ):
-            result = hybrid_search("entry", entries, fusion_mode="bogus_mode")
+            result = hybrid_search("entry", entries, fusion_mode="bogus_mode", scope=DEFAULT_SCOPE)
         warning_events = [log["event"] for log in logs if log.get("log_level") == "warning"]
         assert "hybrid_search_unknown_fusion_mode" in warning_events
         assert all(isinstance(e, MemoryEntry) for e in result)

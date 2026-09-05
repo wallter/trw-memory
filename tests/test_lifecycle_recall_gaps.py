@@ -74,7 +74,7 @@ class TestRecordRecallAccessEmptyIds:
             backend.store(MemoryEntry(id="R-001", content="test"))
             ts = datetime(2024, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
             record_recall_access(backend, ["R-001"], accessed_at=ts)
-            loaded = backend.get("R-001")
+            loaded = backend.get("R-001", namespace="default")
             assert loaded is not None
             assert loaded.recall_count == 1
         finally:

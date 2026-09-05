@@ -151,19 +151,17 @@ class TestFR02EntryToDict:
             "phase_affinity",
             "team_origin",
             "protection_tier",
-            "sessions_surfaced",
-            "avg_rework_delta",
-            "outcome_correlation",
             "recall_count",
             "helpful_count",
             "unhelpful_count",
             "session_count",
             "verification_status",
+            "verification_checked_at",
         }
         assert set(result.keys()) == expected_keys
-        # 52 + 3 bi-temporal fields (PRD-CORE-194) + verification_status
-        # (PRD-CORE-231-FR02)
-        assert len(result) == 56
+        # PRD-CORE-244-FR08 dropped three unproduced attribution fields and
+        # PRD-CORE-244-FR03 added verification_checked_at, in the schema-5 rebuild.
+        assert len(result) == 54
 
         # Verify types of serialized values
         assert result["id"] == "M-TEST-001"
@@ -215,7 +213,7 @@ class TestFR02EntryToDict:
 
         backend = YAMLBackend(tmp_path / "entries")
         backend.store(entry)
-        result = backend.get("M-YAML-001")
+        result = backend.get("M-YAML-001", namespace="default")
 
         assert result is not None
         assert result.id == "M-YAML-001"
@@ -357,9 +355,6 @@ class TestFR05BooleanConversion:
             "[]",  # phase_affinity_json
             "",  # team_origin
             "normal",  # protection_tier
-            0,  # sessions_surfaced
-            None,  # avg_rework_delta
-            "",  # outcome_correlation
             "",  # sync_hash (PRD-INFRA-051)
             0,  # sync_seq (PRD-INFRA-051)
             None,  # last_synced_at (PRD-INFRA-051)
@@ -367,6 +362,7 @@ class TestFR05BooleanConversion:
             0,  # helpful_count (PRD-CORE-132)
             0,  # unhelpful_count (PRD-CORE-132)
             None,  # verification_status (PRD-CORE-231-FR02)
+            "",  # verification_checked_at (PRD-CORE-244-FR03)
         )
 
         entry = row_to_entry(row)
@@ -426,9 +422,6 @@ class TestFR05BooleanConversion:
             "[]",  # phase_affinity_json
             "",  # team_origin
             "normal",  # protection_tier
-            0,  # sessions_surfaced
-            None,  # avg_rework_delta
-            "",  # outcome_correlation
             "",  # sync_hash (PRD-INFRA-051)
             0,  # sync_seq (PRD-INFRA-051)
             None,  # last_synced_at (PRD-INFRA-051)
@@ -436,6 +429,7 @@ class TestFR05BooleanConversion:
             0,  # helpful_count (PRD-CORE-132)
             0,  # unhelpful_count (PRD-CORE-132)
             None,  # verification_status (PRD-CORE-231-FR02)
+            "",  # verification_checked_at (PRD-CORE-244-FR03)
         )
 
         entry = row_to_entry(row)

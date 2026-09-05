@@ -18,6 +18,7 @@ import structlog
 
 from trw_memory.exceptions import StorageError
 from trw_memory.lifecycle._utils import days_since_access as _days_since_access
+from trw_memory.lifecycle.protection import prune_threshold_multiplier
 from trw_memory.lifecycle.tiers._scoring import TierSweepResult, compute_importance_score
 from trw_memory.models.config import MemoryConfig
 from trw_memory.storage.persistence import read_yaml
@@ -86,6 +87,23 @@ def _sweep_hot_to_warm(
     return demoted, errors
 
 
+def _protected_ceiling(
+    entry: dict[str, object],
+    config: MemoryConfig,
+    base_ceiling: float,
+) -> float | None:
+    """Scale a sweep ceiling by ``protection_tier`` (PRD-CORE-244 FR10).
+
+    ``None`` means the entry's tier forbids automatic demotion or purge and the
+    caller must skip it. It is deliberately NOT a ceiling of 0.0: a zero ceiling
+    is still satisfiable, and this promise is absolute.
+    """
+    multiplier = prune_threshold_multiplier(entry, config.protection_tier_prune_discount)
+    if multiplier is None:
+        return None
+    return base_ceiling * multiplier
+
+
 def _sweep_warm_to_cold(
     warm_entries: Iterable[dict[str, object]],
     config: MemoryConfig,
@@ -107,7 +125,10 @@ def _sweep_warm_to_cold(
 
             days = _days_since_access(data, today)
             utility_score = compute_importance_score(data, [], config=config)
-            if days > config.cold_threshold_days and utility_score < config.warm_archive_max_score:
+            archive_ceiling = _protected_ceiling(data, config, config.warm_archive_max_score)
+            if archive_ceiling is None:
+                continue
+            if days > config.cold_threshold_days and utility_score < archive_ceiling:
                 cold_archive_entry_fn(entry_id, data)
                 demoted += 1
                 logger.debug(
@@ -135,6 +156,9 @@ def _sweep_cold_to_purge(
 ) -> tuple[int, int]:
     """Purge expired cold entries with audit trail.
 
+    A ``protected`` or ``permanent`` entry is never purged, whatever its
+    importance or idle time (PRD-CORE-244 FR10).
+
     Returns (purged_count, error_count).
     """
     purged = 0
@@ -150,7 +174,11 @@ def _sweep_cold_to_purge(
             days = _days_since_access(data, today)
             utility_score = compute_importance_score(data, [], config=config)
 
-            if days > config.retention_days and utility_score < config.cold_purge_max_score:
+            purge_ceiling = _protected_ceiling(data, config, config.cold_purge_max_score)
+            if purge_ceiling is None:
+                logger.debug("sweep_cold_purge_protected", entry_id=entry_id)
+                continue
+            if days > config.retention_days and utility_score < purge_ceiling:
                 audit_record: dict[str, object] = {
                     "entry_id": entry_id,
                     "purged_at": datetime.now(timezone.utc).isoformat(),
@@ -197,8 +225,11 @@ def execute_sweep(
 
     Performs three transition checks in order:
     1. Hot -> Warm: entries whose last_accessed_at exceeds hot_ttl_days.
-    2. Warm -> Cold: entries idle > cold_threshold_days with importance < 0.22.
-    3. Cold -> Purge: entries idle > retention_days with importance < 0.1.
+    2. Warm -> Cold: entries idle > cold_threshold_days with importance below
+       ``warm_archive_max_score``, scaled by the entry's protection tier.
+    3. Cold -> Purge: entries idle > retention_days with importance below
+       ``cold_purge_max_score``, scaled the same way. ``protected`` and
+       ``permanent`` entries are never purged (PRD-CORE-244 FR10).
 
     Args:
         hot: The hot tier OrderedDict (mutated in-place for evictions).

@@ -20,16 +20,16 @@ async def test_local_update_advances_vector_clock(memory_client: MemoryClient) -
 
     stored = await memory_client.store("v1 content", importance=0.8, entry_id="M-clock-1")
     backend = memory_client._get_backend()
-    after_create = backend.get(stored["memory_id"])
+    after_create = backend.get(stored["memory_id"], namespace="default")
     assert after_create is not None
     assert after_create.vector_clock == {node: 1}
 
     await memory_client.store("v2 content", importance=0.8, entry_id="M-clock-1")
-    after_update_1 = backend.get("M-clock-1")
+    after_update_1 = backend.get("M-clock-1", namespace="default")
     assert after_update_1 is not None
 
     await memory_client.store("v3 content", importance=0.8, entry_id="M-clock-1")
-    after_update_2 = backend.get("M-clock-1")
+    after_update_2 = backend.get("M-clock-1", namespace="default")
     assert after_update_2 is not None
 
     # The counter must strictly increase on each edit, not reset to 1.
@@ -53,12 +53,12 @@ async def test_locally_updated_entry_wins_conflict_over_stale_remote(
 
     await memory_client.store("original", importance=0.8, entry_id="M-clock-2")
     # Snapshot the clock as it would have been pushed to the backend at v1.
-    remote_snapshot = backend.get("M-clock-2")
+    remote_snapshot = backend.get("M-clock-2", namespace="default")
     assert remote_snapshot is not None
 
     # Local keeps editing after the push snapshot.
     await memory_client.store("edited locally", importance=0.8, entry_id="M-clock-2")
-    local_latest = backend.get("M-clock-2")
+    local_latest = backend.get("M-clock-2", namespace="default")
     assert local_latest is not None
 
     assert compare_clocks(local_latest.vector_clock, remote_snapshot.vector_clock) == "a_wins"

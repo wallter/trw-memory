@@ -40,7 +40,17 @@ class SQLiteCheckpointVectorMixin:
         raise NotImplementedError
 
     def checkpoint_wal(self, mode: str = "TRUNCATE") -> CheckpointResult:
-        """Checkpoint the owning connection under the backend lock; fail open."""
+        """Checkpoint the owning connection under the backend lock; fail open.
+
+        A resetting *mode* is honoured only on an engine carrying the SQLite
+        3.51.3 WAL-reset fix; below that it is coerced to ``PASSIVE`` with no
+        caller-supplied escape (see ``_wal_checkpoint``'s module docstring for
+        why a sole-writer certification is not sufficient). ``PASSIVE`` writes
+        frames back but never truncates, so on an unsafe engine the file stays
+        at ``_connection.WAL_JOURNAL_SIZE_LIMIT_BYTES`` (64 MiB) once it gets
+        there — well above trw-mcp's 10 MB ``wal_checkpoint_threshold_mb``
+        trigger, which is why that trigger keeps firing to no visible effect.
+        """
         # Resolve through the public facade at call time. Besides retaining the
         # long-standing monkeypatch seam, this keeps embedders that instrument
         # checkpoint/lock behavior compatible with the mixin extraction.
@@ -64,28 +74,29 @@ class SQLiteCheckpointVectorMixin:
             logger.warning("wal_checkpoint_lock_failed", error_type=type(exc).__name__, db=str(self._db_path))
             return CheckpointResult(busy=1, checkpointed=0, mode="error")
 
-    def _delete_vector(self, entry_id: str) -> None:
-        delete_vector_internal(self._conn, entry_id)
+    def _delete_vector(self, entry_id: str, namespace: str) -> None:
+        delete_vector_internal(self._conn, entry_id, namespace)
 
-    def delete_vector(self, entry_id: str) -> bool:
+    def delete_vector(self, entry_id: str, *, namespace: str) -> bool:
         with self._fresh_connection():
             return delete_vector(
                 self._conn,
                 self._lock,
                 vec_available=self._vec_available,
                 entry_id=entry_id,
+                namespace=namespace,
                 skip_commit=self._skip_commit_depth != 0,
             )
 
-    def vector_exists(self, entry_id: str) -> bool:
+    def vector_exists(self, entry_id: str, *, namespace: str) -> bool:
         with self._fresh_connection():
-            return vector_exists(self._conn, vec_available=self._vec_available, entry_id=entry_id)
+            return vector_exists(self._conn, vec_available=self._vec_available, entry_id=entry_id, namespace=namespace)
 
     def existing_vector_ids(self, namespace: str | None = None) -> set[str]:
         with self._fresh_connection():
             return existing_vector_ids(self._conn, self._lock, vec_available=self._vec_available, namespace=namespace)
 
-    def upsert_vector(self, entry_id: str, embedding: list[float]) -> None:
+    def upsert_vector(self, entry_id: str, embedding: list[float], *, namespace: str) -> None:
         with self._fresh_connection():
             upsert_vector(
                 self._conn,
@@ -93,6 +104,7 @@ class SQLiteCheckpointVectorMixin:
                 vec_available=self._vec_available,
                 dim=self._dim,
                 entry_id=entry_id,
+                namespace=namespace,
                 embedding=embedding,
                 skip_commit=self._skip_commit_depth != 0,
             )

@@ -22,7 +22,8 @@ from collections.abc import Iterator
 
 import structlog
 
-from trw_memory.exceptions import LocalOnlyViolationError
+from trw_memory.embeddings._hf_cache import CacheProbe, CacheState, probe_model_cache
+from trw_memory.exceptions import LocalOnlyViolationError, RemoteCodeNotPermittedError
 from trw_memory.models.config import MemoryConfig
 
 logger = structlog.get_logger(__name__)
@@ -31,6 +32,18 @@ _DEFAULT_MODEL = "all-MiniLM-L6-v2"
 _DEFAULT_DIM = 384
 _TORCHCODEC_MODULE_PREFIX = "torchcodec"
 _MISSING = object()
+_HF_HOST = "huggingface.co"
+
+# PRD-SEC-014-FR02: the single named consent for executing repo-supplied code.
+_REMOTE_CODE_FIELD = "embedding_trust_remote_code"
+
+# The loader's own refusal when pre-load detection was inconclusive: transformers
+# says "requires you to execute ... set the option `trust_remote_code=True`", so
+# the fail-closed message is reached either way (RISK-004). The markers are the
+# refusal's DIRECTIVE, not the bare flag name: a TypeError from a stale call
+# signature also contains "trust_remote_code" and must not be reported as a
+# security refusal.
+_REMOTE_CODE_ERROR_MARKERS = ("trust_remote_code=true", "requires you to execute")
 
 # PRD-QUAL-110-FR04: offline switches that block the huggingface.co model
 # download. ``TRW_OFFLINE`` is the TRW master switch; ``HF_HUB_OFFLINE`` is the
@@ -43,6 +56,29 @@ _TRUTHY = ("1", "true", "yes", "on")
 def _offline_download_blocked() -> bool:
     """Return True when an env offline switch blocks the model download (FR04)."""
     return any(os.environ.get(name, "").strip().lower() in _TRUTHY for name in _OFFLINE_ENV_VARS)
+
+
+def _blocked_by(config: MemoryConfig, offline: bool) -> str:
+    """Name what prevented the download in a ``local_files_only`` failure.
+
+    Since PRD-SEC-014-FR01 a cache probe can force ``local_files_only`` on its
+    own, so the message must be able to say so (RISK-001): reporting an offline
+    switch that is not set would send the operator to unset nothing.
+    """
+    if config.local_only:
+        return "memory_local_only=True"
+    if offline:
+        return "TRW_OFFLINE/HF_HUB_OFFLINE"
+    return "the local cache reported a complete snapshot, so no download was attempted"
+
+
+def _is_remote_code_error(exc: BaseException) -> bool:
+    """Return True when a loader failure was a refusal to execute remote code."""
+    if isinstance(exc, TypeError):
+        # A bad call signature is a programming error, never a policy refusal.
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _REMOTE_CODE_ERROR_MARKERS)
 
 
 def _torchcodec_installed() -> bool:
@@ -116,6 +152,20 @@ def _hide_broken_torchcodec_for_sentence_transformers() -> Iterator[None]:
                 sys.modules[name] = value  # type: ignore[assignment]
 
 
+#: Device name handed to sentence-transformers when the CUDA load fails.
+_CPU_DEVICE = "cpu"
+#: How much of the CUDA error text the fallback warning carries.
+_CUDA_ERROR_DETAIL_CHARS = 160
+
+
+def _is_cuda_error(exc: BaseException) -> bool:
+    """True when a load-time RuntimeError comes from CUDA (OOM, driver, device)."""
+    if type(exc).__name__ == "OutOfMemoryError":
+        return True
+    text = str(exc).lower()
+    return "cuda" in text or "out of memory" in text
+
+
 class LocalEmbeddingProvider:
     """Sentence-transformers embedding provider with lazy model loading.
 
@@ -140,6 +190,34 @@ class LocalEmbeddingProvider:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _probe_cache(self) -> CacheProbe:
+        """Probe the local HF cache once per instance, failing open (NFR01/NFR02).
+
+        The probe is evaluated inside :meth:`_load_model`, which is latched by
+        ``_load_attempted``, so it runs at most once per provider. A probe that
+        raises for any reason logs one degradation line and yields ``UNKNOWN``;
+        it never fails a load that would otherwise succeed.
+        """
+        try:
+            return probe_model_cache(self._model_name)
+        except Exception as exc:  # justified: the probe must never fail a viable load (NFR02)
+            logger.warning(
+                "embedding_cache_probe_degraded",
+                model=self._model_name,
+                error_type=type(exc).__name__,
+            )
+            return CacheProbe(CacheState.UNKNOWN)
+
+    def _remote_code_error(self, cause: str) -> RemoteCodeNotPermittedError:
+        """Build the fail-closed error naming the one field that permits it."""
+        return RemoteCodeNotPermittedError(
+            f"Model '{self._model_name}' requires executing code shipped by the model "
+            f"repository ({cause}), and {_REMOTE_CODE_FIELD} is False. To permit it, set "
+            f"{_REMOTE_CODE_FIELD}: true in .trw/config.yaml (or export "
+            f"MEMORY_{_REMOTE_CODE_FIELD.upper()}=1) — only if you trust that repository, "
+            f"because its code runs with this process's privileges."
+        )
+
     def _load_model(self) -> object | None:
         """Load and cache the sentence-transformers model.
 
@@ -155,14 +233,35 @@ class LocalEmbeddingProvider:
         # when the config field is False, so an air-gapped deployer can prove
         # zero huggingface.co egress without editing config.
         offline = _offline_download_blocked()
-        local_files_only = bool(config.local_only) or offline
+        switch_forced = bool(config.local_only) or offline
+        # PRD-SEC-014-FR01: the cache decides first. A complete local snapshot
+        # needs no Hub round-trip at all, so the config/env expression is now the
+        # FALLBACK for a cache we could not confirm, not the primary resolution.
+        probe = self._probe_cache()
+        cache_first = probe.state is CacheState.COMPLETE and bool(probe.snapshot_path)
+        local_files_only = switch_forced or probe.state is CacheState.COMPLETE
+        # ``local_files_only=True`` is NOT sufficient on its own: transformers'
+        # AutoProcessor rebuilds its hub kwargs with
+        # ``inspect.signature(cached_file).parameters``, and ``cached_file``'s
+        # signature is ``(path_or_repo_id, filename, **kwargs)`` — so every hub
+        # kwarg, local_files_only included, is dropped and the processor/feature
+        # -extractor probes still reach huggingface.co. That is the source of the
+        # two unauthenticated-request warnings reported against a warm cache.
+        # Handing sentence-transformers the resolved snapshot DIRECTORY takes the
+        # local-directory branch instead, which cannot make a request at all.
+        model_ref = probe.snapshot_path if cache_first else self._model_name
+        # PRD-SEC-014-FR02: one typed field, and nothing else, decides this.
+        trust_remote_code = bool(config.embedding_trust_remote_code)
+        if probe.declares_remote_code and not trust_remote_code:
+            raise self._remote_code_error("its cached snapshot ships Python modules")
         if not local_files_only:
             # A network-capable load may fetch the model from huggingface.co —
             # disclose the potential egress before it happens (FR04).
             logger.info(
                 "embedding_model_download_disclosure",
                 model=self._model_name,
-                source="huggingface.co",
+                source=_HF_HOST,
+                cache_state=probe.state.value,
                 detail=(
                     "Embedding model may be downloaded from huggingface.co on "
                     "first use. Set TRW_OFFLINE=1 (or HF_HUB_OFFLINE=1) to block."
@@ -172,18 +271,35 @@ class LocalEmbeddingProvider:
             with _hide_broken_torchcodec_for_sentence_transformers():
                 from sentence_transformers import SentenceTransformer
 
-            # nomic-ai/nomic-embed-text-v1.5 and similar models with custom
-            # pooling modules require trust_remote_code=True to load.
-            trust_rc = "nomic-ai/" in self._model_name
-            self._model = SentenceTransformer(
-                self._model_name,
-                local_files_only=local_files_only,
-                trust_remote_code=trust_rc,
-            )
+            try:
+                self._model = SentenceTransformer(
+                    model_ref,
+                    local_files_only=local_files_only,
+                    trust_remote_code=trust_remote_code,
+                )
+            except RuntimeError as exc:
+                # A busy or full GPU (another process holding CUDA memory) makes
+                # the default device selection fail at load time. The encoder is
+                # small enough to run on CPU, so a CUDA failure retries there
+                # instead of silently disabling embeddings for the session.
+                if not _is_cuda_error(exc):
+                    raise
+                logger.warning(
+                    "embedding_model_cuda_fallback_cpu",
+                    model=self._model_name,
+                    detail=str(exc).splitlines()[0][:_CUDA_ERROR_DETAIL_CHARS],
+                )
+                self._model = SentenceTransformer(
+                    model_ref,
+                    local_files_only=local_files_only,
+                    trust_remote_code=trust_remote_code,
+                    device=_CPU_DEVICE,
+                )
             logger.debug(
                 "embedding_model_loaded",
                 model=self._model_name,
                 dim=self._dim,
+                cache_state=probe.state.value,
             )
         except ImportError:
             self._last_load_error = "sentence-transformers is not installed"
@@ -192,11 +308,12 @@ class LocalEmbeddingProvider:
                 hint="pip install trw-memory[embeddings]",
             )
         except OSError as exc:
+            if not trust_remote_code and _is_remote_code_error(exc):
+                raise self._remote_code_error("the loader refused to load it without that consent") from exc
             if local_files_only:
-                blocked_by = "memory_local_only=True" if config.local_only else "TRW_OFFLINE/HF_HUB_OFFLINE"
                 raise LocalOnlyViolationError(
                     f"Model '{self._model_name}' not found in local cache. Download is blocked "
-                    f"({blocked_by}). Pre-download the model: "
+                    f"({_blocked_by(config, offline)}). Pre-download the model: "
                     f"python -m sentence_transformers download {self._model_name}"
                 ) from exc
             self._last_load_error = f"sentence-transformers installed but model load failed: {exc}"
@@ -206,6 +323,8 @@ class LocalEmbeddingProvider:
                 exc_info=True,
             )
         except (RuntimeError, TypeError, ValueError) as exc:
+            if not trust_remote_code and _is_remote_code_error(exc):
+                raise self._remote_code_error("the loader refused to load it without that consent") from exc
             self._last_load_error = f"sentence-transformers installed but runtime dependency failed: {exc}"
             logger.warning(
                 "embedding_model_load_failed",

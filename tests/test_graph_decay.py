@@ -33,10 +33,31 @@ class TestMemoryDecayPass:
         assert history_row is not None
         assert "new_value=0.7000" in str(history_row[0])
 
-    def test_skips_non_cross_validated_entries(self) -> None:
+    def test_decays_non_cross_validated_stale_unused_entries(self) -> None:
+        """PRD-CORE-244 FR09: ``cross_validated`` is not part of the decay
+        predicate. It was re-measured at 0 of 9,366 rows on 2026-09-03 — a
+        gate no production entry could ever satisfy — so a stale, unused
+        entry decays regardless of cross-validation status.
+        """
         conn = _make_conn()
         old_date = "2020-01-01T00:00:00+00:00"
         _insert_memory_row(conn, "e1", cross_validated=0, last_accessed_at=old_date, importance=0.8)
+
+        result = memory_decay_pass(conn, cutoff_days=90)
+
+        assert result["processed"] == 1
+        assert result["total_decayed"] == 1
+        row = conn.execute("SELECT importance FROM memories WHERE id = 'e1'").fetchone()
+        assert row is not None
+        assert abs(row[0] - 0.7) < 0.001
+
+    def test_skips_recently_accessed_non_cross_validated_entries(self) -> None:
+        """Negative control: recency, not cross-validation, gates decay — a
+        recently used entry is skipped even when never cross-validated.
+        """
+        conn = _make_conn()
+        recent = datetime.now(timezone.utc).isoformat()
+        _insert_memory_row(conn, "e1", cross_validated=0, last_accessed_at=recent, importance=0.8)
 
         result = memory_decay_pass(conn, cutoff_days=90)
 

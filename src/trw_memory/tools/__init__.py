@@ -2,6 +2,19 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+from trw_memory.tools._contract import (
+    AuditImpl,
+    ConsolidateImpl,
+    ForgetImpl,
+    MemoryToolSurface,
+    RecallImpl,
+    ReviewImpl,
+    SearchImpl,
+    StatusImpl,
+    StoreImpl,
+)
 from trw_memory.tools._types import McpServer
 from trw_memory.tools.audit import memory_audit_impl, register_audit_tool
 from trw_memory.tools.consolidate import (
@@ -17,6 +30,7 @@ from trw_memory.tools.store import memory_store_impl, register_store_tool
 
 __all__ = [
     "McpServer",
+    "MemoryToolSurface",
     "memory_audit_impl",
     "memory_consolidate_impl",
     "memory_forget_impl",
@@ -34,3 +48,16 @@ __all__ = [
     "register_status_tool",
     "register_store_tool",
 ]
+
+if TYPE_CHECKING:  # pragma: no cover - static conformance proof (PRD-CORE-251 FR01)
+    # Binding each impl to its contract member is what makes MemoryToolSurface a
+    # gate rather than documentation: `mypy --strict` fails here the moment an
+    # implementation's signature drifts from the shape this package publishes.
+    _store_conforms: StoreImpl = memory_store_impl
+    _recall_conforms: RecallImpl = memory_recall_impl
+    _search_conforms: SearchImpl = memory_search_impl
+    _forget_conforms: ForgetImpl = memory_forget_impl
+    _consolidate_conforms: ConsolidateImpl = memory_consolidate_impl
+    _status_conforms: StatusImpl = memory_status_impl
+    _review_conforms: ReviewImpl = memory_review_impl
+    _audit_conforms: AuditImpl = memory_audit_impl

@@ -18,7 +18,7 @@ from ._test_retrieval_support import StubEmbedder, stored_embeddings_for
 SENSITIVE_QUERY = "SENSITIVE-sk_live_DEADBEEF-customer-pii-marker"
 
 
-def _captured_text(events: Sequence[Mapping[str, object]]) -> str:
+def _captured_text(events: Sequence[Mapping[str, object]], **_kwargs) -> str:
     """Flatten captured structlog events into a single searchable string."""
     return " ".join(f"{key}={value!r}" for event in events for key, value in event.items())
 

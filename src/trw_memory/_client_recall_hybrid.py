@@ -31,6 +31,8 @@ import structlog
 
 from trw_memory._client_distilled_tiering import entry_to_result as _entry_to_result
 from trw_memory.models.memory import MemoryStatus
+from trw_memory.security.namespace_scope import authorize_namespaces
+from trw_memory.security.rbac import Permission
 
 if TYPE_CHECKING:
     from trw_memory.client import MemoryClient, MemoryResultDict
@@ -225,11 +227,16 @@ async def try_hybrid_recall(
             )
             effective_query_embedding = None
 
+    # PRD-CORE-245 FR04: the client ranks its own namespace and nothing else,
+    # so the scope is minted for exactly that one -- through the authorizer, not
+    # by hand, so the RBAC check runs on this surface too.
+    scope = authorize_namespaces(client._config, [client._namespace], Permission.READ, "recall")
     hybrid_search_start = perf_counter()
     try:
         ranked = hybrid_search(
             query=retrieval_query,
             entries=all_entries,
+            scope=scope,
             embedder=embedder,
             query_embedding=effective_query_embedding,
             stored_embeddings=stored_embeddings or None,

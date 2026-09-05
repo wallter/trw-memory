@@ -70,7 +70,7 @@ def test_entry_columns_count_matches_schema() -> None:
     invalid_from, invalidated_by) added by PRD-CORE-194 (commit 59439beb6)
     + ``verification_status`` added by PRD-CORE-231-FR02.
     """
-    assert len(ENTRY_COLUMNS) == 56, f"Expected 56, got {len(ENTRY_COLUMNS)}: {ENTRY_COLUMNS}"
+    assert len(ENTRY_COLUMNS) == 54, f"Expected 54, got {len(ENTRY_COLUMNS)}: {ENTRY_COLUMNS}"
 
 
 def test_entry_columns_contains_new_fields() -> None:

@@ -83,6 +83,46 @@ def _normalise_status_value(value: object) -> str | None:
     return None
 
 
+def _fts_row(entry: MemoryEntry) -> tuple[str, str, str, str, str]:
+    """Return the ``memories_fts`` row tuple for *entry* (namespace-qualified)."""
+    tags_json = json.dumps(entry.tags) if isinstance(entry.tags, list) else (entry.tags or "[]")
+    return (entry.id, entry.namespace, entry.content, entry.detail or "", tags_json)
+
+
+def _replace_tag_postings(backend: SQLiteBackend, namespace: str, entry_id: str, tags: Sequence[str]) -> None:
+    """Re-point the ``memory_tags`` inverted index at *entry_id*'s current tags.
+
+    PRD-CORE-245 FR07: this index is what the bounded tag derivation queries in
+    place of the 98,288 materialised ``tag_cooccurrence`` edges the schema-5
+    migration deleted. It is maintained beside the FTS row on every write and
+    pruned beside the edges on every delete, so it can never drift from the
+    ``tags`` column it mirrors.
+    """
+    backend._conn.execute(
+        "DELETE FROM memory_tags WHERE namespace = ? AND entry_id = ?",
+        (namespace, entry_id),
+    )
+    rows = [(namespace, tag, entry_id) for tag in dict.fromkeys(tags) if str(tag).strip()]
+    if rows:
+        backend._conn.executemany("INSERT OR IGNORE INTO memory_tags(namespace, tag, entry_id) VALUES(?, ?, ?)", rows)
+
+
+def purge_tag_postings_for(backend: SQLiteBackend, namespace: str, entry_ids: Sequence[str]) -> None:
+    """Drop every ``memory_tags`` posting for *entry_ids* within *namespace*.
+
+    CONTRACT: mirrors :func:`purge_edges_for` — the caller already holds
+    ``backend._lock`` and owns the commit.
+    """
+    if not entry_ids:
+        return
+    for chunk in iter_bind_chunks(list(entry_ids), reserved_bindings=1):
+        placeholders = ",".join("?" for _ in chunk)
+        backend._conn.execute(
+            f"DELETE FROM memory_tags WHERE namespace = ? AND entry_id IN ({placeholders})",  # noqa: S608 — placeholders is ? repeated; ids are parameterized
+            (namespace, *chunk),
+        )
+
+
 def store(
     backend: SQLiteBackend,
     insert_columns_sql: str,
@@ -102,14 +142,19 @@ def store(
         with backend._lock:
             backend._conn.execute(sql, entry_to_row(entry))
             if getattr(backend, "_fts_available", False):
-                tags_json = json.dumps(entry.tags) if isinstance(entry.tags, list) else (entry.tags or "[]")
                 # FTS5 virtual tables don't enforce uniqueness — delete first to
                 # avoid stale rows when store() is called as INSERT OR REPLACE.
-                backend._conn.execute("DELETE FROM memories_fts WHERE id = ?", (entry.id,))
+                # PRD-CORE-245 FR02: the delete is namespace-qualified, or
+                # storing (nsA, X) would destroy the FTS row of (nsB, X).
                 backend._conn.execute(
-                    "INSERT INTO memories_fts(id, content, detail, tags) VALUES (?, ?, ?, ?)",
-                    (entry.id, entry.content, entry.detail or "", tags_json),
+                    "DELETE FROM memories_fts WHERE id = ? AND namespace = ?",
+                    (entry.id, entry.namespace),
                 )
+                backend._conn.execute(
+                    "INSERT INTO memories_fts(id, namespace, content, detail, tags) VALUES (?, ?, ?, ?, ?)",
+                    _fts_row(entry),
+                )
+            _replace_tag_postings(backend, entry.namespace, entry.id, entry.tags)
             # S9 fix: suppress the commit when inside a ``transaction()`` block
             # so a store() batched with other writes commits exactly once at
             # the outermost COMMIT — matching update()/increment_recall_access.
@@ -160,7 +205,7 @@ def store_many(
     rows = [entry_to_row(e) for e in entries]
     # INSERT OR REPLACE makes the last occurrence authoritative. Mirror that
     # result in FTS5, whose virtual table does not enforce id uniqueness.
-    final_entries = list({entry.id: entry for entry in entries}.values())
+    final_entries = list({(entry.namespace, entry.id): entry for entry in entries}.values())
 
     try:
         with backend._lock:
@@ -177,21 +222,15 @@ def store_many(
             fts_batch = getattr(backend, "_fts_available", False)
             if fts_batch:
                 backend._conn.executemany(
-                    "DELETE FROM memories_fts WHERE id = ?",
-                    [(entry.id,) for entry in final_entries],
+                    "DELETE FROM memories_fts WHERE id = ? AND namespace = ?",
+                    [(entry.id, entry.namespace) for entry in final_entries],
                 )
                 backend._conn.executemany(
-                    "INSERT INTO memories_fts(id, content, detail, tags) VALUES (?, ?, ?, ?)",
-                    [
-                        (
-                            e.id,
-                            e.content,
-                            e.detail or "",
-                            json.dumps(e.tags) if isinstance(e.tags, list) else (e.tags or "[]"),
-                        )
-                        for e in final_entries
-                    ],
+                    "INSERT INTO memories_fts(id, namespace, content, detail, tags) VALUES (?, ?, ?, ?, ?)",
+                    [_fts_row(e) for e in final_entries],
                 )
+            for entry in final_entries:
+                _replace_tag_postings(backend, entry.namespace, entry.id, entry.tags)
             # Merge FTS5 index segments after bulk load to prevent fragmentation.
             # Only worthwhile for large batches — optimize() walks the whole index,
             # so the merge cost only pays off when many segments were just appended.
@@ -221,12 +260,18 @@ def get(
     backend: SQLiteBackend,
     select_columns_sql: str,
     entry_id: str,
+    namespace: str,
 ) -> MemoryEntry | None:
-    """Retrieve an entry by id."""
-    sql = f"SELECT {select_columns_sql} FROM memories WHERE id = ?"  # noqa: S608
+    """Retrieve the ``(namespace, id)``-identified entry.
+
+    PRD-CORE-245 FR03: identity is composite under schema 5, so a bare id is
+    ambiguous and the namespace is required rather than defaulted — a default
+    would silently reinstate exactly the ambiguity the composite key removes.
+    """
+    sql = f"SELECT {select_columns_sql} FROM memories WHERE namespace = ? AND id = ?"  # noqa: S608
     try:
         with backend._lock:
-            row = backend._conn.execute(sql, (entry_id,)).fetchone()
+            row = backend._conn.execute(sql, (namespace, entry_id)).fetchone()
         if row is None:
             return None
         return row_to_entry(tuple(row))
@@ -242,13 +287,21 @@ def update(
     select_columns_sql: str,
     valid_update_columns: frozenset[str],
     entry_id: str,
+    namespace: str,
     **fields: object,
 ) -> MemoryEntry | None:
-    """Apply a partial update to an existing entry."""
-    if not fields:
-        return get(backend, select_columns_sql, entry_id)
+    """Apply a partial update to the ``(namespace, entry_id)``-identified entry.
 
-    existing = get(backend, select_columns_sql, entry_id)
+    PRD-CORE-245 FR03: required, for the same reason ``get`` and ``delete``
+    require it. Resolving the row by bare id and taking whichever one came back
+    first was nondeterministic the moment a legitimate cross-namespace id
+    collision existed -- which is exactly the state the composite key makes
+    reachable.
+    """
+    if not fields:
+        return get(backend, select_columns_sql, entry_id, namespace)
+
+    existing = get(backend, select_columns_sql, entry_id, namespace)
     if existing is None:
         return None
 
@@ -310,23 +363,27 @@ def update(
             new_status is not None and new_status in _TERMINAL_STATUS_VALUES and existing.status != new_status
         )
 
-        values.append(entry_id)
-        sql = f"UPDATE memories SET {', '.join(set_parts)} WHERE id = ?"  # noqa: S608
+        values.extend([namespace, entry_id])
+        sql = f"UPDATE memories SET {', '.join(set_parts)} WHERE namespace = ? AND id = ?"  # noqa: S608
         with backend._lock:
             backend._conn.execute(sql, values)
             if prune_vector and backend._vec_available:
                 # Keep the entry row for audit; drop only the KNN vector so
                 # dense recall stops returning the retired entry.
-                backend._delete_vector(entry_id)
+                backend._delete_vector(entry_id, namespace)
             if getattr(backend, "_fts_available", False):
-                backend._conn.execute("DELETE FROM memories_fts WHERE id = ?", (entry_id,))
                 backend._conn.execute(
-                    "INSERT INTO memories_fts(id, content, detail, tags) VALUES (?, ?, ?, ?)",
-                    (entry_id, _fts_content, _fts_detail, _fts_tags),
+                    "DELETE FROM memories_fts WHERE id = ? AND namespace = ?",
+                    (entry_id, namespace),
                 )
+                backend._conn.execute(
+                    "INSERT INTO memories_fts(id, namespace, content, detail, tags) VALUES (?, ?, ?, ?, ?)",
+                    (entry_id, namespace, _fts_content, _fts_detail, _fts_tags),
+                )
+            _replace_tag_postings(backend, namespace, entry_id, json.loads(_fts_tags) if _fts_tags else [])
             if backend._skip_commit_depth == 0:
                 backend._conn.commit()
-        return get(backend, select_columns_sql, entry_id)
+        return get(backend, select_columns_sql, entry_id, namespace)
     except StorageError:
         raise
     except (sqlite3.Error, ValueError, TypeError, json.JSONDecodeError) as exc:
@@ -470,8 +527,8 @@ def increment_recall_access(
 # atomic.
 
 
-def purge_edges_for(backend: SQLiteBackend, entry_ids: Sequence[str]) -> None:
-    """Delete knowledge-graph edges referencing any of *entry_ids*.
+def purge_edges_for(backend: SQLiteBackend, entry_ids: Sequence[str], namespace: str) -> None:
+    """Delete knowledge-graph edges referencing any of *entry_ids* in *namespace*.
 
     ``memory_graph_edges`` declares no FK cascade (``PRAGMA foreign_keys`` is
     off process-wide), so orphan edges must be pruned explicitly whenever their
@@ -487,30 +544,59 @@ def purge_edges_for(backend: SQLiteBackend, entry_ids: Sequence[str]) -> None:
     if not entry_ids:
         return
     ids = list(entry_ids)
-    for chunk in iter_bind_chunks(ids, bindings_per_item=2):
+    for chunk in iter_bind_chunks(ids, bindings_per_item=2, reserved_bindings=1):
         placeholders = ",".join("?" for _ in chunk)
         backend._conn.execute(
-            f"DELETE FROM memory_graph_edges WHERE source_id IN ({placeholders}) "  # noqa: S608 — placeholders is ? repeated; ids are parameterized values
-            f"OR target_id IN ({placeholders})",
-            (*chunk, *chunk),
+            f"DELETE FROM memory_graph_edges WHERE namespace = ? AND (source_id IN ({placeholders}) "  # noqa: S608 — placeholders is ? repeated; ids are parameterized values
+            f"OR target_id IN ({placeholders}))",
+            (namespace, *chunk, *chunk),
         )
 
 
-def delete(backend: SQLiteBackend, entry_id: str) -> bool:
-    """Remove an entry from memories (and vec_index when available)."""
+def purge_orphan_edges(backend: SQLiteBackend) -> None:
+    """Delete every edge whose source or target row no longer exists.
+
+    :func:`purge_edges_for` is namespace-qualified (PRD-CORE-245 FR02) because a
+    per-row delete knows exactly which namespace it is addressing. A bulk
+    ``delete_by_namespace`` needs the complementary guarantee: an edge that
+    names a row which is now gone is dangling regardless of which namespace the
+    edge itself is filed under, and a BFS that follows it lands on a ghost node.
+    This is the edge-table twin of the ``memories_fts`` ghost-row anti-join.
+
+    CONTRACT: caller holds ``backend._lock`` and owns the commit.
+    """
+    backend._conn.execute(
+        "DELETE FROM memory_graph_edges WHERE NOT EXISTS ("
+        "  SELECT 1 FROM memories m WHERE m.namespace = memory_graph_edges.namespace"
+        "    AND m.id = memory_graph_edges.source_id"
+        ") OR NOT EXISTS ("
+        "  SELECT 1 FROM memories m WHERE m.namespace = memory_graph_edges.namespace"
+        "    AND m.id = memory_graph_edges.target_id"
+        ")"
+    )
+
+
+def delete(backend: SQLiteBackend, entry_id: str, namespace: str) -> bool:
+    """Remove the ``(namespace, id)``-identified entry and every sidecar row.
+
+    PRD-CORE-245 FR03: the namespace is required. Under the composite key an
+    unqualified delete would take the row out of whichever namespace happened
+    to hold that id, and FR02's sidecar deletes below would follow it.
+    """
     try:
         with backend._lock:
-            cursor = backend._conn.execute("DELETE FROM memories WHERE id = ?", (entry_id,))
+            cursor = backend._conn.execute("DELETE FROM memories WHERE namespace = ? AND id = ?", (namespace, entry_id))
             deleted = cursor.rowcount > 0
             if deleted and backend._vec_available:
-                backend._delete_vector(entry_id)
+                backend._delete_vector(entry_id, namespace)
             if deleted and getattr(backend, "_fts_available", False):
-                backend._conn.execute("DELETE FROM memories_fts WHERE id = ?", (entry_id,))
-            # Remove knowledge-graph edges that reference the deleted entry as
-            # source or target (see purge_edges_for — one source of truth shared
+                backend._conn.execute("DELETE FROM memories_fts WHERE id = ? AND namespace = ?", (entry_id, namespace))
+            # Remove knowledge-graph edges and tag postings that reference the
+            # deleted entry (see purge_edges_for — one source of truth shared
             # with delete_by_namespace's bulk cleanup).
             if deleted:
-                purge_edges_for(backend, (entry_id,))
+                purge_edges_for(backend, (entry_id,), namespace)
+                purge_tag_postings_for(backend, namespace, (entry_id,))
             # Defer the commit inside a ``transaction()`` block so the row +
             # vector deletes batch into the caller's outermost COMMIT rather
             # than prematurely committing their open transaction.

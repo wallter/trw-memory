@@ -27,8 +27,8 @@ def test_wiki_page_storage_round_trips_without_changing_non_wiki_memories(
     sqlite_memory_backend.store(wiki_entry)
     sqlite_memory_backend.store(plain_entry)
 
-    restored_wiki = sqlite_memory_backend.get("M-wiki")
-    restored_plain = sqlite_memory_backend.get("M-plain")
+    restored_wiki = sqlite_memory_backend.get("M-wiki", namespace="default")
+    restored_plain = sqlite_memory_backend.get("M-plain", namespace="default")
 
     assert restored_wiki is not None
     assert restored_plain is not None
@@ -83,7 +83,7 @@ def test_wiki_ref_persistence_replaces_stale_refs_on_update(
         title="Source",
         outbound_refs=[WikiReference(target_slug="topic/new", ref_type="related")],
     )
-    sqlite_memory_backend.update("M-source", metadata=updated_page.to_memory_metadata())
+    sqlite_memory_backend.update("M-source", metadata=updated_page.to_memory_metadata(), namespace="default")
 
     outbound = sqlite_memory_backend.query_wiki_outbound_refs("topic/source")
 
@@ -101,7 +101,7 @@ def test_wiki_ref_persistence_deletes_refs_for_removed_entries(
     )
     sqlite_memory_backend.store(_wiki_entry("M-source", page))
 
-    assert sqlite_memory_backend.delete("M-source") is True
+    assert sqlite_memory_backend.delete("M-source", namespace="default") is True
 
     assert sqlite_memory_backend.query_wiki_outbound_refs("topic/source") == []
     assert sqlite_memory_backend.query_wiki_inbound_refs("topic/target") == []

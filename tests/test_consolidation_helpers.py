@@ -88,7 +88,7 @@ class TestCreateConsolidatedEntry:
         storage = _InMemoryBackend()
         cluster = [_make_entry("e1"), _make_entry("e2"), _make_entry("e3")]
         result = _create_consolidated_entry(cluster, "c", "d", storage)
-        assert storage.get(result.id) is not None
+        assert storage.get(result.id, namespace="default") is not None
 
     def test_entry_status_is_active(self) -> None:
         storage = _InMemoryBackend()
@@ -175,8 +175,8 @@ class TestArchiveOriginals:
 
         _archive_originals([e1, e2], "M-consolidated", storage)
 
-        updated_e1 = storage.get("e1")
-        updated_e2 = storage.get("e2")
+        updated_e1 = storage.get("e1", namespace="default")
+        updated_e2 = storage.get("e2", namespace="default")
         assert updated_e1 is not None
         assert updated_e2 is not None
         assert updated_e1.consolidated_into == "M-consolidated"

@@ -48,7 +48,7 @@ class TestSingleKeyMetadataRoundTrip:
             source="agent",
         )
         backend.store(entry)
-        result = backend.get("M-single-key")
+        result = backend.get("M-single-key", namespace="default")
 
         assert result is not None
         # The entry's metadata field should round-trip the single key.
@@ -70,7 +70,7 @@ class TestSingleKeyMetadataRoundTrip:
         memory_id = result["memory_id"]
 
         backend = memory_client._get_backend()
-        entry = backend.get(memory_id)
+        entry = backend.get(memory_id, namespace="default")
         assert entry is not None
         assert entry.metadata.get("utility_grade") == "R3", f"client.store dropped utility_grade: {entry.metadata!r}"
         # installation_id is always added by the store path.

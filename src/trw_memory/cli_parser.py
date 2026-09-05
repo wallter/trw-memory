@@ -186,4 +186,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_snap_rotate.add_argument("--namespace", default="default", help="Namespace")
     p_snap_rotate.add_argument("--db", default=None, help="Optional DB path override")
 
+    # --- namespace (PRD-CORE-253 FR05) ---
+    p_namespace = subparsers.add_parser(
+        "namespace",
+        help="Repair a moved or renamed checkout's namespace (over the daemon)",
+    )
+    ns_subs = p_namespace.add_subparsers(dest="namespace_action", required=True)
+
+    p_ns_rename = ns_subs.add_parser("rename", help="Re-label every row of one namespace onto another")
+    p_ns_rename.add_argument("source", help="Namespace to empty")
+    p_ns_rename.add_argument("destination", help="Namespace to fill; must not already hold rows")
+
+    p_ns_merge = ns_subs.add_parser("merge", help="Fold one namespace into another, destination wins conflicts")
+    p_ns_merge.add_argument("source", help="Namespace to fold in")
+    p_ns_merge.add_argument("destination", help="Namespace that wins every id collision")
+
+    p_ns_doctor = ns_subs.add_parser("doctor", help="Report a moved or renamed checkout; never writes")
+    p_ns_doctor.add_argument(
+        "namespace",
+        nargs="?",
+        default="",
+        help="Namespace to check; omit to resolve this checkout's identity",
+    )
+
     return parser

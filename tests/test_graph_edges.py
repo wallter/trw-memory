@@ -6,7 +6,6 @@ from trw_memory.graph import (
     _safe_cosine_similarity,
     create_consolidation_edges,
     create_similarity_edges,
-    create_tag_cooccurrence_edges,
 )
 
 from ._test_graph_support import (
@@ -70,60 +69,12 @@ class TestCreateSimilarityEdges:
         assert count == 0
 
 
-class TestCreateTagCooccurrenceEdges:
-    def test_correct_jaccard_weight(self) -> None:
-        conn = _make_conn()
-        entry = _make_entry("e1", tags=["a", "b", "c"])
-        candidates = [_make_entry("e2", tags=["b", "c", "d"])]
-
-        count = create_tag_cooccurrence_edges(entry, conn, candidate_entries=candidates)
-
-        assert count == 2
-        row = conn.execute(
-            "SELECT weight FROM memory_graph_edges WHERE source_id = 'e1' AND target_id = 'e2'"
-        ).fetchone()
-        assert row is not None
-        assert abs(row[0] - 0.5) < 0.001
-
-    def test_updates_existing_edge_weight(self) -> None:
-        conn = _make_conn()
-        entry = _make_entry("e1", tags=["a", "b"])
-        candidates = [_make_entry("e2", tags=["a", "b"])]
-        create_tag_cooccurrence_edges(entry, conn, candidate_entries=candidates)
-
-        entry2 = _make_entry("e1", tags=["a", "b", "c"])
-        candidates2 = [_make_entry("e2", tags=["a", "b", "d"])]
-        create_tag_cooccurrence_edges(entry2, conn, candidate_entries=candidates2)
-
-        edges = conn.execute(
-            "SELECT weight FROM memory_graph_edges WHERE source_id = 'e1' AND target_id = 'e2' AND edge_type = 'tag_cooccurrence'"
-        ).fetchall()
-        assert len(edges) == 1
-        assert abs(edges[0][0] - 0.5) < 0.001
-
-    def test_no_edge_for_less_than_2_shared_tags(self) -> None:
-        conn = _make_conn()
-        entry = _make_entry("e1", tags=["a", "b"])
-        candidates = [_make_entry("e2", tags=["a", "c"])]
-
-        count = create_tag_cooccurrence_edges(entry, conn, candidate_entries=candidates)
-        assert count == 0
-
-    def test_no_edge_for_empty_tags(self) -> None:
-        conn = _make_conn()
-        entry = _make_entry("e1", tags=[])
-        candidates = [_make_entry("e2", tags=["a", "b"])]
-
-        count = create_tag_cooccurrence_edges(entry, conn, candidate_entries=candidates)
-        assert count == 0
-
-    def test_no_edge_when_candidate_has_empty_tags(self) -> None:
-        conn = _make_conn()
-        entry = _make_entry("e1", tags=["a", "b"])
-        candidates = [_make_entry("e2", tags=[])]
-
-        count = create_tag_cooccurrence_edges(entry, conn, candidate_entries=candidates)
-        assert count == 0
+# TestCreateTagCooccurrenceEdges was DELETED by PRD-CORE-245 FR07 together with
+# the writer it covered. Those six cases asserted that storing an entry wrote up
+# to 1,000 materialised ``tag_cooccurrence`` rows; schema 5 maintains the
+# ``memory_tags`` inverted index on write instead and derives the relation on
+# demand. The equivalent behaviour is covered by
+# ``tests/test_graph_tag_derivation.py``.
 
 
 class TestCreateConsolidationEdges:

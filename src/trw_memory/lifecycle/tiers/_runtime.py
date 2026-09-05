@@ -193,15 +193,15 @@ def tier_candidates(
         backend.store(MemoryEntry.model_validate(entry_data))
 
     def _delete_restored_entry(entry_id: str) -> bool | None:
-        return backend.delete(entry_id)
+        return backend.delete(entry_id, namespace=namespace)
 
     def _force_delete_restored_entry(entry_id: str) -> bool | None:
         with create_backend_from_config(config, namespace) as rollback_backend:
-            return rollback_backend.delete(entry_id)
+            return rollback_backend.delete(entry_id, namespace=namespace)
 
     def _verify_restored_entry_removed(entry_id: str) -> bool:
         with create_backend_from_config(config, namespace) as verification_backend:
-            return verification_backend.get(entry_id) is None
+            return verification_backend.get(entry_id, namespace=namespace) is None
 
     return manager.search(
         query_tokens,

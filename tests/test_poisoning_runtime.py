@@ -922,10 +922,10 @@ class TestScoreAnomalyActiveFilter:
             )
         )
         # Retire it so it should be excluded from the baseline
-        backend.update("M-retired", status=MemoryStatus.OBSOLETE)
+        backend.update("M-retired", status=MemoryStatus.OBSOLETE, namespace="default")
 
         # Verify the backend actually stores the obsolete entry
-        retired = backend.get("M-retired")
+        retired = backend.get("M-retired", namespace="default")
         assert retired is not None and retired.status == MemoryStatus.OBSOLETE
 
         # Track what list_entries was called with
@@ -986,7 +986,7 @@ class TestScoreAnomalyActiveFilter:
                     status=MemoryStatus.ACTIVE,
                 )
             )
-            backend.update(entry_id, status=MemoryStatus.OBSOLETE)
+            backend.update(entry_id, status=MemoryStatus.OBSOLETE, namespace="default")
 
         candidate = MemoryEntry(
             id="M-new",
@@ -1144,3 +1144,66 @@ class TestEvidenceAndAssertionIntakeCoverage:
         secured, matches = apply_runtime_pii_policy(entry, cfg)
         assert secured.assertions[0].last_evidence == "verified for customer 123-45-6789"
         assert any(str(match.pii_type) == "ssn" for match in matches)
+
+
+class TestEvidenceGateLogContainment:
+    """PRD-CORE-244 NFR03 — the FR02 rejection log carries ids and codes only.
+
+    The gate fires BEFORE ``_stage_pii_policy`` runs, so a rejected entry may
+    still hold exactly the payload the PII stage exists to contain. A log line
+    that echoed ``content``, ``detail`` or ``evidence`` would move that payload
+    into a file with different retention and different permissions.
+    """
+
+    _SENTINEL = "sentinel-9f2c1a-do-not-log-this-payload"
+
+    def test_evidence_gate_does_not_leak_entry_content_to_logs(self) -> None:
+        from structlog.testing import capture_logs
+
+        from trw_memory.exceptions import SchemaValidationError
+        from trw_memory.models.memory import Confidence
+        from trw_memory.security.poisoning import reject_unsubstantiated_verified
+
+        entry = MemoryEntry(
+            id="M-leak-probe",
+            content=f"claim about {self._SENTINEL}",
+            detail=f"supporting detail mentioning {self._SENTINEL}",
+            nudge_line=self._SENTINEL,
+            namespace="project:default",
+            confidence=Confidence.VERIFIED,
+        )
+
+        with capture_logs() as logs:
+            with pytest.raises(SchemaValidationError):
+                reject_unsubstantiated_verified(entry, min_items=1)
+
+        # Non-vacuity: the gate really ran and really logged.
+        assert logs, "the rejection must be observable in the log stream"
+        assert any(record.get("event") == "unsubstantiated_verified_rejected" for record in logs)
+        assert any(record.get("entry_id") == "M-leak-probe" for record in logs)
+
+        # Containment: no captured field — key OR value, at any depth — carries it.
+        assert self._SENTINEL not in repr(logs)
+
+    def test_evidence_gate_containment_holds_through_validate_entry_payload(self) -> None:
+        """Same containment on the runtime write path, not just the helper."""
+        from structlog.testing import capture_logs
+
+        from trw_memory.exceptions import SchemaValidationError
+        from trw_memory.models.memory import Confidence
+        from trw_memory.security.poisoning import validate_entry_payload
+
+        entry = MemoryEntry(
+            id="M-leak-probe-2",
+            content=f"claim about {self._SENTINEL}",
+            detail=self._SENTINEL,
+            namespace="project:default",
+            confidence=Confidence.VERIFIED,
+        )
+
+        with capture_logs() as logs:
+            with pytest.raises(SchemaValidationError):
+                validate_entry_payload(entry, max_chars=100_000, min_evidence_items_for_verified=1)
+
+        assert any(record.get("event") == "unsubstantiated_verified_rejected" for record in logs)
+        assert self._SENTINEL not in repr(logs)

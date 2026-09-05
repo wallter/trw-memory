@@ -1,10 +1,13 @@
 [build-system]
-requires = ["hatchling"]
+# Pinned below 1.29: hatchling 1.29+ stamps Metadata-Version 2.5, which twine 7.0 /
+# packaging 26.3 reject ("'2.5' is not a valid metadata version"). Every wheel we
+# have published carries 2.4. Re-verified 2026-09-05 in the release rehearsal.
+requires = ["hatchling>=1.27,<1.29"]
 build-backend = "hatchling.build"
 
 [project]
 name = "trw-memory"
-version = "0.15.0"
+version = "0.16.0"
 description = "Persistent memory engine with hybrid retrieval, tiered storage, and semantic dedup for AI agents"
 readme = "README.md"
 license = "BUSL-1.1"

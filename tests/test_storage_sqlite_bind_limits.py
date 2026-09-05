@@ -103,8 +103,8 @@ def test_recall_access_rolls_back_when_later_chunk_fails() -> None:
         backend._conn = real  # type: ignore[assignment]
 
     try:
-        first = backend.get(ids[0])
-        last = backend.get(ids[-1])
+        first = backend.get(ids[0], namespace="default")
+        last = backend.get(ids[-1], namespace="default")
         assert first is not None and first.recall_count == 0
         assert last is not None and last.recall_count == 0
     finally:

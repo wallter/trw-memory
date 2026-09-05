@@ -18,19 +18,19 @@ class TestEdgeCases:
     def test_empty_vector_clock_round_trip(self, backend: YAMLBackend) -> None:
         entry = make_entry("M-empty-vc", "empty vc")
         backend.store(entry)
-        loaded = backend.get("M-empty-vc")
+        loaded = backend.get("M-empty-vc", namespace="default")
         assert loaded is not None and loaded.vector_clock == {}
 
     def test_empty_outcome_history_round_trip(self, backend: YAMLBackend) -> None:
         entry = make_entry("M-empty-oh", "empty outcome")
         backend.store(entry)
-        loaded = backend.get("M-empty-oh")
+        loaded = backend.get("M-empty-oh", namespace="default")
         assert loaded is not None and loaded.outcome_history == []
 
     def test_empty_assertions_round_trip(self, backend: YAMLBackend) -> None:
         entry = make_entry("M-empty-assert", "empty assertions")
         backend.store(entry)
-        loaded = backend.get("M-empty-assert")
+        loaded = backend.get("M-empty-assert", namespace="default")
         assert loaded is not None and loaded.assertions == []
 
     def test_assertions_with_all_types(self, backend: YAMLBackend) -> None:
@@ -47,7 +47,7 @@ class TestEdgeCases:
             ],
         )
         backend.store(entry)
-        loaded = backend.get("M-all-types")
+        loaded = backend.get("M-all-types", namespace="default")
         assert loaded is not None
         assert len(loaded.assertions) == 4
         loaded_types = [assertion.type for assertion in loaded.assertions]
@@ -75,7 +75,7 @@ class TestEdgeCases:
             ],
         )
         backend.store(entry)
-        loaded = backend.get("M-assert-meta")
+        loaded = backend.get("M-assert-meta", namespace="default")
         assert loaded is not None
         assert len(loaded.assertions) == 1
         assertion = loaded.assertions[0]
@@ -87,5 +87,5 @@ class TestEdgeCases:
         vector_clock = {f"node-{i}": i * 1000 for i in range(10)}
         entry = make_entry("M-large-vc", "large vector clock", vector_clock=vector_clock)
         backend.store(entry)
-        loaded = backend.get("M-large-vc")
+        loaded = backend.get("M-large-vc", namespace="default")
         assert loaded is not None and loaded.vector_clock == vector_clock

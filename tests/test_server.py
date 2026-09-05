@@ -9,14 +9,17 @@ in place to ensure a fresh server state.
 
 from __future__ import annotations
 
+import inspect
 import sys
 import types
 from types import SimpleNamespace
+from typing import get_type_hints
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from trw_memory.exceptions import EncryptionUnavailableError, LocalOnlyViolationError
+from trw_memory.tools._contract import SURFACE_MEMBERS, MemoryToolSurface
 
 
 def _make_fastmcp_mock() -> tuple[MagicMock, MagicMock, list[str]]:
@@ -106,7 +109,7 @@ class TestServerModule:
             patch("trw_memory.embeddings.get_local_embedder", side_effect=LocalOnlyViolationError("blocked")),
             pytest.raises(LocalOnlyViolationError, match="blocked"),
         ):
-            server_mod.main()
+            server_mod.main([])
         mcp_instance.run.assert_not_called()
         sys.modules.pop("trw_memory.server", None)
 
@@ -129,34 +132,26 @@ class TestServerModule:
             ),
             pytest.raises(EncryptionUnavailableError, match="sqlcipher missing"),
         ):
-            server_mod.main()
+            server_mod.main([])
         mcp_instance.run.assert_not_called()
         sys.modules.pop("trw_memory.server", None)
 
-    def test_eight_tools_registered(self) -> None:
-        """All expected MCP tools must be registered via mcp.tool().
+    def test_registered_tools_match_the_published_surface(self) -> None:
+        """What ``_register_tools`` actually registers must equal what we publish.
 
-        Asserts the exact set (not a magic count) so additions/removals are
-        caught explicitly. The code-index + wiki-lint tools were added after
-        the original 8.
+        The expected set is NOT restated here: it is
+        ``server.REGISTERED_TOOL_NAMES``, the one place the surface is declared
+        (PRD-CORE-253 FR03/FR05/FR06 added four tools to it). Asserting in both
+        directions is what makes the constant load-bearing -- an unlisted
+        registration fails just as loudly as a missing one, so neither half can
+        drift ahead of the other.
         """
-        server_mod, mcp_instance, registered_tools = _reload_server_with_mock()
-        expected = {
-            "memory_store",
-            "memory_recall",
-            "memory_audit",
-            "memory_review",
-            "memory_forget",
-            "memory_consolidate",
-            "memory_search",
-            "memory_status",
-            "memory_wiki_lint",
-            "memory_code_index",
-            "memory_code_search",
-            "memory_code_symbol",
-        }
-        assert set(registered_tools) == expected, (
-            f"registered tool set drift: {sorted(set(registered_tools) ^ expected)}"
+        server_mod, _mcp_instance, registered_tools = _reload_server_with_mock()
+        published = set(server_mod.REGISTERED_TOOL_NAMES)
+
+        assert len(server_mod.REGISTERED_TOOL_NAMES) == len(published), "REGISTERED_TOOL_NAMES has a duplicate"
+        assert set(registered_tools) == published, (
+            f"registered tool set drift: {sorted(set(registered_tools) ^ published)}"
         )
         sys.modules.pop("trw_memory.server", None)
 
@@ -195,3 +190,104 @@ class TestServerModule:
             register_status_tool,
         ]:
             assert callable(fn), f"{fn} must be callable"
+
+
+# ---------------------------------------------------------------------------
+# PRD-CORE-251 FR01 — the tool surface is a typed, contract-tested interface
+# ---------------------------------------------------------------------------
+
+
+def _protocol_parameters(member: str) -> dict[str, inspect.Parameter]:
+    """Return the call parameters ``MemoryToolSurface`` declares for *member*.
+
+    ``MemoryToolSurface.__annotations__`` holds strings (the module uses
+    ``from __future__ import annotations``), so the callback Protocol behind
+    each member is resolved through ``typing.get_type_hints`` rather than read
+    literally.
+    """
+    member_protocol = get_type_hints(MemoryToolSurface)[member]
+    signature = inspect.signature(member_protocol.__call__)
+    return {name: param for name, param in signature.parameters.items() if name != "self"}
+
+
+def test_surface_membership_is_not_empty() -> None:
+    """Guard against a silently empty Protocol — an empty contract passes everything."""
+    assert set(SURFACE_MEMBERS) == {
+        "memory_store_impl",
+        "memory_recall_impl",
+        "memory_search_impl",
+        "memory_forget_impl",
+        "memory_consolidate_impl",
+        "memory_status_impl",
+        "memory_review_impl",
+        "memory_audit_impl",
+    }, f"MemoryToolSurface membership drift: {sorted(SURFACE_MEMBERS)}"
+
+
+@pytest.mark.parametrize("member", SURFACE_MEMBERS)
+def test_every_impl_satisfies_the_protocol(member: str) -> None:
+    """FR01 — every declared member resolves, is exported, and matches its signature.
+
+    The static half of this contract lives in ``trw_memory/tools/__init__.py``
+    (a ``TYPE_CHECKING`` binding per impl that ``mypy --strict`` checks). This
+    is the runtime half: it fails without a type checker in the loop, which is
+    the condition a downstream consumer actually installs under.
+    """
+    import trw_memory.tools as tools_module
+
+    impl = getattr(tools_module, member, None)
+    assert impl is not None, f"{member} is declared by MemoryToolSurface but not exported by trw_memory.tools"
+    assert callable(impl), f"{member} is exported but is not callable"
+    assert member in tools_module.__all__, f"{member} is not in trw_memory.tools.__all__, so it is not public API"
+
+    declared = _protocol_parameters(member)
+    actual = dict(inspect.signature(impl).parameters)
+
+    for name, param in declared.items():
+        assert name in actual, f"{member} does not accept the contract parameter {name!r}"
+        assert actual[name].kind == param.kind, (
+            f"{member}.{name} is {actual[name].kind}, the contract declares {param.kind}"
+        )
+        contract_required = param.default is inspect.Parameter.empty
+        impl_required = actual[name].default is inspect.Parameter.empty
+        assert impl_required == contract_required, (
+            f"{member}.{name} required={impl_required} but the contract declares required={contract_required}"
+        )
+
+    # An impl may add a DEFAULTED parameter (a backward-compatible extension);
+    # it may not add one a contract-compliant caller would have to supply.
+    extra_required = [
+        name
+        for name, param in actual.items()
+        if name not in declared
+        and param.default is inspect.Parameter.empty
+        and param.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    ]
+    assert not extra_required, f"{member} requires {extra_required}, which no MemoryToolSurface caller can supply"
+
+
+def test_tools_module_is_a_memory_tool_surface() -> None:
+    """The module itself is the implementation of the Protocol."""
+    import trw_memory.tools as tools_module
+
+    assert isinstance(tools_module, MemoryToolSurface)
+
+
+def test_update_impl_is_declared_and_implemented_together() -> None:
+    """FR07's ``memory_update_impl`` must arrive as implementation AND contract member.
+
+    PRD-CORE-251 Phase 1 ships the Protocol without an update member because
+    the tool does not exist yet (verified 2026-09-03: ``trw_memory.tools`` has
+    no update entry point) and FR01 requires every member to resolve. This is
+    the ratchet that keeps the two halves from landing separately — whichever
+    arrives first fails until its counterpart does.
+    """
+    import trw_memory.tools as tools_module
+
+    declared = "memory_update_impl" in SURFACE_MEMBERS
+    implemented = hasattr(tools_module, "memory_update_impl")
+    assert declared == implemented, (
+        "memory_update_impl is declared by MemoryToolSurface but not exported by trw_memory.tools"
+        if declared
+        else "memory_update_impl is exported by trw_memory.tools but missing from MemoryToolSurface (PRD-CORE-251 FR07)"
+    )

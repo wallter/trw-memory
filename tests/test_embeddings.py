@@ -13,6 +13,7 @@ Covers:
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,6 +21,8 @@ import pytest
 from trw_memory.embeddings import get_local_embedder
 from trw_memory.embeddings.local import LocalEmbeddingProvider
 from trw_memory.exceptions import LocalOnlyViolationError
+
+from ._test_hf_cache_support import use_fixture_cache
 
 # ---------------------------------------------------------------------------
 # Helper: produce a provider with no model loaded
@@ -180,7 +183,14 @@ class TestLocalOnlyModelLoading:
     def test_load_model_uses_local_files_only_when_local_only_enabled(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
+        # PRD-SEC-014-FR01 made the resolution consult the local HF cache, so the
+        # cache must be pinned or this test's outcome would depend on whatever the
+        # developer happens to have downloaded. An empty cache isolates the
+        # local_only branch this test is about.
+        use_fixture_cache(monkeypatch, tmp_path)
+        (tmp_path / "hub").mkdir()
         monkeypatch.setenv("MEMORY_LOCAL_ONLY", "true")
         captured: dict[str, object] = {}
 
@@ -206,7 +216,10 @@ class TestLocalOnlyModelLoading:
     def test_load_model_raises_local_only_violation_when_uncached_model_requires_download(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
+        use_fixture_cache(monkeypatch, tmp_path)
+        (tmp_path / "hub").mkdir()
         monkeypatch.setenv("MEMORY_LOCAL_ONLY", "true")
 
         class FakeSentenceTransformer:

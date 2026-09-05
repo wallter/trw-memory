@@ -1,7 +1,7 @@
 """Behavior tests: merge_entries preserves accumulation fields.
 
 Before the fix, merge_entries dropped q_value, q_observations, access_count,
-recall_count, helpful_count, sessions_surfaced, assertions, and protection_tier
+recall_count, helpful_count, assertions, and protection_tier
 (consolidation._create_consolidated_entry handled them correctly, but the dedup
 merge path did not). These tests assert the cumulative/max/union semantics.
 """
@@ -52,7 +52,6 @@ class TestMergeAccumulationFields:
             access_count=5,
             recall_count=7,
             helpful_count=2,
-            sessions_surfaced=4,
         )
         new_entry = _entry(
             "e2",
@@ -60,14 +59,14 @@ class TestMergeAccumulationFields:
             access_count=1,
             recall_count=3,
             helpful_count=6,
-            sessions_surfaced=1,
         )
         updated = merge_entries(existing, new_entry)
         assert updated.q_observations == 5
         assert updated.access_count == 6
         assert updated.recall_count == 10
         assert updated.helpful_count == 8
-        assert updated.sessions_surfaced == 5
+        # sessions_surfaced was dropped by PRD-CORE-244-FR08 (schema 5): it had no
+        # producer, so this arm only ever summed two zeros.
 
     def test_protection_tier_takes_stronger(self) -> None:
         existing = _entry("e1", protection_tier=ProtectionTier.NORMAL)

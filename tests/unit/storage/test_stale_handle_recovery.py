@@ -141,15 +141,15 @@ def test_previously_unchecked_operations_reconnect_before_use(tmp_path: Path, op
         backend._stale_detector._last_checked = 0.0  # type: ignore[attr-defined]
 
         if operation == "get":
-            assert backend.get("M-new") is not None
-            assert backend.get("M-old") is None
+            assert backend.get("M-new", namespace="default") is not None
+            assert backend.get("M-old", namespace="default") is None
         elif operation == "count":
             assert backend.count() == 1
         else:
             backend.store(_make_entry("M-written-after-replacement"))
             observer = SQLiteBackend(db_path)
             try:
-                assert observer.get("M-written-after-replacement") is not None
+                assert observer.get("M-written-after-replacement", namespace="default") is not None
             finally:
                 observer.close()
         assert backend.reconnect_count == 1
@@ -179,7 +179,7 @@ def test_reconnect_waits_for_active_connection_use(tmp_path: Path) -> None:
 
     def read() -> None:
         try:
-            assert backend.get("M-row") is not None
+            assert backend.get("M-row", namespace="default") is not None
         except BaseException as exc:
             errors.append(exc)
 
@@ -314,7 +314,7 @@ def test_reconnect_reloads_vector_capabilities(tmp_path: Path) -> None:
         backend._stale_detector._last_checked = 0.0  # type: ignore[attr-defined]
 
         assert backend.count() == 0
-        backend.upsert_vector("M-after-reconnect", [0.0] * backend._dim)
-        assert backend.vector_exists("M-after-reconnect")
+        backend.upsert_vector("M-after-reconnect", [0.0] * backend._dim, namespace="default")
+        assert backend.vector_exists("M-after-reconnect", namespace="default")
     finally:
         backend.close()

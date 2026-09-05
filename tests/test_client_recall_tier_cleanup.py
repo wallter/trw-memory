@@ -40,12 +40,12 @@ class TestRecall:
         backend = client._get_backend()
         original_unlink = Path.unlink
 
-        def _fail_archive_delete(path: Path, *, missing_ok: bool = False) -> None:
+        def _fail_archive_delete(path: Path, *, missing_ok: bool = False, **_kwargs) -> None:
             if path == cold_file:
                 raise OSError("archive delete failed")
             original_unlink(path, missing_ok=missing_ok)
 
-        def _fail_primary_delete(_entry_id: str) -> bool:
+        def _fail_primary_delete(_entry_id: str, **_kwargs) -> bool:
             raise OSError("primary rollback delete failed")
 
         monkeypatch.setattr(Path, "unlink", _fail_archive_delete)
@@ -58,7 +58,7 @@ class TestRecall:
 
         assert not any(result["memory_id"] == "M-cold-sqlite-double-fail" for result in results)
         assert cold_file.exists()
-        assert client._get_backend().get("M-cold-sqlite-double-fail") is None
+        assert client._get_backend().get("M-cold-sqlite-double-fail", namespace="default") is None
         await client.close()
 
     async def test_recall_surfaces_semantic_warm_tier_hit(

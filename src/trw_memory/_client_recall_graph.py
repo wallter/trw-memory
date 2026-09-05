@@ -63,10 +63,12 @@ def graph_expand_results(
 
     root_ids = [r["memory_id"] for r in results]
 
-    # Scope BFS to the client's namespace so graph expansion never surfaces
-    # neighbours belonging to a foreign namespace (data-isolation leak —
-    # memory_graph_edges has no namespace column).
-    namespace = getattr(client, "_namespace", None)
+    # Scope BFS AND node hydration to the client's namespace so graph expansion
+    # never surfaces neighbours belonging to a foreign namespace. Under
+    # PRD-CORE-245 the namespace is not optional: an unscoped expansion has no
+    # way to hydrate a node through the composite key, so it would return
+    # nothing anyway — failing closed loudly beats returning a silent empty set.
+    namespace = client._namespace
 
     try:
         nodes = graph_query(conn, root_ids, depth=depth, namespace=namespace)
@@ -87,7 +89,7 @@ def graph_expand_results(
         node_id = str(node["id"])
         if node_id in seen_ids:
             continue
-        entry = backend.get(node_id)
+        entry = backend.get(node_id, namespace=namespace)
         if entry is None or entry.status != MemoryStatus.ACTIVE:
             continue
         node_score = base_score * float(node.get("weight", 1.0))

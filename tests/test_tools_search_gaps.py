@@ -63,7 +63,7 @@ class TestRegisterSearchTool:
         registered: dict[str, object] = {}
         mock_mcp = MagicMock()
 
-        def _capture(f):
+        def _capture(f, **_kwargs):
             registered["fn"] = f
             return f
 

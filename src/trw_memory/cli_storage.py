@@ -168,7 +168,7 @@ def handle_import(
             if args.merge:
                 entry_id = entry_data.get("id", "")
                 if entry_id:
-                    existing = backend.get(entry_id)
+                    existing = backend.get(str(entry_id), namespace=namespace)
                     if existing is not None:
                         skipped += 1
                         continue

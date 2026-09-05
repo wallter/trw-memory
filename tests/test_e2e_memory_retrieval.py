@@ -7,6 +7,8 @@ import pytest
 from tests.conftest import make_entry
 from trw_memory.exceptions import DimensionMismatchError
 
+from ._test_scope_support import DEFAULT_SCOPE
+
 
 class TestHybridRetrieval:
     """Section 3 of E2E plan: BM25, dense, hybrid pipeline."""
@@ -64,10 +66,7 @@ class TestHybridRetrieval:
             make_entry(entry_id="e2", content="react component lifecycle hooks"),
         ]
         results = hybrid_search(
-            query="pydantic validation",
-            entries=entries,
-            embedder=None,
-            top_k=5,
+            query="pydantic validation", entries=entries, embedder=None, top_k=5, scope=DEFAULT_SCOPE
         )
         assert len(results) >= 1
         assert results[0].id == "e1"

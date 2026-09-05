@@ -19,7 +19,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict
 
 from trw_memory.exceptions import PoisoningError, SchemaValidationError
-from trw_memory.models.memory import MemoryEntry
+from trw_memory.models.memory import Confidence, MemoryEntry
 
 logger = structlog.get_logger(__name__)
 
@@ -40,9 +40,9 @@ _CODE_EXEMPT_PATTERNS = (
     re.compile(r"rm[ \t]+-rf[ \t]+/", re.IGNORECASE),
 )
 # NOTE on the classification: `<script` and `javascript:` are waivable because
-# nothing in this repo renders recalled memory as HTML — the only two
-# `dangerouslySetInnerHTML` sinks in `platform/` are JSON-LD and Shiki-rendered
-# docs, neither fed by memory entries. That is a property of today's CONSUMERS,
+# no known consumer renders recalled memory as HTML — the TRW dashboard's only
+# two raw-HTML sinks are JSON-LD and Shiki-rendered docs, neither fed by memory
+# entries. That is a property of today's CONSUMERS,
 # not of the pattern. If a dashboard ever renders recall output as HTML, these two
 # move to _ALWAYS_ENFORCED_PATTERNS.
 
@@ -386,8 +386,76 @@ def scannable_text(entry: MemoryEntry) -> str:
     return "\n".join(part for part in parts if part)
 
 
-def validate_entry_payload(entry: MemoryEntry, *, max_chars: int) -> None:
-    """Apply write-time poisoning and schema validation checks to one entry."""
+def _count_substantiation(entry: MemoryEntry) -> int:
+    """Count the substantiating artifacts *entry* carries (PRD-CORE-244 FR02).
+
+    Exactly three things can substantiate a ``verified`` claim, and each counts
+    once: at least one non-whitespace ``evidence`` string, a non-empty
+    ``assertions`` list, a non-empty ``anchors`` list.
+
+    NFR03: this reads only those three fields. It performs no filesystem and no
+    network access, so a crafted entry cannot turn the gate into an oracle.
+
+    The returned value can never exceed
+    :data:`~trw_memory.models._config_lifecycle.MAX_SUBSTANTIATION_ITEMS`, which
+    is what caps ``min_evidence_items_for_verified``. The two are pinned together
+    by ``tests/test_poisoning_validation.py::TestSubstantiationThresholdCeiling``
+    so a fourth artifact kind added here cannot leave the config ceiling behind
+    — the reverse of that drift is what let 4-8 be configured as an
+    unsatisfiable threshold that silently refused every verified write.
+    """
+    return int(any(item.strip() for item in entry.evidence)) + int(bool(entry.assertions)) + int(bool(entry.anchors))
+
+
+def reject_unsubstantiated_verified(entry: MemoryEntry, *, min_items: int) -> None:
+    """Refuse a ``confidence='verified'`` write that carries no basis (FR02).
+
+    Public because ``validate_entry_payload`` is not the only surface that can
+    set ``confidence``: ``trw_learn_update(fields={"confidence": "verified"})``
+    edits an EXISTING row through ``backend.update()``, which never re-enters the
+    store pipeline. That surface calls this function directly against the
+    projected post-update entry, so both paths enforce one rule from one
+    implementation rather than a copy that can drift.
+
+    Fail-closed by design: the write RAISES rather than degrading to a lower
+    confidence, because silently rewriting a caller's claim is the same class of
+    defect this gate exists to fix.
+
+    NFR03: the log record carries the entry id and the reason code only. The
+    rejection fires before ``_stage_pii_policy``, so a rejected entry may still
+    hold exactly the payload the PII stage exists to contain — its ``content``,
+    ``detail`` and ``evidence`` text must never reach a log line.
+    """
+    if entry.confidence != Confidence.VERIFIED:
+        return
+    if _count_substantiation(entry) >= min_items:
+        return
+    logger.warning(
+        "unsubstantiated_verified_rejected",
+        entry_id=entry.id,
+        reason="unsubstantiated_verified",
+        required_items=min_items,
+    )
+    raise SchemaValidationError(
+        "confidence='verified' requires a substantiating artifact "
+        f"(at least {min_items} of: evidence, assertions, anchors)",
+        failed_fields=["confidence"],
+        reason="unsubstantiated_verified",
+    )
+
+
+def validate_entry_payload(entry: MemoryEntry, *, max_chars: int, min_evidence_items_for_verified: int) -> None:
+    """Apply write-time poisoning and schema validation checks to one entry.
+
+    Args:
+        entry: The entry about to be persisted.
+        max_chars: ``MemoryConfig.max_entry_chars`` serialized-size ceiling.
+        min_evidence_items_for_verified:
+            ``MemoryConfig.min_evidence_items_for_verified`` — how many
+            substantiating artifacts a ``verified`` claim must carry
+            (PRD-CORE-244 FR02). Required rather than defaulted so a caller can
+            never silently inherit a weaker rule than the configured one.
+    """
     try:
         entry.content.encode("utf-8")
         entry.detail.encode("utf-8")
@@ -422,6 +490,9 @@ def validate_entry_payload(entry: MemoryEntry, *, max_chars: int) -> None:
                 f"memory entry matched blocked injection pattern {pattern.pattern!r}",
                 reason="injection_pattern",
             )
+    # PRD-CORE-244 FR02 / NFR03: evaluated AFTER the injection scan, so a
+    # poisoned entry is still rejected on the stronger ground first.
+    reject_unsubstantiated_verified(entry, min_items=min_evidence_items_for_verified)
 
 
 def validate_store_inputs(

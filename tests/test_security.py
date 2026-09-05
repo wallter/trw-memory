@@ -85,47 +85,47 @@ class TestSqliteUpdateInjection:
         entry = factory("e-inj-1")
         sqlite_backend.store(entry)
         with pytest.raises(StorageError, match="Invalid update field"):
-            sqlite_backend.update("e-inj-1", evil_column="value")
+            sqlite_backend.update("e-inj-1", evil_column="value", namespace="default")
 
     def test_sqlite_update_sql_injection_attempt(self, sqlite_backend: SQLiteBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("e-inj-2")
         sqlite_backend.store(entry)
         with pytest.raises(StorageError, match="Invalid update field"):
-            sqlite_backend.update("e-inj-2", **{"id = 1 OR 1=1 --": "pwned"})
+            sqlite_backend.update("e-inj-2", **{"id = 1 OR 1=1 --": "pwned"}, namespace="default")
 
     def test_sqlite_update_cannot_change_id(self, sqlite_backend: SQLiteBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("e-id-change")
         sqlite_backend.store(entry)
         with pytest.raises(StorageError, match="Invalid update field"):
-            sqlite_backend.update("e-id-change", id="new_id")
+            sqlite_backend.update("e-id-change", id="new_id", namespace="default")
 
     def test_sqlite_update_cannot_change_created_at(self, sqlite_backend: SQLiteBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("e-created-at")
         sqlite_backend.store(entry)
         with pytest.raises(StorageError, match="Invalid update field"):
-            sqlite_backend.update("e-created-at", created_at=datetime.now(timezone.utc))
+            sqlite_backend.update("e-created-at", created_at=datetime.now(timezone.utc), namespace="default")
 
     def test_sqlite_update_valid_fields_accepted(self, sqlite_backend: SQLiteBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("e-valid")
         sqlite_backend.store(entry)
-        updated = sqlite_backend.update("e-valid", importance=0.9, status=MemoryStatus.RESOLVED)
+        updated = sqlite_backend.update("e-valid", importance=0.9, status=MemoryStatus.RESOLVED, namespace="default")
         assert updated is not None
         assert updated.importance == pytest.approx(0.9)
         assert updated.status == MemoryStatus.RESOLVED
 
     def test_update_nonexistent_returns_none(self, sqlite_backend: SQLiteBackend) -> None:
-        result = sqlite_backend.update("no-such-entry", importance=0.7)
+        result = sqlite_backend.update("no-such-entry", importance=0.7, namespace="default")
         assert result is None
 
     def test_update_empty_fields_returns_current(self, sqlite_backend: SQLiteBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("e-no-fields", content="original")
         sqlite_backend.store(entry)
-        result = sqlite_backend.update("e-no-fields")
+        result = sqlite_backend.update("e-no-fields", namespace="default")
         assert result is not None
         assert result.content == "original"
         assert result.id == "e-no-fields"
@@ -145,21 +145,21 @@ class TestYamlPathTraversal:
 
     def test_yaml_get_path_traversal_raises(self, yaml_backend: YAMLBackend) -> None:
         with pytest.raises(StorageError, match="traversal"):
-            yaml_backend.get("../../etc/passwd")
+            yaml_backend.get("../../etc/passwd", namespace="default")
 
     def test_yaml_delete_path_traversal_raises(self, yaml_backend: YAMLBackend) -> None:
         with pytest.raises(StorageError, match="traversal"):
-            yaml_backend.delete("../../../tmp/data")
+            yaml_backend.delete("../../../tmp/data", namespace="default")
 
     def test_update_path_traversal_raises(self, yaml_backend: YAMLBackend) -> None:
         with pytest.raises(StorageError, match="traversal"):
-            yaml_backend.update("../evil", importance=0.9)
+            yaml_backend.update("../evil", importance=0.9, namespace="default")
 
     def test_legitimate_id_accepted(self, yaml_backend: YAMLBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("M-001-safe")
         yaml_backend.store(entry)
-        result = yaml_backend.get("M-001-safe")
+        result = yaml_backend.get("M-001-safe", namespace="default")
         assert result is not None
         assert result.id == "M-001-safe"
         assert result.content == "test content"
@@ -174,7 +174,7 @@ class TestYamlPathTraversal:
     )
     def test_various_traversal_patterns_rejected(self, yaml_backend: YAMLBackend, bad_id: str) -> None:
         with pytest.raises(StorageError):
-            yaml_backend.get(bad_id)
+            yaml_backend.get(bad_id, namespace="default")
 
 
 # ---------------------------------------------------------------------------
@@ -188,20 +188,20 @@ class TestYamlFieldInjection:
         entry = factory("e-yaml-inj")
         yaml_backend.store(entry)
         with pytest.raises(StorageError, match="Invalid update field"):
-            yaml_backend.update("e-yaml-inj", __class__="Exploit")
+            yaml_backend.update("e-yaml-inj", __class__="Exploit", namespace="default")
 
     def test_yaml_update_cannot_change_id(self, yaml_backend: YAMLBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("e-yaml-id")
         yaml_backend.store(entry)
         with pytest.raises(StorageError, match="Invalid update field"):
-            yaml_backend.update("e-yaml-id", id="new_id")
+            yaml_backend.update("e-yaml-id", id="new_id", namespace="default")
 
     def test_valid_fields_accepted(self, yaml_backend: YAMLBackend, make_entry: object) -> None:
         factory = make_entry  # type: ignore[operator]
         entry = factory("e-yaml-valid")
         yaml_backend.store(entry)
-        updated = yaml_backend.update("e-yaml-valid", importance=0.8)
+        updated = yaml_backend.update("e-yaml-valid", importance=0.8, namespace="default")
         assert updated is not None
         assert updated.importance == pytest.approx(0.8)
         assert updated.id == "e-yaml-valid"
@@ -218,7 +218,7 @@ class TestSqliteTimezoneRoundtrip:
         now = datetime(2025, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
         entry = factory("e-tz-1", created_at=now, updated_at=now)
         sqlite_backend.store(entry)
-        result = sqlite_backend.get("e-tz-1")
+        result = sqlite_backend.get("e-tz-1", namespace="default")
         assert result is not None
         assert result.created_at.tzinfo is not None
         assert result.created_at.utcoffset().total_seconds() == 0  # type: ignore[union-attr]
@@ -227,7 +227,7 @@ class TestSqliteTimezoneRoundtrip:
         factory = make_entry  # type: ignore[operator]
         entry = factory("e-tz-2")
         sqlite_backend.store(entry)
-        result = sqlite_backend.get("e-tz-2")
+        result = sqlite_backend.get("e-tz-2", namespace="default")
         assert result is not None
         assert result.created_at.tzinfo is not None
         assert result.updated_at.tzinfo is not None
@@ -299,7 +299,7 @@ class TestAutoUpdatedAt:
         sqlite_backend.store(entry)
         # Small sleep to ensure updated_at changes
         time.sleep(0.01)
-        result = sqlite_backend.update("e-upd-ts", importance=0.7)
+        result = sqlite_backend.update("e-upd-ts", importance=0.7, namespace="default")
         assert result is not None
         assert result.updated_at >= before
 
@@ -309,7 +309,7 @@ class TestAutoUpdatedAt:
         entry = factory("e-yaml-upd", created_at=before, updated_at=before)
         yaml_backend.store(entry)
         time.sleep(0.01)
-        result = yaml_backend.update("e-yaml-upd", importance=0.7)
+        result = yaml_backend.update("e-yaml-upd", importance=0.7, namespace="default")
         assert result is not None
         assert result.updated_at >= before
 
@@ -319,7 +319,7 @@ class TestAutoUpdatedAt:
         entry = factory("e-explicit-upd")
         sqlite_backend.store(entry)
         explicit_dt = datetime(2030, 1, 1, tzinfo=timezone.utc)
-        result = sqlite_backend.update("e-explicit-upd", updated_at=explicit_dt)
+        result = sqlite_backend.update("e-explicit-upd", updated_at=explicit_dt, namespace="default")
         assert result is not None
         assert result.updated_at.year == 2030
 

@@ -37,10 +37,18 @@ from typing import Any
 from trw_memory.exceptions import CanaryTamperError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.namespaces.validation import DEFAULT_NAMESPACE
 from trw_memory.security.canary import _CANARY_FIXTURES, PINNED_HASHES
 from trw_memory.security.startup import resolve_security_path
 from trw_memory.security.telemetry_emit import build_security_traceability, emit_security_event
 from trw_memory.storage.interface import StorageBackend
+
+#: Canaries are seeded into the store's unnamed namespace. Under schema 5 a row
+#: is identified by ``(namespace, id)`` (PRD-CORE-245 FR01), so the seed, the
+#: probe and the drift check must all name the SAME namespace or the probe
+#: reads "missing" for a canary that is present and self-heals it forever.
+CANARY_NAMESPACE = DEFAULT_NAMESPACE
+
 
 CANARY_STATE: dict[str, dict[str, object]] = {}
 
@@ -80,7 +88,7 @@ def _store_pinned_canary(
         MemoryEntry(
             id=canary_id,
             content=content,
-            namespace="default",
+            namespace=CANARY_NAMESPACE,
             metadata={
                 "system_canary": "true",
                 "provenance_content_hash": expected_hash,
@@ -96,7 +104,7 @@ def initialize_canaries(config: MemoryConfig, *, backend: StorageBackend) -> Non
     seeded = 0
     fixture_map = dict(_CANARY_FIXTURES)
     for canary_id, expected_hash in list(PINNED_HASHES.items())[: config.canary_injection_rate]:
-        if backend.get(canary_id) is not None:
+        if backend.get(canary_id, namespace=CANARY_NAMESPACE) is not None:
             seeded += 1
             continue
         content = fixture_map[canary_id]
@@ -134,7 +142,7 @@ def probe_canaries(config: MemoryConfig, *, backend: StorageBackend) -> None:
         return
     fixture_map = dict(_CANARY_FIXTURES)
     for canary_id, expected_hash in list(PINNED_HASHES.items())[: config.canary_injection_rate]:
-        entry = backend.get(canary_id)
+        entry = backend.get(canary_id, namespace=CANARY_NAMESPACE)
         if entry is None:
             # PRD-FIX-102 (FR-1/FR-3): a MISSING canary is self-healed from the trusted,
             # hash-pinned in-process fixture rather than halting ALL recall. A missing canary
@@ -218,7 +226,7 @@ def _has_canary_drift(config: MemoryConfig, *, backend: StorageBackend) -> bool:
     from the trusted pin, PRD-FIX-102). Read-only; does not mutate state or re-seed.
     """
     for canary_id, expected_hash in list(PINNED_HASHES.items())[: config.canary_injection_rate]:
-        entry = backend.get(canary_id)
+        entry = backend.get(canary_id, namespace=CANARY_NAMESPACE)
         if entry is None:
             continue  # missing => recoverable, not a tamper
         if hashlib.sha256(entry.content.encode("utf-8")).hexdigest() != expected_hash:
