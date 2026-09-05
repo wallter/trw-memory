@@ -61,7 +61,7 @@ jobs:
               e = MemoryEntry(id='M-smoke', content='smoke', status=MemoryStatus.ACTIVE,
                               created_at=now, updated_at=now)
               b.store(e)
-              assert b.get('M-smoke') is not None, 'round-trip failed'
+              assert b.get('M-smoke', namespace=e.namespace) is not None, 'round-trip failed'
               print(f'vec_available={b._vec_available}')
           "
 

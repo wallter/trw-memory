@@ -13,6 +13,11 @@ All notable changes to the TRW Memory package.
   `PYTEST_WORKERS ?= 4` default. Override with `TRW_PYTEST_ALLOW_WIDE_XDIST=1`.
   The same cap applies to every package suite this monorepo runs.
 
+## [0.16.1] — 2026-09-05
+
+### Fixed
+- **The public release workflow's smoke test calls `get()` with the namespace it now requires.** The `v0.16.0` tag ran the Release-to-PyPI workflow, whose store/get round-trip still called `b.get('M-smoke')`; every matrix leg failed with `TypeError: SQLiteBackend.get() missing 1 required keyword-only argument: 'namespace'` and the publish job was skipped, so 0.16.0 never reached PyPI. This release carries the identical package with the smoke updated for the namespace-as-identity API; the `v0.16.0` tag is superseded.
+
 ## [0.16.0] — 2026-09-03
 
 ### Fixed

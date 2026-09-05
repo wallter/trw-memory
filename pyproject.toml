@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "trw-memory"
-version = "0.16.0"
+version = "0.16.1"
 description = "Persistent memory engine with hybrid retrieval, tiered storage, and semantic dedup for AI agents"
 readme = "README.md"
 license = "BUSL-1.1"
