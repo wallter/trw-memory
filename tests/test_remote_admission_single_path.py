@@ -8,7 +8,6 @@ admission check.
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -20,7 +19,11 @@ from trw_memory.sync._remote_admission import SHARED_NAMESPACE, admit_remote_res
 
 pytestmark = pytest.mark.unit
 
-_REPO = Path(__file__).resolve().parents[2]
+_PACKAGE = Path(__file__).resolve().parents[1]
+# Monorepo checkout: the package sits at <repo>/trw-memory and trw-mcp is a sibling.
+# Exported package tree (the public repo, or the release check's CI replay): the
+# package root IS the repo root, and parents[2] would point above it.
+_REPO = _PACKAGE.parent if (_PACKAGE.name == "trw-memory" and (_PACKAGE.parent / "trw-mcp").is_dir()) else _PACKAGE
 
 _REMOTE_ITEM: dict[str, object] = {
     "source_learning_id": "R-remote-1",
@@ -119,13 +122,20 @@ def test_telemetry_package_has_no_dangling_reference() -> None:
 
 def test_exactly_one_client_posts_to_the_learnings_search_endpoint() -> None:
     """The whole point of FR06: one path to the platform, therefore one gate."""
-    hits = subprocess.run(
-        ["git", "grep", "-l", "v1/learnings/search", "--", "trw-memory/src", "trw-mcp/src"],
-        cwd=_REPO,
-        capture_output=True,
-        text=True,
-        check=False,
-    ).stdout.split()
-    assert hits == ["trw-memory/src/trw_memory/sync/_remote_fetch.py"], (
-        f"expected exactly one client for the platform learning-search endpoint, found {hits}"
+    # Monorepo layout scans both packages; the public trw-memory repository is the
+    # package alone, where the same single client lives at src/. A filesystem scan
+    # rather than `git grep`, so an exported non-git copy of the tree (the release
+    # check's replay of the public CI) answers the same as a checkout.
+    monorepo = (_REPO / "trw-memory").is_dir()
+    scan_roots = [_REPO / "trw-memory" / "src", _REPO / "trw-mcp" / "src"] if monorepo else [_REPO / "src"]
+    expected = [
+        "trw-memory/src/trw_memory/sync/_remote_fetch.py" if monorepo else "src/trw_memory/sync/_remote_fetch.py"
+    ]
+    hits = sorted(
+        path.relative_to(_REPO).as_posix()
+        for root in scan_roots
+        if root.is_dir()
+        for path in root.rglob("*.py")
+        if "v1/learnings/search" in path.read_text(encoding="utf-8", errors="ignore")
     )
+    assert hits == expected, f"expected exactly one client for the platform learning-search endpoint, found {hits}"

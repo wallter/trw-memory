@@ -47,6 +47,23 @@ _TEST_IDLE_SECONDS = 6.0
 _SHUTDOWN_DEADLINE_SECONDS = 60.0
 
 
+def _daemon_env(user_dir: Path) -> dict[str, str]:
+    """Environment for a daemon under test.
+
+    ``MEMORY_EMBEDDING_MODEL`` names a model that does not exist, so the daemon's
+    first ``memory_store`` resolves no local embedder and degrades to keyword-only
+    storage. Without it the daemon downloaded ``all-MiniLM-L6-v2`` from the
+    Hugging Face Hub on every run: the shared ``_trw_home`` fixture redirects
+    HOME, so the model cache is always empty (8-9 s alone on a fast link,
+    unbounded under the full suite or a rate-limited CI runner — the reason this
+    test hung in the public CI replay). ``TRW_OFFLINE=1`` is NOT the right lever:
+    with an uncached model it makes ``memory_store`` fail hard instead of
+    degrading (tracked in the improvement backlog). Keyword-only storage is all
+    these properties need.
+    """
+    return {**os.environ, "TRW_USER_DIR": str(user_dir), "MEMORY_EMBEDDING_MODEL": "trw-tests/no-such-embedding-model"}
+
+
 def _spawn_daemon(user_dir: Path, *, idle_seconds: float = _TEST_IDLE_SECONDS) -> subprocess.Popen[str]:
     return subprocess.Popen(
         [
@@ -58,7 +75,7 @@ def _spawn_daemon(user_dir: Path, *, idle_seconds: float = _TEST_IDLE_SECONDS) -
             "--idle-shutdown-seconds",
             str(idle_seconds),
         ],
-        env={**os.environ, "TRW_USER_DIR": str(user_dir)},
+        env=_daemon_env(user_dir),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -108,14 +125,37 @@ def running_daemon(user_dir: Path, paths: DaemonPaths) -> Iterator[tuple[subproc
             proc.wait(timeout=30)
 
 
+#: Connect retries for the first daemon call (listener may lag the discovery record).
+_CONNECT_ATTEMPTS = 30
+_CONNECT_RETRY_DELAY_S = 0.5
+
+
 async def _call(info: DaemonInfo, name: str, arguments: dict[str, object], *, token: str | None = None) -> object:
+    import asyncio
+
+    import httpx
     from fastmcp import Client
     from fastmcp.client.transports import StreamableHttpTransport
 
     transport = StreamableHttpTransport(url=info.url, auth=token if token is not None else info.token)
-    async with Client(transport) as client:
-        result = await client.call_tool(name, arguments)
-    return result.data
+    # The daemon fixture returns as soon as the discovery record exists; the
+    # listener can still be a few hundred ms behind on a loaded CI runner
+    # (observed: ConnectError on GitHub-hosted ubuntu). Bounded retry, connect
+    # errors only — every other failure (401, tool errors) surfaces unchanged.
+    for attempt in range(_CONNECT_ATTEMPTS):
+        try:
+            async with Client(transport) as client:
+                result = await client.call_tool(name, arguments)
+            return result.data
+        except (httpx.ConnectError, RuntimeError) as exc:
+            # fastmcp wraps the transport's ConnectError in RuntimeError("Client
+            # failed to connect: ..."); anything else is a real failure.
+            if not isinstance(exc, httpx.ConnectError) and "failed to connect" not in str(exc):
+                raise
+            if attempt == _CONNECT_ATTEMPTS - 1:
+                raise
+            await asyncio.sleep(_CONNECT_RETRY_DELAY_S)
+    raise AssertionError("unreachable: retry loop exits by return or raise")
 
 
 async def test_loopback_daemon_single_instance_token_and_idle_shutdown(
@@ -165,7 +205,7 @@ async def test_loopback_daemon_single_instance_token_and_idle_shutdown(
     second = await asyncio.to_thread(
         subprocess.run,
         [sys.executable, "-m", "trw_memory.server", "serve", "http"],
-        env={**os.environ, "TRW_USER_DIR": str(user_dir)},
+        env=_daemon_env(user_dir),
         capture_output=True,
         text=True,
         timeout=120,

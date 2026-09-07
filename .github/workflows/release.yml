@@ -33,8 +33,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+        # One macOS leg only: macOS runner minutes cost 10x, and the platform-specific
+        # risk (sqlite-vec extension loading) is covered by a single interpreter.
+        include:
+          - os: macos-latest
+            python-version: "3.12"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

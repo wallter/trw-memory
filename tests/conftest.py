@@ -35,6 +35,7 @@ import pytest
 # silently miss them. Pulling trw_memory in here at the top of conftest
 # guarantees the swap is in place before any test module is loaded.
 import trw_memory as _trw_memory_shim_trigger  # noqa: F401
+from tests._trw_home import isolated_trw_home  # noqa: F401  (canonical copy; see that module's docstring)
 from trw_memory.client import MemoryClient
 from trw_memory.graph import wait_for_graph_updates
 from trw_memory.models.config import MemoryConfig

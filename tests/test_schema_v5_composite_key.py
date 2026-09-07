@@ -138,6 +138,11 @@ def test_schema_5_is_registered_exactly_once() -> None:
 
 def test_schema_5_delta_matches_the_consolidated_table(tmp_path: Path) -> None:
     """The delta changes exactly what the consolidated migration table says (FR01)."""
+    # vec_index is only created when sqlite-vec is importable (the [vectors]
+    # extra); EXPECTED_TABLES/EXPECTED_MEMORIES_COLUMNS assume it's present, so
+    # this must skip rather than fail on an environment without it — same
+    # guard sibling dense-vector tests use (e.g. test_storage_sqlite_edge_cases.py).
+    pytest.importorskip("sqlite_vec")
     db = tmp_path / "v4.db"
     _v4_fixture(db)
 
