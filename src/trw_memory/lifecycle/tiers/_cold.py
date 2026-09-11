@@ -8,15 +8,24 @@ from __future__ import annotations
 
 import contextlib
 from collections import OrderedDict
+from collections.abc import Generator
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import structlog
 
 from trw_memory.exceptions import StorageError
-from trw_memory.lifecycle.tiers._cold_partition import entry_partition_timestamp as _entry_partition_timestamp
+from trw_memory.lifecycle.tiers._cold_partition import (
+    archive_payload,
+    extract_archived_embedding,
+    sanitize_archived_entry,
+)
+from trw_memory.lifecycle.tiers._cold_partition import (
+    entry_partition_timestamp as _entry_partition_timestamp,
+)
 from trw_memory.lifecycle.tiers._warm import WarmTierStore
 from trw_memory.storage.persistence import read_yaml, write_yaml
 
@@ -24,7 +33,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 logger = structlog.get_logger(__name__)
-_WARM_EMBEDDING_KEY = "_warm_embedding"
 
 
 @dataclass(frozen=True)
@@ -147,7 +155,7 @@ class ColdTierStore:
         """Archive an active entry payload into the cold tier."""
         dest: Path | None = None
         try:
-            archive_data, embedding = self._archive_payload(entry_id, entry_data)
+            archive_data, embedding = archive_payload(entry_data, self._warm_store.get_embedding(entry_id))
             partition = self._cold_partition(self._entry_partition_timestamp(archive_data))
             partition.mkdir(parents=True, exist_ok=True)
             dest_name = source_path.name if source_path is not None else f"{entry_id}.yaml"
@@ -222,7 +230,7 @@ class ColdTierStore:
             # Stage the promoted payload in memory so a failed promotion does not
             # mutate the cold archive's retention metadata.
             promoted_data = dict(data)
-            embedding = self._extract_archived_embedding(promoted_data)
+            embedding = extract_archived_embedding(promoted_data)
             promoted_data["last_accessed_at"] = datetime.now(timezone.utc).isoformat()
             canonical_restore = restore_entry_fn or self._restore_to_entries_dir
             canonical_delete = delete_restored_entry_fn or self._delete_from_entries_dir
@@ -315,60 +323,70 @@ class ColdTierStore:
         force_delete_restored_entry_fn: Callable[[str], bool | None] | None = None,
         verify_restored_entry_removed_fn: Callable[[str], bool] | None = None,
     ) -> list[dict[str, object]]:
-        """Linear scan of the cold archive for keyword matches.
+        """Legacy eager search; closing retains cleanup on competitive early stop."""
+        with contextlib.closing(
+            self.iter_search(
+                query_tokens,
+                promote=promote,
+                restore_entry_fn=restore_entry_fn,
+                delete_restored_entry_fn=delete_restored_entry_fn,
+                force_delete_restored_entry_fn=force_delete_restored_entry_fn,
+                verify_restored_entry_removed_fn=verify_restored_entry_removed_fn,
+            )
+        ) as rows:
+            return list(rows if top_k is None else islice(rows, max(1, top_k)))
 
-        Args:
-            query_tokens: Tokens to match (case-insensitive).
-            promote: If True, promote matched entries back to warm storage before
-                returning them so recall-time cold hits repair the active tier set.
-            top_k: Optional maximum number of matches to return.
-
-        Returns:
-            List of matching entry dicts (includes all YAML fields).
-        """
+    def iter_search(
+        self,
+        query_tokens: list[str],
+        *,
+        promote: bool = False,
+        restore_entry_fn: Callable[[dict[str, object]], None] | None = None,
+        delete_restored_entry_fn: Callable[[str], bool | None] | None = None,
+        force_delete_restored_entry_fn: Callable[[str], bool | None] | None = None,
+        verify_restored_entry_removed_fn: Callable[[str], bool] | None = None,
+    ) -> Generator[dict[str, object], None, None]:
+        """Stream archive hits; always prune the cache when exhausted or closed."""
         cold_base = self._cold_dir()
         if not cold_base.exists() or not query_tokens:
-            return []
+            return
 
         lower_tokens = {t.lower() for t in query_tokens}
-        results: list[dict[str, object]] = []
         live_paths: set[str] = set()
 
-        for yaml_file in sorted(cold_base.rglob("*.yaml")):
-            live_paths.add(str(yaml_file))
-            cached = self._cached_search_entry(yaml_file)
-            if cached is None:
-                continue
-            data = cached.data
-            text = cached.search_text
+        try:
+            for yaml_file in sorted(cold_base.rglob("*.yaml")):
+                live_paths.add(str(yaml_file))
+                cached = self._cached_search_entry(yaml_file)
+                if cached is None:
+                    continue
+                data = cached.data
+                text = cached.search_text
 
-            if any(tok in text for tok in lower_tokens):
-                if promote:
-                    entry_id = str(data.get("id", ""))
-                    promoted_entry = (
-                        self.cold_promote(
-                            entry_id,
-                            restore_entry_fn=restore_entry_fn,
-                            delete_restored_entry_fn=delete_restored_entry_fn,
-                            force_delete_restored_entry_fn=force_delete_restored_entry_fn,
-                            verify_restored_entry_removed_fn=verify_restored_entry_removed_fn,
+                if any(tok in text for tok in lower_tokens):
+                    if promote:
+                        entry_id = str(data.get("id", ""))
+                        promoted_entry = (
+                            self.cold_promote(
+                                entry_id,
+                                restore_entry_fn=restore_entry_fn,
+                                delete_restored_entry_fn=delete_restored_entry_fn,
+                                force_delete_restored_entry_fn=force_delete_restored_entry_fn,
+                                verify_restored_entry_removed_fn=verify_restored_entry_removed_fn,
+                            )
+                            if entry_id
+                            else None
                         )
-                        if entry_id
-                        else None
-                    )
-                    if promoted_entry is None:
-                        continue
-                    results.append(promoted_entry)
-                else:
-                    results.append(self._sanitize_archived_entry(data))
-                if top_k is not None and len(results) >= top_k:
-                    break
+                        if promoted_entry is None:
+                            continue
+                        yield promoted_entry
+                    else:
+                        yield sanitize_archived_entry(data)
 
-        stale_paths = set(self._search_cache) - live_paths
-        for stale_path in stale_paths:
-            self._search_cache.pop(stale_path, None)
-
-        return results
+        finally:
+            stale_paths = set(self._search_cache) - live_paths
+            for stale_path in stale_paths:
+                self._search_cache.pop(stale_path, None)
 
     def _cached_search_entry(self, yaml_file: Path) -> _ColdSearchCacheEntry | None:
         cache_key = str(yaml_file)
@@ -409,33 +427,6 @@ class ColdTierStore:
         """
         while len(self._search_cache) > self._search_cache_max:
             self._search_cache.popitem(last=False)
-
-    def _archive_payload(
-        self,
-        entry_id: str,
-        entry_data: dict[str, object],
-    ) -> tuple[dict[str, object], list[float] | None]:
-        archive_data = dict(entry_data)
-        embedding = self._warm_store.get_embedding(entry_id)
-        if embedding is not None:
-            archive_data[_WARM_EMBEDDING_KEY] = embedding
-        return archive_data, embedding
-
-    def _extract_archived_embedding(self, entry_data: dict[str, object]) -> list[float] | None:
-        raw_embedding = entry_data.pop(_WARM_EMBEDDING_KEY, None)
-        if not isinstance(raw_embedding, list):
-            return None
-        values: list[float] = []
-        for value in raw_embedding:
-            if not isinstance(value, (int, float)):
-                return None
-            values.append(float(value))
-        return values
-
-    def _sanitize_archived_entry(self, entry_data: dict[str, object]) -> dict[str, object]:
-        sanitized = dict(entry_data)
-        sanitized.pop(_WARM_EMBEDDING_KEY, None)
-        return sanitized
 
     def _rollback_cold_archive_failure(
         self,

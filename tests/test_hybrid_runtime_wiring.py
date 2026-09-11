@@ -33,10 +33,19 @@ class _StubEmbedder:
         return 3
 
 
+@pytest.fixture(autouse=True)
+def no_model_loads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wiring tests use explicit deterministic providers, never cached real models."""
+    monkeypatch.setattr("trw_memory.embeddings.get_local_embedder", lambda **kwargs: None)
+    monkeypatch.setattr("trw_memory.tools.store.get_local_embedder", lambda **kwargs: None)
+    monkeypatch.setattr("trw_memory.tools.recall.get_local_embedder", lambda **kwargs: None)
+
+
 @pytest.fixture()
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient:
     monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
     monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("MEMORY_EMBEDDING_DIM", "3")
     return MemoryClient(namespace="default", mode="local")
 
 
@@ -90,15 +99,11 @@ async def test_client_store_rolls_back_when_vector_upsert_fails(client: MemoryCl
 
 async def test_client_recall_passes_stored_embeddings_to_hybrid_search(client: MemoryClient) -> None:
     """MemoryClient.recall feeds backend vectors into the hybrid pipeline."""
-    real_backend = client._backend
-    assert real_backend is not None
-    real_backend.close()
+    backend = client._get_backend()
 
     entry = MemoryEntry(id="M-001", content="pydantic model", namespace="default")
-    backend = MagicMock()
-    backend.list_entries.return_value = [entry]
-    backend.get_stored_embeddings.return_value = {"M-001": [0.9, 0.1, 0.0]}
-    client._backend = backend
+    backend.store(entry)
+    backend.upsert_vector(entry.id, [0.9, 0.1, 0.0], namespace="default")
 
     with (
         patch.object(MemoryClient, "_get_embedder", return_value=_StubEmbedder()),
@@ -107,20 +112,16 @@ async def test_client_recall_passes_stored_embeddings_to_hybrid_search(client: M
         await client.recall("pydantic")
 
     assert hybrid_search_mock.called
-    assert hybrid_search_mock.call_args.kwargs["stored_embeddings"] == {"M-001": [0.9, 0.1, 0.0]}
+    assert hybrid_search_mock.call_args.kwargs["stored_embeddings"]["M-001"] == pytest.approx([0.9, 0.1, 0.0])
 
 
 async def test_client_recall_temporal_prefix_uses_stripped_dense_query(client: MemoryClient) -> None:
     """Temporal prefix stripping must apply to BM25, dense, and rerank text."""
-    real_backend = client._backend
-    assert real_backend is not None
-    real_backend.close()
+    backend = client._get_backend()
 
     entry = MemoryEntry(id="M-001", content="pydantic", namespace="default")
-    backend = MagicMock()
-    backend.list_entries.return_value = [entry]
-    backend.get_stored_embeddings.return_value = {"M-001": [0.8, 0.2, 0.0]}
-    client._backend = backend
+    backend.store(entry)
+    backend.upsert_vector(entry.id, [0.8, 0.2, 0.0], namespace="default")
     temporal = SimpleNamespace(
         is_temporal=True,
         recency_weight=0.42,
@@ -454,18 +455,14 @@ async def test_tag_filter_widens_top_k_to_full_pool(client: MemoryClient) -> Non
     dropped. When tags are supplied, ``effective_top_k`` must be at least the
     namespace size so the tag filter sees every loaded candidate.
     """
-    real_backend = client._backend
-    assert real_backend is not None
-    real_backend.close()
+    backend = client._get_backend()
 
     # 40 entries — larger than the default top_k of 30 (limit 10 * multiplier 3).
     entries = [
         MemoryEntry(id=f"M-{i:03d}", content=f"content {i}", namespace="default", tags=["wanted"]) for i in range(40)
     ]
-    backend = MagicMock()
-    backend.list_entries.return_value = entries
-    backend.get_stored_embeddings.return_value = {}
-    client._backend = backend
+    for entry in entries:
+        backend.store(entry)
 
     with (
         patch.object(MemoryClient, "_get_embedder", return_value=_StubEmbedder()),
@@ -478,26 +475,30 @@ async def test_tag_filter_widens_top_k_to_full_pool(client: MemoryClient) -> Non
     assert hybrid_search_mock.call_args.kwargs["top_k"] >= 40
 
 
-async def test_no_tags_keeps_default_top_k(client: MemoryClient) -> None:
-    """Tag-free recall must NOT widen top_k — preserves the configured pool depth."""
-    real_backend = client._backend
-    assert real_backend is not None
-    real_backend.close()
+@pytest.mark.parametrize("invocation_path", [True, False])
+async def test_tag_free_pool_reaches_finish_without_changing_legacy_depth(
+    client: MemoryClient,
+    invocation_path: bool,
+) -> None:
+    """Native finishing needs all acquired evidence; direct legacy keeps its depth."""
+    backend = client._get_backend()
 
     entries = [MemoryEntry(id=f"M-{i:03d}", content=f"content {i}", namespace="default") for i in range(40)]
-    backend = MagicMock()
-    backend.list_entries.return_value = entries
-    backend.get_stored_embeddings.return_value = {}
-    client._backend = backend
+    for entry in entries:
+        backend.store(entry)
 
     with (
         patch.object(MemoryClient, "_get_embedder", return_value=_StubEmbedder()),
         patch("trw_memory.retrieval.pipeline.hybrid_search", return_value=entries) as hybrid_search_mock,
     ):
-        await client.recall("content", limit=10)
+        if invocation_path:
+            await client.recall("content", limit=10)
+        else:
+            await client._try_hybrid_recall("content", 10, None)
 
-    # No tags → unchanged default depth (limit 10 * multiplier 3 = 30).
-    assert hybrid_search_mock.call_args.kwargs["top_k"] == 10 * client._config.recall_top_k_multiplier
+    legacy_depth = 10 * client._config.recall_top_k_multiplier
+    expected = max(legacy_depth, len(entries)) if invocation_path else legacy_depth
+    assert hybrid_search_mock.call_args.kwargs["top_k"] == expected
 
 
 def _hybrid_recall_event(
@@ -519,15 +520,11 @@ class TestHybridRecallLatencyTelemetry:
 
     async def test_emits_telemetry_on_successful_recall(self, client: MemoryClient) -> None:
         """Successful hybrid recall must emit `hybrid_recall_complete` with outcome=ok."""
-        real_backend = client._backend
-        assert real_backend is not None
-        real_backend.close()
+        backend = client._get_backend()
 
         entry = MemoryEntry(id="M-001", content="pydantic model", namespace="default")
-        backend = MagicMock()
-        backend.list_entries.return_value = [entry]
-        backend.get_stored_embeddings.return_value = {"M-001": [0.9, 0.1, 0.0]}
-        client._backend = backend
+        backend.store(entry)
+        backend.upsert_vector(entry.id, [0.9, 0.1, 0.0], namespace="default")
 
         with (
             patch.object(MemoryClient, "_get_embedder", return_value=_StubEmbedder()),
@@ -553,14 +550,10 @@ class TestHybridRecallLatencyTelemetry:
 
     async def test_emits_telemetry_on_no_candidates(self, client: MemoryClient) -> None:
         """Empty namespace must emit `hybrid_recall_complete` with outcome=no_candidates."""
-        real_backend = client._backend
-        assert real_backend is not None
-        real_backend.close()
+        backend = client._get_backend()
 
-        backend = MagicMock()
-        backend.list_entries.return_value = []
-        backend.get_stored_embeddings.return_value = {}
-        client._backend = backend
+        # Actual client startup seeds canaries; they are not user candidates.
+        assert all(entry.metadata.get("system_canary") == "true" for entry in backend.list_entries(namespace="default"))
 
         with (
             patch.object(MemoryClient, "_get_embedder", return_value=_StubEmbedder()),
@@ -578,15 +571,11 @@ class TestHybridRecallLatencyTelemetry:
 
     async def test_emits_telemetry_on_hybrid_search_failure(self, client: MemoryClient) -> None:
         """hybrid_search raising must emit `hybrid_recall_complete` with outcome=hybrid_search_failed."""
-        real_backend = client._backend
-        assert real_backend is not None
-        real_backend.close()
+        backend = client._get_backend()
 
         entry = MemoryEntry(id="M-001", content="pydantic", namespace="default")
-        backend = MagicMock()
-        backend.list_entries.return_value = [entry]
-        backend.get_stored_embeddings.return_value = {"M-001": [0.9, 0.1, 0.0]}
-        client._backend = backend
+        backend.store(entry)
+        backend.upsert_vector(entry.id, [0.9, 0.1, 0.0], namespace="default")
 
         with (
             patch.object(MemoryClient, "_get_embedder", return_value=_StubEmbedder()),

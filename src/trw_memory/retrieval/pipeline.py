@@ -16,6 +16,8 @@ Graceful degradation matrix:
 
 from __future__ import annotations
 
+import math
+from collections.abc import Callable
 from datetime import datetime
 
 import structlog
@@ -55,6 +57,7 @@ def hybrid_search(
     valid_from_min: datetime | None = None,
     include_superseded: bool = False,
     validity_age_decay: bool = False,
+    validity_reference_time: datetime | None = None,
     recency_weight: float = 0.0,
     recency_halflife_days: float = 14.0,
     recency_now: datetime | None = None,
@@ -63,6 +66,7 @@ def hybrid_search(
     rerank_candidates: int = 50,
     rerank_query: str | None = None,
     collapse_hype: bool = False,
+    dense_observer: Callable[[tuple[tuple[str, float], ...]], None] | None = None,
 ) -> list[MemoryEntry]:
     """Hybrid BM25 + vector search with configurable rank fusion.
 
@@ -103,6 +107,17 @@ def hybrid_search(
         stored_embeddings: Mapping of ``entry_id`` → embedding vector.
             Required for dense search; dense path is skipped when ``None`` or
             empty.
+        dense_observer: Optional request-owned callback receiving an immutable
+            snapshot of finite raw cosine scores, before candidate caps, fusion,
+            importance, recency, or temporal filtering. HyPE hits are collapsed
+            to authorized parent IDs first. Called once when the dense path runs
+            (possibly with an empty tuple), never for an unauthorized candidate
+            scope. Does not persist metadata or identify a request/source: the
+            caller must bind that provenance and intersect observations with its
+            eligible results. Callback exceptions propagate; an observer must not
+            publish partial state before completing successfully. Opting in retains
+            all scores already computed by dense_search, without another model
+            call, and leaves the legacy capped fusion input unchanged.
         bm25_candidates: Maximum BM25 candidates passed to
             :func:`~trw_memory.retrieval.bm25.bm25_search`.
         vector_candidates: Maximum dense candidates passed to
@@ -211,8 +226,18 @@ def hybrid_search(
             embedder=embedder,
             query_embedding=query_embedding,
             stored_embeddings=stored_embeddings,
-            top_k=vector_candidates,
+            top_k=len(dense_entry_ids) if dense_observer is not None else vector_candidates,
         )
+        if dense_observer is not None:
+            # Keep the exact legacy pre-collapse cap for fusion. Observations
+            # carry evidence, not an alternative ranking or persisted metadata.
+            observations = [(eid, score) for eid, score in dense_results if math.isfinite(score)]
+            if collapse_hype:
+                from trw_memory.retrieval._hype_collapse import collapse_hype_ranking
+
+                observations, _ = collapse_hype_ranking(observations, set(entry_map))
+            dense_observer(tuple(observations))
+            dense_results = dense_results[:vector_candidates]
         # PRD-CORE-195 FR04: collapse ``#hype`` hits to their parent id, deduped
         # by best rank, dropping orphans whose parent is not in entry_map. Runs
         # BEFORE fusion so every downstream stage sees only real parent ids and
@@ -289,6 +314,7 @@ def hybrid_search(
         valid_from_min=valid_from_min,
         include_superseded=include_superseded,
         age_decay=validity_age_decay,
+        reference_time=validity_reference_time,
         fusion_scores=fused_scores,
     )
 

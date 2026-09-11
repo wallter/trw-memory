@@ -69,7 +69,9 @@ def test_sidecar_rows_survive_migration_and_tag_cooccurrence_is_dropped(tmp_path
 
     conn = sqlite3.connect(db)
     ensure_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    # ensure_schema runs v5's destructive census and then additive v6;
+    # the sidecar outcomes below still specifically discriminate the v5 delta.
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
 
     assert conn.execute("SELECT COUNT(*) FROM memory_graph_edges").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM memory_graph_edges WHERE edge_type = 'related'").fetchone()[0] == 1

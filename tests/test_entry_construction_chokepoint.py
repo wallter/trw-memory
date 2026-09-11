@@ -79,9 +79,19 @@ async def test_every_writer_populates_the_vector_clock(tmp_path: Path) -> None:
     finally:
         backend.close()
 
-    # Writer 3 — trw-mcp's learning_to_entry (the flagship consumer's write path).
-    transforms = pytest.importorskip("trw_mcp.state._memory_transforms")
-    mcp_entry = transforms._learning_to_memory_entry("L-mcp-clock", "clock through trw-mcp", "detail")
+    # Writer 3 — trw-mcp's store_learning (the flagship consumer's write path).
+    #
+    # PRD-CORE-251 FR03 deleted the hand builder this used to call: that path now
+    # delegates to writer 2, which is the point. Asserting on the ROW it lands
+    # keeps the assertion honest either way -- it would still fail if the
+    # delegation were replaced by a bare constructor tomorrow.
+    adapter = pytest.importorskip("trw_mcp.state.memory_adapter")
+    trw_dir = tmp_path / ".trw"
+    (trw_dir / "memory").mkdir(parents=True)
+    result = adapter.store_learning(trw_dir, "L-mcp-clock", "clock through trw-mcp", "detail")
+    assert result["status"] == "recorded", result
+    mcp_entry = adapter.get_backend(trw_dir).get("L-mcp-clock", namespace="default")
+    assert mcp_entry is not None
     assert mcp_entry.vector_clock, "the trw-mcp write path must stamp a vector clock"
 
 
@@ -134,10 +144,28 @@ def test_no_bare_constructor_outside_the_helper() -> None:
             if relative in _CONSTRUCTION_ALLOWLIST:
                 continue
             module = ast.parse(path.read_text())
+            # CORE-245 FR08 covers persisted identities, not request-local BM25
+            # documents. Exempt only the single constructor in this function,
+            # not its entire module or future constructors added alongside it.
+            lexical_document = None
+            if relative == "trw-mcp/src/trw_mcp/scoring/_query_relevance.py":
+                function = next(
+                    node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "query_relevance"
+                )
+                constructors = [
+                    node
+                    for node in ast.walk(function)
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "MemoryEntry"
+                ]
+                assert len(constructors) == 1, "re-review the request-local construction exemption"
+                lexical_document = constructors[0]
             offenders.extend(
                 f"{relative}:{node.lineno}"
                 for node in ast.walk(module)
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "MemoryEntry"
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "MemoryEntry"
+                and node is not lexical_document
             )
     assert offenders == [], (
         "production code must build entries through trw_memory.models.entry_factory, "

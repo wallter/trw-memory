@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
 
 from trw_memory._client_hype import expand_hype_siblings
+from trw_memory.embeddings.provenance import generation_provenance_kwargs
 from trw_memory.exceptions import MemoryNotFoundError, SchemaValidationError, StorageError
 from trw_memory.graph import schedule_graph_update
 from trw_memory.lifecycle.tiers._runtime import embedding_has_consumer, remember_entry_in_tiers
@@ -248,7 +249,12 @@ async def store_impl(
             with backend.transaction():
                 backend.store(entry)
                 if embedding is not None:
-                    backend.upsert_vector(entry.id, embedding, namespace=entry.namespace)
+                    backend.upsert_vector(
+                        entry.id,
+                        embedding,
+                        namespace=entry.namespace,
+                        **generation_provenance_kwargs(embedder, f"{entry.content} {entry.detail}", embedding),
+                    )
                 # PRD-CORE-195 FR03/FR05: generate + store HyPE sibling vectors
                 # inside the SAME transaction (purge-then-regenerate on UPDATE).
                 # Gated on hype_enabled; fail-open so the canonical row + primary

@@ -31,8 +31,8 @@ async def isolated_client(tmp_path, monkeypatch: pytest.MonkeyPatch):
     The warm-tier manager writes to a namespace-derived `.memory/<ns>/`
     path regardless of MEMORY_STORAGE_SQLITE_PATH, so we rely on a
     test-unique namespace + chdir to tmp_path to keep state isolated.
-    Embeddings forced OFF to avoid sentence-transformers load cost in
-    these tests.
+    The private provider seam supplies no embedder for these storage tests;
+    this is not a public embedding-disable configuration test.
     """
     import uuid as _uuid
 
@@ -42,8 +42,8 @@ async def isolated_client(tmp_path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("TRW_DIR", str(trw_dir))
     monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
     monkeypatch.setenv("MEMORY_STORAGE_SQLITE_PATH", str(db_path))
-    # Force OFF — `setdefault` was leaking from prior tests that set "1".
-    monkeypatch.setenv("MEMORY_EMBEDDINGS_ENABLED", "0")
+    # Model-free fixture via the provider seam, not an unsupported config flag.
+    monkeypatch.setattr("trw_memory.client.MemoryClient._get_embedder", lambda self: None)
     monkeypatch.chdir(tmp_path)
     client: MemoryClient | None = None
     try:

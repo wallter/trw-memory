@@ -48,7 +48,8 @@ from trw_memory.security.startup import verify_defaults
 from trw_memory.sync.retry_queue import RetryQueue
 
 if TYPE_CHECKING:
-    from trw_memory.client import MemoryClient, MemoryResultDict
+    from trw_memory.client import MemoryClient
+    from trw_memory.storage.interface import StorageBackend
 
 SHARED_EVENT_CACHE_MAX = 256
 
@@ -232,6 +233,8 @@ async def publish_entry(
 
 
 async def aenter(client: MemoryClient) -> MemoryClient:
+    if client._pending_close_backend is not None:
+        raise MemoryConnectionError("Client close is incomplete; retry close before entering")
     maybe_start_retry_drain(client)
     return client
 
@@ -243,6 +246,21 @@ async def aexit(
     exc_tb: TracebackType | None,
 ) -> None:
     await close_client(client)
+
+
+async def _drain_owned_graph_updates(backend: StorageBackend) -> asyncio.CancelledError | None:
+    """Finish owned workers even when close is cancelled; timeout stays visible."""
+    from trw_memory.graph import wait_for_graph_updates
+
+    drain = asyncio.create_task(asyncio.to_thread(wait_for_graph_updates, owner=backend))
+    cancellation: asyncio.CancelledError | None = None
+    while not drain.done():
+        try:
+            await asyncio.shield(drain)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+    drain.result()  # A timeout is not successful teardown, even after cancellation.
+    return cancellation
 
 
 async def close_client(client: MemoryClient) -> None:
@@ -259,11 +277,21 @@ async def close_client(client: MemoryClient) -> None:
         raise
     finally:
         client._embedder = None
-        backend = client._backend
+        backend = client._backend if client._backend is not None else client._pending_close_backend
+        client._pending_close_backend = backend
         client._backend = None
         if backend is not None:
+            drained = False
             try:
-                backend.close()
+                try:
+                    drain_cancellation = await _drain_owned_graph_updates(backend)
+                    drained = True
+                    if drain_cancellation is not None:
+                        raise drain_cancellation
+                finally:
+                    backend.close()
+                    if drained and client._pending_close_backend is backend:
+                        client._pending_close_backend = None
             except Exception:
                 if not cancelled:
                     raise
@@ -389,23 +417,21 @@ def handle_sse_event(client: MemoryClient, event: dict[str, object]) -> None:
 
 
 def cache_shared_event(client: MemoryClient, event: dict[str, object]) -> None:
+    from trw_memory._client_org_shared import shared_result_to_result
+
     remote_id = str(event.get("id", "")).strip()
     summary = str(event.get("summary", "")).strip()
     if not remote_id or not summary:
         return
     shared_content = summary if summary.startswith("[shared] ") else f"[shared] {summary}"
-    cached: MemoryResultDict = {
+    payload: dict[str, object] = {
+        **event,
         "memory_id": remote_id,
         "content": shared_content,
-        "detail": "",
-        "tags": [],
-        "importance": 0.0,
-        "score": 0.0,
-        "created_at": "",
-        "updated_at": "",
         "namespace": "shared",
         "source": "shared",
     }
+    cached = shared_result_to_result(payload)
     with client._shared_event_cache_lock:
         client._shared_event_cache = [
             existing for existing in client._shared_event_cache if existing["memory_id"] != remote_id

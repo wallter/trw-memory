@@ -31,7 +31,8 @@ import structlog
 
 from trw_memory._client_distilled_tiering import entry_to_result as _entry_to_result
 from trw_memory.models.memory import MemoryStatus
-from trw_memory.security.namespace_scope import authorize_namespaces
+from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocation
+from trw_memory.security.namespace_scope import NamespaceScopeError, authorize_namespaces
 from trw_memory.security.rbac import Permission
 
 if TYPE_CHECKING:
@@ -49,7 +50,8 @@ async def try_hybrid_recall(
     *,
     as_of: datetime | None = None,
     include_superseded: bool = False,
-) -> list[MemoryResultDict] | None:
+    invocation: RecallInvocation | None = None,
+) -> list[MemoryResultDict] | list[LocalCandidate] | None:
     """Hybrid pipeline (BM25 + dense + RRF). Returns None to signal fallback.
 
     PRD-DIST-2047 Phase 2 (recall-latency telemetry): emits a structlog event
@@ -85,28 +87,50 @@ async def try_hybrid_recall(
         # include_superseded is False.  This prevents superseded candidates from
         # consuming slots in the BM25/dense candidate pool; apply_validity_prior
         # still handles the as_of case in post-fusion.
-        all_entries = backend.list_entries(
-            namespace=client._namespace,
-            limit=candidate_pool_size,
-            exclude_superseded=not include_superseded and as_of is None,
-        )
+        if invocation is not None:
+            all_entries = invocation.acquire(
+                lambda predicate, remaining: backend.list_entries(
+                    namespace=client._namespace,
+                    limit=remaining,
+                    exclude_superseded=not include_superseded and as_of is None,
+                    temporal_selection=invocation.temporal,
+                    entry_filter=predicate,
+                ),
+                limit=candidate_pool_size,
+            )
+        else:
+            all_entries = backend.list_entries(
+                namespace=client._namespace,
+                limit=candidate_pool_size,
+                exclude_superseded=not include_superseded and as_of is None,
+            )
         list_entries_ms = (perf_counter() - list_entries_start) * 1000.0
 
         # FTS5 augmentation: inject text-matching entries that rank past the
         # recency-ordered list_entries pool. At enterprise scale (100K+ entries),
-        # list_entries returns the most recently updated records, missing old but
-        # still-relevant entries. FTS5 (O(log N)) finds those in <5ms regardless
-        # of corpus size. Dedup by id preserves the pool-size invariant without
-        # double-counting. Skipped when FTS5 is unavailable or query is empty.
+        # list_entries may miss old relevant entries within a policy partition.
+        # FTS partition filtering may scan matching rows; no fixed latency is
+        # guaranteed. The deduplicated union is bounded by the sum of base and
+        # FTS caps, not the base cap alone. Skip when unavailable or query empty.
         if query and getattr(backend, "_fts_available", False):
             fts_top_k = min(candidate_pool_size, max(client._config.bm25_candidates * 2, 100))
             try:
-                fts_entries = backend.search_fts(
-                    query,
-                    top_k=fts_top_k,
-                    namespace=client._namespace,
-                    status=MemoryStatus.ACTIVE,
-                )
+                if invocation is not None:
+                    fts_entries = invocation.acquire(
+                        lambda predicate, remaining: backend.search_fts(
+                            query,
+                            top_k=remaining,
+                            namespace=client._namespace,
+                            status=MemoryStatus.ACTIVE,
+                            temporal_selection=invocation.temporal,
+                            entry_filter=predicate,
+                        ),
+                        limit=fts_top_k,
+                    )
+                else:
+                    fts_entries = backend.search_fts(
+                        query, top_k=fts_top_k, namespace=client._namespace, status=MemoryStatus.ACTIVE
+                    )
                 if fts_entries:
                     existing_ids = {e.id for e in all_entries}
                     new_from_fts = [e for e in fts_entries if e.id not in existing_ids]
@@ -119,6 +143,8 @@ async def try_hybrid_recall(
                             new_entries=len(new_from_fts),
                             total_pool=len(all_entries),
                         )
+            except NamespaceScopeError:
+                raise
             except Exception:
                 logger.debug("fts5_augmentation_failed", exc_info=True)
 
@@ -176,7 +202,7 @@ async def try_hybrid_recall(
     # down. namespace_size (== len(all_entries)) is already bounded by
     # candidate_pool_size, so this cannot widen cost beyond the entries we already
     # hold in memory.
-    if tags:
+    if tags or invocation is not None:
         effective_top_k = max(effective_top_k, namespace_size)
 
     # Auto-detect temporal queries and inject recency_weight + strip boilerplate
@@ -251,6 +277,7 @@ async def try_hybrid_recall(
             recency_halflife_days=client._config.recall_recency_halflife_days,
             fusion_mode=client._config.recall_fusion_mode,
             validity_age_decay=client._config.recall_validity_age_decay,
+            validity_reference_time=invocation.temporal.reference_time if invocation else None,
             rerank=client._config.recall_rerank,
             rerank_model=client._config.recall_rerank_model,
             rerank_candidates=client._config.recall_rerank_candidates,
@@ -264,6 +291,8 @@ async def try_hybrid_recall(
             # contain "guidance" vocabulary, causing a -4.5pp T-HR regression.
             # rerank_query=None → the cross-encoder inherits retrieval_query.
         )
+    except NamespaceScopeError:
+        raise
     except Exception:
         hybrid_search_ms = (perf_counter() - hybrid_search_start) * 1000.0
         # warning, not debug: hybrid search failing silently drops recall to the
@@ -329,6 +358,11 @@ async def try_hybrid_recall(
         hybrid_search_ms=hybrid_search_ms,
         total_ms=(perf_counter() - total_start) * 1000.0,
     )
+    if invocation is not None:
+        return [
+            LocalCandidate(entry, round(1.0 / (1 + rank), 4), relevance_hint=round(1.0 / (1 + rank), 4))
+            for rank, entry in enumerate(ranked)
+        ]
     return results
 
 

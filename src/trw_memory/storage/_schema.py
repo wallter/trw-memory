@@ -63,7 +63,8 @@ logger = structlog.get_logger(__name__)
 # becomes nullable, ``verification_checked_at`` is added, and
 # ``sessions_surfaced`` / ``avg_rework_delta`` / ``outcome_correlation`` are
 # dropped). It is registered ONCE, in :mod:`trw_memory.storage._schema_v5`.
-SCHEMA_VERSION = 5
+# Schema 6 adds nullable vector provenance; legacy vectors stay unknown.
+SCHEMA_VERSION = 6
 
 #: The highest schema version whose delta DROPS or RENAMES rather than adding.
 #: ``ensure_schema`` snapshots the store before migrating a database below this
@@ -253,6 +254,7 @@ CREATE TABLE IF NOT EXISTS vec_index (
     rowid     INTEGER PRIMARY KEY AUTOINCREMENT,
     entry_id  TEXT NOT NULL,
     namespace TEXT NOT NULL DEFAULT 'default',
+    provenance_json TEXT DEFAULT NULL,
     UNIQUE (namespace, entry_id)
 )
 """
@@ -705,6 +707,16 @@ _MIGRATIONS[2] = _migrate_v2_memory_model
 _MIGRATIONS[3] = _migrate_v3_legacy_enums
 _MIGRATIONS[4] = _migrate_v4_verification_status
 _MIGRATIONS[5] = _migrate_v5_namespace_boundary
+
+
+def _migrate_v6_vector_provenance(cursor: sqlite3.Cursor) -> None:
+    """Add proof storage without inventing provenance for existing vectors."""
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(vec_index)").fetchall()}
+    if columns and "provenance_json" not in columns:
+        cursor.execute("ALTER TABLE vec_index ADD COLUMN provenance_json TEXT DEFAULT NULL")
+
+
+_MIGRATIONS[6] = _migrate_v6_vector_provenance
 
 
 CREATE_MEMORIES_FTS = """

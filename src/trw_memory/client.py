@@ -14,6 +14,11 @@ Usage::
 
 from __future__ import annotations
 
+from trw_memory._client_recall import fallback_recall as _native_fallback_recall
+from trw_memory._client_recall_hybrid import try_hybrid_recall as _native_try_hybrid_recall
+
+from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocation
+
 import asyncio
 import threading
 import uuid
@@ -118,6 +123,7 @@ from trw_memory._client_models import (  # noqa: E402
     AgentWithToolDecorator as AgentWithToolDecorator,
     ForgetResultDict as ForgetResultDict,
     MemoryResultDict as MemoryResultDict,
+    RemoteResultDict as RemoteResultDict,
     StoreResultDict as StoreResultDict,
     _ToolFn as _ToolFn,
 )
@@ -180,6 +186,7 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
     _lock: asyncio.Lock
     _tools_registered: bool
     _backend: StorageBackend | None
+    _pending_close_backend: StorageBackend | None = None
     _resolved_mode: str
     _config: MemoryConfig
     _project_root: str
@@ -188,7 +195,7 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
     _background_tasks: set[asyncio.Task[None]]
     _retry_queue: RetryQueue
     _retry_drain_started: bool
-    _shared_event_cache: list[MemoryResultDict]
+    _shared_event_cache: list[RemoteResultDict]
     _shared_event_cache_lock: threading.Lock
     _pending_remote_retirements: set[str]
     _pending_remote_retirements_lock: threading.Lock
@@ -479,34 +486,10 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
 
         return await _impl(self, query, local_results, limit, tags, min_score)
 
-    async def _try_hybrid_recall(
-        self,
-        query: str,
-        limit: int,
-        tags: list[str] | None,
-        query_embedding: list[float] | None = None,
-        *,
-        as_of: datetime | None = None,
-        include_superseded: bool = False,
-    ) -> list[MemoryResultDict] | None:
-        from trw_memory._client_recall import try_hybrid_recall as _impl
-
-        return await _impl(
-            self,
-            query,
-            limit,
-            tags,
-            query_embedding=query_embedding,
-            as_of=as_of,
-            include_superseded=include_superseded,
-        )
-
-    async def _fallback_recall(
-        self, query: str, limit: int, tags: list[str] | None, min_score: float
-    ) -> list[MemoryResultDict]:
-        from trw_memory._client_recall import fallback_recall as _impl
-
-        return await _impl(self, query, limit, tags, min_score)
+    # Native implementations bind as methods; direct callers retain the same
+    # compatibility projection while production passes the invocation object.
+    _fallback_recall = _native_fallback_recall
+    _try_hybrid_recall = _native_try_hybrid_recall
 
     async def _record_recall_access(self, results: list[MemoryResultDict]) -> None:
         from trw_memory._client_recall import record_recall_access_impl as _impl
@@ -520,10 +503,12 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
         tags: list[str] | None,
         limit: int,
         query_embedding: list[float] | None = None,
-    ) -> list[MemoryResultDict]:
+        *,
+        invocation: RecallInvocation | None = None,
+    ) -> list[MemoryResultDict] | list[LocalCandidate]:
         from trw_memory._client_recall import tier_results as _impl
 
-        return _impl(self, backend, query, tags, limit, query_embedding)
+        return _impl(self, backend, query, tags, limit, query_embedding, invocation=invocation)
 
     def _remember_results_in_tiers(self, results: list[MemoryResultDict]) -> None:
         from trw_memory._client_recall import remember_results_in_tiers as _impl

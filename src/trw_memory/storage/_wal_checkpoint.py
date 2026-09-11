@@ -88,6 +88,14 @@ class CheckpointResult(TypedDict):
             to completion (or the checkpoint errored), else ``0``.
         checkpointed: Frames written back to the main DB (column 2 of the
             ``wal_checkpoint`` result row).
+        log_frames: Frames present in the WAL (column 1). Reported because it
+            is the only honest measure of whether a checkpoint ACCOMPLISHED
+            anything. File size is not: SQLite normally REUSES a fully
+            checkpointed WAL's allocation rather than shrinking it
+            (sqlite.org/wal.html#avoiding_excessively_large_wal_files), so a
+            perfectly healthy store checkpoints its whole backlog and leaves
+            the file exactly the same size. ``checkpointed >= log_frames``
+            means the backlog was cleared; a growing gap means it was not.
         mode: The mode that actually ran — may differ from the requested mode
             when an unsafe engine downgraded a resetting checkpoint to
             ``PASSIVE`` or when a busy resetting checkpoint fell back.
@@ -96,6 +104,7 @@ class CheckpointResult(TypedDict):
 
     busy: int
     checkpointed: int
+    log_frames: int
     mode: CheckpointMode
 
 
@@ -125,20 +134,34 @@ def normalize_mode(mode: str, *, wal_reset_safe: bool) -> RunMode:
     return run_mode
 
 
-def _read_checkpoint_row(row: object) -> tuple[int, int]:
-    """Map a ``wal_checkpoint`` result row to ``(busy, checkpointed)``.
+def _read_checkpoint_row(row: object) -> tuple[int, int, int]:
+    """Map a ``wal_checkpoint`` result row to ``(busy, checkpointed, log_frames)``.
 
     The PRAGMA returns a ``(busy, log_frames, checkpointed_frames)`` sequence
     (a ``sqlite3.Row`` / ``pysqlite3`` ``Row`` / tuple). A missing or empty row
     is treated as ``busy`` so callers never read an uninitialised result.
+
+    ``log_frames`` used to be discarded here. It is the WAL backlog, and
+    without it no consumer can tell a checkpoint that cleared everything from
+    one that cleared nothing — which is how a downstream health check ended up
+    measuring file size and calling it effectiveness.
     """
     if not row:
-        return 1, 0
+        return 1, 0, 0
     seq = cast("Sequence[object]", row)
     busy = int(cast("int", seq[0]))
+    # SQLite documents pnLog/pnCkpt as -1 when the checkpoint could not run --
+    # an error, or a database not in WAL mode. Passing -1 through let a consumer
+    # compute `checkpointed >= log_frames` as `-1 >= -1` and read a checkpoint
+    # that did nothing as one that cleared its whole backlog. Not measured is
+    # not zero, and it is certainly not success.
+    if any(int(cast("int", v)) < 0 for v in seq[1:3] if v is not None):
+        return 1, 0, 0
+    log_raw = seq[1] if len(seq) > 1 else None
+    log_frames = int(cast("int", log_raw)) if log_raw is not None else 0
     checkpointed_raw = seq[2] if len(seq) > 2 else None
     checkpointed = int(cast("int", checkpointed_raw)) if checkpointed_raw is not None else 0
-    return busy, checkpointed
+    return busy, checkpointed, log_frames
 
 
 def run_checkpoint(
@@ -176,15 +199,15 @@ def run_checkpoint(
             remedy=WAL_RESET_UNSAFE_REMEDY,
         )
     try:
-        busy, checkpointed = _read_checkpoint_row(execute_pragma(f"PRAGMA wal_checkpoint({used})"))
+        busy, checkpointed, log_frames = _read_checkpoint_row(execute_pragma(f"PRAGMA wal_checkpoint({used})"))
         if busy == 1 and used in RESETTING_MODES:
             # Readers held pages; retry the non-blocking PASSIVE checkpoint on
             # this same connection (no second connection -> no race).
-            busy, checkpointed = _read_checkpoint_row(execute_pragma("PRAGMA wal_checkpoint(PASSIVE)"))
+            busy, checkpointed, log_frames = _read_checkpoint_row(execute_pragma("PRAGMA wal_checkpoint(PASSIVE)"))
             used = "PASSIVE"
     except db_error as exc:
         logger.warning("wal_checkpoint_failed", error=str(exc), db=db_path)
-        return CheckpointResult(busy=1, checkpointed=0, mode="error")
+        return CheckpointResult(busy=1, checkpointed=0, log_frames=0, mode="error")
     logger.debug(
         "wal_checkpoint_done",
         db=db_path,
@@ -192,5 +215,6 @@ def run_checkpoint(
         mode=used,
         busy=busy,
         checkpointed=checkpointed,
+        log_frames=log_frames,
     )
-    return CheckpointResult(busy=busy, checkpointed=checkpointed, mode=used)
+    return CheckpointResult(busy=busy, checkpointed=checkpointed, log_frames=log_frames, mode=used)

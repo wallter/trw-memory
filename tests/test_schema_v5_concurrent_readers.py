@@ -71,7 +71,7 @@ def test_reader_survives_migration(tmp_path: Path) -> None:
         writer = sqlite3.connect(db, timeout=30)
         writer.execute("PRAGMA journal_mode=WAL")
         ensure_schema(writer)
-        assert writer.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert writer.execute("PRAGMA user_version").fetchone()[0] == 6
         writer.close()
     finally:
         stop.set()
@@ -138,11 +138,14 @@ def test_the_migration_takes_a_snapshot_first(tmp_path: Path) -> None:
     ensure_schema(conn)
     conn.close()
 
-    snapshots = sorted((tmp_path / BACKUP_DIR_NAME).glob("snapshot.db.pre-schema-5.*"))
+    snapshots = sorted((tmp_path / BACKUP_DIR_NAME).glob("snapshot.db.pre-schema-6.*"))
     assert len(snapshots) == 1, "a destructive delta must leave exactly one recoverable snapshot"
 
     restored = sqlite3.connect(f"file:{snapshots[0]}?mode=ro", uri=True)
     assert restored.execute("PRAGMA user_version").fetchone()[0] == 4
-    assert restored.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 30
+    assert restored.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert restored.execute("SELECT id, namespace, content FROM memories ORDER BY id").fetchall() == [
+        (f"M-{index:04d}", "project:concurrent", f"row {index}") for index in range(30)
+    ]
     assert oct(snapshots[0].stat().st_mode & 0o777) == "0o600"
     restored.close()

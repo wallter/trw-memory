@@ -20,6 +20,7 @@ import structlog
 
 from trw_memory.graph import filter_conflicts, graph_query
 from trw_memory.models.memory import MemoryStatus
+from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocation
 
 if TYPE_CHECKING:
     from trw_memory.client import MemoryClient, MemoryResultDict
@@ -30,11 +31,30 @@ _GRAPH_SCORE_DISCOUNT: float = 0.5
 
 
 def graph_expand_results(
+    client: MemoryClient, results: list[MemoryResultDict], *, depth: int = 1
+) -> list[MemoryResultDict]:
+    """Compatibility projection for direct callers of the old private helper."""
+    backend = client._backend
+    if backend is None or getattr(backend, "_conn", None) is None:
+        return results
+    candidates = []
+    for result in results:
+        entry = backend.get(result["memory_id"], namespace=client._namespace)
+        if entry is not None:
+            candidates.append(LocalCandidate(entry, result["score"]))
+    expanded = graph_expand_candidates(client, candidates, depth=depth)
+    from trw_memory._client_distilled_tiering import candidate_to_result
+
+    return [*results, *[candidate_to_result(c) for c in expanded[len(candidates) :]]]
+
+
+def graph_expand_candidates(
     client: MemoryClient,
-    results: list[MemoryResultDict],
+    results: list[LocalCandidate],
     *,
     depth: int = 1,
-) -> list[MemoryResultDict]:
+    invocation: RecallInvocation | None = None,
+) -> list[LocalCandidate]:
     """Expand *results* by following graph edges from the returned entry IDs.
 
     Args:
@@ -61,7 +81,7 @@ def graph_expand_results(
         logger.debug("graph_expand_skip", reason="no_sqlite_connection")
         return results
 
-    root_ids = [r["memory_id"] for r in results]
+    root_ids = [r.entry.id for r in results]
 
     # Scope BFS AND node hydration to the client's namespace so graph expansion
     # never surfaces neighbours belonging to a foreign namespace. Under
@@ -79,11 +99,11 @@ def graph_expand_results(
     if not nodes:
         return results
 
-    seen_ids: set[str] = {r["memory_id"] for r in results}
-    max_score = max((float(r["score"]) for r in results), default=1.0)
+    seen_ids: set[str] = {r.entry.id for r in results}
+    max_score = max((r.raw_score for r in results), default=1.0)
     base_score = max_score * _GRAPH_SCORE_DISCOUNT
 
-    expanded: list[MemoryResultDict] = list(results)
+    expanded: list[LocalCandidate] = list(results)
     added = 0
     for node in nodes:
         node_id = str(node["id"])
@@ -93,8 +113,9 @@ def graph_expand_results(
         if entry is None or entry.status != MemoryStatus.ACTIVE:
             continue
         node_score = base_score * float(node.get("weight", 1.0))
-        result = _entry_to_result(entry, score=node_score)
-        result["source"] = "graph"
+        if invocation is not None and not invocation.allows_entry(entry):
+            continue
+        result = LocalCandidate(entry, node_score, source="graph", relevance_hint=node_score)
         expanded.append(result)
         seen_ids.add(node_id)
         added += 1

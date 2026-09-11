@@ -39,18 +39,19 @@ logger = structlog.get_logger(__name__)
 # Invalidation-based corpus cache (PRD: BM25Okapi rebuild O(N) per recall call).
 # At 1M+ entries, rebuilding the tokenized corpus + BM25Okapi model on every
 # recall costs 7-15GB RAM and seconds of CPU.  We cache the most-recently-built
-# model keyed on the *set* of entry ids that produced it; when the next call
-# presents the identical id set we reuse the model and the precomputed corpus
+# model keyed on entry ids AND every lexical input; when the next call
+# presents identical lexical entries we reuse the model and the precomputed corpus
 # tokenization instead of rebuilding.  Single-process, in-memory only — no
 # persistence.  A lock guards the cache for thread safety (recall is called
 # concurrently by parallel agents).
 #
-# Cache entry: (id_set, model, ordered_ids, corpus_tokens)
-#   id_set        — frozenset of entry ids that built the model (invalidation key)
+# Cache entry: (signature, model, ordered_ids, corpus_tokens)
+#   signature     — exact immutable id/content/detail/tags tuples, order-independent
 #   model         — the cached BM25Okapi instance
 #   ordered_ids   — entry ids in the order the corpus rows were built
 #   corpus_tokens — the tokenized corpus rows (reused for the Jaccard fallback)
-_bm25_cache: tuple[frozenset[str], _BM25OkapiType, list[str], list[list[str]]] | None = None
+_CorpusSignature = frozenset[tuple[str, str, str, tuple[str, ...]]]
+_bm25_cache: tuple[_CorpusSignature, _BM25OkapiType, list[str], list[list[str]]] | None = None
 _bm25_cache_lock = threading.Lock()
 
 
@@ -106,9 +107,9 @@ def _build_or_reuse_model(
 ) -> tuple[_BM25OkapiType, list[str], list[list[str]]]:
     """Return a BM25Okapi model + the entry-id order and corpus it was built on.
 
-    Reuses the module-level cache when the *set* of entry ids is unchanged from
-    the previous call.  The cache is invalidated (rebuilt) whenever the id set
-    differs — added, removed, or swapped entries.  Both the model and the
+    Reuses the module-level cache when ids and all lexical inputs are unchanged
+    from the previous call. Updates to content, detail or tags invalidate it;
+    nonlexical changes do not. Both the model and the
     tokenized corpus rows are reused, so a cache hit skips re-tokenizing every
     entry as well as reconstructing the BM25Okapi index.
 
@@ -128,12 +129,13 @@ def _build_or_reuse_model(
     global _bm25_cache
 
     id_set = frozenset(e.id for e in entries)
+    signature = frozenset((e.id, e.content, e.detail, tuple(e.tags)) for e in entries)
 
     with _bm25_cache_lock:
         cached = _bm25_cache
         if (
             cached is not None
-            and cached[0] == id_set
+            and cached[0] == signature
             and len(id_set) == len(entries)  # no duplicate ids — safe to map by id
         ):
             _, model, ordered_ids, cached_corpus = cached
@@ -150,7 +152,7 @@ def _build_or_reuse_model(
     # ids would break the by-id score lookup on a subsequent hit.
     if len(id_set) == len(entries):
         with _bm25_cache_lock:
-            _bm25_cache = (id_set, model, ordered_ids, corpus)
+            _bm25_cache = (signature, model, ordered_ids, corpus)
     logger.debug("bm25_cache_miss", entry_count=len(entries))
     return model, ordered_ids, corpus
 
@@ -180,8 +182,8 @@ def bm25_search(
         )
         return []
 
-    # Reuse a cached BM25Okapi model + tokenized corpus when the entry-id set is
-    # unchanged from the prior call; otherwise rebuild and refresh the cache.
+    # Reuse a cached BM25Okapi model + tokenized corpus only when ids and lexical
+    # inputs are unchanged; otherwise rebuild and refresh the cache.
     # ``ordered_ids`` / ``corpus`` are in the model's BUILD order, which is the
     # order ``get_scores()`` returns — so we map scores to ids by build position,
     # never by ``entries`` position (the two can differ on a reordered cache hit).

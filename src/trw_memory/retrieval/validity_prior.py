@@ -19,8 +19,22 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import date, datetime, timezone
+from typing import Protocol
 
 from trw_memory.models.memory import MemoryEntry
+
+
+class ValidityFields(Protocol):
+    """Read-only window fields shared by full entries and preselection views."""
+
+    @property
+    def valid_from(self) -> datetime: ...
+
+    @property
+    def invalid_from(self) -> datetime | None: ...
+
+    @property
+    def expires(self) -> str: ...
 
 
 def _parse_expires_date(raw: str) -> date | None:
@@ -43,7 +57,7 @@ def _parse_expires_date(raw: str) -> date | None:
             return None
 
 
-def _is_expired_at(entry: MemoryEntry, as_of: datetime | None) -> bool:
+def _is_expired_at(entry: ValidityFields, as_of: datetime | None, *, reference_time: datetime | None = None) -> bool:
     """PRD-CORE-244 FR05 — has *entry*'s author-set validity window closed?
 
     Boundary semantics are day-exclusive and chosen to match
@@ -55,14 +69,28 @@ def _is_expired_at(entry: MemoryEntry, as_of: datetime | None) -> bool:
     instant, so a caller asking what was believed at time T gets a record that
     was unexpired at T (resolves OQ-04).
     """
-    expires_date = _parse_expires_date(entry.expires)
+    return expiry_has_passed(entry.expires, reference_time=as_of or reference_time)
+
+
+def expiry_has_passed(expires: str, *, reference_time: datetime | None = None) -> bool:
+    """Canonical day-exclusive expiry, shared by entry and source eligibility.
+
+    Preserve the established date parsing convention; missing or malformed
+    expiry never silently retires a record. Callers supply the invocation's
+    evaluation instant (historical ``as_of`` when present).
+    """
+    expires_date = _parse_expires_date(expires)
     if expires_date is None:
         return False
-    reference = (as_of or datetime.now(timezone.utc)).date()
-    return reference > expires_date
+    instant = reference_time or datetime.now(timezone.utc)
+    # Naive references retain the existing calendar-date interpretation as UTC;
+    # never let astimezone infer the machine's local timezone for them.
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    return instant.astimezone(timezone.utc).date() > expires_date
 
 
-def _is_open_at(entry: MemoryEntry, as_of: datetime | None) -> bool:
+def _is_open_at(entry: ValidityFields, as_of: datetime | None, *, reference_time: datetime | None = None) -> bool:
     """Eligibility test for a single entry.
 
     ``as_of is None`` (default): a record is eligible iff its window is OPEN now
@@ -78,7 +106,7 @@ def _is_open_at(entry: MemoryEntry, as_of: datetime | None) -> bool:
     default-exclude and the ``include_superseded`` append-after-open behaviour —
     with no new ranking code.
     """
-    if _is_expired_at(entry, as_of):
+    if _is_expired_at(entry, as_of, reference_time=reference_time):
         return False
     if as_of is None:
         return entry.invalid_from is None
@@ -91,6 +119,7 @@ def apply_validity_prior(
     entries: list[MemoryEntry],
     *,
     as_of: datetime | None = None,
+    reference_time: datetime | None = None,
     valid_from_min: datetime | None = None,
     include_superseded: bool = False,
     age_decay: bool = False,
@@ -122,8 +151,9 @@ def apply_validity_prior(
     """
     eligible: list[MemoryEntry] = []
     ineligible: list[MemoryEntry] = []
+    reference_time = reference_time or datetime.now(timezone.utc)
     for entry in entries:
-        in_window = _is_open_at(entry, as_of)
+        in_window = _is_open_at(entry, as_of, reference_time=reference_time)
         if in_window and valid_from_min is not None and entry.valid_from < valid_from_min:
             in_window = False
         if in_window:

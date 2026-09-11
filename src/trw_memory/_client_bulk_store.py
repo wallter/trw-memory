@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import structlog
 
 from trw_memory._client_store import _build_store_entry, _existing_entry_for_namespace
+from trw_memory.embeddings.provenance import generation_provenance_kwargs
 from trw_memory.exceptions import MemoryNotFoundError, SchemaValidationError, SecurityDependencyError, StorageError
 from trw_memory.graph import schedule_graph_update
 from trw_memory.lifecycle.tiers._runtime import embedding_has_consumer, remember_entry_in_tiers
@@ -153,7 +154,6 @@ async def bulk_store_impl(
             prepared.append((req, f"schema_invalid:{','.join(exc.failed_fields)}"))
 
     item_slots: list[BulkStoreItemResult | None] = [None] * len(prepared)
-    embedder = client._get_embedder()
     accepted_indices: list[int] = []
     accepted_entries: list[MemoryEntry] = []
 
@@ -235,10 +235,13 @@ async def bulk_store_impl(
             decisions[i] = decision
 
         embeddings: list[list[float] | None] = []
-        # Skip the batch embed when no vector sink can consume the result — the
-        # warm tier, primary vector store, and remote publish are the only
-        # consumers, and all three are inert here when this returns False.
-        if accepted_entries and embedder is not None and embedding_has_consumer(client._config, backend):
+        # Provider acquisition can load a model. Like single-store, acquire
+        # only for accepted records with a vector consumer. Keep acquisition
+        # outside the best-effort embed catch so security refusals propagate.
+        embedder = (
+            client._get_embedder() if accepted_entries and embedding_has_consumer(client._config, backend) else None
+        )
+        if embedder is not None:
             try:
                 texts = [f"{e.content} {e.detail}" for e in accepted_entries]
                 embeddings = await asyncio.to_thread(embedder.embed_batch, texts)
@@ -270,7 +273,12 @@ async def bulk_store_impl(
                 with backend.transaction():
                     backend.store(entry)
                     if embedding is not None:
-                        backend.upsert_vector(entry.id, embedding, namespace=entry.namespace)
+                        backend.upsert_vector(
+                            entry.id,
+                            embedding,
+                            namespace=entry.namespace,
+                            **generation_provenance_kwargs(embedder, f"{entry.content} {entry.detail}", embedding),
+                        )
             except Exception as exc:
                 raise StorageError(f"failed to persist entry+vector for {entry.id!r}; transaction rolled back") from exc
 

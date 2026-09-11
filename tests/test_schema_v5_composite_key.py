@@ -128,8 +128,10 @@ def test_schema_5_is_registered_exactly_once() -> None:
     assignment, no error. This asserts against the imported module AND the
     source text, because only the second catches a duplicate assignment.
     """
-    assert SCHEMA_VERSION == 5
-    assert sorted(schema_module._MIGRATIONS) == [2, 3, 4, 5]
+    # Schema 6 adds vector provenance; the historical v5 migration must still
+    # be registered exactly once and retain its composite-key behavior.
+    assert SCHEMA_VERSION == 6
+    assert sorted(schema_module._MIGRATIONS) == [2, 3, 4, 5, 6]
 
     source = Path(schema_module.__file__).read_text()
     assignments = re.findall(r"^_MIGRATIONS\[5\]\s*=", source, flags=re.MULTILINE)
@@ -174,7 +176,7 @@ def test_composite_key_admits_same_id_in_two_namespaces(tmp_path: Path) -> None:
     _v4_fixture(db)
     backend = SQLiteBackend(db)
     try:
-        assert backend._conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert backend._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         ddl = backend._conn.execute("SELECT sql FROM sqlite_master WHERE name = 'memories'").fetchone()[0]
         assert "PRIMARY KEY (namespace, id)" in ddl
 
@@ -287,9 +289,9 @@ def test_migration_is_atomic_and_idempotent(tmp_path: Path) -> None:
     # Now let it complete, then run it again and prove the second run is a no-op.
     conn = sqlite3.connect(db)
     ensure_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == before
     ensure_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == before
     conn.close()

@@ -23,6 +23,9 @@ from collections.abc import Iterator
 import structlog
 
 from trw_memory.embeddings._hf_cache import CacheProbe, CacheState, probe_model_cache
+from trw_memory.embeddings._loaded_state import dependency_versions, loaded_state_digest
+from trw_memory.embeddings._runtime_identity import capture_runtime_identity, runtime_identity_matches
+from trw_memory.embeddings.provenance import EmbeddingSpace
 from trw_memory.exceptions import LocalOnlyViolationError, RemoteCodeNotPermittedError
 from trw_memory.models.config import MemoryConfig
 
@@ -185,6 +188,9 @@ class LocalEmbeddingProvider:
         self._model: object | None = None
         self._load_attempted: bool = False
         self._last_load_error: str = ""
+        self._identity_model: object | None = None
+        self._embedding_space: EmbeddingSpace | None = None
+        self._identity_guard: object | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -295,6 +301,29 @@ class LocalEmbeddingProvider:
                     trust_remote_code=trust_remote_code,
                     device=_CPU_DEVICE,
                 )
+            # Identify what was loaded, not files that happened to be nearby.
+            # No tree scans or exact dependency-version admission list.
+            captured = None
+            loaded_identity = None
+            try:
+                versions = dependency_versions()
+                captured = (
+                    capture_runtime_identity(self._model, self._dim, versions)
+                    if versions and not trust_remote_code
+                    else None
+                )
+                loaded_identity = loaded_state_digest(self._model) if captured is not None else None
+            except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+                logger.debug("embedding_identity_unavailable", error_type=type(exc).__name__)
+            if captured is not None and loaded_identity is not None:
+                manifest_digest, guard = captured
+                self._identity_model = self._model
+                self._identity_guard = guard
+                self._embedding_space = EmbeddingSpace(
+                    artifact_sha256=loaded_identity,
+                    encoding=f"trw-loaded-encoder-v2:{manifest_digest}",
+                    dimensions=self._dim,
+                )
             logger.debug(
                 "embedding_model_loaded",
                 model=self._model_name,
@@ -337,6 +366,19 @@ class LocalEmbeddingProvider:
     # ------------------------------------------------------------------
     # EmbeddingProvider interface
     # ------------------------------------------------------------------
+
+    def embedding_space(self) -> EmbeddingSpace | None:
+        """Return captured identity without model loads, file reads or inference.
+
+        Only the exact loaded object and unchanged supported encoding settings
+        retain the descriptor. Arbitrary in-place weight/tokenizer mutation is outside this immutable
+        provider-lifetime contract; producers must not mutate loaded encoders.
+        """
+        if self._model is not self._identity_model or self._embedding_space is None:
+            return None
+        if not runtime_identity_matches(self._model, self._dim, self._identity_guard):
+            return None
+        return self._embedding_space
 
     def embed(self, text: str) -> list[float] | None:
         """Generate a single embedding vector.

@@ -234,7 +234,8 @@ class TestMainQuietMode:
         """main(['--quiet', 'store', ...]) → verbosity=-1 passed to configure_logging (line 270)."""
         monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
         monkeypatch.setenv("MEMORY_STORAGE_SQLITE_PATH", str(tmp_path / "mem.db"))
-        monkeypatch.setenv("MEMORY_EMBEDDINGS_ENABLED", "0")
+        # Model-free fixture via the provider seam, not an unsupported config flag.
+        monkeypatch.setattr("trw_memory.client.MemoryClient._get_embedder", lambda self: None)
 
         captured_verbosity: list[int] = []
 

@@ -62,9 +62,7 @@ class MemoryBenchmark:
         self.db_dir.mkdir(parents=True, exist_ok=True)
         self.results: dict[str, dict[str, float]] = {}
 
-    def run(
-        self, sizes: list[int] | None = None
-    ) -> dict[str, dict[str, float]]:
+    def run(self, sizes: list[int] | None = None) -> dict[str, dict[str, float]]:
         """Run all memory benchmarks across specified corpus sizes.
 
         Args:

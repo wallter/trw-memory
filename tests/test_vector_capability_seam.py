@@ -244,3 +244,88 @@ async def test_bulk_store_skips_batch_embed_when_no_vector_sink(
     assert all(item.status == "stored" for item in summary.items)
     assert spy.batch_calls == []
     assert spy.embed_calls == []
+
+
+@pytest.mark.parametrize("batch", [False, True])
+async def test_no_consumer_never_acquires_provider(
+    client: MemoryClient,
+    monkeypatch: pytest.MonkeyPatch,
+    batch: bool,
+) -> None:
+    """Acquisition itself can load a model; checking embed calls is insufficient."""
+    backend = client._get_backend()
+    monkeypatch.setattr(backend, "supports_vectors", lambda: False)
+    monkeypatch.setattr(tier_runtime, "tier_runtime_enabled", lambda _cfg: False)
+    client._config.sync_enabled = False
+    client._config.local_only = True
+
+    def forbidden() -> None:
+        pytest.fail("no-consumer write acquired an embedding provider")
+
+    monkeypatch.setattr(client, "_get_embedder", forbidden)
+    if batch:
+        result = await client.bulk_store([BulkStoreRequest(content="model free bulk write")])
+        assert result.stored == 1
+    else:
+        result_single = await client.store("model free single write")
+        assert backend.get(result_single["memory_id"], namespace="default") is not None
+
+
+async def test_all_rejected_batch_never_acquires_provider(
+    client: MemoryClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Schema rejection needs no provider even when the backend has a vector sink."""
+    monkeypatch.setattr(client._get_backend(), "supports_vectors", lambda: True)
+
+    def forbidden() -> None:
+        pytest.fail("rejected-only batch acquired an embedding provider")
+
+    monkeypatch.setattr(client, "_get_embedder", forbidden)
+    before = client._get_backend().count(namespace="default")
+    result = await client.bulk_store([BulkStoreRequest(content=" "), BulkStoreRequest(content="")])
+    assert result.rejected == 2
+    assert result.stored == 0
+    assert all(item.skipped_reason == "schema_invalid:content" for item in result.items)
+    assert client._get_backend().count(namespace="default") == before
+
+
+async def test_bulk_real_consumer_acquires_once_and_persists_vectors(
+    client: MemoryClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = client._get_backend()
+    assert backend.supports_vectors()
+    spy = _SpyEmbedder(client._config.embedding_dim)
+    acquired: list[bool] = []
+
+    def provider() -> _SpyEmbedder:
+        acquired.append(True)
+        return spy
+
+    monkeypatch.setattr(client, "_get_embedder", provider)
+    result = await client.bulk_store(
+        [BulkStoreRequest(content="vector alpha"), BulkStoreRequest(content="vector beta")]
+    )
+    assert acquired == [True]
+    assert len(spy.batch_calls) == 1
+    assert result.stored == 2
+    assert all(backend.vector_exists(item.memory_id, namespace="default") for item in result.items)
+
+
+async def test_bulk_real_consumer_preserves_provider_security_refusal(
+    client: MemoryClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trw_memory.exceptions import LocalOnlyViolationError
+
+    monkeypatch.setattr(client._get_backend(), "supports_vectors", lambda: True)
+
+    def refused() -> None:
+        raise LocalOnlyViolationError("synthetic offline refusal")
+
+    monkeypatch.setattr(client, "_get_embedder", refused)
+    before = client._get_backend().count(namespace="default")
+    with pytest.raises(LocalOnlyViolationError, match="synthetic offline refusal"):
+        await client.bulk_store([BulkStoreRequest(content="requires actual provider")])
+    assert client._get_backend().count(namespace="default") == before

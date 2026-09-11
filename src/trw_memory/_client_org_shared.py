@@ -27,14 +27,16 @@ from __future__ import annotations
 
 import asyncio
 import functools
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.dense import cosine_similarity
+from trw_memory.sync._remote_admission import admit_remote_results
 from trw_memory.sync._remote_common import decode_learning_api_v1_result
 
 if TYPE_CHECKING:
+    from trw_memory._client_models import RemoteResultDict
     from trw_memory.client import MemoryClient, MemoryResultDict
 
 
@@ -50,15 +52,35 @@ async def merge_shared_results(
     query: str,
     local_results: list[MemoryResultDict],
     limit: int,
+    *,
+    local_entries: list[MemoryEntry] | None = None,
 ) -> list[MemoryResultDict]:
     """Fetch shared memories and append them after local results."""
+    cached_shared: list[MemoryResultDict] = []
     try:
         await client._apply_pending_remote_retirements()
-        local_entries = await load_entries_for_results(client, local_results)
+        # Cached SSE content is remote ingress too. Keep only this admitted
+        # snapshot available to degradation paths; never resnapshot raw cache
+        # after a refusal or an admission error.
+        admission = admit_remote_results(
+            [dict(row, id=row["memory_id"]) for row in snapshot_cached_shared_results(client, query)],
+            config=client._config,
+            backend=client._get_backend(),
+        )
+        cached_shared = [shared_result_to_result(row) for row in admission.admitted]
+        if admission.refused:
+            _client_logger().warning(
+                "memory_shared_cache_admission",
+                refused=admission.refused,
+                gate_errors=admission.gate_errors,
+                admitted=len(cached_shared),
+            )
+        if local_entries is None:
+            local_entries = await load_entries_for_results(client, local_results)
         embedder = client._get_embedder()
         cached_shared = await dedupe_cached_shared_results(
             client,
-            snapshot_cached_shared_results(client, query),
+            cached_shared,
             local_entries=local_entries,
             embedder=embedder,
         )
@@ -103,7 +125,7 @@ async def merge_shared_results(
             namespace=client._namespace,
             exc_info=True,
         )
-        return merge_shared_candidates(local_results, snapshot_cached_shared_results(client, query))
+        return merge_shared_candidates(local_results, cached_shared)
     await mark_fetch_retirements(client, shared)
     live_shared = [shared_result_to_result(item) for item in shared if not is_retired_shared_result(item)]
     return merge_shared_candidates(local_results, [*live_shared, *cached_shared])
@@ -128,8 +150,12 @@ async def load_entries_for_results(
         return loaded
 
 
-def shared_result_to_result(result: dict[str, object]) -> MemoryResultDict:
-    """Normalize a shared remote result into the client result shape."""
+def shared_result_to_result(result: dict[str, object]) -> RemoteResultDict:
+    """Project a remote result into the shared ingress namespace.
+
+    Unlike the wire payload, public namespace/source identify shared ingress,
+    not a caller-asserted local identity. Admission separately uses org:shared.
+    """
     # This dict arrives from the remote/org learning API, so its external
     # impact vocabulary MUST cross the versioned learning_api_v1 boundary rather
     # than a local fallback read — that is the single place the wire field is
@@ -141,11 +167,9 @@ def shared_result_to_result(result: dict[str, object]) -> MemoryResultDict:
     tags = [str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else []
     importance_raw = decoded.get("importance", 0.0)
     score_raw = decoded.get("score", importance_raw)
-    namespace = str(decoded.get("namespace", "shared"))
     created_at = str(decoded.get("created_at", ""))
     updated_at = str(decoded.get("updated_at", created_at))
-    source = str(decoded.get("source", "shared"))
-    shared_result: MemoryResultDict = {
+    shared_result: RemoteResultDict = {
         "memory_id": memory_id,
         "content": str(decoded.get("content", "")),
         "detail": detail,
@@ -154,9 +178,27 @@ def shared_result_to_result(result: dict[str, object]) -> MemoryResultDict:
         "score": coerce_float(score_raw),
         "created_at": created_at,
         "updated_at": updated_at,
-        "namespace": namespace,
-        "source": source,
+        "namespace": "shared",
+        "source": "shared",
     }
+    raw_metadata = decoded.get("metadata")
+    if isinstance(raw_metadata, dict):
+        shared_result["metadata"] = {str(key): str(value) for key, value in raw_metadata.items()}
+    if isinstance(decoded.get("expires"), str):
+        shared_result["expires"] = cast("str", decoded["expires"])
+    # Preserve presence separately from null: missing windows are not a claim
+    # of open validity, and publication created_at is not valid_from.
+    validity_fields: tuple[Literal["valid_from", "invalid_from", "invalidated_by"], ...] = (
+        "valid_from",
+        "invalid_from",
+        "invalidated_by",
+    )
+    for field in validity_fields:
+        if field in decoded:
+            value = decoded[field]
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"Remote {field} must be a string or null")
+            shared_result[field] = value
     return shared_result
 
 
@@ -201,7 +243,7 @@ def snapshot_cached_shared_results(
 ) -> list[MemoryResultDict]:
     """Return cached SSE shared results relevant to the current query."""
     with client._shared_event_cache_lock:
-        cached = list(client._shared_event_cache)
+        cached: list[MemoryResultDict] = list(client._shared_event_cache)
     if not query.strip():
         return cached
     return [result for result in cached if matches_query(result, query)]

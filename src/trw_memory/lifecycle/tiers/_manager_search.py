@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from heapq import nsmallest
 
 import structlog
+from pydantic import ValidationError
 
 from trw_memory.lifecycle.tiers._scoring import compute_importance_score
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocation
+from trw_memory.security.namespace_scope import NamespaceScopeError
 
 logger = structlog.get_logger(__name__)
 
@@ -172,3 +176,57 @@ def merge_search_results(
         config=config,
         relevance_hint_keys=("_tier_relevance",),
     )
+
+
+def discover_candidates(
+    rows: Iterable[tuple[dict[str, object], bool]],
+    *,
+    invocation: RecallInvocation,
+    resolve_entry: Callable[[str], MemoryEntry | None],
+    query_tokens: list[str],
+    query_embedding: list[float] | None,
+    config: MemoryConfig,
+    top_k: int,
+) -> list[LocalCandidate]:
+    """Resolve authoritative entries before admission, scoring, or pool caps."""
+
+    def candidates() -> Iterable[LocalCandidate]:
+        seen: set[str] = set()
+        for data, cold in rows:
+            if "namespace" in data and str(data["namespace"]) != invocation.namespace:
+                raise NamespaceScopeError("tier snapshot outside authorized namespace")
+            entry_id = str(data.get("id", ""))
+            canonical = resolve_entry(entry_id)
+            if canonical is None:
+                if "created_at" not in data:
+                    logger.warning("tier_discovery_missing_temporal_authority", entry_id=entry_id)
+                    continue
+                try:
+                    entry = MemoryEntry.model_validate(data)
+                except ValidationError:
+                    logger.warning("tier_discovery_invalid_entry", entry_id=entry_id)
+                    continue
+            else:
+                entry = canonical
+            if not invocation.allows_entry(entry):
+                continue
+            if entry.id in seen:
+                continue
+            if not invocation.temporal.eligible(entry) and not invocation.temporal.include_superseded:
+                continue
+            hint = _parse_relevance_hint(data, ("_tier_relevance",))
+            payload = entry.model_dump(mode="json")
+            if hint is None and not _entry_matches_tokens(payload, query_tokens):
+                continue
+            seen.add(entry.id)
+            score = compute_importance_score(
+                payload,
+                query_tokens,
+                query_embedding=query_embedding,
+                config=config,
+                relevance_hint=hint,
+                reference_time=invocation.temporal.reference_time,
+            )
+            yield LocalCandidate(entry, score, relevance_hint=hint, cold=cold and canonical is None)
+
+    return nsmallest(top_k, candidates(), key=lambda c: invocation.rank_key(c.entry, c.raw_score))

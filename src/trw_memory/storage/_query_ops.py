@@ -29,6 +29,7 @@ Extracted as PRD-DIST-245 Phase 1 batch 86.
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from typing import TYPE_CHECKING
 
@@ -41,8 +42,9 @@ from trw_memory.storage._sql_utils import iter_bind_chunks
 from trw_memory.storage.interface import EntryCursor
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
+    from trw_memory.retrieval.temporal_selection import TemporalSelection
     from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 logger = structlog.get_logger(__name__)
@@ -92,18 +94,97 @@ def _execute_resilient(
     return backend._fetch_rows_resilient(cursor, query=fetch_query)
 
 
+def _search_keyword_tokens(
+    backend: SQLiteBackend,
+    tokens: list[str],
+    *,
+    top_k: int,
+    tags: list[str] | None,
+    status: MemoryStatus | None,
+    min_importance: float,
+    namespace: str | None,
+    temporal_selection: TemporalSelection | None,
+    entry_filter: Callable[[MemoryEntry], bool] | None,
+) -> list[MemoryEntry]:
+    """Rank substring membership before acquisition truncation, without FTS.
+
+    Only aggregate counts enter Python before bounded row materialisation.
+    IDF uses the SQL-filtered matching union in this namespace, NOT the later
+    temporal/entry-filter eligible subset. No cross-namespace DF lookup occurs.
+    SQL may scan all scoped rows; this bounds hydration, not database work.
+    Counts and retrieval are separate statements under the backend lock, not
+    an atomic snapshot against concurrent external writers.
+    """
+    from trw_memory.storage._temporal_fetch import execute_temporal_query
+
+    terms = list(dict.fromkeys(token for token in tokens if token))
+    if not terms or top_k <= 0:
+        return []
+    clause = (
+        f"(id LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\' OR detail LIKE ? ESCAPE '\\' OR {_TAG_KEYWORD_CLAUSE})"
+    )
+    term_params: list[object] = []
+    for term in terms:
+        escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        term_params.extend([f"%{escaped}%"] * 4)
+    filters, filter_params = backend._build_filter_clause(
+        status=status, namespace=namespace, min_importance=min_importance
+    )
+    params = term_params + filter_params
+    where = "(" + " OR ".join([clause] * len(terms)) + f") AND {filters}"
+    where = _append_exact_tag_filters(where, params, tags)
+    aggregates = ", ".join([f"SUM(CASE WHEN {clause} THEN 1 ELSE 0 END)"] * len(terms))
+    try:
+        with backend._lock:
+            counts = backend._conn.execute(
+                f"SELECT COUNT(*), {aggregates} FROM memories WHERE {where}",  # noqa: S608
+                term_params + params,
+            ).fetchone()
+            if not counts or not counts[0]:
+                return []
+            weights = [math.log((counts[0] + 1) / (df + 1)) + 1.0 for df in counts[1:]]
+            order_params: list[object] = []
+            for index, weight in enumerate(weights):
+                order_params.extend(term_params[index * 4 : (index + 1) * 4])
+                order_params.append(weight)
+            score = " + ".join([f"CASE WHEN {clause} THEN ? ELSE 0 END"] * len(terms))
+            query = backend._fetch_query(
+                where_sql=where,
+                params=params + order_params,
+                order_by=f"({score}) DESC, importance DESC, id DESC",
+            )
+            return execute_temporal_query(backend, query, temporal_selection, limit=top_k, entry_filter=entry_filter)
+    except sqlite3.Error as exc:
+        raise StorageError(f"Failed to search memories: {exc}", path=str(backend._db_path)) from exc
+
+
 def search(
     backend: SQLiteBackend,
     select_columns_sql: str,
     *,
     query: str,
+    keyword_tokens: list[str] | None = None,
     top_k: int = 25,
     tags: list[str] | None = None,
     status: MemoryStatus | None = None,
     min_importance: float = 0.0,
     namespace: str | None = None,
+    temporal_selection: TemporalSelection | None = None,
+    entry_filter: Callable[[MemoryEntry], bool] | None = None,
 ) -> list[MemoryEntry]:
     """Keyword LIKE search on content + detail + tags with filters."""
+    if keyword_tokens is not None:
+        return _search_keyword_tokens(
+            backend,
+            keyword_tokens,
+            top_k=top_k,
+            tags=tags,
+            status=status,
+            min_importance=min_importance,
+            namespace=namespace,
+            temporal_selection=temporal_selection,
+            entry_filter=entry_filter,
+        )
     if top_k <= 0:
         return []
     escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -127,6 +208,16 @@ def search(
     # in-memory issubset check below remains the authoritative exact filter.
     where_sql = _append_exact_tag_filters(where_sql, params, tags)
     order_by = "importance DESC, updated_at DESC"
+    if temporal_selection is not None or entry_filter is not None:
+        from trw_memory.storage._temporal_fetch import execute_temporal_query
+
+        return execute_temporal_query(
+            backend,
+            backend._fetch_query(where_sql=where_sql, params=params, order_by=order_by),
+            temporal_selection,
+            limit=top_k,
+            entry_filter=entry_filter,
+        )
     sql = (
         f"SELECT {select_columns_sql} FROM memories WHERE {where_sql} "  # noqa: S608
         f"ORDER BY {order_by} LIMIT ?"
@@ -144,80 +235,6 @@ def search(
     except (sqlite3.Error, ValueError, KeyError) as exc:
         raise StorageError(
             f"Failed to search memories: {exc}",
-            path=str(backend._db_path),
-        ) from exc
-
-
-def search_fts(
-    backend: SQLiteBackend,
-    select_columns_sql: str,
-    *,
-    query: str,
-    top_k: int = 25,
-    status: MemoryStatus | None = None,
-    min_importance: float = 0.0,
-    namespace: str | None = None,
-) -> list[MemoryEntry]:
-    """FTS5 full-text search — O(log N) inverted index candidate retrieval.
-
-    Replaces the LIKE '%term%' table scan in :func:`search` for callers that
-    have confirmed ``backend._fts_available``.  Results are ranked by FTS5
-    BM25 for candidate retrieval; the caller's hybrid pipeline may re-rank.
-    Falls back to an empty list when no FTS candidates match.
-    """
-    if top_k <= 0:
-        return []
-    # Sanitize: strip whitespace, enforce max length, escape for FTS5 phrase query.
-    # Phrase-quoting (wrapping in "...") makes FTS5 operators (AND, OR, NOT, NEAR)
-    # and colon prefix operators literal; the empty guard and length cap add
-    # DoS protection (empty/whitespace-only or pathologically long queries).
-    query = query.strip()
-    if not query:
-        return []
-    if len(query) > 1000:
-        query = query[:1000]
-    sanitized = query.replace('"', '""')
-    fts_query = f'"{sanitized}"'
-    filter_sql, filter_params = backend._build_filter_clause(
-        status=status, namespace=namespace, min_importance=min_importance
-    )
-    # The candidate query joins memories to memories_fts, and both now declare a
-    # ``namespace`` column, so its copy of the filter must be table-qualified.
-    memories_filter_sql, _ = backend._build_filter_clause(
-        status=status, namespace=namespace, min_importance=min_importance, column_prefix="memories."
-    )
-    over_fetch = min(top_k * 4, 500)
-    try:
-        with backend._lock:
-            candidate_sql = f"""
-                SELECT memories_fts.id FROM memories_fts
-                JOIN memories ON memories.id = memories_fts.id
-                    AND memories.namespace = memories_fts.namespace
-                WHERE memories_fts MATCH ? AND {memories_filter_sql}
-                ORDER BY rank LIMIT ?
-            """  # noqa: S608 - filter_sql is built only from fixed internal clauses.
-            fts_rows = backend._conn.execute(candidate_sql, (fts_query, *filter_params, over_fetch)).fetchall()
-            if not fts_rows:
-                return []
-            ids = [str(row[0]) for row in fts_rows]
-            placeholders = ", ".join(["?"] * len(ids))
-            id_filter = f"id IN ({placeholders})"
-            where_sql = id_filter if filter_sql == "1" else f"{id_filter} AND {filter_sql}"
-            sql = (
-                f"SELECT {select_columns_sql} FROM memories "  # noqa: S608
-                f"WHERE {where_sql} ORDER BY importance DESC, updated_at DESC LIMIT ?"
-            )
-            params: list[object] = [*ids, *filter_params, top_k]
-            fetch_query = backend._fetch_query(
-                where_sql=where_sql,
-                params=[*ids, *filter_params],
-                order_by="importance DESC, updated_at DESC",
-                limit=top_k,
-            )
-            return _execute_resilient(backend, sql, params, fetch_query=fetch_query)
-    except (sqlite3.Error, ValueError, KeyError) as exc:
-        raise StorageError(
-            f"Failed FTS5 search: {exc}",
             path=str(backend._db_path),
         ) from exc
 
@@ -274,6 +291,54 @@ def count(backend: SQLiteBackend, namespace: str | None = None) -> int:
         ) from exc
 
 
+def _refill_verification_entries(
+    backend: SQLiteBackend,
+    select_columns_sql: str,
+    where_sql: str,
+    params: tuple[object, ...],
+    limit: int,
+) -> list[MemoryEntry]:
+    """Fill one maintenance batch, advancing by raw keys rather than decoded rows.
+
+    Malformed payloads can disappear during resilient materialization. Only raw
+    key exhaustion ends this scan; otherwise a corrupt first page would hide all
+    later claims. Each key/payload query and the returned list remain bounded.
+    Caller holds the backend lock; concurrent external mutation is not a snapshot.
+    """
+    result: list[MemoryEntry] = []
+    after: tuple[str, str] | None = None
+    while len(result) < limit:
+        page_where = where_sql
+        page_params = params
+        if after is not None:
+            page_where += " AND (namespace, id) > (?, ?)"
+            page_params = (*page_params, *after)
+        remaining = limit - len(result)
+        keys = backend._conn.execute(
+            f"SELECT namespace, id FROM memories WHERE {page_where} "  # noqa: S608
+            "ORDER BY namespace, id LIMIT ?",
+            (*page_params, remaining),
+        ).fetchall()
+        if not keys:
+            break
+        after = (str(keys[-1][0]), str(keys[-1][1]))
+        page_where += " AND (namespace, id) <= (?, ?)"
+        page_params = (*page_params, *after)
+        query = backend._fetch_query(
+            where_sql=page_where, params=page_params, order_by="namespace, id", limit=remaining
+        )
+        result.extend(
+            _execute_resilient(
+                backend,
+                f"SELECT {select_columns_sql} FROM memories WHERE {page_where} "  # noqa: S608
+                "ORDER BY namespace, id LIMIT ?",
+                (*page_params, remaining),
+                fetch_query=query,
+            )
+        )
+    return result
+
+
 def entries_with_assertions(
     backend: SQLiteBackend,
     select_columns_sql: str,
@@ -281,6 +346,8 @@ def entries_with_assertions(
     status: MemoryStatus | None = MemoryStatus.ACTIVE,
     namespace: str | None = None,
     limit: int = 500,
+    include_anchors: bool = False,
+    after: tuple[str, str] | None = None,
 ) -> list[MemoryEntry]:
     """PRD-CORE-086 FR07 query for assertion-health summary.
 
@@ -296,9 +363,13 @@ def entries_with_assertions(
     rows for aggregate stats, so an unbounded full-table scan on a large store
     is avoided (memory-storage-5).
     """
+    # Maintenance opts into stable namespace/id traversal; legacy summaries
+    # retain assertions-only eligibility and updated-at ordering.
     if limit <= 0:
         return []
     where_sql = "assertions IS NOT NULL AND assertions != '[]'"
+    if include_anchors:
+        where_sql = f"({where_sql} OR (anchors IS NOT NULL AND anchors != '[]'))"
     params: tuple[object, ...] = ()
     if status is not None:
         where_sql = f"{where_sql} AND status = ?"
@@ -306,7 +377,10 @@ def entries_with_assertions(
     if namespace is not None:
         where_sql = f"{where_sql} AND namespace = ?"
         params = (*params, namespace)
-    order_by = "updated_at DESC"
+    if after is not None:
+        where_sql += " AND (namespace, id) > (?, ?)"
+        params = (*params, *after)
+    order_by = "namespace, id" if include_anchors or after is not None else "updated_at DESC"
     sql = (
         f"SELECT {select_columns_sql} FROM memories WHERE {where_sql} "  # noqa: S608
         f"ORDER BY {order_by} LIMIT ?"
@@ -315,6 +389,8 @@ def entries_with_assertions(
     fetch_query = backend._fetch_query(where_sql=where_sql, params=params, order_by=order_by, limit=limit)
     try:
         with backend._lock:
+            if include_anchors or after is not None:
+                return _refill_verification_entries(backend, select_columns_sql, where_sql, params, limit)
             return _execute_resilient(backend, sql, exec_params, fetch_query=fetch_query)
     except sqlite3.Error as exc:
         logger.debug("entries_with_assertions_query_failed", exc_info=True)
@@ -335,6 +411,8 @@ def list_entries(
     exclude_superseded: bool = False,
     tags: list[str] | None = None,
     after: EntryCursor | None = None,
+    temporal_selection: TemporalSelection | None = None,
+    entry_filter: Callable[[MemoryEntry], bool] | None = None,
 ) -> list[MemoryEntry]:
     """Return entries with optional filters, ordered by updated_at desc.
 
@@ -358,6 +436,8 @@ def list_entries(
     TOTAL; without it, rows sharing an ``updated_at`` could be re-ordered
     between pages and be returned twice or not at all.
     """
+    if temporal_selection is not None and after is not None:
+        raise ValueError("Temporal selection cannot resume with a raw-order cursor")
     if limit <= 0:
         return []
     where_sql, params = backend._build_filter_clause(status=status, namespace=namespace, min_importance=min_importance)
@@ -371,6 +451,16 @@ def list_entries(
         where_sql = f"({where_sql}) AND (updated_at < ? OR (updated_at = ? AND id < ?))"
         params.extend([after.updated_at, after.updated_at, after.entry_id])
     order_by = "updated_at DESC, id DESC"
+    if temporal_selection is not None or entry_filter is not None:
+        from trw_memory.storage._temporal_fetch import execute_temporal_query
+
+        return execute_temporal_query(
+            backend,
+            backend._fetch_query(where_sql=where_sql, params=params, order_by=order_by),
+            temporal_selection,
+            limit=limit,
+            entry_filter=entry_filter,
+        )
     sql = (
         f"SELECT {select_columns_sql} FROM memories WHERE {where_sql} "  # noqa: S608
         f"ORDER BY {order_by} LIMIT ?"

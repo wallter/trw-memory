@@ -173,4 +173,4 @@ def configure_logging(
             service_version=_get_version("trw-memory"),
         )
     except Exception:  # justified: best-effort — version binding is non-critical
-        pass
+        logging.getLogger(__name__).debug("service_version_binding_failed", exc_info=True)

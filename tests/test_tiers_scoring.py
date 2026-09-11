@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from trw_memory.lifecycle.tiers import TierSweepResult, compute_importance_score
 from trw_memory.models.config import MemoryConfig
 
@@ -88,7 +90,7 @@ class TestComputeImportanceScore:
         score = compute_importance_score(entry, [], config=cfg)
         assert 0.0 <= score <= 1.0
 
-    def test_prefers_q_value_when_outcomes_exist(self) -> None:
+    def test_historical_q_does_not_override_declared_importance(self) -> None:
         cfg = MemoryConfig()
         entry: dict[str, object] = {
             "content": "deployment lesson",
@@ -102,7 +104,7 @@ class TestComputeImportanceScore:
             "q_value": 0.2,
             "q_observations": 5,
         }
-        assert compute_importance_score(entry, ["deployment"], config=cfg) > compute_importance_score(
+        assert compute_importance_score(entry, ["deployment"], config=cfg) == compute_importance_score(
             baseline,
             ["deployment"],
             config=cfg,
@@ -120,3 +122,19 @@ class TestTierSweepResult:
     def test_total_property(self) -> None:
         result = TierSweepResult(promoted=1, demoted=2, purged=3, errors=1)
         assert result.total == 7
+
+
+def test_ranking_uses_captured_reference_without_reading_wall_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import Mock
+
+    from trw_memory.lifecycle.tiers import _scoring
+
+    reference = datetime(2022, 1, 15, tzinfo=timezone.utc)
+    clock = Mock()
+    clock.now.side_effect = AssertionError("ranking must reuse its invocation clock")
+    monkeypatch.setattr(_scoring, "datetime", clock)
+    cfg = MemoryConfig(
+        score_relevance_weight=0.0, score_recency_weight=1.0, score_importance_weight=0.0, decay_half_life_days=14.0
+    )
+    entry: dict[str, object] = {"content": "policy", "last_accessed_at": "2022-01-01T00:00:00+00:00"}
+    assert compute_importance_score(entry, [], config=cfg, reference_time=reference) == pytest.approx(0.5)

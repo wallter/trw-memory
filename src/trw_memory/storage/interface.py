@@ -11,11 +11,16 @@ from __future__ import annotations
 
 import contextlib
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+
+if TYPE_CHECKING:
+    from trw_memory.embeddings.provenance import StoredVector, VectorProvenance
+    from trw_memory.retrieval.temporal_selection import TemporalSelection
 
 
 @dataclass(frozen=True)
@@ -135,6 +140,8 @@ class StorageBackend(ABC):
         status: MemoryStatus | None = None,
         min_importance: float = 0.0,
         namespace: str | None = None,
+        temporal_selection: TemporalSelection | None = None,
+        entry_filter: Callable[[MemoryEntry], bool] | None = None,
     ) -> list[MemoryEntry]:
         """Keyword search over content and detail fields.
 
@@ -145,6 +152,11 @@ class StorageBackend(ABC):
             status: If provided, filter to entries with this status.
             min_importance: Lower bound on ``importance`` (inclusive).
             namespace: If provided, restrict to this namespace.
+            entry_filter: Pure full-entry predicate applied before result caps; may
+                be replayed after decoding recovery. Exceptions propagate unchanged.
+                None preserves unfiltered behavior and does not imply temporal policy.
+            temporal_selection: Optional eligibility-before-limit policy; None
+                preserves raw maintenance visibility.
 
         Returns:
             Up to *top_k* matching entries, ordered by relevance (descending).
@@ -180,6 +192,8 @@ class StorageBackend(ABC):
         exclude_superseded: bool = False,
         tags: list[str] | None = None,
         after: EntryCursor | None = None,
+        temporal_selection: TemporalSelection | None = None,
+        entry_filter: Callable[[MemoryEntry], bool] | None = None,
     ) -> list[MemoryEntry]:
         """Return entries with optional filters.
 
@@ -191,6 +205,11 @@ class StorageBackend(ABC):
                 layer so callers that only want high-importance rows do not
                 hydrate the full namespace into memory first. Default 0.0 keeps
                 the legacy behaviour (no importance filter).
+            entry_filter: Pure full-entry predicate applied before result caps; may
+                be replayed after decoding recovery. Exceptions propagate unchanged.
+                None preserves unfiltered behavior and does not imply temporal policy.
+            temporal_selection: Optional eligibility-before-limit policy; cannot
+                be combined with a raw-order after cursor.
             limit: Maximum number of entries to return.
             exclude_superseded: When True, exclude entries that have a non-null
                 ``invalid_from`` value (bi-temporal superseded entries).  Only
@@ -378,8 +397,13 @@ class StorageBackend(ABC):
         """
         return False
 
-    def upsert_vector(self, entry_id: str, embedding: list[float], *, namespace: str) -> None:  # noqa: B027
+    def upsert_vector(  # noqa: B027 -- optional vector capability default
+        self, entry_id: str, embedding: list[float], *, namespace: str, provenance: VectorProvenance | None = None
+    ) -> None:
         """Insert or update the dense vector for ``(namespace, entry_id)``.
+
+        Provenance, when supplied, must match vector bytes and be committed
+        atomically with them. An unqualified replacement clears previous proof.
 
         Backends that support vector search (e.g. via ``sqlite-vec``) should
         override this.  The default is a silent no-op so that callers do not
@@ -452,12 +476,24 @@ class StorageBackend(ABC):
         """
         return []
 
-    def get_stored_embeddings(self, entry_ids: list[str]) -> dict[str, list[float]]:
+    def get_stored_embeddings(self, entry_ids: list[str], *, namespace: str | None = None) -> dict[str, list[float]]:
         """Return stored dense vectors for the requested entry IDs.
+
+        ``namespace=None`` retains the legacy unscoped lookup. An explicit
+        namespace, including ``""``, restricts storage selection to that exact
+        value before decoding or building the ID-keyed result mapping.
 
         Backends with vector persistence should override this. The default
         returns an empty mapping so callers can opt into dense retrieval
         without branching on backend capabilities.
+        """
+        return {}
+
+    def get_vector_records(self, entry_ids: list[str], *, namespace: str) -> dict[str, StoredVector]:
+        """Return scoped vectors and validated provenance; missing proof is None.
+
+        Backends without this capability return no records rather than upgrading
+        unqualified legacy vectors into trusted evidence.
         """
         return {}
 
@@ -504,6 +540,8 @@ class StorageBackend(ABC):
         status: MemoryStatus | None = None,
         min_importance: float = 0.0,
         namespace: str | None = None,
+        temporal_selection: TemporalSelection | None = None,
+        entry_filter: Callable[[MemoryEntry], bool] | None = None,
     ) -> list[MemoryEntry]:
         """Full-text search using a backend-native FTS index (e.g. FTS5).
 

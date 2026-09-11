@@ -181,9 +181,9 @@ class _SecurityConfigMixin(BaseModel):
             "snapshot_enabled",
         ),
         description=(
-            "When True, trw_deliver and the CLI `trw-memory snapshot` subcommand take "
-            "VACUUM INTO snapshots under <base_dir>/memory/snapshots/{daily,weekly}/. "
-            "Default False (opt-in) to avoid surprising disk usage."
+            "Reserved opt-in for automatic snapshots; no automatic scheduler or deliver "
+            "hook is currently wired. Setting this flag alone does not create backups. "
+            "Explicit `trw-memory snapshot` commands run independently of this flag."
         ),
     )
     memory_snapshot_daily_keep: int = Field(

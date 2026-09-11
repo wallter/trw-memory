@@ -176,3 +176,59 @@ class TestSortedParseableOsError:
         tier_dir = tmp_path / "nonexistent"
         result = _sorted_parseable(tier_dir, pattern=re.compile(r".*\.db"))
         assert result == []
+
+
+@pytest.mark.parametrize("failure_stage", ["partial_copy", "replace", None])
+def test_restore_preserves_database_until_staged_copy_succeeds(tmp_path, monkeypatch, failure_stage):
+    from trw_memory.storage._snapshot import SnapshotError
+
+    snapshot = snapshots_base_dir(tmp_path) / "daily" / "2026-09-07.db"
+    snapshot.parent.mkdir(parents=True)
+    db_path = tmp_path / "memory.db"
+    for path, value in [(db_path, "original"), (snapshot, "restored")]:
+        with sqlite3.connect(path) as conn:
+            conn.execute("CREATE TABLE evidence (value TEXT)")
+            conn.execute("INSERT INTO evidence VALUES (?)", (value,))
+    before = db_path.read_bytes()
+    source = snapshot.read_bytes()
+    sidecars = [Path(str(db_path) + suffix) for suffix in ("-wal", "-shm")]
+    for path in sidecars:
+        path.write_bytes(b"prior sidecar")
+    unrelated = tmp_path / "memory.db.unrelated.tmp"
+    unrelated.write_bytes(b"not owned by restore")
+    files_before = set(tmp_path.iterdir())
+    failure = OSError("injected disk failure")
+
+    def partial_copy(src, dst):
+        Path(dst).write_bytes(Path(src).read_bytes()[:32])
+        raise failure
+
+    def failed_replace(self, target):
+        assert self.parent == db_path.parent
+        assert self != db_path
+        assert self.read_bytes() == source
+        raise failure
+
+    if failure_stage == "partial_copy":
+        monkeypatch.setattr("trw_memory.storage._snapshot.shutil.copy2", partial_copy)
+    elif failure_stage == "replace":
+        monkeypatch.setattr(Path, "replace", failed_replace)
+    if failure_stage:
+        with pytest.raises(SnapshotError, match="snapshot restore failed") as caught:
+            restore_from_snapshot(tmp_path, snapshot, db_path)
+        assert caught.value.__cause__ is failure
+        assert db_path.read_bytes() == before
+        assert all(path.read_bytes() == b"prior sidecar" for path in sidecars)
+        assert set(tmp_path.iterdir()) == files_before
+    else:
+        restore_from_snapshot(tmp_path, snapshot, db_path)
+        assert db_path.read_bytes() == source
+        assert all(not path.exists() for path in sidecars)
+        assert set(tmp_path.iterdir()) == files_before - set(sidecars)
+    assert snapshot.read_bytes() == source
+    assert unrelated.read_bytes() == b"not owned by restore"
+    # Remove synthetic sidecars before querying the closed database.
+    for path in sidecars:
+        path.unlink(missing_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT value FROM evidence").fetchone() == ("original" if failure_stage else "restored",)

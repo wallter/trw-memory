@@ -116,7 +116,7 @@ trw-memory search --tags security --min-importance 0.7
 # Consolidate related entries
 trw-memory consolidate --namespace project:my-app --dry-run
 
-# Export/import for backup or migration
+# Export/import a namespace's entry data
 trw-memory export --format json > memories.json
 trw-memory import memories.json --namespace project:new-app
 
@@ -143,6 +143,13 @@ trw-memory code-symbol ./src MemoryClient
 # Status overview
 trw-memory status
 ```
+
+Export enumerates the requested namespace (`default` unless specified), not the
+whole project or every namespace. Use an unchanged store for a consistent export:
+pagination is not a snapshot across concurrent writes. JSON/YAML output retains
+the entry format and is materialized in memory; it is not a streaming database
+backup and does not include arbitrary project files or stored vector indexes.
+The separate snapshot commands above serve database snapshot management.
 
 ### Low-Level Backend Access
 

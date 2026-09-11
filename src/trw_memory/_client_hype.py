@@ -37,6 +37,7 @@ from trw_memory._hype_ids import (
     parent_of_hype_id as parent_of_hype_id,
 )
 from trw_memory.embeddings.interface import EmbeddingProvider
+from trw_memory.embeddings.provenance import generation_provenance_kwargs
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.interface import StorageBackend
 
@@ -107,7 +108,18 @@ def expand_hype_siblings(
             q_embedding = embedder.embed(question)
             if q_embedding is None:
                 continue
-            backend.upsert_vector(sibling_id, q_embedding, namespace=entry.namespace)
+            backend.upsert_vector(
+                sibling_id,
+                q_embedding,
+                namespace=entry.namespace,
+                **generation_provenance_kwargs(
+                    embedder,
+                    question,
+                    q_embedding,
+                    input_role="generated-question",
+                    parent_text=f"{entry.content} {entry.detail}",
+                ),
+            )
             stored += 1
         logger.debug(
             "hype_expansion_complete",

@@ -35,6 +35,7 @@ from typing import Any
 import structlog
 
 from trw_memory._hype_ids import parent_of_hype_id
+from trw_memory.embeddings.provenance import StoredVector, VectorProvenance
 from trw_memory.storage._sql_utils import iter_bind_chunks
 
 logger = structlog.get_logger(__name__)
@@ -222,7 +223,7 @@ def existing_vector_ids(
                     "SELECT entry_id FROM vec_index WHERE namespace = ?",
                     (namespace,),
                 ).fetchall()
-    except sqlite3.Error as exc:
+    except sqlite3.Error as exc:  # trw-fail-silent-allow: vec0 being absent is an expected optional-dependency state that degrades to BM25/keyword; a REAL SQL error (corruption, I/O, locked DB) is separated out and surfaced at warning instead of being folded into this empty return
         # Real SQL error here (vec_available was already True) → surface at
         # warning so a bulk backfill doesn't silently re-embed everything on a
         # transient table error; only the vec0-absent case stays at debug.
@@ -266,7 +267,7 @@ def hype_sibling_ids(
                 "AND NOT EXISTS (SELECT 1 FROM memories m WHERE m.id = vi.entry_id)",
                 (_hype_like_pattern(parent_id),),
             ).fetchall()
-    except sqlite3.Error as exc:
+    except sqlite3.Error as exc:  # trw-fail-silent-allow: vec0 being absent is an expected optional-dependency state that degrades to BM25/keyword; a REAL SQL error (corruption, I/O, locked DB) is separated out and surfaced at warning instead of being folded into this empty return
         if _is_optional_vec_unavailable_error(exc):
             logger.debug("hype_sibling_ids_query_failed", exc_info=True)
         else:
@@ -326,6 +327,7 @@ def upsert_vector(
     namespace: str,
     embedding: list[float],
     skip_commit: bool = False,
+    provenance: VectorProvenance | None = None,
 ) -> None:
     """Insert or update the ``(namespace, entry_id)`` vector. No-op when sqlite-vec absent.
 
@@ -354,18 +356,34 @@ def upsert_vector(
         )
         return
     emb_bytes = struct.pack(f"{dim}f", *embedding)
+    if provenance is not None and not provenance.matches_vector(embedding):
+        raise ValueError("vector provenance does not match the vector being stored")
+    proof_json = provenance.to_json() if provenance is not None else None
     try:
         with lock:
-            conn.execute("INSERT OR IGNORE INTO vec_index(entry_id, namespace) VALUES(?, ?)", (entry_id, namespace))
-            row = conn.execute(
-                "SELECT rowid FROM vec_index WHERE namespace = ? AND entry_id = ?", (namespace, entry_id)
-            ).fetchone()
-            rowid: int = row[0]
-            conn.execute("DELETE FROM vec_memories WHERE rowid = ?", (rowid,))
-            conn.execute(
-                "INSERT INTO vec_memories(rowid, embedding) VALUES(?, ?)",
-                (rowid, emb_bytes),
-            )
+            # Optional vector failures can be swallowed while an outer canonical
+            # row transaction still commits. Preserve the old vector AND proof
+            # with an operation savepoint, not an outer-transaction rollback.
+            if not conn.in_transaction:
+                conn.execute("BEGIN")
+            conn.execute("SAVEPOINT trw_vector_upsert")
+            try:
+                conn.execute("INSERT OR IGNORE INTO vec_index(entry_id, namespace) VALUES(?, ?)", (entry_id, namespace))
+                row = conn.execute(
+                    "SELECT rowid FROM vec_index WHERE namespace = ? AND entry_id = ?", (namespace, entry_id)
+                ).fetchone()
+                rowid: int = row[0]
+                conn.execute("UPDATE vec_index SET provenance_json = ? WHERE rowid = ?", (proof_json, rowid))
+                conn.execute("DELETE FROM vec_memories WHERE rowid = ?", (rowid,))
+                conn.execute(
+                    "INSERT INTO vec_memories(rowid, embedding) VALUES(?, ?)",
+                    (rowid, emb_bytes),
+                )
+            except sqlite3.Error:
+                conn.execute("ROLLBACK TO SAVEPOINT trw_vector_upsert")
+                conn.execute("RELEASE SAVEPOINT trw_vector_upsert")
+                raise
+            conn.execute("RELEASE SAVEPOINT trw_vector_upsert")
             if not skip_commit:
                 conn.commit()
     except sqlite3.Error as exc:
@@ -463,7 +481,7 @@ def search_vectors(
                 (query_bytes, knn_k, namespace),
             ).fetchall()
         return [(str(r[0]), float(r[1])) for r in rows[:top_k]]
-    except sqlite3.Error as exc:
+    except sqlite3.Error as exc:  # trw-fail-silent-allow: vec0 being absent is an expected optional-dependency state that degrades to BM25/keyword; a REAL SQL error (corruption, I/O, locked DB) is separated out and surfaced at warning instead of being folded into this empty return
         # Keep the graceful BM25-only fallback (return []), but surface a REAL
         # SQL error (corruption, I/O) at warning — only the expected
         # vec0-module-absent case stays at debug. Otherwise vector search silently
@@ -481,14 +499,20 @@ def get_stored_embeddings(
     *,
     vec_available: bool,
     entry_ids: list[str],
+    namespace: str | None = None,
 ) -> dict[str, list[float]]:
-    """Load stored vectors for the requested entry IDs."""
+    """Load vectors for requested IDs, optionally scoped before blob decoding.
+
+    ``None`` preserves the legacy cross-namespace lookup (duplicate IDs remain
+    ambiguous). Every other value, including the empty string, is an exact
+    namespace predicate. Callers carrying authorized candidates should provide it.
+    """
     if not vec_available or not entry_ids:
         return {}
     try:
         with lock:
             rows = []
-            for chunk in iter_bind_chunks(entry_ids):
+            for chunk in iter_bind_chunks(entry_ids, reserved_bindings=int(namespace is not None)):
                 placeholders = ", ".join(["?"] * len(chunk))
                 sql = f"""
                     SELECT vi.entry_id, vm.embedding
@@ -496,8 +520,12 @@ def get_stored_embeddings(
                     JOIN vec_index vi ON vm.rowid = vi.rowid
                     WHERE vi.entry_id IN ({placeholders})
                 """  # noqa: S608
-                rows.extend(conn.execute(sql, chunk).fetchall())
-    except sqlite3.Error as exc:
+                params: list[object] = list(chunk)
+                if namespace is not None:
+                    sql += " AND vi.namespace = ?"
+                    params.append(namespace)
+                rows.extend(conn.execute(sql, params).fetchall())
+    except sqlite3.Error as exc:  # trw-fail-silent-allow: vec0 being absent is an expected optional-dependency state that degrades to BM25/keyword; a REAL SQL error (corruption, I/O, locked DB) is separated out and surfaced at warning instead of being folded into this empty return
         # Match search_vectors: only the expected vec0-module-absent case stays
         # at debug. A REAL SQL error (corruption, I/O, locked DB) returns {} —
         # which a bulk-backfill caller reads as "no stored embeddings" and
@@ -524,3 +552,52 @@ def get_stored_embeddings(
         dim_len = len(blob) // 4
         embeddings[str(row[0])] = list(struct.unpack(f"{dim_len}f", blob))
     return embeddings
+
+
+def get_vector_records(
+    conn: Any,
+    lock: _thread.LockType | _thread.RLock,
+    *,
+    vec_available: bool,
+    entry_ids: list[str],
+    namespace: str,
+) -> dict[str, StoredVector]:
+    """Read scoped vector bytes and proof together; never infer legacy proof.
+
+    Read-only legacy layouts may lack the additive column. Their vectors remain
+    available as unknown evidence. Malformed or stale proof is also unknown.
+    """
+    if not isinstance(namespace, str):
+        raise TypeError("get_vector_records requires an explicit namespace string")
+    if not vec_available or not entry_ids:
+        return {}
+    try:
+        with lock:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(vec_index)").fetchall()}
+            proof_column = "vi.provenance_json" if "provenance_json" in columns else "NULL"
+            rows = []
+            for chunk in iter_bind_chunks(entry_ids, reserved_bindings=1):
+                placeholders = ", ".join("?" for _ in chunk)
+                # Identifiers are fixed local literals; all caller values bind.
+                sql = (
+                    f"SELECT vi.entry_id, vm.embedding, {proof_column} "  # noqa: S608 -- fixed local SQL fragments only
+                    "FROM vec_memories vm JOIN vec_index vi ON vm.rowid = vi.rowid "
+                    f"WHERE vi.entry_id IN ({placeholders}) AND vi.namespace = ?"
+                )
+                rows.extend(conn.execute(sql, [*chunk, namespace]).fetchall())
+    except sqlite3.Error:  # trw-fail-silent-allow: the optional-dependency case is already gated above (`if not vec_available: return {}`), so EVERY error reaching here is real and every one is surfaced at warning -- no error is folded silently into this empty return
+        logger.warning("vector_record_load_error", exc_info=True)
+        return {}
+    records: dict[str, StoredVector] = {}
+    for entry_id, raw, proof_json in rows:
+        if raw is None:
+            continue
+        blob = bytes(raw)
+        if len(blob) % 4 != 0:
+            continue
+        embedding = tuple(struct.unpack(f"{len(blob) // 4}f", blob))
+        proof = VectorProvenance.from_json(proof_json)
+        if proof is not None and not proof.matches_vector(embedding):
+            proof = None
+        records[str(entry_id)] = StoredVector(embedding=embedding, provenance=proof)
+    return records

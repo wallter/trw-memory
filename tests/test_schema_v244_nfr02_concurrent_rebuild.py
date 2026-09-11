@@ -4,7 +4,7 @@ Acceptance criteria (PRD-CORE-244 verification.mappings NFR02):
 
 1. Three processes opening the same database file concurrently, each running
    ``ensure_schema``, apply the rebuild exactly once, none raises, and
-   ``PRAGMA user_version`` reads 5 in all three.
+   ``PRAGMA user_version`` reaches the complete upgrade target in all three.
 2. The schema-5 rebuild interrupted mid-run completes cleanly on retry: no
    duplicate columns, and (per the PRD) no double-demotion of a confidence
    value.
@@ -94,7 +94,7 @@ def _rebuild_counter(monkeypatch: pytest.MonkeyPatch) -> Callable[[], int]:
 def test_concurrent_openers_apply_schema5_exactly_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, openers: int
 ) -> None:
-    """AC1: N concurrent opens apply the rebuild once, none raises, all read v5.
+    """AC1: N concurrent opens apply the rebuild once, none raises, all read v6.
 
     Parametrised past the AC's three openers to six, the size of a real stdio
     fleet booting after an upgrade, because the defect scaled with the opener
@@ -128,7 +128,7 @@ def test_concurrent_openers_apply_schema5_exactly_once(
         thread.join(timeout=60)
 
     assert errors == [], f"a concurrent opener raised: {errors!r}"
-    assert results == [5] * openers, f"every opener must observe user_version==5, got {results!r}"
+    assert results == [6] * openers, f"every opener must observe user_version==6, got {results!r}"
     assert rebuilds() == 1, f"the schema-5 rebuild must apply exactly once, ran {rebuilds()} times"
 
     # Independent attribution on a different module's code path: the
@@ -136,8 +136,20 @@ def test_concurrent_openers_apply_schema5_exactly_once(
     # migration that ran is also the only one that wrote a restore point.
     # Before the fix every racing opener wrote one, all to the same
     # second-stamped filename, i.e. over each other.
-    snapshots = sorted((tmp_path / BACKUP_DIR_NAME).glob("concurrent.db.pre-schema-5.*"))
+    snapshots = sorted((tmp_path / BACKUP_DIR_NAME).glob("concurrent.db.pre-schema-6.*"))
     assert len(snapshots) == 1, f"exactly one pre-migration snapshot must be written, got {snapshots!r}"
+
+    # The filename names the target, but recovery must restore the pre-v5
+    # source and its actual data, not merely an existing file of that name.
+    restored = sqlite3.connect(f"file:{snapshots[0]}?mode=ro", uri=True)
+    try:
+        assert restored.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert restored.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert restored.execute("SELECT id, namespace, content FROM memories ORDER BY id").fetchall() == [
+            (f"M-{index:04d}", "project:concurrent", f"row {index}") for index in range(50)
+        ]
+    finally:
+        restored.close()
 
     final = sqlite3.connect(db)
     assert int(final.execute("SELECT COUNT(*) FROM memories").fetchone()[0]) == 50
@@ -152,7 +164,7 @@ def test_opener_that_waited_out_the_migration_skips_the_rebuild(
     Reproduces the losing side of the race deterministically instead of hoping
     the scheduler produces it. The opener samples ``user_version`` as 4, and
     only THEN does another connection complete the migration — exactly the
-    window the defect lived in. The re-read under the write lock must see 5
+    window the defect lived in. The re-read under the write lock must see 6
     and skip, so no rebuild runs on this connection at all.
     """
     db = tmp_path / "stale-read.db"
@@ -173,7 +185,7 @@ def test_opener_that_waited_out_the_migration_skips_the_rebuild(
         ensure_schema(conn)
 
         assert rebuilds() == 0, "an opener whose pre-read was invalidated must not rebuild"
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 5
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 6
         assert int(conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]) == 20
         assert not conn.in_transaction, "the skip path must not leave the write lock held"
     finally:
@@ -252,14 +264,14 @@ def test_interrupted_rebuild_leaves_v4_and_a_clean_retry_completes(
     assert leftover == [], f"a rolled-back interruption must not leave rebuild-in-progress tables: {leftover!r}"
     conn.close()
 
-    # Clean retry with the REAL delta restored: completes, stamps v5, preserves
+    # Clean retry with the REAL delta restored: completes v5 then additive v6, preserves
     # every row, and leaves no duplicate column in `memories` (AC2's explicit
     # "without duplicate columns").
     monkeypatch.setitem(schema_module._MIGRATIONS, 5, real_migrate)
     conn = sqlite3.connect(db)
     ensure_schema(conn)
 
-    assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 5
+    assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 6
     assert int(conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]) == 30
     columns = [str(row[1]) for row in conn.execute("PRAGMA table_info(memories)").fetchall()]
     assert len(columns) == len(set(columns)), f"duplicate column after retry: {columns!r}"

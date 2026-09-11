@@ -35,7 +35,7 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
-# Cap WAL file growth so a stalled checkpoint cannot let the WAL grow unbounded
+# Trim the WAL back on reset so a stalled checkpoint cannot let the WAL grow unbounded
 # (a large stale WAL widens the window for WAL-reset inconsistency). 64 MiB.
 #
 # Read this together with trw-mcp's ``wal_checkpoint_threshold_mb`` (default
@@ -43,7 +43,7 @@ logger = structlog.get_logger(__name__)
 # two numbers are 6.4x apart and mean different things, and the gap is exactly
 # what an operator sees on an engine below SQLite 3.51.3: PASSIVE is the only
 # permitted mode there (``_wal_checkpoint.normalize_mode``), PASSIVE writes
-# frames back but never truncates, so the file climbs to THIS cap and stays,
+# frames back but never truncates, so the file climbs toward THIS target and stays,
 # while the 10 MB trigger keeps firing to no visible effect. That is not drift
 # between the two constants — it is the documented consequence of the engine
 # gate, and the remedy is the engine upgrade named in
@@ -63,7 +63,7 @@ _CACHE_SIZE_KB = -65536
 _MMAP_SIZE_BYTES = 1073741824  # 1 GiB
 # Raise WAL auto-checkpoint threshold from the default 1000 pages (4 MiB) to
 # 4000 pages (16 MiB). Reduces checkpoint pressure during bulk writes without
-# risking runaway WAL growth (cap is still enforced by journal_size_limit=64MiB).
+# risking runaway WAL growth (file is still trimmed toward journal_size_limit=64MiB on each reset).
 # NOTE: keep this below journal_size_limit so the WAL cap never fires mid-write.
 # The existing single-connection checkpoint serialiser (_wal_checkpoint.py) is
 # unchanged — this PRAGMA only adjusts the automatic background trigger point.
@@ -217,7 +217,7 @@ def open_probe(
     Both used to call :func:`connect` directly and skip
     :func:`apply_open_pragmas`, so a probe connection ran without
     ``journal_size_limit``: it could append WAL frames (a probe still runs the
-    recovery/checkpoint machinery of the engine) with the 64 MiB cap that every
+    recovery/checkpoint machinery of the engine) with the 64 MiB truncation target that every
     other open path sets left unset. A per-callsite PRAGMA list is exactly how
     that cap gets opted out of by accident, so there is one open path instead.
     """

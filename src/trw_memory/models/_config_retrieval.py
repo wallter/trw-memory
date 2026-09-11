@@ -106,16 +106,12 @@ class _RetrievalConfigMixin(BaseModel):
         default=True,
         validation_alias=AliasChoices("recall_preserve_hybrid_order", "memory_recall_preserve_hybrid_order"),
         description=(
-            "When True, merge_tier_results returns local_results[:limit] "
-            "(preserving the BM25+dense+RRF ordering from _try_hybrid_recall) "
-            "whenever len(local_results) >= limit. Skips the "
-            "compute_importance_score rescore that mixes hybrid RRF "
-            "(1/(1+rank)) and tier-only entry_utility (absolute) scales. An "
-            "offline trace showed missing baseline records sat at "
-            "hybrid_rank=2 but got pushed past top-10 by the rescore; "
-            "follow-up sweeps showed default-ON is robust across "
-            "curated-query oracles, languages, and K-depths. Set "
-            "MEMORY_RECALL_PRESERVE_HYBRID_ORDER=false to opt out."
+            "When True and the local hybrid pool reaches the requested limit, "
+            "preserve hybrid priority over tier-only utility within each final "
+            "temporal/source bucket. All candidates remain available for final "
+            "admission and refill; no early result cut or raw-score rewriting. "
+            "Explicit caller source weights take precedence over this default "
+            "priority. MEMORY_RECALL_PRESERVE_HYBRID_ORDER=false opts out."
         ),
     )
 

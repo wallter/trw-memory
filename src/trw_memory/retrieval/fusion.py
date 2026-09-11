@@ -25,6 +25,7 @@ def rrf_fuse(
     *,
     importances: dict[str, float] | None = None,
     alpha: float = 1.0,
+    tie_scores: bool = False,
 ) -> list[tuple[str, float]]:
     """Reciprocal Rank Fusion of multiple ranked result lists.
 
@@ -63,6 +64,9 @@ def rrf_fuse(
         alpha: Blend weight on the (normalised) RRF position score vs.
             importance.  ``1.0`` = pure position (legacy), ``0.0`` = pure
             importance.  Clamped to ``[0, 1]``.
+        tie_scores: Give equal adjacent source scores equal competition ranks.
+            Opt-in for query-authoritative federation; default preserves legacy
+            positional fusion. Inputs must remain sorted by descending score.
 
     Returns:
         Fused list of ``(entry_id, score)`` pairs sorted by score descending.
@@ -78,8 +82,13 @@ def rrf_fuse(
 
     fused_scores: dict[str, float] = {}
     for ranking in rankings:
-        for rank, (entry_id, _) in enumerate(ranking):
-            fused_scores[entry_id] = fused_scores.get(entry_id, 0.0) + 1.0 / (k + rank + 1)
+        evidence_rank = 1
+        previous_score = None
+        for rank, (entry_id, score) in enumerate(ranking, start=1):
+            if not tie_scores or rank == 1 or score != previous_score:
+                evidence_rank = rank
+            fused_scores[entry_id] = fused_scores.get(entry_id, 0.0) + 1.0 / (k + evidence_rank)
+            previous_score = score
 
     blend_alpha = max(0.0, min(1.0, alpha))
     if importances is not None and blend_alpha < 1.0:

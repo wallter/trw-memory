@@ -27,6 +27,7 @@ from trw_memory.storage._parsing import (
     parse_json_dict_str,
     parse_json_list,
     parse_optional_float,
+    parse_validity_fields,
 )
 from trw_memory.storage._shared import VERIFICATION_STATUS_VALUES
 
@@ -74,7 +75,7 @@ def parse_verification_status(raw: object) -> Literal["verified", "stale"] | Non
     return None
 
 
-def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
+def row_to_entry(row: tuple[object, ...], *, reference_time: datetime | None = None) -> MemoryEntry:
     """Convert a SQLite row tuple to a :class:`MemoryEntry`.
 
     The column order must match
@@ -146,8 +147,10 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
     # corrupted timestamp degrades that one field instead of raising and crashing
     # the whole row read (the 2026-06-10 corruption class that took down
     # list_entries). created_at/updated_at are required, so they fall back to now.
-    _now = datetime.now(timezone.utc)
-    created_at_val = parse_dt_safe(created_at_s, default=_now) or _now
+    _now = reference_time or datetime.now(timezone.utc)
+    created_at_val, opened, closed = parse_validity_fields(
+        created_at_s, valid_from_s, invalid_from_s, reference_time=_now
+    )
     updated_at_val = parse_dt_safe(updated_at_s, default=_now) or _now
 
     metadata = parse_json_dict_str(metadata_json)
@@ -179,10 +182,8 @@ def row_to_entry(row: tuple[object, ...]) -> MemoryEntry:
         last_accessed_at=parse_dt_safe(last_accessed_s, default=None) if last_accessed_s else None,
         # PRD-CORE-194: absent valid_from (pre-migration row) => open validity,
         # back-filled to created_at by the model ``mode="before"`` validator.
-        valid_from=(parse_dt_safe(valid_from_s, default=created_at_val) or created_at_val)
-        if valid_from_s
-        else created_at_val,
-        invalid_from=parse_dt_safe(invalid_from_s, default=None) if invalid_from_s else None,
+        valid_from=opened,
+        invalid_from=closed,
         invalidated_by=str(invalidated_by_raw) if invalidated_by_raw else None,
         access_count=int(str(access_count)),
         session_count=int(str(session_count)) if session_count else 0,

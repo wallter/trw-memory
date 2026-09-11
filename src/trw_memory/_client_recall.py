@@ -30,7 +30,7 @@ Extracted as PRD-DIST-246 batch 105.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, cast
 
 import structlog
@@ -40,7 +40,9 @@ from trw_memory.lifecycle._recall import record_recall_access
 from trw_memory.lifecycle.tiers._runtime import get_tier_manager, tier_runtime_enabled
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
-from trw_memory.retrieval.source_policy import apply_source_policy
+from trw_memory.retrieval.source_policy import SourcePolicy
+from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocation, RemoteCandidate
+from trw_memory.retrieval.temporal_selection import TemporalSelection
 from trw_memory.security.rbac import Permission
 from trw_memory.security.runtime import (
     append_audit_event,
@@ -103,6 +105,31 @@ async def recall_impl(
         raise ValueError(f"limit must be >= 1, got {limit}")
     if token_budget is not None and token_budget <= 0:
         raise ValueError(f"token_budget must be positive, got {token_budget}")
+    evaluation_time = as_of or datetime.now(timezone.utc)
+    invocation = RecallInvocation(
+        source=SourcePolicy.resolve(
+            include_distilled=include_distilled,
+            distilled_weight=distilled_weight,
+            include_source_kinds=include_source_kinds,
+            exclude_source_kinds=exclude_source_kinds,
+            source_weights=source_weights,
+            exclude_expired=exclude_expired,
+            reference_time=evaluation_time,
+        ),
+        temporal=TemporalSelection(
+            as_of=as_of,
+            include_superseded=include_superseded,
+            exclude_system_canaries=True,
+            reference_time=evaluation_time,
+        ),
+        namespace=client._namespace,
+        tags=frozenset(tags or ()),
+        confidence_floor=confidence_floor if confidence_floor is not None else client._config.recall_confidence_filter,
+        exclude_historical_only=exclude_historical_only
+        if exclude_historical_only is not None
+        else client._config.recall_filter_historical_only,
+    )
+    tags = list(invocation.tags) if tags is not None else None
     client._require_permission(Permission.READ, "recall")
     client._maybe_start_retry_drain()
     await client._apply_pending_remote_retirements()
@@ -142,142 +169,66 @@ async def recall_impl(
             )
             return []
         if tier_runtime_enabled(client._config):
-            tier_local_results = client._tier_results(backend, query, tags, limit, query_embedding)
+            tier_local_results = cast(
+                "list[LocalCandidate]",
+                client._tier_results(backend, query, tags, limit, query_embedding, invocation=invocation),
+            )
             client._tier_manager = get_tier_manager(client._config, client._namespace)
         else:
             tier_local_results = []
 
-    # PRD-DIST-2049 c802: resolve per-call kwargs vs config defaults (per-call wins
-    # when non-None; config drives when caller omits).
-    effective_confidence_floor = (
-        confidence_floor if confidence_floor is not None else client._config.recall_confidence_filter
-    )
-    effective_exclude_historical = (
-        exclude_historical_only if exclude_historical_only is not None else client._config.recall_filter_historical_only
-    )
-
-    hybrid_results = await client._try_hybrid_recall(
+    acquired = await client._try_hybrid_recall(
         query,
         limit,
         tags,
         query_embedding=query_embedding,
         as_of=as_of,
         include_superseded=include_superseded,
+        invocation=invocation,
     )
-    if hybrid_results is not None and include_graph_expansion:
-        from trw_memory._client_recall_graph import graph_expand_results
-
-        async with client._lock:
-            hybrid_results = graph_expand_results(client, hybrid_results)
-    if hybrid_results is not None:
-        filtered = [r for r in hybrid_results if r["score"] >= min_score]
-        # PRD-DIST-2049 c802: apply admission filter on the FULL hybrid candidate
-        # pool (top ~limit*3 = 30) AND on the tier candidate pool BEFORE merge.
-        # This lets the filter promote baseline records that would otherwise be
-        # displaced past top-K by zombie / historical_only competitors — closes
-        # the c800/c801 contamination lever rather than just decorating the
-        # already-displaced top-K.
-        filtered = apply_admission_filter(
-            filtered,
-            confidence_floor=effective_confidence_floor,
-            exclude_historical_only=effective_exclude_historical,
-            namespace=client._namespace,
+    search_path = "hybrid" if acquired is not None else "fallback"
+    if acquired is None:
+        acquired = await client._fallback_recall(
+            query, limit, tags, min_score, as_of=as_of, include_superseded=include_superseded, invocation=invocation
         )
-        filtered_tier = apply_admission_filter(
-            tier_local_results,
-            confidence_floor=effective_confidence_floor,
-            exclude_historical_only=effective_exclude_historical,
-            namespace=client._namespace,
-        )
-        final_pre_policy = client._merge_tier_results(
-            filtered[:limit],
-            filtered_tier,
-            limit,
-            query.lower().split(),
-            client._config,
-            query_embedding,
-        )
-        if min_score > 0.0:
-            final_pre_policy = [result for result in final_pre_policy if result["score"] >= min_score]
-        if include_org_memories:
-            final_pre_policy = await client._merge_org_results(query, final_pre_policy, limit, tags, min_score)
-        if include_shared:
-            final_pre_policy = await client._merge_shared_results(query, final_pre_policy, limit)
-        final_scored = cast(
-            "list[MemoryResultDict]",
-            apply_source_policy(
-                final_pre_policy,
-                include_distilled=include_distilled,
-                distilled_weight=distilled_weight,
-                include_source_kinds=include_source_kinds,
-                exclude_source_kinds=exclude_source_kinds,
-                source_weights=source_weights,
-                exclude_expired=exclude_expired,
-            ),
-        )
-        if min_score > 0.0:
-            final_scored = [result for result in final_scored if result["score"] >= min_score]
-        final = await _finalize_recall(client, final_scored, query=query, limit=limit, token_budget=token_budget)
-        _client_logger().debug(
-            "memory_recalled",
-            op="recall",
-            outcome="success",
-            query=query[:80],
-            namespace=client._namespace,
-            result_count=len(final),
-            search_path="hybrid",
-        )
-        return final
-
-    results = await client._fallback_recall(query, limit, tags, min_score)
+    candidates = cast("list[LocalCandidate]", acquired)
     if include_graph_expansion:
-        from trw_memory._client_recall_graph import graph_expand_results
+        from trw_memory._client_recall_graph import graph_expand_candidates
 
         async with client._lock:
-            results = graph_expand_results(client, results)
-    # PRD-DIST-2049 c802: apply filter on fallback candidates AND tier candidates
-    # before merge, mirroring the hybrid path.
-    results = apply_admission_filter(
-        results,
-        confidence_floor=effective_confidence_floor,
-        exclude_historical_only=effective_exclude_historical,
-        namespace=client._namespace,
-    )
-    filtered_tier_fallback = apply_admission_filter(
+            candidates = graph_expand_candidates(client, candidates, invocation=invocation)
+    from trw_memory._client_recall_helpers import merge_local_candidates, collect_org_candidates, finish_candidates
+
+    candidates = merge_local_candidates(
+        candidates,
         tier_local_results,
-        confidence_floor=effective_confidence_floor,
-        exclude_historical_only=effective_exclude_historical,
-        namespace=client._namespace,
-    )
-    results = client._merge_tier_results(
-        results,
-        filtered_tier_fallback,
         limit,
         query.lower().split(),
         client._config,
         query_embedding,
+        invocation=invocation,
     )
-    if min_score > 0.0:
-        results = [result for result in results if result["score"] >= min_score]
     if include_org_memories:
-        results = await client._merge_org_results(query, results, limit, tags, min_score)
+        candidates.extend(await collect_org_candidates(client, query, candidates, limit, tags, min_score, invocation))
+    remote: list[RemoteCandidate] = []
     if include_shared:
-        results = await client._merge_shared_results(query, results, limit)
-    filtered_results = cast(
-        "list[MemoryResultDict]",
-        apply_source_policy(
-            results,
-            include_distilled=include_distilled,
-            distilled_weight=distilled_weight,
-            include_source_kinds=include_source_kinds,
-            exclude_source_kinds=exclude_source_kinds,
-            source_weights=source_weights,
-            exclude_expired=exclude_expired,
-        ),
+        remote = [
+            RemoteCandidate(row)
+            for row in await client._merge_shared_results(query, [], limit, local_entries=[c.entry for c in candidates])
+        ]
+    final = await finish_candidates(
+        client, candidates, remote, invocation, query=query, limit=limit, min_score=min_score, token_budget=token_budget
     )
-    if min_score > 0.0:
-        filtered_results = [result for result in filtered_results if result["score"] >= min_score]
-    return await _finalize_recall(client, filtered_results, query=query, limit=limit, token_budget=token_budget)
+    _client_logger().debug(
+        "memory_recalled",
+        op="recall",
+        outcome="success",
+        query=query[:80],
+        namespace=client._namespace,
+        result_count=len(final),
+        search_path=search_path,
+    )
+    return final
 
 
 async def _finalize_recall(
@@ -287,6 +238,7 @@ async def _finalize_recall(
     query: str,
     limit: int,
     token_budget: int | None,
+    candidates: list[LocalCandidate] | None = None,
 ) -> list[MemoryResultDict]:
     """Apply final security, accounting, audit, and tier side effects in order."""
     from trw_memory._client_recall_graph import filter_conflicting_results
@@ -294,6 +246,17 @@ async def _finalize_recall(
     async with client._lock:
         results = filter_conflicting_results(client, results)
     final = client._apply_recall_security(client._apply_budget(results[:limit], token_budget))
+    if candidates is not None:
+        selected_keys = {(row["namespace"], row["memory_id"]) for row in final}
+        selected = [
+            candidate for candidate in candidates if (candidate.entry.namespace, candidate.entry.id) in selected_keys
+        ]
+        if any(candidate.cold for candidate in selected):
+            from trw_memory.lifecycle.tiers._runtime import restore_selected_cold
+
+            failed_keys = restore_selected_cold(client._config, client._namespace, client._get_backend(), selected)
+            final = [row for row in final if (row["namespace"], row["memory_id"]) not in failed_keys]
+            selected = [c for c in selected if (c.entry.namespace, c.entry.id) not in failed_keys]
     await client._record_recall_access(final)
     append_audit_event(
         client._config,
@@ -302,7 +265,12 @@ async def _finalize_recall(
         namespace=client._namespace,
         data={"query": query[:80], "entries_returned": len(final)},
     )
-    client._remember_results_in_tiers(final)
+    if candidates is None:
+        client._remember_results_in_tiers(final)
+    else:
+        from trw_memory._client_recall_helpers import remember_selected_candidates
+
+        remember_selected_candidates(client, selected, final)
     return final
 
 
@@ -335,19 +303,47 @@ async def fallback_recall(
     limit: int,
     tags: list[str] | None,
     min_score: float,
-) -> list[MemoryResultDict]:
+    *,
+    as_of: datetime | None = None,
+    include_superseded: bool = False,
+    invocation: RecallInvocation | None = None,
+) -> list[MemoryResultDict] | list[LocalCandidate]:
     """LIKE + TF + importance scoring. Used when hybrid pipeline is unavailable."""
+    from trw_memory.retrieval.temporal_selection import TemporalSelection
+
+    selection = (
+        invocation.temporal
+        if invocation
+        else TemporalSelection(as_of=as_of, include_superseded=include_superseded, exclude_system_canaries=True)
+    )
     async with client._lock:
-        entries = client._get_backend().search(
-            query,
-            top_k=limit * 3,
-            tags=tags,
-            namespace=client._namespace,
-            status=MemoryStatus.ACTIVE,
-        )
+        backend = client._get_backend()
+        if invocation is not None:
+            entries = invocation.acquire(
+                lambda predicate, remaining: backend.search(
+                    query,
+                    top_k=remaining,
+                    tags=tags,
+                    namespace=client._namespace,
+                    status=MemoryStatus.ACTIVE,
+                    temporal_selection=selection,
+                    entry_filter=predicate,
+                ),
+                limit=limit * 3,
+            )
+        else:
+            entries = backend.search(
+                query,
+                top_k=limit * 3,
+                tags=tags,
+                namespace=client._namespace,
+                status=MemoryStatus.ACTIVE,
+                temporal_selection=selection,
+            )
 
     query_terms = set(query.lower().split())
     results: list[MemoryResultDict] = []
+    candidates: list[LocalCandidate] = []
     for entry in entries:
         if not query_terms:
             tf_score = entry.importance
@@ -360,8 +356,13 @@ async def fallback_recall(
             )
         if tf_score >= min_score:
             results.append(_entry_to_result(entry, score=round(tf_score, 4)))
+            candidates.append(LocalCandidate(entry, round(tf_score, 4), relevance_hint=round(tf_score, 4)))
 
+    if invocation is not None:
+        return candidates
     results.sort(key=lambda r: float(r["score"]), reverse=True)
+    eligible_ids = {entry.id for entry in entries if selection.eligible(entry)}
+    results.sort(key=lambda row: row["memory_id"] not in eligible_ids)
     final = results[:limit]
     _client_logger().debug(
         "memory_recalled",

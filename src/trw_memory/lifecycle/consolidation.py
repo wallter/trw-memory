@@ -16,13 +16,15 @@ from uuid import uuid4
 import structlog
 
 from trw_memory.embeddings.interface import EmbeddingProvider
+from trw_memory.embeddings.provenance import generation_provenance_kwargs
 from trw_memory.exceptions import DimensionMismatchError, StorageError
 from trw_memory.graph import schedule_graph_update
 from trw_memory.lifecycle._consolidation_metrics import mean_pairwise_similarity as _mean_pairwise_similarity
 from trw_memory.lifecycle._redaction import redact_paths
+from trw_memory.lifecycle.dedup import _stronger_protection_tier, _union_assertions
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.entry_factory import local_node_id_for, new_entry
-from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.models.memory import MemoryEntry, MemoryStatus, ProtectionTier
 from trw_memory.retrieval.dense import cosine_similarity
 from trw_memory.storage.interface import StorageBackend
 
@@ -253,6 +255,21 @@ def _create_consolidated_entry(
     # Inherit provenance from highest-importance source (PRD-CORE-099)
     best_source = max(cluster, key=lambda e: e.importance)
 
+    # Preserve maintenance evidence, not verification of the newly changed claim.
+    # Reuse dedup's tier ordering and assertion identity rather than allowing
+    # the two maintenance paths to evolve incompatible preservation policies.
+    protection_tier: ProtectionTier | str = cluster[0].protection_tier
+    assertions = cluster[0].assertions
+    for source_entry in cluster[1:]:
+        protection_tier = _stronger_protection_tier(protection_tier, source_entry.protection_tier)
+        assertions = _union_assertions(assertions, source_entry.assertions)
+    assertions = [
+        assertion.model_copy(
+            update={"last_result": None, "last_verified_at": None, "last_evidence": "", "first_failed_at": None}
+        )
+        for assertion in assertions
+    ]
+
     now = datetime.now(timezone.utc)
     entry = new_entry(
         entry_id=entry_id,
@@ -272,6 +289,13 @@ def _create_consolidated_entry(
             "evidence": list(dict.fromkeys(ev for e in cluster for ev in e.evidence)),
             "recurrence": sum(e.recurrence for e in cluster),
             "q_value": max(e.q_value for e in cluster),
+            "q_observations": sum(e.q_observations for e in cluster),
+            "access_count": sum(e.access_count for e in cluster),
+            "recall_count": sum(e.recall_count for e in cluster),
+            "helpful_count": sum(e.helpful_count for e in cluster),
+            "unhelpful_count": sum(e.unhelpful_count for e in cluster),
+            "protection_tier": protection_tier,
+            "assertions": assertions,
             "status": MemoryStatus.ACTIVE,
         },
     )
@@ -296,7 +320,12 @@ def _create_consolidated_entry(
         with storage.transaction():
             storage.store(entry)
             if embedding is not None:
-                storage.upsert_vector(entry.id, embedding, namespace=entry.namespace)
+                storage.upsert_vector(
+                    entry.id,
+                    embedding,
+                    namespace=entry.namespace,
+                    **generation_provenance_kwargs(embedder, f"{entry.content} {entry.detail}", embedding),
+                )
     except Exception as exc:
         raise StorageError(f"failed to persist entry+vector for {entry.id!r}; transaction rolled back") from exc
     try:

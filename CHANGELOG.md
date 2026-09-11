@@ -2,7 +2,35 @@
 
 All notable changes to the TRW Memory package.
 
-## [Unreleased]
+## [0.17.0] — Unreleased
+
+### Changed
+
+- Metadata-only updates no longer rewrite unchanged full-text and tag indexes;
+  explicit text/tag changes retain index refresh and namespace isolation.
+
+- Schema 6 stores qualified vector provenance and exposes generation identity
+  to consumers. Atomic vector replacement preserves prior vector/proof on failure.
+- Retrieval/storage interfaces support explicit temporal selection. BM25 cache
+  invalidation includes content changes, preventing stale lexical scoring.
+- When used with MCP 2.1.0, provenance enables qualified semantic admission;
+  vectors lacking compatible proof retain keyword fallback rather than being
+  treated as verified semantic matches by MCP. This is not a standalone promise
+  about every consumer's admission policy.
+
+### Compatibility
+
+- This is a new release artifact, not a replacement for published 0.16.2 bytes.
+  Back up the database before upgrade; rollback requires the pre-upgrade backup.
+  Model/provider qualification is bounded, not a guarantee for every encoder.
+- Third-party `StorageBackend` implementations must accept the new optional
+  selection/filter arguments: `search` and `list_entries` are abstract and now carry
+  `temporal_selection`/`entry_filter`/`after`, so an existing override breaks on
+  signature until updated. The vector-provenance methods differ — `upsert_vector` and
+  `get_vector_records` ship as concrete no-op defaults, so a backend that ignores them
+  keeps working and simply contributes no dense evidence, degrading to keyword
+  retrieval rather than failing. Old override signatures are not automatically
+  adapted; built-in SQLite/YAML coverage does not establish custom-backend compatibility.
 
 ### Added
 

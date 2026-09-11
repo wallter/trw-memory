@@ -52,9 +52,10 @@ JUSTIFIED_INTERNAL_STORES: dict[tuple[str, str], str] = {
         "rewrite_of_persisted_entry: rolls a failed consolidation back by "
         "re-writing the exact entries it had just read out of the store."
     ),
-    ("lifecycle/tiers/_runtime.py", "tier_candidates._restore_entry"): (
-        "rewrite_of_persisted_entry: rehydrates a hot-tier row back into the "
-        "backend it was evicted from; the content already passed intake."
+    ("lifecycle/tiers/_runtime.py", "_restoration_callbacks._restore_entry"): (
+        "rewrite_of_persisted_entry: restores an archived cold-tier row read by "
+        "ColdTierStore.cold_promote into its namespace-checked backend; the "
+        "shared callback serves legacy and selected-result restoration, not new intake."
     ),
     ("lifecycle/consolidation.py", "_create_consolidated_entry"): (
         "derived_from_gated_entries: content is summarised from a cluster of "

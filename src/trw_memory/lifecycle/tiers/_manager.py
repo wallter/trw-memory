@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from collections import OrderedDict
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,6 +14,7 @@ import structlog
 from trw_memory.lifecycle.tiers._cold import ColdTierStore
 from trw_memory.lifecycle.tiers._manager_io import load_warm_entries, open_canonical_backend
 from trw_memory.lifecycle.tiers._manager_search import (
+    discover_candidates,
     merge_search_results,
     rank_search_hits,
     search_hot_entries,
@@ -24,6 +26,7 @@ from trw_memory.lifecycle.tiers._sweep import execute_sweep
 from trw_memory.lifecycle.tiers._warm import WarmTierStore
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocation
 
 logger = structlog.get_logger(__name__)
 
@@ -304,8 +307,26 @@ class TierManager:
         delete_restored_entry_fn: Callable[[str], bool | None] | None = None,
         force_delete_restored_entry_fn: Callable[[str], bool | None] | None = None,
         verify_restored_entry_removed_fn: Callable[[str], bool] | None = None,
-    ) -> list[dict[str, object]]:
+        invocation: RecallInvocation | None = None,
+        resolve_entry: Callable[[str], MemoryEntry | None] | None = None,
+    ) -> list[dict[str, object]] | list[LocalCandidate]:
         """Search hot, warm, and cold tiers as one merged runtime surface."""
+        if invocation is not None:
+            if resolve_entry is None:
+                raise ValueError("tier discovery requires canonical entry resolution")
+            with self._hot_lock:
+                hot = [entry.model_dump(mode="json") for entry in self._hot.values()]
+            warm = self._warm_store.discovery_entries(query_embedding)
+            with closing(self._cold_store.iter_search(query_tokens, promote=False)) as cold:
+                return discover_candidates(
+                    ((row, is_cold) for group, is_cold in ((hot, False), (warm, False), (cold, True)) for row in group),
+                    invocation=invocation,
+                    resolve_entry=resolve_entry,
+                    query_tokens=query_tokens,
+                    query_embedding=query_embedding,
+                    config=self._config,
+                    top_k=top_k,
+                )
         warm_hits = self.warm_search(query_tokens, query_embedding, top_k=max(top_k * 2, top_k))
         cold_hits = self._cold_store.cold_search(
             query_tokens,

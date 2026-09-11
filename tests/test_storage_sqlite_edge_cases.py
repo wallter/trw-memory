@@ -283,6 +283,7 @@ class _FetchOneResult:
 
 class _Vec0MissingConn:
     total_changes = 0
+    in_transaction = False
 
     def __init__(self) -> None:
         self.rollback_called = False

@@ -123,6 +123,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_restore = subparsers.add_parser(
         "restore",
         help="Rebuild the SQLite DB from the cold YAML tier or a snapshot",
+        description="Stop database users before restoring. Restore is not safe with active writers.",
     )
     restore_source = p_restore.add_mutually_exclusive_group(required=True)
     restore_source.add_argument(

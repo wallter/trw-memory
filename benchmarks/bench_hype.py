@@ -25,6 +25,7 @@ from pathlib import Path
 
 from benchmarks.bench_quality import ndcg_at_k, recall_at_k
 from trw_memory.client import MemoryClient
+from trw_memory.exceptions import PIIBlockError, PoisoningError, SchemaValidationError
 from trw_memory.models.memory import MemoryEntry
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "golden_set.json"
@@ -82,10 +83,10 @@ async def _run_arm(
                     importance=float(ge["importance"]),  # type: ignore[arg-type]
                     entry_id=str(ge["id"]),
                 )
-            except Exception:  # noqa: BLE001
-                # A fixture entry that trips the unconditional input-validation
-                # gate (e.g. content containing a flagged phrase) is skipped from
-                # BOTH arms identically, preserving comparison validity.
+            except (SchemaValidationError, PoisoningError, PIIBlockError):
+                # Only explicit write-time content rejections may exclude a
+                # fixture entry. Missing models, storage failures and unexpected
+                # errors invalidate the benchmark and must reach the caller.
                 continue
             stored_ids.add(str(ge["id"]))
 
@@ -124,12 +125,8 @@ class HypeBenchmark:
         db_dir.mkdir(parents=True, exist_ok=True)
         golden_entries, questions_by_id = _load_golden(self.fixture_path)
 
-        off = asyncio.run(
-            _run_arm(golden_entries, questions_by_id, db_dir / "hype_off.db", hype_enabled=False)
-        )
-        on = asyncio.run(
-            _run_arm(golden_entries, questions_by_id, db_dir / "hype_on.db", hype_enabled=True)
-        )
+        off = asyncio.run(_run_arm(golden_entries, questions_by_id, db_dir / "hype_off.db", hype_enabled=False))
+        on = asyncio.run(_run_arm(golden_entries, questions_by_id, db_dir / "hype_on.db", hype_enabled=True))
         delta = {
             "recall_at_10": round(on["recall_at_10"] - off["recall_at_10"], 4),
             "ndcg_at_10": round(on["ndcg_at_10"] - off["ndcg_at_10"], 4),

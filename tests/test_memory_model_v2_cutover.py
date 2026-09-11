@@ -560,7 +560,11 @@ def test_shared_result_routes_external_impact_through_decoder() -> None:
     result = shared_result_to_result({"memory_id": "R-1", "content": "shared", "impact": 0.71, "namespace": "org:acme"})
     assert result["importance"] == 0.71  # external impact decoded to importance
     assert result["score"] == 0.71  # score falls back to the decoded importance
-    assert result["namespace"] == "org:acme"
+    # Remote wire scope is not an authoritative local identity. The public
+    # recall projection uses its shared ingress namespace, independently of
+    # the trusted org:shared namespace used by admission.
+    assert result["namespace"] == "shared"
+    assert result["source"] == "shared"
 
 
 def test_classification_entry_is_typed() -> None:

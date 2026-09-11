@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import contextlib
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -340,6 +342,10 @@ def _decode_bytes_rows(
     column_names: tuple[str, ...],
     db_path: Path,
     table: str,
+    retain_row: Callable[[list[object]], bool] | None = None,
+    on_entry: Callable[[MemoryEntry], None] | None = None,
+    entry_filter: Callable[[MemoryEntry], bool] | None = None,
+    reference_time: datetime | None = None,
 ) -> tuple[list[MemoryEntry], int]:
     """Decode bytes-mode rows column-by-column, quarantining bad ones."""
     results: list[MemoryEntry] = []
@@ -357,9 +363,12 @@ def _decode_bytes_rows(
             )
             continue
 
+        # A selector bug is not a corrupt stored row: propagate rather than
+        # quarantining every row and reporting a successful empty result.
+        if retain_row is not None and not retain_row(decoded):
+            continue
         try:
-            entry = row_to_entry(tuple(decoded))
-            results.append(entry)
+            entry = row_to_entry(tuple(decoded), reference_time=reference_time)
         except (ValueError, TypeError, KeyError) as exc:
             # Columns decoded cleanly but model construction failed (bad
             # enum value, malformed JSON, schema drift). Quarantine the row
@@ -371,6 +380,12 @@ def _decode_bytes_rows(
                 row_index=idx,
                 error=str(exc),
             )
+            continue
+        if entry_filter is not None and not entry_filter(entry):
+            continue
+        if on_entry is not None:
+            on_entry(entry)
+        results.append(entry)
     return results, quarantine_delta
 
 

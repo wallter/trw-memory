@@ -81,8 +81,8 @@ class TestCliErrorBoundary:
                 with pytest.raises(SystemExit):
                     failing_cmd()
 
-            mock_logger.error.assert_called_once()
-            call_kwargs = mock_logger.error.call_args
+            mock_logger.exception.assert_called_once()
+            call_kwargs = mock_logger.exception.call_args
             assert call_kwargs[0][0] == "cli_command_failed"
             assert call_kwargs[1]["command"] == "failing_cmd"
             assert "bad input" in call_kwargs[1]["error"]

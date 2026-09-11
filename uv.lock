@@ -6263,7 +6263,7 @@ wheels = [
 
 [[package]]
 name = "trw-memory"
-version = "0.16.2"
+version = "0.17.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
@@ -6410,7 +6410,7 @@ requires-dist = [
     { name = "python-multipart", marker = "extra == 'mcp'", specifier = ">=0.0.31" },
     { name = "rank-bm25", marker = "extra == 'bm25'", specifier = ">=0.2.0" },
     { name = "ruamel-yaml", specifier = ">=0.18.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.0,<0.16" },
     { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=2.0.0" },
     { name = "setuptools", marker = "extra == 'embeddings'", specifier = ">=83.0.0" },
     { name = "setuptools", marker = "extra == 'llamaindex'", specifier = ">=83.0.0" },

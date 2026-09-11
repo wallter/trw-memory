@@ -17,7 +17,7 @@ names ``_track_graph_thread`` / ``_untrack_graph_thread`` /
 from __future__ import annotations
 
 import threading
-from time import monotonic
+from time import monotonic, sleep
 
 
 class _GraphThreadRegistry:
@@ -30,37 +30,52 @@ class _GraphThreadRegistry:
 
     def __init__(self) -> None:
         self._threads: set[threading.Thread] = set()
+        self._owners: dict[threading.Thread, object | None] = {}
         self._guard = threading.Lock()
 
-    def track(self, thread: threading.Thread) -> None:
+    def track(self, thread: threading.Thread, owner: object | None = None) -> None:
         """Register *thread* as an in-flight background graph update."""
         with self._guard:
             self._threads.add(thread)
+            self._owners[thread] = owner
 
     def untrack(self, thread: threading.Thread) -> None:
         """Remove *thread* once it has finished (called from the worker finally)."""
         with self._guard:
             self._threads.discard(thread)
+            self._owners.pop(thread, None)
 
     def alive(self) -> list[threading.Thread]:
         """Snapshot the currently-alive registered threads under the guard."""
         with self._guard:
             return [thread for thread in self._threads if thread.is_alive()]
 
-    def wait(self, timeout: float = 5.0) -> None:
-        """Block until all registered threads finish or *timeout* elapses.
+    def wait(self, timeout: float = 5.0, *, owner: object | None = None) -> None:
+        """Block until matching registered threads finish or *timeout* elapses.
 
+        An explicit owner is compared by identity, never by shared storage path.
         Raises ``TimeoutError`` if live threads remain past the deadline.
         """
         deadline = monotonic() + timeout
         while True:
-            threads = self.alive()
+            with self._guard:
+                threads = [
+                    thread
+                    for thread in self._threads
+                    if (owner is None or self._owners.get(thread) is owner)
+                    and (thread.is_alive() or thread.ident is None)
+                ]
             if not threads:
                 return
             remaining = deadline - monotonic()
             if remaining <= 0:
                 raise TimeoutError("timed out waiting for background graph updates")
-            threads[0].join(min(0.05, remaining))
+            if threads[0].ident is None:
+                # Registered before start(): never mistake pending work for
+                # completed work, or attempt to join an unstarted thread.
+                sleep(min(0.01, remaining))
+            else:
+                threads[0].join(min(0.05, remaining))
 
 
 # Module-level singleton — one registry for the process, matching the previous
@@ -68,9 +83,9 @@ class _GraphThreadRegistry:
 _REGISTRY = _GraphThreadRegistry()
 
 
-def _track_graph_thread(thread: threading.Thread) -> None:
+def _track_graph_thread(thread: threading.Thread, owner: object | None = None) -> None:
     """Back-compat shim: register *thread* on the process registry."""
-    _REGISTRY.track(thread)
+    _REGISTRY.track(thread, owner)
 
 
 def _untrack_graph_thread(thread: threading.Thread) -> None:
@@ -78,6 +93,6 @@ def _untrack_graph_thread(thread: threading.Thread) -> None:
     _REGISTRY.untrack(thread)
 
 
-def wait_for_graph_updates(timeout: float = 5.0) -> None:
-    """Block until scheduled graph-update threads finish or *timeout* elapses."""
-    _REGISTRY.wait(timeout)
+def wait_for_graph_updates(timeout: float = 5.0, *, owner: object | None = None) -> None:
+    """Drain one backend owner's workers, or all workers when owner is omitted."""
+    _REGISTRY.wait(timeout, owner=owner)

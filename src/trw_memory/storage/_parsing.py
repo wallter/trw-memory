@@ -178,3 +178,13 @@ def parse_json_dict_int(raw: object) -> dict[str, int]:
         return {str(k): int(v) for k, v in candidate.items()}
     except (TypeError, ValueError):
         return {}
+
+
+def parse_validity_fields(
+    created: object, valid_from: object, invalid_from: object, *, reference_time: datetime
+) -> tuple[datetime, datetime, datetime | None]:
+    """Shared legacy-safe timestamp mapping for rows and early selection."""
+    created_at = parse_dt_safe(created, default=reference_time) or reference_time
+    opened = (parse_dt_safe(valid_from, default=created_at) or created_at) if valid_from else created_at
+    closed = parse_dt_safe(invalid_from, default=None) if invalid_from else None
+    return created_at, opened, closed

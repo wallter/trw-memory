@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import MutableMapping
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 import structlog
@@ -112,5 +113,8 @@ class TestConfigureLogging:
         import importlib.metadata as meta
 
         monkeypatch.setattr(meta, "version", lambda _: (_ for _ in ()).throw(Exception("no ver")))
+        debug = Mock()
+        monkeypatch.setattr(logging.getLogger("trw_memory._logging"), "debug", debug)
         configure_logging()
         assert logging.getLogger().level == logging.INFO
+        debug.assert_called_once_with("service_version_binding_failed", exc_info=True)

@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "trw-memory"
-version = "0.16.2"
+version = "0.17.0"
 description = "Persistent memory engine with hybrid retrieval, tiered storage, and semantic dedup for AI agents"
 readme = "README.md"
 license = "BUSL-1.1"
@@ -160,7 +160,12 @@ trw-memory = "trw_memory.cli:main"
 trw-memory-server = "trw_memory.server:main"
 
 [tool.hatch.build.targets.wheel]
+# Same per-target exclusion as the sdist below — hatchling does not share them,
+# so without this the wheel `pip install` delivers ships src/trw_memory/security/
+# CLAUDE.md, which records that the memory-poisoning defense, trust scoring and
+# quarantine are all observe/log-only. Found in pre-release review, 2026-09-11.
 packages = ["src/trw_memory"]
+exclude = ["**/CLAUDE.md", "**/AGENTS.md"]
 
 [tool.hatch.build.targets.sdist]
 # Defense in depth alongside .gitignore: hatchling honors the package-local

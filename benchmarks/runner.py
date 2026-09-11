@@ -41,9 +41,7 @@ def run_benchmarks(
     sizes = sizes or [100, 1000]
 
     if golden_set_path is None:
-        golden_set_path = (
-            Path(__file__).parent / "fixtures" / "golden_set.json"
-        )
+        golden_set_path = Path(__file__).parent / "fixtures" / "golden_set.json"
 
     with tempfile.TemporaryDirectory(prefix="trw-bench-") as tmp:
         tmp_dir = Path(tmp)
@@ -78,16 +76,12 @@ def run_benchmarks(
 
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(
-            json.dumps(report, indent=2) + "\n", encoding="utf-8"
-        )
+        output_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
     return report
 
 
-def compare_reports(
-    current: dict[str, Any], previous: dict[str, Any]
-) -> dict[str, Any]:
+def compare_reports(current: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
     """Compare two benchmark reports, showing deltas and regressions.
 
     For each numeric metric present in both reports, computes:
@@ -111,9 +105,17 @@ def compare_reports(
 
     # Metrics where LOWER is better
     lower_is_better = {
-        "p50_ms", "p95_ms", "p99_ms", "mean_ms", "total_ms",
-        "total_sec", "rss_delta_kb", "db_size_bytes", "db_size_mb",
-        "per_1000_rss_mb", "per_1000_db_mb",
+        "p50_ms",
+        "p95_ms",
+        "p99_ms",
+        "mean_ms",
+        "total_ms",
+        "total_sec",
+        "rss_delta_kb",
+        "db_size_bytes",
+        "db_size_mb",
+        "per_1000_rss_mb",
+        "per_1000_db_mb",
     }
 
     for suite_name in current.get("suites", {}):
@@ -128,8 +130,12 @@ def compare_reports(
         # Handle flat dict (quality) and nested dict (latency, throughput, memory)
         if suite_name == "quality":
             _compare_flat(
-                cur_suite, prev_suite, suite_deltas,
-                comparison["regressions"], suite_name, lower_is_better,
+                cur_suite,
+                prev_suite,
+                suite_deltas,
+                comparison["regressions"],
+                suite_name,
+                lower_is_better,
             )
         else:
             for bench_key in cur_suite:
@@ -140,9 +146,12 @@ def compare_reports(
                 if isinstance(cur_bench, dict) and isinstance(prev_bench, dict):
                     key_deltas: dict[str, Any] = {}
                     _compare_flat(
-                        cur_bench, prev_bench, key_deltas,
+                        cur_bench,
+                        prev_bench,
+                        key_deltas,
                         comparison["regressions"],
-                        f"{suite_name}.{bench_key}", lower_is_better,
+                        f"{suite_name}.{bench_key}",
+                        lower_is_better,
                     )
                     suite_deltas[bench_key] = key_deltas
 
@@ -169,9 +178,7 @@ def _compare_flat(
             continue
 
         delta = float(cur_val) - float(prev_val)
-        pct_change = (
-            (delta / float(prev_val)) * 100 if float(prev_val) != 0 else 0.0
-        )
+        pct_change = (delta / float(prev_val)) * 100 if float(prev_val) != 0 else 0.0
 
         # Determine if this is a regression
         is_regression = False
@@ -191,12 +198,14 @@ def _compare_flat(
         }
 
         if is_regression:
-            regressions.append({
-                "metric": f"{prefix}.{key}",
-                "current": cur_val,
-                "previous": prev_val,
-                "pct_change": round(pct_change, 2),
-            })
+            regressions.append(
+                {
+                    "metric": f"{prefix}.{key}",
+                    "current": cur_val,
+                    "previous": prev_val,
+                    "pct_change": round(pct_change, 2),
+                }
+            )
 
 
 def format_report(report: dict[str, Any], human_readable: bool = True) -> str:
@@ -258,9 +267,7 @@ def format_report(report: dict[str, Any], human_readable: bool = True) -> str:
                 for key, val in suite_deltas.items():
                     if isinstance(val, dict) and "delta" in val:
                         lines.append(
-                            f"    {key}: {val['current']} "
-                            f"(delta: {val['delta']:+.4f}, "
-                            f"{val['pct_change']:+.2f}%)"
+                            f"    {key}: {val['current']} (delta: {val['delta']:+.4f}, {val['pct_change']:+.2f}%)"
                         )
                     elif isinstance(val, dict):
                         # Nested sub-benchmark
@@ -278,10 +285,7 @@ def format_report(report: dict[str, Any], human_readable: bool = True) -> str:
     if regressions:
         lines.append("--- REGRESSIONS ---")
         for reg in regressions:
-            lines.append(
-                f"  {reg['metric']}: {reg['previous']} -> {reg['current']} "
-                f"({reg['pct_change']:+.2f}%)"
-            )
+            lines.append(f"  {reg['metric']}: {reg['previous']} -> {reg['current']} ({reg['pct_change']:+.2f}%)")
         lines.append("")
 
     return "\n".join(lines)
@@ -316,14 +320,16 @@ def check_thresholds(report: dict[str, Any]) -> list[dict[str, Any]]:
         if isinstance(bench_data, dict):
             actual = bench_data.get(metric_key)
             if actual is not None and float(actual) > threshold_val:
-                failures.append({
-                    "suite": "latency",
-                    "benchmark": bench_key,
-                    "metric": metric_key,
-                    "actual": actual,
-                    "threshold": threshold_val,
-                    "violation": "exceeds_maximum",
-                })
+                failures.append(
+                    {
+                        "suite": "latency",
+                        "benchmark": bench_key,
+                        "metric": metric_key,
+                        "actual": actual,
+                        "threshold": threshold_val,
+                        "violation": "exceeds_maximum",
+                    }
+                )
 
     # Check quality thresholds (higher is better)
     quality = suites.get("quality", {})
@@ -331,14 +337,16 @@ def check_thresholds(report: dict[str, Any]) -> list[dict[str, Any]]:
         for metric_key, threshold_val in QUALITY_THRESHOLDS.items():
             actual = quality.get(metric_key)
             if actual is not None and float(actual) < threshold_val:
-                failures.append({
-                    "suite": "quality",
-                    "benchmark": "golden_set",
-                    "metric": metric_key,
-                    "actual": actual,
-                    "threshold": threshold_val,
-                    "violation": "below_minimum",
-                })
+                failures.append(
+                    {
+                        "suite": "quality",
+                        "benchmark": "golden_set",
+                        "metric": metric_key,
+                        "actual": actual,
+                        "threshold": threshold_val,
+                        "violation": "below_minimum",
+                    }
+                )
 
     # Check throughput thresholds (higher is better)
     throughput = suites.get("throughput", {})
@@ -351,26 +359,30 @@ def check_thresholds(report: dict[str, Any]) -> list[dict[str, Any]]:
                 actual_key = metric_key.replace("write_", "")
                 actual = bench_data.get(actual_key)
                 if actual is not None and float(actual) < threshold_val:
-                    failures.append({
-                        "suite": "throughput",
-                        "benchmark": bench_key,
-                        "metric": actual_key,
-                        "actual": actual,
-                        "threshold": threshold_val,
-                        "violation": "below_minimum",
-                    })
+                    failures.append(
+                        {
+                            "suite": "throughput",
+                            "benchmark": bench_key,
+                            "metric": actual_key,
+                            "actual": actual,
+                            "threshold": threshold_val,
+                            "violation": "below_minimum",
+                        }
+                    )
             elif metric_key.startswith("read_") and bench_key.startswith("read_"):
                 actual_key = metric_key.replace("read_", "")
                 actual = bench_data.get(actual_key)
                 if actual is not None and float(actual) < threshold_val:
-                    failures.append({
-                        "suite": "throughput",
-                        "benchmark": bench_key,
-                        "metric": actual_key,
-                        "actual": actual,
-                        "threshold": threshold_val,
-                        "violation": "below_minimum",
-                    })
+                    failures.append(
+                        {
+                            "suite": "throughput",
+                            "benchmark": bench_key,
+                            "metric": actual_key,
+                            "actual": actual,
+                            "threshold": threshold_val,
+                            "violation": "below_minimum",
+                        }
+                    )
 
     # Check memory thresholds
     memory = suites.get("memory", {})
@@ -381,25 +393,29 @@ def check_thresholds(report: dict[str, Any]) -> list[dict[str, Any]]:
             if threshold_key == "rss_per_1000_entries_mb":
                 actual = bench_data.get("per_1000_rss_mb")
                 if actual is not None and float(actual) > threshold_val:
-                    failures.append({
-                        "suite": "memory",
-                        "benchmark": bench_key,
-                        "metric": "per_1000_rss_mb",
-                        "actual": actual,
-                        "threshold": threshold_val,
-                        "violation": "exceeds_maximum",
-                    })
+                    failures.append(
+                        {
+                            "suite": "memory",
+                            "benchmark": bench_key,
+                            "metric": "per_1000_rss_mb",
+                            "actual": actual,
+                            "threshold": threshold_val,
+                            "violation": "exceeds_maximum",
+                        }
+                    )
             elif threshold_key == "db_per_1000_entries_mb":
                 actual = bench_data.get("per_1000_db_mb")
                 if actual is not None and float(actual) > threshold_val:
-                    failures.append({
-                        "suite": "memory",
-                        "benchmark": bench_key,
-                        "metric": "per_1000_db_mb",
-                        "actual": actual,
-                        "threshold": threshold_val,
-                        "violation": "exceeds_maximum",
-                    })
+                    failures.append(
+                        {
+                            "suite": "memory",
+                            "benchmark": bench_key,
+                            "metric": "per_1000_db_mb",
+                            "actual": actual,
+                            "threshold": threshold_val,
+                            "violation": "exceeds_maximum",
+                        }
+                    )
 
     return failures
 
@@ -418,7 +434,8 @@ def main(argv: list[str] | None = None) -> int:
         description="trw-memory benchmark runner",
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         type=Path,
         help="Output path for JSON report",
     )

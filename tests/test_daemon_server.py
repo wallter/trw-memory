@@ -50,18 +50,16 @@ _SHUTDOWN_DEADLINE_SECONDS = 60.0
 def _daemon_env(user_dir: Path) -> dict[str, str]:
     """Environment for a daemon under test.
 
-    ``MEMORY_EMBEDDING_MODEL`` names a model that does not exist, so the daemon's
-    first ``memory_store`` resolves no local embedder and degrades to keyword-only
-    storage. Without it the daemon downloaded ``all-MiniLM-L6-v2`` from the
-    Hugging Face Hub on every run: the shared ``_trw_home`` fixture redirects
-    HOME, so the model cache is always empty (8-9 s alone on a fast link,
-    unbounded under the full suite or a rate-limited CI runner — the reason this
-    test hung in the public CI replay). ``TRW_OFFLINE=1`` is NOT the right lever:
-    with an uncached model it makes ``memory_store`` fail hard instead of
-    degrading (tracked in the improvement backlog). Keyword-only storage is all
-    these properties need.
+    An existing empty LOCAL model directory resolves no embedder and selects
+    keyword-only storage without Hub lookups. A nonexistent remote model name
+    still causes network retries; offline switches instead change the security
+    contract for uncached remote models. Neither is needed to test real daemon
+    transport, authentication, locking and storage. Preserve inherited offline
+    policy and isolate this deliberately unavailable model under the test home.
     """
-    return {**os.environ, "TRW_USER_DIR": str(user_dir), "MEMORY_EMBEDDING_MODEL": "trw-tests/no-such-embedding-model"}
+    model_dir = user_dir.resolve() / "unavailable-local-model"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    return {**os.environ, "TRW_USER_DIR": str(user_dir), "MEMORY_EMBEDDING_MODEL": str(model_dir)}
 
 
 def _spawn_daemon(user_dir: Path, *, idle_seconds: float = _TEST_IDLE_SECONDS) -> subprocess.Popen[str]:
@@ -80,6 +78,29 @@ def _spawn_daemon(user_dir: Path, *, idle_seconds: float = _TEST_IDLE_SECONDS) -
         stderr=subprocess.STDOUT,
         text=True,
     )
+
+
+def test_daemon_model_fixture_is_local_and_never_contacts_hub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("sentence_transformers")
+    from trw_memory.embeddings import get_local_embedder
+
+    network_calls: list[object] = []
+
+    def reject_network(*args: object, **kwargs: object) -> None:
+        network_calls.append(args)
+        pytest.fail("the local unavailable-model fixture attempted network access")
+
+    monkeypatch.setattr(socket.socket, "connect", reject_network)
+    monkeypatch.setattr(socket, "create_connection", reject_network)
+    env = _daemon_env(tmp_path / "userhome")
+    model_dir = Path(env["MEMORY_EMBEDDING_MODEL"])
+    assert model_dir.is_absolute()
+    assert model_dir.is_dir()
+    assert list(model_dir.iterdir()) == []
+    for key in ("TRW_OFFLINE", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "MEMORY_LOCAL_ONLY"):
+        assert env.get(key) == os.environ.get(key)
+    assert get_local_embedder(model_name=str(model_dir), dim=384) is None
+    assert network_calls == []
 
 
 def _wait_for_exit(proc: subprocess.Popen[str]) -> int | None:

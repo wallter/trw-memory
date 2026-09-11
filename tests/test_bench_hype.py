@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -11,6 +13,73 @@ pytest.importorskip("sentence_transformers")
 
 from benchmarks.bench_hype import GoldenQuestionGenerator, HypeBenchmark
 from tests.conftest import make_entry
+from trw_memory.exceptions import (
+    LocalOnlyViolationError,
+    MemoryError,
+    PIIBlockError,
+    PoisoningError,
+    SchemaValidationError,
+    StorageError,
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [LocalOnlyViolationError, StorageError, MemoryError, RuntimeError])
+async def test_arm_propagates_infrastructure_errors_and_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_type: type[Exception]
+) -> None:
+    from benchmarks import bench_hype
+
+    error = error_type("benchmark infrastructure unavailable")
+    client = SimpleNamespace(
+        _config=SimpleNamespace(),
+        store=AsyncMock(side_effect=error),
+        recall=AsyncMock(),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(bench_hype, "MemoryClient", lambda *args, **kwargs: client)
+    entries = [{"id": "g1", "content": "fixture", "tags": [], "importance": 0.5, "queries": []}]
+
+    with pytest.raises(error_type) as raised:
+        await bench_hype._run_arm(entries, {}, tmp_path / "arm.db", hype_enabled=False)
+
+    assert raised.value is error
+    client.store.assert_awaited_once()
+    client.recall.assert_not_awaited()
+    client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [SchemaValidationError, PoisoningError, PIIBlockError])
+async def test_arm_excludes_only_explicit_content_rejections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_type: type[Exception]
+) -> None:
+    from benchmarks import bench_hype
+
+    client = SimpleNamespace(
+        _config=SimpleNamespace(),
+        store=AsyncMock(side_effect=[error_type("fixture content rejected"), {"memory_id": "accepted"}]),
+        recall=AsyncMock(return_value=[{"memory_id": "accepted"}]),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(bench_hype, "MemoryClient", lambda *args, **kwargs: client)
+    entries = [
+        {
+            "id": entry_id,
+            "content": "fixture",
+            "tags": [],
+            "importance": 0.5,
+            "queries": [{"query": entry_id, "relevant": True}],
+        }
+        for entry_id in ("rejected", "accepted")
+    ]
+
+    result = await bench_hype._run_arm(entries, {}, tmp_path / "arm.db", hype_enabled=True)
+
+    assert result == {"recall_at_10": 1.0, "ndcg_at_10": 1.0, "queries": 1.0}
+    assert client.store.await_count == 2
+    client.recall.assert_awaited_once_with("accepted", limit=10)
+    client.close.assert_awaited_once()
 
 
 def test_golden_generator_returns_mapped_questions() -> None:

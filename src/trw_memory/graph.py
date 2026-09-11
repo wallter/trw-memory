@@ -10,6 +10,12 @@ import contextlib
 import sqlite3
 import threading
 from collections import deque
+from collections.abc import Callable, Iterator
+from dataclasses import replace
+from heapq import nsmallest
+
+from trw_memory.retrieval.recall_selection import RecallInvocation
+from trw_memory.storage.interface import EntryCursor
 from pathlib import Path
 from typing import Any
 
@@ -140,7 +146,7 @@ def schedule_graph_update(
         name=f"trw-memory-graph-{entry.id}",
         daemon=True,
     )
-    _track_graph_thread(thread)
+    _track_graph_thread(thread, owner=backend)
     try:
         thread.start()
     except RuntimeError:
@@ -284,53 +290,80 @@ def list_org_shared_entries(
     min_importance: float = 0.8,
     limit: int = 25,
     exclude_keys: set[tuple[str, str]] | None = None,
+    invocation: RecallInvocation | None = None,
+    entry_filter: Callable[[MemoryEntry], bool] | None = None,
 ) -> list[MemoryEntry]:
-    """Return high-importance cross-validated memories from sibling projects."""
+    """Acquire authorized sibling entries; native policy precedes every pool cap.
+
+    Native paging bounds retained page/final references, not database scans or
+    total work. No-invocation callers retain the legacy per-namespace 10k cut.
+    """
     current_project = _project_scope_key(namespace)
     if current_project is None:
         return []
-
     from trw_memory.integrations._backend import discover_namespace_backends
     from trw_memory.security.rbac import Permission, require_namespace_permission
+    from trw_memory.security.namespace_scope import NamespaceScopeError
 
     seen = set(exclude_keys or set())
-    matches: list[MemoryEntry] = []
 
-    with discover_namespace_backends(config) as stores:
-        for namespaces, backend in stores:
-            for candidate_namespace in namespaces:
-                project_id = _project_scope_key(candidate_namespace)
-                if project_id is None or project_id == current_project:
-                    continue
-                try:
-                    require_namespace_permission(config, candidate_namespace, Permission.READ, "read")
-                except AuthorizationError:
-                    continue
-
-                # Push status + min_importance into the storage layer so we
-                # only hydrate the high-importance rows we can actually keep,
-                # instead of materialising up to 10k full MemoryEntry objects
-                # per sibling namespace and discarding most in Python. The
-                # cross_validated + dedup + final sort still run below; the
-                # limit stays high so the candidate set the sort sees is
-                # unchanged from the pre-filter behaviour.
-                entries = backend.list_entries(
-                    status=MemoryStatus.ACTIVE,
-                    namespace=candidate_namespace,
-                    min_importance=min_importance,
-                    limit=10_000,
-                )
-                for entry in entries:
-                    entry_key = (entry.namespace, entry.id)
-                    if entry_key in seen:
+    def candidates() -> Iterator[MemoryEntry]:
+        with discover_namespace_backends(config) as stores:
+            for namespaces, backend in stores:
+                for candidate_namespace in namespaces:
+                    project_id = _project_scope_key(candidate_namespace)
+                    if project_id is None or project_id == current_project:
                         continue
-                    if not entry.cross_validated or entry.importance < min_importance:
+                    try:
+                        require_namespace_permission(config, candidate_namespace, Permission.READ, "read")
+                    except AuthorizationError:
                         continue
-                    seen.add(entry_key)
-                    matches.append(entry)
+                    policy = replace(invocation, namespace=candidate_namespace) if invocation else None
 
-    matches.sort(key=lambda entry: (entry.importance, entry.updated_at), reverse=True)
-    return matches[:limit]
+                    def allows(
+                        entry: MemoryEntry,
+                        candidate_namespace: str = candidate_namespace,
+                        policy: RecallInvocation | None = policy,
+                    ) -> bool:
+                        if entry.namespace != candidate_namespace:
+                            raise NamespaceScopeError("org producer returned an unauthorized namespace")
+                        return (
+                            entry.cross_validated
+                            and (entry.namespace, entry.id) not in seen
+                            and (
+                                policy is None
+                                or (
+                                    policy.allows_entry(entry)
+                                    and (policy.temporal.eligible(entry) or policy.temporal.include_superseded)
+                                )
+                            )
+                            and (entry_filter is None or entry_filter(entry))
+                        )
+
+                    after = None
+                    while True:
+                        entries = backend.list_entries(
+                            status=MemoryStatus.ACTIVE,
+                            namespace=candidate_namespace,
+                            min_importance=min_importance,
+                            limit=256 if policy else 10_000,
+                            after=after,
+                            entry_filter=allows if policy else None,
+                        )
+                        for entry in entries:
+                            if not allows(entry) or entry.importance < min_importance:
+                                continue
+                            seen.add((entry.namespace, entry.id))
+                            yield entry
+                        if policy is None or len(entries) < 256:
+                            break
+                        after = EntryCursor.from_entry(entries[-1])
+
+    if invocation is not None:
+        return nsmallest(
+            limit, candidates(), key=lambda entry: invocation.rank_key(entry, entry.importance, source="org")
+        )
+    return sorted(candidates(), key=lambda entry: (entry.importance, entry.updated_at), reverse=True)[:limit]
 
 
 def detect_cross_validation(

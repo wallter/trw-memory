@@ -8,12 +8,14 @@ from typing import Any
 
 import structlog
 
+from trw_memory.embeddings.provenance import StoredVector, VectorProvenance
 from trw_memory.storage._vector_ops import (
     delete_hype_siblings,
     delete_vector,
     delete_vector_internal,
     existing_vector_ids,
     get_stored_embeddings,
+    get_vector_records,
     hype_sibling_ids,
     search_vectors,
     upsert_vector,
@@ -72,7 +74,7 @@ class SQLiteCheckpointVectorMixin:
                 )
         except OSError as exc:
             logger.warning("wal_checkpoint_lock_failed", error_type=type(exc).__name__, db=str(self._db_path))
-            return CheckpointResult(busy=1, checkpointed=0, mode="error")
+            return CheckpointResult(busy=1, checkpointed=0, log_frames=0, mode="error")
 
     def _delete_vector(self, entry_id: str, namespace: str) -> None:
         delete_vector_internal(self._conn, entry_id, namespace)
@@ -96,7 +98,9 @@ class SQLiteCheckpointVectorMixin:
         with self._fresh_connection():
             return existing_vector_ids(self._conn, self._lock, vec_available=self._vec_available, namespace=namespace)
 
-    def upsert_vector(self, entry_id: str, embedding: list[float], *, namespace: str) -> None:
+    def upsert_vector(
+        self, entry_id: str, embedding: list[float], *, namespace: str, provenance: VectorProvenance | None = None
+    ) -> None:
         with self._fresh_connection():
             upsert_vector(
                 self._conn,
@@ -107,6 +111,7 @@ class SQLiteCheckpointVectorMixin:
                 namespace=namespace,
                 embedding=embedding,
                 skip_commit=self._skip_commit_depth != 0,
+                provenance=provenance,
             )
 
     def search_vectors(
@@ -123,9 +128,17 @@ class SQLiteCheckpointVectorMixin:
                 namespace=namespace,
             )
 
-    def get_stored_embeddings(self, entry_ids: list[str]) -> dict[str, list[float]]:
+    def get_stored_embeddings(self, entry_ids: list[str], *, namespace: str | None = None) -> dict[str, list[float]]:
         with self._fresh_connection():
-            return get_stored_embeddings(self._conn, self._lock, vec_available=self._vec_available, entry_ids=entry_ids)
+            return get_stored_embeddings(
+                self._conn, self._lock, vec_available=self._vec_available, entry_ids=entry_ids, namespace=namespace
+            )
+
+    def get_vector_records(self, entry_ids: list[str], *, namespace: str) -> dict[str, StoredVector]:
+        with self._fresh_connection():
+            return get_vector_records(
+                self._conn, self._lock, vec_available=self._vec_available, entry_ids=entry_ids, namespace=namespace
+            )
 
     def hype_sibling_ids(self, parent_id: str) -> list[str]:
         with self._fresh_connection():

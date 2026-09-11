@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, cast
 
@@ -31,6 +32,9 @@ from trw_memory.lifecycle.scoring import entry_utility
 from trw_memory.lifecycle.tiers._runtime import remember_entry_data_in_tiers, tier_candidates
 from trw_memory.lifecycle.tiers._scoring import compute_importance_score
 from trw_memory.models.config import MemoryConfig
+from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocation, RemoteCandidate
+from trw_memory.security.namespace_scope import NamespaceScopeError, authorize_namespaces
+from trw_memory.security.rbac import Permission
 from trw_memory.storage.interface import StorageBackend
 
 if TYPE_CHECKING:
@@ -62,46 +66,106 @@ async def merge_org_results(
     tags: list[str] | None,
     min_score: float,
 ) -> list[MemoryResultDict]:
-    """Append cross-validated sibling-project memories after local results."""
+    candidates = await _org_candidates(
+        client, query, {(r["namespace"], r["memory_id"]) for r in local_results}, limit, tags, min_score
+    )
+    from trw_memory._client_distilled_tiering import candidate_to_result
+
+    return client._merge_shared_candidates(local_results, [candidate_to_result(c) for c in candidates])
+
+
+async def collect_org_candidates(
+    client: MemoryClient,
+    query: str,
+    local: list[LocalCandidate],
+    limit: int,
+    tags: list[str] | None,
+    min_score: float,
+    invocation: RecallInvocation,
+) -> list[LocalCandidate]:
+    seen_ids = {c.entry.id for c in local}
+    seen_content = {c.entry.content for c in local}
+    candidates = await _org_candidates(
+        client,
+        query,
+        {(c.entry.namespace, c.entry.id) for c in local},
+        limit,
+        tags,
+        min_score,
+        invocation,
+        exclude_ids=seen_ids,
+        exclude_content=seen_content,
+    )
+    admitted = []
+    for candidate in candidates:
+        if candidate.entry.id in seen_ids or candidate.entry.content in seen_content:
+            continue
+        if replace(invocation, namespace=candidate.entry.namespace).allows_entry(candidate.entry):
+            admitted.append(candidate)
+            seen_ids.add(candidate.entry.id)
+            seen_content.add(candidate.entry.content)
+    return admitted
+
+
+async def _org_candidates(
+    client: MemoryClient,
+    query: str,
+    exclude_keys: set[tuple[str, str]],
+    limit: int,
+    tags: list[str] | None,
+    min_score: float,
+    invocation: RecallInvocation | None = None,
+    *,
+    exclude_ids: set[str] | None = None,
+    exclude_content: set[str] | None = None,
+) -> list[LocalCandidate]:
     try:
         from trw_memory import client as _c
 
-        org_entries = await asyncio.to_thread(
-            functools.partial(
-                _c.list_org_shared_entries,
-                client._config,
-                client._namespace,
-                exclude_keys={(result["namespace"], result["memory_id"]) for result in local_results},
-                limit=max(limit, 25),
+        producer = functools.partial(
+            _c.list_org_shared_entries,
+            client._config,
+            client._namespace,
+            exclude_keys=exclude_keys,
+            limit=limit if invocation is not None else max(limit, 25),
+        )
+        if invocation is not None:
+            producer = functools.partial(
+                producer,
+                invocation=invocation,
+                entry_filter=lambda entry: (
+                    entry.importance >= max(0.8, min_score)
+                    and (exclude_ids is None or entry.id not in exclude_ids)
+                    and (exclude_content is None or entry.content not in exclude_content)
+                    and (not tags or set(tags).issubset(entry.tags))
+                    and (not query.strip() or client._matches_query(_entry_to_result(entry), query))
+                ),
             )
-        )
-    except Exception:
-        logger.debug(
-            "memory_org_recall_failed",
-            op="recall",
-            outcome="failure",
-            namespace=client._namespace,
-            exc_info=True,
-        )
-        return local_results
-
-    tag_set = set(tags or [])
-    org_results: list[MemoryResultDict] = []
+        org_entries = await asyncio.to_thread(producer)
+    except NamespaceScopeError:
+        raise
+    except Exception:  # trw-fail-silent-allow: org entries SUPPLEMENT local recall, so a broken org lookup must degrade rather than fail the whole call; the info-level event above is what keeps the degradation observable
+        # info, not debug: under the shipped default (`debug: false`) structlog's
+        # filtering bound logger drops a debug event before any processor runs,
+        # so the only record that org recall was attempted and broke would be
+        # destroyed -- and an empty list then reads as "there are no org
+        # entries" rather than "we never got to look". That is the exact
+        # we-checked-vs-we-never-checked collapse this release is fixing.
+        logger.info("memory_org_recall_failed", namespace=client._namespace, exc_info=True)
+        return []
+    scope = authorize_namespaces(client._config, {entry.namespace for entry in org_entries}, Permission.READ, "recall")
+    candidates: list[LocalCandidate] = []
     for entry in org_entries:
-        if not entry.cross_validated or entry.importance < 0.8:
+        if entry.namespace not in scope.namespaces:
+            raise NamespaceScopeError("org acquisition returned an unauthorized namespace")
+        if not entry.cross_validated or entry.importance < max(0.8, min_score):
             continue
-        if tag_set and not tag_set.issubset(set(entry.tags)):
+        if tags and not set(tags).issubset(entry.tags):
             continue
-
-        candidate = _entry_to_result(entry, score=entry.importance)
-        candidate["source"] = "org"
-        if query.strip() and not client._matches_query(candidate, query):
+        if query.strip() and not client._matches_query(_entry_to_result(entry), query):
             continue
-        if min_score > 0.0 and candidate["score"] < min_score:
-            continue
-        org_results.append(candidate)
-
-    return client._merge_shared_candidates(local_results, org_results)
+        candidates.append(LocalCandidate(entry, entry.importance, source="org"))
+    return candidates
 
 
 def tier_results(
@@ -111,7 +175,9 @@ def tier_results(
     tags: list[str] | None,
     limit: int,
     query_embedding: list[float] | None = None,
-) -> list[MemoryResultDict]:
+    *,
+    invocation: RecallInvocation | None = None,
+) -> list[MemoryResultDict] | list[LocalCandidate]:
     """Collect local tier-managed candidates for this namespace."""
     candidates = tier_candidates(
         client._config,
@@ -121,8 +187,11 @@ def tier_results(
         tags=tags,
         limit=limit,
         query_embedding=query_embedding,
+        invocation=invocation,
     )
-    return [tier_result_from_entry(candidate) for candidate in candidates]
+    if invocation is not None:
+        return cast("list[LocalCandidate]", candidates)
+    return [tier_result_from_entry(candidate) for candidate in cast("list[dict[str, object]]", candidates)]
 
 
 def remember_results_in_tiers(
@@ -240,3 +309,124 @@ def tier_result_from_entry(entry: dict[str, object]) -> MemoryResultDict:
 from trw_memory.retrieval.admission_policy import (  # noqa: E402
     apply_admission_filter as apply_admission_filter,
 )
+
+
+def merge_local_candidates(
+    local: list[LocalCandidate],
+    tiers: list[LocalCandidate],
+    limit: int,
+    query_tokens: list[str],
+    config: MemoryConfig,
+    query_embedding: list[float] | None,
+    *,
+    invocation: RecallInvocation | None = None,
+) -> list[LocalCandidate]:
+    """Merge acquired entries without a requested-result cut or source weighting."""
+    seen = {(c.entry.namespace, c.entry.id) for c in local}
+    content = {c.entry.content for c in local}
+    added = [c for c in tiers if (c.entry.namespace, c.entry.id) not in seen and c.entry.content not in content]
+    if not added:
+        return local
+    merged = [*local, *added]
+    if config.recall_preserve_hybrid_order and len(local) >= limit:
+        # Keep the whole pool for final admission/refill, but do not compare
+        # reciprocal hybrid ranks with tier-only absolute utility scores.
+        return [*local, *(replace(c, tier_fallback=True) for c in added)]
+    return [
+        replace(
+            c,
+            raw_score=round(
+                compute_importance_score(
+                    c.entry.model_dump(mode="json"),
+                    query_tokens,
+                    query_embedding=query_embedding,
+                    config=config,
+                    relevance_hint=c.relevance_hint,
+                    reference_time=invocation.temporal.reference_time if invocation else None,
+                ),
+                4,
+            ),
+        )
+        for c in merged
+    ]
+
+
+def remember_selected_candidates(
+    client: MemoryClient, candidates: list[LocalCandidate], results: list[MemoryResultDict]
+) -> None:
+    rows = {(r["namespace"], r["memory_id"]): r for r in results}
+    for candidate in candidates:
+        if candidate.source != "local":
+            continue
+        row = rows[(candidate.entry.namespace, candidate.entry.id)]
+        payload = candidate.entry.model_dump(mode="json")
+        # Security-masked returned content is what may enter the cache; validity
+        # and provenance still come from the authoritative entry, not projection.
+        payload.update(
+            content=row["content"], detail=row["detail"], last_accessed_at=datetime.now(timezone.utc).isoformat()
+        )
+        remember_entry_data_in_tiers(client._config, payload)
+
+
+async def finish_candidates(
+    client: MemoryClient,
+    candidates: list[LocalCandidate],
+    remote: list[RemoteCandidate],
+    invocation: RecallInvocation,
+    *,
+    query: str,
+    limit: int,
+    min_score: float,
+    token_budget: int | None,
+) -> list[MemoryResultDict]:
+    from trw_memory._client_distilled_tiering import candidate_to_result
+    from trw_memory._client_recall import _finalize_recall
+
+    # Explicit caller weighting takes precedence, even at the default value.
+    explicit_weights = bool(invocation.source.explicit_weight_overrides) or invocation.source.explicit_distilled_weight
+    ranked: list[tuple[tuple[int, int, int, float], MemoryResultDict]] = []
+    for candidate in candidates:
+        entry = candidate.entry
+        policy = replace(invocation, namespace=entry.namespace) if candidate.source == "org" else invocation
+        if not policy.allows_entry(entry):
+            continue
+        eligible = policy.temporal.eligible(entry)
+        if not eligible and not policy.temporal.include_superseded:
+            continue
+        row = candidate_to_result(candidate)
+        bucket, negative_score = policy.source.rank_key(row)
+        row["score"] = -negative_score
+        if candidate.raw_score >= min_score and row["score"] >= min_score:
+            fallback = int(candidate.tier_fallback and not explicit_weights)
+            ranked.append(((int(not eligible), bucket, fallback, negative_score), row))
+    unknown_windows = 0
+    for remote_candidate in remote:
+        eligible_remote = remote_candidate.temporal_eligibility(invocation.temporal)
+        if eligible_remote is False and not invocation.temporal.include_superseded:
+            continue
+        unknown_windows += eligible_remote is None
+        remote_row = dict(remote_candidate.result)
+        if not invocation.source.allows(remote_row) or not apply_admission_filter(
+            [remote_row],
+            confidence_floor=invocation.confidence_floor,
+            exclude_historical_only=invocation.exclude_historical_only,
+        ):
+            continue
+        bucket, negative_score = invocation.source.rank_key(remote_row)
+        remote_row["score"] = -negative_score
+        for field in ("valid_from", "invalid_from", "invalidated_by"):
+            remote_row.pop(field, None)
+        if -negative_score >= min_score:
+            ranked.append(
+                ((int(eligible_remote is False), bucket, 0, negative_score), cast("MemoryResultDict", remote_row))
+            )
+    if unknown_windows:
+        logger.debug(
+            "recall_remote_temporal_coverage",
+            unknown_windows=unknown_windows,
+            historical_coverage="limited" if invocation.temporal.as_of is not None else "unknown",
+        )
+    ranked.sort(key=lambda item: item[0])
+    return await _finalize_recall(
+        client, [row for _, row in ranked], query=query, limit=limit, token_budget=token_budget, candidates=candidates
+    )

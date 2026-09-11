@@ -47,6 +47,18 @@ class MemoryResultDict(TypedDict):
     _relevance_hint: NotRequired[float]
 
 
+class RemoteResultDict(MemoryResultDict, total=False):
+    """Internal remote projection: absent validity is unknown, never defaulted.
+
+    These transport fields survive cache/selection but are not additions to the
+    public recall result contract. Local legacy-entry defaults do not apply.
+    """
+
+    valid_from: str | None
+    invalid_from: str | None
+    invalidated_by: str | None
+
+
 class StoreResultDict(TypedDict):
     """Shape of the dict returned by MemoryClient.store()."""
 

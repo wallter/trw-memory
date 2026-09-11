@@ -38,8 +38,10 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only imports
+    from pathlib import Path
+
     from trw_memory.models.config import MemoryConfig
-    from trw_memory.models.memory import Assertion
+    from trw_memory.models.memory import Anchor, Assertion, Confidence, MemoryType, ProtectionTier
     from trw_memory.storage.interface import StorageBackend
 
 
@@ -57,14 +59,31 @@ class StoreImpl(Protocol):
         detail: str = "",
         metadata: dict[str, str] | None = None,
         config: MemoryConfig | None = None,
-        source: Literal["human", "agent", "tool", "consolidated"] = "tool",
+        source: Literal["human", "agent", "tool", "consolidated", "team_sync", "company_sync"] = "tool",
         source_identity: str = "",
         session_id: str | None = None,
         entry_id: str | None = None,
         evidence: list[str] | None = None,
         expires: str = "",
         assertions: list[Assertion] | None = None,
+        client_profile: str | None = None,
+        model_id: str | None = None,
+        q_value: float | None = None,
+        type: MemoryType | str | None = None,
+        nudge_line: str | None = None,
+        confidence: Confidence | str | None = None,
+        task_type: str | None = None,
+        domain: list[str] | None = None,
+        phase_origin: str | None = None,
+        phase_affinity: list[str] | None = None,
+        team_origin: str | None = None,
+        protection_tier: ProtectionTier | str | None = None,
+        anchors: list[Anchor] | None = None,
+        anchor_validity: float | None = None,
+        trw_dir: Path | None = None,
+        enrich_after_store: bool = True,
         raise_security_errors: bool = False,
+        raise_storage_errors: bool = False,
     ) -> dict[str, object]: ...
 
 

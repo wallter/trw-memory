@@ -29,10 +29,17 @@ class OrgSharedAliasMixin:
     """Thin org-shared recall delegators preserving the monkeypatch seam."""
 
     async def _merge_shared_results(
-        self, query: str, local_results: list[MemoryResultDict], limit: int
+        self,
+        query: str,
+        local_results: list[MemoryResultDict],
+        limit: int,
+        *,
+        local_entries: list[MemoryEntry] | None = None,
     ) -> list[MemoryResultDict]:
         from trw_memory._client_org_shared import merge_shared_results as _impl
 
+        if local_entries is not None:
+            return await _impl(cast("MemoryClient", self), query, local_results, limit, local_entries=local_entries)
         return await _impl(cast("MemoryClient", self), query, local_results, limit)
 
     async def _load_entries_for_results(self, results: list[MemoryResultDict]) -> list[MemoryEntry]:

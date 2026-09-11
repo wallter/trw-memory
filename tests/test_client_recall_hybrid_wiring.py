@@ -106,11 +106,24 @@ class TestHybridSearchConfigWiring:
             captured.update(kwargs)
             return original(*args, **kwargs)
 
-        with patch.object(_pipeline_mod, "hybrid_search", side_effect=spy):
+        # Exercise the real hybrid path, stopping only at model execution: this
+        # test owns configuration forwarding, not downloading a cross-encoder.
+        with (
+            patch.object(_pipeline_mod, "hybrid_search", side_effect=spy),
+            patch(
+                "trw_memory.retrieval.reranker.cross_encode_rerank",
+                side_effect=lambda query, entries, **kwargs: entries,
+            ) as reranker,
+        ):
             await wired_client.recall("rerank test")
 
         assert captured.get("rerank") is True
         assert captured.get("rerank_candidates") == 20
+        reranker.assert_called_once()
+        assert reranker.call_args.args[0] == "rerank test"
+        assert reranker.call_args.args[1]
+        assert len(reranker.call_args.args[1]) <= 20
+        assert reranker.call_args.kwargs["model_name"] == wired_client._config.recall_rerank_model
 
     async def test_validity_age_decay_forwarded_from_config(self, wired_client: MemoryClient) -> None:
         await wired_client.store("validity decay test entry")
@@ -145,7 +158,18 @@ class TestHybridSearchConfigWiring:
             captured.update(kwargs)
             return original(*args, **kwargs)
 
-        with patch.object(_pipeline_mod, "hybrid_search", side_effect=spy):
+        with (
+            patch.object(_pipeline_mod, "hybrid_search", side_effect=spy),
+            patch(
+                "trw_memory.retrieval.reranker.cross_encode_rerank",
+                side_effect=lambda query, entries, **kwargs: entries,
+            ) as reranker,
+        ):
             await wired_client.recall("rerank model")
 
         assert captured.get("rerank_model") == custom_model
+        assert captured.get("rerank") is True
+        reranker.assert_called_once()
+        assert reranker.call_args.args[0] == "rerank model"
+        assert reranker.call_args.args[1]
+        assert reranker.call_args.kwargs["model_name"] == custom_model

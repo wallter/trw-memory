@@ -171,9 +171,17 @@ def _move_rows(
                     f"at {next_cursor.entry_id!r} did not advance"
                 )
             cursor = next_cursor
-            embeddings = (
-                stores.source.get_stored_embeddings([entry.id for entry in batch])
+            records = (
+                stores.source.get_vector_records([entry.id for entry in batch], namespace=source)
                 if stores.source.supports_vectors()
+                else {}
+            )
+            # Preserve unknown legacy bytes for backends without record reads,
+            # but never widen a scoped copy to an unqualified ID lookup.
+            missing = [entry.id for entry in batch if entry.id not in records]
+            legacy_vectors = (
+                stores.source.get_stored_embeddings(missing, namespace=source)
+                if missing and stores.source.supports_vectors()
                 else {}
             )
             for entry in batch:
@@ -181,9 +189,20 @@ def _move_rows(
                     skipped += 1
                     continue
                 stores.destination.store(entry.model_copy(update={"namespace": destination}))
-                embedding = embeddings.get(entry.id)
+                record = records.get(entry.id)
+                embedding = list(record.embedding) if record is not None else legacy_vectors.get(entry.id)
                 if embedding is not None:
-                    stores.destination.upsert_vector(entry.id, embedding, namespace=destination)
+                    proof = record.provenance if record is not None else None
+                    if proof is not None and not proof.matches(
+                        proof.space, f"{entry.content} {entry.detail}", embedding
+                    ):
+                        proof = None
+                    stores.destination.upsert_vector(
+                        entry.id,
+                        embedding,
+                        namespace=destination,
+                        **({"provenance": proof} if proof is not None else {}),
+                    )
                 # Deleting the source row drops its vector too, which is why the
                 # destination vector is written first.
                 stores.source.delete(entry.id, namespace=source)

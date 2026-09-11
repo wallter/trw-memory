@@ -27,6 +27,7 @@ import os
 from typing import TYPE_CHECKING, Any
 
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.retrieval.recall_selection import LocalCandidate
 
 if TYPE_CHECKING:
     from trw_memory.client import MemoryResultDict
@@ -153,4 +154,11 @@ def entry_to_result(entry: MemoryEntry, score: float = 0.0) -> MemoryResultDict:
                 pass
     if entry.expires:
         result["expires"] = entry.expires
+    return result
+
+
+def candidate_to_result(candidate: LocalCandidate) -> MemoryResultDict:
+    """Project only at the client boundary, retaining raw candidate state elsewhere."""
+    result = entry_to_result(candidate.entry, candidate.raw_score)
+    result["source"] = candidate.source
     return result

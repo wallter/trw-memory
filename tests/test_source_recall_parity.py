@@ -2,39 +2,38 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
 
-from trw_memory.client import MemoryClient, MemoryResultDict
+from trw_memory.client import MemoryClient
+from trw_memory.models.memory import MemoryEntry
+from trw_memory.retrieval.recall_selection import LocalCandidate
 
 
-def _result(
+def _candidate(
     *,
     memory_id: str,
     score: float,
     metadata: dict[str, str] | None = None,
     expires: str = "",
-) -> MemoryResultDict:
-    raw: dict[str, Any] = {
-        "memory_id": memory_id,
-        "content": memory_id,
-        "detail": "",
-        "tags": [],
-        "importance": 0.5,
-        "score": score,
-        "created_at": "2026-04-23T12:00:00+00:00",
-        "updated_at": "2026-04-23T12:00:00+00:00",
-        "namespace": "default",
-        "source": "local",
-    }
-    if metadata is not None:
-        raw["metadata"] = metadata
-    if expires:
-        raw["expires"] = expires
-    return cast("MemoryResultDict", raw)
+) -> LocalCandidate:
+    """The invocation seam carries authoritative entries, never projected results."""
+    return LocalCandidate(
+        MemoryEntry(
+            id=memory_id,
+            content=memory_id,
+            importance=0.5,
+            namespace="default",
+            created_at=datetime.fromisoformat("2026-04-23T12:00:00+00:00"),
+            updated_at=datetime.fromisoformat("2026-04-23T12:00:00+00:00"),
+            metadata=metadata or {},
+            expires=expires,
+        ),
+        score,
+    )
 
 
 @pytest.fixture()
@@ -61,8 +60,8 @@ async def test_recall_fallback_applies_source_policy(client: MemoryClient, monke
         "_fallback_recall",
         AsyncMock(
             return_value=[
-                _result(memory_id="instruction", score=0.8, metadata={"source_kind": "instruction_rule"}),
-                _result(
+                _candidate(memory_id="instruction", score=0.8, metadata={"source_kind": "instruction_rule"}),
+                _candidate(
                     memory_id="expired-lifecycle",
                     score=0.95,
                     metadata={"source_kind": "lifecycle"},
@@ -85,8 +84,8 @@ async def test_recall_hybrid_applies_same_source_policy(client: MemoryClient, mo
         "_try_hybrid_recall",
         AsyncMock(
             return_value=[
-                _result(memory_id="semantic", score=0.9, metadata={"source_kind": "semantic_memory"}),
-                _result(memory_id="git", score=0.88, metadata={"source": "distilled:git:aaa..bbb"}),
+                _candidate(memory_id="semantic", score=0.9, metadata={"source_kind": "semantic_memory"}),
+                _candidate(memory_id="git", score=0.88, metadata={"source": "distilled:git:aaa..bbb"}),
             ]
         ),
     )

@@ -7,13 +7,17 @@ for keyword search.
 from __future__ import annotations
 
 import json
+import sqlite3
+import threading
 from collections.abc import Iterator
+from contextlib import closing
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import structlog
 
 from trw_memory.namespaces.validation import DEFAULT_NAMESPACE
+from trw_memory.storage._vector_ops import get_stored_embeddings
 from trw_memory.storage.persistence import lock_for_rmw
 
 if TYPE_CHECKING:
@@ -294,6 +298,45 @@ class WarmTierStore:
                     encoding="utf-8",
                 )
         return sidecar_removed
+
+    def discovery_entries(self, query_embedding: list[float] | None) -> list[dict[str, object]]:
+        """Read full sidecars and uncapped vectors without a writable backend.
+
+        SQLite mode=ro may create WAL coordination sidefiles; records, schema,
+        archive contents and lifecycle access metadata are never written here.
+        """
+        sidecar = self._base_dir / "memory" / "warm.jsonl"
+        if not sidecar.exists():
+            return []
+        entries = self._warm_sidecar_entries_by_id()
+        db_path = sidecar.with_suffix(".db")
+        if query_embedding is None or not db_path.exists():
+            return list(entries.values())
+        try:
+            import sqlite_vec
+
+            with closing(sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)) as conn:
+                conn.enable_load_extension(True)
+                sqlite_vec.load(conn)
+                conn.enable_load_extension(False)
+                # Warm vectors have one fixed namespace; reject corrupted foreign rows
+                # before the existing ID-based bulk decoder sees them.
+                foreign = conn.execute(
+                    "SELECT 1 FROM vec_index WHERE namespace != ? LIMIT 1", (WARM_TIER_NAMESPACE,)
+                ).fetchone()
+                if foreign:
+                    from trw_memory.security.namespace_scope import NamespaceScopeError
+
+                    raise NamespaceScopeError("warm vector index contains foreign namespace")
+                vectors = get_stored_embeddings(conn, threading.Lock(), vec_available=True, entry_ids=list(entries))
+            for entry_id, vector in vectors.items():
+                if len(vector) != len(query_embedding):
+                    continue
+                distance_squared = sum((a - b) ** 2 for a, b in zip(vector, query_embedding, strict=True))
+                entries[entry_id]["_tier_relevance"] = 1.0 - distance_squared / 2.0
+        except (ImportError, sqlite3.Error, OSError, AttributeError):
+            logger.debug("warm_tier_discovery_vectors_unavailable", exc_info=True)
+        return list(entries.values())
 
     def warm_search(
         self,

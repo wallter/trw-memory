@@ -1,7 +1,8 @@
 """Snapshot rotation for :class:`SQLiteBackend` (PRD-INFRA-065 / B4).
 
-VACUUM INTO-based hot backup with daily + weekly rotation. Opt-in: invoked
-only when ``config.memory_snapshot_enabled=True``. Snapshots live under
+VACUUM INTO-based hot backup with explicit daily + weekly rotation helpers.
+The CLI invokes these independently of the reserved automatic-snapshot flag;
+no automatic scheduler is implemented here. Snapshots live under
 ``<base_dir>/memory/snapshots/daily/YYYY-MM-DD.db`` and
 ``<base_dir>/memory/snapshots/weekly/YYYY-Www.db`` (ISO week). Rotation
 follows the PRD-CORE-139 oldest-by-filename-timestamp pattern — never
@@ -27,6 +28,7 @@ import contextlib
 import re
 import shutil
 import sqlite3
+import tempfile
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -350,7 +352,10 @@ def latest_snapshot(base_dir: Path) -> Path | None:
 
 
 def restore_from_snapshot(base_dir: Path, snapshot: Path, db_path: Path) -> None:
-    """Copy ``snapshot`` over ``db_path`` after validating path safety.
+    """Stage ``snapshot`` then atomically replace ``db_path`` after path validation.
+
+    Copy or replacement failure preserves the prior database and its sidecars.
+    Callers must quiesce database users; this is not a live-writer restore.
 
     Args:
         base_dir: Root memory directory — used to enforce path boundary.
@@ -366,10 +371,20 @@ def restore_from_snapshot(base_dir: Path, snapshot: Path, db_path: Path) -> None
     if not snapshot.exists():
         raise SnapshotError(f"snapshot not found: {snapshot}")
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    staged: Path | None = None
     try:
-        shutil.copy2(str(snapshot), str(db_path))
+        with tempfile.NamedTemporaryFile(
+            dir=db_path.parent, prefix=f".{db_path.name}.", suffix=".restore", delete=False
+        ) as tmp:
+            staged = Path(tmp.name)
+        shutil.copy2(str(snapshot), str(staged))
+        staged.replace(db_path)
     except OSError as exc:
         raise SnapshotError(f"snapshot restore failed: {exc}") from exc
+    finally:
+        if staged is not None:
+            with contextlib.suppress(OSError):
+                staged.unlink(missing_ok=True)
     # Clear stale WAL/SHM sidecars left by the prior DB at this path: applying old
     # WAL frames on top of a freshly-restored base file would corrupt the restore.
     for suffix in (".db-wal", ".db-shm"):

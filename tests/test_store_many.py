@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import datetime
+import statistics
 import threading
 import time
 import uuid
@@ -246,22 +247,30 @@ class TestStoreManyRollbackLocking:
 
 class TestStoreManyThroughput:
     def test_store_many_faster_than_per_row_at_1k(self, tmp_path: Path) -> None:
-        """store_many must be at least 5x faster than per-row store at 1K entries."""
-        N = 1000
-        db1 = SQLiteBackend(tmp_path / "batch.db")
-        db2 = SQLiteBackend(tmp_path / "perrow.db")
+        """Median paired speedup must be at least 3x at 1K entries."""
+        # Fixed sample count and alternating arm order reduce one-shot scheduling
+        # sensitivity without retrying until green, trimming, or selecting a best
+        # sample. Every pair uses fresh databases; every measurement is retained.
+        measurements: list[dict[str, float]] = []
+        for pair in range(5):
+            with (
+                SQLiteBackend(tmp_path / f"batch-{pair}.db") as batch,
+                SQLiteBackend(tmp_path / f"perrow-{pair}.db") as perrow,
+            ):
+                batch_entries = [_entry(content=f"batch content {i}") for i in range(1000)]
+                perrow_entries = [_entry(content=f"perrow content {i}") for i in range(1000)]
+                timings: dict[str, float] = {}
+                order = ("batch", "perrow") if pair % 2 == 0 else ("perrow", "batch")
+                for arm in order:
+                    start = time.perf_counter()
+                    if arm == "batch":
+                        batch.store_many(batch_entries)
+                    else:
+                        for entry in perrow_entries:
+                            perrow.store(entry)
+                    timings[arm] = (time.perf_counter() - start) * 1000
+                timings["speedup"] = timings["perrow"] / timings["batch"]
+                measurements.append(timings)
 
-        entries1 = [_entry(content=f"batch content {i}") for i in range(N)]
-        entries2 = [_entry(content=f"perrow content {i}") for i in range(N)]
-
-        t0 = time.perf_counter()
-        db1.store_many(entries1)
-        batch_ms = (time.perf_counter() - t0) * 1000
-
-        t0 = time.perf_counter()
-        for e in entries2:
-            db2.store(e)
-        perrow_ms = (time.perf_counter() - t0) * 1000
-
-        speedup = perrow_ms / batch_ms
-        assert speedup >= 3, f"store_many speedup {speedup:.1f}x < 3x: batch={batch_ms:.0f}ms, perrow={perrow_ms:.0f}ms"
+        speedup = statistics.median(pair["speedup"] for pair in measurements)
+        assert speedup >= 3, f"store_many median speedup {speedup:.3f}x < 3x; all paired timings (ms): {measurements}"

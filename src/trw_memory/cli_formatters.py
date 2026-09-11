@@ -148,7 +148,8 @@ def format_import_summary(imported: int, skipped: int, rejected: int = 0) -> str
 def entry_to_export_dict(entry: MemoryEntry) -> dict[str, object]:
     """Convert a MemoryEntry to a serializable dict for lossless export.
 
-    Includes every field returned by :meth:`MemoryEntry.to_dict` for full backup/restore via CLI
-    export/import.
+    Includes every field returned by :meth:`MemoryEntry.to_dict`. The ordinary
+    import command ingests content as new entries; it is not an identity-preserving
+    inverse. Use the SQLite snapshot/restore commands for database recovery.
     """
     return entry.to_dict()

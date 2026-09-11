@@ -15,7 +15,7 @@ from __future__ import annotations
 import contextlib
 import sqlite3
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -24,6 +24,7 @@ import structlog
 
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.storage._fts_query import search_fts_method as _query_ops_search_fts
 from trw_memory.storage._shared import (
     ENTRY_COLUMNS,
     IMMUTABLE_FIELDS,
@@ -53,6 +54,7 @@ from trw_memory.storage._permissions import harden_db_file_mode as _harden_db_fi
 from trw_memory.storage._permissions import prepare_db_file_mode as _prepare_db_file_mode
 
 if TYPE_CHECKING:
+    from trw_memory.retrieval.temporal_selection import TemporalSelection
     from trw_memory.wiki.storage import StoredWikiReference
 
 logger = structlog.get_logger(__name__)
@@ -124,7 +126,6 @@ from trw_memory.storage._query_ops import (
     list_entries as _query_ops_list_entries,
     list_namespaces as _query_ops_list_namespaces,
     search as _query_ops_search,
-    search_fts as _query_ops_search_fts,
 )
 
 # CRUD ops extracted to _crud_ops.py (PRD-DIST-245 batch 87).
@@ -532,23 +533,36 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         self,
         query: str,
         *,
+        keyword_tokens: list[str] | None = None,
         top_k: int = 25,
         tags: list[str] | None = None,
         status: MemoryStatus | None = None,
         min_importance: float = 0.0,
         namespace: str | None = None,
+        temporal_selection: TemporalSelection | None = None,
+        entry_filter: Callable[[MemoryEntry], bool] | None = None,
     ) -> list[MemoryEntry]:
-        """Keyword LIKE search on content + detail + tags with filters."""
+        """Keyword LIKE search on content + detail + tags with filters.
+
+        Optional ``keyword_tokens`` ranks a substring OR union by scoped IDF
+        before truncation; omitted preserves single-query importance ordering.
+        Optional ``temporal_selection`` applies canonical eligibility before
+        top_k; omitted preserves raw storage visibility. Retained rows are
+        bounded, but selection may scan all matching records.
+        """
         with self._fresh_connection():
             return _query_ops_search(
                 self,
                 _SELECT_COLUMNS_SQL,
                 query=query,
+                keyword_tokens=keyword_tokens,
                 top_k=top_k,
                 tags=tags,
                 status=status,
                 min_importance=min_importance,
                 namespace=namespace,
+                temporal_selection=temporal_selection,
+                entry_filter=entry_filter,
             )
 
     @property
@@ -556,32 +570,7 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         """``True`` when FTS5 is compiled into the active SQLite build."""
         return self._fts_available
 
-    def search_fts(
-        self,
-        query: str,
-        *,
-        top_k: int = 25,
-        status: MemoryStatus | None = None,
-        min_importance: float = 0.0,
-        namespace: str | None = None,
-    ) -> list[MemoryEntry]:
-        """FTS5 full-text search — O(log N) inverted-index candidate retrieval.
-
-        Raises :class:`~trw_memory.exceptions.StorageError` on SQLite failure.
-        Returns an empty list when FTS5 is unavailable or no entries match.
-        """
-        if not self._fts_available:
-            return []
-        with self._fresh_connection():
-            return _query_ops_search_fts(
-                self,
-                _SELECT_COLUMNS_SQL,
-                query=query,
-                top_k=top_k,
-                status=status,
-                min_importance=min_importance,
-                namespace=namespace,
-            )
+    search_fts = _query_ops_search_fts
 
     def find_active_by_content(
         self,
@@ -609,6 +598,8 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         status: MemoryStatus | None = MemoryStatus.ACTIVE,
         namespace: str | None = None,
         limit: int = 500,
+        include_anchors: bool = False,
+        after: tuple[str, str] | None = None,
     ) -> list[MemoryEntry]:
         """PRD-CORE-086 FR07 query for assertion-health summary.
 
@@ -617,11 +608,19 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
 
         ``namespace`` scopes the query to one namespace (omit for all). ``limit``
         caps the scan (default 500) so the summary never triggers an unbounded
-        full-table scan on a large store.
+        full-table scan on a large store. ``include_anchors`` opts maintenance
+        into assertion-or-anchor eligibility and namespace/id keyset ordering;
+        ``after`` advances that traversal without depending on mutable timestamps.
         """
         with self._fresh_connection():
             return _query_ops_entries_with_assertions(
-                self, _SELECT_COLUMNS_SQL, status=status, namespace=namespace, limit=limit
+                self,
+                _SELECT_COLUMNS_SQL,
+                status=status,
+                namespace=namespace,
+                limit=limit,
+                include_anchors=include_anchors,
+                after=after,
             )
 
     # Backward-compat alias for PRD-CORE-086 FR07 traceability.
@@ -637,12 +636,18 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         exclude_superseded: bool = False,
         tags: list[str] | None = None,
         after: EntryCursor | None = None,
+        temporal_selection: TemporalSelection | None = None,
+        entry_filter: Callable[[MemoryEntry], bool] | None = None,
     ) -> list[MemoryEntry]:
         """Return entries ordered by ``updated_at`` desc, ``id`` desc.
 
         When *tags* is provided the predicate is pushed into SQL so the LIMIT
         applies AFTER tag filtering — tagged entries past the row limit are not
         silently truncated away before the filter runs.
+
+        ``temporal_selection`` opts into eligibility-before-limit; omitted
+        preserves maintenance visibility. It cannot compose with ``after``:
+        an eligible-first result does not have the raw cursor's ordering.
 
         *after* resumes from a previous page's keyset position, which is the
         only correct way to page over rows the caller is deleting or skipping.
@@ -658,6 +663,8 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
                 exclude_superseded=exclude_superseded,
                 tags=tags,
                 after=after,
+                temporal_selection=temporal_selection,
+                entry_filter=entry_filter,
             )
 
     def list_namespaces(self, required_namespaces: list[str] | None = None) -> list[str]:

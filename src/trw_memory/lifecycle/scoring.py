@@ -338,8 +338,6 @@ def entry_utility(
         return effective_params.expired_utility_floor
 
     base_impact = _float_field(entry, "importance", _float_field(entry, "impact", 0.5))
-    q_value = _float_field(entry, "q_value", base_impact)
-    q_observations = _int_field(entry, "q_observations", 0)
     recurrence = _int_field(entry, "recurrence", 1)
     access_count = _int_field(entry, "access_count", 0)
     source_type = str(entry.get("source", entry.get("source_type", "agent")))
@@ -375,11 +373,13 @@ def entry_utility(
         str(entry.get("confidence", "unverified")),
     )
     return compute_utility_score(
-        q_value=q_value,
+        # trw:intentional CORE268: historical rewards are retained data, not
+        # default importance evidence. The explicit historical API remains.
+        q_value=base_impact,
         days_since_last_access=days_unused,
         recurrence_count=recurrence,
         base_impact=base_impact,
-        q_observations=q_observations,
+        q_observations=0,
         half_life_days=half_life,
         use_exponent=effective_params.use_exponent,
         cold_start_threshold=effective_params.cold_start_threshold,

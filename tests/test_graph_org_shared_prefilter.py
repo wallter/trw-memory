@@ -9,11 +9,13 @@ caller can keep are hydrated.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
 
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.storage.interface import EntryCursor
 
 from .conftest import make_entry
 
@@ -32,6 +34,8 @@ class _SpyBackend:
         namespace: str | None = None,
         min_importance: float = 0.0,
         limit: int = 100,
+        after: EntryCursor | None = None,
+        entry_filter: Callable[[MemoryEntry], bool] | None = None,
     ) -> list[MemoryEntry]:
         self.list_entries_calls.append(
             {
@@ -41,6 +45,9 @@ class _SpyBackend:
                 "limit": limit,
             }
         )
+        # This legacy-path spy must not accidentally claim to test pagination.
+        assert after is None
+        assert entry_filter is None
         results = list(self._entries)
         if status is not None:
             results = [e for e in results if e.status == status]

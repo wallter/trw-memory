@@ -318,3 +318,94 @@ async def test_memory_client_store_preserves_expires_on_update(
 
     assert results[0]["memory_id"] == "M-fixed-expiry"
     assert results[0]["expires"] == "2099-01-01T00:00:00+00:00"
+
+
+def test_resolved_policy_snapshots_options_and_default_weights(monkeypatch: pytest.MonkeyPatch) -> None:
+    from dataclasses import FrozenInstanceError
+    from datetime import datetime, timezone
+
+    from trw_memory.retrieval.source_policy import DEFAULT_SOURCE_WEIGHTS, SourcePolicy
+
+    includes = ["unknown", "episodic", "git_distilled"]
+    excludes = ["semantic_memory"]
+    weights = {"episodic": 1.0, "git_distilled": 0.1}
+    policy = SourcePolicy.resolve(
+        include_source_kinds=includes,
+        exclude_source_kinds=excludes,
+        source_weights=weights,
+        distilled_weight=0.8,
+        reference_time=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    includes.clear()
+    excludes.append("unknown")
+    weights["episodic"] = 0.0
+    monkeypatch.setitem(DEFAULT_SOURCE_WEIGHTS, "unknown", 0.0)
+    rows = [
+        _result(memory_id="unknown", score=1.0),
+        _result(memory_id="episode", score=2.0, metadata={"source_kind": "episodic"}),
+        _result(memory_id="git", score=1.0, metadata={"source_kind": "git"}),
+    ]
+    result = policy.apply(rows)
+    assert [r["memory_id"] for r in result] == ["episode", "unknown", "git"]
+    assert result[-1]["score"] == pytest.approx(0.8)
+    with pytest.raises(TypeError):
+        policy.weights["unknown"] = 0.0  # type: ignore[index]
+    with pytest.raises(FrozenInstanceError):
+        policy.exclude_expired = False  # type: ignore[misc]
+
+
+def test_resolved_policy_captures_one_clock_and_admission_never_reads_score(monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import datetime, timezone
+
+    import trw_memory.retrieval.source_policy as source_policy
+
+    calls: list[bool] = []
+
+    class Clock:
+        @staticmethod
+        def now(tz: object) -> datetime:
+            calls.append(True)
+            return datetime(2026, 1, 2, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(source_policy, "datetime", Clock)
+    policy = source_policy.SourcePolicy.resolve()
+    row: dict[str, object] = {"metadata": {"source_kind": "episodic"}, "expires": "2026-01-02", "score": object()}
+    assert policy.allows(row)
+    row["score"] = 1.0
+    assert len(policy.apply([row])) == 1
+    assert policy.allows(row)
+    assert calls == [True]
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {},
+        {"include_distilled": False},
+        {"include_source_kinds": ["unknown", "episodic"]},
+        {"exclude_source_kinds": ["unknown"]},
+        {"source_weights": {"unknown": 0.0, "episodic": -1.0}},
+        {"exclude_expired": False},
+        {"distilled_weight": 0.0},
+    ],
+)
+def test_resolved_admission_and_legacy_weighted_apply_agree(options: dict[str, Any]) -> None:
+    from datetime import datetime, timezone
+
+    from trw_memory.retrieval.source_policy import SourcePolicy
+
+    rows = [
+        _result(memory_id="unknown", score=1.0),
+        _result(memory_id="git", score=1.0, metadata={"source_kind": "git"}),
+        _result(memory_id="expired", score=3.0, metadata={"source_kind": "episodic"}, expires="2026-01-01"),
+        _result(memory_id="episode", score=2.0, metadata={"source_kind": "episodic"}),
+        _result(memory_id="tie", score=1.0),
+    ]
+    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    policy = SourcePolicy.resolve(reference_time=now, **options)
+    applied = policy.apply(rows)
+    assert {row["memory_id"] for row in applied} == {row["memory_id"] for row in rows if policy.allows(row)}
+    assert applied == apply_source_policy(rows, reference_time=now, **options)
+    assert all(row["score"] in (1.0, 2.0, 3.0) for row in rows)  # inputs unchanged
+    if options == {}:
+        assert [row["memory_id"] for row in applied] == ["unknown", "tie", "git", "episode"]

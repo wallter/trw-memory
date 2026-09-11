@@ -101,7 +101,7 @@ def _cli_error_boundary(fn: Callable[P, object]) -> Callable[P, object]:
         except SystemExit:
             raise
         except Exception as exc:
-            logger.error("cli_command_failed", command=fn.__name__, error=str(exc), exc_info=True)
+            logger.exception("cli_command_failed", command=fn.__name__, error=str(exc))
             print(f"Error: {exc}", file=sys.stderr)
             raise SystemExit(1) from exc
 
@@ -112,7 +112,7 @@ def _cli_error_boundary(fn: Callable[P, object]) -> Callable[P, object]:
         except SystemExit:
             raise
         except Exception as exc:
-            logger.error("cli_command_failed", command=fn.__name__, error=str(exc), exc_info=True)
+            logger.exception("cli_command_failed", command=fn.__name__, error=str(exc))
             print(f"Error: {exc}", file=sys.stderr)
             raise SystemExit(1) from exc
 

@@ -13,7 +13,7 @@ from trw_memory.cli_formatters import StatusDict
 from trw_memory.cli_json_input import JsonInputError, load_json_document, read_source_text
 from trw_memory.models.config import MemoryConfig
 from trw_memory.namespaces.validation import validate_namespace
-from trw_memory.storage.interface import StorageBackend
+from trw_memory.storage.interface import EntryCursor, StorageBackend
 
 
 def open_validated_backend(
@@ -63,6 +63,9 @@ def handle_consolidate(
         backend.close()
 
 
+_EXPORT_PAGE_SIZE = 10000
+
+
 def handle_export(
     args: argparse.Namespace,
     *,
@@ -74,8 +77,25 @@ def handle_export(
     config = config_cls()
     namespace, backend = open_validated_backend(config, args.namespace, backend_factory=backend_factory)
     try:
-        entries = backend.list_entries(namespace=namespace, limit=10000)
-        data = [entry_to_export_dict(e) for e in entries]
+        # Materialize before opening output: a later acquisition failure must
+        # not replace an existing export with an apparently successful prefix.
+        # Pages preserve backend order; this is not a cross-page snapshot.
+        data: list[dict[str, Any]] = []
+        cursor: EntryCursor | None = None
+        while True:
+            entries = backend.list_entries(namespace=namespace, limit=_EXPORT_PAGE_SIZE, after=cursor)
+            if not entries:
+                break
+            next_cursor = EntryCursor.from_entry(entries[-1])
+            if cursor is not None and (next_cursor.updated_at, next_cursor.entry_id) >= (
+                cursor.updated_at,
+                cursor.entry_id,
+            ):
+                raise RuntimeError("Export cursor did not advance; no output written")
+            data.extend(entry_to_export_dict(entry) for entry in entries)
+            if len(entries) < _EXPORT_PAGE_SIZE:
+                break
+            cursor = next_cursor
 
         if args.fmt == "yaml":
             from ruamel.yaml import YAML

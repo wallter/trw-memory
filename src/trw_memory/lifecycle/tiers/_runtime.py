@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import threading
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
+from typing import overload
 
 import structlog
+from typing_extensions import TypedDict
 
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.lifecycle.tiers._manager import TierManager
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocation
+from trw_memory.security.namespace_scope import NamespaceScopeError
 from trw_memory.storage.interface import StorageBackend
 
 logger = structlog.get_logger(__name__)
@@ -173,6 +178,7 @@ def remove_entry_from_tiers(config: MemoryConfig, namespace: str, entry_id: str)
         logger.warning("tier_cold_remove_failed", namespace=namespace, entry_id=entry_id, exc_info=True)
 
 
+@overload
 def tier_candidates(
     config: MemoryConfig,
     namespace: str,
@@ -182,15 +188,69 @@ def tier_candidates(
     tags: list[str] | None,
     limit: int,
     query_embedding: list[float] | None = None,
-) -> list[dict[str, object]]:
+    invocation: None = None,
+) -> list[dict[str, object]]: ...
+
+
+@overload
+def tier_candidates(
+    config: MemoryConfig,
+    namespace: str,
+    backend: StorageBackend,
+    *,
+    query: str,
+    tags: list[str] | None,
+    limit: int,
+    query_embedding: list[float] | None = None,
+    invocation: RecallInvocation,
+) -> list[LocalCandidate]: ...
+
+
+def tier_candidates(
+    config: MemoryConfig,
+    namespace: str,
+    backend: StorageBackend,
+    *,
+    query: str,
+    tags: list[str] | None,
+    limit: int,
+    query_embedding: list[float] | None = None,
+    invocation: RecallInvocation | None = None,
+) -> list[dict[str, object]] | list[LocalCandidate]:
     """Collect full-entry candidates from the tier runtime."""
     if not tier_runtime_enabled(config):
         return []
-    manager = warmup_tier_manager(config, namespace, backend)
+    manager = (
+        get_tier_manager(config, namespace)
+        if invocation is not None
+        else warmup_tier_manager(config, namespace, backend)
+    )
     query_tokens = [token for token in query.lower().split() if token]
 
+    return manager.search(
+        query_tokens,
+        query_embedding=query_embedding,
+        tags=tags,
+        top_k=max(limit * 2, config.hot_max_entries),
+        invocation=invocation,
+        resolve_entry=lambda entry_id: backend.get(entry_id, namespace=namespace),
+        **_restoration_callbacks(config, namespace, backend),
+    )
+
+
+class _RestorationCallbacks(TypedDict):
+    restore_entry_fn: Callable[[dict[str, object]], None]
+    delete_restored_entry_fn: Callable[[str], bool | None]
+    force_delete_restored_entry_fn: Callable[[str], bool | None]
+    verify_restored_entry_removed_fn: Callable[[str], bool]
+
+
+def _restoration_callbacks(config: MemoryConfig, namespace: str, backend: StorageBackend) -> _RestorationCallbacks:
     def _restore_entry(entry_data: dict[str, object]) -> None:
-        backend.store(MemoryEntry.model_validate(entry_data))
+        entry = MemoryEntry.model_validate(entry_data)
+        if entry.namespace != namespace:
+            raise NamespaceScopeError("cold restoration outside authorized namespace")
+        backend.store(entry)
 
     def _delete_restored_entry(entry_id: str) -> bool | None:
         return backend.delete(entry_id, namespace=namespace)
@@ -203,13 +263,27 @@ def tier_candidates(
         with create_backend_from_config(config, namespace) as verification_backend:
             return verification_backend.get(entry_id, namespace=namespace) is None
 
-    return manager.search(
-        query_tokens,
-        query_embedding=query_embedding,
-        tags=tags,
-        top_k=max(limit * 2, config.hot_max_entries),
-        restore_entry_fn=_restore_entry,
-        delete_restored_entry_fn=_delete_restored_entry,
-        force_delete_restored_entry_fn=_force_delete_restored_entry,
-        verify_restored_entry_removed_fn=_verify_restored_entry_removed,
-    )
+    return {
+        "restore_entry_fn": _restore_entry,
+        "delete_restored_entry_fn": _delete_restored_entry,
+        "force_delete_restored_entry_fn": _force_delete_restored_entry,
+        "verify_restored_entry_removed_fn": _verify_restored_entry_removed,
+    }
+
+
+def restore_selected_cold(
+    config: MemoryConfig,
+    namespace: str,
+    backend: StorageBackend,
+    selected: list[LocalCandidate],
+) -> set[tuple[str, str]]:
+    """Restore returned cold hits only; existing rollback is per entry, not per call."""
+    failed: set[tuple[str, str]] = set()
+    manager = get_tier_manager(config, namespace)
+    for candidate in selected:
+        if candidate.cold:
+            if candidate.entry.namespace != namespace:
+                raise NamespaceScopeError("cold restoration outside authorized namespace")
+            if manager.cold_promote(candidate.entry.id, **_restoration_callbacks(config, namespace, backend)) is None:
+                failed.add((namespace, candidate.entry.id))
+    return failed

@@ -23,7 +23,8 @@ async def isolated_client(tmp_path, monkeypatch: pytest.MonkeyPatch) -> MemoryCl
     monkeypatch.setenv("TRW_DIR", str(trw_dir))
     monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
     monkeypatch.setenv("MEMORY_STORAGE_SQLITE_PATH", str(db_path))
-    monkeypatch.setenv("MEMORY_EMBEDDINGS_ENABLED", "0")
+    # Model-free fixture via the provider seam, not an unsupported config flag.
+    monkeypatch.setattr("trw_memory.client.MemoryClient._get_embedder", lambda self: None)
     monkeypatch.chdir(tmp_path)
     ns = f"project:gap-test-{uuid.uuid4().hex[:8]}"
     client = MemoryClient(namespace=ns, mode="local")
@@ -39,7 +40,8 @@ async def team_client(tmp_path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient
     monkeypatch.setenv("TRW_DIR", str(trw_dir))
     monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
     monkeypatch.setenv("MEMORY_STORAGE_SQLITE_PATH", str(db_path))
-    monkeypatch.setenv("MEMORY_EMBEDDINGS_ENABLED", "0")
+    # Model-free fixture via the provider seam, not an unsupported config flag.
+    monkeypatch.setattr("trw_memory.client.MemoryClient._get_embedder", lambda self: None)
     monkeypatch.chdir(tmp_path)
     client = MemoryClient(namespace="team:gap-test", mode="local")
     yield client

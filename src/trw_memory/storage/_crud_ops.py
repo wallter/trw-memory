@@ -371,7 +371,9 @@ def update(
                 # Keep the entry row for audit; drop only the KNN vector so
                 # dense recall stops returning the retired entry.
                 backend._delete_vector(entry_id, namespace)
-            if getattr(backend, "_fts_available", False):
+            # Q-values, sync metadata and status do not change indexed text.
+            # Avoid rewriting the inverted indexes for these hot-path updates.
+            if {"content", "detail", "tags"} & fields.keys() and getattr(backend, "_fts_available", False):
                 backend._conn.execute(
                     "DELETE FROM memories_fts WHERE id = ? AND namespace = ?",
                     (entry_id, namespace),
@@ -380,7 +382,8 @@ def update(
                     "INSERT INTO memories_fts(id, namespace, content, detail, tags) VALUES (?, ?, ?, ?, ?)",
                     (entry_id, namespace, _fts_content, _fts_detail, _fts_tags),
                 )
-            _replace_tag_postings(backend, namespace, entry_id, json.loads(_fts_tags) if _fts_tags else [])
+            if "tags" in fields:
+                _replace_tag_postings(backend, namespace, entry_id, json.loads(_fts_tags) if _fts_tags else [])
             if backend._skip_commit_depth == 0:
                 backend._conn.commit()
         return get(backend, select_columns_sql, entry_id, namespace)

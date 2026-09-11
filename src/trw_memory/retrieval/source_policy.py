@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from types import MappingProxyType
+from typing import Any, cast
+
+from trw_memory.retrieval.validity_prior import expiry_has_passed
 
 SourceFamily = str
 _TRANSIENT_SOURCE_FAMILIES = frozenset({"lifecycle", "episodic"})
@@ -19,7 +23,7 @@ DEFAULT_SOURCE_WEIGHTS: dict[SourceFamily, float] = {
 }
 
 
-def classify_source_family(result: Mapping[str, Any]) -> SourceFamily:
+def classify_source_family(result: Mapping[str, object]) -> SourceFamily:
     metadata = result.get("metadata") or {}
     if isinstance(metadata, dict):
         explicit = str(metadata.get("source_kind", "")).strip()
@@ -33,7 +37,7 @@ def classify_source_family(result: Mapping[str, Any]) -> SourceFamily:
         if source.startswith("distilled:bulletin:"):
             return "lifecycle"
     tags = result.get("tags", []) or []
-    for tag in tags:
+    for tag in cast("Iterable[object]", tags):
         if not isinstance(tag, str):
             continue
         if tag.startswith("source_kind:"):
@@ -49,7 +53,7 @@ def classify_source_family(result: Mapping[str, Any]) -> SourceFamily:
     return "unknown"
 
 
-def resolve_expiry(result: Mapping[str, Any]) -> str:
+def resolve_expiry(result: Mapping[str, object]) -> str:
     raw = result.get("expires")
     if isinstance(raw, str) and raw:
         return raw
@@ -61,16 +65,89 @@ def resolve_expiry(result: Mapping[str, Any]) -> str:
     return ""
 
 
-def is_expired_result(result: Mapping[str, Any], *, now: datetime | None = None) -> bool:
-    raw = resolve_expiry(result)
-    if not raw:
-        return False
-    try:
-        expiry = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    current = now or datetime.now(timezone.utc)
-    return expiry <= current
+def is_expired_result(result: Mapping[str, object], *, now: datetime | None = None) -> bool:
+    """Use the same day-exclusive expiry contract as temporal selection."""
+    return expiry_has_passed(resolve_expiry(result), reference_time=now)
+
+
+@dataclass(frozen=True)
+class SourcePolicy:
+    """Immutable per-invocation source admission and ranking policy.
+
+    Construct with ``resolve`` to snapshot caller options and the clock once.
+    Admission is score-independent, so acquisition and ranking can share it.
+    """
+
+    include_distilled: bool
+    include_kinds: frozenset[str]
+    exclude_kinds: frozenset[str]
+    weights: Mapping[str, float]
+    explicit_weight_overrides: frozenset[str]
+    exclude_expired: bool
+    reference_time: datetime
+    # Preserve presence even when the caller explicitly chooses the default.
+    explicit_distilled_weight: bool = False
+
+    @classmethod
+    def resolve(
+        cls,
+        *,
+        include_distilled: bool = True,
+        distilled_weight: float | None = None,
+        include_source_kinds: list[str] | None = None,
+        exclude_source_kinds: list[str] | None = None,
+        source_weights: dict[str, float] | None = None,
+        exclude_expired: bool = True,
+        reference_time: datetime | None = None,
+    ) -> SourcePolicy:
+        weights = dict(DEFAULT_SOURCE_WEIGHTS)
+        if source_weights:
+            weights.update(source_weights)
+        if distilled_weight is not None:
+            weights["git_distilled"] = distilled_weight
+        return cls(
+            include_distilled=include_distilled,
+            include_kinds=frozenset(include_source_kinds or ()),
+            exclude_kinds=frozenset(exclude_source_kinds or ()),
+            weights=MappingProxyType(weights),
+            explicit_weight_overrides=frozenset(source_weights or ()),
+            exclude_expired=exclude_expired,
+            reference_time=reference_time or datetime.now(timezone.utc),
+            explicit_distilled_weight=distilled_weight is not None,
+        )
+
+    def allows(self, result: Mapping[str, object]) -> bool:
+        """Apply hard source/expiry/weight exclusions without inspecting score."""
+        family = classify_source_family(result)
+        if family == "git_distilled" and not self.include_distilled:
+            return False
+        if self.include_kinds and family not in self.include_kinds:
+            return False
+        if family in self.exclude_kinds:
+            return False
+        if (
+            self.exclude_expired
+            and family in _TRANSIENT_SOURCE_FAMILIES
+            and is_expired_result(result, now=self.reference_time)
+        ):
+            return False
+        return not self.weights.get(family, 1.0) <= 0.0
+
+    def rank_key(self, result: Mapping[str, object]) -> tuple[int, float]:
+        """Ascending containment and weighted-score key for an admitted raw result."""
+        family = classify_source_family(result)
+        bucket = 0
+        if family in _TRANSIENT_SOURCE_FAMILIES and family not in self.explicit_weight_overrides:
+            bucket = 2
+        elif str(result.get("source", "")) in {"org", "shared"}:
+            bucket = 1
+        return bucket, -float(cast("float", result.get("score", 0.0))) * self.weights.get(family, 1.0)
+
+    def apply(self, results: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+        """Copy admitted results, applying the shared rank key exactly once."""
+        ranked = [(self.rank_key(result), result) for result in results if self.allows(result)]
+        ranked.sort(key=lambda item: item[0])
+        return [dict(result, score=-key[1]) for key, result in ranked]
 
 
 def apply_source_policy(
@@ -82,44 +159,22 @@ def apply_source_policy(
     exclude_source_kinds: list[str] | None = None,
     source_weights: dict[str, float] | None = None,
     exclude_expired: bool = True,
+    reference_time: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    include_set = set(include_source_kinds or [])
-    exclude_set = set(exclude_source_kinds or [])
-    weights = dict(DEFAULT_SOURCE_WEIGHTS)
-    explicit_weight_overrides = set((source_weights or {}).keys())
-    if source_weights:
-        weights.update(source_weights)
-    if distilled_weight is not None:
-        weights["git_distilled"] = distilled_weight
-
-    ranked: list[tuple[int, dict[str, Any]]] = []
-    for result in results:
-        family = classify_source_family(result)
-        if family == "git_distilled" and not include_distilled:
-            continue
-        if include_set and family not in include_set:
-            continue
-        if family in exclude_set:
-            continue
-        if exclude_expired and family in {"lifecycle", "episodic"} and is_expired_result(result):
-            continue
-        weight = weights.get(family, 1.0)
-        if weight <= 0.0:
-            continue
-        adjusted = dict(result)
-        adjusted["score"] = float(result.get("score", 0.0)) * weight
-        containment_bucket = 0
-        if family in _TRANSIENT_SOURCE_FAMILIES and family not in explicit_weight_overrides:
-            containment_bucket = 2
-        elif str(result.get("source", "")) in {"org", "shared"}:
-            containment_bucket = 1
-        ranked.append((containment_bucket, adjusted))
-    ranked.sort(key=lambda item: (item[0], -float(item[1].get("score", 0.0))))
-    return [item for _, item in ranked]
+    return SourcePolicy.resolve(
+        include_distilled=include_distilled,
+        distilled_weight=distilled_weight,
+        include_source_kinds=include_source_kinds,
+        exclude_source_kinds=exclude_source_kinds,
+        source_weights=source_weights,
+        exclude_expired=exclude_expired,
+        reference_time=reference_time,
+    ).apply(results)
 
 
 __all__ = [
     "DEFAULT_SOURCE_WEIGHTS",
+    "SourcePolicy",
     "apply_source_policy",
     "classify_source_family",
     "is_expired_result",

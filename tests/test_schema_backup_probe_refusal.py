@@ -140,6 +140,16 @@ def test_readable_populated_store_still_snapshots_then_migrates(tmp_path: Path) 
     finally:
         conn.close()
 
-    backups = sorted((tmp_path / BACKUP_DIR_NAME).glob("memory.db.pre-schema-5.*"))
+    backups = sorted((tmp_path / BACKUP_DIR_NAME).glob("memory.db.pre-schema-6.*"))
     assert len(backups) == 1, f"expected exactly one pre-migration snapshot, got {backups!r}"
-    assert _observed(db)[0] == 5
+    # The complete upgrade now includes additive v6 after destructive v5.
+    assert _observed(db) == (6, 3)
+    restored = sqlite3.connect(f"file:{backups[0]}?mode=ro", uri=True)
+    try:
+        assert restored.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert restored.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert restored.execute("SELECT id, namespace, content FROM memories ORDER BY id").fetchall() == [
+            (f"M-{index:04d}", "project:probe", f"row {index}") for index in range(3)
+        ]
+    finally:
+        restored.close()

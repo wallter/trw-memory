@@ -270,7 +270,7 @@ def test_checkpoint_lock_failure_returns_error_without_running_checkpoint(
     finally:
         backend.close()
 
-    assert result == {"busy": 1, "checkpointed": 0, "mode": "error"}
+    assert result == {"busy": 1, "checkpointed": 0, "log_frames": 0, "mode": "error"}
 
 
 # ---------------------------------------------------------------------------
@@ -485,7 +485,7 @@ def test_run_checkpoint_busy_resetting_falls_back_to_passive() -> None:
 
     result = run_checkpoint(execute, "TRUNCATE", wal_reset_safe=True, db_path=":mem:")
 
-    assert result == {"busy": 0, "checkpointed": 5, "mode": "PASSIVE"}
+    assert result == {"busy": 0, "checkpointed": 5, "log_frames": 5, "mode": "PASSIVE"}
     assert "TRUNCATE" in calls[0]
     assert "PASSIVE" in calls[1]
     assert len(calls) == 2
@@ -518,7 +518,7 @@ def test_run_checkpoint_fail_open_on_sqlite_error() -> None:
     with structlog.testing.capture_logs() as logs:
         result = run_checkpoint(execute, "TRUNCATE", wal_reset_safe=True, db_path="/x.db")
 
-    assert result == {"busy": 1, "checkpointed": 0, "mode": "error"}
+    assert result == {"busy": 1, "checkpointed": 0, "log_frames": 0, "mode": "error"}
     failures = [log for log in logs if log.get("event") == "wal_checkpoint_failed"]
     assert len(failures) == 1
 
@@ -542,7 +542,7 @@ def test_run_checkpoint_fail_open_on_active_driver_error() -> None:
             db_error=DriverError,
         )
 
-    assert result == {"busy": 1, "checkpointed": 0, "mode": "error"}
+    assert result == {"busy": 1, "checkpointed": 0, "log_frames": 0, "mode": "error"}
     failures = [log for log in logs if log.get("event") == "wal_checkpoint_failed"]
     assert len(failures) == 1
 
@@ -563,7 +563,7 @@ def test_checkpoint_wal_threads_active_driver_error_type(
 
     def checkpoint_spy(*_args: object, **kwargs: object) -> dict[str, object]:
         captured.update(kwargs)
-        return {"busy": 0, "checkpointed": 0, "mode": "PASSIVE"}
+        return {"busy": 0, "checkpointed": 0, "log_frames": 0, "mode": "PASSIVE"}
 
     backend = SQLiteBackend(tmp_path / "m.db")
     try:
@@ -590,7 +590,7 @@ def test_checkpoint_result_is_a_dict_with_public_export() -> None:
     at runtime (so .get()-based consumers like trw-mcp keep working)."""
     from trw_memory.storage import CheckpointMode, CheckpointResult  # public import surface
 
-    result: CheckpointResult = {"busy": 0, "checkpointed": 3, "mode": "TRUNCATE"}
+    result: CheckpointResult = {"busy": 0, "checkpointed": 3, "log_frames": 3, "mode": "TRUNCATE"}
     assert isinstance(result, dict)
     assert result.get("mode") == "TRUNCATE"
     # CheckpointMode is the Literal alias consumers use for the mode field.

@@ -12,8 +12,11 @@ Trade-offs vs :class:`~trw_memory.storage.sqlite_backend.SQLiteBackend`:
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
+from heapq import nlargest
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -37,6 +40,9 @@ from trw_memory.storage._yaml_row_mapper import (
 from trw_memory.storage.interface import EntryCursor, StorageBackend
 from trw_memory.storage.persistence import lock_for_rmw, read_yaml, write_yaml
 from trw_memory.sync.delta import DeltaTracker
+
+if TYPE_CHECKING:
+    from trw_memory.retrieval.temporal_selection import TemporalSelection
 
 logger = structlog.get_logger(__name__)
 
@@ -105,13 +111,12 @@ class YAMLBackend(StorageBackend):
             )
         return candidate
 
-    def _load_all(self) -> list[MemoryEntry]:
+    def _iter_all(self) -> Iterator[MemoryEntry]:
         """Load every YAML file in the directory.  Silently skips corrupt files."""
-        entries: list[MemoryEntry] = []
         for yaml_file in self._dir.glob("*.yaml"):
             try:
                 data = read_yaml(yaml_file)
-                entries.append(_read_row(yaml_file, data).entry)
+                yield _read_row(yaml_file, data).entry
             except (
                 OSError,
                 StorageError,
@@ -119,7 +124,10 @@ class YAMLBackend(StorageBackend):
                 KeyError,
             ):  # per-item error handling: skip corrupt YAML files, load the rest
                 logger.warning("yaml_backend_skip_corrupt", path=str(yaml_file))
-        return entries
+
+    def _load_all(self) -> list[MemoryEntry]:
+        """Retain the raw-storage materialization API for existing callers."""
+        return list(self._iter_all())
 
     # ------------------------------------------------------------------
     # StorageBackend interface
@@ -295,6 +303,8 @@ class YAMLBackend(StorageBackend):
         status: MemoryStatus | None = None,
         min_importance: float = 0.0,
         namespace: str | None = None,
+        temporal_selection: TemporalSelection | None = None,
+        entry_filter: Callable[[MemoryEntry], bool] | None = None,
     ) -> list[MemoryEntry]:
         """O(N) keyword scan with optional filters.
 
@@ -308,6 +318,8 @@ class YAMLBackend(StorageBackend):
             status: If provided, restrict to this status.
             min_importance: Lower bound on importance (inclusive).
             namespace: If provided, restrict to this namespace.
+            temporal_selection: Optional eligibility-before-limit policy; None
+                preserves raw maintenance visibility.
 
         Returns:
             Up to *top_k* matching entries sorted by importance desc.
@@ -319,33 +331,47 @@ class YAMLBackend(StorageBackend):
         if status is not None:
             status_val = status.value
 
-        results: list[MemoryEntry] = []
-        for entry in self._load_all():
-            # Keyword match
-            entry_status = str(entry.status)
-            tag_text = " ".join(entry.tags).lower()
-            if needle not in entry.content.lower() and needle not in entry.detail.lower() and needle not in tag_text:
-                continue
+        def matches() -> Iterator[MemoryEntry]:
+            for entry in (
+                self._iter_all() if temporal_selection is not None or entry_filter is not None else self._load_all()
+            ):
+                # Keyword match
+                entry_status = str(entry.status)
+                tag_text = " ".join(entry.tags).lower()
+                if (
+                    needle not in entry.content.lower()
+                    and needle not in entry.detail.lower()
+                    and needle not in tag_text
+                ):
+                    continue
 
-            # Status filter
-            if status_val is not None and entry_status != status_val:
-                continue
+                # Status filter
+                if status_val is not None and entry_status != status_val:
+                    continue
 
-            # Importance filter
-            if entry.importance < min_importance:
-                continue
+                # Importance filter
+                if entry.importance < min_importance:
+                    continue
 
-            # Namespace filter
-            if namespace is not None and entry.namespace != namespace:
-                continue
+                # Namespace filter
+                if namespace is not None and entry.namespace != namespace:
+                    continue
 
-            # Tag all-of filter
-            if tags and not set(tags).issubset(set(entry.tags)):
-                continue
+                # Tag all-of filter
+                if tags and not set(tags).issubset(set(entry.tags)):
+                    continue
 
-            results.append(entry)
+                if entry_filter is not None and not entry_filter(entry):
+                    continue
+                yield entry
 
-        # Sort by importance desc, then by updated_at desc
+        if temporal_selection:
+            return temporal_selection.select_ranked(
+                matches(), limit=top_k, rank_key=lambda e: (e.importance, e.updated_at.isoformat(), "")
+            )
+        if entry_filter is not None:
+            return nlargest(top_k, matches(), key=lambda e: (e.importance, e.updated_at.isoformat()))
+        results = list(matches())
         results.sort(key=lambda e: (e.importance, e.updated_at.isoformat()), reverse=True)
         return results[:top_k]
 
@@ -374,6 +400,8 @@ class YAMLBackend(StorageBackend):
         exclude_superseded: bool = False,
         tags: list[str] | None = None,
         after: EntryCursor | None = None,
+        temporal_selection: TemporalSelection | None = None,
+        entry_filter: Callable[[MemoryEntry], bool] | None = None,
     ) -> list[MemoryEntry]:
         """Return entries with optional filters.
 
@@ -383,6 +411,8 @@ class YAMLBackend(StorageBackend):
             min_importance: If > 0.0, only return entries whose importance is
                 >= this value (parity with the SQLite backend's storage-layer
                 pre-filter). Default 0.0 disables the importance filter.
+            temporal_selection: Optional eligibility-before-limit policy; cannot
+                be combined with a raw-order after cursor.
             limit: Maximum entries to return.
             exclude_superseded: When True, exclude entries with a non-null
                 ``invalid_from`` (bi-temporal superseded entries).
@@ -399,6 +429,8 @@ class YAMLBackend(StorageBackend):
             id descending. The id tiebreak makes the order total, which is what
             makes consecutive ``after=`` pages disjoint and complete.
         """
+        if temporal_selection is not None and after is not None:
+            raise ValueError("Temporal selection cannot resume with a raw-order cursor")
         if limit <= 0:
             return []
         status_val: str | None = None
@@ -406,23 +438,34 @@ class YAMLBackend(StorageBackend):
             status_val = status.value
         required_tags = set(tags) if tags else None
 
-        results: list[MemoryEntry] = []
-        for entry in self._load_all():
-            entry_status = str(entry.status)
-            if status_val is not None and entry_status != status_val:
-                continue
-            if namespace is not None and entry.namespace != namespace:
-                continue
-            if min_importance > 0.0 and entry.importance < min_importance:
-                continue
-            if exclude_superseded and entry.invalid_from is not None:
-                continue
-            if required_tags is not None and not required_tags.issubset(set(entry.tags)):
-                continue
-            if after is not None and (entry.updated_at.isoformat(), entry.id) >= (after.updated_at, after.entry_id):
-                continue
-            results.append(entry)
+        def matches() -> Iterator[MemoryEntry]:
+            for entry in (
+                self._iter_all() if temporal_selection is not None or entry_filter is not None else self._load_all()
+            ):
+                entry_status = str(entry.status)
+                if status_val is not None and entry_status != status_val:
+                    continue
+                if namespace is not None and entry.namespace != namespace:
+                    continue
+                if min_importance > 0.0 and entry.importance < min_importance:
+                    continue
+                if exclude_superseded and entry.invalid_from is not None:
+                    continue
+                if required_tags is not None and not required_tags.issubset(set(entry.tags)):
+                    continue
+                if after is not None and (entry.updated_at.isoformat(), entry.id) >= (after.updated_at, after.entry_id):
+                    continue
+                if entry_filter is not None and not entry_filter(entry):
+                    continue
+                yield entry
 
+        if temporal_selection:
+            return temporal_selection.select_ranked(
+                matches(), limit=limit, rank_key=lambda e: (0.0, e.updated_at.isoformat(), e.id)
+            )
+        if entry_filter is not None:
+            return nlargest(limit, matches(), key=lambda e: (e.updated_at.isoformat(), e.id))
+        results = list(matches())
         results.sort(key=lambda e: (e.updated_at.isoformat(), e.id), reverse=True)
         return results[:limit]
 

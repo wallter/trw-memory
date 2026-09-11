@@ -14,7 +14,6 @@ import structlog
 
 from trw_memory.exceptions import DimensionMismatchError
 from trw_memory.lifecycle._utils import days_since_access as _days_since_access
-from trw_memory.lifecycle.scoring import bayesian_calibrate
 from trw_memory.models.config import MemoryConfig
 from trw_memory.retrieval.dense import cosine_similarity
 
@@ -59,6 +58,7 @@ def compute_importance_score(
     *,
     config: MemoryConfig | None = None,
     relevance_hint: float | None = None,
+    reference_time: datetime | None = None,
 ) -> float:
     """Compute a composite importance score for a memory entry.
 
@@ -72,6 +72,7 @@ def compute_importance_score(
         query_embedding: Optional dense query vector for cosine similarity.
         entry_embedding: Optional dense entry vector for cosine similarity.
         config: MemoryConfig for weights and decay settings.
+        reference_time: Captured query instant; omitted retains wall-clock scoring.
 
     Returns:
         Composite importance score in [0.0, 1.0].
@@ -109,23 +110,17 @@ def compute_importance_score(
             relevance = 0.0
 
     # Recency: exponential decay based on days since access
-    today = datetime.now(tz=timezone.utc).date()
+    today = (reference_time or datetime.now(tz=timezone.utc)).date()
     days = _days_since_access(entry, today)
     half_life = cfg.decay_half_life_days
     decay_rate = math.log(2) / half_life if half_life > 0 else 0.0
     recency = math.exp(-decay_rate * days)
 
-    # Importance: prefer the calibrated q-value surface when present. Reads
+    # CORE268: historical lifecycle rewards do not calibrate importance. Reads
     # canonical ``importance`` only — the PRD-CORE-181 FR06 cutover migrated
     # every legacy record, so no dual-read fallback remains here.
     base_importance = float(str(entry.get("importance", 0.5)))
-    q_value = float(str(entry.get("q_value", base_importance)))
-    q_observations = int(str(entry.get("q_observations", 0)))
-    blended_importance = bayesian_calibrate(q_value)
-    if q_observations < 3:
-        weight = q_observations / 3.0
-        blended_importance = (1.0 - weight) * base_importance + weight * blended_importance
-    importance = max(0.0, min(1.0, blended_importance))
+    importance = max(0.0, min(1.0, base_importance))
 
     score = w1 * relevance + w2 * recency + w3 * importance
     return max(0.0, min(1.0, score))
