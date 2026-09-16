@@ -112,9 +112,29 @@ class TestRecallPipelineBasics:
 
     async def test_recall_tag_filter_narrows_results(self, client_with_varied_entries: MemoryClient) -> None:
         """Tag filter restricts results to matching entries."""
-        results = await client_with_varied_entries.recall(query="learning", tags=["pydantic"])
-        for r in results:
-            assert "pydantic" in r["tags"]
+        # The query has to be able to MATCH the tagged entry, or the test measures
+        # nothing. The previous query was "learning", a word absent from the only
+        # pydantic-tagged fixture entry, so the filtered recall was legitimately
+        # empty -- and the bare `for r in results` loop passed over zero results,
+        # hiding that this test had never exercised tag filtering at all.
+        # "learning" reaches several fixture entries; only one of them is tagged
+        # "database", so the tag has something to exclude. Pairing a query with a
+        # tag that cannot co-occur with it -- the previous "learning" + "pydantic"
+        # -- makes the filtered recall legitimately empty and tests nothing.
+        unfiltered = await client_with_varied_entries.recall(query="learning")
+        filtered = await client_with_varied_entries.recall(query="learning", tags=["database"])
+
+        assert filtered, "tag filter returned nothing; narrowing cannot be shown"
+        for r in filtered:
+            assert "database" in r["tags"]
+        # Narrowing, not merely filtering: the unfiltered query must reach at least
+        # one entry that the tag excludes, or "narrows" is untested even when every
+        # returned row carries the tag.
+        assert len(unfiltered) > len(filtered), (
+            f"tag filter did not narrow: {len(unfiltered)} unfiltered vs {len(filtered)} filtered"
+        )
+        excluded = {r["content"] for r in unfiltered} - {r["content"] for r in filtered}
+        assert excluded, "no entry was excluded, so the filter cannot be shown to apply"
 
 
 # ===================================================================

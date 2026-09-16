@@ -23,8 +23,12 @@ class _FakeBackend:
     def _open_and_configure(self, _db_path: Path) -> Any:
         raise self.exc
 
-    def _db_has_data(self, _db_path: Path, *, dbapi: Any, sqlcipher_key_hex: str | None) -> bool:
-        return True
+    #: What the (also-locked) probe reports. ``None`` is UNKNOWN — see
+    #: ``test_lock_contention_with_an_UNKNOWN_probe_is_not_a_wipe``.
+    has_data: bool | None = True
+
+    def _db_has_data(self, _db_path: Path, *, dbapi: Any, sqlcipher_key_hex: str | None) -> bool | None:
+        return self.has_data
 
     def _open_without_integrity_check(self, _db_path: Path, *, dbapi: Any, sqlcipher_key_hex: str | None) -> Any:
         self.open_without_called = True
@@ -85,6 +89,60 @@ def test_lock_contention_with_rows_keeps_non_destructive_open_without_probe(tmp_
     assert integrity_warning is True
     assert recovered is False
     assert recovery_state_path(tmp_path / "memory.db").exists()
+
+
+def test_lock_contention_with_an_UNKNOWN_probe_is_not_a_wipe(tmp_path: Path) -> None:
+    """The defect, end to end: a busy machine used to destroy a populated store.
+
+    ``open_connection_with_recovery`` reaches this branch when the open failed on
+    lock/busy, and it asks ``_db_has_data`` whether there is anything to lose. But
+    under contention the PROBE is locked too, so it returned ``False`` — "no rows"
+    — and the ``else`` branch renamed the live database to ``.corrupt.bak`` and
+    initialised a blank schema.
+
+    The probe now returns ``None`` for lock/busy and the caller tests
+    ``is not False``, so UNKNOWN takes the non-destructive path. This is the arm
+    the previous test could not cover: it hardcoded ``True``, i.e. a probe that
+    succeeded, which is the one case that was never broken.
+    """
+    backend = _FakeBackend(sqlite3.DatabaseError("database is locked"))
+    backend.has_data = None
+
+    conn, integrity_warning, recovered = open_connection_with_recovery(
+        backend,  # type: ignore[arg-type]
+        tmp_path / "memory.db",
+        dbapi=sqlite3,
+        sqlcipher_key_hex=None,
+        recovery_policy="strict",
+        corrupt_backup_keep=5,
+        rebuild_from_cold=True,
+    )
+
+    conn.close()
+    assert backend.recover_called is False, "an UNKNOWN probe under lock contention triggered destructive recovery"
+    assert backend.open_without_called is True
+    assert integrity_warning is True
+    assert recovered is False
+
+
+def test_a_genuinely_empty_store_still_recovers(tmp_path: Path) -> None:
+    """Non-vacuity partner. ``False`` must still reach the recovery path, or the
+    fix would have disabled recovery for every store it is meant to repair."""
+    backend = _FakeBackend(sqlite3.DatabaseError("database is locked"))
+    backend.has_data = False
+
+    open_connection_with_recovery(
+        backend,  # type: ignore[arg-type]
+        tmp_path / "memory.db",
+        dbapi=sqlite3,
+        sqlcipher_key_hex=None,
+        recovery_policy="strict",
+        corrupt_backup_keep=5,
+        rebuild_from_cold=True,
+    )
+
+    assert backend.recover_called is True
+    assert backend.open_without_called is False
 
 
 def test_preflight_classifies_large_db_as_degraded_open(tmp_path: Path) -> None:

@@ -1,132 +1,191 @@
-"""PRD-CORE-195 FR05 — HyPE sibling lifecycle (forget purge, re-store overwrite)."""
+"""PRD-CORE-272: legacy cleanup is namespace-scoped and atomic, never a purge."""
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
 
-pytest.importorskip("sqlite_vec")
-
 from tests.conftest import make_entry
-from tests.test_hype_store import _FakeEmbedder, _ListGenerator
-from trw_memory.client import MemoryClient
+from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 
-@pytest.fixture(autouse=True)
-def _isolate_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "tier-storage"))
+@pytest.fixture
+def backend(tmp_path: Path):
+    pytest.importorskip("sqlite_vec")
+    backend = SQLiteBackend(tmp_path / "legacy.db")
+    assert backend.supports_vectors()
+    yield backend
+    backend.close()
 
 
-def _client(tmp_path: Path, generator: object) -> MemoryClient:
-    client = MemoryClient(
-        "default",
-        mode="local",
-        db_path=tmp_path / "lifecycle.db",
-        question_generator=generator,  # type: ignore[arg-type]
-    )
-    client._config.hype_enabled = True
-    client._get_embedder = lambda: _FakeEmbedder()  # type: ignore[method-assign]
-    return client
+def _seed(backend, parent="P", namespace="default"):
+    backend.store(make_entry(entry_id=parent, namespace=namespace))
+    backend.upsert_vector(parent, [0.1] * 384, namespace=namespace)
+    backend.upsert_vector(f"{parent}#hype0", [0.2] * 384, namespace=namespace)
 
 
-async def test_forget_purges_siblings(tmp_path: Path) -> None:
-    client = _client(tmp_path, _ListGenerator(["a good question about strict mode"]))
+def _snapshot(backend):
+    return {
+        table: backend._conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+        for table in ("memories", "vec_index", "vec_memories")
+    }
+
+
+@pytest.mark.parametrize("parent", ["P", "P%", "P_", "P\\", "café", "P#hype0"])
+def test_cleanup_exact_namespace_membership(backend, parent):
+    _seed(backend, parent)
+    _seed(backend, parent, "other")
+    # A canonical collision in another namespace must NOT block local cleanup.
+    backend.store(make_entry(entry_id=f"{parent}#hype0", namespace="other"))
+    for suffix in ("#hype1", "#hype\u0660", "#hypevictim#hype0"):
+        backend.upsert_vector(parent + suffix, [0.3] * 384, namespace="default")
+    backend.store(make_entry(entry_id=parent + "#hype1"))
+    before = _snapshot(backend)
+    assert backend.hype_sibling_ids(parent, namespace="default") == [parent + "#hype0"]
+    assert backend.delete_hype_siblings(parent, namespace="default") == 1
+    assert backend.delete_hype_siblings(parent, namespace="default") == 0
+    assert backend.vector_exists(parent + "#hype0", namespace="other")
+    for suffix in ("", "#hype1", "#hype\u0660", "#hypevictim#hype0"):
+        assert backend.vector_exists(parent + suffix, namespace="default")
+    assert _snapshot(backend)["memories"] == before["memories"]
+
+
+def test_orphans_untouched_and_namespace_required(backend):
+    backend.upsert_vector("absent#hype0", [0.1] * 384, namespace="default")
+    assert backend.delete_hype_siblings("absent", namespace="default") == 0
+    assert backend.vector_exists("absent#hype0", namespace="default")
+    with pytest.raises(TypeError):
+        backend.delete_hype_siblings("absent")
+
+
+def test_cleanup_failure_rolls_back_and_reopens(backend, monkeypatch):
+    from trw_memory.storage import _vector_ops
+
+    _seed(backend)
+    backend.upsert_vector("P#hype1", [0.3] * 384, namespace="default")
+    before = _snapshot(backend)
+    original = _vector_ops.delete_vector_internal
+    calls = []
+
+    def fail_after_delete(conn, entry_id, namespace, *, allow_unavailable):
+        original(conn, entry_id, namespace, allow_unavailable=allow_unavailable)
+        calls.append(entry_id)
+        raise sqlite3.OperationalError("injected interruption")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(_vector_ops, "delete_vector_internal", fail_after_delete)
+        with pytest.raises(sqlite3.OperationalError, match="interruption"):
+            backend.delete_hype_siblings("P", namespace="default")
+    assert calls == ["P#hype0"]
+    assert _snapshot(backend) == before
+    path = backend._db_path
+    backend.close()
+    reopened = SQLiteBackend(path)
     try:
-        await client.store("content", entry_id="P1")
-        assert client._get_backend().hype_sibling_ids("P1")
-        await client.forget("P1")
-        assert client._get_backend().hype_sibling_ids("P1") == []
+        assert _snapshot(reopened) == before
+        assert reopened.delete_hype_siblings("P", namespace="default") == 2
+        assert reopened.delete_hype_siblings("P", namespace="default") == 0
+        assert _snapshot(reopened)["memories"] == before["memories"]
     finally:
-        await client.close()
+        reopened.close()
 
 
-async def test_restore_overwrites_without_stale_accumulation(tmp_path: Path) -> None:
-    client = _client(tmp_path, _ListGenerator(["question one padded out", "question two padded out"]))
-    try:
-        await client.store("content v1", entry_id="P2")
-        first = set(client._get_backend().hype_sibling_ids("P2"))
-        assert len(first) == 2
-        # Re-store with a generator yielding a SINGLE question → siblings must
-        # be overwritten (purge-then-regenerate), not appended.
-        client._question_generator = _ListGenerator(["only one question now padded"])
-        await client.store("content v2", entry_id="P2")
-        second = client._get_backend().hype_sibling_ids("P2")
-        assert len(second) == 1  # no stale accumulation
-    finally:
-        await client.close()
+def test_query_errors_propagate(backend):
+    _seed(backend)
+    backend._conn.execute("DROP TABLE vec_index")
+    with pytest.raises(sqlite3.OperationalError):
+        backend.hype_sibling_ids("P", namespace="default")
 
 
-async def test_delete_hype_siblings_idempotent(tmp_path: Path) -> None:
-    client = _client(tmp_path, _ListGenerator(["a good question about strict mode"]))
-    try:
-        await client.store("content", entry_id="P3")
-        backend = client._get_backend()
-        removed_first = backend.delete_hype_siblings("P3")
-        removed_second = backend.delete_hype_siblings("P3")
-        assert removed_first >= 1
-        assert removed_second == 0  # idempotent double-delete no-ops
-    finally:
-        await client.close()
-
-
-@pytest.mark.parametrize("parent_id", ["P%", "P_", "P\\"])
-async def test_delete_hype_siblings_treats_parent_like_wildcards_literally(tmp_path: Path, parent_id: str) -> None:
-    client = _client(tmp_path, _ListGenerator(["a good question about strict mode"]))
-    try:
-        backend = client._get_backend()
-        backend.upsert_vector(f"{parent_id}#hype0", [0.0] * 384, namespace="default")
-        backend.upsert_vector("P1#hype0", [0.0] * 384, namespace="default")
-
-        assert backend.hype_sibling_ids(parent_id) == [f"{parent_id}#hype0"]
-        assert backend.delete_hype_siblings(parent_id) == 1
-        assert backend.hype_sibling_ids(parent_id) == []
-        assert backend.hype_sibling_ids("P1") == ["P1#hype0"]
-    finally:
-        await client.close()
-
-
-def test_delete_hype_siblings_noop_without_vectors(tmp_path: Path) -> None:
-    # NFR03: a backend without vec support no-ops, never raises.
+def test_no_vector_capability_is_not_success(tmp_path):
     from trw_memory.storage.yaml_backend import YAMLBackend
 
     backend = YAMLBackend(tmp_path / "yaml")
-    assert backend.delete_hype_siblings("anything") == 0
-    assert backend.hype_sibling_ids("anything") == []
+    assert not backend.supports_vectors()
+    with pytest.raises(NotImplementedError, match="unavailable"):
+        backend.delete_hype_siblings("P", namespace="default")
 
 
-async def test_delete_hype_siblings_preserves_canonical_and_nested_foreign_ids(tmp_path: Path) -> None:
-    client = _client(tmp_path, _ListGenerator(["a good question about strict mode"]))
+def test_direct_storage_helper_accepts_nonreentrant_lock(backend):
+    import threading
+
+    from trw_memory.storage._vector_ops import delete_hype_siblings
+
+    _seed(backend)
+
+    # A lock that rejects reentry makes regression fail, rather than hang pytest.
+    class CheckedLock:
+        def __init__(self):
+            self.lock = threading.Lock()
+
+        def __enter__(self):
+            assert self.lock.acquire(blocking=False), "helper acquired nonreentrant lock twice"
+
+        def __exit__(self, *args):
+            self.lock.release()
+
+    with backend.transaction():
+        assert (
+            delete_hype_siblings(
+                backend._conn, CheckedLock(), vec_available=True, parent_id="P", namespace="default", skip_commit=True
+            )
+            == 1
+        )
+
+
+def test_cleanup_preserves_exact_primary_and_other_namespace_vector_rows(backend):
+    _seed(backend)
+    _seed(backend, namespace="other")
+    before = _snapshot(backend)
+    # Capture the selected row's key; all remaining rows must be byte-identical.
+    selected_rowid = backend._conn.execute(
+        "SELECT rowid FROM vec_index WHERE entry_id = ? AND namespace = ?", ("P#hype0", "default")
+    ).fetchone()[0]
+    assert backend.delete_hype_siblings("P", namespace="default") == 1
+    after = _snapshot(backend)
+    assert after["memories"] == before["memories"]
+    assert len(after["vec_index"]) == len(before["vec_index"]) - 1
+    assert len(after["vec_memories"]) == len(before["vec_memories"]) - 1
+    assert all(row in before["vec_index"] for row in after["vec_index"])
+    assert all(row in before["vec_memories"] for row in after["vec_memories"])
+
+
+def test_vec0_disappearing_cannot_report_successful_cleanup(backend):
+    _seed(backend)
+    before = _snapshot(backend)
+    real = backend._conn
+
+    class MissingVecConnection:
+        def execute(self, sql, *args):
+            if sql.startswith("DELETE FROM vec_memories"):
+                raise sqlite3.OperationalError("no such module: vec0")
+            return real.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    backend._conn = MissingVecConnection()
     try:
-        backend = client._get_backend()
-        embedding = [0.0] * 384
-        backend.store(make_entry(entry_id="foo#hypevictim"))
-        backend.store(make_entry(entry_id="foo#hype0"))
-        backend.upsert_vector("foo#hypevictim", embedding, namespace="default")
-        backend.upsert_vector("foo#hypevictim#hype0", embedding, namespace="default")
-        backend.upsert_vector("foo#hype0", embedding, namespace="default")
-
-        assert backend.hype_sibling_ids("foo") == []
-        assert backend.delete_hype_siblings("foo") == 0
-        assert backend.vector_exists("foo#hypevictim", namespace="default")
-        assert backend.vector_exists("foo#hypevictim#hype0", namespace="default")
-        assert backend.vector_exists("foo#hype0", namespace="default")
+        with pytest.raises(sqlite3.OperationalError, match="no such module: vec0"):
+            backend.delete_hype_siblings("P", namespace="default")
     finally:
-        await client.close()
+        backend._conn = real
+    assert _snapshot(backend) == before
+    assert backend.hype_sibling_ids("P", namespace="default") == ["P#hype0"]
 
 
-async def test_hype_expansion_does_not_overwrite_canonical_numeric_collision(tmp_path: Path) -> None:
-    client = _client(tmp_path, _ListGenerator(["a good question about strict mode"]))
+def test_missing_parent_uses_only_canonical_point_lookup(backend):
+    # Unrelated and orphan vectors cannot turn first insertion into a namespace scan.
+    backend.upsert_vector("absent#hype0", [0.1] * 384, namespace="default")
+    statements = []
+    backend._conn.set_trace_callback(statements.append)
     try:
-        client._config.hype_enabled = False
-        await client.store("canonical collision content", entry_id="foo#hype0")
-        backend = client._get_backend()
-        original = backend.get_stored_embeddings(["foo#hype0"])["foo#hype0"]
-
-        client._config.hype_enabled = True
-        await client.store("parent content", entry_id="foo")
-
-        assert backend.get_stored_embeddings(["foo#hype0"])["foo#hype0"] == original
-        assert backend.hype_sibling_ids("foo") == []
+        assert backend.hype_sibling_ids("absent", namespace="default") == []
     finally:
-        await client.close()
+        backend._conn.set_trace_callback(None)
+    selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
+    assert len(selects) == 1
+    assert "FROM memories WHERE namespace" in selects[0]
+    assert "vec_index" not in selects[0]

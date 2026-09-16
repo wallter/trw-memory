@@ -140,8 +140,12 @@ def test_on_regression_callback_exception_swallowed(tmp_path: Path) -> None:
         raise RuntimeError("boom")
 
     sched = IntegrityScheduler(db, interval_minutes=0, on_regression=_raiser)
-    # Must not raise even though callback raises.
-    sched.run_once()
+    escaped: list[str] = []
+    try:
+        sched.run_once()
+    except Exception as exc:
+        escaped.append(repr(exc))
+    assert escaped == [], f"a buggy on_regression callback escaped run_once: {escaped}"
 
 
 # ---------------------------------------------------------------------------

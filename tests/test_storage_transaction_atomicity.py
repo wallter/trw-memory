@@ -535,6 +535,8 @@ def test_standalone_vector_writes_roll_back_on_commit_failure(tmp_path: Path, op
     embedding = [1.0] * backend._dim
     initially_present = operation != "upsert"
     try:
+        if operation == "delete_hype":
+            backend.store(make_entry(entry_id="P"))
         if initially_present:
             backend.upsert_vector(entry_id, embedding, namespace="default")
 
@@ -548,7 +550,7 @@ def test_standalone_vector_writes_roll_back_on_commit_failure(tmp_path: Path, op
                 elif operation == "delete":
                     backend.delete_vector(entry_id, namespace="default")
                 else:
-                    backend.delete_hype_siblings("P")
+                    backend.delete_hype_siblings("P", namespace="default")
             assert proxy.rolled_back
         finally:
             backend._conn = real_conn

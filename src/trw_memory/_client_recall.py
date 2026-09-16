@@ -95,7 +95,6 @@ async def recall_impl(
     as_of: datetime | None = None,
     include_superseded: bool = False,
     include_graph_expansion: bool = False,
-    query_expansion: str | None = None,
 ) -> list[MemoryResultDict]:
     """Async impl for :meth:`MemoryClient.recall`.
 
@@ -141,21 +140,7 @@ async def recall_impl(
     embedder = client._get_embedder() if query.strip() else None
     query_embedding: list[float] | None = None
     if embedder is not None:
-        exp_text: str | None = query_expansion if query_expansion and query_expansion.strip() else None
-        if exp_text is not None:
-            # HyDE multi-vector: embed both query and hypothetical expansion,
-            # then average. Averaging captures query specificity (BM25 intent)
-            # AND expansion semantics (hypothetical-answer space). This
-            # consistently outperforms using either embedding alone.
-            raw_vec = await asyncio.to_thread(embedder.embed, query)
-            exp_vec = await asyncio.to_thread(embedder.embed, exp_text)
-            if raw_vec is not None and exp_vec is not None:
-                dim = len(raw_vec)
-                query_embedding = [0.5 * (raw_vec[i] + exp_vec[i]) for i in range(dim)]
-            else:
-                query_embedding = raw_vec if raw_vec is not None else exp_vec
-        else:
-            query_embedding = await asyncio.to_thread(embedder.embed, query)
+        query_embedding = await asyncio.to_thread(embedder.embed, query)
 
     async with client._lock:
         backend = client._get_backend()

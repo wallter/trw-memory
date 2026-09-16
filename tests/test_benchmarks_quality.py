@@ -178,6 +178,8 @@ class TestQualityBenchmarkIntegration:
             report = run_benchmarks(sizes=[100], golden_set_path=golden_path)
             violations = check_thresholds(report)
             if not violations:
-                return
+                break
 
-        pytest.fail(f"threshold violations persisted across {_MAX_THRESHOLD_ATTEMPTS} attempts: {violations}")
+        assert violations == [], (
+            f"threshold violations persisted across {_MAX_THRESHOLD_ATTEMPTS} attempts: {violations}"
+        )

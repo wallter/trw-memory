@@ -26,8 +26,6 @@ if TYPE_CHECKING:
     from trw_memory.storage.interface import StorageBackend
 
 __all__ = [
-    "DEFAULT_LIST_LIMIT",
-    "ROLE_TAG_PREFIX",
     "config_for_storage_path",
     "create_backend",
     "create_backend_from_config",
@@ -38,11 +36,6 @@ __all__ = [
     "resolve_backend_location",
 ]
 
-#: Default limit for ``list_entries`` calls across all adapters.
-DEFAULT_LIST_LIMIT: int = 10_000
-
-#: Shared tag prefix for message roles (used by LangChain + LlamaIndex).
-ROLE_TAG_PREFIX: str = "role:"
 _NAMESPACE_METADATA_FILE = "namespace.txt"
 logger = structlog.get_logger(__name__)
 

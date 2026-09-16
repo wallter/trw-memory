@@ -41,6 +41,9 @@ class SQLiteCheckpointVectorMixin:
     def _fresh_connection(self) -> contextlib.AbstractContextManager[None]:
         raise NotImplementedError
 
+    def transaction(self) -> contextlib.AbstractContextManager[Any]:
+        raise NotImplementedError
+
     def checkpoint_wal(self, mode: str = "TRUNCATE") -> CheckpointResult:
         """Checkpoint the owning connection under the backend lock; fail open.
 
@@ -140,16 +143,19 @@ class SQLiteCheckpointVectorMixin:
                 self._conn, self._lock, vec_available=self._vec_available, entry_ids=entry_ids, namespace=namespace
             )
 
-    def hype_sibling_ids(self, parent_id: str) -> list[str]:
+    def hype_sibling_ids(self, parent_id: str, *, namespace: str) -> list[str]:
         with self._fresh_connection():
-            return hype_sibling_ids(self._conn, self._lock, vec_available=self._vec_available, parent_id=parent_id)
+            return hype_sibling_ids(
+                self._conn, self._lock, vec_available=self._vec_available, parent_id=parent_id, namespace=namespace
+            )
 
-    def delete_hype_siblings(self, parent_id: str) -> int:
-        with self._fresh_connection():
+    def delete_hype_siblings(self, parent_id: str, *, namespace: str) -> int:
+        with self.transaction():
             return delete_hype_siblings(
                 self._conn,
                 self._lock,
                 vec_available=self._vec_available,
                 parent_id=parent_id,
+                namespace=namespace,
                 skip_commit=self._skip_commit_depth != 0,
             )

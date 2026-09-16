@@ -118,10 +118,12 @@ from trw_memory.storage._resilient_fetch import (
 
 # Query / list / namespace operations extracted to _query_ops.py
 # (PRD-DIST-245 batch 86).
+from trw_memory.storage._assertion_queries import (
+    entries_with_assertions as _query_ops_entries_with_assertions,
+)
 from trw_memory.storage._namespace_purge import delete_namespace as _namespace_purge_delete
 from trw_memory.storage._query_ops import (
     count as _query_ops_count,
-    entries_with_assertions as _query_ops_entries_with_assertions,
     find_active_by_content as _query_ops_find_active_by_content,
     list_entries as _query_ops_list_entries,
     list_namespaces as _query_ops_list_namespaces,

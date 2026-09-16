@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "trw-memory"
-version = "0.17.0"
+version = "0.18.0"
 description = "Persistent memory engine with hybrid retrieval, tiered storage, and semantic dedup for AI agents"
 readme = "README.md"
 license = "BUSL-1.1"
@@ -34,6 +34,15 @@ dependencies = [
     # cryptography directly in security/encryption.py.
     "cryptography>=50.0.0",
     "httpx>=0.27.0",
+    # PyNaCl backs Ed25519 provenance signing AND verification. It used to be
+    # undeclared -- named only in prose and a deptry ignore -- so no install
+    # command anywhere turned signature verification on. CI installed it bare
+    # and verified properly while every user install silently skipped the
+    # check; `verify_signed` returned the same None that means "verified
+    # cleanly". Required now, and `verify_signed` refuses rather than degrades.
+    # 1.4 MB, 24 wheels incl. manylinux_2_17 x86_64/aarch64 and macOS
+    # universal2, so there is no platform argument for leaving it optional.
+    "pynacl>=1.5.0",
     # pysqlite3-binary ships a recent SQLite (>=3.51 wheels) and is preferred
     # over stdlib sqlite3 to mitigate the WAL-reset bug present in older
     # bundled SQLite versions. The storage._dbapi shim swaps it in at import
@@ -50,10 +59,15 @@ dependencies = [
     "ruamel.yaml>=0.18.0",
     "structlog>=24.0.0",
     "typing-extensions>=4.6.0",
-]
-
-[project.optional-dependencies]
-mcp = [
+    # --- formerly the [mcp] extra; now REQUIRED ---
+    # The package's own console script already depended on it unconditionally:
+    # `cli.py` imports `cli_namespace`, which imports `daemon.client`, which
+    # does a hard module-level `from fastmcp import Client`. So
+    # `pip install trw-memory` shipped a `trw-memory` entry point that raised
+    # ModuleNotFoundError on EVERY invocation while the README presented that
+    # install as supported. `import trw_memory` still worked, which is why it
+    # went unnoticed -- and CI installs `.[dev,vectors,bm25,mcp]`, so a
+    # core-only install was never exercised.
     "fastmcp>=3.2.0,<4.0.0",
     # The floors below pin fastmcp's own transitive deps past their patched
     # advisories (2026-09 dependabot sweep); fastmcp's own version range does
@@ -63,6 +77,8 @@ mcp = [
     "starlette>=1.3.1",  # GHSA-jp82-jpqv-5vv3 / GHSA-82w8-qh3p-5jfq
     "joserfc>=1.6.8",  # GHSA-gg9x-qcx2-xmrh / GHSA-wphv-vfrh-23q5 (pulled via authlib)
 ]
+
+[project.optional-dependencies]
 encryption = ["sqlcipher3>=0.5.0", "keyring>=24.0.0", "cryptography>=50.0.0"]
 embeddings = [
     "sentence-transformers>=2.0.0",
@@ -87,50 +103,9 @@ bm25 = [
     # 3.10-compatible numpy.
     "numpy<2.5",
 ]
-llm = ["anthropic>=0.40.0"]
-langchain = [
-    "langchain-core>=0.3.0",
-    "langsmith>=0.8.18",  # GHSA-f4xh-w4cj-qxq8 (pulled via langchain-core)
-]
-llamaindex = [
-    "llama-index-core>=0.11.0",
-    # llama-index-core's own range does not force these transitive deps past
-    # their patched advisories (2026-09 dependabot sweep).
-    # nltk: fixes 12 of 13 open advisories; GHSA-8mgp-746c-j5xp (model-artifact
-    # pathsec bypass, CVE-2026-81726) has no patched release as of 2026-09-05.
-    # trw-memory never calls nltk directly (llamaindex is a lazily-imported
-    # optional adapter) and does not invoke nltk's model-download APIs, so the
-    # residual risk is accepted and tracked rather than blocking this floor
-    # bump; re-check when upstream ships a fix.
-    "nltk>=3.10.3",
-    "banks>=2.4.5",  # GHSA-x8wg-4xgc-vr54
-    "pillow>=12.3.0",  # 13 advisories across Pillow/pillow casing, all fixed at 12.3.0
-    "setuptools>=83.0.0",  # GHSA-h35f-9h28-mq5c (also pulled via embeddings/torch)
-]
-crewai = [
-    "crewai>=0.74.0",
-    # ChromaDB has NO patched release for any version in the 0.4.17-1.5.9
-    # range (GHSA-36p7-vc44-83pf critical code-injection, CVE-2026-45833;
-    # GHSA-2wm9-hf6c-p5cr and GHSA-xph7-9rjv-w5fr high-severity RBAC/tenant
-    # isolation bypasses) — the earlier belief that pinning below 1.0 avoided
-    # the exposure was incorrect; 0.6.x is affected too. trw-memory's own
-    # code never imports chromadb (only the optional crewai adapter reaches
-    # it, transitively, when a caller opts into CrewAI-backed storage), so
-    # this is a documented accepted risk pending an upstream fix, not a
-    # version bump — see CHANGELOG.md [0.16.2] Security section.
-    "chromadb<1.0",
-    # CrewAI versions compatible with ChromaDB 0.x otherwise resolve to a
-    # LiteLLM release with multiple fixed 2026 advisories.
-    "litellm>=1.84.0",
-    # crewai's own range does not force these transitive deps past their
-    # patched advisories (2026-09 dependabot sweep).
-    "aiohttp>=3.14.3",  # GHSA-cq5v-8q36-5273 / GHSA-mfx4-hv73-q22v / GHSA-mq44-7p77-q5h7
-    "json-repair>=0.60.1",  # GHSA-xf7x-x43h-rpqh
-]
-all-integrations = [
-    "trw-memory[langchain,llamaindex,crewai]",
-]
-all = ["trw-memory[mcp,embeddings,vectors,bm25,llm]"]
+# `mcp` dropped from this alias: it is now a required dependency, so naming
+# it here would reference a nonexistent extra and pip would warn.
+all = ["trw-memory[embeddings,vectors,bm25]"]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",
@@ -192,7 +167,7 @@ exclude = [
 [tool.deptry]
 known_first_party = ["trw_memory"]
 optional_dependencies_dev_groups = ["dev"]
-package_module_name_map = { "llama-index-core" = "llama_index", "langchain-core" = "langchain_core", "sqlcipher3" = "sqlcipher3", "crewai" = "crewai" }
+package_module_name_map = { "sqlcipher3" = "sqlcipher3" }
 
 [tool.deptry.per_rule_ignores]
 # Optional probe: text embeddings can hide a broken torchcodec install during
@@ -200,9 +175,13 @@ package_module_name_map = { "llama-index-core" = "llama_index", "langchain-core"
 DEP001 = ["torchcodec"]
 # Optional extras / self-referential aggregate extras are intentionally not
 # imported in the core package scan.
-DEP002 = ["sqlcipher3", "anthropic", "crewai", "trw-memory"]
-# PyNaCl-backed signing is optional; row provenance can still use cryptography
-# and the chain helpers degrade explicitly when nacl is unavailable.
+DEP002 = ["sqlcipher3", "trw-memory"]
+# `nacl` is the import name for the pynacl distribution, which IS a declared
+# core dependency -- the mapping is what deptry cannot infer, not the absence
+# of a declaration. This ignore previously read "PyNaCl-backed signing is
+# optional ... the chain helpers degrade explicitly", which was the reason the
+# undeclared dependency went unnoticed; verification degraded SILENTLY, not
+# explicitly.
 DEP003 = ["nacl"]
 
 [tool.ruff]

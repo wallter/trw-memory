@@ -279,13 +279,15 @@ class TestFtsSpecialChars:
         assert any(r.id == e.id for r in results)
 
     def test_fts_handles_empty_query(self, backend: SQLiteBackend) -> None:
+        """An empty query matches nothing; it does not error and does not match all.
+
+        The try/except this replaces accepted BOTH outcomes and asserted only
+        ``isinstance(results, list)``, so it passed whether the backend returned
+        nothing, returned every row, or raised. Probed against the real backend:
+        an empty query returns an empty list.
+        """
         backend.store(_entry(content="any content"))
-        # Empty string after quoting becomes '""' — FTS5 may error; should not propagate
-        try:
-            results = backend.search_fts("")
-            assert isinstance(results, list)
-        except Exception:
-            pass  # StorageError is acceptable for empty FTS query
+        assert backend.search_fts("") == []
 
 
 # ---------------------------------------------------------------------------

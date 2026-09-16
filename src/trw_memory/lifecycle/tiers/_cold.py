@@ -27,7 +27,8 @@ from trw_memory.lifecycle.tiers._cold_partition import (
     entry_partition_timestamp as _entry_partition_timestamp,
 )
 from trw_memory.lifecycle.tiers._warm import WarmTierStore
-from trw_memory.storage.persistence import read_yaml, write_yaml
+from trw_memory.storage.persistence import read_yaml as read_yaml
+from trw_memory.storage.persistence import write_yaml
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -276,41 +277,12 @@ class ColdTierStore:
     def cold_remove(self, entry_id: str) -> int:
         """Permanently delete an entry from the cold YAML archive.
 
-        Scans the cold partition tree for any archived YAML whose ``id`` field
-        matches ``entry_id`` and unlinks it. Used by erasure / GDPR
-        ``forget`` flows so a deleted entry cannot survive in the cold tier.
-
-        Failures to stat/read a file are skipped (the file may be mid-write or
-        belong to another entry); unlink failures are logged WARN and the file
-        is counted as *not* removed so the caller can detect incomplete erasure.
-
-        Args:
-            entry_id: Memory entry identifier to erase from cold storage.
-
-        Returns:
-            Count of cold YAML files removed (0 if the entry was not archived).
+        Implementation lives in ``_cold_erasure.cold_remove``; see it for the
+        erasure-visibility contract. Kept here as the tier's public surface.
         """
-        cold_base = self._cold_dir()
-        if not cold_base.exists():
-            return 0
+        from trw_memory.lifecycle.tiers._cold_erasure import cold_remove as _impl
 
-        removed = 0
-        for yaml_file in sorted(cold_base.rglob("*.yaml")):
-            try:
-                data = read_yaml(yaml_file)
-            except (OSError, StorageError):
-                continue
-            if str(data.get("id", "")) != entry_id:
-                continue
-            try:
-                yaml_file.unlink(missing_ok=True)
-            except OSError:
-                logger.warning("cold_remove_unlink_failed", entry_id=entry_id, path=str(yaml_file), exc_info=True)
-                continue
-            self._search_cache.pop(str(yaml_file), None)
-            removed += 1
-            logger.debug("cold_remove", entry_id=entry_id, path=str(yaml_file))
-        return removed
+        return _impl(self._cold_dir(), entry_id, self._search_cache)
 
     def cold_search(
         self,

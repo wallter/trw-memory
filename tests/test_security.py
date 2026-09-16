@@ -450,7 +450,13 @@ class TestBm25FallbackJaccard:
         e1 = self._make_entry("j-match", "python testing patterns")
         e2 = self._make_entry("j-no-match", "completely unrelated xyz abc")
         results = bm25_search("python", [e1, e2, e2], top_k=10)
-        # All returned scores must be positive
+        # The loop alone proved nothing: an empty result set satisfies it
+        # vacuously, which is the same outcome as "the search is broken". Pin
+        # the exclusion itself -- the matching entry is returned, the
+        # zero-overlap one is not -- before checking the scores.
+        returned = {entry_id for entry_id, _score in results}
+        assert "j-match" in returned
+        assert "j-no-match" not in returned
         for _entry_id, score in results:
             assert score > 0.0
 

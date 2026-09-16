@@ -20,6 +20,7 @@ from trw_memory._client_recall_hybrid import try_hybrid_recall as _native_try_hy
 from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocation
 
 import asyncio
+import warnings
 import threading
 import uuid
 from collections.abc import Callable, Coroutine
@@ -32,7 +33,6 @@ import structlog
 from typing_extensions import NotRequired
 
 from trw_memory.embeddings.interface import EmbeddingProvider
-from trw_memory.hype import NoOpQuestionGenerator, QuestionGenerator
 from trw_memory.exceptions import MemoryConnectionError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import Assertion, MemoryEntry
@@ -168,6 +168,9 @@ def _create_local_backend(
     return create_backend_from_config(config, namespace, db_path_override=db_path_override)
 
 
+_RETIRED_UNSET = object()
+
+
 class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixin):
     """High-level async client for the trw-memory system.
 
@@ -204,7 +207,6 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
     _tier_manager: object | None
     _embedder: EmbeddingProvider | None
     _embedder_initialized: bool
-    _question_generator: QuestionGenerator
 
     def __init__(
         self,
@@ -213,7 +215,7 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
         timeout: float = 5.0,
         *,
         db_path: Path | str | None = None,
-        question_generator: QuestionGenerator | None = None,
+        question_generator: object = _RETIRED_UNSET,
     ) -> None:
         """Initialise a MemoryClient with namespace isolation and mode selection.
 
@@ -237,16 +239,14 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
         the queried namespace — used by trw-distill to seed the MCP-read flat
         store at ``<trw_dir>/memory/memory.db`` under ``namespace="default"``.
 
-        ``question_generator`` (PRD-CORE-195) is the optional, injected HyPE
-        hypothetical-question generator. When ``None`` (the default), a
-        :class:`~trw_memory.hype.NoOpQuestionGenerator` is bound so the engine
-        stays LLM-free; HyPE expansion is additionally gated on
-        ``MemoryConfig.hype_enabled`` (default ``False``).
         """
+        if question_generator is not _RETIRED_UNSET:
+            if question_generator is not None:
+                raise TypeError("question_generator: HyPE is retired; remove this argument")
+            warnings.warn("question_generator: HyPE is retired; remove this argument", UserWarning, stacklevel=2)
         from trw_memory._client_lifecycle import init_client as _impl
 
         _impl(self, namespace, mode=mode, timeout=timeout, db_path=db_path)
-        self._question_generator = question_generator or NoOpQuestionGenerator()
 
     def __repr__(self) -> str:
         return f"MemoryClient(namespace={self._namespace!r}, mode={self._resolved_mode!r})"
@@ -397,7 +397,7 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
         as_of: datetime | None = None,
         include_superseded: bool = False,
         include_graph_expansion: bool = False,
-        query_expansion: str | None = None,
+        query_expansion: object = _RETIRED_UNSET,
     ) -> list[MemoryResultDict]:
         """Search memories by keyword query using hybrid retrieval.
 
@@ -408,14 +408,11 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
         Implementation lives in ``_client_recall.recall_impl`` (PRD-DIST-246
         batch 105).
 
-        Args:
-            query_expansion: Optional hypothetical document for HyDE — when
-                provided, the dense embedding uses this text instead of the
-                raw query, while BM25 still searches the original ``query``.
-                Callers that have LLM access can generate a hypothetical
-                answer to the query and pass it here for improved recall on
-                under-specified or abstract queries.
         """
+        if query_expansion is not _RETIRED_UNSET:
+            if query_expansion is not None and not (isinstance(query_expansion, str) and not query_expansion.strip()):
+                raise TypeError("query_expansion: HyDE is retired; remove this argument")
+            warnings.warn("query_expansion: HyDE is retired; remove this argument", UserWarning, stacklevel=2)
         from trw_memory._client_recall import recall_impl as _recall_impl
 
         return await _recall_impl(
@@ -438,7 +435,6 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
             as_of=as_of,
             include_superseded=include_superseded,
             include_graph_expansion=include_graph_expansion,
-            query_expansion=query_expansion,
         )
 
     def _get_embedder(self) -> EmbeddingProvider | None:

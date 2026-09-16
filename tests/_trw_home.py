@@ -48,7 +48,10 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def isolated_trw_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def isolated_trw_home(
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
     """Redirect HOME, XDG_DATA_HOME, and TRW_USER_DIR to isolated tmp dirs.
 
     ``monkeypatch.setenv`` restores the prior value (or absence) automatically

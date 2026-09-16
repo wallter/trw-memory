@@ -19,7 +19,11 @@ from trw_memory.models._config_daemon import _DaemonConfigMixin
 from trw_memory.models._config_lifecycle import _LifecycleConfigMixin
 from trw_memory.models._config_retrieval import _RetrievalConfigMixin
 from trw_memory.models._config_security import _SecurityConfigMixin
-from trw_memory.models._config_sources import _TRWConfigYamlSource
+from trw_memory.models._config_sources import (
+    _check_retired_hype_environment,
+    _check_retired_hype_settings,
+    _TRWConfigYamlSource,
+)
 from trw_memory.models._config_storage import _StorageConfigMixin
 
 __all__ = ["MemoryConfig"]
@@ -137,6 +141,9 @@ class MemoryConfig(
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """Load ``.trw/config.yaml`` after environment variables."""
+        _check_retired_hype_settings(init_settings(), source="constructor")
+        # Inspect source data before Pydantic drops aliases of removed fields.
+        _check_retired_hype_environment(dotenv_settings)
         return (
             init_settings,
             env_settings,

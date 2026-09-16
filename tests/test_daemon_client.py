@@ -34,7 +34,17 @@ from trw_memory.models.config import MemoryConfig
 pytest.importorskip("fastmcp")
 
 _START_DEADLINE_SECONDS = 60.0
-_TEST_IDLE_SECONDS = 15.0
+
+#: The daemon's idle-shutdown window for these tests. Same reasoning as
+#: ``test_cli_namespace``: the daemon loads its embedding model LAZILY, on the
+#: first tool call rather than at boot, so in an environment that has
+#: `sentence-transformers` installed -- which the mirror CI does and a typical
+#: dev venv does not -- that first call pays the model load. Measured at 13.5s
+#: against a warm cache; unbounded against a cold one, where it is a download.
+#: At 15s the daemon shut itself down mid-call and the client reported a
+#: ConnectError against a daemon that had been alive moments earlier, so the
+#: window has to outlast the SLOWEST legitimate first call, not the typical one.
+_TEST_IDLE_SECONDS = 120.0
 
 
 @pytest.fixture

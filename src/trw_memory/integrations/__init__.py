@@ -1,18 +1,20 @@
-"""Framework integration adapters for trw-memory.
+"""Integration adapters for trw-memory.
 
-Provides drop-in adapters for LangChain, LlamaIndex, CrewAI, and a VSCode
-interface contract.  All framework imports are lazy — ``import trw_memory``
-never pulls in any framework dependency.
+Provides the VSCode interface contract plus the adapter factory. Adapter
+imports are lazy — ``import trw_memory`` never pulls an adapter module in.
+
+The LangChain, LlamaIndex and CrewAI adapters were removed as unused surface;
+see CHANGELOG.md [Unreleased] Removed.
 
 Usage::
 
     from trw_memory.integrations import get_adapter, list_available
 
     # Factory auto-detect
-    adapter_cls = get_adapter("langchain")
+    adapter_cls = get_adapter("vscode")
 
-    # Direct import (requires extras)
-    from trw_memory.integrations.langchain import TRWChatMessageHistory
+    # Direct import
+    from trw_memory.integrations.vscode import LocalMemoryAdapter
 """
 
 from __future__ import annotations

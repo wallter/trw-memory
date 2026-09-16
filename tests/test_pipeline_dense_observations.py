@@ -43,7 +43,7 @@ def test_raw_semantic_scores_precede_caps_and_importance(importance_alpha: float
     assert [entry.model_dump() for entry in entries] == before
 
 
-def test_hype_observations_collapse_before_exposure_without_changing_cap() -> None:
+def test_legacy_vectors_are_excluded_before_observation_and_cap() -> None:
     entries = _entries()
     batches: list[tuple[tuple[str, float], ...]] = []
     kwargs = {
@@ -56,14 +56,13 @@ def test_hype_observations_collapse_before_exposure_without_changing_cap() -> No
             "literal": [0.6, 0.8],
             "outside#hype0": [1.0, 0.0],
         },
-        "collapse_hype": True,
         "vector_candidates": 2,
         "top_k": 5,
     }
     baseline = hybrid_search("unrelated", entries, **kwargs)
     observed = hybrid_search("unrelated", entries, dense_observer=batches.append, **kwargs)
     assert observed == baseline
-    assert dict(batches[0]) == pytest.approx({"semantic": 1.0, "literal": 0.6})
+    assert dict(batches[0]) == pytest.approx({"semantic": 0.0, "literal": 0.6})
     assert all("#hype" not in eid for eid, _ in batches[0])
 
 

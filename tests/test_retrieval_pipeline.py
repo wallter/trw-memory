@@ -162,9 +162,15 @@ class TestHybridSearch:
         assert "e1" in [entry.id for entry in results]
 
     def test_hybrid_search_query_empty_string(self) -> None:
+        """An empty query ranks nothing; it must not silently return the corpus.
+
+        ``len(results) >= 0`` is true of every possible return value, including
+        the whole corpus and a list of corrupted entries, so it could only ever
+        fail on an unhandled exception.
+        """
         entries = self._entries()
         results = hybrid_search("", entries, scope=DEFAULT_SCOPE)
-        assert len(results) >= 0
+        assert [entry.id for entry in results] == []
 
 
 class TestHybridSearchDegradation:

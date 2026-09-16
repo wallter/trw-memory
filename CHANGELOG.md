@@ -2,7 +2,120 @@
 
 All notable changes to the TRW Memory package.
 
-## [0.17.0] — Unreleased
+## [Unreleased]
+
+## [0.18.0] — 2026-09-15
+
+### Removed
+
+- **BREAKING — the LangChain, LlamaIndex and CrewAI adapters and four optional
+  extras are gone.** Removed modules: `trw_memory.integrations.langchain`
+  (`TRWChatMessageHistory`), `trw_memory.integrations.llamaindex`
+  (`TRWChatStore`), `trw_memory.integrations.crewai` (`TRWCrewStorage`). Removed
+  extras: `[langchain]`, `[llamaindex]`, `[crewai]`, `[all-integrations]`.
+  `get_adapter("langchain"|"llamaindex"|"crewai")` now raises `ValueError`
+  instead of returning a class, and `list_available()` returns `["vscode"]`.
+  There is no deprecation window: this is unused surface, not a migration. The
+  three adapters were built as outbound integration surface in one feature push
+  and nothing in or out of the tree was ever evidenced using them — no importer
+  anywhere in the monorepo outside the adapters themselves, the factory, and
+  mock-only tests that asserted against locally-defined stubs (so they passed
+  identically whether the frameworks were installed or not). `integrations/`
+  continues to ship the VSCode adapter (`LocalMemoryAdapter`,
+  `VSCodeMemoryInterface`) and the factory.
+  - **Two CVE risk-acceptances are retired rather than deferred.** `[crewai]`
+    pulled `chromadb<1.0`, which has NO patched release anywhere in the
+    0.4.17–1.5.9 range (GHSA-36p7-vc44-83pf critical code injection,
+    CVE-2026-45833; GHSA-2wm9-hf6c-p5cr and GHSA-xph7-9rjv-w5fr RBAC/tenant
+    isolation bypasses), and `[llamaindex]` pulled `nltk`, whose
+    GHSA-8mgp-746c-j5xp model-artifact path bypass (CVE-2026-81726) is likewise
+    unpatched. Both were documented accepted risks in `pyproject.toml`; a
+    published package no longer offers an install path that resolves either one.
+- **The `[llm]` extra (`anthropic>=0.40.0`).** It declared a dependency this
+  package never imported: `anthropic` appears nowhere in `trw_memory` and never
+  did. Consolidation summarises a cluster with `_summarize_cluster_fallback`
+  (longest content), and `lifecycle/consolidation.py` still carries the
+  `# Future: LLM summarization hook point` comments that were the real state of
+  it. `[all]` no longer aliases it and is now
+  `trw-memory[embeddings,vectors,bm25]`. The corresponding false claims in this
+  changelog (`[0.1.0]`), the README, and the trw-memory status/audit/overview
+  docs are annotated as errata rather than deleted. No behaviour changes:
+  consolidation output is byte-identical.
+- HyPE hypothetical-question generation, question-generator exports and dedicated
+  benchmark; HyDE query-document averaging and synthetic sibling score collapse.
+  Remove the retired generator/expansion/collapse arguments and HyPE settings.
+  Neutral legacy inputs warn temporarily; activation and invalid values reject
+  explicitly. Tombstones are removed at the next declared breaking API release
+  after this retirement release, with release-note notice.
+
+### Fixed
+
+- Legacy question-vector cleanup requires a namespace and exact canonical-parent
+  membership, preserves canonical suffix-shaped IDs and other namespaces, and
+  rolls sibling/canonical forget deletion back together on failure. Real SQL
+  errors propagate; missing vector capability is not reported as a purge.
+  No global cleanup or historical schema rewrite is performed. See the README
+  for disposable-snapshot maintenance and the internal cleanup bridge sunset.
+
+- Retired HyPE inputs are checked before environment/dotenv empty-value
+  filtering can hide them. Explicit activation and invalid inputs still fail
+  before client initialization.
+- Strict legacy cleanup propagates runtime vector-index failures instead of
+  falsely reporting deletion. An absent-parent point lookup avoids scanning
+  namespace vectors on ordinary first insertion.
+
+- **A security-invariant gate proved absence by not looking.** For negative assertions
+  (`grep_absent` / `glob_absent`) the result was `len(matching_files) == 0`, and a file the
+  gate could not read never contributed a match — so an unreadable tree reported "pattern
+  correctly absent from 0 file(s)". Four separate routes reached it: an `OSError` on read; a
+  failed directory walk returning `[]`, indistinguishable from "no matches"; an oversized
+  file, disclosed in the evidence string while still counting as proof; and a binary check
+  that caught `OSError` and answered "binary", so "cannot read" dropped the file *before*
+  the read was attempted. Skipped candidates now yield `passed=None` — the state an invalid
+  regex already used — with evidence naming how many were skipped and which. A found match
+  still outranks an unread sibling: a refuted claim stays refuted rather than degrading to
+  unverified.
+
+- **A keyring that could not be READ was treated as one that was EMPTY, and the master key
+  was regenerated over it.** Any `ValueError`/`OSError`/`RuntimeError` from the keyring —
+  including a present-but-malformed payload, where `bytes.fromhex` raised on a key that was
+  sitting right there — reported "no key was ever provisioned". With `auto_generate_key` on
+  (the default) the caller then minted a new 256-bit key and overwrote the entry, leaving
+  every existing encrypted memory permanently undecryptable. The handler also returned
+  rather than continuing, so the legacy fallback accounts were never tried, and the failure
+  was logged at DEBUG — dropped by the default level, so the only record that a user's key
+  had been destroyed did not exist. A typed `MasterKeyUnreadableError` now separates
+  present-but-unreadable from absent; only absent may auto-generate; the legacy accounts are
+  tried; the log is a warning.
+- **`database is locked` during the startup probe was read as "this store has no rows", and
+  the store was wiped.** The probe returned `False` on any `sqlite3.Error`, so the caller's
+  `lock contention AND has data` test came out false on exactly the transient failure it was
+  written to protect against, and took the destructive branch: the live database renamed to
+  `.corrupt.bak` and replaced with a blank schema. `db_has_data` now returns `bool | None`,
+  where `None` means unknown. Deliberately narrow: only lock/busy becomes `None`. A
+  structural failure still returns `False`, because a garbage file genuinely has no readable
+  rows and the recovery path exists for that case — widening it to every `sqlite3.Error`
+  would have disabled recovery for real corruption.
+
+### Changed
+
+- `db_has_data` returns `bool | None` rather than `bool`, and `MasterKeyUnreadableError` is
+  a new public exception.
+
+## [0.17.0] — 2026-09-11
+
+_Published to PyPI 2026-09-11T17:40:34Z from the monorepo tree at `60af35a9ce`._
+
+### Fixed
+
+- **The published wheels no longer ship internal `CLAUDE.md` files.** `pip install`
+  delivered repository-internal agent instructions, including `security/CLAUDE.md`, to
+  every user. Excluded from the wheel build targets.
+- Deduplication retains negative feedback. A merge accumulated helpful assessments while
+  discarding unhelpful ones, so repeatedly deduplicating an entry could only ever improve
+  its standing — the correction signal was the one thing the merge threw away.
+- Consolidation preserves maintenance evidence. Feedback assessments and constraints
+  survive entry replacement instead of being dropped with the replaced entry.
 
 ### Changed
 
@@ -2266,6 +2379,7 @@ the sentinel on their next read, reconnect, and resume.
 - **Tiered storage** — `lifecycle/tiers.py`: hot tier (in-memory LRU), warm tier (sqlite-vec + JSONL sidecar), cold tier (YAML archive). Four automatic transitions: Hot→Warm (TTL/overflow), Warm→Cold (idle+low-impact), Cold→Warm (on access), Cold→Purge (365d+low-impact). Purge audit trail at `.trw/memory/purge_audit.jsonl`.
 - **Scoring engine** — `lifecycle/scoring.py`: Q-learning with EMA updates, Ebbinghaus forgetting curve, Bayesian MACLA calibration. Stanford Generative Agents importance formula: `w1*relevance + w2*recency + w3*importance`.
 - **LLM consolidation** — `lifecycle/consolidation.py`: embedding-based cluster detection (single-linkage agglomerative, pairwise cosine threshold), LLM-powered summarization via `anthropic` SDK (claude-haiku), original entry archival to cold tier with atomic rollback.
+  - **ERRATUM (2026-09-12): the "LLM-powered summarization via `anthropic` SDK (claude-haiku)" clause in the entry above was never true of this package and is left in place only because a changelog is a record.** `anthropic` was imported nowhere in `trw-memory/src` in this release or any later one (`git log -S"anthropic" -- trw-memory/src` returns nothing). Cluster summarization has always been `_summarize_cluster_fallback`, a longest-content heuristic, beside a `# Future: LLM summarization hook point` comment. The sentence was copied from `trw-mcp`'s changelog, where it is accurate — trw-mcp really does call Haiku (`state/consolidation/_summarize.py`). The `[llm]` extra that made the claim look plausible is removed in `[Unreleased]`.
 - **Semantic dedup** — `lifecycle/dedup.py`: three-tier write-time dedup (skip ≥0.95, merge ≥0.85, store <0.85) via cosine similarity. `merge_entries()` with union tags/evidence, max impact, recurrence increment, and `merged_from` audit trail.
 
 #### Knowledge graph

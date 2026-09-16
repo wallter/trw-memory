@@ -113,9 +113,12 @@ class TestBackendUpdateGuardYAMLPath:
         """backend_update_guard with no path attr → nullcontext (line 113)."""
         mock_backend = MagicMock(spec=[])  # no _db_path, no _dir
         ctx = backend_update_guard(mock_backend)
-        # Should function as a nullcontext
-        with ctx:
-            pass
+        assert type(ctx).__name__ == "nullcontext", (
+            "a backend with no path must take no lock at all; a real lock here would "
+            f"serialise unrelated writers, and this returned {type(ctx).__name__}"
+        )
+        with ctx as handle:
+            assert handle is None
 
 
 # ---------------------------------------------------------------------------

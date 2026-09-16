@@ -138,3 +138,104 @@ def test_verify_entry_provenance_requires_real_verify_key() -> None:
     assert verify_entry_provenance(entry, derive_verify_key(key)) is True
     assert verify_entry_provenance(entry, derive_verify_key(SigningKey.generate())) is False
     assert verify_entry_provenance(entry, None) is False
+
+
+# ---------------------------------------------------------------------------
+# Verification must REFUSE, not degrade, when it cannot verify
+# ---------------------------------------------------------------------------
+
+
+def test_verify_signed_REFUSES_when_pynacl_is_absent(tmp_path: Path) -> None:
+    """The caller asked "are these signatures valid?" and we cannot answer.
+
+    Before this, `verify_signed` skipped the signature check and returned
+    ``None`` on a clean hash-chain -- the same value that means "every
+    signature verified cleanly". So a chain carrying FORGED signatures
+    reported clean on any install without PyNaCl, and PyNaCl was declared in
+    no extra at all, so that was every user install. CI installed it bare and
+    verified properly, which is why nothing caught it.
+    """
+    from trw_memory.exceptions import ProvenanceVerifierUnavailableError
+
+    key = SigningKey.generate()
+    chain = tmp_path / "chain.jsonl"
+    append_signed(chain, _entry(1), key)
+
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(prov_mod, "_NACL_AVAILABLE", False)
+        with pytest.raises(ProvenanceVerifierUnavailableError) as excinfo:
+            verify_signed(chain, key.verify_key)
+    finally:
+        monkey.undo()
+
+    # The message must name the remedy, not just the fault.
+    assert "PyNaCl" in str(excinfo.value)
+    assert "verify_key=None" in str(excinfo.value)
+
+
+def test_verify_signed_with_a_TAMPERED_chain_refuses_rather_than_passing(
+    tmp_path: Path,
+) -> None:
+    """The scenario that made this a security bug rather than a papercut.
+
+    A forged entry plus an absent verifier used to produce the clean verdict.
+    It must now be impossible to get `None` back without a signature check
+    having actually run.
+    """
+    from trw_memory.exceptions import ProvenanceVerifierUnavailableError
+
+    key = SigningKey.generate()
+    chain = tmp_path / "chain.jsonl"
+    append_signed(chain, _entry(1), key)
+    # Re-sign the record's content with a DIFFERENT key: hash-links stay intact,
+    # only the signature is wrong. This is exactly what the skipped check covers.
+    wrong = SigningKey.generate()
+    append_signed(chain, _entry(2), wrong)
+
+    # With PyNaCl present the forgery is caught.
+    assert verify_signed(chain, key.verify_key) == "L-002"
+
+    # With PyNaCl absent it must NOT come back clean.
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(prov_mod, "_NACL_AVAILABLE", False)
+        with pytest.raises(ProvenanceVerifierUnavailableError):
+            verify_signed(chain, key.verify_key)
+    finally:
+        monkey.undo()
+
+
+def test_hash_link_only_verification_is_still_allowed_without_a_key(
+    tmp_path: Path,
+) -> None:
+    """Non-vacuity partner.
+
+    Raising on *every* call would satisfy the two tests above while destroying
+    a legitimate use: `verify_key=None` is a valid request to check hash-links
+    only, and it must keep working with or without PyNaCl.
+    """
+    key = SigningKey.generate()
+    chain = tmp_path / "chain.jsonl"
+    append_signed(chain, _entry(1), key)
+
+    assert verify_signed(chain, None) is None
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(prov_mod, "_NACL_AVAILABLE", False)
+        assert verify_signed(chain, None) is None, "hash-link-only verification must not require PyNaCl"
+    finally:
+        monkey.undo()
+
+
+def test_a_GENUINELY_clean_signed_chain_still_returns_none(tmp_path: Path) -> None:
+    """Second non-vacuity partner: None must remain reachable.
+
+    If the fix made `None` unreachable for a signed chain, every caller would
+    see a permanent failure and the check would be worse than the bug.
+    """
+    key = SigningKey.generate()
+    chain = tmp_path / "chain.jsonl"
+    for i in range(3):
+        append_signed(chain, _entry(i), key)
+    assert verify_signed(chain, key.verify_key) is None

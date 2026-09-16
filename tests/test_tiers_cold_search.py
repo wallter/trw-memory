@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -184,3 +185,53 @@ class TestColdPromoteEdgeCases:
         result = mgr.cold_promote("promote-accessed")
         assert result is not None
         assert result["last_accessed_at"] != old_time
+
+
+class TestColdRemoveDoesNotEraseSilently:
+    """An erasure path that skips a file it cannot read must say so.
+
+    ``cold_remove`` returns a count of files removed, and its docstring offers
+    that count as the caller's way to detect incomplete erasure. But a candidate
+    that could not be READ was skipped by a bare ``continue`` with no log at any
+    level — and that file may have held the entry being erased. The caller saw a
+    number that could not express the difference between "not archived here" and
+    "possibly still on disk".
+
+    Reported by a cross-family audit 2026-09-12 as a privacy/erasure defect.
+    """
+
+    def test_an_unreadable_candidate_is_reported_not_swallowed(self, mgr: TierManager) -> None:
+        import structlog
+
+        from trw_memory.exceptions import StorageError
+
+        cold_partition = mgr._cold_dir() / "2026" / "03"
+        cold_partition.mkdir(parents=True, exist_ok=True)
+        (cold_partition / "candidate.yaml").write_text("id: M-target\n", encoding="utf-8")
+
+        with (
+            patch("trw_memory.lifecycle.tiers._cold.read_yaml", side_effect=StorageError("unreadable")),
+            structlog.testing.capture_logs() as logs,
+        ):
+            removed = mgr.cold_remove("M-target")
+
+        assert removed == 0
+        events = {entry.get("event") for entry in logs}
+        assert "cold_remove_unreadable_candidate" in events, "an unreadable erasure candidate was skipped silently"
+        assert "cold_remove_incomplete" in events, "the caller got a count with no signal that erasure is unverified"
+
+    def test_a_readable_tree_erases_without_the_warning(self, mgr: TierManager) -> None:
+        """Non-vacuity partner: the warning must not fire on a normal erasure, or
+        it becomes noise operators learn to ignore."""
+        import structlog
+
+        cold_partition = mgr._cold_dir() / "2026" / "03"
+        cold_partition.mkdir(parents=True, exist_ok=True)
+        (cold_partition / "real.yaml").write_text("id: M-target\ncontent: x\n", encoding="utf-8")
+
+        with structlog.testing.capture_logs() as logs:
+            removed = mgr.cold_remove("M-target")
+
+        assert removed == 1
+        events = {entry.get("event") for entry in logs}
+        assert "cold_remove_incomplete" not in events

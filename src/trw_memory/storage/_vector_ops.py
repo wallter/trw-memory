@@ -78,7 +78,7 @@ def _rollback_standalone_write(conn: Any, *, skip_commit: bool) -> None:
             conn.rollback()
 
 
-def delete_vector_internal(conn: Any, entry_id: str, namespace: str) -> None:
+def delete_vector_internal(conn: Any, entry_id: str, namespace: str, *, allow_unavailable: bool = True) -> None:
     """Remove the ``(namespace, entry_id)`` vector row (no-op if absent).
 
     PRD-CORE-245 FR02/FR03: ``vec_index`` is keyed ``UNIQUE (namespace,
@@ -95,7 +95,7 @@ def delete_vector_internal(conn: Any, entry_id: str, namespace: str) -> None:
         conn.execute("DELETE FROM vec_memories WHERE rowid = ?", (rowid,))
         conn.execute("DELETE FROM vec_index WHERE rowid = ?", (rowid,))
     except sqlite3.Error as exc:
-        if _is_optional_vec_unavailable_error(exc):
+        if allow_unavailable and _is_optional_vec_unavailable_error(exc):
             logger.warning(
                 "vector_index_unavailable",
                 op="delete",
@@ -251,30 +251,32 @@ def hype_sibling_ids(
     *,
     vec_available: bool,
     parent_id: str,
+    namespace: str,
 ) -> list[str]:
-    """Return the stored ``{parent_id}#hype{n}`` sibling ids for *parent_id*.
+    """Enumerate only namespace-owned, noncanonical legacy derived vectors.
 
-    PRD-CORE-195 FR05: enumerates a parent's HyPE siblings via a bounded
-    ``LIKE`` scan on ``vec_index``. Empty list when sqlite-vec is unavailable.
+    Canonical membership, not suffix spelling, establishes ownership. Orphans
+    remain for a future canonical-index rebuild. SQL failures must propagate.
     """
     if not vec_available:
+        raise NotImplementedError("legacy vector cleanup unavailable: sqlite-vec is not available")
+    with lock:
+        return _legacy_sibling_ids(conn, parent_id=parent_id, namespace=namespace)
+
+
+def _legacy_sibling_ids(conn: Any, *, parent_id: str, namespace: str) -> list[str]:
+    """Caller holds the connection lock (and write transaction for deletion)."""
+    if conn.execute("SELECT 1 FROM memories WHERE namespace = ? AND id = ?", (namespace, parent_id)).fetchone() is None:
         return []
-    try:
-        with lock:
-            rows = conn.execute(
-                "SELECT vi.entry_id FROM vec_index vi "
-                "WHERE vi.entry_id LIKE ? ESCAPE '\\' "
-                "AND NOT EXISTS (SELECT 1 FROM memories m WHERE m.id = vi.entry_id)",
-                (_hype_like_pattern(parent_id),),
-            ).fetchall()
-    except sqlite3.Error as exc:  # trw-fail-silent-allow: vec0 being absent is an expected optional-dependency state that degrades to BM25/keyword; a REAL SQL error (corruption, I/O, locked DB) is separated out and surfaced at warning instead of being folded into this empty return
-        if _is_optional_vec_unavailable_error(exc):
-            logger.debug("hype_sibling_ids_query_failed", exc_info=True)
-        else:
-            logger.warning("hype_sibling_ids_query_failed", exc_info=True)
-        return []
-    candidate_ids = [str(row[0]) for row in rows]
-    return [entry_id for entry_id in candidate_ids if parent_of_hype_id(entry_id) == parent_id]
+    rows = conn.execute(
+        "SELECT vi.entry_id FROM vec_index vi "
+        "WHERE vi.namespace = ? AND vi.entry_id LIKE ? ESCAPE '\\' "
+        "AND EXISTS (SELECT 1 FROM memories p WHERE p.id = ? AND p.namespace = vi.namespace) "
+        "AND NOT EXISTS (SELECT 1 FROM memories m "
+        "WHERE m.id = vi.entry_id AND m.namespace = vi.namespace)",
+        (namespace, _hype_like_pattern(parent_id), parent_id),
+    ).fetchall()
+    return [str(row[0]) for row in rows if parent_of_hype_id(str(row[0])) == parent_id]
 
 
 def delete_hype_siblings(
@@ -283,37 +285,26 @@ def delete_hype_siblings(
     *,
     vec_available: bool,
     parent_id: str,
+    namespace: str,
     skip_commit: bool = False,
 ) -> int:
-    """Delete all ``{parent_id}#hype{n}`` sibling vectors for *parent_id*.
+    """Delete namespace-qualified legacy vectors inside the caller's transaction.
 
-    PRD-CORE-195 FR05: idempotent purge used on forget + on UPDATE
-    (purge-then-regenerate). Returns the number of sibling rows removed.
-    No-op (returns 0) when sqlite-vec is unavailable. When ``skip_commit`` is
-    True the deletes batch into the caller's open ``transaction()`` COMMIT —
-    same defer-commit contract as :func:`delete_vector`.
+    The backend wrapper supplies a transaction even for standalone calls, so
+    canonical membership cannot change between enumeration and deletion.
     """
-    if not vec_available:
-        return 0
-    sibling_ids = hype_sibling_ids(conn, lock, vec_available=vec_available, parent_id=parent_id)
-    if not sibling_ids:
-        return 0
-    try:
-        with lock:
+    with lock:
+        if not vec_available:
+            raise NotImplementedError("legacy vector cleanup unavailable: sqlite-vec is not available")
+        sibling_ids = _legacy_sibling_ids(conn, parent_id=parent_id, namespace=namespace)
+        try:
             for sibling_id in sibling_ids:
-                # PRD-CORE-245 open question 5 keeps ``delete_hype_siblings``
-                # addressed by a bare parent id, so each sibling's own
-                # namespace is read back from vec_index before the qualified
-                # delete rather than being guessed.
-                for (sibling_namespace,) in conn.execute(
-                    "SELECT namespace FROM vec_index WHERE entry_id = ?", (sibling_id,)
-                ).fetchall():
-                    delete_vector_internal(conn, sibling_id, str(sibling_namespace))
+                delete_vector_internal(conn, sibling_id, namespace, allow_unavailable=False)
             if not skip_commit:
                 conn.commit()
-    except sqlite3.Error:
-        _rollback_standalone_write(conn, skip_commit=skip_commit)
-        raise
+        except sqlite3.Error:
+            _rollback_standalone_write(conn, skip_commit=skip_commit)
+            raise
     return len(sibling_ids)
 
 

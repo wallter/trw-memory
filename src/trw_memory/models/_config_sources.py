@@ -2,15 +2,71 @@
 
 from __future__ import annotations
 
+import os
+import warnings
 from pathlib import Path
 from typing import Any
 
+from dotenv import dotenv_values
 from pydantic_settings import BaseSettings
-from pydantic_settings.sources import InitSettingsSource
+from pydantic_settings.sources import DotEnvSettingsSource, InitSettingsSource, PydanticBaseSettingsSource
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
+from trw_memory.exceptions import ConfigError
+
 __all__ = ["_TRWConfigYamlSource"]
+
+
+# Temporary input tombstones only; remove at the next breaking API release.
+_RETIRED_HYPE_DEFAULTS = {
+    "hype_enabled": False,
+    "hype_questions_per_entry": 3,
+    "hype_min_question_chars": 8,
+}
+
+
+def _check_retired_hype_settings(raw: dict[str, object], *, source: str, textual: bool = False) -> None:
+    """Check each source before precedence/filtering can hide retired activation."""
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            continue
+        name = key.lower().removeprefix("memory_")
+        if name not in _RETIRED_HYPE_DEFAULTS:
+            continue
+        default = _RETIRED_HYPE_DEFAULTS[name]
+        if textual:
+            neutral = isinstance(value, str) and (
+                value.lower() in {"false", "0"} if default is False else value == str(default)
+            )
+        else:
+            neutral = type(value) is type(default) and value == default
+        if not neutral:
+            raise ConfigError(f"{key} in {source}: HyPE is retired; remove this setting")
+        warnings.warn(
+            f"{key} in {source}: HyPE is retired; remove this neutral legacy setting",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
+def _check_retired_hype_environment(dotenv_source: PydanticBaseSettingsSource) -> None:
+    """Validate raw sources before ignore-empty/precedence discards evidence."""
+    _check_retired_hype_settings(dict(os.environ), source="environment", textual=True)
+    if not isinstance(dotenv_source, DotEnvSettingsSource):
+        return
+    files = dotenv_source.env_file
+    if files is None:
+        return
+    paths = [files] if isinstance(files, (str, os.PathLike)) else files
+    for path in paths:
+        expanded = Path(path).expanduser()
+        if expanded.is_file():
+            _check_retired_hype_settings(
+                dict(dotenv_values(expanded, encoding=dotenv_source.env_file_encoding or "utf-8")),
+                source=f"dotenv {expanded}",
+                textual=True,
+            )
 
 
 def _read_trw_config_yaml() -> dict[str, object]:
@@ -42,6 +98,7 @@ def _first_truthy_item(values: object) -> object | None:
 
 
 def _map_trw_config_yaml_to_memory_settings(raw: dict[str, object]) -> dict[str, Any]:
+    _check_retired_hype_settings(raw, source=".trw/config.yaml")
     mapped: dict[str, Any] = {}
 
     # PRD-SEC-004-FR06: derive sync_enabled (learning-content sync) from the

@@ -6,11 +6,16 @@ from __future__ import annotations
 import importlib
 import sys
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
-from ._test_integrations_support import _make_crewai_mocks, _make_langchain_mocks, _make_llamaindex_mocks, tmp_backend
+from trw_memory.integrations import factory
+
+from ._test_integrations_support import tmp_backend
+
+#: Import path of the module under test, purged and re-imported by UT-FA-08.
+_FACTORY = "trw_memory.integrations.factory"
 
 
 class TestVSCodeInterface:
@@ -75,14 +80,22 @@ class TestVSCodeInterface:
         assert status["entry_count"] == 0
 
     def test_search_uses_instance_namespace_by_default(self, tmp_backend: Any) -> None:
-        """search() defaults to adapter's namespace, not 'default'."""
+        """search() defaults to the adapter's namespace, not 'default'.
+
+        The previous assertion was ``isinstance(results, list)``, which also holds
+        for the empty list a wrong-namespace search returns -- so it could not
+        distinguish the behaviour it names from its exact opposite. The result
+        dicts carry no namespace key, so the claim is pinned differentially: an
+        adapter on another namespace, over the SAME backend, must not see the entry.
+        """
         from trw_memory.integrations.vscode import LocalMemoryAdapter
 
-        adapter = LocalMemoryAdapter(namespace="my-ns", backend=tmp_backend)
-        adapter.store_selection("content", "/f.py", [])
+        mine = LocalMemoryAdapter(namespace="my-ns", backend=tmp_backend)
+        other = LocalMemoryAdapter(namespace="other-ns", backend=tmp_backend)
+        mine.store_selection("content", "/f.py", [])
 
-        results = adapter.search("content")
-        assert isinstance(results, list)
+        assert mine.search("content"), "the storing adapter's own namespace was not searched"
+        assert other.search("content") == [], "search leaked across the namespace boundary"
 
     def test_search_with_explicit_namespace(self, tmp_backend: Any) -> None:
         """search() with explicit namespace overrides default."""
@@ -103,91 +116,6 @@ class TestVSCodeInterface:
 
 class TestFactory:
     """Tests for get_adapter and list_available."""
-
-    def test_get_adapter_langchain_with_dep(self) -> None:
-        """UT-FA-01: get_adapter('langchain') returns adapter when installed."""
-        mocks = _make_langchain_mocks()
-        mock_spec = MagicMock()
-
-        with patch.dict(sys.modules, mocks):
-            for key in list(sys.modules.keys()):
-                if key.startswith("trw_memory.integrations.langchain"):
-                    del sys.modules[key]
-
-            orig_find_spec = importlib.util.find_spec
-
-            def _patched_find_spec(name: str, *a: Any, **kw: Any) -> Any:
-                if name == "langchain_core":
-                    return mock_spec
-                return orig_find_spec(name, *a, **kw)
-
-            with patch("importlib.util.find_spec", side_effect=_patched_find_spec):
-                from trw_memory.integrations.factory import get_adapter
-
-                cls = get_adapter("langchain")
-                assert cls.__name__ == "TRWChatMessageHistory"
-
-    def test_get_adapter_langchain_without_dep(self) -> None:
-        """UT-FA-02: get_adapter('langchain') raises ImportError when missing."""
-        orig_find_spec = importlib.util.find_spec
-
-        def _patched_find_spec(name: str, *a: Any, **kw: Any) -> Any:
-            if name == "langchain_core":
-                return None
-            return orig_find_spec(name, *a, **kw)
-
-        with patch("importlib.util.find_spec", side_effect=_patched_find_spec):
-            from trw_memory.integrations.factory import get_adapter
-
-            with pytest.raises(ImportError, match="pip install"):
-                get_adapter("langchain")
-
-    def test_get_adapter_llamaindex(self) -> None:
-        """UT-FA-03: get_adapter('llamaindex') returns TRWChatStore."""
-        mocks = _make_llamaindex_mocks()
-        mock_spec = MagicMock()
-
-        with patch.dict(sys.modules, mocks):
-            for key in list(sys.modules.keys()):
-                if key.startswith("trw_memory.integrations.llamaindex"):
-                    del sys.modules[key]
-
-            orig_find_spec = importlib.util.find_spec
-
-            def _patched_find_spec(name: str, *a: Any, **kw: Any) -> Any:
-                if name == "llama_index.core":
-                    return mock_spec
-                return orig_find_spec(name, *a, **kw)
-
-            with patch("importlib.util.find_spec", side_effect=_patched_find_spec):
-                from trw_memory.integrations.factory import get_adapter
-
-                cls = get_adapter("llamaindex")
-                assert cls.__name__ == "TRWChatStore"
-
-    def test_get_adapter_crewai(self) -> None:
-        """UT-FA-04: get_adapter('crewai') returns TRWCrewStorage."""
-        mocks = _make_crewai_mocks()
-        mock_spec = MagicMock()
-
-        with patch.dict(sys.modules, mocks):
-            for key in list(sys.modules.keys()):
-                if key.startswith("trw_memory.integrations.crewai"):
-                    del sys.modules[key]
-
-            orig_find_spec = importlib.util.find_spec
-
-            def _patched_find_spec(name: str, *a: Any, **kw: Any) -> Any:
-                if name == "crewai":
-                    return mock_spec
-                return orig_find_spec(name, *a, **kw)
-
-            with patch("importlib.util.find_spec", side_effect=_patched_find_spec):
-                with patch("importlib.metadata.version", return_value="0.74.0"):
-                    from trw_memory.integrations.factory import get_adapter
-
-                    cls = get_adapter("crewai")
-                    assert cls.__name__ == "TRWCrewStorage"
 
     def test_get_adapter_vscode_no_extras(self) -> None:
         """UT-FA-05: get_adapter('vscode') returns LocalMemoryAdapter without extras."""
@@ -210,12 +138,50 @@ class TestFactory:
         available = list_available()
         assert "vscode" in available
 
-    def test_factory_import_no_framework_modules(self) -> None:
-        """UT-FA-08: importing factory doesn't import framework modules."""
-        before = set(sys.modules.keys())
-        importlib.import_module("trw_memory.integrations.factory")
-        after = set(sys.modules.keys())
+    def test_factory_import_does_not_import_any_adapter(self) -> None:
+        """UT-FA-08: importing the factory defers every adapter module.
 
-        new_modules = after - before
-        framework_modules = [m for m in new_modules if any(f in m for f in ["langchain", "llama_index", "crewai"])]
-        assert framework_modules == [], f"Framework modules loaded: {framework_modules}"
+        Previously this asserted that no LangChain/LlamaIndex/CrewAI module was
+        loaded; with those adapters removed that assertion is vacuous. The live
+        invariant is the same one it was protecting -- the factory resolves
+        adapters lazily -- so it is now pinned against the registry itself, which
+        also covers an adapter added later.
+        """
+        adapter_modules = {module for _spec, module, _cls in factory._REGISTRY.values()}
+        assert adapter_modules, "non-vacuity: the registry must name at least one adapter module"
+
+        saved = {name: sys.modules[name] for name in adapter_modules | {_FACTORY} if name in sys.modules}
+        try:
+            for name in saved:
+                del sys.modules[name]
+            importlib.import_module(_FACTORY)
+            still_deferred = adapter_modules - set(sys.modules)
+            assert still_deferred == adapter_modules, (
+                f"factory import eagerly loaded: {sorted(adapter_modules - still_deferred)}"
+            )
+        finally:
+            sys.modules.update(saved)
+
+    def test_a_registered_adapter_with_a_missing_dependency_raises_importerror(self) -> None:
+        """UT-FA-09: the dependency probe still refuses an uninstalled adapter.
+
+        Every shipped adapter is dependency-free, so the probe branch has no live
+        registry entry to exercise it. Driving it through a synthetic entry keeps
+        the seam proven rather than dormant -- and keeps ``get_adapter``'s
+        documented ``ImportError`` contract honest for the next adapter that
+        needs an extra.
+        """
+        with patch.dict(
+            factory._REGISTRY,
+            {"synthetic": ("a_module_that_is_not_installed", "trw_memory.integrations.vscode", "LocalMemoryAdapter")},
+        ):
+            with pytest.raises(ImportError, match="pip install"):
+                factory.get_adapter("synthetic")
+
+            # Control: the same entry resolves once its dependency is importable.
+            with patch.dict(
+                factory._REGISTRY,
+                {"synthetic": ("sys", "trw_memory.integrations.vscode", "LocalMemoryAdapter")},
+            ):
+                assert factory.get_adapter("synthetic").__name__ == "LocalMemoryAdapter"
+                assert "synthetic" in factory.list_available()

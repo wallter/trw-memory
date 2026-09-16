@@ -29,7 +29,7 @@ from typing import Any
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from trw_memory.exceptions import StorageError
+from trw_memory.exceptions import ProvenanceVerifierUnavailableError, StorageError
 from trw_memory.storage.persistence import lock_for_rmw
 
 try:
@@ -378,9 +378,31 @@ def verify_signed(chain_path: Path, verify_key: Any) -> str | None:
     *only if* a verify_key was provided (signed chain was expected).
     A missing file returns ``None`` (empty chain is trivially valid).
 
-    If PyNaCl is unavailable, this degrades to plain :func:`verify` and
-    returns ``None`` on pass / the first broken ``learning_id`` on fail.
+    Raises :class:`ProvenanceVerifierUnavailableError` when a ``verify_key``
+    is supplied but PyNaCl is not importable.
+
+    This function previously DEGRADED in that case: it skipped the signature
+    check and returned ``None`` on a clean hash-chain -- the same value that
+    means "every signature verified". A chain carrying forged or absent
+    signatures therefore reported clean on any install without PyNaCl, and
+    PyNaCl was declared in no extra, so that was every user install while CI
+    installed it bare and verified properly. The write path was always honest
+    (``append_signed`` records ``reason="pynacl_unavailable"`` and stores an
+    empty signature), which made the asymmetry worse: we recorded that we
+    could not sign, then later reported those unsigned entries as verified.
+
+    A verifier that cannot verify must refuse, which is what the sibling
+    package already does -- see ``trw_mcp.security.mcp_registry`` raising
+    ``MCPSecurityUnavailableError``. Passing ``verify_key=None`` is still a
+    valid request for hash-link-only checking and does not raise.
     """
+    if verify_key is not None and not _NACL_AVAILABLE:
+        raise ProvenanceVerifierUnavailableError(
+            "signature verification was requested but PyNaCl is not installed, so the "
+            "signatures in this chain cannot be checked. Refusing to report the chain "
+            "as verified. PyNaCl is a required dependency of trw-memory -- reinstall the "
+            "package, or pass verify_key=None to request hash-link-only verification."
+        )
     if not chain_path.exists():
         return None
 

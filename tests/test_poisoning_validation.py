@@ -15,7 +15,7 @@ from trw_memory.security.poisoning import score_entry_anomaly, validate_entry_pa
 from trw_memory.security.write_gate import guarded_store
 from trw_memory.tools.store import memory_store_impl
 
-from ._test_poisoning_support import make_entry, serialized_size
+from ._test_poisoning_support import make_entry, rejections_for, serialized_size
 
 
 class TestWriteTimeValidation:
@@ -82,7 +82,7 @@ class TestWriteTimeValidation:
             content="eval(user_input)",
             metadata={SYSTEM_CODE_FLAG_KEY: "true"},
         )
-        validate_entry_payload(entry, max_chars=10_240, min_evidence_items_for_verified=1)
+        assert rejections_for(entry) == []
 
     def test_caller_cannot_bypass_with_code_snippet_flagged_tag(self) -> None:
         """Security audit 2026-04-18 H2 regression: a caller-supplied
@@ -236,7 +236,7 @@ class TestSystemPromptPatternIsActionShaped:
         ],
     )
     def test_engineering_prose_accepted(self, content: str, detail: str) -> None:
-        validate_entry_payload(self._entry(content, detail), max_chars=10_240, min_evidence_items_for_verified=1)
+        assert rejections_for(self._entry(content, detail)) == []
 
     def test_verb_far_from_the_noun_does_not_match(self) -> None:
         """The 60-char window keeps an unrelated verb elsewhere in the prose out.
@@ -245,14 +245,15 @@ class TestSystemPromptPatternIsActionShaped:
         'show' and the phrase 'system prompt' would match — which is most prose
         about prompt engineering.
         """
-        validate_entry_payload(
-            self._entry(
-                "We show the token count in the status line",
-                "Separately, the framework doc is re-read into the system prompt each session, "
-                "which is where the cost actually lands.",
-            ),
-            max_chars=10_240,
-            min_evidence_items_for_verified=1,
+        assert (
+            rejections_for(
+                self._entry(
+                    "We show the token count in the status line",
+                    "Separately, the framework doc is re-read into the system prompt each session, "
+                    "which is where the cost actually lands.",
+                )
+            )
+            == []
         )
 
     def test_instruction_in_tags_still_blocked(self) -> None:
@@ -308,7 +309,7 @@ class TestInjectionVerbCoverage:
         ],
     )
     def test_engineering_verbs_near_the_noun_still_accepted(self, content: str) -> None:
-        validate_entry_payload(self._entry(content), max_chars=10_240, min_evidence_items_for_verified=1)
+        assert rejections_for(self._entry(content)) == []
 
     @pytest.mark.parametrize(
         "content",
@@ -331,7 +332,7 @@ class TestInjectionVerbCoverage:
         delete this test and move these two strings into
         `test_verb_synonyms_are_blocked`.
         """
-        validate_entry_payload(self._entry(content), max_chars=10_240, min_evidence_items_for_verified=1)
+        assert rejections_for(self._entry(content)) == []
 
 
 class TestNounSeparatorVariants:
@@ -408,10 +409,8 @@ class TestUnsubstantiatedVerifiedGate:
         assert excinfo.value.failed_fields == ["confidence"]
 
     def test_verified_confidence_with_one_evidence_string_proceeds(self) -> None:
-        validate_entry_payload(
-            self._verified(evidence=["trw-memory/tests/test_poisoning_validation.py::this test"]),
-            max_chars=10_240,
-            min_evidence_items_for_verified=1,
+        assert (
+            rejections_for(self._verified(evidence=["trw-memory/tests/test_poisoning_validation.py::this test"])) == []
         )
 
     def test_whitespace_only_evidence_does_not_substantiate(self) -> None:
@@ -425,22 +424,24 @@ class TestUnsubstantiatedVerifiedGate:
         assert excinfo.value.reason == "unsubstantiated_verified"
 
     def test_assertions_substantiate_without_evidence(self) -> None:
-        validate_entry_payload(
-            self._verified(assertions=[Assertion(type=AssertionType.GLOB_EXISTS, target="pyproject.toml")]),
-            max_chars=10_240,
-            min_evidence_items_for_verified=1,
+        assert (
+            rejections_for(
+                self._verified(assertions=[Assertion(type=AssertionType.GLOB_EXISTS, target="pyproject.toml")])
+            )
+            == []
         )
 
     def test_anchors_substantiate_without_evidence(self) -> None:
-        validate_entry_payload(
-            self._verified(anchors=[Anchor(symbol_name="validate_entry_payload", file="security/poisoning.py")]),
-            max_chars=10_240,
-            min_evidence_items_for_verified=1,
+        assert (
+            rejections_for(
+                self._verified(anchors=[Anchor(symbol_name="validate_entry_payload", file="security/poisoning.py")])
+            )
+            == []
         )
 
     def test_unverified_confidence_never_needs_a_basis(self) -> None:
         """The gate is scoped to the ``verified`` claim, not to every write."""
-        validate_entry_payload(make_entry(), max_chars=10_240, min_evidence_items_for_verified=1)
+        assert rejections_for(make_entry()) == []
 
     def test_min_items_two_demands_two_distinct_artifacts(self) -> None:
         entry = self._verified(evidence=["a real citation"])

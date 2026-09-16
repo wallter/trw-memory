@@ -10,6 +10,75 @@
 
 **[Quick start](#quick-start)** · **[Python API](#memoryclient-recommended)** · **[CLI](#cli)** · **[Benchmarks](#benchmarks)** · **[Security and network behavior](#telemetry--network-behavior)** · **[Development](#development)**
 
+## Retired hypothetical expansion (unreleased)
+
+HyPE question generation and HyDE query expansion are removed. Ordinary
+embeddings, lexical/hybrid recall, code/wiki references and Distill data are not
+removed. Delete imports of `QuestionGenerator` and `NoOpQuestionGenerator`.
+Remove `question_generator`, `query_expansion`, and `collapse_hype` arguments,
+and the `hype_enabled`, `hype_questions_per_entry`, `hype_min_question_chars`
+settings (including `memory_` aliases and environment/YAML entries).
+
+Explicit neutral legacy settings (`False`, `3`, `8`) and API arguments (`None`
+for the generator, `None`/blank expansion, `False` for collapse) warn temporarily;
+activation, nondefault values and invalid types fail before the operation.
+Retired settings no longer appear in emitted configuration. These tombstones
+will disappear in the next declared breaking API release **after** the retirement
+release; that release's notes must announce their removal.
+
+Existing derived question vectors are not knowledge records. Recall ignores them
+by requiring canonical membership, without excluding real IDs that happen to end
+in `#hype0`. Normal update/forget removes only namespace-owned noncanonical
+siblings of the selected canonical parent. Orphan/unknown vector rows remain
+untouched for a future canonical-only index rebuild. No startup purge occurs.
+
+### Optional legacy-vector maintenance on a disposable snapshot
+
+Stop old-version writers first; they can regenerate retired vectors. Preserve a
+verified backup using SQLite's online backup API (the approach in
+`storage/_schema_backup.py`), **not** a copy of a live database without its WAL.
+Do not overwrite canonical writes made since a snapshot to recover optional
+vectors. The retirement itself changes no schema or historical migration.
+
+This recipe is for an **existing disposable unencrypted snapshot**, not a live
+store. Choose its original embedding dimension, namespace and parent IDs
+explicitly; opening `SQLiteBackend` can perform normal schema initialization.
+Encrypted stores require their existing key-aware backup/open procedure instead.
+`apply = False` only enumerates selected vectors; changing it to `True` removes
+those derived vectors atomically. It never deletes canonical records or other
+namespaces. No vectors installed means unavailable, not a successful cleanup.
+
+```python
+from pathlib import Path
+from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+snapshot = Path("/absolute/path/to/disposable-snapshot.db")
+if not snapshot.is_file():
+    raise FileNotFoundError(snapshot)
+namespace = "default"  # explicitly selected, locally authorized namespace
+parents = ["selected-parent-id"]
+apply = False
+backend = SQLiteBackend(snapshot, dim=384)  # use this snapshot's dimension
+try:
+    if not backend.supports_vectors():
+        raise RuntimeError("legacy cleanup unavailable: sqlite-vec required")
+    with backend.transaction():
+        for parent_id in parents:
+            siblings = backend.hype_sibling_ids(parent_id, namespace=namespace)
+            print(parent_id, siblings)
+            if apply:
+                backend.delete_hype_siblings(parent_id, namespace=namespace)
+finally:
+    backend.close()
+```
+
+Cleanup is idempotent; interruption rolls the transaction back. Package rollback
+can reopen the same canonical store; restoring previous optional ranking also
+requires its matching derived-index snapshot. Never discard newer canonical data
+for that purpose. Internal cleanup helpers will be removed once the supported
+store floor rejects pre-retirement stores unless canonical-only vector rebuilding
+has been verified; ordinary orphan-index handling then owns residual derived data.
+
 ## How it fits
 
 trw-memory is the standalone memory engine for [TRW (The Real Work)](https://trwframework.com) — a methodology layer for AI-assisted development that provides stateless agents with a persistent memory layer **designed to enable self-improvement across sessions** via [knowledge compounding](https://trwframework.com/docs). *The outcome effect of cross-session memory on coding tasks is an open empirical question; early SWE-bench single-shot runs (n≥40) produced null. See the [verification docs](https://trwframework.com/docs/verification) for the current methodology and evidence posture.* It works alongside [trw-mcp](https://github.com/wallter/trw-mcp), the MCP server that builds its tooling on this engine.
@@ -37,7 +106,7 @@ Designed as the storage backend for [trw-mcp](https://github.com/wallter/trw-mcp
 - **Remote Sync** -- Publish/fetch learnings across installations with vector clock conflict resolution and SSE live updates
 - **Security** -- AES-256-GCM field encryption, PII detection/redaction, memory poisoning detection (z-score anomaly), RBAC, audit trail
 - **Agent Integration** -- `register_tools()` for any agent framework, `@auto_recall` decorator
-- **Framework Integrations** -- LangChain memory, LlamaIndex reader/writer, CrewAI component, OpenAI-compatible adapter
+- **Framework Integrations** -- VS Code interface contract and an OpenAI-compatible adapter
 - **CLI** -- Full command-line interface for store, recall, search, forget, consolidate, export/import
 - **MCP Tools** -- store, recall, search, consolidate, forget, status, audit, review, wiki-lint, and an explicit code index (index/search/symbol) — exposed via the optional `[mcp]` extra
 - **Dual Storage Backends** -- SQLite with keyword search (primary) + YAML (backup) with one-time migration
@@ -218,7 +287,7 @@ drift quickly.)
 | `embeddings/` | Embedding provider protocol + local sentence-transformers provider |
 | `sync/` | Remote publish/fetch with vector clocks, three-way merge, retry queue, SSE subscriber |
 | `security/` | AES-256-GCM field encryption, PII detection/redaction, poisoning/anomaly defense, RBAC, provenance, audit, trust scoring, quarantine |
-| `integrations/`, `adapters/` | LangChain / LlamaIndex / CrewAI / VS Code integrations and an OpenAI-compatible adapter |
+| `integrations/`, `adapters/` | VS Code integration (plus the adapter factory) and an OpenAI-compatible adapter |
 | `models/`, `namespaces/`, `migration/`, `utils/` | Pydantic models/config, namespace lifecycle + validation + path mapping, YAML→SQLite migration, and shared utilities |
 
 ## API Reference
@@ -424,13 +493,15 @@ python -m pytest tests/test_storage_sqlite_*.py -v
 | `[embeddings]` | sentence-transformers | Dense vector embeddings (all-MiniLM-L6-v2, 384-dim) |
 | `[vectors]` | sqlite-vec | Vector similarity search in SQLite |
 | `[bm25]` | rank-bm25 | BM25 keyword search |
-| `[llm]` | anthropic | LLM-augmented consolidation |
-| `[langchain]` | langchain-core | LangChain memory integration |
-| `[llamaindex]` | llama-index-core | LlamaIndex reader/writer |
-| `[crewai]` | crewai | CrewAI memory component |
-| `[all-integrations]` | langchain + llamaindex + crewai | All framework integrations |
-| `[all]` | mcp + embeddings + vectors + bm25 + llm | Retrieval stack, MCP server, and LLM consolidation |
+| `[all]` | embeddings + vectors + bm25 | The full retrieval stack |
 | `[dev]` | pytest, mypy, ruff, coverage, pip-audit, vulture, deptry | Testing and linting |
+
+There is no `[llm]` extra and no LLM-backed consolidation. Consolidation
+summarises a cluster with a longest-content heuristic; an earlier revision of
+this table advertised `[llm]`/`anthropic` "LLM-augmented consolidation", which
+this package never implemented. The `[langchain]`, `[llamaindex]`, `[crewai]`
+and `[all-integrations]` extras and their adapter modules were removed as unused
+surface — see [CHANGELOG.md](CHANGELOG.md) `[Unreleased]` Removed.
 
 ### Entry Points
 

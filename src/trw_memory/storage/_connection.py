@@ -266,23 +266,51 @@ def check_integrity(
                 conn.close()
 
 
+def is_lock_contention_error(exc: sqlite3.Error) -> bool:
+    """True for SQLite lock/busy errors, not structural corruption.
+
+    Lives here, at the lowest layer that needs it, so ``db_has_data`` and
+    ``open_connection_with_recovery`` cannot drift apart on what "transient"
+    means — they make the same destructive decision together.
+    """
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
+
+
 def db_has_data(
     db_path: Path,
     *,
     dbapi: Any = sqlite3,
     sqlcipher_key_hex: str | None = None,
-) -> bool:
-    """Probe whether the DB at ``db_path`` has any rows in ``memories``.
+) -> bool | None:
+    """Rows in ``memories``? ``True``/``False``, or ``None`` when UNKNOWN.
 
     Non-destructive: this proves rows are readable; it does not prove the
     database is structurally healthy after a failed quick_check.
+
+    ``None`` is the load-bearing third answer and it exists because of one
+    caller. ``open_connection_with_recovery`` asks this on the lock-contention
+    branch, and a busy database makes the PROBE fail too — so a blanket ``False``
+    told that caller "this store has no rows", and it took the destructive branch:
+    rename the live database to ``.corrupt.bak`` and initialise a blank schema. A
+    populated store was wiped because the machine was busy, which is exactly when
+    it is most likely to happen.
+
+    A structural failure still returns ``False``: a garbage file genuinely has no
+    readable rows and the recovery path is designed for it. Only lock/busy — a
+    transient condition that says nothing about content — is ``None``.
+
+    Found by a cross-family audit 2026-09-12.
     """
     conn: Any = None
     try:
         conn = open_probe(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
         count = conn.execute("SELECT count(*) FROM memories").fetchone()[0]
         return bool(count > 0)
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        if is_lock_contention_error(exc):
+            logger.warning("db_has_data_probe_locked", db=str(db_path), error=str(exc))
+            return None
         return False
     finally:
         # Close in finally so an unexpected (non-sqlite) exception cannot leak it.

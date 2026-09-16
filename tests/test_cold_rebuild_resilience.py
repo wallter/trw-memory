@@ -140,7 +140,13 @@ def test_assert_within_cold_dir_accepts_legitimate(tmp_path: Path) -> None:
     inner = cold_base / "2026" / "04" / "ok.yaml"
     inner.parent.mkdir(parents=True)
     inner.write_text("x", encoding="utf-8")
-    _assert_within_cold_dir(cold_base, inner)
+
+    refused: list[str] = []
+    try:
+        _assert_within_cold_dir(cold_base, inner)
+    except ValueError as exc:
+        refused.append(str(exc))
+    assert refused == [], f"the traversal guard rejected a path strictly under the cold root: {refused}"
 
 
 def test_idempotent_double_run(tmp_path: Path) -> None:

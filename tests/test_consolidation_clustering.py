@@ -81,9 +81,11 @@ class TestFindClusters:
             storage.store(_make_entry(f"f{i}", namespace="ns-b"))
         embedder = _make_embedder(vectors=[_V1, _V2, _V3])
         result = find_clusters(storage, embedder, similarity_threshold=0.5, min_cluster_size=3, namespace="ns-a")
-        if result:
-            for entry in result[0]:
-                assert entry.namespace == "ns-a"
+        # `if result:` made "no cluster found" pass the namespace-isolation test,
+        # which is the outcome a broken namespace filter also produces.
+        assert result, "no cluster found; namespace isolation cannot be shown"
+        for entry in result[0]:
+            assert entry.namespace == "ns-a"
 
     def test_max_entries_cap(self) -> None:
         storage = _InMemoryBackend()

@@ -1,65 +1,37 @@
-"""PRD-CORE-195 NFR05 — disabled-arm parity: HyPE off == pre-HyPE behaviour.
+"""Disabled-path ordered baseline captured from f80062857a before retirement."""
 
-Regression pin: with hype_enabled=False, the store path writes zero sibling
-vectors and the recall pipeline runs no collapse pass, so recall id-ordering is
-byte-identical to a run where the collapse code does not exist.
-"""
-
-from __future__ import annotations
-
-from pathlib import Path
+from datetime import datetime, timezone
 
 import pytest
 
-pytest.importorskip("sqlite_vec")
-
-from tests.conftest import make_entry
-from tests.test_hype_store import _FakeEmbedder, _ListGenerator
-from trw_memory.client import MemoryClient
+from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.pipeline import hybrid_search
 
 from ._test_scope_support import DEFAULT_SCOPE
 
 
-async def test_disabled_store_writes_no_siblings(tmp_path: Path) -> None:
-    # Even with a question generator wired, hype_enabled=False stores nothing.
-    client = MemoryClient(
-        "default",
-        mode="local",
-        db_path=tmp_path / "compat.db",
-        question_generator=_ListGenerator(["a perfectly fine question string"]),
-    )
-    client._config.hype_enabled = False
-    client._get_embedder = lambda: _FakeEmbedder()  # type: ignore[method-assign]
-    try:
-        await client.store("Pydantic strict mode content", entry_id="C1")
-        backend = client._get_backend()
-        # No #hype rows at all.
-        assert backend.hype_sibling_ids("C1") == []
-        assert all("#hype" not in vid for vid in backend.existing_vector_ids())
-    finally:
-        await client.close()
-
-
-def test_hybrid_search_collapse_off_matches_default() -> None:
-    # The collapse_hype=False arm (default) must equal a call that never passes
-    # the flag — bit-for-bit id ordering on the same inputs.
+def test_default_and_neutral_tombstone_preserve_frozen_baseline():
     entries = [
-        make_entry(entry_id="a", content="alpha beta gamma"),
-        make_entry(entry_id="b", content="beta gamma delta"),
-        make_entry(entry_id="c", content="gamma delta epsilon"),
+        MemoryEntry(id=i, content=c, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
+        for i, c in [("a", "alpha beta gamma"), ("b", "beta gamma delta"), ("c", "gamma delta epsilon")]
     ]
     baseline = hybrid_search("beta gamma", entries, top_k=10, scope=DEFAULT_SCOPE)
-    with_flag_off = hybrid_search("beta gamma", entries, top_k=10, collapse_hype=False, scope=DEFAULT_SCOPE)
-    assert [e.id for e in baseline] == [e.id for e in with_flag_off]
+    with pytest.warns(UserWarning, match="retired"):
+        neutral = hybrid_search("beta gamma", entries, top_k=10, collapse_hype=False, scope=DEFAULT_SCOPE)
+    assert [e.id for e in baseline] == [e.id for e in neutral] == ["a", "b", "c"]
 
 
-def test_hybrid_search_collapse_off_ignores_sibling_embeddings() -> None:
-    # When collapse_hype is False, even if stored_embeddings carries #hype keys
-    # they are never injected into the dense pool → no synthetic id can surface.
-    entries = [make_entry(entry_id="a", content="alpha beta")]
-    stored = {"a": [0.1] * 384, "a#hype0": [0.1] * 384}
+def test_dense_hybrid_frozen_baseline_preserves_canonical_suffix_ids():
+    entries = [
+        MemoryEntry(id=i, content=c, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
+        for i, c in [("a", "alpha beta gamma"), ("a#hype0", "beta gamma delta"), ("c", "gamma delta epsilon")]
+    ]
     result = hybrid_search(
-        "alpha", entries, stored_embeddings=stored, collapse_hype=False, top_k=10, scope=DEFAULT_SCOPE
+        "beta gamma",
+        entries,
+        top_k=3,
+        scope=DEFAULT_SCOPE,
+        query_embedding=[1.0, 0.0],
+        stored_embeddings={"a": [0.6, 0.8], "a#hype0": [0.8, 0.6], "c": [0.0, 1.0], "a#hype1": [1.0, 0.0]},
     )
-    assert all("#hype" not in e.id for e in result)
+    assert [e.id for e in result] == ["a", "a#hype0", "c"]

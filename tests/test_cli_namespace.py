@@ -28,7 +28,17 @@ from trw_memory.models.config import MemoryConfig
 pytest.importorskip("fastmcp")
 
 _START_DEADLINE_SECONDS = 60.0
-_TEST_IDLE_SECONDS = 20.0
+
+#: The daemon's idle-shutdown window for these tests. It must outlast the
+#: SLOWEST legitimate first call, not the typical one: the daemon loads its
+#: embedding model lazily, on the first tool call rather than at boot, so in an
+#: environment where `sentence-transformers` is installed that call pays the
+#: model load. Measured at 13.5s for a warm cache in a minimal venv -- two
+#: thirds of the old 20s window, and unbounded on a cold one, where the load is
+#: a network download. The window then expired mid-call and the client saw a
+#: ConnectError against a daemon that had shut itself down.
+_TEST_IDLE_SECONDS = 120.0
+
 
 OLD = "project:moved-11111111"
 NEW = "project:moved-22222222"

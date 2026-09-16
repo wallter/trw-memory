@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trw_memory.exceptions import CorruptDatabaseUnsalvageableError
+from trw_memory.storage._connection import is_lock_contention_error
 from trw_memory.storage._recovery import classify_recovery_preflight, write_recovery_state
 from trw_memory.storage._schema import ensure_schema, ensure_vec_table
 
@@ -43,10 +44,10 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
-def _is_lock_contention_error(exc: sqlite3.DatabaseError) -> bool:
-    """Return True for SQLite lock/busy errors, not structural corruption."""
-    message = str(exc).lower()
-    return "locked" in message or "busy" in message
+#: Re-exported from ``_connection`` so this module and ``db_has_data`` cannot
+#: drift on what counts as transient: they make the same destructive decision
+#: together, and the whole defect was the two halves disagreeing.
+_is_lock_contention_error = is_lock_contention_error
 
 
 def open_connection_with_recovery(
@@ -83,8 +84,16 @@ def open_connection_with_recovery(
         else:
             conn = backend._open_and_configure(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
     except sqlite3.DatabaseError as exc:
-        if _is_lock_contention_error(exc) and backend._db_has_data(
-            db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex
+        # `is not False`, deliberately, not a truth test. Under contention the
+        # PROBE is locked too and returns None (UNKNOWN), and the safe reading of
+        # "I could not check" is "assume there is something to lose" — the
+        # degraded open below is non-destructive, while the `else` branch renames
+        # the live database and initialises a blank schema. A plain truth test
+        # sent UNKNOWN down the destructive path, so a populated store was wiped
+        # precisely when the machine was busy.
+        if (
+            _is_lock_contention_error(exc)
+            and backend._db_has_data(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex) is not False
         ):
             logger.warning(
                 "db_integrity_check_deferred_due_to_lock",

@@ -74,12 +74,10 @@ async def forget_impl(
                 ):
                     if candidate.source_identity != actor:
                         continue
+                    if backend.supports_vectors():
+                        backend.delete_hype_siblings(candidate.id, namespace=client._namespace)
                     if backend.delete(candidate.id, namespace=candidate.namespace):
                         local_deleted += 1
-                        # PRD-CORE-195 FR05: purge the parent's HyPE sibling
-                        # vectors so they cannot linger as orphan dense hits.
-                        # Idempotent; no-op when vec support / siblings absent.
-                        backend.delete_hype_siblings(candidate.id)
                         _c.remove_entry_from_tiers(client._config, client._namespace, candidate.id)
                 return local_deleted
 
@@ -136,9 +134,10 @@ async def forget_impl(
         if existing.namespace != client._namespace:
             raise MemoryNotFoundError(f"Memory entry {memory_id!r} not found in namespace {client._namespace!r}")
         remote_id = existing.remote_id
-        backend.delete(memory_id, namespace=client._namespace)
-        # PRD-CORE-195 FR05: purge the parent's HyPE sibling vectors on forget.
-        backend.delete_hype_siblings(memory_id)
+        with backend.transaction():
+            if backend.supports_vectors():
+                backend.delete_hype_siblings(memory_id, namespace=client._namespace)
+            backend.delete(memory_id, namespace=client._namespace)
         _c.remove_entry_from_tiers(client._config, client._namespace, memory_id)
         append_audit_event(
             client._config,

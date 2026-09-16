@@ -32,7 +32,12 @@ except ImportError:  # pragma: no cover
     _CRYPTO_ED25519_AVAILABLE = False
     _CryptoEd25519PrivateKey = Any  # type: ignore[misc,assignment]
 
-from trw_memory.exceptions import ConfigError, KeyRotationError, MasterKeyNotFoundError
+from trw_memory.exceptions import (
+    ConfigError,
+    KeyRotationError,
+    MasterKeyNotFoundError,
+    MasterKeyUnreadableError,
+)
 from trw_memory.models.config import MemoryConfig
 from trw_memory.security.encryption import (
     decrypt_entry_fields,
@@ -128,9 +133,31 @@ def _ensure_secure_key_source(config: MemoryConfig) -> None:
 
 
 def _read_key_from_keyring() -> bytes | None:
-    """Attempt to read the master key from the OS keyring."""
+    """Read the master key from the OS keyring, or ``None`` when it is ABSENT.
+
+    Raises :class:`MasterKeyUnreadableError` when a keyring account could not be
+    read at all, which is emphatically not the same answer.
+
+    Why this distinction is worth an exception type. ``None`` flows back to
+    :func:`_resolve_master_key`, which falls through to ``config.auto_generate_key``
+    — **default True** — and that path calls :func:`store_master_key`, OVERWRITING
+    the keyring entry with a fresh 256-bit key. So a locked keyring, a backend
+    that raises, or a corrupt hex payload used to mean: generate a new key,
+    destroy the old one, and permanently orphan every SQLCipher-encrypted memory
+    the user had. The failure is silent, it happens on the next start, and it is
+    not recoverable — the real key is gone.
+
+    Two smaller bugs rode along and are fixed here too: the handler ``return``ed
+    instead of ``continue``ing, so one bad account aborted the legacy-account
+    fallback before it was tried; and ``bytes.fromhex`` raising ``ValueError`` on
+    a CORRUPT stored value took the same path, which is the worst case of all —
+    the key is right there, merely malformed, and the old behaviour overwrote it.
+
+    Found by a cross-family audit 2026-09-12.
+    """
     if not _KEYRING_AVAILABLE or _keyring is None:
         return None
+    unreadable: list[str] = []
     for account in (_KEY_ACCOUNT, *_LEGACY_KEY_ACCOUNTS):
         try:
             stored: str | None = _keyring.get_password(_SERVICE_NAME, account)
@@ -138,8 +165,19 @@ def _read_key_from_keyring() -> bytes | None:
                 continue
             return bytes.fromhex(stored)
         except (ValueError, OSError, RuntimeError):
-            logger.debug("keyring_read_failed", account=account, exc_info=True)
-            return None
+            # WARNING, not debug: this is the only record that a key source was
+            # present-but-broken, and the default log level drops debug entirely.
+            logger.warning("keyring_read_failed", account=account, exc_info=True)
+            unreadable.append(account)
+            continue
+    if unreadable:
+        raise MasterKeyUnreadableError(
+            "The OS keyring holds a master key entry that could not be read "
+            f"(accounts: {', '.join(unreadable)}). Refusing to continue, because "
+            "auto-generation would overwrite it and permanently orphan every "
+            "memory encrypted under the existing key. Unlock the keyring, or set "
+            "MEMORY_MASTER_KEY to the known key, then retry."
+        )
     return None
 
 

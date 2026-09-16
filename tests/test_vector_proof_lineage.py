@@ -4,9 +4,7 @@ import json
 
 import pytest
 
-from trw_memory._client_hype import expand_hype_siblings, hype_sibling_id
 from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
-from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.curate import NamespaceStores, rename_namespace
 from trw_memory.storage.sqlite_backend import SQLiteBackend
@@ -44,43 +42,29 @@ def test_namespace_move_preserves_bytes_and_only_current_source_proof(backend, p
     assert backend.get_vector_records([entry.id], namespace="project:source") == {}
 
 
-def test_question_generation_binds_question_and_current_parent(backend):
+def test_legacy_question_cleanup_preserves_canonical_proof(backend):
     parent = MemoryEntry(id="parent", content="Summary", detail="Detail")
+    vector = [1.0, 0.0]
+    primary_proof = VectorProvenance.for_vector(space(), "Summary Detail", vector)
     question = "How does this documented behavior work?"
-
-    class Provider:
-        def embed(self, text):
-            assert text == question
-            return [1.0, 0.0]
-
-        def embedding_space(self):
-            return space()
-
-    class Generator:
-        def generate(self, entry):
-            assert entry is parent
-            return [question]
-
+    legacy_proof = VectorProvenance.for_vector(
+        space(), question, vector, input_role="generated-question", parent_text="Summary Detail"
+    )
     with backend.transaction():
         backend.store(parent)
-        expand_hype_siblings(
-            backend=backend,
-            config=MemoryConfig(hype_enabled=True),
-            entry=parent,
-            embedder=Provider(),
-            generator=Generator(),
-        )
-    record = backend.get_vector_records([hype_sibling_id(parent.id, 0)], namespace="default")[
-        hype_sibling_id(parent.id, 0)
-    ]
-    proof = record.provenance
-    assert proof.matches(
+        backend.upsert_vector(parent.id, vector, namespace="default", provenance=primary_proof)
+        backend.upsert_vector("parent#hype0", vector, namespace="default", provenance=legacy_proof)
+    before = backend.get_vector_records([parent.id], namespace="default")
+    record = backend.get_vector_records(["parent#hype0"], namespace="default")["parent#hype0"]
+    assert record.provenance.matches(
         space(), question, record.embedding, input_role="generated-question", parent_text="Summary Detail"
     )
-    assert not proof.matches(
+    assert not record.provenance.matches(space(), question, record.embedding)
+    assert not record.provenance.matches(
         space(), question, record.embedding, input_role="generated-question", parent_text="Changed Detail"
     )
-    assert not proof.matches(space(), question, record.embedding)  # never ordinary document evidence
+    assert backend.delete_hype_siblings(parent.id, namespace="default") == 1
+    assert backend.get_vector_records([parent.id], namespace="default") == before
 
 
 def test_legacy_document_proof_without_parent_field_still_parses():

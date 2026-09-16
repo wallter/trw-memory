@@ -249,7 +249,8 @@ def test_floor_exploration_rate() -> None:
     state = random.getstate()
     random.seed(20260727)
     try:
-        _assert_floor_exploration_rate()
+        exploration_rate = _measure_floor_exploration_rate()
+        assert exploration_rate >= 0.10, f"Exploration rate {exploration_rate:.1%} is below 10% floor"
     finally:
         # Restore rather than leave the global RNG seeded: a fixed seed leaking
         # into later tests would make THEIR randomness deterministic too, hiding
@@ -257,7 +258,7 @@ def test_floor_exploration_rate() -> None:
         random.setstate(state)
 
 
-def _assert_floor_exploration_rate() -> None:
+def _measure_floor_exploration_rate() -> float:
     selector = BanditSelector(tau=25, cold_start_min=3, floor_exploration=0.12)
     arms = ["dominant", "other1", "other2"]
 
@@ -277,8 +278,7 @@ def _assert_floor_exploration_rate() -> None:
         if decision.exploration:
             exploration_count += 1
 
-    exploration_rate = exploration_count / total
-    assert exploration_rate >= 0.10, f"Exploration rate {exploration_rate:.1%} is below 10% floor"
+    return exploration_count / total
 
 
 # ---------------------------------------------------------------------------

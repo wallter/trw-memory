@@ -160,8 +160,14 @@ class TestRbacEnforcement:
     ) -> None:
         release_update = threading.Event()
 
+        # Same reasoning as test_store_does_not_wait_for_remote_publish_completion
+        # below: the property is that store RETURNS BEFORE the background graph
+        # update finishes, so the budget must be a fraction of the block it is
+        # racing, not an absolute wall-clock number that machine load can blow.
+        _SLOW_GRAPH_SECONDS = 2.0
+
         def slow_graph_update(*_args: object, **_kwargs: object) -> dict[str, int]:
-            release_update.wait(timeout=1.0)
+            release_update.wait(timeout=_SLOW_GRAPH_SECONDS)
             return {"similarity_edges": 0, "tag_edges": 0, "consolidation_edges": 0, "cross_validated_projects": 0}
 
         with (
@@ -175,7 +181,7 @@ class TestRbacEnforcement:
             await asyncio.to_thread(wait_for_graph_updates)
 
             assert stored["status"] == "stored"
-            assert elapsed < 0.1
+            assert elapsed < _SLOW_GRAPH_SECONDS / 2
 
     async def test_store_cross_validates_matching_project_entries(
         self,
@@ -299,8 +305,20 @@ class TestRbacEnforcement:
         monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
         client = MemoryClient(namespace="default", mode="local")
 
+        # The property is that `store` RETURNS BEFORE the publish finishes, so the
+        # only honest comparison is against the publish duration itself. The
+        # original form slept 0.2s and asserted elapsed < 0.1 -- 100ms of headroom
+        # for everything store does BESIDES waiting. That is not a measurement of
+        # non-blocking, it is a measurement of machine load: it passes on an idle
+        # box and fails under concurrency, which is exactly when a release gate
+        # runs. Observed failing in a mirror-CI replay while five other jobs were
+        # running on the same host, and passing 3/3 immediately after in isolation.
+        # A whole second of daylight cannot be closed by scheduler noise, and if
+        # store ever did block, elapsed would be >= _SLOW_PUBLISH_SECONDS.
+        _SLOW_PUBLISH_SECONDS = 2.0
+
         def slow_publish_result(*_args: object, **_kwargs: object) -> dict[str, object]:
-            time.sleep(0.2)
+            time.sleep(_SLOW_PUBLISH_SECONDS)
             return {"success": True, "remote_id": "42", "retryable": False}
 
         started = asyncio.get_running_loop().time()
@@ -312,7 +330,7 @@ class TestRbacEnforcement:
         elapsed = asyncio.get_running_loop().time() - started
 
         assert stored["status"] == "stored"
-        assert elapsed < 0.1
+        assert elapsed < _SLOW_PUBLISH_SECONDS / 2
         await client.close()
 
     async def test_store_invalid_platform_url_skips_publish_without_marking_synced(

@@ -64,6 +64,17 @@ class MasterKeyNotFoundError(MemoryError):
     """Raised when no usable master key exists in any configured source."""
 
 
+class MasterKeyUnreadableError(MemoryError):
+    """Raised when a configured key source EXISTS but could not be read.
+
+    Deliberately distinct from :class:`MasterKeyNotFoundError`. "Absent" may be
+    auto-generated over; "unreadable" may never be, because auto-generation
+    overwrites the stored key and every memory encrypted under the old one
+    becomes permanently undecryptable. A locked keyring, a keyring backend that
+    raises, and a corrupt hex payload are all this error, not absence.
+    """
+
+
 class EncryptionUnavailableError(MemoryError):
     """Raised when an encryption-required runtime dependency is unavailable."""
 
@@ -117,10 +128,10 @@ class MemoryQuarantinedError(MemoryError):
 
     It exists because ``guarded_store`` reports a quarantine in its *return value*
     (``stored=False, quarantined=True``) rather than by raising, and a caller
-    whose only return channel is ``None`` cannot pass that on. Three chat adapters
-    discarded that result while their docstrings promised the opposite — "a chat
-    history that silently dropped a turn would leave the caller unable to tell a
-    censored transcript from a complete one". They now raise this.
+    whose only return channel is ``None`` cannot pass that on — a write that
+    silently vanished would leave the caller unable to tell held-for-review from
+    stored. ``guarded_store_or_raise`` is the seam that raises this; the three
+    chat adapters it was introduced for have since been removed as unused.
     """
 
     def __init__(
@@ -199,6 +210,19 @@ class CanaryFixturesMissingError(SecurityDefaultUnresolvableError):
 
 class ProvenanceKeyUnavailableError(SecurityDependencyError):
     """Raised when provenance signing is required but no signing key is available."""
+
+
+class ProvenanceVerifierUnavailableError(SecurityDependencyError):
+    """Raised when signature VERIFICATION was requested but cannot be performed.
+
+    A caller that passes a verify_key is asking "are these signatures valid?".
+    Without PyNaCl that question cannot be answered, and the honest reply is
+    this error -- not the ``None`` that :func:`verify_signed` uses to mean
+    "every hash-link and signature verified cleanly". Returning the clean
+    verdict for an unperformed check let a forged signature pass on any install
+    where PyNaCl happened to be absent, which was every user install: PyNaCl
+    was declared in no extra at all.
+    """
 
 
 class SecurityTelemetryUnavailableError(SecurityDependencyError):

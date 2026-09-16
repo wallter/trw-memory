@@ -5,9 +5,11 @@ and the MCP ``memory_store`` tool (``tools/store``) each call
 :func:`~trw_memory.security.runtime.prepare_entry_for_store` inline before their
 ``backend.store``. The integration adapters and the ``trw-memory import`` CLI did
 not: they called ``backend.store(entry)`` directly, so an entry arriving through
-LangChain / CrewAI / LlamaIndex / the VSCode adapter / a JSON import file skipped
-the injection-pattern gate, the PII scan, the write rate limit, anomaly scoring
-and provenance signing entirely, and was replayed verbatim on every later recall.
+an adapter or a JSON import file skipped the injection-pattern gate, the PII
+scan, the write rate limit, anomaly scoring and provenance signing entirely, and
+was replayed verbatim on every later recall. (Three of the five surfaces that had
+the defect — the LangChain, CrewAI and LlamaIndex adapters — were later removed
+as unused; the VSCode adapter and the import CLI remain.)
 
 :func:`guarded_store` is the shared seam those surfaces now use. It is the ONLY
 supported way to persist a caller-supplied entry from outside ``security/``;
@@ -145,15 +147,14 @@ def guarded_store_or_raise(
     ``guarded_store`` reports a quarantine by returning ``stored=False`` rather
     than raising, which is right for a caller that can surface the distinction
     (the VSCode adapter puts it in ``status``). A caller whose only return channel
-    is ``None`` — the LangChain, CrewAI and LlamaIndex adapters — cannot, and all
-    three discarded the result: a quarantined turn vanished from the transcript
-    while ``add_messages`` returned normally, which is exactly the "censored
-    transcript indistinguishable from a complete one" failure their own docstrings
-    called out as the reason to raise.
+    is ``None`` cannot, and silently dropping a held write there produces a
+    "censored transcript indistinguishable from a complete one".
 
-    This lives here rather than being re-implemented per adapter because three
-    hand-rolled copies of one four-line check is how the original divergence
-    happened (``docs/documentation/wiring-defect-patterns.md`` P10).
+    The three chat adapters that needed this form (LangChain, CrewAI, LlamaIndex)
+    were removed as unused surface, so it currently has no in-tree caller; it is
+    kept as the sanctioned seam for any writer whose return channel cannot express
+    "held", because re-implementing the check per adapter is how the original
+    divergence happened (``docs/documentation/wiring-defect-patterns.md`` P10).
 
     Raises:
         MemoryQuarantinedError: when the entry was held for review.

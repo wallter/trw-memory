@@ -70,9 +70,7 @@ def test_memory_config_composes_every_mixin_field_once() -> None:
 
 def test_recent_fields_live_in_their_owning_mixins() -> None:
     cfg = MemoryConfig()
-    assert cfg.hype_enabled is False
-    assert cfg.hype_questions_per_entry == 3
-    assert cfg.hype_min_question_chars == 8
+    assert not any("hype" in key for key in cfg.model_dump())
     assert cfg.cold_search_cache_max == 1000
     assert cfg.lifecycle_use_fsrs is False
 

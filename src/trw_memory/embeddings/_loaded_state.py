@@ -24,7 +24,8 @@ def dependency_versions() -> dict[str, str] | None:
                 return None
             versions[name] = loaded
         return versions
-    except importlib.metadata.PackageNotFoundError:  # trw-fail-silent-allow: None is the typed unknown-identity signal; an unidentifiable runtime must not qualify a vector, so this fails closed
+    except importlib.metadata.PackageNotFoundError:
+        # trw-fail-silent-allow: None is the typed unknown-identity signal; an unidentifiable runtime must not qualify a vector, so this fails closed
         return None
 
 
@@ -97,5 +98,6 @@ def loaded_state_digest(model: object) -> str | None:
             if (tensor._version, str(tensor.dtype), tuple(tensor.shape)) != stamp:
                 return None
         return digest.hexdigest() if total_bytes else None
-    except (AttributeError, TypeError, ValueError, RuntimeError, OverflowError):  # trw-fail-silent-allow: None is the typed unknown-identity signal -- a digest that cannot be computed must not be treated as a match
+    except (AttributeError, TypeError, ValueError, RuntimeError, OverflowError):
+        # trw-fail-silent-allow: None is the typed unknown-identity signal -- a digest that cannot be computed must not be treated as a match
         return None

@@ -249,8 +249,10 @@ class TestLockForRmw:
         with lock_for_rmw(target):
             pass
         lock_file = tmp_path / "data.yaml.lock"
-        # Lock file may or may not remain — just verify the context exits cleanly
-        # and no exception is raised (file existence is an impl detail)
+        # Advisory-lock pattern: lock_for_rmw releases the flock in its `finally`
+        # but never unlinks the sentinel, so a concurrent holder's open handle is
+        # never invalidated. Unlinking on release is the classic lock-file race.
+        assert lock_file.exists()
 
     def test_creates_parent_dirs_for_lock(self, tmp_path: Path) -> None:
         target = tmp_path / "sub" / "deep" / "data.yaml"

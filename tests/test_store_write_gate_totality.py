@@ -2,7 +2,9 @@
 
 Five shipped write surfaces (the LangChain / CrewAI / LlamaIndex / VSCode
 adapters and the ``trw-memory import`` CLI) each called ``backend.store(entry)``
-directly, so caller-supplied content reached the store without the injection
+directly — the three chat adapters have since been removed as unused surface, so
+only the VSCode adapter and the CLI remain to anchor below. Caller-supplied
+content reached the store without the injection
 gate, PII scan, anomaly scoring or provenance signature that
 ``prepare_entry_for_store`` applies. Fixing those five call sites does not stop a
 sixth adapter from being written the same way, so the durable fix is this test:
@@ -48,7 +50,7 @@ JUSTIFIED_INTERNAL_STORES: dict[tuple[str, str], str] = {
         "backend_internal: the default bulk-write fallback fans out to this "
         "backend's own store(); gating here would double-gate every caller."
     ),
-    ("lifecycle/consolidation.py", "_restore_originals"): (
+    ("lifecycle/_consolidation_rollback.py", "_restore_originals"): (
         "rewrite_of_persisted_entry: rolls a failed consolidation back by "
         "re-writing the exact entries it had just read out of the store."
     ),
@@ -345,16 +347,28 @@ class TestStoreGateTotality:
         assert rotation.in_security_package
         assert rotation not in _bypasses(store_calls)
 
-    def test_repaired_write_surfaces_are_no_longer_bypasses(self, store_calls: list[StoreCall]) -> None:
-        """Attribution anchor: reverting any adapter puts it back in this list."""
+    def test_repaired_write_surfaces_still_route_through_the_seam(self, store_calls: list[StoreCall]) -> None:
+        """Attribution anchor: reverting either surface fails here by name.
+
+        This used to read ``repaired & bypasses == set()`` over five ``(module,
+        qualname)`` keys. That could not fail: a surface repaired by DELEGATING to
+        ``guarded_store`` no longer contains a ``.store(...)`` call site at all,
+        so the scan never produces its key and the intersection was empty for
+        reasons unrelated to the repair. (Three of the five keys named modules
+        that have since been removed outright, which would have hidden it
+        further.) The check is re-keyed on the evidence that does exist: each
+        surviving surface delegates to the seam, and neither appears as a bypass.
+        """
         repaired = {
-            ("integrations/langchain.py", "TRWChatMessageHistory.add_messages"),
-            ("integrations/crewai.py", "TRWCrewStorage.save"),
-            ("integrations/llamaindex.py", "TRWChatStore.add_message"),
-            ("integrations/vscode.py", "LocalMemoryAdapter.store_selection"),
-            ("cli_storage.py", "handle_import"),
+            "integrations/vscode.py": "LocalMemoryAdapter.store_selection",
+            "cli_storage.py": "handle_import",
         }
-        assert repaired & {call.key for call in _bypasses(store_calls)} == set()
+        bypass_modules = {call.module for call in _bypasses(store_calls)}
+        for module, qualname in repaired.items():
+            source = (SRC_ROOT / module).read_text(encoding="utf-8")
+            assert f"def {qualname.split('.')[-1]}(" in source, f"{module} no longer defines {qualname}"
+            assert "guarded_store(" in source, f"{module} stopped routing writes through the store gate"
+            assert module not in bypass_modules, f"{module} is back on the bypass list"
 
 
 class TestScannerContracts:

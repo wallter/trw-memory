@@ -58,12 +58,44 @@ class TestRankByUtilityEdgePaths:
 
 
 class TestRecordRecallAccessEmptyIds:
-    def test_empty_entry_ids_is_noop(self) -> None:
-        """Empty entry_ids list → early return, no backend call."""
+    def test_empty_entry_ids_makes_no_backend_call(self) -> None:
+        """The docstring always said "no backend call"; now the test does too.
+
+        It previously asserted ``backend.count() == 0`` on a store that was empty
+        before the call, which is true whether or not the early return exists:
+        ``increment_recall_access`` only issues ``UPDATE ... WHERE id IN ()`` and
+        never inserts, so a complete inversion of the guard left the assertion
+        green. Flagged by a cross-family audit 2026-09-12 as satisfying the
+        static detector without testing the branch.
+
+        Recording the call is what actually inverts.
+        """
         backend = SQLiteBackend(Path(":memory:"))
+        calls: list[tuple[list[str], object]] = []
+
+        def _spy(entry_ids: list[str], *, accessed_at: object = None) -> None:
+            calls.append((list(entry_ids), accessed_at))
+
         try:
-            # No entries stored, empty list should not raise
+            backend.increment_recall_access = _spy  # type: ignore[method-assign, assignment]
             record_recall_access(backend, [])
+            assert calls == [], "an empty id list still reached the backend"
+        finally:
+            backend.close()
+
+    def test_a_nonempty_list_does_reach_the_backend(self) -> None:
+        """Non-vacuity partner: the spy must be capable of recording a call, or
+        the assertion above passes for the wrong reason."""
+        backend = SQLiteBackend(Path(":memory:"))
+        calls: list[tuple[list[str], object]] = []
+
+        def _spy(entry_ids: list[str], *, accessed_at: object = None) -> None:
+            calls.append((list(entry_ids), accessed_at))
+
+        try:
+            backend.increment_recall_access = _spy  # type: ignore[method-assign, assignment]
+            record_recall_access(backend, ["M-1"])
+            assert [ids for ids, _ in calls] == [["M-1"]]
         finally:
             backend.close()
 

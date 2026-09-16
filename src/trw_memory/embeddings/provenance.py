@@ -105,7 +105,8 @@ class VectorProvenance:
     def matches_vector(self, embedding: Sequence[float]) -> bool:
         try:
             return len(embedding) == self.space.dimensions and vector_digest(embedding) == self.vector_sha256
-        except (ValueError, TypeError):  # trw-fail-silent-allow: a vector that cannot be digested does not MATCH this provenance; False is the correct answer to the question asked, and it fails closed toward unqualified
+        except (ValueError, TypeError):
+            # trw-fail-silent-allow: a vector that cannot be digested does not MATCH this provenance; False is the correct answer to the question asked, and it fails closed toward unqualified
             return False
 
     def matches(
@@ -142,7 +143,8 @@ class VectorProvenance:
             if not isinstance(space, dict):
                 return None
             return cls(space=EmbeddingSpace(**space), **value)
-        except (TypeError, ValueError, RecursionError):  # trw-fail-silent-allow: None IS the typed unqualified signal here -- the docstring's contract is that malformed records are never repaired or inferred, and unqualified vectors keep keyword fallback
+        except (TypeError, ValueError, RecursionError):
+            # trw-fail-silent-allow: None IS the typed unqualified signal here -- the docstring's contract is that malformed records are never repaired or inferred, and unqualified vectors keep keyword fallback
             return None
 
 
@@ -165,7 +167,8 @@ def provider_embedding_space(provider: object) -> EmbeddingSpace | None:
         return None
     try:
         space = descriptor()
-    except (OSError, ValueError, RuntimeError, TypeError):  # trw-fail-silent-allow: embedding_space() is an opt-in extension; a provider that cannot describe its space is unqualified, which is the same outcome as not implementing it
+    except (OSError, ValueError, RuntimeError, TypeError):
+        # trw-fail-silent-allow: embedding_space() is an opt-in extension; a provider that cannot describe its space is unqualified, which is the same outcome as not implementing it
         return None
     return space if isinstance(space, EmbeddingSpace) else None
 
@@ -192,5 +195,6 @@ def generation_provenance_kwargs(
                 space, text, embedding, input_role=input_role, parent_text=parent_text
             )
         }
-    except (ValueError, TypeError):  # trw-fail-silent-allow: {} means no provenance was bound, so the vector stays unqualified and keeps keyword fallback -- inventing a descriptor here is the failure this gate exists to prevent
+    except (ValueError, TypeError):
+        # trw-fail-silent-allow: {} means no provenance was bound, so the vector stays unqualified and keeps keyword fallback -- inventing a descriptor here is the failure this gate exists to prevent
         return {}

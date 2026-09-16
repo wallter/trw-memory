@@ -24,7 +24,6 @@ import asyncio
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
 
-from trw_memory._client_hype import expand_hype_siblings
 from trw_memory.embeddings.provenance import generation_provenance_kwargs
 from trw_memory.exceptions import MemoryNotFoundError, SchemaValidationError, StorageError
 from trw_memory.graph import schedule_graph_update
@@ -247,6 +246,8 @@ async def store_impl(
         # exception triggers a single ROLLBACK — no manual compensating delete.
         try:
             with backend.transaction():
+                if backend.supports_vectors():
+                    backend.delete_hype_siblings(entry.id, namespace=entry.namespace)
                 backend.store(entry)
                 if embedding is not None:
                     backend.upsert_vector(
@@ -255,17 +256,6 @@ async def store_impl(
                         namespace=entry.namespace,
                         **generation_provenance_kwargs(embedder, f"{entry.content} {entry.detail}", embedding),
                     )
-                # PRD-CORE-195 FR03/FR05: generate + store HyPE sibling vectors
-                # inside the SAME transaction (purge-then-regenerate on UPDATE).
-                # Gated on hype_enabled; fail-open so the canonical row + primary
-                # vector always commit even if generation/embedding raises.
-                expand_hype_siblings(
-                    backend=backend,
-                    config=client._config,
-                    entry=entry,
-                    embedder=embedder,
-                    generator=client._question_generator,
-                )
         except Exception as exc:
             raise StorageError(f"failed to persist entry+vector for {entry.id!r}; transaction rolled back") from exc
         try:

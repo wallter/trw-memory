@@ -153,7 +153,10 @@ def test_live_wal_sidecars_are_0600_under_permissive_umask(tmp_path: Path) -> No
 def test_in_memory_db_does_not_raise() -> None:
     """The :memory: path has no on-disk file to chmod and must not raise."""
     backend = SQLiteBackend(Path(":memory:"))
-    backend.close()
+    try:
+        assert backend.count() == 0, "an in-memory backend must come up usable, not merely constructed"
+    finally:
+        backend.close()
 
 
 @_POSIX_ONLY
@@ -171,7 +174,13 @@ def test_chmod_failure_is_swallowed(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(mod.os, "chmod", _selective)
     db_path = tmp_path / "memory.db"
     backend = SQLiteBackend(db_path)  # must not raise
-    backend.close()
+    try:
+        # Swallowing the chmod must not also cost the store: the backend is
+        # usable and the file is there, just without the tightened mode.
+        assert backend.count() == 0
+        assert db_path.exists()
+    finally:
+        backend.close()
 
 
 @pytest.mark.parametrize("suffix", ["", "-wal", "-shm"])

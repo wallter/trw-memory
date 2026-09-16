@@ -451,11 +451,36 @@ def test_mark_dirty_existing_entry_increments_seq(tmp_path: Path) -> None:
     backend.close()
 
 
-def test_mark_dirty_nonexistent_entry_is_noop(tmp_path: Path) -> None:
-    """mark_dirty on a missing entry returns early without error (line 76)."""
+def test_mark_dirty_nonexistent_entry_leaves_real_entries_alone(tmp_path: Path) -> None:
+    """mark_dirty on a missing entry returns early without error (line 76).
+
+    The assertion used to be ``get_dirty_entries(backend) == []`` against a store
+    that had never held a row, which is trivially true and says nothing about the
+    guard. A cross-family audit flagged it 2026-09-12: query an empty table and
+    you get false assurance that the early return was responsible for the zero.
+
+    Seeding a real entry first makes the dirty set a meaningful measurement —
+    it distinguishes "the missing id was skipped" from "nothing was tracked".
+    """
     backend = SQLiteBackend(tmp_path / "test.db")
-    DeltaTracker.mark_dirty("DOES-NOT-EXIST", backend, namespace="default")
-    backend.close()
+    try:
+        backend.store(MemoryEntry(id="M-present", content="already here"))
+        before = backend.get("M-present", namespace="default")
+        assert before is not None
+        # A freshly stored entry is legitimately dirty — it has never been synced.
+        # The claim is that the missing id changes NOTHING, so the measurement is a
+        # before/after comparison, not an emptiness check. Writing it the other way
+        # round is what produced the original vacuous assertion.
+        dirty_before = sorted(entry.id for entry in DeltaTracker.get_dirty_entries(backend))
+
+        DeltaTracker.mark_dirty("DOES-NOT-EXIST", backend, namespace="default")
+
+        after = backend.get("M-present", namespace="default")
+        assert after is not None
+        assert after.sync_seq == before.sync_seq, "a missing id bumped an unrelated entry's sync_seq"
+        assert sorted(entry.id for entry in DeltaTracker.get_dirty_entries(backend)) == dirty_before
+    finally:
+        backend.close()
 
 
 def test_get_dirty_entries_without_lock(tmp_path: Path) -> None:

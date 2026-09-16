@@ -190,7 +190,8 @@ def capture_runtime_identity(
             }
         )
         return hashlib.sha256(manifest.encode()).hexdigest(), RuntimeGuard(model, objects, dimensions, settings)
-    except (AttributeError, TypeError, ValueError, RuntimeError, OverflowError):  # trw-fail-silent-allow: None is the typed unknown-identity signal; no identity means no qualified provenance, which is the fail-closed direction
+    except (AttributeError, TypeError, ValueError, RuntimeError, OverflowError):
+        # trw-fail-silent-allow: None is the typed unknown-identity signal; no identity means no qualified provenance, which is the fail-closed direction
         return None
 
 
@@ -206,5 +207,6 @@ def runtime_identity_matches(model: object, dimensions: int, guard: object) -> b
             and all(current is old for current, old in zip(objects, guard.objects, strict=True))
             and _settings(model, dimensions, objects) == guard.settings_json
         )
-    except (AttributeError, TypeError, ValueError, RuntimeError, OverflowError):  # trw-fail-silent-allow: False means "not provably the same runtime", which forces re-derivation -- the safe direction for a lifetime guard
+    except (AttributeError, TypeError, ValueError, RuntimeError, OverflowError):
+        # trw-fail-silent-allow: False means "not provably the same runtime", which forces re-derivation -- the safe direction for a lifetime guard
         return False

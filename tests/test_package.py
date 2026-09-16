@@ -158,10 +158,8 @@ def test_all_exports_complete() -> None:
         "MemoryQuarantinedError",
         "MemoryNotFoundError",
         "MemoryStatus",
-        "NoOpQuestionGenerator",
         "PIIBlockError",
         "PoisoningError",
-        "QuestionGenerator",
         "RateLimitError",
         "SchemaValidationError",
         "StorageError",
@@ -267,25 +265,35 @@ def test_pyproject_declares_current_optional_extras_and_scripts() -> None:
     scripts = project["scripts"]
     assert isinstance(scripts, dict)
 
+    # `mcp` is deliberately absent: it was folded into [project.dependencies]
+    # because the console script hard-imports fastmcp. See
+    # test_fastmcp_is_a_REQUIRED_dependency_not_an_extra.
+    # `llm`, `langchain`, `llamaindex`, `crewai` and `all-integrations` are
+    # deliberately absent: the `anthropic` SDK was never imported anywhere in
+    # this package (consolidation summarises with a longest-content heuristic),
+    # and the three framework adapters were removed with zero evidenced
+    # consumers. Their removal also retired the chromadb and nltk CVE
+    # risk-acceptances. See CHANGELOG.md [Unreleased] Removed.
     assert set(optional) == {
-        "mcp",
         "encryption",
         "embeddings",
         "vectors",
         "bm25",
-        "llm",
-        "langchain",
-        "llamaindex",
-        "crewai",
-        "all-integrations",
         "all",
         "dev",
     }
-    assert optional["all"] == ["trw-memory[mcp,embeddings,vectors,bm25,llm]"]
-    assert optional["all-integrations"] == ["trw-memory[langchain,llamaindex,crewai]"]
-    assert "chromadb<1.0" in optional["crewai"]
-    assert "litellm>=1.84.0" in optional["crewai"]
-    assert "fastmcp>=3.2.0,<4.0.0" in optional["mcp"]
+    assert optional["all"] == ["trw-memory[embeddings,vectors,bm25]"]
+    # The retired extras must not come back by name without a deliberate edit
+    # here: each one either shipped a dependency nothing imported or pulled a
+    # package with an unpatched advisory into a public install.
+    for retired in ("llm", "langchain", "llamaindex", "crewai", "all-integrations"):
+        assert retired not in optional, f"the [{retired}] extra was removed; re-adding it needs a PRD"
+    declared = "\n".join(str(value) for value in optional.values())
+    assert "chromadb" not in declared, "chromadb has no patched release for GHSA-36p7-vc44-83pf"
+    assert "litellm" not in declared
+    assert "anthropic" not in declared
+    # fastmcp is REQUIRED now, not an extra -- the console script hard-imports it.
+    assert "fastmcp>=3.2.0,<4.0.0" in project["dependencies"]
     assert scripts["trw-memory"] == "trw_memory.cli:main"
     assert scripts["trw-memory-server"] == "trw_memory.server:main"
 
@@ -309,17 +317,15 @@ def test_pyproject_deptry_config_keeps_static_audit_signal_focused() -> None:
 
     assert deptry["known_first_party"] == ["trw_memory"]
     assert deptry["optional_dependencies_dev_groups"] == ["dev"]
-    assert deptry["package_module_name_map"] == {
-        "llama-index-core": "llama_index",
-        "langchain-core": "langchain_core",
-        "sqlcipher3": "sqlcipher3",
-        "crewai": "crewai",
-    }
+    assert deptry["package_module_name_map"] == {"sqlcipher3": "sqlcipher3"}
 
     per_rule = deptry["per_rule_ignores"]
     assert isinstance(per_rule, dict)
     assert per_rule["DEP001"] == ["torchcodec"]
-    assert per_rule["DEP002"] == ["sqlcipher3", "anthropic", "crewai", "trw-memory"]
+    # `anthropic` and `crewai` left with the extras that declared them; the
+    # self-referential `trw-memory[...]` aggregate and the optional sqlcipher3
+    # driver are the only remaining unimported declarations.
+    assert per_rule["DEP002"] == ["sqlcipher3", "trw-memory"]
     assert per_rule["DEP003"] == ["nacl"]
 
 
@@ -590,3 +596,71 @@ def test_requirements_lock_has_no_stale_self_pin() -> None:
         "requirements.lock pins trw-memory to a frozen git commit; "
         "use an editable path reference (`-e .`) instead so it does not drift."
     )
+
+
+def test_retired_hypothetical_generation_exports_and_benchmark_absent():
+    import importlib
+
+    import trw_memory
+
+    assert not hasattr(trw_memory, "QuestionGenerator")
+    assert not hasattr(trw_memory, "NoOpQuestionGenerator")
+    with pytest.raises(ImportError):
+        importlib.import_module("trw_memory.hype")
+    assert not (PACKAGE_ROOT / "benchmarks/bench_hype.py").exists()
+
+
+# ---------------------------------------------------------------------------
+# The console script must be importable using DECLARED dependencies only
+# ---------------------------------------------------------------------------
+
+
+def test_the_console_script_entry_point_imports() -> None:
+    """`pip install trw-memory` shipped a `trw-memory` command that could not run.
+
+    `cli.py` imports `cli_namespace`, which imports `daemon.client`, which does
+    a hard module-level `from fastmcp import Client`. fastmcp was in the `[mcp]`
+    extra, so the entry point raised ModuleNotFoundError on EVERY invocation of
+    a core-only install while the README presented that install as supported.
+    `import trw_memory` still worked, which is why it went unnoticed.
+
+    This imports the actual module named by `[project.scripts]` rather than
+    asserting on a dependency list, so it fails for a NEW undeclared hard
+    import too, not only for the one we just fixed.
+    """
+    import importlib
+
+    import tomllib
+
+    manifest = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+    scripts = manifest["project"]["scripts"]
+    assert scripts, "non-vacuity: the package must declare at least one console script"
+
+    for name, target in scripts.items():
+        module_path = target.split(":", 1)[0]
+        try:
+            importlib.import_module(module_path)
+        # try/except inside the loop: one entry point per iteration, and a
+        # per-script failure message is clearer than a batched one. (PERF203 is
+        # not an enabled rule here, so this needs no suppression.)
+        except ImportError as exc:
+            raise AssertionError(
+                f"console script `{name}` points at `{module_path}`, which cannot be "
+                f"imported: {exc}. Every import reachable from an entry point must be "
+                f"satisfied by [project.dependencies], never by an extra."
+            ) from exc
+
+
+def test_fastmcp_is_a_REQUIRED_dependency_not_an_extra() -> None:
+    """Pins the decision so the import above cannot quietly break again.
+
+    Moving fastmcp back into an extra would restore a broken console script,
+    and the import test alone would not say why.
+    """
+    import tomllib
+
+    manifest = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+    required = " ".join(manifest["project"]["dependencies"])
+    assert "fastmcp" in required, "fastmcp must be a required dependency"
+    extras = manifest["project"].get("optional-dependencies", {})
+    assert "mcp" not in extras, "the [mcp] extra was folded into the required set"

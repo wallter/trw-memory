@@ -109,7 +109,12 @@ class TestVerifyDefaults:
             patch.object(cfg, "quarantine_db_path", str(quarantine_db)),
             patch.object(cfg, "provenance_signing_key_path", str(signing_key)),
         ):
-            verify_defaults(cfg)
+            rejected: list[str] = []
+            try:
+                verify_defaults(cfg)
+            except Exception as exc:
+                rejected.append(repr(exc))
+        assert rejected == [], f"verify_defaults rejected a config whose paths all resolve: {rejected}"
 
     def test_verify_defaults_rejects_signing_key_symlink(self, tmp_path: Path) -> None:
         canary_dir = tmp_path / "fixtures"

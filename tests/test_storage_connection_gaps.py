@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import structlog.testing
 
 from trw_memory.storage._connection import (
     apply_open_pragmas,
@@ -27,9 +28,11 @@ class TestApplyOpenPragmasVerify:
         """verify=False never logs WAL/sync warnings."""
         conn = sqlite3.connect(str(tmp_path / "test.db"))
         try:
-            apply_open_pragmas(conn, verify=False)
+            with structlog.testing.capture_logs() as logs:
+                apply_open_pragmas(conn, verify=False)
         finally:
             conn.close()
+        assert [entry for entry in logs if entry.get("log_level") == "warning"] == []
 
     def test_verify_true_wal_not_enabled_logs_warning(self) -> None:
         """verify=True + WAL result not 'wal' → warning logged (line 57)."""
@@ -255,17 +258,46 @@ class TestDbHasData:
         result = db_has_data(db_path)
         assert result is False
 
-    def test_connect_error_returns_false(self, tmp_path: Path) -> None:
-        """sqlite3.Error on connect → returns False."""
+    def test_a_locked_probe_is_unknown_not_empty(self, tmp_path: Path) -> None:
+        """The defect this test used to assert as correct.
+
+        It was ``test_connect_error_returns_false`` and it used the literal error
+        ``locked``. ``open_connection_with_recovery`` asks ``db_has_data`` on its
+        lock-contention branch, and under contention the PROBE is locked too — so
+        ``False`` told that caller "this store has no rows" and it took the
+        destructive branch: rename the live database to ``.corrupt.bak`` and
+        initialise a blank schema. A populated store was wiped because the machine
+        was busy, which is exactly when it is most likely to happen.
+
+        Found by a cross-family audit 2026-09-12.
+        """
         db_path = tmp_path / "test.db"
 
         with patch(
             "trw_memory.storage._connection.connect",
-            side_effect=sqlite3.OperationalError("locked"),
+            side_effect=sqlite3.OperationalError("database is locked"),
         ):
             result = db_has_data(db_path)
+        assert result is None
+        assert result is not False, (
+            "False is the value that sends open_connection_with_recovery down the "
+            "destructive branch; UNKNOWN must never be spelled that way"
+        )
 
-        assert result is False
+    def test_a_structural_connect_error_is_still_false(self, tmp_path: Path) -> None:
+        """Non-vacuity partner, and the boundary of the fix.
+
+        Only lock/busy is UNKNOWN. A genuine structural failure has no readable
+        rows and the recovery path is designed for it, so widening the tri-state
+        to every ``sqlite3.Error`` would disable recovery for real corruption.
+        """
+        db_path = tmp_path / "test.db"
+
+        with patch(
+            "trw_memory.storage._connection.connect",
+            side_effect=sqlite3.DatabaseError("file is not a database"),
+        ):
+            assert db_has_data(db_path) is False
 
 
 # ---------------------------------------------------------------------------

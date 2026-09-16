@@ -50,3 +50,32 @@ def serialized_size(entry: MemoryEntry) -> int:
             "utf-8"
         )
     )
+
+
+def rejections_for(
+    entry: MemoryEntry, *, max_chars: int = 10_240, min_evidence_items_for_verified: int = 1
+) -> list[str]:
+    """Return the validator's rejection reasons for ``entry`` — empty when accepted.
+
+    ``validate_entry_payload`` returns ``None`` and signals rejection by raising,
+    so "accepted" has no positive value to compare against, and the acceptance
+    tests were all written as a bare call asserting nothing. That shape survives a
+    total inversion of the validator: if every input were suddenly accepted, only
+    the rejection tests would notice — and they are the half that an over-eager
+    NARROWING does not break, which is the direction this file's history actually
+    moved in (the 2026-07-27 window narrowing).
+
+    Turning the raise into a returned list lets each test state the claim as
+    ``assert rejections_for(...) == []``, so the assertion lives where a reader
+    looks for it and the failure message names the reason instead of a traceback.
+    """
+    from trw_memory.exceptions import PoisoningError, SchemaValidationError
+    from trw_memory.security.poisoning import validate_entry_payload
+
+    try:
+        validate_entry_payload(
+            entry, max_chars=max_chars, min_evidence_items_for_verified=min_evidence_items_for_verified
+        )
+    except (PoisoningError, SchemaValidationError) as exc:
+        return [f"{type(exc).__name__}(reason={getattr(exc, 'reason', None)!r})"]
+    return []
