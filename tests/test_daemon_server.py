@@ -147,7 +147,9 @@ def running_daemon(user_dir: Path, paths: DaemonPaths) -> Iterator[tuple[subproc
 
 
 #: Connect retries for the first daemon call (listener may lag the discovery record).
-_CONNECT_ATTEMPTS = 30
+#: 40 x 0.5 s = 20 s: under the public CI's branch-coverage run on ubuntu the
+#: listener took longer than the previous bound (2026-09-17, v0.19.0 sync CI).
+_CONNECT_ATTEMPTS = 40
 _CONNECT_RETRY_DELAY_S = 0.5
 
 
