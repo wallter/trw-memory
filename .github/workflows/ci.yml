@@ -30,6 +30,36 @@ jobs:
           # _NACL_AVAILABLE=False fallback) — required for the INFRA-020 branch
           # coverage gate below. (mypy still passes without it via the nacl overrides.)
           pip install cryptography keyring sentence-transformers pynacl
+      # ONE pin, two consumers. The TRW installer's semantic-readiness probe
+      # resolves this exact snapshot (SEMANTIC_MODEL_REPO_ID /
+      # SEMANTIC_MODEL_REVISION / SEMANTIC_MODEL_ALLOW_PATTERNS in
+      # trw-mcp/scripts/install-trw.template.py) and checks for it with
+      # local_files_only=True, so a user whose cache holds a DIFFERENT revision of
+      # the same repo_id is not running what CI measured. Until 2026-09-17 this
+      # step did not exist -- `git log -S 'repo_id=' -- .github/workflows/ci.yml`
+      # returned nothing for the whole history of the file -- so CI resolved
+      # whatever revision the hub happened to serve and the installer's pin was
+      # unmirrored and ungoverned.
+      #
+      # Kept honest by
+      # trw-mcp/tests/test_installer_semantic_readiness.py::test_pinned_fixture_matches_the_trw_memory_ci_fixture,
+      # which fails the moment the two spellings diverge. Change one, change both.
+      - name: Cache pinned CPU embedding fixture
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ runner.os }}-hf-1110a243fdf4706b3f48f1d95db1a4f5529b4d41
+      - name: Provision pinned CPU embedding fixture
+        run: |
+          python - <<'PROVISION'
+          from huggingface_hub import snapshot_download
+
+          snapshot_download(
+              repo_id="sentence-transformers/all-MiniLM-L6-v2",
+              revision="1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+              allow_patterns=["*.json", "*.txt", "*.safetensors", "1_Pooling/*"],
+          )
+          PROVISION
       - name: Lint
         run: ruff check src/
       - name: Type check

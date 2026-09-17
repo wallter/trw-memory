@@ -18,8 +18,11 @@ so a client never races the bind.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import signal
 import time
+from collections.abc import Iterator
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 
@@ -29,6 +32,7 @@ from pydantic import BaseModel, Field
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from trw_memory.daemon._instance import claim_single_instance, release_single_instance
+from trw_memory.daemon._offload import shutdown_offload_pool
 from trw_memory.daemon._paths import DaemonPaths
 from trw_memory.daemon._token import ensure_token
 from trw_memory.daemon._verifier import LoopbackTokenVerifier
@@ -142,8 +146,66 @@ def _build_app(token: str) -> ASGIApp:
     return mcp.http_app(transport="streamable-http")
 
 
+@contextlib.contextmanager
+def _record_termination_signals() -> Iterator[list[signal.Signals]]:
+    """Capture SIGTERM/SIGINT without letting them kill the process.
+
+    This is the fix for the discovery record that outlived the daemon
+    (PRD-CORE-279 FR05). The cleanup below was always in a ``finally``; the
+    reason it did not run is that it never got the chance. uvicorn's
+    ``Server.capture_signals`` installs its own handlers, and when ``serve()``
+    finishes it RESTORES the handlers it found and then calls
+    ``signal.raise_signal()`` for every signal it captured. Whatever is
+    installed here is therefore what runs at that re-raise -- and the default
+    disposition, which is what used to be installed, terminates the process
+    from inside ``serve()``, before this function's ``finally``.
+
+    The handler does nothing but record the number. No file I/O, no lock: a
+    handler runs between bytecodes of whatever the main thread was doing, and
+    taking the claim lock there could deadlock against a lock the interrupted
+    code already holds. Cleanup happens in ordinary code afterwards, and the
+    signal is re-delivered under its default disposition once the record is
+    gone, so the process still dies FROM the signal.
+    """
+    captured: list[signal.Signals] = []
+
+    def _release_on_signal(signum: int, frame: object) -> None:
+        captured.append(signal.Signals(signum))
+
+    installed: dict[signal.Signals, object] = {}
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        with contextlib.suppress(ValueError):  # not the main thread
+            installed[sig] = signal.signal(sig, _release_on_signal)
+    try:
+        yield captured
+    finally:
+        for sig, previous in installed.items():
+            with contextlib.suppress(ValueError):
+                signal.signal(sig, previous)  # type: ignore[arg-type]
+
+
+def _redeliver(captured: list[signal.Signals]) -> None:
+    """Die from the signal that asked us to stop, now that cleanup is done."""
+    if not captured:
+        return
+    signum = captured[-1]
+    logger.info("daemon_signal_shutdown", signal=signum)
+    with contextlib.suppress(ValueError):
+        signal.signal(signum, signal.SIG_DFL)
+        signal.raise_signal(signum)
+
+
 async def serve_loopback(options: DaemonServeOptions, *, paths: DaemonPaths | None = None) -> None:
-    """Run the loopback daemon until its idle window elapses.
+    """Run the loopback daemon until its idle window elapses or it is signalled.
+
+    The daemon serves ONE principal: the operating-system user who can read the
+    0600 token file beside the store. Every request carrying that token is
+    fully authorised for every namespace in the store -- there is no per-caller
+    identity, and a namespace argument is a scope, not a permission. That is a
+    stated property of this program, not an oversight: the endpoint is bound to
+    loopback and the token is per-user, so the trust boundary is the user
+    account. Serving several mutually distrusting tenants from one daemon is
+    outside what this transport offers.
 
     Args:
         options: Port and idle window for this invocation.
@@ -158,19 +220,41 @@ async def serve_loopback(options: DaemonServeOptions, *, paths: DaemonPaths | No
     os.environ.setdefault(_STORAGE_PATH_ENV, str(resolved.user_memory_dir))
     os.environ.setdefault(_SINGLE_STORE_ENV, str(resolved.store))
     token = ensure_token(resolved)
-    claim = claim_single_instance(
-        resolved,
-        port=options.port,
-        token=token,
-        version=_package_version(),
-    )
-    tracker = _IdleTracker(_build_app(token))
-    server = uvicorn.Server(uvicorn.Config(tracker, log_config=None, lifespan="on"))
-    logger.info("daemon_serving", url=claim.info.url, pid=claim.info.pid)
-    watchdog = asyncio.create_task(_watch_idle(tracker, server, options.idle_shutdown_seconds))
-    try:
-        await server.serve(sockets=[claim.sock])
-    finally:
-        watchdog.cancel()
-        claim.sock.close()
-        release_single_instance(resolved)
+    # Signal recording starts BEFORE the claim. The record is published by
+    # ``claim_single_instance``, so a SIGTERM that lands between publication and
+    # handler installation would otherwise kill the process with the default
+    # disposition and leave exactly the residue this fixes (FR05/FR06).
+    with _record_termination_signals() as captured:
+        claim = claim_single_instance(
+            resolved,
+            port=options.port,
+            token=token,
+            version=_package_version(),
+        )
+        watchdog: asyncio.Task[None] | None = None
+        try:
+            # Everything past the claim is inside the try: a failure while
+            # building the app or the server is the case that used to leak a
+            # record naming a process that never served (FR06).
+            tracker = _IdleTracker(_build_app(token))
+            server = uvicorn.Server(uvicorn.Config(tracker, log_config=None, lifespan="on"))
+            logger.info("daemon_serving", url=claim.info.url, pid=claim.info.pid)
+            watchdog = asyncio.create_task(_watch_idle(tracker, server, options.idle_shutdown_seconds))
+            if not captured:
+                await server.serve(sockets=[claim.sock])
+        finally:
+            try:
+                if watchdog is not None:
+                    watchdog.cancel()
+                claim.sock.close()
+                # Drain the workers BEFORE withdrawing the endpoint, so a store
+                # write that finishes in time cannot outlive the record that
+                # advertised it. The drain is bounded; a stuck worker does not
+                # get to hold the daemon past its shutdown.
+                shutdown_offload_pool()
+                release_single_instance(resolved, claimed=claim.info)
+            finally:
+                # Redelivery lives in a finally so an exception on the way out
+                # cannot swallow the operator's SIGTERM: the process must still
+                # die FROM the signal, after the record is gone.
+                _redeliver(captured)

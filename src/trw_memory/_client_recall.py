@@ -192,6 +192,7 @@ async def recall_impl(
         client._config,
         query_embedding,
         invocation=invocation,
+        query=query,
     )
     if include_org_memories:
         candidates.extend(await collect_org_candidates(client, query, candidates, limit, tags, min_score, invocation))

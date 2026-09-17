@@ -15,6 +15,7 @@ from trw_memory.lifecycle.scoring import entry_utility
 from trw_memory.lifecycle.tiers._scoring import compute_importance_score
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.retrieval.lexical import lexical_relevance, tokenize_query
 from trw_memory.security.recall_filter import filter_recall_window
 from trw_memory.security.telemetry_emit import build_security_traceability, emit_security_event
 from trw_memory.storage.interface import StorageBackend
@@ -84,16 +85,33 @@ def _merge_tier_entries(
     config: MemoryConfig,
     query_embedding: list[float] | None,
 ) -> list[dict[str, object]]:
-    """Merge tier-only matches into the main recall candidate set."""
+    """Merge tier-only matches into the main recall candidate set.
+
+    PRD-CORE-278 FR03: never rescore a candidate that carries a retrieval score.
+    A tier-only candidate's score is an ABSOLUTE utility-scale number and a
+    retrieval candidate's is a relative relevance score; rescoring the merged set
+    with ``compute_importance_score`` mixed the two scales, destroyed the score
+    the caller was supposed to read, and pushed high-rank retrieval results past
+    the cap. Tier-only candidates are therefore ranked among THEMSELVES and
+    appended after the retrieval order — never excluded, and first in the result
+    whenever retrieval found nothing, which is the case the tier exists for.
+
+    Unlike the SDK path (``_client_recall_helpers.merge_local_candidates``) this
+    is unconditional: the tool path has no second ranking stage to restore an
+    order it gave up here, so a thin retrieval pool must not be a reason to
+    discard the scores of the candidates it did find.
+    """
     merged: list[dict[str, object]] = list(ranked_dicts)
     seen_keys = {(str(item.get("namespace", "project:default")), str(item.get("id", ""))) for item in ranked_dicts}
+    tier_only: list[dict[str, object]] = []
     for item in tier_dicts:
         key = (str(item.get("namespace", "project:default")), str(item.get("id", "")))
         if key in seen_keys:
             continue
-        merged.append(item)
+        tier_only.append(item)
         seen_keys.add(key)
-    for item in merged:
+
+    for item in tier_only:
         relevance_hint = item.get("_tier_relevance")
         item["score"] = compute_importance_score(
             item,
@@ -102,8 +120,8 @@ def _merge_tier_entries(
             config=config,
             relevance_hint=float(str(relevance_hint)) if relevance_hint is not None else None,
         )
-    merged.sort(key=lambda entry: float(str(entry.get("score", 0.0))), reverse=True)
-    return merged
+    tier_only.sort(key=lambda entry: float(str(entry.get("score", 0.0))), reverse=True)
+    return [*merged, *tier_only]
 
 
 def _org_memory_results(
@@ -126,7 +144,7 @@ def _org_memory_results(
     if not org_entries:
         return []
 
-    query_tokens = query.lower().split() if query else []
+    query_tokens = tokenize_query(query) if query else []
     tag_set = set(tags or [])
     org_results = []
     for entry in org_entries:
@@ -141,18 +159,16 @@ def _org_memory_results(
             continue
         org_results.append(item)
 
-    return rank_by_utility(org_results, query_tokens, lambda_weight=0.4, config=config)
+    return rank_by_utility(org_results, query_tokens, config=config)
 
 
 def _entry_matches_query(entry: dict[str, object], query_tokens: list[str]) -> bool:
-    """Return whether any query token appears in content, detail, or tags."""
-    if not query_tokens:
-        return True
-    content = str(entry.get("content", "")).lower()
-    detail = str(entry.get("detail", "")).lower()
-    raw_tags = entry.get("tags", [])
-    tag_text = " ".join(str(tag).lower() for tag in raw_tags) if isinstance(raw_tags, list) else ""
-    return any(token in f"{content} {detail} {tag_text}" for token in query_tokens)
+    """Return whether any query token appears as a WHOLE WORD in the entry.
+
+    PRD-CORE-278 FR02: substring matching made ``is`` match ``this`` and ``do``
+    match ``documentation``, so this admission check admitted nearly everything.
+    """
+    return lexical_relevance(entry, query_tokens) > 0.0
 
 
 def _graph_related(

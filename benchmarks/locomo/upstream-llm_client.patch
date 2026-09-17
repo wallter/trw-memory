@@ -1,0 +1,38 @@
+diff --git a/benchmarks/common/llm_client.py b/benchmarks/common/llm_client.py
+index 1455f57..c07b3f4 100644
+--- a/benchmarks/common/llm_client.py
++++ b/benchmarks/common/llm_client.py
+@@ -68,6 +68,17 @@ class LLMClient:
+         else:
+             self._init_openai(api_key, base_url, timeout, **kwargs)
+ 
++    def _openai_extra_body(self) -> dict[str, Any]:
++        """TRW patch: LLM_EXTRA_BODY env (JSON) is merged into every chat call.
++
++        Used to pass Ollama-only knobs such as {"reasoning_effort": "none"} so
++        thinking models answer directly. Empty when the env var is unset.
++        """
++        raw = os.getenv("LLM_EXTRA_BODY", "").strip()
++        if not raw:
++            return {}
++        return {"extra_body": json.loads(raw)}
++
+     def _openai_chat_token_limit_kwargs(self, max_tokens: int) -> dict[str, Any]:
+         """Chat Completions: gpt-5 / o-series reject ``max_tokens``; use ``max_completion_tokens``."""
+         m = self.model.lower()
+@@ -170,6 +181,7 @@ class LLMClient:
+                             messages=messages,
+                             **self._openai_chat_temperature_kwargs(temperature),
+                             **self._openai_chat_token_limit_kwargs(max_tokens),
++                            **self._openai_extra_body(),
+                         ),
+                         timeout=self.timeout,
+                     )
+@@ -272,6 +284,7 @@ class LLMClient:
+                             **self._openai_chat_temperature_kwargs(temperature),
+                             response_format={"type": "json_object"},
+                             **self._openai_chat_token_limit_kwargs(max_tokens),
++                            **self._openai_extra_body(),
+                         ),
+                         timeout=self.timeout,
+                     )

@@ -106,7 +106,7 @@ class _RetrievalConfigMixin(BaseModel):
         default=True,
         validation_alias=AliasChoices("recall_preserve_hybrid_order", "memory_recall_preserve_hybrid_order"),
         description=(
-            "When True and the local hybrid pool reaches the requested limit, "
+            "When True and the local hybrid pool is non-empty, "
             "preserve hybrid priority over tier-only utility within each final "
             "temporal/source bucket. All candidates remain available for final "
             "admission and refill; no early result cut or raw-score rewriting. "
@@ -163,13 +163,15 @@ class _RetrievalConfigMixin(BaseModel):
     )
     # Cross-encoder re-ranking (optional; requires sentence-transformers)
     recall_rerank: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("recall_rerank", "memory_recall_rerank"),
         description=(
-            "When True, apply cross-encoder re-ranking after RRF fusion using "
-            "recall_rerank_model. Requires sentence-transformers and a cached model. "
-            "Silently falls back to fusion order when unavailable. Latency: ~20-80ms "
-            "on CPU for 50 candidates. Default False = disabled."
+            "When True (default), apply cross-encoder re-ranking after RRF fusion using "
+            "recall_rerank_model. Requires sentence-transformers and a cached model; "
+            "silently falls back to fusion order when either is unavailable. On LOCOMO "
+            "evidence retrieval the reranker lifts hit@10 from 73.5% to 80.3% and doubles "
+            "MRR (385 questions, benchmarks/locomo, 2026-09-17) for ~30-300 ms per recall "
+            "at 50 candidates depending on CPU load. Set False for latency-critical paths."
         ),
     )
     recall_rerank_model: str = Field(
@@ -189,6 +191,25 @@ class _RetrievalConfigMixin(BaseModel):
             "Limiting to top-50 captures the quality gain at reasonable latency. "
             "Ignored when recall_rerank=False."
         ),
+    )
+    recall_rerank_min_score: float | None = Field(
+        default=-8.0,
+        validation_alias=AliasChoices("recall_rerank_min_score", "memory_recall_rerank_min_score"),
+        description=(
+            "Confidence-bounded recall: after re-ranking, drop candidates whose "
+            "cross-encoder logit is below this value (ms-marco MiniLM scale, about "
+            "-11 for unrelated text, +10 for an exact answer). Recall returns FEWER "
+            "than `limit` rows when the store holds fewer plausible answers, so a "
+            "reader is not handed noise. -8 shrank LOCOMO top-50 lists to 34 rows "
+            "while keeping 99% of their evidence; None disables the cut. Ignored "
+            "when recall_rerank=False or the cross-encoder is unavailable."
+        ),
+    )
+    recall_rerank_min_keep: int = Field(
+        default=5,
+        ge=1,
+        validation_alias=AliasChoices("recall_rerank_min_keep", "memory_recall_rerank_min_keep"),
+        description="Minimum rows kept regardless of recall_rerank_min_score, so a low-confidence query still answers.",
     )
     recall_auto_temporal: bool = Field(
         default=True,

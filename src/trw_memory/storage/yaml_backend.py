@@ -23,6 +23,7 @@ import structlog
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage._shared import (
+    _BOOKKEEPING_FIELDS,
     ENTRY_COLUMNS,
     IMMUTABLE_FIELDS,
     serialize_update_value,
@@ -227,7 +228,9 @@ class YAMLBackend(StorageBackend):
                     f"Invalid update field: {ve.args[0]!r}",
                     path=str(path),
                 ) from None
-            if "updated_at" not in field_dict:
+            # PRD-CORE-278 FR06: the same rule as the SQLite backend, so the two
+            # cannot disagree about what "newest" means.
+            if "updated_at" not in field_dict and not set(field_dict).issubset(_BOOKKEEPING_FIELDS):
                 field_dict["updated_at"] = datetime.now(timezone.utc)
             row = _read_row(path, data)
             if row.partial:

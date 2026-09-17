@@ -43,6 +43,7 @@ from trw_memory.storage._sqlcipher_setup import (
 )
 from trw_memory.storage._stale_handle_detector import StaleHandleDetector
 from trw_memory.storage._wal_checkpoint import (
+    WAL_RESET_UNSAFE_REMEDY as WAL_RESET_UNSAFE_REMEDY,
     CheckpointMode as CheckpointMode,
     CheckpointResult as CheckpointResult,
     run_checkpoint as run_checkpoint,
@@ -235,26 +236,28 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         # degrades to a WARNING rather than blocking construction.
         _harden_db_file_mode(db_path)
 
-        # WAL-reset-bug safety gate. The active SQLite engine carries the
-        # WAL-reset corruption bug (sqlite.org/wal.html §walresetbug) unless it
-        # is >= 3.51.3 (or backport 3.44.6 / 3.50.7). When unsafe we cannot fix
-        # the engine (no fixed pysqlite3 wheel exists yet) so we warn loudly and
-        # rely on single-connection checkpoint serialization (see checkpoint_wal)
-        # to avoid the two-connection race that detonates the bug.
+        # WAL-reset-bug safety gate. An engine carries the WAL-reset corruption
+        # bug (sqlite.org/wal.html §walresetbug) unless it is >= 3.51.3 (or
+        # backport 3.44.6 / 3.50.7). When unsafe, resetting checkpoint modes are
+        # coerced to PASSIVE (see checkpoint_wal) so the race cannot be triggered.
+        #
+        # The version read is THIS BACKEND'S driver, not the process-wide one.
+        # An encrypted store opens sqlcipher3 (``self._dbapi`` above), whose
+        # bundled SQLite is unrelated to the stdlib/pysqlite3 selection in
+        # ``_dbapi``; deriving the gate from the process driver would let a
+        # capable stdlib authorise a resetting checkpoint on an unsafe SQLCipher
+        # build, and would log a version the store is not running on
+        # (PRD-INFRA-185 FR07).
         from trw_memory.storage import _dbapi as _driver
 
-        self.wal_reset_safe: bool = _driver.is_wal_reset_safe()
+        driver_version = str(getattr(self._dbapi, "sqlite_version", ""))
+        self.wal_reset_safe: bool = _driver.wal_reset_safe_version(driver_version)
         if not self.wal_reset_safe:
             logger.warning(
                 "sqlite_wal_reset_unsafe",
-                sqlite_version=_driver.sqlite_version(),
-                driver=_driver.backend(),
-                detail=(
-                    "Active SQLite predates the 3.51.3 WAL-reset fix; WAL "
-                    "checkpoints are serialized on the single owning connection "
-                    "to avoid the corruption race. Upgrade to a pysqlite3 build "
-                    "bundling SQLite>=3.51.3 when one is published."
-                ),
+                sqlite_version=driver_version,
+                driver=getattr(self._dbapi, "__name__", _driver.backend()),
+                detail=WAL_RESET_UNSAFE_REMEDY,
             )
 
         # P3 — stale-handle detector (belt + suspenders: inode + sentinel).

@@ -5,8 +5,6 @@ Core scoring functions:
 - compute_utility_score: Ebbinghaus decay + Q-value composite
 - apply_time_decay: Linear time decay with 0.3 floor
 - bayesian_calibrate: MACLA Bayesian impact calibration
-- rank_by_utility: Relevance + utility blending for recall ranking
-- utility_based_prune_candidates: Identify stale/low-utility entries
 
 Research basis:
 - MemRL Q-values (arXiv:2601.03192)
@@ -564,55 +562,6 @@ def enforce_tier_distribution(
 # ---------------------------------------------------------------------------
 # Recall ranking
 # ---------------------------------------------------------------------------
-
-
-def rank_by_utility(
-    matches: list[dict[str, object]],
-    query_tokens: list[str],
-    lambda_weight: float,
-    config: MemoryConfig | None = None,
-) -> list[dict[str, object]]:
-    """Compatibility wrapper for :func:`lifecycle._recall.rank_by_utility`."""
-    # Import lazily because _recall imports entry_utility from this module.
-    from trw_memory.lifecycle._recall import rank_by_utility as _rank_by_utility
-
-    return _rank_by_utility(matches, query_tokens, lambda_weight, config=config)
-
-
-# ---------------------------------------------------------------------------
-# Pruning candidate identification
-# ---------------------------------------------------------------------------
-
-
-def utility_based_prune_candidates(
-    entries: list[dict[str, object]],
-    config: MemoryConfig | None = None,
-    *,
-    delete_threshold: float = 0.05,
-    prune_threshold: float = 0.15,
-) -> list[dict[str, object]]:
-    """Compatibility wrapper for the canonical recall-time implementation."""
-    from trw_memory.lifecycle._recall import utility_based_prune_candidates as _prune_candidates
-
-    return _prune_candidates(
-        entries,
-        config=config,
-        delete_threshold=delete_threshold,
-        prune_threshold=prune_threshold,
-    )
-
-
-# ---------------------------------------------------------------------------
-# FSRS-inspired adaptive retention scoring (frontier-002)
-# ---------------------------------------------------------------------------
-# Simplified FSRS-4.5: tracks stability S (days at 90% retention) and
-# difficulty D via the power-law retention curve
-# R(t, S) = (1 + FACTOR * t/S)^DECAY, with FACTOR/DECAY chosen so R(S,S)=0.9.
-# Full FSRS-4.5 uses a neural scheduler; we implement the closed-form
-# retrieval-based update rules from the original paper.
-# Reference: Ye et al. "A Stochastic Shortest Path Algorithm for
-#   Optimizing Spaced Repetition Scheduling" (2022).
-
 
 _FSRS_DECAY: float = -0.5  # power-law decay exponent (FSRS-4.5 default)
 # FSRS-4.5 forgetting-curve FACTOR. Derived so that R(t=S, S) == 0.9 exactly:

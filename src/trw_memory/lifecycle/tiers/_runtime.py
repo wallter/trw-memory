@@ -28,7 +28,15 @@ logger = structlog.get_logger(__name__)
 # it so the connection is released.
 _TIER_MANAGER_CACHE_MAX = 32
 _TIER_MANAGER_CACHE: OrderedDict[tuple[str, str, str], TierManager] = OrderedDict()
-_TIER_MANAGER_CACHE_LOCK = threading.Lock()
+# PRD-CORE-279 FR04: the served tool bodies now run in a worker pool, so two
+# requests can reach this cache at once. The lock is REENTRANT and is held
+# across acquisition AND use, not just the dictionary mutation: a manager owns
+# an open warm-tier SQLite connection that eviction closes, so a lock released
+# at the end of the lookup would let one worker close the very manager another
+# worker is mid-search on. Serialising the tier phase is the cheap, provable
+# answer; the expensive phases (BM25, dense search, the primary backend) stay
+# parallel because they hold no shared object.
+_TIER_MANAGER_CACHE_LOCK = threading.RLock()
 
 
 def namespace_storage_dir(config: MemoryConfig, namespace: str) -> Path:
@@ -103,28 +111,50 @@ def get_tier_manager(config: MemoryConfig, namespace: str) -> TierManager:
         return manager
 
 
+def reset_tier_manager_cache() -> None:
+    """Close and drop every cached TierManager.
+
+    The cache is process-lifetime by design -- in production the process is a
+    server. A test process has many logical lifetimes in one real one, and the
+    cache key is the CONFIGURED storage path, so two tests pointing that path at
+    different temporary stores share entries and resolve one store's ids against
+    the other's backend. Closing on the way out also releases each manager's
+    warm-tier SQLite connection instead of leaking it.
+    """
+    with _TIER_MANAGER_CACHE_LOCK:
+        managers = list(_TIER_MANAGER_CACHE.items())
+        _TIER_MANAGER_CACHE.clear()
+    for cache_key, manager in managers:
+        try:
+            manager.close()
+        except Exception:  # justified: a best-effort teardown must not mask the caller's failure
+            logger.warning("tier_manager_cache_reset_close_failed", cache_key=cache_key, exc_info=True)
+
+
 def warmup_tier_manager(
     config: MemoryConfig,
     namespace: str,
     backend: StorageBackend,
 ) -> TierManager:
     """Ensure the namespace tier manager has a usable hot cache."""
-    manager = get_tier_manager(config, namespace)
-    warmed = manager.warmup_hot_from_warm()
-    if warmed > 0 or manager.hot_size > 0:
-        return manager
+    with _TIER_MANAGER_CACHE_LOCK:
+        manager = get_tier_manager(config, namespace)
+        warmed = manager.warmup_hot_from_warm()
+        if warmed > 0 or manager.hot_size > 0:
+            return manager
 
-    # Existing stores may predate the warm sidecar entirely. Seeding the hottest
-    # current backend rows into both hot and warm gives the tier runtime a
-    # migration path without forcing users to rewrite their store first.
-    try:
-        entries = backend.list_entries(namespace=namespace, limit=max(config.hot_max_entries * 8, 200))
-    except Exception:
-        logger.warning("tier_warmup_backend_scan_failed", namespace=namespace, exc_info=True)
-        return manager
+        # Existing stores may predate the warm sidecar entirely. Seeding the
+        # hottest current backend rows into both hot and warm gives the tier
+        # runtime a migration path without forcing users to rewrite their store
+        # first.
+        try:
+            entries = backend.list_entries(namespace=namespace, limit=max(config.hot_max_entries * 8, 200))
+        except Exception:
+            logger.warning("tier_warmup_backend_scan_failed", namespace=namespace, exc_info=True)
+            return manager
 
-    manager.warmup_hot_from_entries(entries, mirror_to_warm=True)
-    return manager
+        manager.warmup_hot_from_entries(entries, mirror_to_warm=True)
+        return manager
 
 
 def remember_entry_in_tiers(
@@ -136,12 +166,13 @@ def remember_entry_in_tiers(
     """Mirror a freshly written entry into the runtime tier system."""
     if not tier_runtime_enabled(config):
         return
-    manager = get_tier_manager(config, namespace)
-    manager.hot_put(entry.id, entry)
-    try:
-        manager.warm_add(entry.id, entry.model_dump(mode="json"), embedding)
-    except (OSError, ValueError):
-        logger.warning("tier_warm_mirror_failed", namespace=namespace, entry_id=entry.id, exc_info=True)
+    with _TIER_MANAGER_CACHE_LOCK:
+        manager = get_tier_manager(config, namespace)
+        manager.hot_put(entry.id, entry)
+        try:
+            manager.warm_add(entry.id, entry.model_dump(mode="json"), embedding)
+        except (OSError, ValueError):
+            logger.warning("tier_warm_mirror_failed", namespace=namespace, entry_id=entry.id, exc_info=True)
 
 
 def remember_entry_data_in_tiers(config: MemoryConfig, entry_data: dict[str, object]) -> None:
@@ -156,6 +187,47 @@ def remember_entry_data_in_tiers(config: MemoryConfig, entry_data: dict[str, obj
     remember_entry_in_tiers(config, entry.namespace, entry)
 
 
+def remember_entries_data_in_tiers(config: MemoryConfig, payloads: list[dict[str, object]]) -> None:
+    """Mirror several serialized entry payloads into the tiers, one warm write per namespace.
+
+    Recall calls this with every returned row so the warm sidecar sees a
+    fresh ``last_accessed_at``; doing it per entry made recall latency scale
+    with ``limit * sidecar_rows``. Hot-tier order is the same as sequential
+    :func:`remember_entry_data_in_tiers`; the warm sidecar ends up identical.
+    """
+    if not tier_runtime_enabled(config) or not payloads:
+        return
+    by_namespace: dict[str, list[MemoryEntry]] = {}
+    for entry_data in payloads:
+        try:
+            entry = MemoryEntry.model_validate(entry_data)
+        except Exception:
+            logger.warning("tier_entry_validation_failed", namespace=entry_data.get("namespace", ""), exc_info=True)
+            continue
+        by_namespace.setdefault(entry.namespace, []).append(entry)
+    for namespace, entries in by_namespace.items():
+        # Held across put, warm write and drop, as remember_entry_in_tiers holds
+        # it: a concurrent single-entry write to an evictee id could otherwise be
+        # reverted by the deferred hot_drop and the batch's stale warm snapshot.
+        with _TIER_MANAGER_CACHE_LOCK:
+            manager = get_tier_manager(config, namespace)
+            # Evictees stay in hot until warm has them: a failed warm write must not
+            # lose them from both tiers (release-verify 2026-09-17 B-1).
+            evicted = manager.hot_put_many([(entry.id, entry) for entry in entries], drop_evictees=False)
+            # Evictees first, then the recalled rows, so a row that was both
+            # evicted and recalled ends up with its fresh payload (last write wins).
+            items: list[tuple[str, dict[str, object], list[float] | None]] = [
+                (evicted_id, evicted_data, None) for evicted_id, evicted_data in evicted
+            ]
+            items.extend((entry.id, entry.model_dump(mode="json"), None) for entry in entries)
+            try:
+                manager.warm_add_many(items)
+            except (OSError, ValueError):
+                logger.warning("tier_warm_mirror_failed", namespace=namespace, entry_count=len(items), exc_info=True)
+                continue
+            manager.hot_drop([evicted_id for evicted_id, _ in evicted])
+
+
 def remove_entry_from_tiers(config: MemoryConfig, namespace: str, entry_id: str) -> None:
     """Delete an entry from EVERY runtime tier (hot, warm, and cold).
 
@@ -166,16 +238,17 @@ def remove_entry_from_tiers(config: MemoryConfig, namespace: str, entry_id: str)
     """
     if not tier_runtime_enabled(config):
         return
-    manager = get_tier_manager(config, namespace)
-    manager.hot_remove(entry_id)
-    try:
-        manager.warm_remove(entry_id)
-    except (OSError, ValueError):
-        logger.warning("tier_warm_remove_failed", namespace=namespace, entry_id=entry_id, exc_info=True)
-    try:
-        manager.cold_remove(entry_id)
-    except OSError:
-        logger.warning("tier_cold_remove_failed", namespace=namespace, entry_id=entry_id, exc_info=True)
+    with _TIER_MANAGER_CACHE_LOCK:
+        manager = get_tier_manager(config, namespace)
+        manager.hot_remove(entry_id)
+        try:
+            manager.warm_remove(entry_id)
+        except (OSError, ValueError):
+            logger.warning("tier_warm_remove_failed", namespace=namespace, entry_id=entry_id, exc_info=True)
+        try:
+            manager.cold_remove(entry_id)
+        except OSError:
+            logger.warning("tier_cold_remove_failed", namespace=namespace, entry_id=entry_id, exc_info=True)
 
 
 @overload
@@ -220,22 +293,23 @@ def tier_candidates(
     """Collect full-entry candidates from the tier runtime."""
     if not tier_runtime_enabled(config):
         return []
-    manager = (
-        get_tier_manager(config, namespace)
-        if invocation is not None
-        else warmup_tier_manager(config, namespace, backend)
-    )
-    query_tokens = [token for token in query.lower().split() if token]
+    with _TIER_MANAGER_CACHE_LOCK:
+        manager = (
+            get_tier_manager(config, namespace)
+            if invocation is not None
+            else warmup_tier_manager(config, namespace, backend)
+        )
+        query_tokens = [token for token in query.lower().split() if token]
 
-    return manager.search(
-        query_tokens,
-        query_embedding=query_embedding,
-        tags=tags,
-        top_k=max(limit * 2, config.hot_max_entries),
-        invocation=invocation,
-        resolve_entry=lambda entry_id: backend.get(entry_id, namespace=namespace),
-        **_restoration_callbacks(config, namespace, backend),
-    )
+        return manager.search(
+            query_tokens,
+            query_embedding=query_embedding,
+            tags=tags,
+            top_k=max(limit * 2, config.hot_max_entries),
+            invocation=invocation,
+            resolve_entry=lambda entry_id: backend.get(entry_id, namespace=namespace),
+            **_restoration_callbacks(config, namespace, backend),
+        )
 
 
 class _RestorationCallbacks(TypedDict):
@@ -278,12 +352,16 @@ def restore_selected_cold(
     selected: list[LocalCandidate],
 ) -> set[tuple[str, str]]:
     """Restore returned cold hits only; existing rollback is per entry, not per call."""
-    failed: set[tuple[str, str]] = set()
-    manager = get_tier_manager(config, namespace)
-    for candidate in selected:
-        if candidate.cold:
-            if candidate.entry.namespace != namespace:
-                raise NamespaceScopeError("cold restoration outside authorized namespace")
-            if manager.cold_promote(candidate.entry.id, **_restoration_callbacks(config, namespace, backend)) is None:
-                failed.add((namespace, candidate.entry.id))
-    return failed
+    with _TIER_MANAGER_CACHE_LOCK:
+        failed: set[tuple[str, str]] = set()
+        manager = get_tier_manager(config, namespace)
+        for candidate in selected:
+            if candidate.cold:
+                if candidate.entry.namespace != namespace:
+                    raise NamespaceScopeError("cold restoration outside authorized namespace")
+                if (
+                    manager.cold_promote(candidate.entry.id, **_restoration_callbacks(config, namespace, backend))
+                    is None
+                ):
+                    failed.add((namespace, candidate.entry.id))
+        return failed

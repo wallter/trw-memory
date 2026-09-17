@@ -11,6 +11,7 @@ import pytest
 from trw_memory.integrations._backend import create_backend_from_config, discover_namespace_backends, make_entry
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
+from trw_memory.retrieval.pipeline import ScoredCandidate
 from trw_memory.tools.recall import memory_recall_impl
 from trw_memory.tools.status import memory_status_impl
 
@@ -32,8 +33,13 @@ def test_memory_recall_include_namespaces_reads_extra_namespace_store(
         extra_backend.store(extra_entry)
 
     monkeypatch.setattr(
-        "trw_memory.tools.recall.hybrid_search",
-        lambda **kwargs: kwargs["entries"],
+        "trw_memory.tools.recall.hybrid_search_scored",
+        # PRD-CORE-278 FR01: the tool consumes the SCORED boundary, so the stub
+        # returns scored candidates rather than bare entries.
+        lambda **kwargs: [
+            ScoredCandidate(entry=entry, score=round(1.0 / (1 + rank), 6), basis="fused")
+            for rank, entry in enumerate(kwargs["entries"])
+        ],
     )
 
     with create_backend_from_config(cfg, "project:aaa") as primary_backend:

@@ -100,14 +100,23 @@ class TestBlankTextShortCircuit:
         assert result is None
 
     def test_embed_blank_does_not_call_model(self) -> None:
+        """Blank text short-circuits BEFORE the model; the same provider still embeds real text.
+
+        The non-blank leg is the control: "encode was not called" is also true of
+        a provider whose model was never wired up at all, so on its own it
+        cannot tell a working short-circuit from a dead provider.
+        """
         provider = LocalEmbeddingProvider()
         mock_model = MagicMock()
+        mock_model.encode.return_value = [0.5, 0.25]
         provider._model = mock_model
         provider._load_attempted = True
 
-        result = provider.embed("   ")
-        assert result is None
-        mock_model.encode.assert_not_called()
+        assert provider.embed("   ") is None
+        assert mock_model.encode.call_count == 0
+
+        assert provider.embed("real text") == [0.5, 0.25]
+        assert mock_model.encode.call_args.args[0] == "real text"
 
 
 # ---------------------------------------------------------------------------

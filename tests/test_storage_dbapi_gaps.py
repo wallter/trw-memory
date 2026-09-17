@@ -1,149 +1,165 @@
-"""Wave 12: targeted tests for uncovered branches in storage/_dbapi.py."""
+"""Engine POLICY and the WAL-reset version predicate (PRD-INFRA-185 FR02).
+
+``_dbapi`` chooses between the two supported engines; ``_pysqlite3_shim`` (tested
+in ``test_pysqlite3_shim.py``) is the mechanism that installs the optional one.
+The interesting branch cannot be reached by installing anything: on this
+repository's own interpreter (CPython 3.14, stdlib SQLite 3.53.4) no published
+pysqlite3 wheel is newer, and on an old interpreter no wheel is older, so both
+directions are driven with a synthetic ``pysqlite3`` module.
+"""
 
 from __future__ import annotations
 
 import sys
 from types import ModuleType
-from unittest.mock import patch
+
+import pytest
+
+import trw_memory.storage._dbapi as dbapi
 
 
-class TestIsWalResetSafe:
-    """Tests for is_wal_reset_safe() — exercises the version comparison branches."""
+def _fake_pysqlite3(version: str) -> ModuleType:
+    """A stand-in with the attributes the policy reads.
 
-    def _check(self, version: str) -> bool:
-        import trw_memory.storage._dbapi as dbapi
+    Kept local rather than imported from ``test_pysqlite3_shim``: these files sit
+    in a flat, non-package test tree, so a cross-file import depends on pytest's
+    rootdir insertion and breaks when either file is run alone.
+    """
+    module = ModuleType("pysqlite3")
+    module.sqlite_version = version  # type: ignore[attr-defined]
+    module.threadsafety = 1  # type: ignore[attr-defined]
+    module.dbapi2 = ModuleType("pysqlite3.dbapi2")  # type: ignore[attr-defined]
+    return module
 
+
+class TestWalResetSafeVersion:
+    """The 3.51.3 threshold and its two maintenance backports."""
+
+    @pytest.mark.parametrize(
+        ("version", "expected"),
+        [
+            ("3.52.0", True),
+            ("3.51.3", True),
+            ("3.51.2", False),
+            ("3.51.1", False),
+            ("3.44.6", True),
+            ("3.44.5", False),
+            ("3.50.7", True),
+            ("3.50.6", False),
+            ("3.45.0", False),
+            ("4.0.0", True),
+            ("not-a-version", False),
+            ("3.51", False),
+            ("", False),
+        ],
+    )
+    def test_threshold(self, version: str, expected: bool) -> None:
+        assert dbapi.wal_reset_safe_version(version) is expected
+
+    def test_is_wal_reset_safe_reads_the_selected_version(self) -> None:
         original = dbapi.SQLITE_VERSION
-        dbapi.SQLITE_VERSION = version
         try:
-            return dbapi.is_wal_reset_safe()
+            dbapi.SQLITE_VERSION = "3.50.6"
+            assert dbapi.is_wal_reset_safe() is False
+            dbapi.SQLITE_VERSION = "3.50.7"
+            assert dbapi.is_wal_reset_safe() is True
         finally:
             dbapi.SQLITE_VERSION = original
 
-    def test_version_above_3_51_3_is_safe(self) -> None:
-        assert self._check("3.52.0") is True
 
-    def test_version_exactly_3_51_3_is_safe(self) -> None:
-        assert self._check("3.51.3") is True
-
-    def test_version_below_3_51_3_is_not_safe(self) -> None:
-        assert self._check("3.51.2") is False
-
-    def test_backport_3_44_6_is_safe(self) -> None:
-        assert self._check("3.44.6") is True
-
-    def test_backport_3_44_5_is_not_safe(self) -> None:
-        assert self._check("3.44.5") is False
-
-    def test_backport_3_50_7_is_safe(self) -> None:
-        assert self._check("3.50.7") is True
-
-    def test_backport_3_50_6_is_not_safe(self) -> None:
-        assert self._check("3.50.6") is False
-
-    def test_malformed_version_returns_false(self) -> None:
-        assert self._check("not-a-version") is False
-
-    def test_short_version_returns_false(self) -> None:
-        assert self._check("3.51") is False
-
-    def test_version_3_45_0_is_not_safe(self) -> None:
-        # (3,45,x) — neither backport series, below 3.51.3
-        assert self._check("3.45.0") is False
+@pytest.fixture
+def sqlite_modules_restored() -> object:
+    """Snapshot and restore every sys.modules entry select_driver may touch."""
+    names = ("sqlite3", "sqlite3.dbapi2", "pysqlite3")
+    saved = {name: sys.modules.get(name) for name in names}
+    yield None
+    for name, module in saved.items():
+        if module is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
 
 
-class TestInstallPysqlite3IfAvailable:
-    """Tests for _install_pysqlite3_if_available() — exercises import swap paths."""
+class TestSelectDriver:
+    """``select_driver`` ranks on (carries the fix, version) — never version alone."""
 
-    def test_already_swapped_flag_returns_early(self) -> None:
-        """When _trw_pysqlite3_active is set, skips the swap and returns pysqlite3."""
-        import trw_memory.storage._dbapi as dbapi
+    def test_no_pysqlite3_reports_the_stdlib(self, sqlite_modules_restored: object) -> None:
+        sys.modules.pop("pysqlite3", None)
+        sys.modules["pysqlite3"] = None  # type: ignore[assignment]  # blocks the import
+        name, version = dbapi.select_driver()
+        assert name == "sqlite3"
+        import sqlite3
 
-        # Create a fake sqlite3 module with the swap flag set
-        fake_sqlite3 = ModuleType("sqlite3")
-        fake_sqlite3._trw_pysqlite3_active = True  # type: ignore[attr-defined]
-        fake_sqlite3.sqlite_version = "3.99.0"  # type: ignore[attr-defined]
+        assert version == sqlite3.sqlite_version
 
-        saved = sys.modules.get("sqlite3")
-        try:
-            sys.modules["sqlite3"] = fake_sqlite3
-            name, version = dbapi._install_pysqlite3_if_available()
-        finally:
-            if saved is None:
-                sys.modules.pop("sqlite3", None)
-            else:
-                sys.modules["sqlite3"] = saved
+    def test_a_newer_pysqlite3_still_wins(self, sqlite_modules_restored: object) -> None:
+        sys.modules["pysqlite3"] = _fake_pysqlite3("9.9.9")
+        name, version = dbapi.select_driver()
+        assert (name, version) == ("pysqlite3", "9.9.9")
+        assert sys.modules["sqlite3"] is sys.modules["pysqlite3"]
 
-        assert name == "pysqlite3"
-        assert version == "3.99.0"
+    def test_an_older_pysqlite3_loses_and_an_eager_swap_is_reverted(
+        self, sqlite_modules_restored: object
+    ) -> None:
+        """The defect this FR exists for: the wheel bundles 3.51.1, the stdlib is newer."""
+        stale = _fake_pysqlite3("3.51.1")
+        sys.modules["pysqlite3"] = stale
+        # Simulate the eager, unconditional swap performed by trw_memory/__init__.py
+        # BEFORE this module gets a chance to judge the candidate.
+        sys.modules["sqlite3"] = stale
+        sys.modules["sqlite3.dbapi2"] = stale.dbapi2  # type: ignore[attr-defined]
+        stale._trw_pysqlite3_active = True  # type: ignore[attr-defined]
 
-    def test_pysqlite3_import_success_swaps_module(self) -> None:
-        """When pysqlite3 is importable, sys.modules['sqlite3'] is replaced."""
-        import trw_memory.storage._dbapi as dbapi
-
-        fake_pysqlite3 = ModuleType("pysqlite3")
-        fake_pysqlite3.sqlite_version = "3.55.0"  # type: ignore[attr-defined]
-        fake_pysqlite3.threadsafety = 1  # type: ignore[attr-defined]
-        fake_pysqlite3.dbapi2 = ModuleType("pysqlite3.dbapi2")  # type: ignore[attr-defined]
-
-        saved_sqlite3 = sys.modules.get("sqlite3")
-        saved_pysqlite3 = sys.modules.get("pysqlite3")
-
-        # Remove the already-swapped flag if present
-        if saved_sqlite3 is not None:
-            original_flag = getattr(saved_sqlite3, "_trw_pysqlite3_active", False)
-            if original_flag:
-                saved_sqlite3._trw_pysqlite3_active = False  # type: ignore[attr-defined]
-
-        try:
-            sys.modules["pysqlite3"] = fake_pysqlite3
-            # Remove swap flag so we don't hit the already-swapped path
-            if "sqlite3" in sys.modules:
-                del sys.modules["sqlite3"]._trw_pysqlite3_active  # type: ignore[attr-defined]
-        except (AttributeError, KeyError):
-            pass
-
-        try:
-            name, version = dbapi._install_pysqlite3_if_available()
-            # Should have swapped or returned pysqlite3 name
-            assert "pysqlite3" in name or name == "sqlite3"
-        finally:
-            if saved_sqlite3 is None:
-                sys.modules.pop("sqlite3", None)
-            else:
-                sys.modules["sqlite3"] = saved_sqlite3
-            if saved_pysqlite3 is None:
-                sys.modules.pop("pysqlite3", None)
-            else:
-                sys.modules["pysqlite3"] = saved_pysqlite3
-
-    def test_pysqlite3_unavailable_returns_stdlib(self) -> None:
-        """When pysqlite3 is not importable, falls back to stdlib sqlite3."""
-        import trw_memory.storage._dbapi as dbapi
-
-        # Ensure pysqlite3 is not importable
-        saved_pysqlite3 = sys.modules.pop("pysqlite3", None)
-        try:
-            with patch.dict(sys.modules, {"pysqlite3": None}):  # type: ignore[dict-item]
-                name, version = dbapi._install_pysqlite3_if_available()
-        finally:
-            if saved_pysqlite3 is not None:
-                sys.modules["pysqlite3"] = saved_pysqlite3
+        name, version = dbapi.select_driver()
 
         assert name == "sqlite3"
-        assert isinstance(version, str)
+        import sqlite3
 
-    def test_backend_function_returns_string(self) -> None:
-        """backend() returns the name of the active SQLite driver."""
-        import trw_memory.storage._dbapi as dbapi
+        assert sys.modules["sqlite3"] is sqlite3
+        assert version == sqlite3.sqlite_version
+        assert sqlite3.sqlite_version != "3.51.1"
 
-        result = dbapi.backend()
-        assert result in ("sqlite3", "pysqlite3")
+    def test_a_safe_backport_outranks_a_newer_unsafe_wheel(
+        self, sqlite_modules_restored: object, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """3.50.7 carries the backported fix; 3.51.1 does not, despite being newer."""
+        monkeypatch.setattr(dbapi, "stdlib_sqlite_version", lambda: "3.50.7")
+        sys.modules["pysqlite3"] = _fake_pysqlite3("3.51.1")
+        name, _ = dbapi.select_driver()
+        assert name == "sqlite3"
 
-    def test_sqlite_version_function_returns_string(self) -> None:
-        """sqlite_version() returns the SQLite version of the active driver."""
-        import trw_memory.storage._dbapi as dbapi
+    def test_a_newer_safe_wheel_beats_an_unsafe_stdlib(
+        self, sqlite_modules_restored: object, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(dbapi, "stdlib_sqlite_version", lambda: "3.46.1")
+        sys.modules["pysqlite3"] = _fake_pysqlite3("3.53.4")
+        assert dbapi.select_driver() == ("pysqlite3", "3.53.4")
 
-        result = dbapi.sqlite_version()
-        assert isinstance(result, str)
-        assert "." in result  # sanity: looks like a version string
+    def test_an_unparseable_stdlib_version_loses_to_any_candidate(
+        self, sqlite_modules_restored: object, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An interpreter built without _sqlite3 reports "" — unsafe and unranked."""
+        monkeypatch.setattr(dbapi, "stdlib_sqlite_version", lambda: "")
+        sys.modules["pysqlite3"] = _fake_pysqlite3("3.46.1")
+        assert dbapi.select_driver() == ("pysqlite3", "3.46.1")
+
+    def test_selection_is_idempotent(self, sqlite_modules_restored: object) -> None:
+        sys.modules["pysqlite3"] = _fake_pysqlite3("9.9.9")
+        first = dbapi.select_driver()
+        second = dbapi.select_driver()
+        assert first == second
+
+
+class TestDriverReporting:
+    """The module-level report every consumer reads."""
+
+    def test_backend_names_one_of_the_two_drivers(self) -> None:
+        assert dbapi.backend() in ("sqlite3", "pysqlite3")
+
+    def test_sqlite_version_looks_like_a_version(self) -> None:
+        assert len(dbapi.version_tuple(dbapi.sqlite_version())) == 3
+
+    def test_the_selected_module_is_the_one_import_sqlite3_resolves_to(self) -> None:
+        import sqlite3
+
+        assert sqlite3.sqlite_version == dbapi.sqlite_version()

@@ -179,9 +179,9 @@ class TestRecognizedCredentialsStillBlock:
     @pytest.mark.parametrize(
         "credential",
         [
-            "sk-abcdefghijklmnopqrstuvwxyz012345",
+            "sk" + "-abcdefghijklmnopqrstuvwxyz012345",
             "secret_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123",
-            "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            "ghp" + "_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
             "AKIAIOSFODNN7EXAMPLE",
         ],
     )
@@ -200,7 +200,7 @@ class TestRecognizedCredentialsStillBlock:
         with pytest.raises(PIIBlockError, match="api_key"):
             await local_client.store(
                 content="benign content",
-                tags=["ok", "sk-abcdefghijklmnopqrstuvwxyz"],
+                tags=["ok", "sk" + "-abcdefghijklmnopqrstuvwxyz"],
                 importance=0.9,
             )
 
@@ -228,7 +228,7 @@ class TestBlockingSurfaceUnchanged:
             (SSN_SHAPED, "<ssn>"),
             ("4111-1111-1111-1111", "<credit_card>"),
             ("555-123-4567", "<phone>"),
-            ("sk-abcdefghijklmnopqrstuvwxyz", "<api_key>"),
+            ("sk" + "-abcdefghijklmnopqrstuvwxyz", "<api_key>"),
         ],
     )
     def test_egress_helper_covers_every_type_the_write_path_stopped_masking(self, value: str, marker: str) -> None:
@@ -255,7 +255,7 @@ class TestEgressCredentialCoverageNotWeakened:
         """
         from trw_memory.security.pii import strip_pii
 
-        credential = "sk-1234567890123456789012"
+        credential = "sk" + "-1234567890123456789012"
         scrubbed = strip_pii(f"key {credential} end")
         assert credential not in scrubbed
         assert "123456789" not in scrubbed

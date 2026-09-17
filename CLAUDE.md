@@ -39,13 +39,14 @@ pip install -e ".[dev,vectors,bm25]"                         # With optional dep
 
 ## Package Info
 
-- Version: <!-- inv:version_trw_memory -->0.18.0<!-- /inv --> (source: `pyproject.toml`, synced by `make inventory` — do not hardcode elsewhere)
+- Version: <!-- inv:version_trw_memory -->0.19.0<!-- /inv --> (source: `pyproject.toml`, synced by `make inventory` — do not hardcode elsewhere)
 - ~170 source modules; 240 test files, 214 with test functions; coverage gate 85%
 - Valid namespace prefixes: `project:`, `global`, `default`, `team:`, `org:`, `user:` — the `user:` scope was added by PRD-CORE-185 and is live in `namespaces/validation.py`
 
 ## Compatibility Notes
 
 - Concurrent-writer fixes (warm-tier sidecar lock, hot-tier sweep race) shipped in **0.9.5**. Operators running concurrent agents against the same memory store should require `trw-memory >= 0.9.5`.
+- **0.19.0 changed recall defaults**: cross-encoder rerank is on (`MEMORY_RECALL_RERANK=false` to opt out; ~30-300 ms per recall on CPU, needs `sentence-transformers` + the cached ms-marco model, else silently falls back) and recall is confidence-bounded (`MEMORY_RECALL_RERANK_MIN_SCORE`, default -8; `None`/unset-to-null disables), so `recall(limit=N)` may return fewer than N rows. BM25 now stems and drops query stopwords, which reorders lexical ties.
 - SQLite WAL-reset corruption guard requires SQLite >= 3.51.3 or the single-connection window mitigation (active by default); see `reference_memory_db_walreset_fix.md`.
 
 ## Key Gotchas

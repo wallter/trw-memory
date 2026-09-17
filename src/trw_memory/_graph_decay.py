@@ -137,7 +137,7 @@ def memory_decay_pass(
             # drift between them would report a "remaining" computed over
             # different rows than "processed", the class of silent miscount FR09
             # exists to remove.
-            f"SELECT id, importance FROM memories WHERE {_DECAY_PREDICATE} LIMIT ?",  # noqa: S608
+            f"SELECT namespace, id, importance FROM memories WHERE {_DECAY_PREDICATE} LIMIT ?",  # noqa: S608
             (cutoff, effective_batch_size),
         ).fetchall()
 
@@ -147,7 +147,7 @@ def memory_decay_pass(
         ).fetchone()
         total_qualifying = total[0] if total else 0
         try:
-            for entry_id, raw_importance in rows:
+            for namespace, entry_id, raw_importance in rows:
                 new_value = max(round(float(raw_importance) - DECAY_DELTA, 4), 0.0)
                 outcome = (
                     f"importance_decay:delta=-{DECAY_DELTA:.2f}:"
@@ -156,8 +156,8 @@ def memory_decay_pass(
                 conn.execute(
                     "UPDATE memories SET importance = ?, "
                     "outcome_history = json_insert(outcome_history, '$[#]', ?) "
-                    "WHERE id = ?",
-                    (new_value, outcome, entry_id),
+                    "WHERE namespace = ? AND id = ?",
+                    (new_value, outcome, namespace, entry_id),
                 )
                 decayed += 1
             conn.commit()

@@ -206,10 +206,25 @@ class TestHybridSearchDegradation:
         assert len(results) >= 1
         assert "e1" in [entry.id for entry in results]
 
-    def test_hybrid_search_both_unavailable(self) -> None:
+    def test_hybrid_search_both_unavailable_falls_back_to_lexical(self) -> None:
+        """PRD-CORE-278 FR04: both sources down is not a reason to answer nothing.
+
+        This asserted ``[]``. An empty result then meant two different things —
+        "nothing matched" and "retrieval could not run" — and the tool path had
+        no fallback, so a whole recall returned zero rows for a query whose
+        words are in the corpus.
+        """
         entries = self._entries()
         with patch("trw_memory.retrieval.bm25._BM25_AVAILABLE", False):
             results = hybrid_search("pydantic", entries, embedder=None, stored_embeddings=None, scope=DEFAULT_SCOPE)
+        assert [entry.id for entry in results] == ["e1"]
+
+    def test_hybrid_search_both_unavailable_and_no_lexical_match_is_empty(self) -> None:
+        entries = self._entries()
+        with patch("trw_memory.retrieval.bm25._BM25_AVAILABLE", False):
+            results = hybrid_search(
+                "wholly unrelated vocabulary", entries, embedder=None, stored_embeddings=None, scope=DEFAULT_SCOPE
+            )
         assert results == []
 
     def test_hybrid_search_single_source_passthrough(self) -> None:
@@ -348,14 +363,14 @@ class TestHybridSearchFusionModes:
         assert len(results) >= 1
 
     def test_rerank_true_called_with_mock(self) -> None:
-        """rerank=True wires cross_encode_rerank into the pipeline."""
+        """rerank=True wires cross_encode_scores into the pipeline."""
         from unittest.mock import patch
 
         entries = self._entries()
-        sentinel = [entries[0]]
+        sentinel = [(entries[0], 1.0)]
 
         with patch(
-            "trw_memory.retrieval.reranker.cross_encode_rerank",
+            "trw_memory.retrieval.reranker.cross_encode_scores",
             return_value=sentinel,
         ) as mock_rerank:
             results = hybrid_search("asyncio", entries, rerank=True, rerank_candidates=5, scope=DEFAULT_SCOPE)
@@ -370,8 +385,8 @@ class TestHybridSearchFusionModes:
         entries = self._entries()
 
         with patch(
-            "trw_memory.retrieval.reranker.cross_encode_rerank",
-            return_value=[entries[0]],
+            "trw_memory.retrieval.reranker.cross_encode_scores",
+            return_value=[(entries[0], 1.0)],
         ) as mock_rerank:
             hybrid_search(
                 "asyncio",  # matches entry content so rerank path is reached

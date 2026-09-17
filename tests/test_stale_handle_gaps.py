@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -24,11 +25,17 @@ class TestHandleIntegrityRegression:
 
 
 class TestReconnectSqlCipherPath:
-    def test_sqlcipher_path_calls_open_and_configure_with_key(self) -> None:
-        """_sqlcipher_key_hex is not None → open_and_configure called with key (line 57)."""
+    def test_sqlcipher_path_calls_open_and_configure_with_key(self, tmp_path: Path) -> None:
+        """_sqlcipher_key_hex is not None → open_and_configure called with key (line 57).
+
+        ``prepare_db_file_mode`` is deliberately NOT patched here — it is part of
+        the path under test — so the db path must be a real, non-symlinked
+        directory. A hardcoded ``/tmp`` fails on macOS, where ``/tmp`` is a
+        symlink to ``/private/tmp`` and the secure-open check refuses it.
+        """
         backend = MagicMock()
         backend._sqlcipher_key_hex = "deadbeef"
-        backend._db_path = "/tmp/test.db"
+        backend._db_path = str(tmp_path / "test.db")
         backend._dbapi = MagicMock()
         backend.reconnect_count = 0
         backend._skip_commit_depth = 0

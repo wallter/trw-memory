@@ -14,6 +14,7 @@ from uuid import uuid4
 import structlog
 
 from trw_memory._client_store import _existing_entry_for_namespace
+from trw_memory.daemon._offload import run_offloaded
 from trw_memory.embeddings import get_local_embedder
 from trw_memory.embeddings.provenance import generation_provenance_kwargs
 from trw_memory.exceptions import (
@@ -406,22 +407,27 @@ def register_store_tool(mcp: McpServer) -> None:
         Returns:
             {"memory_id": str, "status": "stored", "namespace": str}
         """
-        cfg = MemoryConfig()
-        with create_backend_from_config(cfg, namespace) as backend:
-            return memory_store_impl(
-                content,
-                namespace,
-                backend=backend,
-                tags=tags,
-                importance=importance,
-                detail=detail,
-                metadata=metadata,
-                config=cfg,
-                source_identity=source_identity,
-                session_id=session_id,
-                entry_id=entry_id,
-                evidence=evidence,
-                expires=expires,
-                assertions=assertions,
-                raise_security_errors=True,
-            )
+        def _run() -> dict[str, object]:
+            # PRD-CORE-279 FR04: backend open, write and close all happen in ONE
+            # worker thread, so the SQLite connection never crosses threads.
+            cfg = MemoryConfig()
+            with create_backend_from_config(cfg, namespace) as backend:
+                return memory_store_impl(
+                    content,
+                    namespace,
+                    backend=backend,
+                    tags=tags,
+                    importance=importance,
+                    detail=detail,
+                    metadata=metadata,
+                    config=cfg,
+                    source_identity=source_identity,
+                    session_id=session_id,
+                    entry_id=entry_id,
+                    evidence=evidence,
+                    expires=expires,
+                    assertions=assertions,
+                    raise_security_errors=True,
+                )
+
+        return await run_offloaded(_run)

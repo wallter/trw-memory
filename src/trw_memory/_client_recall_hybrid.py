@@ -266,6 +266,9 @@ async def try_hybrid_recall(
             rerank=client._config.recall_rerank,
             rerank_model=client._config.recall_rerank_model,
             rerank_candidates=client._config.recall_rerank_candidates,
+            rerank_min_score=client._config.recall_rerank_min_score,
+            rerank_min_keep=client._config.recall_rerank_min_keep,
+            rerank_local_only=client._config.local_only,
             # When prefix was stripped, the cross-encoder also uses the
             # stripped query — passing the original "latest guidance on X"
             # confuses the ms-marco reranker because memory entries don't

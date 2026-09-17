@@ -19,15 +19,18 @@ from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 
 class TestRankByUtilityEdgePaths:
-    def test_all_expired_returns_empty(self) -> None:
-        """All entries expired → drop_expired empties list → early return."""
+    def test_expired_entries_are_ranked_not_dropped(self) -> None:
+        """PRD-CORE-278 FR05: admission moved to ``drop_expired_entries``."""
+        from trw_memory.lifecycle._recall import drop_expired_entries
+
         expired_entry = {
             "id": "E-001",
             "content": "stale content",
             "expires": "2020-01-01T00:00:00+00:00",
         }
-        result = rank_by_utility([expired_entry], query_tokens=["stale"], lambda_weight=0.5)
-        assert result == []
+        result = rank_by_utility([expired_entry], query_tokens=["stale"])
+        assert [e["id"] for e in result] == ["E-001"]
+        assert drop_expired_entries(result) == []
 
     def test_empty_query_tokens_uses_wildcard_relevance(self) -> None:
         """Empty query_tokens → relevance = 1.0 for all entries (line 132)."""
@@ -35,7 +38,7 @@ class TestRankByUtilityEdgePaths:
             {"id": "E-001", "content": "alpha content", "tags": []},
             {"id": "E-002", "content": "beta content", "tags": []},
         ]
-        result = rank_by_utility(entries, query_tokens=[], lambda_weight=0.0)
+        result = rank_by_utility(entries, query_tokens=[])
         # Both get relevance 1.0; order determined by utility (both near-zero → stable)
         assert len(result) == 2
         ids = {e["id"] for e in result}
@@ -44,11 +47,11 @@ class TestRankByUtilityEdgePaths:
     def test_tags_not_a_list_is_handled(self) -> None:
         """Non-list tags are treated as empty string for relevance scoring."""
         entries = [{"id": "E-003", "content": "content", "tags": "not-a-list"}]
-        result = rank_by_utility(entries, query_tokens=["content"], lambda_weight=0.0)
+        result = rank_by_utility(entries, query_tokens=["content"])
         assert len(result) == 1
 
     def test_empty_input_returns_empty(self) -> None:
-        result = rank_by_utility([], query_tokens=["x"], lambda_weight=0.5)
+        result = rank_by_utility([], query_tokens=["x"])
         assert result == []
 
 

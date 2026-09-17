@@ -12,13 +12,28 @@ SQLite < 3.51.3 carries the WAL-reset corruption bug
 (sqlite.org/wal.html §walresetbug): a *resetting* checkpoint
 (``TRUNCATE``/``RESTART``) that races a second connection's checkpoint/write
 can leave the WAL-index header inconsistent, so a later checkpoint skips a
-committed transaction. The fix that does not depend on the engine version is
-to (a) run every checkpoint on the backend's single owning connection under
-its lock — there is then never a second checkpointer to race — and (b) on an
-unsafe engine, downgrade resetting modes to ``PASSIVE`` (which never resets
-the WAL, so it cannot trigger the bug regardless of connection/process count).
-This module implements (b)'s mode coercion and the ``busy``-aware fallback;
-the caller supplies the locked, owning connection for (a).
+committed transaction. Two things stand between this store and that bug, and
+they are not equal:
+
+(a) Every checkpoint runs on the backend's single owning connection under
+    ``lock_for_rmw(<db>.checkpoint)``. That lock serialises checkpoint against checkpoint
+    — including across processes — and nothing more. It
+    does NOT exclude an ordinary write: ``SQLiteBackend.transaction()`` is a
+    plain ``BEGIN IMMEDIATE``/``COMMIT`` that never takes it, and
+    ``WriterRegistry`` is an advisory head-count, not mutual exclusion. On a
+    store with five to eight live server processes — the normal case, not an
+    edge case — a checkpoint and an unrelated write in another process still
+    overlap. An earlier version of this docstring credited (a) with removing
+    the race outright; that was an overstatement (reported 2026-09-16,
+    sub_ETsiykrdS-wM_Te8, verified against the source).
+
+(b) On an unsafe engine, resetting modes are downgraded to ``PASSIVE``, which
+    never resets the WAL and therefore cannot trigger the bug regardless of
+    connection or process count.
+
+So (b) is the load-bearing mitigation and (a) is a useful narrowing of the
+window. This module implements (b)'s mode coercion and the ``busy``-aware
+fallback; the caller supplies the locked, owning connection for (a).
 
 Why a resetting checkpoint is REFUSED outright below 3.51.3 (PRD-CORE-248 OQ-1)
 -----------------------------------------------------------------------------
@@ -39,10 +54,16 @@ repository has already suffered once.
 
 So the rule is unconditional and has no caller-supplied escape: when
 ``wal_reset_safe`` is False, resetting modes become ``PASSIVE``, whoever asks
-and whatever they can certify. The WAL is reclaimed by upgrading the engine —
-SQLite >= 3.51.3, or a ``pysqlite3`` wheel bundling it — and the checkpoint
-log and the ``trw-mcp doctor`` ``memory_wal`` row say so in those words, so an
-operator seeing a large WAL is told the remedy rather than left to infer it.
+and whatever they can certify. The WAL is reclaimed by running on an engine at
+SQLite >= 3.51.3, and the checkpoint log and the ``trw-mcp doctor``
+``memory_wal`` row say so in those words, so an operator seeing a large WAL is
+told the remedy rather than left to infer it.
+
+The remedy names an INTERPRETER, not a wheel. Every published ``pysqlite3`` /
+``pysqlite3-binary`` wheel measured on 2026-09-16 bundles SQLite 3.51.1, below
+the fix, so "install the wheel" reads as a fix and delivers an engine change
+with no effect on the problem — and on a current interpreter it is a downgrade
+(see ``_dbapi``, which now refuses that downgrade).
 """
 
 from __future__ import annotations
@@ -74,9 +95,10 @@ RESETTING_MODES: frozenset[RunMode] = frozenset({"TRUNCATE", "RESTART"})
 #: and this module's own warning all say the same sentence — an operator who
 #: reads any one of them gets the remedy, not just the symptom.
 WAL_RESET_UNSAFE_REMEDY = (
-    "this SQLite engine predates the 3.51.3 WAL-reset fix, so the WAL can be "
-    "written back but never reclaimed; upgrade to SQLite >= 3.51.3 (e.g. a "
-    "pysqlite3 wheel bundling it) to let TRUNCATE shrink the file"
+    "this SQLite engine predates the 3.51.3 WAL-reset fix, so the WAL can be written back "
+    "but never reclaimed; run TRW on any interpreter whose sqlite3.sqlite_version >= 3.51.3 "
+    "(3.44.6 and 3.50.7 carry the backport) -- on macOS Homebrew Python ships one. "
+    "No published pysqlite3 wheel qualifies as of 2026-09-16"
 )
 
 

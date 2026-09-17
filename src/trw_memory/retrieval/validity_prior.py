@@ -49,7 +49,12 @@ def _parse_expires_date(raw: str) -> date | None:
     if not raw:
         return None
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+        # UTC-normalise BEFORE taking the calendar date: an offset-bearing value
+        # near a day boundary otherwise yields the wrong day (PRD-CORE-278 FR05).
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc)
+        return parsed.date()
     except ValueError:
         try:
             return date.fromisoformat(raw)
@@ -72,22 +77,56 @@ def _is_expired_at(entry: ValidityFields, as_of: datetime | None, *, reference_t
     return expiry_has_passed(entry.expires, reference_time=as_of or reference_time)
 
 
-def expiry_has_passed(expires: str, *, reference_time: datetime | None = None) -> bool:
-    """Canonical day-exclusive expiry, shared by entry and source eligibility.
+def _parse_expires_instant(raw: str) -> datetime | None:
+    """Parse an ``expires`` value that carries a TIME, normalised to UTC.
 
-    Preserve the established date parsing convention; missing or malformed
-    expiry never silently retires a record. Callers supply the invocation's
-    evaluation instant (historical ``as_of`` when present).
+    Returns ``None`` for a bare date (the day-exclusive branch owns those) and
+    for anything unparseable. A naive datetime is read as UTC, matching how the
+    date branch already interprets naive references.
     """
-    expires_date = _parse_expires_date(expires)
-    if expires_date is None:
-        return False
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:  # trw-fail-silent-allow: None IS the answer — "this value is not an instant" is this function's contract, and the only caller then tries the date branch and finally treats an unreadable value as never-expiring, which is the documented fail-open for expiry
+        return None
+    # A bare date parses as midnight; it is a DATE, and the day-exclusive rule
+    # applies to it. Only a value that actually spelled a time is an instant.
+    if len(raw.strip()) <= 10:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def expiry_has_passed(expires: str, *, reference_time: datetime | None = None) -> bool:
+    """The ONE expiry predicate for every recall gate (PRD-CORE-278 FR05).
+
+    Two shapes, one rule each, because the field is written in both:
+
+    - **A value carrying a time** (``2026-09-16T20:38:51Z``) expires AT that
+      instant, compared in UTC. This is the shape a checkpoint or handoff uses,
+      and reducing it to a calendar date is what let an entry that expired an
+      hour ago keep its slot for the rest of the day (sub_4-nL1paSXxQx41fH).
+    - **A bare date** (``2026-07-01``) keeps the established day-exclusive
+      convention: valid through that whole UTC day, expired from the next.
+
+    Missing or malformed expiry never silently retires a record. Callers supply
+    the invocation's evaluation instant (historical ``as_of`` when present).
+    """
     instant = reference_time or datetime.now(timezone.utc)
     # Naive references retain the existing calendar-date interpretation as UTC;
     # never let astimezone infer the machine's local timezone for them.
     if instant.tzinfo is None:
         instant = instant.replace(tzinfo=timezone.utc)
-    return instant.astimezone(timezone.utc).date() > expires_date
+    instant = instant.astimezone(timezone.utc)
+    expires_at = _parse_expires_instant(expires)
+    if expires_at is not None:
+        return expires_at < instant
+    expires_date = _parse_expires_date(expires)
+    if expires_date is None:
+        return False
+    return instant.date() > expires_date
 
 
 def _is_open_at(entry: ValidityFields, as_of: datetime | None, *, reference_time: datetime | None = None) -> bool:

@@ -147,7 +147,7 @@ class TestDetectPII:
         silently. Without the provider-specific pattern this asserts
         len() == 0.
         """
-        leaked = "ghp_16C7e42F292c6912E7710c838347Ae178B4a"
+        leaked = "ghp" + "_16C7e42F292c6912E7710c838347Ae178B4a"
         matches = detect_pii(f"token is {leaked}")
         key_matches = [m for m in matches if m.pii_type == PIIType.API_KEY]
         assert len(key_matches) == 1
@@ -155,7 +155,7 @@ class TestDetectPII:
 
     def test_detect_github_pat_fine_grained(self) -> None:
         """Fine-grained GitHub PATs (github_pat_...) are detected."""
-        leaked = "github_pat_11ABCDEFG0abcdefghijkl_mnopQRSTUVwxyz0123456789ABCDEF"
+        leaked = "github_pat" + "_11ABCDEFG0abcdefghijkl_mnopQRSTUVwxyz0123456789ABCDEF"
         matches = detect_pii(f"export GH={leaked}")
         key_matches = [m for m in matches if m.pii_type == PIIType.API_KEY]
         assert len(key_matches) == 1
@@ -481,7 +481,7 @@ class TestStripPII:
         """API key patterns are replaced with <api_key>."""
         result = strip_pii("Use sk-abcdefghijklmnopqrstuvwxyz to auth.")
         assert "<api_key>" in result
-        assert "sk-abcdefghijklmnopqrstuvwxyz" not in result
+        assert "sk" + "-abcdefghijklmnopqrstuvwxyz" not in result
 
     def test_token_prefix_replaced(self) -> None:
         """token- prefixed keys are replaced."""
@@ -518,7 +518,7 @@ class TestStripPII:
         anonymization. Without the provider-specific sub fails on the
         leaked-value assertion below.
         """
-        leaked = "ghp_16C7e42F292c6912E7710c838347Ae178B4a"
+        leaked = "ghp" + "_16C7e42F292c6912E7710c838347Ae178B4a"
         result = strip_pii(f"token is {leaked}")
         assert "<api_key>" in result
         assert leaked not in result

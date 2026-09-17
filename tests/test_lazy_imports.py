@@ -100,3 +100,29 @@ def test_retrieval_getattr_rejects_unknown_name() -> None:
 
     with pytest.raises(AttributeError):
         _ = retrieval.does_not_exist  # type: ignore[attr-defined]
+
+
+def test_import_trw_memory_package_is_lazy() -> None:
+    """``import trw_memory`` loads only the driver policy and logging default (PEP 562).
+
+    The package and ``trw_memory.storage`` inits defer every public name to first
+    access; an eager regression would re-add ~1.2 s to every hook subprocess.
+    """
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, trw_memory\n"
+            "loaded = sorted(m for m in sys.modules if m.startswith('trw_memory'))\n"
+            "print('|'.join(loaded))\n",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    loaded = set(proc.stdout.strip().split("|"))
+    assert "trw_memory.client" not in loaded
+    assert "trw_memory.models.memory" not in loaded
+    assert "trw_memory.storage.sqlite_backend" not in loaded
+    assert {"trw_memory", "trw_memory.storage", "trw_memory.storage._dbapi"} <= loaded

@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 import warnings
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 
 import structlog
@@ -28,6 +29,7 @@ from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.bm25 import bm25_search
 from trw_memory.retrieval.dense import dense_search
 from trw_memory.retrieval.fusion import blend_recency, combmax_fuse, rrf_fuse
+from trw_memory.retrieval.lexical import lexical_relevance, tokenize_query
 from trw_memory.retrieval.recency import recency_rank
 from trw_memory.retrieval.validity_prior import apply_validity_prior
 from trw_memory.security.namespace_scope import NamespaceScope, NamespaceScopeError
@@ -36,7 +38,46 @@ logger = structlog.get_logger(__name__)
 _RETIRED_UNSET = object()
 
 
+@dataclass(frozen=True, slots=True)
+class ScoredCandidate:
+    """One ranked candidate and the number that put it where it is.
+
+    PRD-CORE-278 FR01. ``basis`` is part of the contract because the fused score
+    is NOT always the authority for the final order: ``apply_validity_prior``
+    positionally appends superseded records and ``cross_encode_rerank`` re-scores
+    the head of the list. Returning the original fusion numbers after either ran
+    would produce a score sequence that contradicts the order it claims to
+    explain.
+
+    - ``basis="fused"`` — no post-fusion pass reordered the list; ``score`` is
+      the blended fusion score.
+    - ``basis="position"`` — a post-fusion pass ran; ``score`` is ``1 / (1 +
+      rank)`` over the FINAL order, for every candidate in the call.
+
+    The basis is uniform per call, never per candidate, so a consumer never
+    compares two scales inside one result.
+    """
+
+    entry: MemoryEntry
+    score: float
+    basis: str
+
+
 def hybrid_search(
+    query: str,
+    entries: list[MemoryEntry],
+    **kwargs: object,
+) -> list[MemoryEntry]:
+    """Entry-only view of :func:`hybrid_search_scored` (unchanged contract).
+
+    Kept as the package's stable surface: callers that only need the ranking
+    order — including ``trw_mcp.state._memory_queries`` — are unaffected by
+    PRD-CORE-278's scored boundary.
+    """
+    return [candidate.entry for candidate in hybrid_search_scored(query, entries, **kwargs)]  # type: ignore[arg-type]
+
+
+def hybrid_search_scored(
     query: str,
     entries: list[MemoryEntry],
     *,
@@ -67,9 +108,12 @@ def hybrid_search(
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
     rerank_candidates: int = 50,
     rerank_query: str | None = None,
+    rerank_min_score: float | None = None,
+    rerank_min_keep: int = 5,
+    rerank_local_only: bool = False,
     collapse_hype: object = _RETIRED_UNSET,
     dense_observer: Callable[[tuple[tuple[str, float], ...]], None] | None = None,
-) -> list[MemoryEntry]:
+) -> list[ScoredCandidate]:
     """Hybrid BM25 + vector search with configurable rank fusion.
 
     Runs BM25 and dense retrieval in sequence then fuses their rankings using
@@ -178,8 +222,10 @@ def hybrid_search(
             Ignored when ``rerank=False``.
 
     Returns:
-        Up to *top_k* :class:`~trw_memory.models.memory.MemoryEntry` objects
-        ordered by fused (and optionally re-ranked) relevance score descending.
+        Up to *top_k* :class:`ScoredCandidate` objects ordered by descending
+        score. The score is the fused relevance score, or a position-derived
+        score when a post-fusion pass reordered the list; ``basis`` says which,
+        uniformly for the whole call.
     """
     if collapse_hype is not _RETIRED_UNSET:
         if collapse_hype is not False:
@@ -229,6 +275,28 @@ def hybrid_search(
             dense_results = dense_results[:vector_candidates]
         if dense_results:
             rankings.append(dense_results)
+
+    # ------------------------------------------------- Lexical fallback source
+    # PRD-CORE-278 FR04: when BOTH sources produced nothing — no BM25 match and
+    # no stored vectors — rank whole-word lexical overlap rather than returning
+    # an empty list. It is added HERE, as a third ranking source before fusion,
+    # so it inherits the namespace-scope assertion above, the validity prior
+    # below and ``top_k``. Doing it in the caller would resurrect superseded and
+    # ``as_of``-excluded records, because those exclusions live in the prior.
+    lexical_fallback: list[tuple[str, float]] = []
+    if not rankings and query.strip():
+        query_tokens = tokenize_query(query)
+        lexical_fallback = sorted(
+            (
+                (entry.id, relevance)
+                for entry in entries
+                if (relevance := lexical_relevance(entry.model_dump(mode="json"), query_tokens)) > 0.0
+            ),
+            key=lambda pair: pair[1],
+            reverse=True,
+        )
+        if lexical_fallback:
+            rankings.append(lexical_fallback)
 
     if not rankings:
         logger.debug(
@@ -287,6 +355,7 @@ def hybrid_search(
     # ``include_superseded`` (so they never outrank an open record), and applies a
     # bounded age advantage. Fusion order is otherwise preserved. ``top_k`` is
     # applied AFTER the prior so excluded records do not consume result slots.
+    pre_prior_order = [entry.id for entry in fused_entries]
     fused_entries = apply_validity_prior(
         fused_entries,
         as_of=as_of,
@@ -296,13 +365,21 @@ def hybrid_search(
         reference_time=validity_reference_time,
         fusion_scores=fused_scores,
     )
+    # The prior may drop records (order preserved) or REORDER them (superseded
+    # rows appended, age decay applied). Only a reorder invalidates the fused
+    # numbers as an explanation of the final order.
+    survivors = {entry.id for entry in fused_entries}
+    prior_reordered = [entry.id for entry in fused_entries] != [
+        entry_id for entry_id in pre_prior_order if entry_id in survivors
+    ]
 
     # --------------------------------------------------------- Re-ranking
     # Optional cross-encoder re-ranking: score top-N candidates jointly as
     # (query, passage) pairs.  This captures finer-grained relevance than
     # bi-encoder + RRF at the cost of O(rerank_candidates) model calls.
+    reranked = False
     if rerank and fused_entries:
-        from trw_memory.retrieval.reranker import cross_encode_rerank
+        from trw_memory.retrieval.reranker import cross_encode_scores
 
         # Use rerank_query (original un-preprocessed query) when supplied so
         # the cross-encoder receives the full user intent even if the search
@@ -310,21 +387,57 @@ def hybrid_search(
         effective_rerank_query = rerank_query if rerank_query is not None else query
         rerank_input = fused_entries[:rerank_candidates]
         tail = fused_entries[rerank_candidates:]
-        rerank_input = cross_encode_rerank(effective_rerank_query, rerank_input, model_name=rerank_model)
-        fused_entries = [*rerank_input, *tail]
+        pre_rerank_order = [entry.id for entry in rerank_input]
+        scored = cross_encode_scores(
+            effective_rerank_query, rerank_input, model_name=rerank_model, local_only=rerank_local_only
+        )
+        if scored is None:
+            pass  # cross-encoder unavailable: keep fusion order and every candidate
+        elif rerank_min_score is None:
+            fused_entries = [*(e for e, _ in scored), *tail]
+        else:
+            # Confidence-bounded recall: return only what the cross-encoder finds
+            # plausibly relevant, never fewer than rerank_min_keep, and nothing
+            # from the un-scored tail (it ranked below everything scored). On
+            # LOCOMO a -8 logit cutoff shrank the list from 50 to 34 entries
+            # while keeping 99% of the evidence the uncut top-50 held.
+            keep = max(0, rerank_min_keep)
+            fused_entries = [e for i, (e, s) in enumerate(scored) if i < keep or s >= rerank_min_score]
+        # PRD-CORE-278: a reorder OR a cut means the fused numbers no longer
+        # explain the returned list, so the scores below switch to position.
+        reranked = scored is not None and (
+            [entry.id for entry in fused_entries[: len(pre_rerank_order)]] != pre_rerank_order
+            or len(fused_entries) != len(pre_rerank_order) + len(tail)
+        )
 
-    results: list[MemoryEntry] = fused_entries[:top_k]
+    ranked_entries: list[MemoryEntry] = fused_entries[:top_k]
+    # PRD-CORE-278 FR01: report the score that explains the order actually
+    # returned, and say which basis it is on.
+    if prior_reordered or reranked:
+        results = [
+            # Not rounded: at a deep top_k, rounding collapses adjacent
+            # positions onto one value and hands the ordering back to utility.
+            ScoredCandidate(entry=entry, score=1.0 / (1 + rank), basis="position")
+            for rank, entry in enumerate(ranked_entries)
+        ]
+    else:
+        results = [
+            ScoredCandidate(entry=entry, score=float(fused_scores.get(entry.id, 0.0)), basis="fused")
+            for entry in ranked_entries
+        ]
 
     logger.debug(
         "hybrid_search_complete",
         query=query[:80],
         entry_count=len(entries),
         bm25_hits=len(bm25_results) if bm25_results else 0,
+        lexical_fallback_hits=len(lexical_fallback),
         recency_hits=len(recency_results),
         fused_total=len(fused),
         returned=len(results),
         fusion_mode=fusion_mode,
         recency_weight=recency_weight,
         rerank=rerank,
+        score_basis=results[0].basis if results else "",
     )
     return results

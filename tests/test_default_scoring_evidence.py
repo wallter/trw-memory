@@ -5,10 +5,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from trw_memory.lifecycle import utility_based_prune_candidates
 from trw_memory.lifecycle.scoring import (
     compute_utility_score,
     entry_utility,
-    utility_based_prune_candidates,
 )
 from trw_memory.lifecycle.tiers._scoring import compute_importance_score
 from trw_memory.models.config import MemoryConfig

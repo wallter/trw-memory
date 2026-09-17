@@ -20,6 +20,7 @@ from itertools import pairwise
 
 import pytest
 
+from trw_memory.lifecycle import rank_by_utility, utility_based_prune_candidates
 from trw_memory.lifecycle.scoring import (
     apply_time_decay,
     bayesian_calibrate,
@@ -27,9 +28,7 @@ from trw_memory.lifecycle.scoring import (
     compute_utility_score,
     enforce_tier_distribution,
     entry_utility,
-    rank_by_utility,
     update_q_value,
-    utility_based_prune_candidates,
 )
 from trw_memory.models.config import MemoryConfig
 
@@ -524,41 +523,52 @@ def test_compute_utility_score_extreme_age_bounded() -> None:
 
 
 def test_rank_by_utility_empty() -> None:
-    assert rank_by_utility([], ["python"], 0.5) == []
+    assert rank_by_utility([], ["python"]) == []
 
 
-def test_rank_by_utility_compatibility_import_drops_expired_entries() -> None:
+def test_rank_by_utility_compatibility_import_keeps_expired_entries() -> None:
+    """PRD-CORE-278 FR05: the ranker ranks; ``drop_expired_entries`` admits.
+
+    This used to assert the ranker returned ``[]`` for an expired entry. It was
+    a guard that ran before the tier and org merges re-added the same row, so
+    the guarantee it looked like it made was never true on the tool path.
+    """
+    from trw_memory.lifecycle._recall import drop_expired_entries
+
     expired = _entry(entry_id="M-expired")
     expired["expires"] = "2020-01-01T00:00:00+00:00"
 
-    assert rank_by_utility([expired], ["python"], 0.5) == []
+    assert [e["id"] for e in rank_by_utility([expired], ["python"])] == ["M-expired"]
+    assert drop_expired_entries(rank_by_utility([expired], ["python"])) == []
 
 
 def test_rank_by_utility_wildcard_all_same_relevance() -> None:
     entries = [_entry(importance=0.9, entry_id="M-001"), _entry(importance=0.2, entry_id="M-002")]
-    # With empty query tokens (wildcard), relevance=1.0 for all
-    # Higher importance → higher utility → higher rank
-    ranked = rank_by_utility(entries, [], 0.9)
+    # With empty query tokens (wildcard), relevance=1.0 for all, so the utility
+    # tiebreak decides and higher importance wins.
+    ranked = rank_by_utility(entries, [])
     assert ranked[0]["id"] == "M-001"
 
 
-def test_rank_by_utility_relevance_dominates_at_lambda_zero() -> None:
-    # lambda=0 → pure relevance
+def test_rank_by_utility_relevance_outranks_utility() -> None:
+    # PRD-CORE-278 FR02: utility is a TIEBREAK, so it can never reorder two
+    # entries whose relevance differs -- there is no lambda that makes the
+    # irrelevant-but-important entry win.
     relevant = _entry(entry_id="M-001", importance=0.1)
     relevant["content"] = "python async coroutines"
     irrelevant = _entry(entry_id="M-002", importance=0.9)
     irrelevant["content"] = "unrelated topic"
 
-    ranked = rank_by_utility([relevant, irrelevant], ["python"], lambda_weight=0.0)
+    ranked = rank_by_utility([relevant, irrelevant], ["python"])
     assert ranked[0]["id"] == "M-001"
 
 
-def test_rank_by_utility_utility_dominates_at_lambda_one() -> None:
-    # lambda=1 → pure utility, high importance wins
+def test_rank_by_utility_utility_breaks_ties_at_equal_relevance() -> None:
+    # Both entries are equally (ir)relevant to the query, so utility decides.
     low_imp = _entry(entry_id="M-001", importance=0.1, q_observations=10, q_value=0.1)
     high_imp = _entry(entry_id="M-002", importance=0.9, q_observations=10, q_value=0.9)
 
-    ranked = rank_by_utility([low_imp, high_imp], ["python"], lambda_weight=1.0)
+    ranked = rank_by_utility([low_imp, high_imp], ["python"])
     assert ranked[0]["id"] == "M-002"
 
 
@@ -774,7 +784,7 @@ class TestNativePruneHonoursProtectionTier:
 
     def test_the_scoring_facade_delegate_inherits_the_exemption(self) -> None:
         """lifecycle.scoring.utility_based_prune_candidates delegates into the same code."""
-        from trw_memory.lifecycle.scoring import utility_based_prune_candidates as facade
+        from trw_memory.lifecycle import utility_based_prune_candidates as facade
 
         permanent = self._worthless("m-facade-permanent", "permanent")
         normal = self._worthless("m-facade-normal", "normal")

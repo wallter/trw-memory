@@ -9,7 +9,8 @@ file stays under the 350 effective-LOC gate (PRD-DIST-246 batch 105).
 - ``apply_budget`` — pure token-budget filtering.
 - ``merge_org_results`` — append cross-validated sibling memories.
 - ``tier_results`` — collect local tier-managed candidates.
-- ``remember_results_in_tiers`` — keep hot/warm tiers aligned.
+- ``remember_results_in_tiers`` / ``remember_selected_candidates`` — re-exported from
+  ``_client_recall_mirror`` (tier mirroring after a recall).
 - ``merge_tier_results`` — fuse tier-only candidates with composite score.
 - ``tier_result_from_entry`` — tier-entry → result-dict.
 - ``apply_admission_filter`` — PRD-DIST-2049 c802 confidence / currentness filter.
@@ -22,14 +23,19 @@ from __future__ import annotations
 import asyncio
 import functools
 from dataclasses import replace
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, cast
 
 import structlog
 
 from trw_memory._client_distilled_tiering import entry_to_result as _entry_to_result
+from trw_memory._client_recall_mirror import (
+    remember_results_in_tiers as remember_results_in_tiers,
+)
+from trw_memory._client_recall_mirror import (
+    remember_selected_candidates as remember_selected_candidates,
+)
 from trw_memory.lifecycle.scoring import entry_utility
-from trw_memory.lifecycle.tiers._runtime import remember_entry_data_in_tiers, tier_candidates
+from trw_memory.lifecycle.tiers._runtime import tier_candidates
 from trw_memory.lifecycle.tiers._scoring import compute_importance_score
 from trw_memory.models.config import MemoryConfig
 from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocation, RemoteCandidate
@@ -194,31 +200,6 @@ def tier_results(
     return [tier_result_from_entry(candidate) for candidate in cast("list[dict[str, object]]", candidates)]
 
 
-def remember_results_in_tiers(
-    client: MemoryClient,
-    results: list[MemoryResultDict],
-) -> None:
-    """Keep the hot/warm tiers aligned with the entries callers actually saw."""
-    recalled_at = datetime.now(timezone.utc).isoformat()
-    for result in results:
-        if result.get("source", "local") != "local":
-            continue
-        payload: dict[str, object] = {
-            "id": result["memory_id"],
-            "content": result["content"],
-            "detail": result["detail"],
-            "tags": result["tags"],
-            "importance": result["importance"],
-            "namespace": result["namespace"],
-            "last_accessed_at": recalled_at,
-        }
-        if result["created_at"]:
-            payload["created_at"] = result["created_at"]
-        if result["updated_at"]:
-            payload["updated_at"] = result["updated_at"]
-        remember_entry_data_in_tiers(client._config, payload)
-
-
 def merge_tier_results(
     local_results: list[MemoryResultDict],
     tier_only_results: list[MemoryResultDict],
@@ -320,17 +301,47 @@ def merge_local_candidates(
     query_embedding: list[float] | None,
     *,
     invocation: RecallInvocation | None = None,
+    query: str | None = None,
 ) -> list[LocalCandidate]:
-    """Merge acquired entries without a requested-result cut or source weighting."""
+    """Merge acquired entries without a requested-result cut or source weighting.
+
+    Under confidence-bounded recall (``recall_rerank`` with a
+    ``recall_rerank_min_score``) tier-only rows are held to the same bar as
+    the hybrid pool: when *query* is given they are scored by the cross-encoder
+    and only those at or above the floor may refill; cold hits are exempt
+    because an archived entry is invisible to the hybrid pool and this is its
+    only way back. Without *query* (legacy callers) refill is unchanged.
+    """
     seen = {(c.entry.namespace, c.entry.id) for c in local}
     content = {c.entry.content for c in local}
     added = [c for c in tiers if (c.entry.namespace, c.entry.id) not in seen and c.entry.content not in content]
+    floor = config.recall_rerank_min_score if config.recall_rerank else None
+    # The floor is applied only when a hybrid pool exists to compare against.
+    # With an EMPTY hybrid pool the tier rows are the only evidence there is,
+    # and a warm-tier dense hit ("opaque title" that only its vector matches)
+    # is exactly the case tier discovery exists for; a text cross-encoder
+    # that never saw the vector must not be allowed to erase it.
+    if added and local and query is not None and floor is not None:
+        from trw_memory.retrieval.reranker import cross_encode_scores
+
+        warm = [c for c in added if not c.cold]
+        scored = cross_encode_scores(
+            query, [c.entry for c in warm], model_name=config.recall_rerank_model, local_only=config.local_only
+        )
+        if scored is not None:
+            passing = {e.id for e, s in scored if s >= floor}
+            added = [c for c in added if c.cold or c.entry.id in passing]
     if not added:
         return local
     merged = [*local, *added]
-    if config.recall_preserve_hybrid_order and len(local) >= limit:
+    if config.recall_preserve_hybrid_order and local:
         # Keep the whole pool for final admission/refill, but do not compare
         # reciprocal hybrid ranks with tier-only absolute utility scores.
+        # This used to apply only when the hybrid pool reached `limit`; a
+        # shorter pool (confidence-bounded recall, or a small namespace) fell
+        # through to the heuristic re-score below, which reorders the
+        # cross-encoder's ranking by token overlap and cost LOCOMO hit@10
+        # 85% -> 70%. Hybrid rows keep their order; tier rows follow as fallback.
         return [*local, *(replace(c, tier_fallback=True) for c in added)]
     return [
         replace(
@@ -349,23 +360,6 @@ def merge_local_candidates(
         )
         for c in merged
     ]
-
-
-def remember_selected_candidates(
-    client: MemoryClient, candidates: list[LocalCandidate], results: list[MemoryResultDict]
-) -> None:
-    rows = {(r["namespace"], r["memory_id"]): r for r in results}
-    for candidate in candidates:
-        if candidate.source != "local":
-            continue
-        row = rows[(candidate.entry.namespace, candidate.entry.id)]
-        payload = candidate.entry.model_dump(mode="json")
-        # Security-masked returned content is what may enter the cache; validity
-        # and provenance still come from the authoritative entry, not projection.
-        payload.update(
-            content=row["content"], detail=row["detail"], last_accessed_at=datetime.now(timezone.utc).isoformat()
-        )
-        remember_entry_data_in_tiers(client._config, payload)
 
 
 async def finish_candidates(

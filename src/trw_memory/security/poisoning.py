@@ -36,7 +36,10 @@ MIN_ANOMALY_BASELINE = 10
 _CODE_EXEMPT_PATTERNS = (
     re.compile(r"<script\b", re.IGNORECASE),
     re.compile(r"javascript[ \t]*:", re.IGNORECASE),
-    re.compile(r"\beval[ \t]*\(", re.IGNORECASE),
+    # Not ``\b``: a hyphen is a word boundary, so ``\beval`` matched the package name in
+    # "trw-eval (which reads ...)" and blocked ordinary prose. A dot must NOT exempt:
+    # ``window.eval(`` is the attack shape (release-verify 2026-09-17 P1).
+    re.compile(r"(?<![\w-])eval[ \t]*\(", re.IGNORECASE),
     re.compile(r"rm[ \t]+-rf[ \t]+/", re.IGNORECASE),
 )
 # NOTE on the classification: `<script` and `javascript:` are waivable because

@@ -37,6 +37,7 @@ import pytest
 import trw_memory as _trw_memory_shim_trigger  # noqa: F401
 from tests._trw_home import isolated_trw_home  # noqa: F401  (canonical copy; see that module's docstring)
 from trw_memory.client import MemoryClient
+from trw_memory.embeddings import reset_provider_cache
 from trw_memory.graph import wait_for_graph_updates
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
@@ -119,6 +120,75 @@ def drain_background_graph_updates() -> Iterator[None]:
         # Graph enrichment is best-effort; tests should not hang if a worker is
         # already blocked on an intentionally fault-injected backend.
         pass
+
+
+@pytest.fixture(autouse=True)
+def reset_embedding_provider_cache() -> Iterator[None]:
+    """Empty the process-level embedding-provider cache around each test.
+
+    PRD-CORE-279 gave ``get_local_embedder`` a per-process cache so a long-lived
+    server loads the model once. That cache is process-global state, so without
+    this a test that patched ``LocalEmbeddingProvider`` would be answered by the
+    provider an earlier test built -- which is exactly how
+    ``test_returns_none_on_unexpected_exception`` started passing a MagicMock.
+    """
+    reset_provider_cache()
+    yield
+    reset_provider_cache()
+
+
+@pytest.fixture(autouse=True)
+def restore_daemon_store_pins() -> Iterator[None]:
+    """Undo the store pins a daemon start writes into ``os.environ``.
+
+    ``serve_loopback`` pins MEMORY_STORAGE_PATH and MEMORY_SINGLE_STORE_PATH so
+    every ``MemoryConfig()`` in the DAEMON's process resolves the one user-space
+    store (PRD-CORE-253 FR01). That is right for a process whose whole life is
+    that daemon, and wrong for a test process: the pins outlive the test, and
+    every later test in the same xdist worker then resolves its store to a
+    deleted temporary directory. Measured: running
+    ``tests/test_daemon_lifecycle_signals.py`` before
+    ``tests/test_tools_recall_core.py`` made the latter see another namespace's
+    rows. Snapshot and restore rather than delete, so a deliberate outer pin
+    survives.
+    """
+    pinned = {name: os.environ.get(name) for name in ("MEMORY_STORAGE_PATH", "MEMORY_SINGLE_STORE_PATH")}
+    try:
+        yield
+    finally:
+        for name, value in pinned.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+@pytest.fixture(autouse=True)
+def reset_process_global_runtime_caches() -> Iterator[None]:
+    """Clear the process-lifetime caches the served tool paths populate.
+
+    Three module-level caches survive a test by design, because in production
+    they are per-PROCESS and the process is a server: the tier-manager cache
+    (each entry owns an open warm-tier SQLite connection), the canary state
+    (whose ``failed`` flag halts recall), and the offload worker pool. In a test
+    process the same lifetime is cross-test leakage, and the tier cache is keyed
+    on the configured storage path, so two tests using different temporary
+    stores at the same configured path resolve one store's entry ids against
+    the other's backend.
+    """
+    _clear_runtime_caches()
+    yield
+    _clear_runtime_caches()
+
+
+def _clear_runtime_caches() -> None:
+    from trw_memory.daemon._offload import shutdown_offload_pool
+    from trw_memory.lifecycle.tiers._runtime import reset_tier_manager_cache
+    from trw_memory.security._runtime_canary import CANARY_STATE
+
+    reset_tier_manager_cache()
+    CANARY_STATE.clear()
+    shutdown_offload_pool()
 
 
 @pytest.fixture(autouse=True)

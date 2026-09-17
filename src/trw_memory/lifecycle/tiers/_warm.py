@@ -7,6 +7,7 @@ for keyword search.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from collections.abc import Iterator
@@ -46,6 +47,12 @@ class WarmTierStore:
         # Cached SQLiteBackend to avoid open/close per operation
         self._warm_backend: SQLiteBackend | None = None
         self._warm_backend_dim: int | None = None
+        # Parsed-sidecar cache keyed on (mtime_ns, size). Every write path goes
+        # through the RMW lock and changes both, so a stale hit is impossible
+        # in-process and across processes; a hit skips re-parsing N JSON rows
+        # per recall (tier discovery re-reads the whole sidecar on every call).
+        self._sidecar_cache: tuple[tuple[int, int], list[tuple[int, dict[str, object]]]] | None = None
+        self._sidecar_cache_lock = threading.Lock()
 
     def _get_warm_backend(self, dim: int | None = None) -> SQLiteBackend | None:
         """Lazy-init and cache a SQLiteBackend for warm tier operations.
@@ -109,7 +116,33 @@ class WarmTierStore:
         line-number locality) survive a corrupt byte sequence anywhere in the
         file. ``\r`` from CRLF-terminated rows is stripped, matching the prior
         ``str.splitlines`` behaviour.
+
+        Parsed rows are cached against the file's ``(mtime_ns, size)``; a
+        cache hit yields shallow copies so callers may annotate records
+        without poisoning the cache. Corrupt-row warnings therefore fire once
+        per file version, not once per read.
         """
+        try:
+            stat = sidecar.stat()
+            key = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            key = None
+        with self._sidecar_cache_lock:
+            cached = self._sidecar_cache
+        if key is not None and cached is not None and cached[0] == key:
+            for line_number, rec in cached[1]:
+                yield line_number, dict(rec)
+            return
+        parsed: list[tuple[int, dict[str, object]]] = []
+        for line_number, rec in self._parse_sidecar_records(sidecar):
+            parsed.append((line_number, rec))
+            yield line_number, dict(rec)
+        if key is not None:
+            with self._sidecar_cache_lock:
+                self._sidecar_cache = (key, parsed)
+
+    def _parse_sidecar_records(self, sidecar: Path) -> Iterator[tuple[int, dict[str, object]]]:
+        """Parse the sidecar from disk (see ``_iter_sidecar_records`` for the contract)."""
         for line_number, byte_line in enumerate(sidecar.read_bytes().split(b"\n"), start=1):
             if not byte_line.strip():
                 continue
@@ -183,24 +216,62 @@ class WarmTierStore:
         self._warm_sidecar_upsert(entry_id, entry_data)
         logger.debug("warm_tier_add", entry_id=entry_id, has_embedding=embedding is not None)
 
-    def _warm_sidecar_upsert(self, entry_id: str, entry_data: dict[str, object]) -> None:
-        """Write entry metadata to the warm sidecar JSONL for keyword search.
+    def warm_add_many(
+        self,
+        items: list[tuple[str, dict[str, object], list[float] | None]],
+    ) -> None:
+        """Insert or replace several entries with ONE sidecar read-modify-write.
 
-        Optimized: for new entries (not already in sidecar), appends directly
-        without reading/rewriting the entire file. For updates to existing
-        entries, falls back to full read-filter-write.
+        ``warm_add`` costs a full sidecar parse (and, for an entry already
+        present, a full rewrite) per call. Recall mirrors every returned entry
+        back into the warm tier to refresh ``last_accessed_at``, so a 50-result
+        recall over a 400-row sidecar was 50 parses + 50 rewrites -- measured at
+        ~80% of recall latency (2.1 s of 2.6 s) on the LOCOMO benchmark. This
+        path parses and rewrites once for the whole batch; the resulting file
+        is identical to applying ``warm_add`` in order.
         """
-        sidecar = self._warm_sidecar_path()
-        sidecar.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not items:
+            return
+        for entry_id, _entry_data, embedding in items:
+            if embedding is None:
+                continue
+            try:
+                backend = self._get_warm_backend(dim=len(embedding))
+                if backend is not None:
+                    backend.upsert_vector(entry_id, embedding, namespace=WARM_TIER_NAMESPACE)
+            except (OSError, ValueError):
+                logger.debug("warm_tier_vec_upsert_failed", entry_id=entry_id, exc_info=True)
+        # Last write wins for a duplicated id, matching sequential warm_add.
+        records: dict[str, dict[str, object]] = {}
+        for entry_id, entry_data, _embedding in items:
+            records[entry_id] = self._sidecar_record(entry_id, entry_data)
+        self._warm_sidecar_upsert_many(records)
+        logger.debug("warm_tier_add_many", count=len(records))
 
+    @staticmethod
+    def _sidecar_record(entry_id: str, entry_data: dict[str, object]) -> dict[str, object]:
         # Use 'content' (MemoryEntry) or fall back to 'summary' (legacy)
         summary = str(entry_data.get("content", entry_data.get("summary", "")))
-        record: dict[str, object] = {
+        return {
             "id": entry_id,
             "summary": summary,
             "tags": entry_data.get("tags", []),
             "entry": dict(entry_data),
         }
+
+    def _warm_sidecar_upsert(self, entry_id: str, entry_data: dict[str, object]) -> None:
+        """Write one entry's metadata to the warm sidecar JSONL for keyword search."""
+        self._warm_sidecar_upsert_many({entry_id: self._sidecar_record(entry_id, entry_data)})
+
+    def _warm_sidecar_upsert_many(self, records: dict[str, dict[str, object]]) -> None:
+        """Upsert *records* (keyed by entry id) into the sidecar in one pass.
+
+        Optimized: ids not already in the sidecar are appended without
+        rewriting the file. When at least one id is already present the
+        surviving rows plus every new record are rewritten once.
+        """
+        sidecar = self._warm_sidecar_path()
+        sidecar.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
         # The entire read-modify-write must be serialized: two concurrent
         # upserts (or an upsert racing purge_sidecar_entry) would otherwise
@@ -209,35 +280,36 @@ class WarmTierStore:
         # advisory lock is both in-process and cross-process (fcntl), matching
         # yaml_backend's RMW discipline.
         with lock_for_rmw(sidecar):
-            # Fast path: if sidecar doesn't exist or entry is new, just append
+            new_lines = "".join(json.dumps(r) + "\n" for r in records.values())
+            # Fast path: no sidecar yet -- every record is new.
             if not sidecar.exists():
-                sidecar.write_text(json.dumps(record) + "\n", encoding="utf-8")
+                sidecar.write_text(new_lines, encoding="utf-8")
                 return
 
             # Single pass through the parsing Seam: collect surviving records while
-            # detecting whether this entry is already present.
+            # detecting whether any incoming id is already present.
             survivors: list[dict[str, object]] = []
-            entry_exists = False
+            any_exists = False
             for _line_number, rec in self._iter_sidecar_records(sidecar):
-                if str(rec.get("id", "")) == entry_id:
-                    entry_exists = True
+                if str(rec.get("id", "")) in records:
+                    any_exists = True
                 else:
                     survivors.append(rec)
 
-            if not entry_exists:
+            if not any_exists:
                 # Append-only: O(1) write for new entries (leaves existing rows,
                 # including any corrupt ones, untouched on disk).
                 with sidecar.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(record) + "\n")
+                    f.write(new_lines)
                 return
 
-            # Update path: rewrite surviving records plus the new one (O(N) —
-            # infrequent). Corrupt rows are dropped by the Seam, as before.
-            survivors.append(record)
-            sidecar.write_text(
-                "\n".join(json.dumps(r) for r in survivors) + "\n",
-                encoding="utf-8",
-            )
+            # Update path: rewrite surviving records plus the incoming ones
+            # (O(N) once per batch). Corrupt rows are dropped by the Seam.
+            # Written to a sibling and renamed so a concurrent reader (and the
+            # (mtime_ns, size) parse cache) never sees a half-written file.
+            tmp = sidecar.with_name(sidecar.name + ".tmp")
+            tmp.write_text("".join(json.dumps(r) + "\n" for r in survivors) + new_lines, encoding="utf-8")
+            os.replace(tmp, sidecar)
 
     def warm_remove(self, entry_id: str) -> bool:
         """Delete an entry from the warm store and sidecar.

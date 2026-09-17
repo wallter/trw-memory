@@ -31,10 +31,15 @@ from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 
 def test_boot_warns_when_wal_reset_unsafe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Constructing a backend on an unsafe engine logs sqlite_wal_reset_unsafe."""
+    """Constructing a backend on an unsafe engine logs sqlite_wal_reset_unsafe.
+
+    The gate reads the version of the driver THIS BACKEND opened (PRD-INFRA-185
+    FR07), not the process-wide selection, so the patch target is the
+    version-taking predicate rather than the process-wide verdict.
+    """
     from trw_memory.storage import _dbapi
 
-    monkeypatch.setattr(_dbapi, "is_wal_reset_safe", lambda: False)
+    monkeypatch.setattr(_dbapi, "wal_reset_safe_version", lambda _version: False)
     with structlog.testing.capture_logs() as logs:
         backend = SQLiteBackend(tmp_path / "m.db")
     try:
@@ -50,7 +55,7 @@ def test_boot_silent_when_wal_reset_safe(tmp_path: Path, monkeypatch: pytest.Mon
     """A safe engine emits no warning and sets wal_reset_safe True."""
     from trw_memory.storage import _dbapi
 
-    monkeypatch.setattr(_dbapi, "is_wal_reset_safe", lambda: True)
+    monkeypatch.setattr(_dbapi, "wal_reset_safe_version", lambda _version: True)
     with structlog.testing.capture_logs() as logs:
         backend = SQLiteBackend(tmp_path / "m.db")
     try:
@@ -113,7 +118,7 @@ def test_checkpoint_wal_unsafe_engine_coerces_truncate_to_passive(
     """
     from trw_memory.storage import _dbapi
 
-    monkeypatch.setattr(_dbapi, "is_wal_reset_safe", lambda: False)
+    monkeypatch.setattr(_dbapi, "wal_reset_safe_version", lambda _version: False)
     backend = SQLiteBackend(tmp_path / "m.db")
     try:
         assert backend.wal_reset_safe is False
@@ -127,7 +132,7 @@ def test_checkpoint_wal_safe_engine_allows_truncate(tmp_path: Path, monkeypatch:
     """On a fixed engine (>=3.51.3) TRUNCATE is allowed (reclaims WAL space)."""
     from trw_memory.storage import _dbapi
 
-    monkeypatch.setattr(_dbapi, "is_wal_reset_safe", lambda: True)
+    monkeypatch.setattr(_dbapi, "wal_reset_safe_version", lambda _version: True)
     backend = SQLiteBackend(tmp_path / "m.db")
     try:
         assert backend.wal_reset_safe is True

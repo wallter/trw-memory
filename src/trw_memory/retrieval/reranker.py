@@ -29,6 +29,7 @@ Performance notes
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import structlog
@@ -92,18 +93,46 @@ def __getattr__(name: str) -> object:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def _get_model(model_name: str) -> object | None:
-    """Lazy-load and cache a CrossEncoder model by name."""
+# Same offline switches as ``embeddings/local.py`` (PRD-QUAL-110-FR04): any
+# truthy value forces ``local_files_only=True`` so an air-gapped deployer can
+# prove zero huggingface.co egress. ``local_only`` (config) is threaded in by
+# the caller for the same effect.
+_OFFLINE_ENV_VARS = ("TRW_OFFLINE", "HF_HUB_OFFLINE")
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+def _offline_download_blocked() -> bool:
+    return any(os.environ.get(name, "").strip().lower() in _TRUTHY for name in _OFFLINE_ENV_VARS)
+
+
+def _get_model(model_name: str, *, local_only: bool = False) -> object | None:
+    """Lazy-load and cache a CrossEncoder model by name.
+
+    Under ``TRW_OFFLINE`` / ``HF_HUB_OFFLINE`` or ``local_only`` the load is
+    ``local_files_only``: an uncached model yields ``None`` (callers keep
+    fusion order) instead of a huggingface.co download. Rerank is on by
+    default, so this is what keeps the README's "no outbound calls" contract.
+    A disclosure line is logged before any network-capable load.
+    """
     if not _import_cross_encoder():
         return None
-    if model_name not in _LOADED_MODELS:
+    local_files_only = local_only or _offline_download_blocked()
+    key = f"{model_name}|offline" if local_files_only else model_name
+    if key not in _LOADED_MODELS:
+        if not local_files_only:
+            logger.info(
+                "reranker_model_load_may_download",
+                model=model_name,
+                host="huggingface.co",
+                disable="TRW_OFFLINE=1 or MEMORY_RECALL_RERANK=false",
+            )
         try:
-            _LOADED_MODELS[model_name] = _cross_encoder_cls(model_name, max_length=512)
-            logger.debug("reranker_model_loaded", model=model_name)
+            _LOADED_MODELS[key] = _cross_encoder_cls(model_name, max_length=512, local_files_only=local_files_only)
+            logger.debug("reranker_model_loaded", model=model_name, local_files_only=local_files_only)
         except Exception:
-            logger.warning("reranker_model_load_failed", model=model_name)
-            _LOADED_MODELS[model_name] = None
-    return _LOADED_MODELS.get(model_name)
+            logger.warning("reranker_model_load_failed", model=model_name, local_files_only=local_files_only)
+            _LOADED_MODELS[key] = None
+    return _LOADED_MODELS.get(key)
 
 
 def _entry_text(entry: MemoryEntry) -> str:
@@ -115,6 +144,39 @@ def _entry_text(entry: MemoryEntry) -> str:
         parts.append(" ".join(entry.tags))
     text = " ".join(parts)
     return text[:_MAX_PASSAGE_CHARS]
+
+
+def cross_encode_scores(
+    query: str,
+    entries: list[MemoryEntry],
+    *,
+    model_name: str = _DEFAULT_MODEL,
+    local_only: bool = False,
+) -> list[tuple[MemoryEntry, float]] | None:
+    """Score every entry against *query* with the cross-encoder.
+
+    Returns ``(entry, score)`` pairs sorted by score descending, on the model's
+    native logit scale (ms-marco MiniLM: roughly -11 for unrelated text up to
+    +10 for an exact answer). Returns ``None`` when the cross-encoder is
+    unavailable or inference fails, so callers can keep their fusion order.
+    """
+    if not entries:
+        return []
+    model = _get_model(model_name, local_only=local_only)
+    if model is None:
+        logger.debug("cross_encode_scores_skipped", reason="model_unavailable", count=len(entries))
+        return None
+    pairs = [[query, _entry_text(e)] for e in entries]
+    try:
+        scores = model.predict(pairs)  # type: ignore[attr-defined]
+        # A model that returns the wrong shape or non-numeric output counts as
+        # "inference failed": callers must keep fusion order, never crash recall.
+        scored = [(e, float(s)) for e, s in zip(entries, scores, strict=True)]
+    except Exception as exc:  # trw-fail-silent-allow: documented degradation -- an uncached model under an offline switch, a load failure or malformed model output returns None so callers keep fusion order; the warning names the cause
+        logger.warning("cross_encode_rerank_error", error=str(exc)[:120])
+        return None
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored
 
 
 def cross_encode_rerank(
@@ -160,11 +222,11 @@ def cross_encode_rerank(
 
     try:
         scores = model.predict(pairs)  # type: ignore[attr-defined]
+        scored = sorted(zip(entries, scores, strict=True), key=lambda x: float(x[1]), reverse=True)
     except Exception as exc:
         logger.warning("cross_encode_rerank_error", error=str(exc)[:120])
         return entries[:top_k] if top_k is not None else entries
 
-    scored = sorted(zip(entries, scores, strict=True), key=lambda x: float(x[1]), reverse=True)
     reranked = [e for e, _ in scored]
 
     logger.debug(

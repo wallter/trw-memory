@@ -108,7 +108,7 @@ def claim_single_instance(paths: DaemonPaths, *, port: int, token: str, version:
     return InstanceClaim(paths=paths, sock=sock, info=info)
 
 
-def release_single_instance(paths: DaemonPaths) -> None:
+def release_single_instance(paths: DaemonPaths, *, claimed: DaemonInfo | None = None) -> None:
     """Remove this process's discovery record, if it is still ours.
 
     Called on idle shutdown and on any exit path. The pid check keeps a slow
@@ -116,9 +116,30 @@ def release_single_instance(paths: DaemonPaths) -> None:
     already written their own, and this must not undo it. A record we cannot
     read is left alone for the same reason -- deleting on no evidence is how a
     successor's record disappears.
+
+    ``claimed`` is the record this process wrote when it won its claim, and
+    passing it is what makes ownership provable rather than presumed. A pid
+    alone cannot separate two claims made by the SAME process -- which is not
+    hypothetical, because :func:`claim_single_instance` deliberately permits a
+    re-claim from the same pid (it only refuses *another* live pid). Comparing
+    ``started_at`` as well means a late cleanup from claim A cannot delete the
+    record claim B just wrote. Omitting it keeps the older pid-only behaviour
+    for callers that never held a claim object.
+
+    Args:
+        paths: Resolved daemon file locations.
+        claimed: The discovery record this process wrote, when known.
     """
     with lock_for_rmw(paths.lock_anchor):
         existing = read_discovery_result(paths)
-        if isinstance(existing, DaemonInfo) and existing.pid == os.getpid():
-            paths.discovery.unlink(missing_ok=True)
-            logger.info("daemon_discovery_removed", path=str(paths.discovery), pid=existing.pid)
+        if not isinstance(existing, DaemonInfo) or existing.pid != os.getpid():
+            return
+        if claimed is not None and existing.started_at != claimed.started_at:
+            logger.info(
+                "daemon_discovery_kept_for_newer_claim",
+                path=str(paths.discovery),
+                pid=existing.pid,
+            )
+            return
+        paths.discovery.unlink(missing_ok=True)
+        logger.info("daemon_discovery_removed", path=str(paths.discovery), pid=existing.pid)

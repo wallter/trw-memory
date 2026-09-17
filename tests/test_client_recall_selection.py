@@ -212,8 +212,8 @@ def test_refresh_keeps_authoritative_window_but_only_returned_masked_content(mon
     row.update(content="masked", detail="masked detail")
     captured = []
     monkeypatch.setattr(
-        "trw_memory._client_recall_helpers.remember_entry_data_in_tiers",
-        lambda config, payload: captured.append(payload),
+        "trw_memory._client_recall_mirror.remember_entries_data_in_tiers",
+        lambda config, payloads: captured.extend(payloads),
     )
     remember_selected_candidates(Mock(), [LocalCandidate(entry, 0.5)], [row])
     assert len(captured) == 1

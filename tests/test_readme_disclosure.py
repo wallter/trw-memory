@@ -20,7 +20,7 @@ def readme_text() -> str:
 
 
 def test_has_telemetry_network_section(readme_text: str) -> None:
-    assert "## Telemetry & network behavior" in readme_text
+    assert "## Telemetry and network behavior" in readme_text
 
 
 def test_has_env_var_inventory(readme_text: str) -> None:

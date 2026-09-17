@@ -103,32 +103,51 @@ class TestTagFilterAppliesBeforeLimit:
 
 
 class TestF6ExpiryFiltering:
+    """PRD-CORE-278 FR05 migrated these from a top-level-``expires`` string
+    predicate to the ONE predicate over a serialised entry: a value carrying a
+    TIME expires at that instant, a bare date expires at the end of its UTC day,
+    and the value is resolved from ``expires`` or ``metadata["expires"]``."""
+
     def test_past_iso_date_is_expired(self) -> None:
-        assert _expires_in_past("2025-01-01") is True
+        assert _expires_in_past({"expires": "2025-01-01"}) is True
 
     def test_past_iso_datetime_with_offset_is_expired(self) -> None:
-        assert _expires_in_past("2025-01-01T00:00:00+00:00") is True
+        assert _expires_in_past({"expires": "2025-01-01T00:00:00+00:00"}) is True
 
     def test_past_iso_datetime_with_z_is_expired(self) -> None:
-        assert _expires_in_past("2025-01-01T00:00:00Z") is True
+        assert _expires_in_past({"expires": "2025-01-01T00:00:00Z"}) is True
+
+    def test_instant_one_hour_ago_is_expired_same_day(self) -> None:
+        # The defect sub_4-nL1paSXxQx41fH reported: a day-exclusive predicate
+        # called this valid until tomorrow.
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        assert _expires_in_past({"expires": past}) is True
+
+    def test_todays_date_is_not_expired(self) -> None:
+        today = datetime.now(timezone.utc).date().isoformat()
+        assert _expires_in_past({"expires": today}) is False
+
+    def test_metadata_expiry_is_resolved(self) -> None:
+        assert _expires_in_past({"metadata": {"expires": "2025-01-01"}}) is True
 
     def test_future_iso_date_is_not_expired(self) -> None:
         future = (datetime.now(timezone.utc) + timedelta(days=365)).date().isoformat()
-        assert _expires_in_past(future) is False
+        assert _expires_in_past({"expires": future}) is False
 
     def test_empty_expires_is_not_expired(self) -> None:
-        assert _expires_in_past("") is False
-        assert _expires_in_past("   ") is False
+        assert _expires_in_past({"expires": ""}) is False
+        assert _expires_in_past({"expires": "   "}) is False
 
     def test_non_date_condition_is_not_expired(self) -> None:
         # Free-form condition strings must never be treated as expired.
-        assert _expires_in_past("when the migration ships") is False
-        assert _expires_in_past("never") is False
-        assert _expires_in_past("2025-13-99") is False
+        assert _expires_in_past({"expires": "when the migration ships"}) is False
+        assert _expires_in_past({"expires": "never"}) is False
+        assert _expires_in_past({"expires": "2025-13-99"}) is False
 
     def test_non_string_is_not_expired(self) -> None:
-        assert _expires_in_past(None) is False
-        assert _expires_in_past(12345) is False
+        assert _expires_in_past({}) is False
+        assert _expires_in_past({"expires": None}) is False
+        assert _expires_in_past({"expires": 12345}) is False
 
     def test_drop_expired_excludes_only_past_dates(self) -> None:
         future = (datetime.now(timezone.utc) + timedelta(days=10)).date().isoformat()
@@ -143,17 +162,24 @@ class TestF6ExpiryFiltering:
         assert kept_ids == {"empty", "condition", "future", "missing"}
         assert "past" not in kept_ids
 
-    def test_rank_by_utility_drops_expired(self) -> None:
+    def test_rank_by_utility_no_longer_drops_expired(self) -> None:
+        """PRD-CORE-278 FR05: ranking and admission are different jobs.
+
+        The ranker used to drop expired rows, which looked like a guard but was
+        not one: the tier and org merges ran AFTER it and put the rows straight
+        back (sub_4-nL1paSXxQx41fH). Admission is now ``drop_expired_entries``
+        on the merged set, asserted above and in
+        ``tests/test_core278_expiry_and_timestamps.py``.
+        """
         future = (datetime.now(timezone.utc) + timedelta(days=10)).date().isoformat()
         matches: list[dict[str, object]] = [
             {"id": "past", "content": "stale", "expires": "2025-01-01", "importance": 0.9},
             {"id": "fresh", "content": "fresh", "expires": future, "importance": 0.5},
             {"id": "plain", "content": "plain"},
         ]
-        ranked = rank_by_utility(matches, ["fresh"], lambda_weight=0.4)
-        ranked_ids = {str(e["id"]) for e in ranked}
-        assert "past" not in ranked_ids
-        assert ranked_ids == {"fresh", "plain"}
+        ranked = rank_by_utility(matches, ["fresh"])
+        assert {str(e["id"]) for e in ranked} == {"past", "fresh", "plain"}
+        assert {str(e["id"]) for e in drop_expired_entries(ranked)} == {"fresh", "plain"}
 
     def test_drop_expired_empty_input(self) -> None:
         assert drop_expired_entries([]) == []

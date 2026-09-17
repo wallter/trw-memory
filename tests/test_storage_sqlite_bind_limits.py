@@ -80,7 +80,11 @@ def test_recall_access_and_namespace_filters_stay_below_bind_ceiling() -> None:
     backend._conn = recording  # type: ignore[assignment]
     try:
         assert backend.increment_recall_access(ids) == 899
-        assert recording.bound_writes == [900, 3]
+        # 899 and 2, not 900 and 3: PRD-CORE-278 FR06 dropped ``updated_at = ?``
+        # from the recall-access UPDATE, so each chunk binds one value fewer.
+        # ``reserved_bindings=2`` is kept deliberately conservative, which is
+        # why the chunk SIZES are unchanged.
+        assert recording.bound_writes == [899, 2]
         assert backend.list_namespaces(required_namespaces=["default", *[f"missing-{i}" for i in range(900)]]) == [
             "default"
         ]

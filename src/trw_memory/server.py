@@ -48,6 +48,7 @@ REGISTERED_TOOL_NAMES: tuple[str, ...] = (
     "memory_code_symbol",
     "memory_consolidate",
     "memory_forget",
+    "memory_maintain",
     "memory_namespace_diagnose",
     "memory_namespace_merge",
     "memory_namespace_rename",
@@ -66,6 +67,7 @@ def _register_tools() -> None:
     from trw_memory.tools.code_index import register_code_index_tools
     from trw_memory.tools.consolidate import register_consolidate_tool
     from trw_memory.tools.forget import register_forget_tool
+    from trw_memory.tools.maintain import register_maintain_tool
     from trw_memory.tools.namespace_admin import register_namespace_admin_tools
     from trw_memory.tools.recall import register_recall_tool
     from trw_memory.tools.review import register_quarantine_list_tool, register_review_tool
@@ -82,6 +84,7 @@ def _register_tools() -> None:
     register_namespace_admin_tools(mcp)
     register_forget_tool(mcp)
     register_consolidate_tool(mcp)
+    register_maintain_tool(mcp)
     register_search_tool(mcp)
     register_status_tool(mcp)
     register_wiki_lint_tool(mcp)

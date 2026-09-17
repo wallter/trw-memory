@@ -9,6 +9,7 @@ These were extracted from scoring.py to keep module size below 500 lines.
 
 from __future__ import annotations
 
+import math
 from datetime import date, datetime, timezone
 
 import structlog
@@ -16,7 +17,14 @@ import structlog
 from trw_memory.lifecycle.protection import prune_threshold_multiplier
 from trw_memory.lifecycle.scoring import entry_utility
 from trw_memory.models.config import MemoryConfig
+from trw_memory.retrieval.lexical import lexical_relevance
+from trw_memory.retrieval.source_policy import resolve_expiry
+from trw_memory.retrieval.validity_prior import expiry_has_passed
 from trw_memory.storage.interface import StorageBackend
+
+#: The key a recall path writes the retrieval score under. Named here, where the
+#: ranker reads it, so the producer and the consumer cannot drift.
+FUSED_SCORE_KEY = "score"
 
 logger = structlog.get_logger(__name__)
 
@@ -26,54 +34,35 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _expires_in_past(raw: object) -> bool:
-    """Return True only when ``raw`` parses as a PAST ISO datetime.
+def _expires_in_past(entry: dict[str, object], *, now: datetime | None = None) -> bool:
+    """Return True when *entry*'s expiry has passed (PRD-CORE-278 FR05).
 
-    ``MemoryEntry.expires`` is FREE-FORM: it may hold a date, a date-time, a
-    natural-language condition (e.g. "when migration ships"), or be empty.
-    We must only treat an entry as expired when its ``expires`` value parses
-    unambiguously as an ISO datetime that is already in the past. Empty values,
-    non-date strings, and future datetimes are never treated as expired.
+    Delegates to :func:`~trw_memory.retrieval.validity_prior.expiry_has_passed`,
+    the ONE predicate: a value carrying a time expires at that instant (UTC), a
+    bare date expires at the end of that UTC day, and a missing, empty or
+    unparseable value never expires. Field resolution is shared too — the value
+    is read through :func:`~trw_memory.retrieval.source_policy.resolve_expiry`,
+    which looks at the top-level ``expires`` and then ``metadata["expires"]`` —
+    so an entry cannot be expired on one surface and live on another.
     """
-    if not isinstance(raw, str):
-        return False
-    text = raw.strip()
-    if not text:
-        return False
-    candidate = text
-    # Accept a trailing 'Z' (UTC) which datetime.fromisoformat historically
-    # rejected on older Pythons; normalise to an explicit offset.
-    if candidate.endswith(("Z", "z")):
-        candidate = candidate[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(candidate)
-    except ValueError:
-        # Date-only ISO string (no time component).
-        try:
-            parsed_date = date.fromisoformat(candidate)
-        except ValueError:
-            return False
-        parsed = datetime(parsed_date.year, parsed_date.month, parsed_date.day, tzinfo=timezone.utc)  # pragma: no cover
-    # Compare in UTC. Treat naive datetimes as UTC for a stable comparison.
-    now = datetime.now(timezone.utc)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed < now
+    return expiry_has_passed(resolve_expiry(entry), reference_time=now)
 
 
 def drop_expired_entries(matches: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Filter out entries whose ``expires`` is a PAST ISO datetime (F6).
+    """Filter out entries whose expiry has passed (F6, PRD-CORE-278 FR05).
 
-    Entries with an empty / non-date / future ``expires`` value pass through
-    unchanged. This is the recall-path guard that stops stale, already-expired
-    learnings (e.g. ``expires='2025-01-01'``) from being surfaced forever.
+    Entries with an empty / non-date / future expiry pass through unchanged.
+    This is the recall-path guard that stops stale, already-expired learnings
+    from being surfaced forever. It runs on the MERGED result set — after the
+    tier and org merges — because running it earlier (inside ``rank_by_utility``)
+    let a merge re-admit an entry it had just removed.
     """
     if not matches:
         return matches
     kept: list[dict[str, object]] = []
     dropped = 0
     for entry in matches:
-        if _expires_in_past(entry.get("expires")):
+        if _expires_in_past(entry):
             dropped += 1
             continue
         kept.append(entry)
@@ -87,58 +76,77 @@ def drop_expired_entries(matches: list[dict[str, object]]) -> list[dict[str, obj
 # ---------------------------------------------------------------------------
 
 
+def _relevance(entry: dict[str, object], query_tokens: list[str], max_score: float) -> float:
+    """Relevance in ``[0, 1]`` for one candidate (PRD-CORE-278 FR02).
+
+    A candidate carrying a FINITE retrieval score is scored on it, normalised by
+    the largest finite score in the same call. An unreadable or non-finite score
+    is rejected individually — it falls back to lexical relevance — rather than
+    collapsing the whole call. Normalisation is per-call, order-preserving
+    within the call, and never persisted; the raw score is what the response
+    carries.
+    """
+    raw = entry.get(FUSED_SCORE_KEY)
+    if isinstance(raw, (int, float)) and math.isfinite(float(raw)):
+        # A score at or below zero carries NO usable relevance and is reported
+        # as 0.0 rather than normalised: every producer in this package emits a
+        # non-negative score (RRF positions, recency blend, utility), so a
+        # negative value means the number is not on the expected scale, and
+        # inventing an order for it would be inventing evidence. Such rows tie
+        # at 0.0 and the utility tiebreak decides between them.
+        if max_score <= 0.0:
+            return 0.0
+        return max(0.0, min(1.0, float(raw) / max_score))
+    return lexical_relevance(entry, query_tokens)
+
+
 def rank_by_utility(
     matches: list[dict[str, object]],
     query_tokens: list[str],
-    lambda_weight: float,
     config: MemoryConfig | None = None,
 ) -> list[dict[str, object]]:
-    """Re-rank matched entries by combined relevance + utility score.
+    """Re-rank matched entries by relevance, with utility as a TIEBREAK.
 
-    Combined score = (1 - lambda) * relevance + lambda * utility
+    PRD-CORE-278 FR02. The relevance term is the retrieval score the pipeline
+    already computed, when the caller carried it (see ``FUSED_SCORE_KEY``);
+    otherwise it is whole-word lexical overlap with stopwords removed. Utility
+    (recency, access count, importance) breaks ties between equal relevance and
+    can no longer reorder two candidates whose relevance differs — which is what
+    a ``0.6 * substring + 0.4 * utility`` blend did, discarding the ranking the
+    retrieval pipeline had just produced.
 
-    F6: expired entries (``expires`` parses as a past ISO datetime) are dropped
-    up front so they never reach the ranked recall result.
+    The ``lambda_weight`` parameter is gone with the blend: a tiebreak has
+    nothing to weigh, and no new weighting knob replaces it (NFR01).
+
+    Expiry is NOT applied here. Ranking and admission are different jobs; see
+    :func:`drop_expired_entries`, which the recall path runs on the merged set.
 
     Args:
-        matches: List of MemoryEntry dicts.
-        query_tokens: Lowercased query tokens for relevance scoring.
-        lambda_weight: Blend factor. 0.0 = pure relevance, 1.0 = pure utility.
+        matches: List of MemoryEntry dicts, optionally carrying ``score``.
+        query_tokens: Query tokens for the lexical fallback. Empty = wildcard,
+            which scores every entry 1.0 and therefore orders purely by utility.
         config: MemoryConfig for utility calculation. Defaults to MemoryConfig().
 
     Returns:
-        Sorted list (highest combined score first).
+        Sorted list (highest relevance first, then highest utility).
     """
-    matches = drop_expired_entries(matches)
     if not matches:
         return matches
 
-    scored: list[tuple[float, dict[str, object]]] = []
+    finite_scores = [
+        float(value)
+        for entry in matches
+        if isinstance(value := entry.get(FUSED_SCORE_KEY), (int, float)) and math.isfinite(float(value))
+    ]
+    max_score = max(finite_scores) if finite_scores else 0.0
 
+    scored: list[tuple[float, float, dict[str, object]]] = []
     for entry in matches:
-        # Text relevance score — MemoryEntry uses 'content' (was 'summary')
-        content = str(entry.get("content", "")).lower()
-        detail = str(entry.get("detail", "")).lower()
-        raw_tags = entry.get("tags", [])
-        tag_text = " ".join(str(t).lower() for t in raw_tags) if isinstance(raw_tags, list) else ""
+        relevance = _relevance(entry, query_tokens, max_score)
+        scored.append((relevance, entry_utility(entry, config=config), entry))
 
-        if query_tokens:
-            content_hits = sum(1 for t in query_tokens if t in content)
-            tag_hits = sum(1 for t in query_tokens if t in tag_text)
-            detail_hits = sum(1 for t in query_tokens if t in detail)
-            weighted_hits = content_hits * 3 + tag_hits * 2 + detail_hits
-            max_possible = len(query_tokens) * 3
-            relevance = min(1.0, weighted_hits / max(max_possible, 1))
-        else:
-            relevance = 1.0  # wildcard query
-
-        utility = entry_utility(entry, config=config)
-        combined = (1.0 - lambda_weight) * relevance + lambda_weight * utility
-
-        scored.append((combined, entry))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [e for _, e in scored]
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [entry for _, _, entry in scored]
 
 
 def record_recall_access(

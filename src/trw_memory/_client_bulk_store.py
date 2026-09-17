@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import structlog
 
@@ -365,3 +365,31 @@ async def bulk_store_impl(
         duration_ms=duration_ms,
         items=items,
     )
+
+
+async def store_many_impl(client: MemoryClient, entries: list[dict[str, object]]) -> int:
+    """Async impl for :meth:`MemoryClient.store_many` (dict-shaped batch over ``bulk_store``)."""
+    if not entries:
+        return 0
+    requests = [
+        BulkStoreRequest(
+            content=str(entry["content"]),
+            detail=str(entry.get("detail", "")),
+            tags=cast("list[str] | None", entry.get("tags")),
+            evidence=cast("list[str] | None", entry.get("evidence")),
+            importance=float(cast("float | int | str", entry.get("importance", 0.5))),
+            metadata=cast("dict[str, str] | None", entry.get("metadata")),
+            expires=str(entry.get("expires", "")),
+            assertions=cast("list[Assertion] | None", entry.get("assertions")),
+            source=cast(
+                "Literal['human', 'agent', 'tool', 'consolidated']",
+                entry.get("source", "agent"),
+            ),
+            source_identity=str(entry.get("source_identity", "")),
+            session_id=cast("str | None", entry.get("session_id")),
+            entry_id=cast("str | None", entry.get("entry_id")),
+        )
+        for entry in entries
+    ]
+    summary = await client.bulk_store(requests)
+    return summary.succeeded

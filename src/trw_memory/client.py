@@ -23,7 +23,7 @@ import asyncio
 import warnings
 import threading
 import uuid
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast, runtime_checkable
@@ -90,7 +90,9 @@ from trw_memory._client_bulk_store import (
     BulkStoreRequest as BulkStoreRequest,
     BulkStoreSummary as BulkStoreSummary,
     bulk_store_impl as _bulk_store_impl,
+    store_many_impl as _store_many_impl,
 )
+from trw_memory._client_conversation import ConversationMessage as ConversationMessage
 from trw_memory._client_recall import (
     _FALLBACK_IMPORTANCE_WEIGHT as _FALLBACK_IMPORTANCE_WEIGHT,
     _FALLBACK_TF_SCALE as _FALLBACK_TF_SCALE,
@@ -331,6 +333,40 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
             self, requests, skip_audit_per_item=skip_audit_per_item, skip_remote_publish=skip_remote_publish
         )
 
+    async def store_conversation(
+        self,
+        messages: Sequence[ConversationMessage],
+        *,
+        context_turns: int = 1,
+        preceding: Sequence[str] = (),
+        observed_at: datetime | str | None = None,
+        session_id: str | None = None,
+        tags: list[str] | None = None,
+        importance: float = 0.5,
+        metadata: dict[str, str] | None = None,
+        source: Literal["human", "agent", "tool", "consolidated"] = "human",
+    ) -> BulkStoreSummary:
+        """Store chat turns as memories, each carrying its preceding turns as context.
+
+        Implementation lives in ``_client_conversation.store_conversation_impl``;
+        see that module for why turns are kept verbatim (no ingest-time LLM)
+        and what ``context_turns`` / ``preceding`` do for chunked feeds.
+        """
+        from trw_memory._client_conversation import store_conversation_impl as _impl
+
+        return await _impl(
+            self,
+            messages,
+            context_turns=context_turns,
+            preceding=preceding,
+            observed_at=observed_at,
+            session_id=session_id,
+            tags=tags,
+            importance=importance,
+            metadata=metadata,
+            source=source,
+        )
+
     async def store_many(self, entries: list[dict[str, object]]) -> int:
         """Bulk-insert memory entries from plain dicts; return rows written.
 
@@ -351,30 +387,7 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
             Number of entries written to the primary store (stored + updated).
             Rejected/quarantined rows are excluded from the count.
         """
-        if not entries:
-            return 0
-        requests = [
-            BulkStoreRequest(
-                content=str(entry["content"]),
-                detail=str(entry.get("detail", "")),
-                tags=cast("list[str] | None", entry.get("tags")),
-                evidence=cast("list[str] | None", entry.get("evidence")),
-                importance=float(cast("float | int | str", entry.get("importance", 0.5))),
-                metadata=cast("dict[str, str] | None", entry.get("metadata")),
-                expires=str(entry.get("expires", "")),
-                assertions=cast("list[Assertion] | None", entry.get("assertions")),
-                source=cast(
-                    "Literal['human', 'agent', 'tool', 'consolidated']",
-                    entry.get("source", "agent"),
-                ),
-                source_identity=str(entry.get("source_identity", "")),
-                session_id=cast("str | None", entry.get("session_id")),
-                entry_id=cast("str | None", entry.get("entry_id")),
-            )
-            for entry in entries
-        ]
-        summary = await self.bulk_store(requests)
-        return summary.succeeded
+        return await _store_many_impl(self, entries)
 
     async def recall(
         self,

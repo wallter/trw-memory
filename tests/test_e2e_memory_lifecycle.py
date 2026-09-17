@@ -80,7 +80,7 @@ class TestThreeTierLifecycle:
 
     def test_prune_candidates_tier_classification(self) -> None:
         """2.6 — utility_based_prune_candidates classifies entries into tiers."""
-        from trw_memory.lifecycle.scoring import utility_based_prune_candidates
+        from trw_memory.lifecycle import utility_based_prune_candidates
 
         now = datetime.now(timezone.utc)
         entries = [
@@ -116,7 +116,7 @@ class TestThreeTierLifecycle:
 
     def test_sweep_resolved_entries_are_candidates(self) -> None:
         """2.7 — Resolved entries are always prune candidates regardless of age."""
-        from trw_memory.lifecycle.scoring import utility_based_prune_candidates
+        from trw_memory.lifecycle import utility_based_prune_candidates
 
         now = datetime.now(timezone.utc)
         entries = [

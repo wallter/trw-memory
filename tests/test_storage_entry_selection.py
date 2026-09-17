@@ -156,7 +156,22 @@ def test_callback_replayed_only_after_real_decode_failure(tmp_path):
                 entry_filter=predicate,
             )
             assert [e.id for e in rows] == ["keep"]
-            assert seen == ["first", "first", "middle", "keep"]
+            # Exactly one replay, and only because a row failed to decode.
+            #
+            # The tail is the full bytes-mode pass over every decodable row, in
+            # ORDER BY order. The head is whatever the primary pass delivered
+            # before the driver surfaced the decode error, which is a DRIVER
+            # detail, not a contract: this repo's sqlite3 3.53.4 raises on the
+            # fetch of "bad" itself (head == first, middle), while a driver that
+            # steps one row ahead in execute() raises one row earlier (head ==
+            # first). Pinning one of those two spellings made this test assert
+            # the sqlite build, not the replay behaviour. Asserting a PROPER
+            # PREFIX keeps the teeth: a second replay, a replay without a decode
+            # failure, or "bad" reaching the callback all still fail.
+            replay_pass = ["first", "middle", "keep"]
+            assert seen[-len(replay_pass) :] == replay_pass
+            partial = seen[: -len(replay_pass)]
+            assert partial == ["first", "middle"][: len(partial)], seen
             assert quarantined == 1
     finally:
         backend.close()

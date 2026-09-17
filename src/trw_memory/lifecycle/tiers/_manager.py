@@ -132,6 +132,45 @@ class TierManager:
                     capacity=cfg.hot_max_entries,
                 )
 
+    def hot_put_many(
+        self, items: list[tuple[str, MemoryEntry]], *, drop_evictees: bool = True
+    ) -> list[tuple[str, dict[str, object]]]:
+        """Add or refresh several entries; return the LRU evictees instead of demoting them.
+
+        With ``drop_evictees=False`` the evictees are reported but left in the
+        hot tier, so the caller can write them to warm first and then call
+        :meth:`hot_drop`; a failed warm write then loses nothing, where popping
+        first lost the whole batch from both tiers (release-verify 2026-09-17 B-1).
+
+        ``hot_put`` demotes each evictee with its own ``warm_add`` (a full
+        sidecar read-modify-write). A recall that mirrors ``limit`` results
+        into a full hot tier evicts up to ``limit`` entries, so the caller
+        pays ``limit`` more sidecar rewrites. This variant applies the same
+        LRU policy in one pass and hands back ``(evicted_id, entry_data)``
+        pairs so the caller can demote them together with its own batch via
+        ``warm_add_many``. Hot-tier contents after the call equal sequential
+        ``hot_put`` calls in the same order.
+        """
+        evicted: list[tuple[str, dict[str, object]]] = []
+        with self._hot_lock:
+            for entry_id, entry in items:
+                self._hot[entry_id] = entry
+                self._hot.move_to_end(entry_id)
+            capacity = self._config.hot_max_entries
+            surplus = len(self._hot) - capacity
+            for evicted_id, evicted_entry in list(self._hot.items())[: max(surplus, 0)]:
+                evicted.append((evicted_id, evicted_entry.model_dump(mode="json")))
+                if drop_evictees:
+                    del self._hot[evicted_id]
+                logger.debug("hot_tier_evict", evicted_id=evicted_id, capacity=capacity)
+        return evicted
+
+    def hot_drop(self, entry_ids: list[str]) -> None:
+        """Remove entries from the hot tier without demoting them (they are already in warm)."""
+        with self._hot_lock:
+            for entry_id in entry_ids:
+                self._hot.pop(entry_id, None)
+
     def hot_clear(self) -> None:
         """Evict all entries from the hot cache."""
         with self._hot_lock:
@@ -209,6 +248,10 @@ class TierManager:
     ) -> None:
         """Insert or replace an entry in the warm store."""
         self._warm_store.warm_add(entry_id, entry_data, embedding)
+
+    def warm_add_many(self, items: list[tuple[str, dict[str, object], list[float] | None]]) -> None:
+        """Insert or replace several entries with one sidecar read-modify-write."""
+        self._warm_store.warm_add_many(items)
 
     def warm_remove(self, entry_id: str) -> bool:
         """Delete an entry from the warm store and sidecar."""

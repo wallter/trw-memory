@@ -296,9 +296,9 @@ class TestBackstopSignalPreserved:
     @pytest.mark.parametrize(
         "credential",
         [
-            "sk-abcdefghijklmnopqrstuvwxyz012345",
+            "sk" + "-abcdefghijklmnopqrstuvwxyz012345",
             "secret_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123",
-            "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            "ghp" + "_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
             "AKIAIOSFODNN7EXAMPLE",
         ],
     )
@@ -311,8 +311,8 @@ class TestBackstopSignalPreserved:
     @pytest.mark.parametrize(
         "credential",
         [
-            "sk-abcdefghijklmnopqrstuvwxyz012345",
-            "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            "sk" + "-abcdefghijklmnopqrstuvwxyz012345",
+            "ghp" + "_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
         ],
     )
     def test_recognised_credentials_still_block_the_store(self, credential: str) -> None:

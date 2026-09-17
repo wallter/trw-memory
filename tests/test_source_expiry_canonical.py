@@ -16,7 +16,13 @@ from trw_memory.retrieval.validity_prior import expiry_has_passed
         ("2024-01-01", True),
         ("2024-01-02", False),
         ("2024-01-03", False),
-        ("2024-01-02T00:00:00Z", False),
+        # PRD-CORE-278 FR05: a value carrying a TIME expires at that instant.
+        # This row asserted False — midnight on the reference day treated as
+        # unexpired until the following day — which is exactly the defect
+        # sub_4-nL1paSXxQx41fH reported: an entry that expired an hour ago kept
+        # its slot in recall for the rest of the day. Bare dates below keep the
+        # day-exclusive convention.
+        ("2024-01-02T00:00:00Z", True),
         ("2024-01-02T23:00:00-06:00", False),
         ("2024-01-01T23:00:00-06:00", True),
         ("20240102", False),

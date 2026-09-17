@@ -31,7 +31,7 @@ class TestHybridSearchConfigWiring:
         assert cfg.recall_recency_halflife_days == pytest.approx(14.0)
         assert cfg.recall_fusion_mode == "rrf"
         assert cfg.recall_validity_age_decay is True
-        assert cfg.recall_rerank is False
+        assert cfg.recall_rerank is True
         assert cfg.recall_rerank_model == "cross-encoder/ms-marco-MiniLM-L-6-v2"
         assert cfg.recall_rerank_candidates == 50
 
@@ -111,8 +111,8 @@ class TestHybridSearchConfigWiring:
         with (
             patch.object(_pipeline_mod, "hybrid_search", side_effect=spy),
             patch(
-                "trw_memory.retrieval.reranker.cross_encode_rerank",
-                side_effect=lambda query, entries, **kwargs: entries,
+                "trw_memory.retrieval.reranker.cross_encode_scores",
+                side_effect=lambda query, entries, **kwargs: [(e, 1.0) for e in entries],
             ) as reranker,
         ):
             await wired_client.recall("rerank test")
@@ -161,8 +161,8 @@ class TestHybridSearchConfigWiring:
         with (
             patch.object(_pipeline_mod, "hybrid_search", side_effect=spy),
             patch(
-                "trw_memory.retrieval.reranker.cross_encode_rerank",
-                side_effect=lambda query, entries, **kwargs: entries,
+                "trw_memory.retrieval.reranker.cross_encode_scores",
+                side_effect=lambda query, entries, **kwargs: [(e, 1.0) for e in entries],
             ) as reranker,
         ):
             await wired_client.recall("rerank model")

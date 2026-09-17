@@ -11,6 +11,7 @@ import threading
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from trw_memory.storage._vector_ops import (
     delete_vector,
@@ -150,9 +151,20 @@ class TestUpsertVectorTableDimensionMismatch:
         )
 
         # Must not raise: the canonical row + BM25 still provide retrieval.
-        upsert_vector(
-            conn, _lock(), vec_available=True, dim=384, entry_id="M-001", embedding=[0.1] * 384, namespace="default"
-        )
+        with capture_logs() as logs:
+            upsert_vector(
+                conn, _lock(), vec_available=True, dim=384, entry_id="M-001", embedding=[0.1] * 384, namespace="default"
+            )
+
+        # "Did not raise" alone is also true of a function that silently swallows
+        # everything, so assert on the degradation the operator is supposed to
+        # see: one WARNING naming the entry and the dim the store was built for.
+        degraded = [entry for entry in logs if entry["event"] == "vector_dimension_mismatch"]
+        assert len(degraded) == 1
+        assert degraded[0]["log_level"] == "warning"
+        assert degraded[0]["entry_id"] == "M-001"
+        assert degraded[0]["expected_dim"] == 384
+        assert "rebuild the vector index" in degraded[0]["hint"]
 
     def test_a_genuine_dimension_free_error_still_raises(self) -> None:
         """The predicate must not swallow unrelated OperationalErrors."""

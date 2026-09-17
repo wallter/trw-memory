@@ -3535,7 +3535,7 @@ wheels = [
 
 [[package]]
 name = "trw-memory"
-version = "0.18.0"
+version = "0.19.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
@@ -3547,7 +3547,6 @@ dependencies = [
     { name = "pydantic", version = "2.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
     { name = "pydantic-settings" },
     { name = "pynacl" },
-    { name = "pysqlite3-binary", marker = "sys_platform == 'linux'" },
     { name = "python-multipart" },
     { name = "ruamel-yaml" },
     { name = "starlette" },
@@ -3598,6 +3597,9 @@ encryption = [
     { name = "keyring" },
     { name = "sqlcipher3" },
 ]
+sqlite-fix = [
+    { name = "pysqlite3-binary", marker = "platform_machine == 'x86_64' and platform_system == 'Linux'" },
+]
 vectors = [
     { name = "sqlite-vec" },
 ]
@@ -3622,7 +3624,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pydantic-settings", specifier = ">=2.14.2" },
     { name = "pynacl", specifier = ">=1.5.0" },
-    { name = "pysqlite3-binary", marker = "sys_platform == 'linux'", specifier = ">=0.5.4" },
+    { name = "pysqlite3-binary", marker = "platform_machine == 'x86_64' and platform_system == 'Linux' and extra == 'sqlite-fix'", specifier = ">=0.5.4" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0.0" },

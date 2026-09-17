@@ -544,3 +544,24 @@ class TestSubstantiationThresholdCeiling:
             }
         )
         assert _count_substantiation(everything) == MAX_SUBSTANTIATION_ITEMS
+
+
+class TestEvalPatternBoundary:
+    """The ``eval(`` rule must fire on the builtin, not on a name that merely ends in ``eval``."""
+
+    def test_package_name_followed_by_paren_is_not_an_injection(self) -> None:
+        from trw_memory.security.poisoning import _CODE_EXEMPT_PATTERNS
+
+        eval_rule = next(p for p in _CODE_EXEMPT_PATTERNS if "eval" in p.pattern)
+        assert eval_rule.search("trw-eval (which reads the scorer) and my_eval(x)") is None
+
+    def test_builtin_eval_call_still_matches(self) -> None:
+        from trw_memory.security.poisoning import _CODE_EXEMPT_PATTERNS
+
+        eval_rule = next(p for p in _CODE_EXEMPT_PATTERNS if "eval" in p.pattern)
+        assert eval_rule.search("then eval(user_input)") is not None
+        assert eval_rule.search("EVAL (payload)") is not None
+        assert eval_rule.search("(eval(payload))") is not None
+        # A dot-qualified call is the attack shape; the hyphen exemption must not widen to it.
+        assert eval_rule.search("then run window.eval(atob('...'))") is not None
+        assert eval_rule.search("obj.eval (x)") is not None

@@ -18,6 +18,7 @@ import contextlib
 import importlib.util
 import os
 import sys
+import threading
 from collections.abc import Iterator
 
 import structlog
@@ -185,6 +186,13 @@ class LocalEmbeddingProvider:
     ) -> None:
         self._model_name = model_name
         self._dim = dim
+        # PRD-CORE-279 NFR01: one provider is now shared by every worker
+        # thread, and ``SentenceTransformer.encode`` is not a read-only call --
+        # it moves the module to a device, flips it to eval, and mutates the
+        # tokenizer's truncation/padding settings before encoding. Inference is
+        # therefore serialised per provider. The lock is NOT held during the
+        # model load; ``_provider_cache`` owns that serialisation.
+        self._encode_lock = threading.Lock()
         self._model: object | None = None
         self._load_attempted: bool = False
         self._last_load_error: str = ""
@@ -397,7 +405,8 @@ class LocalEmbeddingProvider:
             return None
 
         try:
-            vector = model.encode(text, normalize_embeddings=True)  # type: ignore[attr-defined]
+            with self._encode_lock:
+                vector = model.encode(text, normalize_embeddings=True)  # type: ignore[attr-defined]
             return [float(v) for v in vector]
         except (RuntimeError, ValueError, TypeError):
             logger.warning(
@@ -441,11 +450,12 @@ class LocalEmbeddingProvider:
         vectors = None
         while _batch_size >= _min_batch:
             try:
-                vectors = model.encode(  # type: ignore[attr-defined]
-                    non_blank,
-                    normalize_embeddings=True,
-                    batch_size=_batch_size,
-                )
+                with self._encode_lock:
+                    vectors = model.encode(  # type: ignore[attr-defined]
+                        non_blank,
+                        normalize_embeddings=True,
+                        batch_size=_batch_size,
+                    )
                 break
             except (RuntimeError, ValueError, TypeError):
                 if _batch_size == _min_batch:

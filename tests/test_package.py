@@ -253,6 +253,11 @@ def test_pyproject_declares_current_package_contract() -> None:
     assert "Programming Language :: Python :: 3.11" in classifiers
     assert "Programming Language :: Python :: 3.12" in classifiers
     assert "Programming Language :: Python :: 3.13" in classifiers
+    # 3.14 is declared because it is the interpreter this repository's own suite
+    # runs on (CPython 3.14.7). sub_IdK7P9kY3r8XSdWk asked for the tested range to
+    # be readable from metadata, since "move to an interpreter with a newer SQLite"
+    # is otherwise an unvalidated experiment for the operator (PRD-INFRA-185 FR06).
+    assert "Programming Language :: Python :: 3.14" in classifiers
 
 
 def test_pyproject_declares_current_optional_extras_and_scripts() -> None:
@@ -275,6 +280,7 @@ def test_pyproject_declares_current_optional_extras_and_scripts() -> None:
     # consumers. Their removal also retired the chromadb and nltk CVE
     # risk-acceptances. See CHANGELOG.md [Unreleased] Removed.
     assert set(optional) == {
+        "sqlite-fix",
         "encryption",
         "embeddings",
         "vectors",
@@ -664,3 +670,59 @@ def test_fastmcp_is_a_REQUIRED_dependency_not_an_extra() -> None:
     assert "fastmcp" in required, "fastmcp must be a required dependency"
     extras = manifest["project"].get("optional-dependencies", {})
     assert "mcp" not in extras, "the [mcp] extra was folded into the required set"
+
+
+def test_pysqlite3_is_an_optional_extra_not_a_hard_dependency() -> None:
+    """PRD-INFRA-185 FR01.
+
+    ``pysqlite3-binary`` 0.5.4.post2 publishes exactly one wheel
+    (manylinux2014_x86_64), so requiring it on all of Linux made
+    ``pip install trw-memory`` fail outright on aarch64 — Graviton, Ampere,
+    Apple-Silicon containers, Raspberry Pi (sub_UDHveA9lOKJXTZma). And it bundles
+    SQLite 3.51.1, below the 3.51.3 WAL-reset fix it was added to deliver
+    (sub_XT5i7XFXI4HbOb0C), so nothing is lost by making it opt-in.
+    """
+    pyproject = _load_pyproject()
+    project = pyproject["project"]
+    assert isinstance(project, dict)
+    dependencies = project["dependencies"]
+    assert isinstance(dependencies, list)
+    assert not [dep for dep in dependencies if "pysqlite3" in str(dep)], (
+        "pysqlite3-binary must not be a runtime dependency: it has no aarch64 wheel, "
+        "so declaring it makes the whole package uninstallable there"
+    )
+
+    optional = project["optional-dependencies"]
+    assert isinstance(optional, dict)
+    extra = optional["sqlite-fix"]
+    assert isinstance(extra, list)
+    assert len(extra) == 1
+    requirement = str(extra[0])
+    assert requirement.startswith("pysqlite3-binary>=0.5.4")
+    # Marked for the ONE platform that publishes a wheel. On every other platform
+    # the extra resolves to nothing and the install still succeeds -- which is the
+    # point, but it also means the extra's name promises more than it delivers,
+    # and the README says so.
+    assert "platform_machine == 'x86_64'" in requirement
+    assert "platform_system == 'Linux'" in requirement
+
+
+def test_readme_declares_supported_interpreters() -> None:
+    """PRD-INFRA-185 FR06 — the tested range and the SQLite floor are published."""
+    readme = (PACKAGE_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "### Supported interpreters" in readme
+    assert "3.51.3" in readme
+    assert "[sqlite-fix]" in readme
+    # The old paragraph claimed a Linux dependency that no longer exists.
+    assert "On Linux, `trw-memory` depends on `pysqlite3-binary`" not in readme
+
+
+def test_submodules_resolve_as_attributes_after_a_plain_import() -> None:
+    """The lazy package init still serves ``trw_memory.exceptions`` style access."""
+    import trw_memory
+    import trw_memory.storage as storage
+
+    assert trw_memory.exceptions.MemoryError is trw_memory.MemoryError
+    assert storage.persistence.read_yaml is storage.read_yaml
+    with pytest.raises(AttributeError):
+        _ = trw_memory.definitely_not_a_module

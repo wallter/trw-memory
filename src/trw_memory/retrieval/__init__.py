@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 from trw_memory.retrieval.bm25 import bm25_search
 from trw_memory.retrieval.dense import cosine_similarity, dense_search
 from trw_memory.retrieval.fusion import blend_recency, combmax_fuse, rrf_fuse
-from trw_memory.retrieval.pipeline import hybrid_search
+from trw_memory.retrieval.pipeline import ScoredCandidate, hybrid_search, hybrid_search_scored
 from trw_memory.retrieval.recency import recency_rank, recency_score
 from trw_memory.retrieval.temporal_query import (
     classify_temporal,
@@ -82,6 +82,7 @@ def __getattr__(name: str) -> object:
 __all__ = [
     "METADATA_OVERHEAD",
     "TOKEN_MULTIPLIER",
+    "ScoredCandidate",
     "apply_token_budget",
     "blend_recency",
     "bm25_search",
@@ -94,6 +95,7 @@ __all__ = [
     "estimate_serialized_entry_tokens",
     "estimate_tokens",
     "hybrid_search",
+    "hybrid_search_scored",
     "prepare_temporal_query",
     "recency_rank",
     "recency_score",

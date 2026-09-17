@@ -4,6 +4,110 @@ All notable changes to the TRW Memory package.
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-09-17
+
+### Added
+
+- **`MemoryClient.store_conversation(messages, ...)`** ingests chat turns as memories. Every turn is
+  stored verbatim (speaker-prefixed) and carries the preceding `context_turns` (default 1) turns of
+  the same conversation in `detail`, which both BM25 and the embedder index, so a context-free reply
+  is retrievable by what it answered. `preceding=` seeds the window for chunked feeds, `observed_at`
+  lands in metadata, and no model runs at ingest time. On LOCOMO evidence retrieval (385 questions,
+  `all-MiniLM-L6-v2`) this lifted hit@10 from 73.5% to 78.2%.
+- **`memory_maintain`** runs decay, consolidation and a WAL checkpoint for one namespace on demand,
+  and records `last_attempted_at` alongside `last_maintained_at` — the latter only when every pass
+  succeeded.
+- **A provider cache keyed on `EmbeddingSpace`**, with `reset_provider_cache()` and
+  `reset_tier_manager_cache()` for test and process hygiene.
+- **A LOCOMO benchmark harness** that drives mem0's own runner, unmodified, against trw-memory and
+  against in-process mem0 through one REST shim, plus an LLM-free evidence-retrieval scorer and a
+  ranker component scorer.
+
+### Changed
+
+- **Cross-encoder re-ranking is on by default** (`recall_rerank=True`; set
+  `MEMORY_RECALL_RERANK=false` to disable). It still degrades to fusion order when
+  `sentence-transformers` or the cached model is missing, and it honours `TRW_OFFLINE` /
+  `HF_HUB_OFFLINE` / `local_only` by loading `local_files_only` and logging a disclosure line before
+  any network-capable load. LOCOMO evidence hit@10 went 73.5% → 80.3%, for roughly 30–300 ms per
+  recall at 50 candidates.
+- **Recall is confidence-bounded.** After re-ranking, rows whose cross-encoder logit falls below
+  `recall_rerank_min_score` (default -8; `None` disables) are dropped, never below
+  `recall_rerank_min_keep` (default 5), so `recall()` returns fewer than `limit` rows when the store
+  holds fewer plausible answers instead of padding with noise. LOCOMO hit@50 92.2% → 93.2%, hit@10
+  unchanged (385 questions).
+- **The fused hybrid score survives to the final order.** The retrieval pipeline returns scored
+  candidates, the fused score is the relevance term with utility only as a tiebreak (`lambda_weight`
+  is removed), score and order survive tier merge, weighting, `min_score` and the security filter,
+  and the per-entry `score` in the response is that fused score. Hybrid order is now also kept for
+  short pools, which used to be re-scored by token overlap and lose the reranker's ordering.
+- **BM25 drops query stopwords and stems suffixes** on both sides, so "researched" meets "research"
+  and "agencies" meets "agency" while identifiers such as `v2` and `sqlite3` are untouched; lexical
+  fallback tokenises identifiers whole-word. LOCOMO BM25 hit@10 57% → 64% (stopwords) and 72.7% →
+  75.8% (stemming), fused hit@50 90.6% → 92.5%.
+- **`import trw_memory` resolves its public names on first access (PEP 562)** instead of loading the
+  client, models, sync and every backend up front: 1.25 s → 0.12 s per interpreter on macOS. Every
+  `from trw_memory import X` keeps working and keeps its type, and submodule attribute access after a
+  plain `import trw_memory` still resolves.
+- **The SQLite engine is chosen by version policy.** Driver selection ranks the stdlib `sqlite3` and
+  `pysqlite3` by WAL-reset safety and then version, and never lets an older wheel replace a newer
+  interpreter engine. `pysqlite3` is now the optional `[sqlite-fix]` extra on x86_64 Linux only, so
+  arm64 Linux installs again, and the WAL remedy text names any interpreter with
+  `sqlite3.sqlite_version >= 3.51.3` (Homebrew Python on macOS ships one) rather than a wheel that
+  does not exist.
+- **The local embedder is built once per process**, keyed by model, dimension, offline and
+  trust-remote-code policy, and shared by store, recall and consolidate: 40 recalls load the model
+  once instead of 40 times. The build runs outside the cache lock behind a handoff with a 120 s
+  bounded wait.
+- **The loopback daemon runs recall and store off the event loop** in a bounded worker pool
+  (`OFFLOAD_MAX_WORKERS = 4`) with a per-worker backend connection and a 5 s shutdown drain. At 5
+  concurrent callers on a 65-entry namespace, p95 fell 1438 ms → 963 ms and model loads 40 → 0. The
+  daemon's trust boundary is now stated plainly: one trusted loopback principal per daemon, with no
+  per-caller authorization.
+- **Expiry is one predicate**, instant-aware and applied after tier merge, so `exclude_expired` is
+  honoured on every result path.
+- **Content time is separate from maintenance time.** `list_entries` newest-first orders by content
+  time, and maintenance and access passes stamp their own fields instead of rewriting `updated_at`.
+- `recall(include_org_memories=...)` is unchanged, but note that org-sibling discovery opens every
+  other project store under the same `storage_path` on each call; pass `False` when one path holds
+  many unrelated namespaces.
+- `trw_memory.lifecycle.scoring.rank_by_utility` and `.utility_based_prune_candidates` are removed.
+  They were zero-caller wrappers around the canonical `trw_memory.lifecycle` exports, which are
+  unchanged.
+- **Measured for this release, not a claim of general lift.** LOCOMO-10 evidence retrieval over all
+  ten conversations, N = 1540 questions, `all-MiniLM-L6-v2`, on the product recall path (BM25 + dense
+  fusion, cross-encoder re-rank, confidence floor): hit@10 84.0%, hit@50 90.5%, recall@50 83.9%, MRR
+  59.5%. The judged conversation-0 comparison against mem0 OSS (91.4% / 91.4% vs 88.2% / 92.1% top-10
+  / top-50, N = 152 per side, McNemar p = 0.38 / 1.00: no significant difference detected, which does
+  not establish equivalence) was measured before the ranking work above, and is cited with that
+  caveat.
+
+### Fixed
+
+- **Decay is keyed on `(namespace, id)`**, the table's primary key. It used to key on bare `id`, so a
+  store holding one id in more than one namespace decayed rows that did not qualify, and
+  `memory_maintain` no longer skips the pass with `reason: cross_namespace_id_collision` on such a
+  store.
+- **Recall latency no longer scales with `limit` × warm-sidecar rows.** Every returned row used to be
+  mirrored back into the hot and warm tiers one at a time, rewriting the whole warm sidecar each
+  time; mirroring is now one read-modify-write per recall and the parsed sidecar is cached. Warm
+  recall on a 419-entry namespace: 2.6 s → 0.5 s, with identical sidecar contents.
+- **Batch recall mirroring no longer drops hot-tier evictees on a failed warm write.** Evictees are
+  reported, the warm batch is written, and only then are they dropped from the hot tier.
+- **SIGTERM leaves no stale `daemon.json`.** uvicorn re-raised captured signals after restoring
+  default handlers, so cleanup never ran; the handler now records the signal, runs cleanup, and
+  re-delivers it. A startup failure releases the instance it claimed, and a replacement process's
+  record is never deleted.
+- An empty-namespace recall still warms the embedder when embeddings are enabled.
+- The `eval(` injection rule exempts a hyphenated name that merely ends in `eval`, while a
+  dot-qualified call is still blocked.
+- The tier-manager cache lock is reentrant and held across use, and the runtime canary's seeding is
+  serialised; the worker pool had turned both latent races into live ones.
+- Test isolation: the daemon's storage-path pins and the process-lifetime caches are restored between
+  tests, and leaked warm-tier connections are closed, so the suite runs in about 80 s instead of
+  11 minutes.
+- `mypy --strict` no longer fails on interpreters without a `pysqlite3` wheel, such as macOS arm64.
+
 ## [0.18.0] — 2026-09-15
 
 ### Removed

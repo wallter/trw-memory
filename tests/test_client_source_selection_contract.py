@@ -128,9 +128,9 @@ async def test_reranking_cannot_promote_deferred_durable_over_live_transient(
 
     def reverse_ranking(query, entries, **kwargs):
         reranked.append([entry.id for entry in entries])
-        return list(reversed(entries))
+        return [(entry, float(i)) for i, entry in enumerate(entries)][::-1]  # last in = highest score, first out
 
-    monkeypatch.setattr("trw_memory.retrieval.reranker.cross_encode_rerank", reverse_ranking)
+    monkeypatch.setattr("trw_memory.retrieval.reranker.cross_encode_scores", reverse_ranking)
     backend = source_client._get_backend()
     start = datetime(2020, 1, 1, tzinfo=timezone.utc)
     backend.store(

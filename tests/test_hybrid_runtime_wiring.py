@@ -15,8 +15,22 @@ from trw_memory.client import MemoryClient
 from trw_memory.exceptions import StorageError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.retrieval.pipeline import ScoredCandidate
 from trw_memory.tools.recall import memory_recall_impl
 from trw_memory.tools.store import memory_store_impl
+
+
+def _scored(entries: list[MemoryEntry]) -> list[ScoredCandidate]:
+    """Wrap entries as the pipeline's scored candidates (PRD-CORE-278 FR01).
+
+    ``memory_recall_impl`` consumes ``hybrid_search_scored`` so the retrieval
+    score reaches the caller; a stub that returns bare entries would be testing
+    an interface the tool no longer calls.
+    """
+    return [
+        ScoredCandidate(entry=entry, score=round(1.0 / (1 + rank), 6), basis="fused")
+        for rank, entry in enumerate(entries)
+    ]
 
 
 class _StubEmbedder:
@@ -235,7 +249,7 @@ def test_memory_recall_impl_passes_stored_embeddings_to_hybrid_search() -> None:
 
     with (
         patch("trw_memory.tools.recall.get_local_embedder", return_value=_StubEmbedder()),
-        patch("trw_memory.tools.recall.hybrid_search", return_value=[entry]) as hybrid_search_mock,
+        patch("trw_memory.tools.recall.hybrid_search_scored", return_value=_scored([entry])) as hybrid_search_mock,
     ):
         result = memory_recall_impl("pydantic", "project:default", backend=backend)
 
@@ -254,7 +268,7 @@ def test_memory_recall_impl_uses_configured_embedder_settings() -> None:
 
     with (
         patch("trw_memory.tools.recall.get_local_embedder", return_value=None) as embedder_mock,
-        patch("trw_memory.tools.recall.hybrid_search", return_value=[entry]),
+        patch("trw_memory.tools.recall.hybrid_search_scored", return_value=_scored([entry])),
     ):
         result = memory_recall_impl("pydantic", "project:default", backend=backend, config=config)
 
@@ -282,7 +296,7 @@ def test_memory_recall_impl_forwards_retrieval_config_to_hybrid_search() -> None
 
     with (
         patch("trw_memory.tools.recall.get_local_embedder", return_value=_StubEmbedder()),
-        patch("trw_memory.tools.recall.hybrid_search", return_value=[entry]) as hybrid_search_mock,
+        patch("trw_memory.tools.recall.hybrid_search_scored", return_value=_scored([entry])) as hybrid_search_mock,
     ):
         memory_recall_impl("pydantic", "project:default", backend=backend, config=config)
 
@@ -318,7 +332,7 @@ def test_memory_recall_impl_applies_temporal_query_wiring() -> None:
         patch("trw_memory.tools.recall.get_local_embedder", return_value=_StubEmbedder()),
         patch("trw_memory.retrieval.temporal_query.classify_temporal", return_value=temporal),
         patch("trw_memory.retrieval.temporal_query.strip_temporal_prefix", return_value="pydantic"),
-        patch("trw_memory.tools.recall.hybrid_search", return_value=[entry]) as hybrid_search_mock,
+        patch("trw_memory.tools.recall.hybrid_search_scored", return_value=_scored([entry])) as hybrid_search_mock,
     ):
         memory_recall_impl("latest guidance on pydantic", "project:default", backend=backend, config=config)
 

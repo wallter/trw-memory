@@ -76,37 +76,58 @@ class TestMemoryRecallImpl:
             sweep_result = manager.sweep(config=cfg)
             assert sweep_result.demoted == 0
 
-    def test_merge_tier_entries_reranks_by_composite_score(self) -> None:
+    def test_merge_tier_entries_appends_tier_only_below_scored_results(self) -> None:
+        """PRD-CORE-278 FR03: a retrieval score is never rescored away.
+
+        This assertion used to be the opposite — a fresh, important tier
+        candidate outranked a stale local one, because the merge rescored BOTH
+        with ``compute_importance_score``. That rescore mixed a relative
+        retrieval score with an absolute utility score and destroyed the number
+        the caller reads as ``score``. Tier-only candidates are still merged in,
+        and still rank first when retrieval found nothing (the test below); they
+        no longer displace a candidate retrieval actually scored.
+        """
         cfg = MemoryConfig()
-        merged = _merge_tier_entries(
-            [
-                {
-                    "id": "M-local",
-                    "content": "deploy lesson",
-                    "detail": "stale local result",
-                    "importance": 0.1,
-                    "q_value": 0.1,
-                    "q_observations": 5,
-                    "last_accessed_at": (datetime.now(timezone.utc) - timedelta(days=60)).isoformat(),
-                    "score": 0.9,
-                    "namespace": "project:default",
-                }
-            ],
-            [
-                {
-                    "id": "M-tier",
-                    "content": "deploy lesson",
-                    "detail": "fresh tier result",
-                    "importance": 0.9,
-                    "q_value": 0.95,
-                    "q_observations": 5,
-                    "last_accessed_at": datetime.now(timezone.utc).isoformat(),
-                    "score": 0.2,
-                    "namespace": "project:default",
-                }
-            ],
-            ["deploy"],
-            cfg,
-            None,
-        )
-        assert [str(entry["id"]) for entry in merged] == ["M-tier", "M-local"]
+        local: dict[str, object] = {
+            "id": "M-local",
+            "content": "deploy lesson",
+            "detail": "stale local result",
+            "importance": 0.1,
+            "q_value": 0.1,
+            "q_observations": 5,
+            "last_accessed_at": (datetime.now(timezone.utc) - timedelta(days=60)).isoformat(),
+            "score": 0.9,
+            "namespace": "project:default",
+        }
+        tier: dict[str, object] = {
+            "id": "M-tier",
+            "content": "deploy lesson",
+            "detail": "fresh tier result",
+            "importance": 0.9,
+            "q_value": 0.95,
+            "q_observations": 5,
+            "last_accessed_at": datetime.now(timezone.utc).isoformat(),
+            "score": 0.2,
+            "namespace": "project:default",
+        }
+        merged = _merge_tier_entries([local], [tier], ["deploy"], cfg, None)
+        assert [str(entry["id"]) for entry in merged] == ["M-local", "M-tier"]
+        # The retrieval score survived the merge untouched.
+        assert merged[0]["score"] == 0.9
+
+    def test_merge_tier_entries_ranks_tier_only_first_when_retrieval_found_nothing(self) -> None:
+        cfg = MemoryConfig()
+        weak: dict[str, object] = {
+            "id": "M-weak",
+            "content": "unrelated",
+            "importance": 0.1,
+            "namespace": "project:default",
+        }
+        strong: dict[str, object] = {
+            "id": "M-strong",
+            "content": "deploy lesson",
+            "importance": 0.9,
+            "namespace": "project:default",
+        }
+        merged = _merge_tier_entries([], [weak, strong], ["deploy"], cfg, None)
+        assert [str(entry["id"]) for entry in merged] == ["M-strong", "M-weak"]

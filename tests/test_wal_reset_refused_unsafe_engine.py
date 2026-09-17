@@ -23,6 +23,7 @@ from __future__ import annotations
 import inspect
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import structlog
@@ -168,7 +169,7 @@ def test_backend_refuses_the_reset_end_to_end(tmp_path: Path, monkeypatch: pytes
     from trw_memory.storage import _dbapi
     from trw_memory.storage.sqlite_backend import SQLiteBackend
 
-    monkeypatch.setattr(_dbapi, "is_wal_reset_safe", lambda: False)
+    monkeypatch.setattr(_dbapi, "wal_reset_safe_version", lambda _version: False)
     backend = SQLiteBackend(tmp_path / "m.db")
     try:
         assert backend.wal_reset_safe is False
@@ -178,7 +179,75 @@ def test_backend_refuses_the_reset_end_to_end(tmp_path: Path, monkeypatch: pytes
         backend.close()
 
 
+def test_the_gate_follows_the_backend_driver_not_the_process_driver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRD-INFRA-185 FR07.
+
+    An encrypted store opens ``sqlcipher3``, whose bundled SQLite is unrelated to
+    the stdlib/pysqlite3 selection. Reading the gate from the PROCESS driver let a
+    capable stdlib authorise a resetting checkpoint against an unsafe SQLCipher
+    build. Here the process driver is forced SAFE and the backend's own driver
+    reports an unsafe version; the gate must follow the backend.
+    """
+    from trw_memory.storage import _dbapi
+    from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+    monkeypatch.setattr(_dbapi, "is_wal_reset_safe", lambda: True)
+    monkeypatch.setattr(_dbapi, "sqlite_version", lambda: "3.53.4")
+
+    backend = SQLiteBackend(tmp_path / "m.db")
+    try:
+        # Real construction used the real driver; re-derive with a stub standing in
+        # for an encrypted store's DB-API module.
+        stub = SimpleNamespace(sqlite_version="3.44.0", Error=sqlite3.Error, __name__="sqlcipher3")
+        backend._dbapi = stub
+        assert _dbapi.wal_reset_safe_version(str(stub.sqlite_version)) is False
+        assert _dbapi.is_wal_reset_safe() is True, "the process driver is deliberately safe here"
+        backend.wal_reset_safe = _dbapi.wal_reset_safe_version(str(stub.sqlite_version))
+        assert backend.checkpoint_wal("TRUNCATE")["mode"] == "PASSIVE"
+    finally:
+        backend.close()
+
+
+def test_the_constructor_derives_the_gate_from_its_own_driver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The derivation happens in __init__, not only at the call site."""
+    from trw_memory.storage import _dbapi
+    from trw_memory.storage import sqlite_backend as backend_module
+
+    seen: list[str] = []
+    real = _dbapi.wal_reset_safe_version
+
+    def _recording(version: str) -> bool:
+        seen.append(version)
+        return real(version)
+
+    monkeypatch.setattr(_dbapi, "wal_reset_safe_version", _recording)
+    backend = backend_module.SQLiteBackend(tmp_path / "m.db")
+    try:
+        assert seen, "the constructor must consult wal_reset_safe_version"
+        assert seen[0] == str(backend._dbapi.sqlite_version)
+    finally:
+        backend.close()
+
+
 def test_remedy_string_is_the_single_source_for_every_surface() -> None:
     """One sentence, exported, so log/doctor/docstring cannot drift apart."""
     assert "3.51.3" in WAL_RESET_UNSAFE_REMEDY
-    assert "pysqlite3" in WAL_RESET_UNSAFE_REMEDY
+
+
+def test_the_remedy_names_an_interpreter_not_a_wheel() -> None:
+    """PRD-INFRA-185 FR03.
+
+    Every published pysqlite3 wheel measured on 2026-09-16 bundles SQLite 3.51.1,
+    below the fix. Telling an operator to install one reads as a fix and delivers
+    an engine change with no effect — and on a current interpreter it is a
+    downgrade. The remedy must point at an interpreter.
+    """
+    assert "any interpreter whose sqlite3.sqlite_version >= 3.51.3" in WAL_RESET_UNSAFE_REMEDY
+    assert "on macOS Homebrew Python ships one" in WAL_RESET_UNSAFE_REMEDY
+    # It may MENTION pysqlite3 only to say no wheel qualifies -- never as the fix.
+    assert "No published pysqlite3 wheel qualifies" in WAL_RESET_UNSAFE_REMEDY
+    assert "e.g. a pysqlite3 wheel bundling it" not in WAL_RESET_UNSAFE_REMEDY

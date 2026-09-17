@@ -39,6 +39,7 @@ from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage._row_mapper import entry_to_row, row_to_entry
 from trw_memory.storage._shared import (
+    _BOOKKEEPING_FIELDS,
     DICT_FIELDS,
     LIST_FIELDS,
     serialize_update_value,
@@ -317,7 +318,7 @@ def update(
         _raw_tags = field_dict.get("tags", existing.tags or [])
         _fts_tags: str = json.dumps(_raw_tags) if isinstance(_raw_tags, list) else str(_raw_tags)
 
-        if "updated_at" not in field_dict:
+        if "updated_at" not in field_dict and not set(field_dict).issubset(_BOOKKEEPING_FIELDS):
             field_dict["updated_at"] = datetime.now(timezone.utc)
 
         try:
@@ -406,14 +407,16 @@ def increment_session_counts(
     if not entry_ids:
         return 0
 
-    now = updated_at or datetime.now(timezone.utc)
-    values = [(now.isoformat(), entry_id) for entry_id in entry_ids]
+    # PRD-CORE-278 FR06: session bookkeeping no longer stamps ``updated_at``.
+    # ``updated_at`` is kept as the parameter name because callers pass it, and
+    # because a future content-bearing use of this path would want it.
+    _ = updated_at
+    values = [(entry_id,) for entry_id in entry_ids]
 
     try:
         sql = f"""
             UPDATE memories
             SET session_count = MIN(COALESCE(session_count, 0) + 1, {_MAX_COUNTER}),
-                updated_at = ?,
                 sync_seq = COALESCE(sync_seq, 0) + 1,
                 last_synced_at = NULL
             WHERE id = ?
@@ -448,14 +451,15 @@ def increment_access_counts(
         return 0
 
     now = accessed_at or datetime.now(timezone.utc)
-    values = [(now.isoformat(), now.isoformat(), entry_id) for entry_id in entry_ids]
+    # PRD-CORE-278 FR06: ``last_accessed_at`` IS the access stamp; ``updated_at``
+    # is content time and is left alone.
+    values = [(now.isoformat(), entry_id) for entry_id in entry_ids]
 
     try:
         sql = f"""
             UPDATE memories
             SET access_count = MIN(COALESCE(access_count, 0) + 1, {_MAX_COUNTER}),
                 last_accessed_at = ?,
-                updated_at = ?,
                 sync_seq = COALESCE(sync_seq, 0) + 1,
                 last_synced_at = NULL
             WHERE id = ?
@@ -510,12 +514,11 @@ def increment_recall_access(
                     SET access_count = MIN(COALESCE(access_count, 0) + 1, {_MAX_COUNTER}),
                         recall_count = MIN(COALESCE(recall_count, 0) + 1, {_MAX_COUNTER}),
                         last_accessed_at = ?,
-                        updated_at = ?,
                         sync_seq = COALESCE(sync_seq, 0) + 1,
                         last_synced_at = NULL
                     WHERE id IN ({placeholders})
                 """  # noqa: S608
-                backend._conn.execute(sql, [now_iso, now_iso, *chunk])
+                backend._conn.execute(sql, [now_iso, *chunk])
             return int(backend._conn.total_changes - before)
     except sqlite3.Error as exc:
         raise StorageError(

@@ -60,9 +60,39 @@ _bm25_cache_lock = threading.Lock()
 # "test" and "trw-memory" is kept for hyphen-expansion below.
 _PUNCT_RE = re.compile(r"[^\w\s-]")
 
+# PRD-CORE-278 FR04: ``\w`` includes the underscore, so ``favourite_language``
+# was indexed as ONE token and the query "favourite language" matched nothing —
+# a measured 1-of-5 lexical hit@3 on key-value content. Identifier separators are
+# split the same way CamelCase already is; the composite token is preserved
+# alongside the parts (below) so a query spelling the identifier in full still
+# matches exactly.
+_IDENTIFIER_RE = re.compile(r"_+")
+
 # CamelCase / PascalCase splitter: insert a space before each uppercase letter
 # that follows a lowercase letter or digit so "hybridSearch" → "hybrid Search".
 _CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+# Query-side stopwords. Natural-language recall queries ("what did Caroline
+# research?", "when did we last change the retry policy?") are dominated by
+# function words that match nearly every document; with rank_bm25's IDF
+# floor they still carry weight and push documents that merely share "what"
+# and "did" above the ones that share the content terms. Dropping them from
+# the QUERY only (documents keep every token, so phrase-like tags such as
+# "how-to" still index) lifted LOCOMO evidence hit@10 from 57% to 64% for
+# BM25 alone and from 64.5% to 69.7% after fusion (benchmarks/locomo,
+# 2026-09-17). A query made entirely of stopwords keeps its tokens so it
+# still matches something rather than nothing.
+_QUERY_STOPWORD_TEXT = """
+    a an the and or but if then than so as of to in on at by for from with
+    about into over after before between under during without within
+    is are was were be been being am do does did done doing have has had
+    having can could may might must shall should will would
+    i me my mine we us our ours you your yours he him his she her hers it its
+    they them their theirs this that these those there here who whom whose
+    which what when where why how
+    not no nor yes any some all each every either neither both
+"""
+_QUERY_STOPWORDS = frozenset(_QUERY_STOPWORD_TEXT.split())
 
 
 def _normalize_text(text: str) -> str:
@@ -71,6 +101,56 @@ def _normalize_text(text: str) -> str:
     text = text.lower()
     text = _PUNCT_RE.sub(" ", text)
     return text
+
+
+# Suffix-strip stemming applied to document AND query tokens so "researched"
+# meets "research" and "agencies" meets "agency". Deliberately crude (no
+# Porter tables, no dependency): only alphabetic tokens long enough that the
+# stem keeps at least four characters are touched, so identifiers such as
+# "v2", "sqlite3" or "fts" pass through untouched. On LOCOMO evidence
+# retrieval this lifted BM25 hit@10 72.7% -> 75.8% and fused hit@50
+# 90.6% -> 92.5% (385 questions, benchmarks/locomo, 2026-09-17).
+
+
+def _stem_token(token: str) -> str:
+    if not token.isalpha() or len(token) < 5:
+        return token
+    if token.endswith("ies"):
+        return token[:-3] + "y"
+    if token.endswith("ss"):
+        return token  # class, process, address
+    # "-es" is only an added syllable after a sibilant in the ORIGINAL word
+    # (boxes, classes, churches, wishes); "houses"/"phrases" end in -se + s, so
+    # look at the letters before "es" on the token itself, never on the
+    # 2-char-stripped remainder (which for "houses" is "hous" and ends in s).
+    if token.endswith("es") and (token[-3] in "xz" or token[-4:-2] in ("ss", "ch", "sh")):
+        return token[:-2]
+    if token.endswith("s"):
+        return token[:-1]
+    for suffix in ("edly", "ing", "ed", "ly"):
+        if len(token) > len(suffix) + 3 and token.endswith(suffix):
+            base = token[: -len(suffix)]
+            # stopped -> stop, running -> run (undo the doubled consonant)
+            if len(base) > 3 and base[-1] == base[-2] and base[-1] not in "aeiou":
+                base = base[:-1]
+            return base
+    return token
+
+
+def _split_identifiers(tokens: list[str]) -> list[str]:
+    """Expand ``snake_case`` tokens into their parts, keeping the composite.
+
+    Keeping the whole token means a query that spells the identifier exactly
+    still scores it; adding the parts means a query that spells it as words
+    scores it too. Both sides go through this helper so the index and the query
+    agree (PRD-CORE-278 FR04).
+    """
+    expanded: list[str] = []
+    for token in tokens:
+        expanded.append(token)
+        if "_" in token:
+            expanded.extend(part for part in _IDENTIFIER_RE.split(token) if part)
+    return expanded
 
 
 def _tokenize_entry(entry: MemoryEntry) -> list[str]:
@@ -99,7 +179,7 @@ def _tokenize_entry(entry: MemoryEntry) -> list[str]:
 
     tags_str = " ".join(tag_parts)
     text = f"{content} {detail} {tags_str}"
-    return [t for t in text.split() if t]
+    return [_stem_token(t) for t in _split_identifiers([t for t in text.split() if t])]
 
 
 def _build_or_reuse_model(
@@ -197,6 +277,15 @@ def bm25_search(
         tokenized_query.append(_t)
         if "-" in _t:
             tokenized_query.extend(_t.split("-"))
+    # ...and the identifier expansion, for the same reason (PRD-CORE-278 FR04).
+    tokenized_query = _split_identifiers(tokenized_query)
+
+    # Drop function words from the query; keep them only when nothing else
+    # survives so an all-stopword query still degrades to the old behaviour.
+    content_tokens = [t for t in tokenized_query if t not in _QUERY_STOPWORDS]
+    if content_tokens:
+        tokenized_query = content_tokens
+    tokenized_query = [_stem_token(t) for t in tokenized_query]
 
     scores = bm25.get_scores(tokenized_query)
 

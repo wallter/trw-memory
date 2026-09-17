@@ -32,6 +32,7 @@ parent ``runtime`` module to break the import cycle.
 from __future__ import annotations
 
 import hashlib
+import threading
 from typing import Any
 
 from trw_memory.exceptions import CanaryTamperError
@@ -51,6 +52,13 @@ CANARY_NAMESPACE = DEFAULT_NAMESPACE
 
 
 CANARY_STATE: dict[str, dict[str, object]] = {}
+
+# PRD-CORE-279 FR04: recall now runs in a worker pool, so seeding and probing
+# can be entered concurrently. This is a security control -- an unlocked
+# check-then-seed lets two callers both initialise, and a late initialiser that
+# REPLACES the state dict erases a tamper failure another caller just recorded.
+# Reentrant because probe_canaries calls initialize_canaries.
+_CANARY_STATE_LOCK = threading.RLock()
 
 
 def _trace_context(*, session_id: str | None = None) -> tuple[str, str | None]:
@@ -98,6 +106,11 @@ def _store_pinned_canary(
 
 
 def initialize_canaries(config: MemoryConfig, *, backend: StorageBackend) -> None:
+    with _CANARY_STATE_LOCK:
+        _initialize_canaries_locked(config, backend=backend)
+
+
+def _initialize_canaries_locked(config: MemoryConfig, *, backend: StorageBackend) -> None:
     state_key = _state_key(config, backend)
     if CANARY_STATE.get(state_key, {}).get("seeded"):
         return
@@ -110,7 +123,10 @@ def initialize_canaries(config: MemoryConfig, *, backend: StorageBackend) -> Non
         content = fixture_map[canary_id]
         _store_pinned_canary(backend, canary_id=canary_id, content=content, expected_hash=expected_hash)
         seeded += 1
-    CANARY_STATE[state_key] = {"seeded": True, "recall_count": 0, "failed": False}
+    # Update in place rather than replacing: a concurrent probe may already have
+    # recorded a tamper failure against this key, and a fresh dict would drop it.
+    state = CANARY_STATE.setdefault(state_key, {"seeded": False, "recall_count": 0, "failed": False})
+    state["seeded"] = True
     telemetry_session_id, telemetry_run_id = _trace_context(session_id="canary-bootstrap")
     emit_security_event(
         config,
@@ -130,6 +146,11 @@ def initialize_canaries(config: MemoryConfig, *, backend: StorageBackend) -> Non
 
 
 def probe_canaries(config: MemoryConfig, *, backend: StorageBackend) -> None:
+    with _CANARY_STATE_LOCK:
+        _probe_canaries_locked(config, backend=backend)
+
+
+def _probe_canaries_locked(config: MemoryConfig, *, backend: StorageBackend) -> None:
     state_key = _state_key(config, backend)
     state: dict[str, Any] = CANARY_STATE.setdefault(state_key, {"seeded": False, "recall_count": 0, "failed": False})
     if not state["seeded"]:

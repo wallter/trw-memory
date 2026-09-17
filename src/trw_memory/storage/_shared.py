@@ -16,6 +16,28 @@ from trw_memory.models.memory import Anchor, Assertion, Confidence, MemoryStatus
 # Field definitions
 # ---------------------------------------------------------------------------
 
+#: Columns that record HOUSEKEEPING, not content: access and recall bookkeeping,
+#: session counters, and the replication cursor. PRD-CORE-278 FR06 — an update
+#: whose fields are ALL in this set does not move ``updated_at``, because
+#: ``updated_at`` means "when this entry's content last changed" and
+#: ``list_entries`` orders newest-first by it. A background pass touching every
+#: row's counters used to rewrite a whole namespace's content time, so the first
+#: entry written sorted above the sixty written after it (sub_ruTTqov1kvAvpbiJ).
+#: Replication is unaffected: it selects on ``sync_seq`` / ``last_synced_at``
+#: (``sync/delta.py``) and resolves conflicts on vector clocks, never on
+#: ``updated_at``.
+_BOOKKEEPING_FIELDS: frozenset[str] = frozenset(
+    {
+        "access_count",
+        "last_accessed_at",
+        "last_synced_at",
+        "recall_count",
+        "session_count",
+        "sync_hash",
+        "sync_seq",
+    }
+)
+
 #: All column/field names on MemoryEntry, in canonical order.
 #: Used by SQLiteBackend for SELECT/INSERT column lists.
 ENTRY_COLUMNS: tuple[str, ...] = (
