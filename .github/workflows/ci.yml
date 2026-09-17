@@ -1,10 +1,16 @@
 name: CI
 
+# A push to main is only ever a release sync from the monorepo, whose tree has
+# already passed this same workflow in `make release-check` (a faithful local
+# replay of these jobs) before it was cut; re-running it here doubled every
+# release's wall time (2026-09-17: two 20-minute reruns for test-only syncs).
+# Pull requests still run it, and it can be started by hand. The tag-triggered
+# release.yml keeps the multi-OS install smoke, which is the cross-platform
+# check that matters for a published wheel.
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   test:
