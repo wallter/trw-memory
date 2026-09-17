@@ -99,9 +99,16 @@ class TestSelectDriver:
         assert sys.modules["sqlite3"] is sys.modules["pysqlite3"]
 
     def test_an_older_pysqlite3_loses_and_an_eager_swap_is_reverted(
-        self, sqlite_modules_restored: object
+        self, sqlite_modules_restored: object, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The defect this FR exists for: the wheel bundles 3.51.1, the stdlib is newer."""
+        """The defect this FR exists for: the wheel bundles 3.51.1, the stdlib is newer.
+
+        The stdlib version is pinned, as the sibling tests pin it: on the public
+        CI's Ubuntu runner the interpreter's own SQLite is 3.45, older than the
+        wheel, so the wheel correctly wins there and the unpinned form of this
+        test failed on the v0.19.0 tag (2026-09-17).
+        """
+        monkeypatch.setattr(dbapi, "stdlib_sqlite_version", lambda: "3.53.4")
         stale = _fake_pysqlite3("3.51.1")
         sys.modules["pysqlite3"] = stale
         # Simulate the eager, unconditional swap performed by trw_memory/__init__.py
@@ -113,11 +120,9 @@ class TestSelectDriver:
         name, version = dbapi.select_driver()
 
         assert name == "sqlite3"
-        import sqlite3
-
-        assert sys.modules["sqlite3"] is sqlite3
-        assert version == sqlite3.sqlite_version
-        assert sqlite3.sqlite_version != "3.51.1"
+        assert version == "3.53.4"
+        assert sys.modules["sqlite3"] is not stale
+        assert sys.modules["sqlite3"].sqlite_version != "3.51.1"
 
     def test_a_safe_backport_outranks_a_newer_unsafe_wheel(
         self, sqlite_modules_restored: object, monkeypatch: pytest.MonkeyPatch
