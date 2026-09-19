@@ -62,9 +62,7 @@ class TestCandidateVersion:
 
 
 class TestInstall:
-    def test_install_makes_import_sqlite3_resolve_to_the_wheel(
-        self, sqlite_modules_restored: object
-    ) -> None:
+    def test_install_makes_import_sqlite3_resolve_to_the_wheel(self, sqlite_modules_restored: object) -> None:
         candidate = fake_pysqlite3("9.9.9")
         sys.modules["pysqlite3"] = candidate
 

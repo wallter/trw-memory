@@ -79,6 +79,7 @@ def _v4_live_store(path: Path, rows: int) -> None:
     conn.close()
 
 
+@pytest.mark.perf
 @pytest.mark.slow
 def test_schema5_rebuild_against_copy_within_budget_preserves_rows(tmp_path: Path) -> None:
     """AC1: migrating a BYTE COPY completes in budget, row count invariant, original untouched."""
@@ -112,6 +113,7 @@ def test_schema5_rebuild_against_copy_within_budget_preserves_rows(tmp_path: Pat
     live_conn.close()
 
 
+@pytest.mark.perf
 @pytest.mark.slow
 def test_second_run_against_the_migrated_copy_is_a_measured_no_op(tmp_path: Path) -> None:
     """AC2: re-running the migration on the already-migrated copy changes zero rows."""

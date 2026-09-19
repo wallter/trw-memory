@@ -8,6 +8,8 @@ import tracemalloc
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from trw_memory.lifecycle.tiers import TierManager
 from trw_memory.models.config import MemoryConfig
 
@@ -15,6 +17,7 @@ from ._test_tiers_support import _make_entry, cfg, mem_dir, mgr  # noqa: F401
 
 
 class TestTierPerformanceContracts:
+    @pytest.mark.perf
     def test_hot_tier_latency_p95_under_1ms(self, mgr: TierManager) -> None:
         for index in range(3):
             mgr.hot_put(f"hot-{index}", _make_entry(f"hot-{index}"))
@@ -28,6 +31,7 @@ class TestTierPerformanceContracts:
         durations.sort()
         assert durations[int(len(durations) * 0.95)] < 0.001
 
+    @pytest.mark.perf
     def test_warm_tier_search_p95_under_50ms(self, mgr: TierManager) -> None:
         for index in range(500):
             mgr.warm_add(
@@ -50,6 +54,7 @@ class TestTierPerformanceContracts:
         durations.sort()
         assert durations[int(len(durations) * 0.95)] < 0.05
 
+    @pytest.mark.perf
     def test_cold_tier_search_p95_under_350ms(self, mgr: TierManager) -> None:
         from trw_memory.storage.persistence import write_yaml
 
@@ -86,6 +91,7 @@ class TestTierPerformanceContracts:
 
         assert peak < 50 * 1024 * 1024
 
+    @pytest.mark.perf
     def test_sweep_processes_100_entries_under_5_seconds(
         self,
         mgr: TierManager,

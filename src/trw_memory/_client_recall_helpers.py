@@ -34,6 +34,7 @@ from trw_memory._client_recall_mirror import (
 from trw_memory._client_recall_mirror import (
     remember_selected_candidates as remember_selected_candidates,
 )
+from trw_memory.embeddings._space_gate import active_embedding_space
 from trw_memory.lifecycle.scoring import entry_utility
 from trw_memory.lifecycle.tiers._runtime import tier_candidates
 from trw_memory.lifecycle.tiers._scoring import compute_importance_score
@@ -183,8 +184,13 @@ def tier_results(
     query_embedding: list[float] | None = None,
     *,
     invocation: RecallInvocation | None = None,
+    covered_ids: frozenset[str] = frozenset(),
 ) -> list[MemoryResultDict] | list[LocalCandidate]:
-    """Collect local tier-managed candidates for this namespace."""
+    """Collect local tier-managed candidates for this namespace.
+
+    *covered_ids* (with *invocation* only) names primary rows the hybrid path
+    already ranked; tier discovery skips them (see ``TierManager.search``).
+    """
     candidates = tier_candidates(
         client._config,
         client._namespace,
@@ -193,7 +199,9 @@ def tier_results(
         tags=tags,
         limit=limit,
         query_embedding=query_embedding,
+        query_space=active_embedding_space(client._get_embedder()) if query_embedding is not None else None,
         invocation=invocation,
+        covered_ids=covered_ids,
     )
     if invocation is not None:
         return cast("list[LocalCandidate]", candidates)

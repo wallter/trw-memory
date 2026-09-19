@@ -1,9 +1,10 @@
 """Tests for the BM25 corpus invalidation cache.
 
-The cache stores the most-recently-built ``BM25Okapi`` model keyed on the *set*
-of entry ids that produced it.  Two ``bm25_search`` calls presenting the same id
-set reuse the model (and the tokenized corpus); any change to the id set
-invalidates and rebuilds.  This eliminates the O(N) per-call corpus rebuild that
+The cache is a small LRU of ``BM25Okapi`` models keyed on the *set* of entries
+(ids plus lexical fields) that produced each one.  Two ``bm25_search`` calls
+presenting the same corpus reuse the model (and the tokenized corpus); any
+change to the id set misses and rebuilds.  Several corpora (one per namespace)
+stay cached at once, bounded by model count and total indexed rows.  This eliminates the O(N) per-call corpus rebuild that
 costs 7-15GB RAM and seconds at 1M+ entries.
 """
 
@@ -22,9 +23,9 @@ from ._test_retrieval_support import make_entry
 @pytest.fixture(autouse=True)
 def _reset_bm25_cache() -> Iterator[None]:
     """Reset the module-level cache before and after each test for isolation."""
-    bm25_mod._bm25_cache = None
+    bm25_mod.clear_bm25_cache()
     yield
-    bm25_mod._bm25_cache = None
+    bm25_mod.clear_bm25_cache()
 
 
 class _CountingBM25:
@@ -141,7 +142,7 @@ class TestBm25Cache:
         cached_results = bm25_search("neural gradient", entries)
 
         # Force a fresh build by clearing the cache, then compare.
-        bm25_mod._bm25_cache = None
+        bm25_mod.clear_bm25_cache()
         fresh_results = bm25_search("neural gradient", entries)
 
         assert cached_results == fresh_results
@@ -160,4 +161,55 @@ class TestBm25Cache:
         bm25_search("bar", dupes)
 
         assert counting_bm25.construction_count == 2
-        assert bm25_mod._bm25_cache is None
+        assert len(bm25_mod._bm25_cache) == 0
+
+
+class TestBm25CacheLru:
+    """Several corpora stay cached at once, within a model-count and row bound."""
+
+    def test_alternating_namespaces_both_hit(self, counting_bm25: type[_CountingBM25]) -> None:
+        """Two corpora recalled alternately each build once, then always hit.
+
+        A single-slot cache evicted one namespace's model on every switch, so
+        concurrent recalls over two namespaces rebuilt O(N) on every call.
+        """
+        alpha = [make_entry("a1", "pottery class schedule"), make_entry("a2", "adoption agency research")]
+        beta = [make_entry("b1", "camping trip gear"), make_entry("b2", "marathon training plan")]
+
+        for _ in range(3):
+            assert bm25_search("pottery", alpha)[0][0] == "a1"
+            assert bm25_search("marathon", beta)[0][0] == "b2"
+
+        assert counting_bm25.construction_count == 2
+
+    def test_least_recently_used_model_is_evicted_at_capacity(
+        self, counting_bm25: type[_CountingBM25], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(bm25_mod, "_BM25_CACHE_MAX_MODELS", 2)
+        corpora = [[make_entry(f"{name}1", f"{name} alpha"), make_entry(f"{name}2", "beta")] for name in "xyz"]
+
+        bm25_search("alpha", corpora[0])
+        bm25_search("alpha", corpora[1])
+        bm25_search("alpha", corpora[0])  # hit: x becomes most recently used
+        bm25_search("alpha", corpora[2])  # evicts y, the least recently used
+        assert counting_bm25.construction_count == 3
+        assert len(bm25_mod._bm25_cache) == 2
+
+        bm25_search("alpha", corpora[0])  # still cached
+        assert counting_bm25.construction_count == 3
+        bm25_search("alpha", corpora[1])  # was evicted: rebuilds
+        assert counting_bm25.construction_count == 4
+
+    def test_row_bound_evicts_but_keeps_the_newest_model(
+        self, counting_bm25: type[_CountingBM25], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(bm25_mod, "_BM25_CACHE_MAX_ROWS", 3)
+        small = [make_entry("s1", "alpha"), make_entry("s2", "beta")]
+        large = [make_entry(f"l{i}", f"alpha {i}") for i in range(5)]
+
+        bm25_search("alpha", small)
+        bm25_search("alpha", large)  # 7 rows > 3: small is evicted, large alone is kept
+
+        assert [len(ids) for _, ids, _ in bm25_mod._bm25_cache.values()] == [5]
+        bm25_search("beta", large)
+        assert counting_bm25.construction_count == 2

@@ -105,15 +105,36 @@ class DaemonServeOptions(BaseModel):
 
 
 class _IdleTracker:
-    """ASGI wrapper recording when the last request arrived."""
+    """ASGI wrapper recording HTTP activity for the idle watchdog.
+
+    The daemon is idle only when no HTTP request is in flight AND none has
+    started or finished within the window. Stamping arrival alone let the
+    watchdog shut the server down underneath a tool call that ran longer than
+    the window, and the caller waited on a response that never came. The
+    ``lifespan`` scope passes through uncounted: it spans the server's whole
+    life and would otherwise keep the daemon up forever.
+    """
 
     def __init__(self, app: ASGIApp) -> None:
         self._app = app
         self.last_request_at = time.monotonic()
+        self.in_flight = 0
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+        self.in_flight += 1
         self.last_request_at = time.monotonic()
-        await self._app(scope, receive, send)
+        try:
+            await self._app(scope, receive, send)
+        finally:
+            self.in_flight -= 1
+            self.last_request_at = time.monotonic()
+
+    def idle_for(self, idle_shutdown_seconds: float) -> bool:
+        """True when nothing is in flight and the last activity is a window old."""
+        return self.in_flight == 0 and time.monotonic() - self.last_request_at >= idle_shutdown_seconds
 
 
 def _package_version() -> str:
@@ -128,11 +149,11 @@ def _idle_poll_seconds(idle_shutdown_seconds: float) -> float:
 
 
 async def _watch_idle(tracker: _IdleTracker, server: uvicorn.Server, idle_shutdown_seconds: float) -> None:
-    """Ask the server to exit once no request has arrived for the window."""
+    """Ask the server to exit once nothing has been in flight for the window."""
     poll = _idle_poll_seconds(idle_shutdown_seconds)
     while not server.should_exit:
         await asyncio.sleep(poll)
-        if time.monotonic() - tracker.last_request_at >= idle_shutdown_seconds:
+        if tracker.idle_for(idle_shutdown_seconds):
             logger.info("daemon_idle_shutdown", idle_seconds=idle_shutdown_seconds)
             server.should_exit = True
             return

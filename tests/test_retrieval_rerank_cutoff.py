@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.pipeline import hybrid_search
@@ -126,7 +128,8 @@ def test_malformed_model_output_degrades_to_none_not_an_exception() -> None:
         assert [e.id for e in reranker.cross_encode_rerank("q", _entries())] == [e.id for e in _entries()]
 
 
-def test_offline_switch_forces_local_files_only_and_never_downloads(monkeypatch) -> None:
+@pytest.mark.parametrize("offline_variable", ["TRW_OFFLINE", "HF_HUB_OFFLINE"])
+def test_offline_switch_forces_local_files_only_and_never_downloads(monkeypatch, offline_variable) -> None:
     """TRW_OFFLINE / HF_HUB_OFFLINE / local_only must reach the cross-encoder loader
     (rerank is on by default, so this is the README's no-outbound-calls contract)."""
     from trw_memory.retrieval import reranker
@@ -142,11 +145,15 @@ def test_offline_switch_forces_local_files_only_and_never_downloads(monkeypatch)
     monkeypatch.setattr(reranker, "_cross_encoder_cls", FakeCrossEncoder)
     monkeypatch.setattr(reranker, "_cross_encoder_available", True)
     monkeypatch.setattr(reranker, "_LOADED_MODELS", {})
-    monkeypatch.setenv("TRW_OFFLINE", "1")
+    # Control both switches: an inherited offline flag must not contaminate
+    # the online branch below. The fake loader never accesses the network.
+    monkeypatch.delenv("TRW_OFFLINE", raising=False)
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.setenv(offline_variable, "1")
     assert reranker._get_model("some/model") is None
     assert calls[-1]["local_files_only"] is True
     assert reranker.cross_encode_scores("q", _entries(), model_name="some/model") is None
-    monkeypatch.delenv("TRW_OFFLINE")
+    monkeypatch.delenv(offline_variable)
     assert reranker._get_model("some/model", local_only=True) is None
     assert calls[-1]["local_files_only"] is True
     reranker._get_model("some/model")  # online: a network-capable load is allowed

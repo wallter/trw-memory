@@ -217,7 +217,7 @@ class TestLocalOnlyModelLoading:
 
         assert model is not None
         assert captured == {
-            "model_name": "all-MiniLM-L6-v2",
+            "model_name": "BAAI/bge-small-en-v1.5",
             "local_files_only": True,
             "trust_remote_code": False,
         }
@@ -233,7 +233,7 @@ class TestLocalOnlyModelLoading:
 
         class FakeSentenceTransformer:
             def __init__(self, model_name: str, *, local_files_only: bool, trust_remote_code: bool = False) -> None:
-                assert model_name == "all-MiniLM-L6-v2"
+                assert model_name == "BAAI/bge-small-en-v1.5"
                 assert local_files_only is True
                 raise OSError("model not cached")
 
@@ -244,7 +244,7 @@ class TestLocalOnlyModelLoading:
             with pytest.raises(
                 LocalOnlyViolationError,
                 match=(
-                    "Model 'all-MiniLM-L6-v2' not found in local cache. Download is blocked "
+                    "Model 'BAAI/bge-small-en-v1.5' not found in local cache. Download is blocked "
                     r"\(memory_local_only=True\)"
                 ),
             ):

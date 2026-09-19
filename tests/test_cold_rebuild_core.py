@@ -122,6 +122,7 @@ def test_hydrator_covers_all_entry_columns() -> None:
     )
 
 
+@pytest.mark.perf
 @pytest.mark.slow
 def test_rebuild_throughput_10k_files(tmp_path: Path) -> None:
     """NFR01: rebuild must process 10,000 cold YAML files in under 30 seconds."""

@@ -39,9 +39,9 @@ def test_default_model_needs_no_remote_code(
     tmp_path: Path,
 ) -> None:
     """FR03: the default snapshot declares no Python module and loads at False."""
-    assert local_mod._DEFAULT_MODEL == "all-MiniLM-L6-v2"
+    assert local_mod._DEFAULT_MODEL == "BAAI/bge-small-en-v1.5"
     use_fixture_cache(monkeypatch, tmp_path)
-    snapshot = build_model_cache(tmp_path)
+    snapshot = build_model_cache(tmp_path, repo_id=local_mod._DEFAULT_MODEL)
 
     probe = probe_model_cache(local_mod._DEFAULT_MODEL)
     assert probe.state is CacheState.COMPLETE
@@ -60,7 +60,7 @@ def test_invariant_fails_for_a_default_that_declares_custom_modules(
 ) -> None:
     """Non-vacuity: the same guard rejects a remote-code default (FR03 acceptance)."""
     use_fixture_cache(monkeypatch, tmp_path)
-    build_model_cache(tmp_path, files=REMOTE_CODE_SNAPSHOT_FILES)
+    build_model_cache(tmp_path, repo_id=local_mod._DEFAULT_MODEL, files=REMOTE_CODE_SNAPSHOT_FILES)
 
     probe = probe_model_cache(local_mod._DEFAULT_MODEL)
     assert probe.declares_remote_code is True

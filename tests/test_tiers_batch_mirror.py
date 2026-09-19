@@ -54,7 +54,8 @@ class TestWarmAddMany:
         store = WarmTierStore(tmp_path)
         entries = [_entry(i) for i in range(20)]
         store.warm_add_many([(e.id, e.model_dump(mode="json"), None) for e in entries])
-        with patch.object(WarmTierStore, "_iter_sidecar_records", wraps=store._iter_sidecar_records) as spy:
+        store._sidecar_cache.invalidate()  # as if another process wrote last
+        with patch.object(WarmTierStore, "_parse_sidecar_records", wraps=store._parse_sidecar_records) as spy:
             store.warm_add_many([(e.id, e.model_dump(mode="json"), None) for e in entries])
         assert spy.call_count == 1
 
@@ -112,18 +113,21 @@ class TestSidecarParseCache:
         store = WarmTierStore(tmp_path)
         entries = [_entry(i) for i in range(5)]
         store.warm_add_many([(e.id, e.model_dump(mode="json"), None) for e in entries])
+        path = store._warm_sidecar_path()
         with patch.object(WarmTierStore, "_parse_sidecar_records", wraps=store._parse_sidecar_records) as parse:
-            first = list(store._iter_sidecar_records(store._warm_sidecar_path()))
-            second = list(store._iter_sidecar_records(store._warm_sidecar_path()))
+            store._sidecar_cache.invalidate()  # drop the writer's re-seed so the first read parses
+            first = list(store._iter_sidecar_records(path))
+            second = list(store._iter_sidecar_records(path))
             assert parse.call_count == 1
             assert [r for _, r in first] == [r for _, r in second]
             # annotating a yielded record must not leak into the next read
             second[0][1]["_tier_relevance"] = 0.9
-            third = list(store._iter_sidecar_records(store._warm_sidecar_path()))
+            third = list(store._iter_sidecar_records(path))
             assert "_tier_relevance" not in third[0][1]
+            # this store's own write re-seeds the cache: no re-parse (see test_warm_sidecar_cache.py)
             store.warm_add(_entry(9).id, _entry(9).model_dump(mode="json"), None)
-            fourth = list(store._iter_sidecar_records(store._warm_sidecar_path()))
-        assert parse.call_count >= 2
+            fourth = list(store._iter_sidecar_records(path))
+        assert parse.call_count == 1
         assert len(fourth) == 6
 
     def test_evictees_survive_a_failed_warm_write(self, tmp_path: Path) -> None:

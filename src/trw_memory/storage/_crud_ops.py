@@ -37,6 +37,7 @@ import structlog
 
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.storage._change_feed import note_delete
 from trw_memory.storage._row_mapper import entry_to_row, row_to_entry
 from trw_memory.storage._shared import (
     _BOOKKEEPING_FIELDS,
@@ -593,6 +594,8 @@ def delete(backend: SQLiteBackend, entry_id: str, namespace: str) -> bool:
         with backend._lock:
             cursor = backend._conn.execute("DELETE FROM memories WHERE namespace = ? AND id = ?", (namespace, entry_id))
             deleted = cursor.rowcount > 0
+            if deleted:
+                note_delete(backend)  # a delete moves no change-token maximum (see _change_feed)
             if deleted and backend._vec_available:
                 backend._delete_vector(entry_id, namespace)
             if deleted and getattr(backend, "_fts_available", False):

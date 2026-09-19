@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import _thread
 import contextlib
+import hashlib
 import sqlite3
 import struct
 from collections.abc import Sequence
@@ -588,7 +589,12 @@ def get_vector_records(
             continue
         embedding = tuple(struct.unpack(f"{len(blob) // 4}f", blob))
         proof = VectorProvenance.from_json(proof_json)
-        if proof is not None and not proof.matches_vector(embedding):
+        # Same check as ``proof.matches_vector(embedding)``: the proof digests the
+        # float32 packing of the vector, which IS this blob, so hash it directly
+        # (recall reads a whole candidate pool through here).
+        if proof is not None and (
+            len(embedding) != proof.space.dimensions or hashlib.sha256(blob).hexdigest() != proof.vector_sha256
+        ):
             proof = None
         records[str(entry_id)] = StoredVector(embedding=embedding, provenance=proof)
     return records

@@ -89,6 +89,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("--namespace", default="default", help="Namespace")
     p_status.add_argument("--format", dest="fmt", choices=["table", "json"], default="table", help="Output format")
 
+    # --- reembed ---
+    p_reembed = subparsers.add_parser(
+        "reembed",
+        help="Re-encode stored vectors into the configured embedding model's space",
+        description=(
+            "Dense recall ignores vectors from another embedding model (or with no recorded model) "
+            "until they are re-encoded. Idempotent and resumable; honours TRW_OFFLINE/HF_HUB_OFFLINE."
+        ),
+    )
+    p_reembed.add_argument("--namespace", default="default", help="Namespace")
+    p_reembed.add_argument("--batch-size", type=int, default=64, help="Rows encoded and committed per batch")
+    p_reembed.add_argument("--format", dest="fmt", choices=["table", "json"], default="table", help="Output format")
+
     # --- wiki-lint ---
     p_wiki_lint = subparsers.add_parser("wiki-lint", help="Lint wiki page JSON")
     p_wiki_lint.add_argument("path", help="JSON file containing a list of wiki page objects")

@@ -36,6 +36,8 @@ from typing import TYPE_CHECKING, Any, cast
 import structlog
 
 from trw_memory._client_distilled_tiering import entry_to_result as _entry_to_result
+from trw_memory._client_recall_hybrid import HybridPool
+from trw_memory.embeddings._query_prompts import embed_query
 from trw_memory.lifecycle._recall import record_recall_access
 from trw_memory.lifecycle.tiers._runtime import get_tier_manager, tier_runtime_enabled
 from trw_memory.models.memory import MemoryStatus
@@ -140,7 +142,7 @@ async def recall_impl(
     embedder = client._get_embedder() if query.strip() else None
     query_embedding: list[float] | None = None
     if embedder is not None:
-        query_embedding = await asyncio.to_thread(embedder.embed, query)
+        query_embedding = await asyncio.to_thread(embed_query, embedder, query)
 
     async with client._lock:
         backend = client._get_backend()
@@ -153,15 +155,8 @@ async def recall_impl(
                 namespace=client._namespace,
             )
             return []
-        if tier_runtime_enabled(client._config):
-            tier_local_results = cast(
-                "list[LocalCandidate]",
-                client._tier_results(backend, query, tags, limit, query_embedding, invocation=invocation),
-            )
-            client._tier_manager = get_tier_manager(client._config, client._namespace)
-        else:
-            tier_local_results = []
 
+    pool = HybridPool()
     acquired = await client._try_hybrid_recall(
         query,
         limit,
@@ -170,6 +165,7 @@ async def recall_impl(
         as_of=as_of,
         include_superseded=include_superseded,
         invocation=invocation,
+        pool=pool,
     )
     search_path = "hybrid" if acquired is not None else "fallback"
     if acquired is None:
@@ -177,6 +173,30 @@ async def recall_impl(
             query, limit, tags, min_score, as_of=as_of, include_superseded=include_superseded, invocation=invocation
         )
     candidates = cast("list[LocalCandidate]", acquired)
+    tier_local_results: list[LocalCandidate] = []
+    if tier_runtime_enabled(client._config):
+        # Tier discovery runs AFTER primary acquisition so it can be told which
+        # rows are already ranked. When the hybrid pool held the whole namespace
+        # (the cap did not bind), every hot/warm row with a primary copy is a
+        # row hybrid already ranked and merge_local_candidates would drop it, so
+        # discovery skips resolving and vector-scoring those rows and only the
+        # cold archive and primary-less warm rows can add candidates. A capped
+        # pool, or the fallback path, keeps today's full discovery.
+        covered = pool.covered_ids() if search_path == "hybrid" else frozenset()
+        async with client._lock:
+            tier_local_results = cast(
+                "list[LocalCandidate]",
+                client._tier_results(
+                    client._get_backend(),
+                    query,
+                    tags,
+                    limit,
+                    query_embedding,
+                    invocation=invocation,
+                    covered_ids=covered,
+                ),
+            )
+            client._tier_manager = get_tier_manager(client._config, client._namespace)
     if include_graph_expansion:
         from trw_memory._client_recall_graph import graph_expand_candidates
 

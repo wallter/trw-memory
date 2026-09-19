@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import structlog
 
+from trw_memory.embeddings._similarity_calibration import calibrated_threshold
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.embeddings.provenance import generation_provenance_kwargs
 from trw_memory.exceptions import DimensionMismatchError, StorageError
@@ -189,7 +190,7 @@ def find_clusters(
 
     return complete_linkage_cluster(
         indexed,
-        similarity_threshold,
+        calibrated_threshold(similarity_threshold, embedder),
         min_cluster_size,
     )
 

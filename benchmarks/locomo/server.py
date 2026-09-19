@@ -26,7 +26,9 @@ Env knobs::
     BENCH_BACKEND      mem0 | trw                 (required)
     BENCH_DATA_DIR     where backend state lives   (default: ./bench-state/<backend>)
     BENCH_EMBED_MODEL  sentence-transformers name  (default: all-MiniLM-L6-v2)
-    BENCH_LLM_MODEL    Ollama model for mem0 fact extraction (default: llama3.1:latest)
+    BENCH_LLM_MODEL    model for mem0 fact extraction (default: llama3.1:latest)
+    BENCH_EXTRACT_BASE_URL / BENCH_EXTRACT_API_KEY
+                       OpenAI-compatible endpoint for mem0 extraction (default: local Ollama)
     OLLAMA_BASE_URL    default http://localhost:11434
     BENCH_TRW_CONTEXT  preceding turns carried as context per stored turn (default 1)
 """
@@ -59,6 +61,21 @@ LLM_MODEL = os.getenv("BENCH_LLM_MODEL", "llama3.1:latest")
 OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 
+def _mem0_llm_config() -> dict[str, Any]:
+    """mem0's extraction LLM: local Ollama by default, or any OpenAI-compatible
+    endpoint (OpenRouter, OpenAI, vLLM) when BENCH_EXTRACT_BASE_URL is set."""
+    base_url = os.getenv("BENCH_EXTRACT_BASE_URL", "").strip()
+    if not base_url:
+        return {"provider": "ollama", "config": {"model": LLM_MODEL, "ollama_base_url": OLLAMA_URL, "temperature": 0.1}}
+    api_key = os.getenv("BENCH_EXTRACT_API_KEY", "").strip()
+    if not api_key:
+        raise SystemExit("BENCH_EXTRACT_API_KEY is required with BENCH_EXTRACT_BASE_URL")
+    return {
+        "provider": "openai",
+        "config": {"model": LLM_MODEL, "openai_base_url": base_url, "api_key": api_key, "temperature": 0.1},
+    }
+
+
 def _epoch_to_iso(ts: int | None) -> str:
     if ts is None:
         return ""
@@ -79,10 +96,7 @@ class Mem0Backend:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         cfg: dict[str, Any] = {
             "version": "v1.1",
-            "llm": {
-                "provider": "ollama",
-                "config": {"model": LLM_MODEL, "ollama_base_url": OLLAMA_URL, "temperature": 0.1},
-            },
+            "llm": _mem0_llm_config(),
             "embedder": {"provider": "huggingface", "config": {"model": EMBED_MODEL}},
             "vector_store": {
                 "provider": "qdrant",

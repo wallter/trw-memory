@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from trw_memory.embeddings._declared_space import DECLARED_ENCODING_PREFIX, declared_embedding_space
 from trw_memory.embeddings._hf_cache import CacheProbe, CacheState
 from trw_memory.embeddings._loaded_state import _PACKAGES, dependency_versions, loaded_state_digest
 from trw_memory.embeddings.local import LocalEmbeddingProvider
@@ -187,8 +188,13 @@ def test_local_provider_uses_runtime_identity_without_file_identity(monkeypatch,
     )
     assert provider.embed("input") == [1.0, 0.0]
     descriptor = provider.embedding_space()
-    assert (descriptor is not None) == (qualification == "known")
-    if descriptor:
+    assert descriptor is not None
+    if qualification != "known":
+        # No measured identity: the provider still names the model it loaded
+        # (declared tier), which never equals a measured descriptor.
+        assert descriptor == declared_embedding_space("model-name", "", 2)
+        assert descriptor.encoding.startswith(DECLARED_ENCODING_PREFIX)
+    else:
         assert descriptor.artifact_sha256 == loaded_state_digest(model)
         assert descriptor.encoding == "trw-loaded-encoder-v2:" + "b" * 64
         monkeypatch.setattr(

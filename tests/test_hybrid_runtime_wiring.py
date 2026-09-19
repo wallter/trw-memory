@@ -12,6 +12,7 @@ import pytest
 import structlog
 
 from trw_memory.client import MemoryClient
+from trw_memory.embeddings.provenance import EmbeddingSpace, StoredVector, VectorProvenance
 from trw_memory.exceptions import StorageError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -33,9 +34,16 @@ def _scored(entries: list[MemoryEntry]) -> list[ScoredCandidate]:
     ]
 
 
+_SPACE = EmbeddingSpace("9" * 64, "test-encoder:wiring", 3)
+
+
 class _StubEmbedder:
     def embed(self, text: str) -> list[float] | None:
         return [float(len(text)), 1.0, 0.5]
+
+    def embedding_space(self) -> EmbeddingSpace:
+        # Dense recall scores only vectors recorded in the embedder's space.
+        return _SPACE
 
     def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
         return [self.embed(text) for text in texts]
@@ -117,7 +125,12 @@ async def test_client_recall_passes_stored_embeddings_to_hybrid_search(client: M
 
     entry = MemoryEntry(id="M-001", content="pydantic model", namespace="default")
     backend.store(entry)
-    backend.upsert_vector(entry.id, [0.9, 0.1, 0.0], namespace="default")
+    backend.upsert_vector(
+        entry.id,
+        [0.9, 0.1, 0.0],
+        namespace="default",
+        provenance=VectorProvenance.for_vector(_SPACE, "pydantic model ", [0.9, 0.1, 0.0]),
+    )
 
     with (
         patch.object(MemoryClient, "_get_embedder", return_value=_StubEmbedder()),
@@ -245,7 +258,9 @@ def test_memory_recall_impl_passes_stored_embeddings_to_hybrid_search() -> None:
     entry = MemoryEntry(id="M-001", content="pydantic", namespace="project:default")
     backend = MagicMock()
     backend.list_entries.return_value = [entry]
-    backend.get_stored_embeddings.return_value = {"M-001": [0.8, 0.2, 0.0]}
+    backend.get_vector_records.return_value = {
+        "M-001": StoredVector((0.8, 0.2, 0.0), VectorProvenance.for_vector(_SPACE, "pydantic ", [0.8, 0.2, 0.0]))
+    }
 
     with (
         patch("trw_memory.tools.recall.get_local_embedder", return_value=_StubEmbedder()),
@@ -263,7 +278,7 @@ def test_memory_recall_impl_uses_configured_embedder_settings() -> None:
     entry = MemoryEntry(id="M-001", content="pydantic", namespace="project:default")
     backend = MagicMock()
     backend.list_entries.return_value = [entry]
-    backend.get_stored_embeddings.return_value = {}
+    backend.get_vector_records.return_value = {}
     config = MemoryConfig(embedding_model="custom-model", embedding_dim=768)
 
     with (
@@ -281,7 +296,9 @@ def test_memory_recall_impl_forwards_retrieval_config_to_hybrid_search() -> None
     entry = MemoryEntry(id="M-001", content="pydantic", namespace="project:default")
     backend = MagicMock()
     backend.list_entries.return_value = [entry]
-    backend.get_stored_embeddings.return_value = {"M-001": [0.8, 0.2, 0.0]}
+    backend.get_vector_records.return_value = {
+        "M-001": StoredVector((0.8, 0.2, 0.0), VectorProvenance.for_vector(_SPACE, "pydantic ", [0.8, 0.2, 0.0]))
+    }
     config = MemoryConfig(
         rrf_k=22,
         rrf_importance_alpha=0.4,
@@ -319,7 +336,9 @@ def test_memory_recall_impl_applies_temporal_query_wiring() -> None:
     entry = MemoryEntry(id="M-001", content="pydantic", namespace="project:default")
     backend = MagicMock()
     backend.list_entries.return_value = [entry]
-    backend.get_stored_embeddings.return_value = {"M-001": [0.8, 0.2, 0.0]}
+    backend.get_vector_records.return_value = {
+        "M-001": StoredVector((0.8, 0.2, 0.0), VectorProvenance.for_vector(_SPACE, "pydantic ", [0.8, 0.2, 0.0]))
+    }
     config = MemoryConfig(recall_recency_weight=0.0, recall_auto_temporal=True)
     temporal = SimpleNamespace(
         is_temporal=True,

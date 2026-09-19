@@ -6,6 +6,9 @@ from __future__ import annotations
 import hashlib
 import threading
 from collections import deque
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from math import isfinite
 from pathlib import Path
 from time import time
@@ -80,6 +83,29 @@ from trw_memory.security._runtime_quarantine import (
 )
 
 
+# session key -> None (charged and admitted) or the RateLimitError its charge raised.
+_WRITE_OPERATION: ContextVar[dict[str, RateLimitError | None] | None] = ContextVar("_WRITE_OPERATION", default=None)
+
+
+@contextmanager
+def single_write_operation() -> Iterator[None]:
+    """Charge each writer session ONE rate-limit slot for everything written in this block.
+
+    The limiter stops an agent flooding memory with many independent writes. A
+    ``bulk_store`` batch is one caller operation, so it costs one slot per session,
+    not one per row: per-row charging rejected every row after the tenth of a batch
+    (10/min default). Inside the block the first charge of a session decides the
+    outcome and every later row of that session shares it -- admitted rows stay
+    admitted, and a refused session refuses ALL its rows with the same
+    ``RateLimitError`` rather than admitting an arbitrary prefix.
+    """
+    token = _WRITE_OPERATION.set({})
+    try:
+        yield
+    finally:
+        _WRITE_OPERATION.reset(token)
+
+
 def enforce_write_rate_limit(
     config: MemoryConfig,
     *,
@@ -88,7 +114,7 @@ def enforce_write_rate_limit(
     namespace: str,
     entry_id: str,
 ) -> None:
-    """Apply the configured rolling write-rate limit."""
+    """Apply the rolling write-rate limit; once per session inside ``single_write_operation``."""
     if not session_id or config.max_memory_writes_per_minute <= 0:
         return
 
@@ -97,6 +123,23 @@ def enforce_write_rate_limit(
     if len(session_id) > 256:
         session_id = "sha256:" + hashlib.sha256(session_id.encode()).hexdigest()
 
+    operation = _WRITE_OPERATION.get()
+    if operation is not None and session_id in operation:
+        prior = operation[session_id]
+        if prior is not None:
+            raise RateLimitError(str(prior), retry_after=prior.retry_after)
+        return
+    try:
+        _charge_write_slot(config, session_id)
+    except RateLimitError as exc:
+        if operation is not None:
+            operation[session_id] = exc
+        raise
+    if operation is not None:
+        operation[session_id] = None
+
+
+def _charge_write_slot(config: MemoryConfig, session_id: str) -> None:
     state_path = Path(config.rate_limit_state_path)
     now = time()
     with lock_for_rmw(state_path):

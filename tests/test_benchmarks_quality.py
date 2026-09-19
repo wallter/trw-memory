@@ -163,6 +163,7 @@ class TestQualityBenchmarkIntegration:
     # Timing gates measure the shipped runtime, not coverage tracing overhead.
     # The test and thresholds still run; other tests supply aggregate coverage.
     @pytest.mark.no_cover
+    @pytest.mark.perf
     def test_run_benchmarks_meets_thresholds_with_bundled_fixtures(self, tmp_path: Path) -> None:
         """Bundled benchmark fixtures clear the default threshold gate.
 

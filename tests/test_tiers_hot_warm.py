@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from trw_memory.embeddings.provenance import EmbeddingSpace, StoredVector, VectorProvenance
 from trw_memory.lifecycle.tiers import TierManager
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
@@ -170,6 +171,18 @@ class TestHotTier:
         assert {"hot-entry", "warm-entry", "cold-entry"}.issubset(ids)
 
 
+_SPACE = EmbeddingSpace("d" * 64, "test-encoder:warm", 2)
+
+
+def _records_in_space(entry_ids: list[str]) -> dict[str, StoredVector]:
+    """Stored vectors whose provenance names ``_SPACE`` -- the only ones warm search scores."""
+    vector = [1.0, 0.0]
+    return {
+        entry_id: StoredVector(tuple(vector), VectorProvenance.for_vector(_SPACE, entry_id, vector))
+        for entry_id in entry_ids
+    }
+
+
 class TestWarmTier:
     def test_warm_add_and_sidecar_created(self, mgr: TierManager) -> None:
         entry_data: dict[str, object] = {"id": "e1", "content": "warm entry", "tags": ["x"]}
@@ -251,9 +264,12 @@ class TestWarmTier:
             def search_vectors(self, _query_embedding: list[float], top_k: int) -> list[tuple[str, float]]:
                 return [("orphaned-entry", 0.0)][:top_k]
 
+            def get_vector_records(self, entry_ids: list[str], *, namespace: str) -> dict[str, StoredVector]:
+                return _records_in_space(entry_ids)
+
         monkeypatch.setattr(mgr._warm_store, "_get_warm_backend", lambda dim=None: _FakeBackend())
 
-        assert mgr.warm_search(["semantic"], [1.0, 0.0], top_k=5) == []
+        assert mgr.warm_search(["semantic"], [1.0, 0.0], top_k=5, query_space=_SPACE) == []
 
     def test_warm_search_score_is_cosine_from_l2_distance(
         self, mgr: TierManager, monkeypatch: pytest.MonkeyPatch
@@ -271,9 +287,12 @@ class TestWarmTier:
             def search_vectors(self, _q: list[float], top_k: int) -> list[tuple[str, float]]:
                 return [("e1", dist)][:top_k]
 
+            def get_vector_records(self, entry_ids: list[str], *, namespace: str) -> dict[str, StoredVector]:
+                return _records_in_space(entry_ids)
+
         monkeypatch.setattr(mgr._warm_store, "_get_warm_backend", lambda dim=None: _FakeBackend())
 
-        results = mgr.warm_search(["shared"], [1.0, 0.0], top_k=5)
+        results = mgr.warm_search(["shared"], [1.0, 0.0], top_k=5, query_space=_SPACE)
         assert results, "in-sidecar hit should be returned"
         # _tier_relevance is the raw cosine the fix controls (it then feeds the
         # composite importance score). Assert it equals 1 - dist**2/2, not the

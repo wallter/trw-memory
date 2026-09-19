@@ -210,9 +210,7 @@ def test_the_gate_follows_the_backend_driver_not_the_process_driver(
         backend.close()
 
 
-def test_the_constructor_derives_the_gate_from_its_own_driver(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_the_constructor_derives_the_gate_from_its_own_driver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The derivation happens in __init__, not only at the call site."""
     from trw_memory.storage import _dbapi
     from trw_memory.storage import sqlite_backend as backend_module

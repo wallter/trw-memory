@@ -341,6 +341,71 @@ class TestAuditLogTailCorruption:
         assert "line 1" in str(excinfo.value)
 
 
+class TestAuditChainHeadCache:
+    """append() re-parses the log for the chain head only when another writer changed it."""
+
+    def test_own_appends_do_not_re_read_the_log(
+        self, audit_log: AuditLog, audit_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        audit_log.append("store", entry_id="M-000")
+        reads: list[int] = []
+        real = AuditLog._read_last_hash_unlocked
+
+        def counting(self: AuditLog) -> str:
+            reads.append(1)
+            return real(self)
+
+        monkeypatch.setattr(AuditLog, "_read_last_hash_unlocked", counting)
+        for index in range(1, 30):
+            AuditLog(audit_path).append(
+                "store", entry_id=f"M-{index:03d}"
+            )  # a fresh instance per call, as runtime does
+
+        assert reads == []
+        assert audit_log.verify_chain() == {
+            "valid": True,
+            "entries_checked": 30,
+            "first_broken_at": None,
+            "broken_hash": None,
+        }
+
+    def test_a_foreign_corrupt_tail_after_cached_appends_still_fails_closed(
+        self, audit_log: AuditLog, audit_path: Path
+    ) -> None:
+        audit_log.append("store", entry_id="M-001")
+        with audit_path.open("a", encoding="utf-8") as handle:
+            handle.write('{"op": "store", "id": "M-002"}\n')  # no hash
+
+        with pytest.raises(StorageError):
+            audit_log.append("forget", entry_id="M-001")
+
+    def test_another_processes_appends_are_chained_onto(self, audit_log: AuditLog, audit_path: Path) -> None:
+        import os
+        import subprocess
+        import sys
+
+        import trw_memory
+
+        for index in range(3):
+            audit_log.append("store", entry_id=f"A-{index}")
+        src = str(Path(trw_memory.__file__).resolve().parents[1])
+        code = (
+            "from pathlib import Path\n"
+            "from trw_memory.security.audit import AuditLog\n"
+            f"log = AuditLog(Path({str(audit_path)!r}))\n"
+            "log.append('store', entry_id='B-0')\n"
+            "log.append('store', entry_id='B-1')\n"
+        )
+        env = {**os.environ, "PYTHONPATH": src + os.pathsep + os.environ.get("PYTHONPATH", "")}
+        subprocess.run([sys.executable, "-c", code], check=True, env=env, timeout=120)
+
+        last = audit_log.append("store", entry_id="A-3")
+        records = audit_log.read_all()
+        assert [record.id for record in records] == ["A-0", "A-1", "A-2", "B-0", "B-1", "A-3"]
+        assert last.prev_hash == records[4].hash
+        assert audit_log.verify_chain()["valid"] is True
+
+
 class TestAuditPaths:
     def test_audit_log_path_differs_from_entry_storage(self, tmp_path: Path) -> None:
         from trw_memory.models.config import MemoryConfig

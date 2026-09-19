@@ -151,6 +151,18 @@ class _RetrievalConfigMixin(BaseModel):
             "Set MEMORY_RECALL_FUSION_MODE=combmax to enable."
         ),
     )
+    # Entity-bridge second hop after cross-encoder rerank (retrieval/bridge.py)
+    recall_bridge_hop: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("recall_bridge_hop", "memory_recall_bridge_hop"),
+        description=(
+            "When True (and rerank ran), recall takes rare terms from the top reranked "
+            "rows, runs one more BM25 search with them, and lets the cross-encoder score "
+            "up to 30 extra rows. LOCOMO: hit@10 85.1% -> 85.6% (p=0.022), multi-hop "
+            "recall@10 49.9% -> 51.3% (p=0.020); LongMemEval unchanged. Costs about "
+            "30-80 ms per recall. Set MEMORY_RECALL_BRIDGE_HOP=false to disable."
+        ),
+    )
     # Validity age decay — break ties by valid_from recency in the eligibility pass
     recall_validity_age_decay: bool = Field(
         default=True,

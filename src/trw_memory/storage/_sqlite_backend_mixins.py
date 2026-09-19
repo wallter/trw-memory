@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import contextlib
+import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
 from trw_memory.embeddings.provenance import StoredVector, VectorProvenance
+from trw_memory.exceptions import StorageError
+from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.storage._change_feed import change_token, entries_changed_since
 from trw_memory.storage._vector_ops import (
     delete_hype_siblings,
     delete_vector,
@@ -22,6 +26,10 @@ from trw_memory.storage._vector_ops import (
     vector_exists,
 )
 from trw_memory.storage._wal_checkpoint import CheckpointResult
+from trw_memory.storage.interface import NamespaceChangeToken
+
+if TYPE_CHECKING:
+    from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 logger = structlog.get_logger(__name__)
 
@@ -143,6 +151,21 @@ class SQLiteCheckpointVectorMixin:
                 self._conn, self._lock, vec_available=self._vec_available, entry_ids=entry_ids, namespace=namespace
             )
 
+    def recent_vector_records(self, *, namespace: str, limit: int) -> dict[str, StoredVector]:
+        """``StorageBackend.recent_vector_records`` selecting ids only (same order as ``list_entries``)."""
+        if not self._vec_available or limit <= 0:
+            return {}
+        try:
+            with self._fresh_connection(), self._lock:
+                rows = self._conn.execute(
+                    "SELECT id FROM memories WHERE namespace = ? AND status = ? "
+                    "ORDER BY updated_at DESC, id DESC LIMIT ?",
+                    (namespace, MemoryStatus.ACTIVE.value, limit),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise StorageError(f"Failed to list recent entry ids: {exc}", path=str(self._db_path)) from exc
+        return self.get_vector_records([str(row[0]) for row in rows], namespace=namespace)
+
     def hype_sibling_ids(self, parent_id: str, *, namespace: str) -> list[str]:
         with self._fresh_connection():
             return hype_sibling_ids(
@@ -159,3 +182,13 @@ class SQLiteCheckpointVectorMixin:
                 namespace=namespace,
                 skip_commit=self._skip_commit_depth != 0,
             )
+
+    def namespace_change_token(self, namespace: str) -> NamespaceChangeToken:
+        """``StorageBackend.namespace_change_token``: two index seeks (see ``_change_feed``)."""
+        return change_token(cast("SQLiteBackend", self), namespace)
+
+    def entries_changed_since(
+        self, namespace: str, token: NamespaceChangeToken, *, limit: int
+    ) -> list[MemoryEntry] | None:
+        """``StorageBackend.entries_changed_since`` over the rowid and updated_at indexes."""
+        return entries_changed_since(cast("SQLiteBackend", self), namespace, token, limit=limit)

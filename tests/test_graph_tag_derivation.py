@@ -168,6 +168,7 @@ def test_default_traversal_returns_no_derived_edge(tmp_path: Path) -> None:
         backend.close()
 
 
+@pytest.mark.perf
 def test_derivation_latency_budget(tmp_path: Path) -> None:
     """NFR01: bounded single-root derivation stays at or below the 15 ms p50 budget."""
     backend = SQLiteBackend(tmp_path / "latency.db")

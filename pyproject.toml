@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "trw-memory"
-version = "0.19.0"
+version = "1.0.0"
 description = "Persistent memory engine with hybrid retrieval, tiered storage, and semantic dedup for AI agents"
 readme = "README.md"
 license = "BUSL-1.1"
@@ -133,7 +133,7 @@ Homepage = "https://trwframework.com"
 Documentation = "https://trwframework.com/docs"
 Repository = "https://github.com/wallter/trw-memory"
 Issues = "https://github.com/wallter/trw-memory/issues"
-Changelog = "https://github.com/wallter/trw-memory/blob/main/CHANGELOG.md"
+Changelog = "https://trwframework.com/docs/changelog"
 
 [project.scripts]
 trw-memory = "trw_memory.cli:main"
@@ -145,7 +145,7 @@ trw-memory-server = "trw_memory.server:main"
 # CLAUDE.md, which records that the memory-poisoning defense, trust scoring and
 # quarantine are all observe/log-only. Found in pre-release review, 2026-09-11.
 packages = ["src/trw_memory"]
-exclude = ["**/CLAUDE.md", "**/AGENTS.md"]
+exclude = ["/CHANGELOG.md", "**/CLAUDE.md", "**/AGENTS.md"]
 
 [tool.hatch.build.targets.sdist]
 # Defense in depth alongside .gitignore: hatchling honors the package-local
@@ -156,8 +156,9 @@ exclude = ["**/CLAUDE.md", "**/AGENTS.md"]
 # The agent-facing dev docs (CLAUDE.md / AGENTS.md / FRAMEWORK.md) and the uv
 # lockfile are monorepo development artifacts, not part of the published
 # library — they are excluded so the public PyPI sdist carries only library
-# sources, packaging metadata, and the changelog/license/readme.
+# sources, packaging metadata, and the license/readme.
 exclude = [
+  "/CHANGELOG.md",
   ".memory",
   "coverage.json",
   "*.db",
@@ -290,6 +291,7 @@ markers = [
   "integration: uses real filesystem / sqlite / network — slower, still isolated",
   "slow: individual-test runtime > 5 seconds — excluded from default runs",
   "network: requires external network access (embedding models, API calls)",
+  "perf: asserts a wall-clock or CPU budget; result depends on machine load",
 ]
 
 [tool.mypy]

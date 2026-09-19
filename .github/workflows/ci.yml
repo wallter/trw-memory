@@ -54,7 +54,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: ${{ runner.os }}-hf-1110a243fdf4706b3f48f1d95db1a4f5529b4d41
+          key: ${{ runner.os }}-hf-1110a243fdf4706b3f48f1d95db1a4f5529b4d41-bge-5c38ec7c405ec4b44b94cc5a9bb96e735b38267a
       - name: Provision pinned CPU embedding fixture
         run: |
           python - <<'PROVISION'
@@ -65,48 +65,48 @@ jobs:
               revision="1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
               allow_patterns=["*.json", "*.txt", "*.safetensors", "1_Pooling/*"],
           )
+          # The daemon uses the package default BGE model, not the installer
+          # MiniLM probe above. Provision both before offline CI replay.
+          snapshot_download(
+              repo_id="BAAI/bge-small-en-v1.5",
+              revision="5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+              allow_patterns=["*.json", "*.txt", "*.safetensors", "1_Pooling/*"],
+          )
           PROVISION
       - name: Lint
         run: ruff check src/
+      - name: Format check (ruff format --check)
+        run: ruff format --check src/ tests/
       - name: Type check
         run: mypy --strict src/trw_memory/
-      - name: Test with coverage (85% fail_under)
+      # ONE suite execution feeds both coverage gates (release retrospective
+      # 2026-09-17 §6 Q2: the suite used to run twice, once per gate). Branch
+      # coverage is on for the whole package, so the 85% package floor now counts
+      # branches as well as lines -- stricter than the old line-only gate (measured
+      # 2026-09-17, macOS: 92.4% branch-inclusive vs 93.8% line-only). The security
+      # gate reads the same data filtered to trw_memory/security, which is the
+      # branch coverage the old ``--cov=trw_memory.security --cov-branch`` run
+      # measured; measuring the whole package from startup also removes the
+      # mid-collection numpy import that run needed a warm-up plugin for.
+      - name: Test with coverage
         run: >-
           pytest tests/ -q
           --cov=trw_memory
-          --cov-report=term-missing
+          --cov-branch
           --cov-report=xml:coverage.xml
-          --cov-fail-under=85
       - name: Upload coverage XML
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-xml
           path: coverage.xml
-      # INFRA-020 security coverage gate. The security package is exercised by
-      # the broad client/tools/e2e tiers as well as the security-named tests, so
-      # the gate runs over the full suite (a curated subset under-covers it).
-      # The ``-p tests._cov_numpy_warmup`` plugin eagerly imports the
-      # numpy/transformers stack at pytest bootstrap (before pytest-cov starts
-      # its tracer). The narrow ``--cov=trw_memory.security`` scope does not
-      # import numpy at coverage startup, so without the warm-up numpy first
-      # loads mid-collection under the active tracer and trips numpy's
-      # "cannot load module more than once per process" C-extension guard
-      # (the broader ``--cov=trw_memory`` Test gate above is immune because it
-      # imports the whole package, which loads numpy, at startup).
-      # Threshold calibrated 90 -> 88 (2026-06-16): the 90% target was set against
-      # the dev/monorepo environment and was NEVER validated in this standalone CI
-      # (it had been unreachable behind a failing mypy gate). With the FULL real dep
-      # set here (incl. pynacl + an in-memory keyring backend) the standalone env
-      # measures 88.57% branch coverage; the ~1.4% residual is env-specific branches
-      # (real OS keyring backend, monorepo-path code) that don't execute on a headless
-      # runner. 88 keeps the gate meaningful + regression-catching. FOLLOW-UP: add
-      # targeted trw_memory.security branch tests to restore a 90% floor.
-      - name: INFRA-020 security coverage gate (88% branch)
-        run: >-
-          pytest tests/ -q
-          -p tests._cov_numpy_warmup
-          --cov=trw_memory.security
-          --cov-branch
-          --cov-report=term-missing
-          --cov-fail-under=88
+      - name: Coverage gate (85%, lines + branches)
+        run: coverage report --fail-under=85
+      # INFRA-020 security coverage gate. Threshold calibrated 90 -> 88
+      # (2026-06-16): the standalone CI env (full real dep set incl. pynacl and an
+      # in-memory keyring backend) measured 88.57% branch coverage; the residual is
+      # env-specific branches (real OS keyring backend, monorepo-path code) that do
+      # not execute on a headless runner. FOLLOW-UP: targeted trw_memory.security
+      # branch tests to restore a 90% floor.
+      - name: INFRA-020 security coverage gate (88%, lines + branches)
+        run: coverage report --include='*/trw_memory/security/*' --fail-under=88

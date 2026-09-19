@@ -13,6 +13,7 @@ from typing import Literal, NamedTuple
 
 import structlog
 
+from trw_memory.embeddings._similarity_calibration import calibrated_threshold
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.exceptions import DimensionMismatchError
 from trw_memory.models.config import MemoryConfig
@@ -170,6 +171,9 @@ def check_duplicate(
         )
         skip_threshold = 0.95
         merge_threshold = 0.85
+    # Thresholds are on the reference-encoder scale; compare in this encoder's.
+    skip_threshold = calibrated_threshold(skip_threshold, embedder)
+    merge_threshold = calibrated_threshold(merge_threshold, embedder)
 
     # Check embedder availability. When embeddings are unavailable, fall back to
     # an exact normalized-text match (zero false-positive risk) instead of a
@@ -378,6 +382,8 @@ def batch_dedup(
     if merge_threshold >= skip_threshold:
         skip_threshold = 0.95
         merge_threshold = 0.85
+    skip_threshold = calibrated_threshold(skip_threshold, embedder)
+    merge_threshold = calibrated_threshold(merge_threshold, embedder)
 
     # Collect active entries then batch-embed in a single model call so the
     # embedding provider (sentence-transformers, etc.) can process all texts

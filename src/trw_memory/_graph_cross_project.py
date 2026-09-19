@@ -14,9 +14,10 @@ validation:
 - ``_backend_update_guard`` — cross-process file-backed RMW guard.
 - ``_merge_cross_validated_entry`` — atomic single-project validation +
   importance boost.
-- ``apply_cross_project_validation`` — top-level orchestrator that walks
-  sibling project stores, computes embeddings similarity, and applies
-  validations bidirectionally.
+- ``cross_validate_entries`` — top-level orchestrator that scores a written
+  batch against every sibling project namespace's cached candidates
+  (``_graph_sibling_index``) and applies validations bidirectionally
+  (``apply_cross_project_validation`` is its one-entry form).
 
 Extracted as PRD-DIST-245 Phase 2 batch 93.
 """
@@ -24,15 +25,25 @@ Extracted as PRD-DIST-245 Phase 2 batch 93.
 from __future__ import annotations
 
 import contextlib
+import functools
+import os
 import sqlite3
 import threading
 import weakref
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from trw_memory._graph_sibling_index import SiblingStoreView
+from trw_memory.embeddings._similarity_calibration import calibrated_threshold
+from trw_memory.embeddings.provenance import EmbeddingSpace
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.interface import StorageBackend
+
+if TYPE_CHECKING:
+    from trw_memory.integrations._backend import NamespaceStoreLocation
 
 CROSS_VALIDATION_THRESHOLD = 0.92
 CANDIDATE_LIMIT = 500
@@ -156,91 +167,80 @@ def apply_cross_project_validation(
     *,
     embedding: list[float] | None = None,
     config: MemoryConfig | None = None,
+    space: EmbeddingSpace | None = None,
 ) -> int:
-    """Cross-validate against sibling project stores when embeddings exist.
+    """Cross-validate one entry against sibling project stores (see :func:`cross_validate_entries`).
 
-    Package-local cross-project evidence comes from sibling on-disk project
-    namespaces. This keeps the feature usable without waiting on a platform-
-    side embedding feed while still failing closed when embeddings are
-    unavailable.
-
-    Looks up ``detect_cross_validation`` and ``_safe_cosine_similarity`` via
-    the parent ``graph`` module so test monkeypatches propagate.
+    *conn* is unused and kept for signature compatibility.
     """
+    del conn
     if embedding is None:
         return 0
+    return cross_validate_entries([(entry, embedding, space)], backend, config=config).get(entry.id, 0)
 
-    current_project = project_scope_key(entry.namespace)
-    if current_project is None:
-        return 0
 
-    from trw_memory import graph as _graph_module
-    from trw_memory.integrations._backend import discover_namespace_backends
+def _open_sibling(
+    config: MemoryConfig, location: NamespaceStoreLocation, writer_key: str | None, writer: StorageBackend
+) -> contextlib.AbstractContextManager[StorageBackend]:
+    """Open *location*, or reuse the writer's already-open backend when it IS that store."""
+    if writer_key is not None and os.path.realpath(location.db_path) == writer_key:
+        return contextlib.nullcontext(writer)
+    from trw_memory.integrations._backend import open_namespace_store
+
+    return open_namespace_store(config, location)
+
+
+def cross_validate_entries(
+    items: Sequence[tuple[MemoryEntry, list[float], EmbeddingSpace | None]],
+    backend: StorageBackend,
+    *,
+    config: MemoryConfig | None = None,
+) -> dict[str, int]:
+    """Cross-validate *items* (entry, its embedding, its recorded space) against sibling project stores.
+
+    Returns the number of projects newly validating each entry, by entry id.
+    Only sibling vectors recorded in an entry's own space are compared; an
+    entry with no known space compares against nothing (a cross-space cosine is
+    noise). Package-local evidence comes from sibling on-disk project
+    namespaces, so the feature works without a platform embedding feed.
+
+    Sibling candidates come from the process-wide ``SIBLING_CACHE``
+    (``_graph_sibling_index``): a sibling store is opened only when its file
+    changed since its candidates were read, or when a match must be written
+    back to it. Re-reading every sibling on every write made a single-row
+    store cost O(sibling namespaces x ``CANDIDATE_LIMIT``) row decodes.
+    """
+    matched: dict[str, int] = {entry.id: 0 for entry, _embedding, _space in items}
+    live = [(entry, embedding, space) for entry, embedding, space in items if space is not None]
+    if not live:
+        return matched
+    from trw_memory.integrations import _backend as stores
 
     cfg = config or MemoryConfig()
-    matched_projects = 0
-    current_entry = entry
-
-    with discover_namespace_backends(cfg) as stores:
-        for namespaces, remote_backend in stores:
-            project_namespaces = [
-                namespace
-                for namespace in namespaces
-                if (project_id := project_scope_key(namespace)) is not None and project_id != current_project
-            ]
-            for namespace in project_namespaces:
+    writer_path = getattr(backend, "_db_path", None)
+    writer_key = os.path.realpath(writer_path) if isinstance(writer_path, Path) else None
+    for location in stores.namespace_store_locations(cfg):
+        opener = functools.partial(_open_sibling, cfg, location, writer_key, backend)
+        with SiblingStoreView(location.db_path, opener, candidate_limit=CANDIDATE_LIMIT) as view:
+            for namespace in view.namespaces:
                 project_id = project_scope_key(namespace)
                 if project_id is None:
                     continue
-
-                remote_entries = remote_backend.list_entries(
-                    status=MemoryStatus.ACTIVE,
-                    namespace=namespace,
-                    limit=CANDIDATE_LIMIT,
-                )
-                if not remote_entries:
-                    continue
-
-                remote_embeddings = remote_backend.get_stored_embeddings([candidate.id for candidate in remote_entries])
-                remote_candidates = [
-                    (candidate, remote_embedding)
-                    for candidate in remote_entries
-                    if (remote_embedding := remote_embeddings.get(candidate.id)) is not None
-                ]
-                remote_payload = [
-                    (candidate.id, project_id, remote_embedding) for candidate, remote_embedding in remote_candidates
-                ]
-                if not _graph_module.detect_cross_validation(
-                    current_entry,
-                    conn,
-                    embedding=embedding,
-                    remote_entries=remote_payload,
-                ):
-                    continue
-
-                for remote_entry, remote_embedding in remote_candidates:
-                    similarity = _graph_module._safe_cosine_similarity(embedding, remote_embedding)
-                    if similarity <= CROSS_VALIDATION_THRESHOLD:
+                for entry, embedding, space in live:
+                    current_project = project_scope_key(entry.namespace)
+                    if current_project in (None, project_id):
                         continue
-
-                    merged_entry, applied = merge_cross_validated_entry(
-                        backend,
-                        entry.id,
-                        project_id,
-                        similarity,
-                        namespace=entry.namespace,
-                    )
-                    if merged_entry is not None:
-                        current_entry = merged_entry
-                    if applied:
-                        matched_projects += 1
-
-                    merge_cross_validated_entry(
-                        remote_backend,
-                        remote_entry.id,
-                        current_project,
-                        similarity,
-                        namespace=remote_entry.namespace,
-                    )
-
-    return matched_projects
+                    candidates = view.candidates(namespace, space)
+                    if candidates is None:
+                        continue
+                    threshold = calibrated_threshold(CROSS_VALIDATION_THRESHOLD, space)
+                    for remote_id, similarity in candidates.above(embedding, threshold):
+                        _merged, applied = merge_cross_validated_entry(
+                            backend, entry.id, project_id, similarity, namespace=entry.namespace
+                        )
+                        if applied:
+                            matched[entry.id] += 1
+                        merge_cross_validated_entry(
+                            view.backend(), remote_id, str(current_project), similarity, namespace=namespace
+                        )
+    return matched

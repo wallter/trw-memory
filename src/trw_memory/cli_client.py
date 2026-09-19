@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from argparse import Namespace
 from collections.abc import Callable
 
@@ -71,6 +72,23 @@ async def handle_search(
         return 0
     finally:
         await client.close()
+
+
+async def handle_reembed(args: Namespace, *, client_cls: type[MemoryClient]) -> int:
+    client = client_cls(namespace=args.namespace, mode="local")
+    try:
+        result = await client.reembed(batch_size=args.batch_size)
+    finally:
+        await client.close()
+    if args.fmt == "json":
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print(
+            f"{result['namespace']}: {result['reembedded']} re-embedded, {result['already_current']} already current, "
+            f"{result['skipped']} skipped of {result['examined']} rows; warm tier {result['warm_reembedded']} "
+            f"of {result['warm_examined']}; model {result['embedding_model']}"
+        )
+    return 0
 
 
 async def handle_forget(

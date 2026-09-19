@@ -4,8 +4,6 @@ import asyncio
 import sqlite3
 import threading
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -13,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from trw_memory.client import MemoryClient
+from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
 from trw_memory.graph import update_entry_graph, wait_for_graph_updates
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
@@ -87,10 +86,18 @@ class TestRbacEnforcement:
                 tags=["python", "async", "sqlite"],
             )
         )
-        backend.upsert_vector("M-existing", vector, namespace="default")
+        # Similarity edges compare vectors of one embedding space only.
+        space = EmbeddingSpace("f" * 64, "test-encoder:graph", backend._dim)
+        backend.upsert_vector(
+            "M-existing",
+            vector,
+            namespace="default",
+            provenance=VectorProvenance.for_vector(space, "existing memory ", vector),
+        )
 
         fake_embedder = MagicMock()
         fake_embedder.embed.return_value = vector
+        fake_embedder.embedding_space.return_value = space
 
         with patch.object(client, "_get_embedder", return_value=fake_embedder):
             stored = await client.store("new memory", tags=["python", "async", "graph"])
@@ -154,6 +161,7 @@ class TestRbacEnforcement:
         assert tuple(row) == ("sprint-24", None, "active")
         await client.close()
 
+    @pytest.mark.perf
     async def test_store_returns_before_graph_update_finishes(
         self,
         client: MemoryClient,
@@ -205,22 +213,20 @@ class TestRbacEnforcement:
             )
 
             embedding = [1.0] + ([0.0] * 383)
+            space = EmbeddingSpace("f" * 64, "test-encoder:graph", len(embedding))
             fake_embedder = MagicMock()
             fake_embedder.embed.return_value = embedding
+            fake_embedder.embedding_space.return_value = space
+            # A real sibling vector: cross-validation finds it by enumerating the
+            # on-disk stores under the storage path, not through a patched seam.
+            remote_backend.upsert_vector(
+                "M-remote",
+                embedding,
+                namespace="project:other",
+                provenance=VectorProvenance.for_vector(space, "shared operational lesson ", embedding),
+            )
 
-            @contextmanager
-            def fake_discover(*_args: object, **_kwargs: object) -> Iterator[object]:
-                yield [(["project:other"], remote_backend)]
-
-            with (
-                patch.object(
-                    remote_backend,
-                    "get_stored_embeddings",
-                    return_value={"M-remote": embedding},
-                ),
-                patch.object(client, "_get_embedder", return_value=fake_embedder),
-                patch("trw_memory.integrations._backend.discover_namespace_backends", fake_discover),
-            ):
+            with patch.object(client, "_get_embedder", return_value=fake_embedder):
                 stored = await client.store("shared operational lesson", importance=0.6)
                 await asyncio.to_thread(wait_for_graph_updates)
 
@@ -294,6 +300,7 @@ class TestRbacEnforcement:
         lines = (Path(tmp_path) / "storage" / "sync_queue.jsonl").read_text(encoding="utf-8").splitlines()
         assert stored["memory_id"] in lines[0]
 
+    @pytest.mark.perf
     async def test_store_does_not_wait_for_remote_publish_completion(
         self,
         tmp_path: Path,

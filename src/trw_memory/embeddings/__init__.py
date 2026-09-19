@@ -3,6 +3,8 @@
 import structlog
 
 from trw_memory.embeddings._provider_cache import cached_local_embedder, reset_provider_cache
+from trw_memory.embeddings._query_prompts import embed_query, query_prefix
+from trw_memory.embeddings._similarity_calibration import calibrated_threshold
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.embeddings.local import LocalEmbeddingProvider
 from trw_memory.exceptions import LocalOnlyViolationError, RemoteCodeNotPermittedError
@@ -12,11 +14,14 @@ logger = structlog.get_logger(__name__)
 __all__ = [
     "EmbeddingProvider",
     "LocalEmbeddingProvider",
+    "calibrated_threshold",
+    "embed_query",
     "get_local_embedder",
+    "query_prefix",
     "reset_provider_cache",
 ]
 
-_DEFAULT_MODEL = "all-MiniLM-L6-v2"
+_DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 _DEFAULT_DIM = 384
 
 

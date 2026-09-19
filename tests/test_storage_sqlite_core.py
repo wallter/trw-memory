@@ -255,6 +255,7 @@ class TestIncrementSessionCounts:
         commit_count = sum(1 for statement in statements if statement.upper().startswith("COMMIT"))
         assert commit_count == 1
 
+    @pytest.mark.perf
     def test_increment_session_counts_stays_under_latency_budget_for_25_rows(self, backend: SQLiteBackend) -> None:
         for index in range(25):
             backend.store(make_entry(f"L-lat{index:04d}"))

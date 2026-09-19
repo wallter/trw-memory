@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
 from trw_memory.lifecycle.tiers import _runtime
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
@@ -15,6 +16,13 @@ from trw_memory.retrieval.temporal_selection import TemporalSelection
 from trw_memory.security.namespace_scope import NamespaceScopeError
 from trw_memory.storage.persistence import write_yaml
 from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+#: Warm vectors are scored only within the query's recorded embedding space.
+SPACE = EmbeddingSpace("e" * 64, "test-encoder:tiers", 2)
+
+
+def proof(vector):
+    return VectorProvenance.for_vector(SPACE, "needle", vector)
 
 
 def entry(id, kind="episodic", **kwargs):
@@ -41,6 +49,7 @@ def tiers(tmp_path):
 
 
 def discover(manager, backend, invocation=None, **kwargs):
+    kwargs.setdefault("query_space", SPACE)
     return manager.search(
         ["needle"],
         invocation=invocation or policy(),
@@ -74,14 +83,16 @@ def test_source_policy_before_competitive_cap(tiers, tier):
         if tier == "hot":
             manager.hot_put(value.id, value)
         elif tier in {"warm", "vector"}:
-            manager.warm_add(value.id, value.model_dump(mode="json"), [1.0, 0.0] if tier == "vector" else None)
+            vector = [1.0, 0.0] if tier == "vector" else None
+            manager.warm_add(value.id, value.model_dump(mode="json"), vector, provenance=vector and proof(vector))
         else:
             archive(manager, value)
     durable = entry("zzdurable", "semantic_memory", importance=0.1)
     if tier == "hot":
         manager.hot_put(durable.id, durable)
     elif tier in {"warm", "vector"}:
-        manager.warm_add(durable.id, durable.model_dump(mode="json"), [0.0, 1.0] if tier == "vector" else None)
+        vector = [0.0, 1.0] if tier == "vector" else None
+        manager.warm_add(durable.id, durable.model_dump(mode="json"), vector, provenance=vector and proof(vector))
     else:
         archive(manager, durable)
     manager._warm_store.close()
@@ -214,7 +225,7 @@ def test_vector_discovery_connection_denies_writes(tiers, monkeypatch):
     pytest.importorskip("sqlite_vec")
     _, manager, backend = tiers
     value = entry("readonly")
-    manager.warm_add(value.id, value.model_dump(mode="json"), [1.0, 0.0])
+    manager.warm_add(value.id, value.model_dump(mode="json"), [1.0, 0.0], provenance=proof([1.0, 0.0]))
     manager._warm_store.close()
     original_connect = sqlite3.connect
     connections = []
@@ -279,7 +290,7 @@ def test_nonlexical_hot_snapshot_does_not_hide_matching_warm_vector(tiers):
     _, manager, backend = tiers
     value = entry("vector-only").model_copy(update={"content": "unrelated text"})
     manager.hot_put(value.id, value)
-    manager.warm_add(value.id, value.model_dump(mode="json"), [1.0, 0.0])
+    manager.warm_add(value.id, value.model_dump(mode="json"), [1.0, 0.0], provenance=proof([1.0, 0.0]))
     rows = discover(manager, backend, query_embedding=[1.0, 0.0])
     assert [row.entry.id for row in rows] == [value.id]
     assert rows[0].relevance_hint == 1.0

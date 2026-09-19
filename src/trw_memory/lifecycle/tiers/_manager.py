@@ -33,6 +33,7 @@ logger = structlog.get_logger(__name__)
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
     from trw_memory.storage.interface import StorageBackend
 
 
@@ -245,9 +246,11 @@ class TierManager:
         entry_id: str,
         entry_data: dict[str, object],
         embedding: list[float] | None,
+        *,
+        provenance: VectorProvenance | None = None,
     ) -> None:
         """Insert or replace an entry in the warm store."""
-        self._warm_store.warm_add(entry_id, entry_data, embedding)
+        self._warm_store.warm_add(entry_id, entry_data, embedding, provenance=provenance)
 
     def warm_add_many(self, items: list[tuple[str, dict[str, object], list[float] | None]]) -> None:
         """Insert or replace several entries with one sidecar read-modify-write."""
@@ -262,9 +265,13 @@ class TierManager:
         query_tokens: list[str],
         query_embedding: list[float] | None,
         top_k: int = 25,
+        *,
+        query_space: EmbeddingSpace | None = None,
     ) -> list[dict[str, object]]:
-        """Search the warm tier for relevant entries."""
-        raw_hits = self._warm_store.warm_search(query_tokens, query_embedding, max(top_k * 2, top_k))
+        """Search the warm tier; only vectors in *query_space* are dense-scored."""
+        raw_hits = self._warm_store.warm_search(
+            query_tokens, query_embedding, max(top_k * 2, top_k), query_space=query_space
+        )
         ranked = rank_search_hits(
             raw_hits,
             query_tokens=query_tokens,
@@ -344,6 +351,7 @@ class TierManager:
         query_tokens: list[str],
         *,
         query_embedding: list[float] | None = None,
+        query_space: EmbeddingSpace | None = None,
         tags: list[str] | None = None,
         top_k: int = 25,
         restore_entry_fn: Callable[[dict[str, object]], None] | None = None,
@@ -352,14 +360,24 @@ class TierManager:
         verify_restored_entry_removed_fn: Callable[[str], bool] | None = None,
         invocation: RecallInvocation | None = None,
         resolve_entry: Callable[[str], MemoryEntry | None] | None = None,
+        covered_ids: frozenset[str] = frozenset(),
     ) -> list[dict[str, object]] | list[LocalCandidate]:
-        """Search hot, warm, and cold tiers as one merged runtime surface."""
+        """Search hot, warm, and cold tiers as one merged runtime surface.
+
+        With an *invocation* (discovery mode), *covered_ids* names primary rows
+        the caller already ranked for this query: they are neither resolved nor
+        vector-scored, so a caller whose hybrid pool held the whole namespace
+        pays only for the rows the pool could not see (cold archives and warm
+        rows with no primary copy).
+        """
         if invocation is not None:
             if resolve_entry is None:
                 raise ValueError("tier discovery requires canonical entry resolution")
             with self._hot_lock:
                 hot = [entry.model_dump(mode="json") for entry in self._hot.values()]
-            warm = self._warm_store.discovery_entries(query_embedding)
+            warm = self._warm_store.discovery_entries(
+                query_embedding, covered_ids=covered_ids, namespace=invocation.namespace, query_space=query_space
+            )
             with closing(self._cold_store.iter_search(query_tokens, promote=False)) as cold:
                 return discover_candidates(
                     ((row, is_cold) for group, is_cold in ((hot, False), (warm, False), (cold, True)) for row in group),
@@ -369,8 +387,13 @@ class TierManager:
                     query_embedding=query_embedding,
                     config=self._config,
                     top_k=top_k,
+                    covered_ids=covered_ids,
                 )
-        warm_hits = self.warm_search(query_tokens, query_embedding, top_k=max(top_k * 2, top_k))
+        if covered_ids:
+            raise ValueError("covered_ids applies only to invocation-based tier discovery")
+        warm_hits = self.warm_search(
+            query_tokens, query_embedding, top_k=max(top_k * 2, top_k), query_space=query_space
+        )
         cold_hits = self._cold_store.cold_search(
             query_tokens,
             promote=bool(query_tokens),

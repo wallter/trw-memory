@@ -5,12 +5,11 @@ Tests the *_impl functions directly without requiring a running FastMCP server.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
 
+from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
 from trw_memory.graph import wait_for_graph_updates
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
@@ -154,10 +153,18 @@ class TestMemoryStoreImpl:
                     tags=["python", "async", "sqlite"],
                 )
             )
-            backend.upsert_vector("M-existing", [1.0, 0.0, 0.0, 0.0], namespace="default")
+            # Similarity edges compare same-namespace vectors of one embedding space.
+            space = EmbeddingSpace("f" * 64, "test-encoder:graph", 4)
+            backend.upsert_vector(
+                "M-existing",
+                [1.0, 0.0, 0.0, 0.0],
+                namespace="project:default",
+                provenance=VectorProvenance.for_vector(space, "existing memory ", [1.0, 0.0, 0.0, 0.0]),
+            )
 
             fake_embedder = MagicMock()
             fake_embedder.embed.return_value = [1.0, 0.0, 0.0, 0.0]
+            fake_embedder.embedding_space.return_value = space
 
             with patch("trw_memory.tools.store.get_local_embedder", return_value=fake_embedder):
                 result = memory_store_impl(
@@ -216,20 +223,21 @@ class TestMemoryStoreImpl:
                     importance=0.6,
                 )
             )
-            remote_vectors: dict[str, list[float]] = {"M-remote": [1.0, 0.0, 0.0, 0.0]}
+            space = EmbeddingSpace("f" * 64, "test-encoder:graph", 4)
+            # A real sibling vector: cross-validation finds it by enumerating the
+            # on-disk stores under ``cfg.storage_path``, not through a patched seam.
+            remote_backend.upsert_vector(
+                "M-remote",
+                [1.0, 0.0, 0.0, 0.0],
+                namespace="project:other",
+                provenance=VectorProvenance.for_vector(space, "shared operational lesson ", [1.0, 0.0, 0.0, 0.0]),
+            )
 
             fake_embedder = MagicMock()
             fake_embedder.embed.return_value = [1.0, 0.0, 0.0, 0.0]
+            fake_embedder.embedding_space.return_value = space
 
-            @contextmanager
-            def fake_discover(_cfg: MemoryConfig) -> Iterator[object]:
-                yield [(["project:other"], remote_backend)]
-
-            with (
-                patch.object(remote_backend, "get_stored_embeddings", return_value=remote_vectors),
-                patch("trw_memory.tools.store.get_local_embedder", return_value=fake_embedder),
-                patch("trw_memory.integrations._backend.discover_namespace_backends", fake_discover),
-            ):
+            with patch("trw_memory.tools.store.get_local_embedder", return_value=fake_embedder):
                 result = memory_store_impl(
                     "shared operational lesson",
                     "project:default",

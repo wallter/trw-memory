@@ -19,7 +19,13 @@ class _StorageConfigMixin(BaseModel):
     storage_path: str = Field(default=".memory", description="Root directory for memory storage files")
     sqlite_db_name: str = Field(default="memory.db", description="SQLite database filename within namespace dir")
     embedding_dim: int = Field(default=384, gt=0, description="Dimensionality of dense embedding vectors")
-    embedding_model: str = Field(default="all-MiniLM-L6-v2", description="Sentence-transformer model for embeddings")
+    embedding_model: str = Field(
+        default="BAAI/bge-small-en-v1.5",
+        description=(
+            "Sentence-transformer model for embeddings. Changing it leaves stored vectors in the old "
+            "space: dense recall ignores them until `trw-memory reembed` re-encodes them"
+        ),
+    )
 
     # Encryption
     encryption_enabled: bool = Field(

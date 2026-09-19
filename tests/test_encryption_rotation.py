@@ -377,6 +377,7 @@ class TestRotateKey:
         finally:
             new_conn.close()
 
+    @pytest.mark.perf
     def test_recall_encrypted_vs_unencrypted(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _load_real_sqlcipher_driver_or_skip()
         monkeypatch.setattr("trw_memory.tools.recall.get_local_embedder", lambda **_: None)
@@ -415,6 +416,7 @@ class TestRotateKey:
 
         assert encrypted_time <= plain_time * 1.10
 
+    @pytest.mark.perf
     def test_rotate_key_100mb_database_completes_under_30s(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

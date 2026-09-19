@@ -128,7 +128,7 @@ def test_real_sentence_transformers_warm_load_makes_zero_network_calls(
     """
     pytest.importorskip("sentence_transformers")
     use_fixture_cache(monkeypatch, tmp_path)
-    build_loadable_model_cache(tmp_path)
+    build_loadable_model_cache(tmp_path, repo_id=local_mod._DEFAULT_MODEL)
 
     assert local_mod._offline_download_blocked() is False
     assert probe_model_cache(local_mod._DEFAULT_MODEL).state is CacheState.COMPLETE

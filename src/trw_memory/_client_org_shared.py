@@ -29,6 +29,8 @@ import asyncio
 import functools
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from trw_memory.embeddings._query_prompts import embed_query
+from trw_memory.embeddings._similarity_calibration import calibrated_threshold
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.dense import cosine_similarity
@@ -86,7 +88,7 @@ async def merge_shared_results(
         )
         query_embedding: list[float] | None = None
         if embedder is not None and query.strip():
-            query_embedding = await asyncio.to_thread(embedder.embed, query)
+            query_embedding = await asyncio.to_thread(embed_query, embedder, query)
 
         # Look up `fetch_shared_memories` via parent module so test patches
         # on `trw_memory.client.fetch_shared_memories` propagate.
@@ -291,13 +293,14 @@ async def dedupe_cached_shared_results(
     remote_vectors = vectors[len(local_entries) :]
     if not local_vectors:
         return candidates
+    threshold = calibrated_threshold(dedup_threshold, embedder)
 
     deduped: list[MemoryResultDict] = []
     for candidate, remote_vector in zip(candidates, remote_vectors, strict=False):
         if remote_vector is None:
             deduped.append(candidate)
             continue
-        if any(cosine_similarity(remote_vector, local_vector) > dedup_threshold for local_vector in local_vectors):
+        if any(cosine_similarity(remote_vector, local_vector) > threshold for local_vector in local_vectors):
             continue
         deduped.append(candidate)
     return deduped

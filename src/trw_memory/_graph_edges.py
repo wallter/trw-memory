@@ -9,14 +9,13 @@ captured only 3.3% of the relation they claimed to store — with the
 :mod:`trw_memory.retrieval.tag_derivation`.
 
 - ``create_similarity_edges`` — write similarity edges between an entry
-  and its top candidates above ``SIMILARITY_THRESHOLD``. Uses the
-  cosine similarity helper from the parent module.
+  and its top candidates above ``SIMILARITY_THRESHOLD``, scored through
+  ``CandidateVectors`` (normalised once per candidate set).
 - ``create_consolidation_edges`` — consolidation lineage edges from
   ``entry.consolidated_from`` after verifying source exists.
 
-Looks up ``_optional_lock`` / ``_safe_cosine_similarity`` /
-``_upsert_edge`` via the parent ``graph`` module so test monkeypatches
-on those helpers still propagate.
+Looks up ``_optional_lock`` / ``_upsert_edge`` via the parent ``graph``
+module so test monkeypatches on those helpers still propagate.
 
 Extracted as PRD-DIST-245 Phase 2 batch 95.
 """
@@ -30,6 +29,7 @@ from typing import Any
 
 import structlog
 
+from trw_memory._graph_primitives import CandidateVectors, ScoredCandidates
 from trw_memory.models.memory import MemoryEntry
 
 logger = structlog.get_logger(__name__)
@@ -51,24 +51,37 @@ def create_similarity_edges(
     candidate_embeddings: list[tuple[str, list[float]]] | None = None,
     *,
     lock: threading.Lock | None = None,
+    threshold: float = SIMILARITY_THRESHOLD,
+    candidates: ScoredCandidates | None = None,
 ) -> int:
-    """Create similarity edges between entry and candidates above threshold."""
-    if embedding is None or candidate_embeddings is None:
+    """Create similarity edges between entry and candidates above *threshold*.
+
+    *threshold* is in the scale of the vectors compared; the caller calibrates
+    the reference-scale ``SIMILARITY_THRESHOLD`` to their embedding space.
+    *candidates* is *candidate_embeddings* already normalised; a caller
+    enriching many entries against one candidate set builds it once and
+    passes it here instead (it takes precedence); graph enrichment passes a
+    view of the namespace's similarity index (``_graph_namespace_index``).
+    Candidates are scored BEFORE *lock* is taken: an index view reads the
+    database itself, and scoring needs no lock the writes hold.
+    """
+    if embedding is None or (candidate_embeddings is None and candidates is None):
         return 0
 
     g = _graph_module()
+    if candidates is None:
+        candidates = CandidateVectors(candidate_embeddings or [])
+    hits = candidates.above(embedding, threshold)
     created = 0
     now = datetime.now(timezone.utc).isoformat()
 
     with g._optional_lock(lock):
-        for cand_id, cand_emb in candidate_embeddings:
+        for cand_id, sim in hits:
             if cand_id == entry.id:
                 continue
-            sim = g._safe_cosine_similarity(embedding, cand_emb)
-            if sim > SIMILARITY_THRESHOLD:
-                g._upsert_edge(conn, entry.id, cand_id, "similarity", round(sim, 4), now, namespace=entry.namespace)
-                g._upsert_edge(conn, cand_id, entry.id, "similarity", round(sim, 4), now, namespace=entry.namespace)
-                created += 2
+            g._upsert_edge(conn, entry.id, cand_id, "similarity", round(sim, 4), now, namespace=entry.namespace)
+            g._upsert_edge(conn, cand_id, entry.id, "similarity", round(sim, 4), now, namespace=entry.namespace)
+            created += 2
         conn.commit()
     logger.debug("similarity_edges_created", entry_id=entry.id, count=created)
     return created

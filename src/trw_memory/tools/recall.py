@@ -18,6 +18,8 @@ import structlog
 
 from trw_memory.daemon._offload import run_offloaded
 from trw_memory.embeddings import get_local_embedder
+from trw_memory.embeddings._space_gate import active_embedding_space, admit_space_vectors
+from trw_memory.embeddings.provenance import StoredVector
 from trw_memory.exceptions import ConfigError
 from trw_memory.lifecycle._recall import drop_expired_entries, rank_by_utility
 from trw_memory.lifecycle.tiers._runtime import remember_entries_data_in_tiers, supports_tier_runtime, tier_candidates
@@ -185,7 +187,7 @@ def memory_recall_impl(
     # Namespace-scoped local backends can only see one store at a time, so
     # cross-namespace recall must reopen the requested namespaces explicitly.
     all_entries = []
-    stored_embeddings: dict[str, list[float]] = {}
+    vector_records: list[tuple[str, dict[str, StoredVector]]] = []
     seen_namespaces: set[str] = set()
     with ExitStack() as stack:
         for ns in all_namespaces:
@@ -225,7 +227,9 @@ def memory_recall_impl(
             all_entries.extend(ns_entries)
 
             if query and ns_entries:
-                stored_embeddings.update(ns_backend.get_stored_embeddings([entry.id for entry in ns_entries]))
+                vector_records.append(
+                    (ns, ns_backend.get_vector_records([entry.id for entry in ns_entries], namespace=ns))
+                )
 
     # PRD-CORE-278 FR07: resolve the embedder whenever there is a query, even
     # when the namespace holds nothing to rank. A readiness probe that recalls in
@@ -233,6 +237,12 @@ def memory_recall_impl(
     # cold, so the first real call paid the 5s load (sub_6PZlZpuFaO90dcFq). An
     # empty query still resolves nothing: there is nothing to embed.
     embedder = get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim) if query else None
+    # Dense-score only vectors from the active embedder's space, reported once
+    # per namespace; excluded rows stay in the pool for BM25.
+    stored_embeddings: dict[str, list[float]] = {}
+    active_space = active_embedding_space(embedder)
+    for ns, records in vector_records if embedder is not None else ():
+        stored_embeddings.update(admit_space_vectors(records, active_space, namespace=ns, surface="memory_recall_tool"))
 
     entry_dicts, query_embedding = build_scored_candidates(
         query,
@@ -258,6 +268,7 @@ def memory_recall_impl(
             tags=tags,
             limit=limit,
             query_embedding=query_embedding,
+            query_space=active_space,
         )
     retrieval_keys = {(str(row.get("namespace", namespace)), str(row.get("id", ""))) for row in ranked_dicts}
     if tier_dicts:

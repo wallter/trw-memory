@@ -237,6 +237,11 @@ async def store_impl(
         embedding = (
             await asyncio.to_thread(embedder.embed, f"{entry.content} {entry.detail}") if embedder is not None else None
         )
+        proof = (
+            generation_provenance_kwargs(embedder, f"{entry.content} {entry.detail}", embedding)
+            if embedding is not None
+            else {}
+        )
         if client._namespace.startswith("team:"):
             NamespaceManager(backend).ensure_team_namespace(client._namespace, created_at=now)
         # S1 fix: commit the row + its vector in ONE transaction so a crash
@@ -250,19 +255,14 @@ async def store_impl(
                     backend.delete_hype_siblings(entry.id, namespace=entry.namespace)
                 backend.store(entry)
                 if embedding is not None:
-                    backend.upsert_vector(
-                        entry.id,
-                        embedding,
-                        namespace=entry.namespace,
-                        **generation_provenance_kwargs(embedder, f"{entry.content} {entry.detail}", embedding),
-                    )
+                    backend.upsert_vector(entry.id, embedding, namespace=entry.namespace, **proof)
         except Exception as exc:
             raise StorageError(f"failed to persist entry+vector for {entry.id!r}; transaction rolled back") from exc
         try:
             schedule_graph_update(entry, backend, embedding=embedding, config=client._config)
         except RuntimeError:
             _client_logger().warning("memory_store_graph_schedule_failed", memory_id=entry.id, exc_info=True)
-        remember_entry_in_tiers(client._config, client._namespace, entry, embedding)
+        remember_entry_in_tiers(client._config, client._namespace, entry, embedding, proof.get("provenance"))
         append_audit_event(
             client._config,
             decision.op,

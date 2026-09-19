@@ -116,7 +116,7 @@ def drain_background_graph_updates() -> Iterator[None]:
     yield
     try:
         wait_for_graph_updates(timeout=1.0)
-    except TimeoutError:
+    except TimeoutError:  # trw-fail-silent-allow: best-effort drain; a fault-injected worker must not hang teardown
         # Graph enrichment is best-effort; tests should not hang if a worker is
         # already blocked on an intentionally fault-injected backend.
         pass
@@ -255,7 +255,9 @@ def _hermetic_keyring_backend() -> Iterator[None]:
         import keyring
         import keyring.backend
         from keyring.errors import PasswordDeleteError
-    except Exception:  # pragma: no cover - keyring genuinely unavailable
+    except (
+        Exception
+    ):  # pragma: no cover  # trw-fail-silent-allow: keyring is an optional test dep; fixture is a no-op without it
         yield
         return
 
@@ -480,3 +482,24 @@ def memory_config(tmp_path: Path) -> MemoryConfig:
     care about the storage backend specifics.
     """
     return MemoryConfig(storage_path=str(tmp_path / "mem"))
+
+
+# Git exports GIT_DIR / GIT_INDEX_FILE / GIT_WORK_TREE into hooks and some worktree
+# contexts. A test that runs `git init --bare` from a directory while GIT_DIR is
+# inherited re-initialises the REAL repository as bare: on 2026-09-18 that set
+# core.bare=true on the shared checkout and broke every git command until a peer
+# session restored it. No test may address the developer's repository implicitly.
+for _git_var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_PREFIX"):
+    os.environ.pop(_git_var, None)
+
+
+@pytest.fixture(scope="session")
+def provisioned_embedding_cache() -> str:
+    """Resolve the model cache before function-scoped HOME isolation.
+
+    Daemon subprocesses must see the same provisioned models as the parent,
+    while their HOME and all writable TRW state remain in temporary directories.
+    """
+    from trw_memory.embeddings._hf_cache import _resolve_cache_dir
+
+    return _resolve_cache_dir() or str(Path.home() / ".cache" / "huggingface" / "hub")

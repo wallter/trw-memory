@@ -1,55 +1,106 @@
-"""Anomaly-stats helpers for the runtime store path.
+"""Anomaly scoring and anomaly-stats persistence for the runtime store path.
 
 Belongs to ``security/runtime.py``. Re-exported there for back-compat.
 
-Per-namespace rolling-window anomaly statistics + z-score scoring used
-by the runtime intake gate.
-
-- ``AnomalyStats`` — frozen dataclass: ``sample_count`` and per-
-  dimension ``{mean, std_dev}`` payload.
-- ``score_anomaly`` — pull a clean reference set (active +
-  non-canary), build rolling stats, then score the candidate via
-  ``poisoning.score_entry_anomaly``.
-- ``build_anomaly_stats`` — compute mean/std_dev across entry
-  length / tag-count / importance dimensions.
-- ``series_stats`` — per-series mean + std_dev helper.
+- ``score_anomaly`` — score a candidate against its namespace's reference
+  window (active, non-quarantined, non-canary; see ``_anomaly_reference``,
+  which keeps that window current incrementally) via
+  ``poisoning.score_series_anomaly``.
+- ``shared_anomaly_reference`` — scope in which every entry scored against
+  one namespace reuses a single reference view (``bulk_store``).
 - ``write_anomaly_stats`` — persist the rolling-window stats to
-  ``anomaly_stats.yaml`` next to the quarantine root.
+  ``anomaly_stats.yaml`` next to the quarantine root, at most once per
+  ``_STATS_WRITE_INTERVAL_S`` or ``_STATS_WRITE_MAX_DEFERRED`` calls per file;
+  ``flush_anomaly_stats`` writes what is pending (client close, interpreter exit).
+- ``AnomalyStats`` / ``build_anomaly_stats`` / ``series_stats`` — re-exported
+  from ``_anomaly_reference``.
 
 Extracted as PRD-DIST-245 Phase 3 batch 102.
 """
 
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass
+import atexit
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+import structlog
+
+from trw_memory.exceptions import StorageError
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import MemoryEntry, MemoryStatus
-from trw_memory.security.poisoning import score_entry_anomaly
+from trw_memory.models.memory import MemoryEntry
+from trw_memory.security._anomaly_reference import (
+    _REFERENCE_FETCH_LIMIT as _REFERENCE_FETCH_LIMIT,
+)
+from trw_memory.security._anomaly_reference import (
+    _ROLLING_WINDOW as _ROLLING_WINDOW,
+)
+from trw_memory.security._anomaly_reference import (
+    AnomalyStats as AnomalyStats,
+)
+from trw_memory.security._anomaly_reference import (
+    ReferenceView,
+    reference_view,
+)
+from trw_memory.security._anomaly_reference import (
+    build_anomaly_stats as build_anomaly_stats,
+)
+from trw_memory.security._anomaly_reference import (
+    series_stats as series_stats,
+)
+from trw_memory.security.poisoning import score_series_anomaly
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.persistence import write_yaml
 
-# Rolling-window size used for per-namespace anomaly statistics.
-_ROLLING_WINDOW = 100
-# Over-fetch buffer: list_entries already returns updated_at DESC, so the
-# rolling window is the first _ROLLING_WINDOW clean rows. We fetch 2x the
-# window so the small set of in-store filtered rows (system canaries — capped
-# at 5 by canary_injection_rate; legacy quarantined rows are kept in a
-# SEPARATE quarantine store) can be skipped without dropping below the window.
-# This caps per-write deserialization at 2x the window instead of the prior
-# fixed 1,000 full MemoryEntry objects (sliced to 100 and the rest discarded).
-_REFERENCE_FETCH_LIMIT = _ROLLING_WINDOW * 2
+logger = structlog.get_logger(__name__)
+
+# anomaly_stats.yaml is an observability snapshot (nothing in the store path
+# reads it back), so a single-row writer need not rewrite it on every store.
+_STATS_WRITE_INTERVAL_S = 5.0
+_STATS_WRITE_MAX_DEFERRED = 100
+_MAX_TRACKED_STATS_FILES = 256
 
 
-@dataclass(frozen=True)
-class AnomalyStats:
-    """Rolling anomaly statistics persisted alongside the quarantine store."""
+@dataclass
+class _SharedReference:
+    views: dict[tuple[int, str], ReferenceView] = field(default_factory=dict)
 
-    sample_count: int
-    dimensions: dict[str, dict[str, float]]
+
+_SHARED_REFERENCE: ContextVar[_SharedReference | None] = ContextVar("trw_memory_shared_anomaly_reference", default=None)
+
+
+@dataclass
+class _StatsFile:
+    last_write: float = float("-inf")
+    pending: AnomalyStats | None = None
+    deferred: int = 0
+
+
+_STATS_FILES: dict[Path, _StatsFile] = {}
+# Held across the write so two threads cannot land an older snapshot last.
+_STATS_LOCK = threading.Lock()
+_ATEXIT_REGISTERED = False
+
+
+@contextmanager
+def shared_anomaly_reference() -> Iterator[None]:
+    """Within this block, score every entry of a namespace against ONE reference view.
+
+    Only correct while nothing is written to the scored namespaces inside the
+    block: ``bulk_store`` scores every row before it persists any, so each row
+    already saw the same reference window.
+    """
+    token = _SHARED_REFERENCE.set(_SharedReference())
+    try:
+        yield
+    finally:
+        _SHARED_REFERENCE.reset(token)
 
 
 def score_anomaly(
@@ -58,56 +109,73 @@ def score_anomaly(
     *,
     config: MemoryConfig,
 ) -> tuple[tuple[str, float] | None, AnomalyStats]:
-    # ACTIVE-only: retire/obsolete/archived entries no longer represent normal
-    # write behaviour — including them skews mean/std and corrupts z-scores.
-    reference_entries = backend.list_entries(
-        namespace=entry.namespace,
-        status=MemoryStatus.ACTIVE,
-        limit=_REFERENCE_FETCH_LIMIT,
+    shared = _SHARED_REFERENCE.get()
+    key = (id(backend), entry.namespace)
+    view = shared.views.get(key) if shared is not None else None
+    if view is None:
+        view = reference_view(entry.namespace, backend)
+        if shared is not None:
+            shared.views[key] = view
+    anomaly = score_series_anomaly(
+        entry, lengths=view.lengths, tag_counts=view.tag_counts, z_threshold=config.poisoning_z_threshold
     )
-    clean_reference = [
-        candidate
-        for candidate in reference_entries
-        if candidate.metadata.get("quarantined") != "true" and candidate.metadata.get("system_canary") != "true"
-    ]
-    clean_reference.sort(key=lambda candidate: candidate.updated_at, reverse=True)
-    rolling = clean_reference[:_ROLLING_WINDOW]
-    stats = build_anomaly_stats(rolling)
-    anomaly_reference = [candidate for candidate in rolling if (candidate.content + candidate.detail).strip()]
-    anomaly = score_entry_anomaly(entry, anomaly_reference, z_threshold=config.poisoning_z_threshold)
-    return anomaly, stats
-
-
-def build_anomaly_stats(entries: list[MemoryEntry]) -> AnomalyStats:
-    if not entries:
-        return AnomalyStats(sample_count=0, dimensions={})
-    lengths = [float(len((entry.content + entry.detail).encode("utf-8"))) for entry in entries]
-    tag_counts = [float(len(entry.tags)) for entry in entries]
-    importances = [float(entry.importance) for entry in entries]
-    return AnomalyStats(
-        sample_count=len(entries),
-        dimensions={
-            "entry_length": series_stats(lengths),
-            "tag_count": series_stats(tag_counts),
-            "importance": series_stats(importances),
-        },
-    )
-
-
-def series_stats(values: list[float]) -> dict[str, float]:
-    if not values:
-        return {"mean": 0.0, "std_dev": 0.0}
-    mean = sum(values) / len(values)
-    variance = sum((value - mean) ** 2 for value in values) / len(values)
-    return {"mean": mean, "std_dev": math.sqrt(variance)}
+    return anomaly, view.stats
 
 
 def write_anomaly_stats(config: MemoryConfig, stats: AnomalyStats) -> None:
-    stats_path = Path(config.quarantine_path).parent / "anomaly_stats.yaml"
+    """Persist *stats* now, or defer them when this file was written moments ago.
+
+    The first call per file writes immediately. Later calls write when
+    ``_STATS_WRITE_INTERVAL_S`` passed since the last write or
+    ``_STATS_WRITE_MAX_DEFERRED`` calls were deferred; otherwise the newest
+    stats stay pending for the next due call or :func:`flush_anomaly_stats`.
+    Writes are atomic (temp file + rename), so a concurrent reader or another
+    process's writer never sees a torn file; the last rename wins.
+    """
+    global _ATEXIT_REGISTERED
+    path = Path(config.quarantine_path).parent / "anomaly_stats.yaml"
+    with _STATS_LOCK:
+        if path not in _STATS_FILES and len(_STATS_FILES) >= _MAX_TRACKED_STATS_FILES:
+            for idle in [known for known, tracked in _STATS_FILES.items() if tracked.pending is None]:
+                del _STATS_FILES[idle]  # forgetting an idle file only makes its next write immediate
+        state = _STATS_FILES.setdefault(path, _StatsFile())
+        now = time.monotonic()
+        state.deferred += 1
+        if now - state.last_write < _STATS_WRITE_INTERVAL_S and state.deferred < _STATS_WRITE_MAX_DEFERRED:
+            state.pending = stats
+            if not _ATEXIT_REGISTERED:
+                atexit.register(_flush_at_exit)
+                _ATEXIT_REGISTERED = True
+            return
+        state.pending, state.deferred, state.last_write = None, 0, now
+        _write_stats_file(path, stats)
+
+
+def flush_anomaly_stats(config: MemoryConfig | None = None) -> None:
+    """Write pending anomaly stats: *config*'s file, or every file when ``None``."""
+    only = None if config is None else Path(config.quarantine_path).parent / "anomaly_stats.yaml"
+    with _STATS_LOCK:
+        for path, state in _STATS_FILES.items():
+            if state.pending is None or (only is not None and path != only):
+                continue
+            stats, state.pending, state.deferred, state.last_write = state.pending, None, 0, time.monotonic()
+            _write_stats_file(path, stats)
+
+
+def _flush_at_exit() -> None:
+    try:
+        flush_anomaly_stats()
+    except (
+        StorageError
+    ):  # trw-fail-silent-allow: interpreter exit; the stats are an observability snapshot the next store rewrites
+        logger.warning("anomaly_stats_flush_failed", op="anomaly_stats", outcome="skipped_at_exit", exc_info=True)
+
+
+def _write_stats_file(path: Path, stats: AnomalyStats) -> None:
     payload: dict[str, object] = {
         "version": "1.0",
         "updated": datetime.now(timezone.utc).isoformat(),
         "sample_count": stats.sample_count,
         "dimensions": stats.dimensions,
     }
-    write_yaml(stats_path, payload)
+    write_yaml(path, payload)

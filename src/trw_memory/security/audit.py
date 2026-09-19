@@ -7,6 +7,7 @@ import json
 import os
 import stat
 import tempfile
+import threading
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,6 +19,25 @@ from trw_memory.storage.persistence import lock_for_rmw
 
 _GENESIS_HASH = "0" * 64
 _COMPACT_MANIFEST_NAME = "audit_compact_manifest.jsonl"
+# Chain head per log path, keyed by the file identity (device, inode, size,
+# mtime) observed right after this process last read or appended under the RMW
+# lock. append() used to re-parse the whole log for the head on EVERY record, a
+# cost that grew with the log (one per store). It now re-reads, and re-validates,
+# only when the file changed under another writer; the one change that goes
+# unseen is a same-size in-place rewrite within one mtime tick on the same
+# inode, which verify_chain() still reports.
+_HEAD_CACHE: dict[str, tuple[tuple[int, int, int, int], str]] = {}
+_HEAD_CACHE_LOCK = threading.Lock()
+_HEAD_CACHE_MAX = 256
+
+
+def _file_identity(path: Path) -> tuple[int, int, int, int] | None:
+    try:
+        info = os.stat(path)
+    # trw-fail-silent-allow: no log yet is a real state; None never matches a cached head, so append re-reads
+    except FileNotFoundError:
+        return None
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
 
 
 class AuditRecord(BaseModel):
@@ -63,7 +83,7 @@ class AuditLog:
         with lock_for_rmw(self._path):
             if self._path.is_symlink():
                 raise StorageError("Refusing symlink audit log path", path=str(self._path))
-            prev_hash = self._read_last_hash_unlocked()
+            prev_hash = self._chain_head_unlocked()
             record = AuditRecord(
                 op=effective_op,
                 id=effective_entry_id,
@@ -75,6 +95,7 @@ class AuditLog:
             payload = record.model_dump(mode="json")
             payload["hash"] = self._compute_hash(prev_hash, payload)
             self._append_line_unlocked(payload)
+            self._remember_head_unlocked(str(payload["hash"]))
         return record.model_copy(update={"hash": str(payload["hash"])})
 
     def verify_chain(self) -> dict[str, object]:
@@ -298,6 +319,27 @@ class AuditLog:
     def _count_records(self) -> int:
         """Count non-blank JSONL records without validating each payload."""
         return sum(1 for _ in self._iter_record_dicts())
+
+    def _chain_head_unlocked(self) -> str:
+        """``_read_last_hash_unlocked``, skipped while the file is as this process left it."""
+        identity = _file_identity(self._path)
+        with _HEAD_CACHE_LOCK:
+            cached = _HEAD_CACHE.get(str(self._path))
+        if identity is not None and cached is not None and cached[0] == identity:
+            return cached[1]
+        head = self._read_last_hash_unlocked()
+        self._remember_head_unlocked(head)
+        return head
+
+    def _remember_head_unlocked(self, head: str) -> None:
+        identity = _file_identity(self._path)
+        with _HEAD_CACHE_LOCK:
+            if identity is None:
+                _HEAD_CACHE.pop(str(self._path), None)
+                return
+            if len(_HEAD_CACHE) >= _HEAD_CACHE_MAX:
+                _HEAD_CACHE.clear()
+            _HEAD_CACHE[str(self._path)] = (identity, head)
 
     def _read_last_hash_unlocked(self) -> str:
         """Return the chain-head hash for the next append, failing closed.

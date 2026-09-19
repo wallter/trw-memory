@@ -37,6 +37,8 @@ __all__ = [
     "memory_decay_pass",
     "propagate_impact",
     "schedule_graph_update",
+    "schedule_graph_update_many",
+    "update_entries_graph",
     "update_entry_graph",
     "wait_for_graph_updates",
 ]
@@ -132,26 +134,53 @@ def schedule_graph_update(
     if resolved_config is None:
         logger.debug("graph_update_skipped", entry_id=entry.id, reason="missing_background_config")
         return False
+    return _dispatch_graph_worker(
+        entry.id, backend, lambda: _run_scheduled_graph_update(entry, resolved_config, embedding)
+    )
 
+
+def schedule_graph_update_many(
+    items: list[tuple[MemoryEntry, list[float] | None]],
+    backend: StorageBackend,
+    *,
+    config: MemoryConfig | None = None,
+) -> bool:
+    """Dispatch ONE background enrichment pass for a whole write batch (see ``_graph_batch``)."""
+    resolved_config = _derive_graph_config(backend, config)
+    if not items or resolved_config is None:
+        logger.debug("graph_update_skipped", count=len(items), reason="empty_batch_or_missing_background_config")
+        return False
+    batch = list(items)
+
+    def run() -> None:
+        from trw_memory.integrations._backend import create_backend_from_config
+
+        # Reopen each namespace's backend inside the worker (see _run_scheduled_graph_update).
+        for namespace in dict.fromkeys(entry.namespace for entry, _embedding in batch):
+            with create_backend_from_config(resolved_config, namespace) as ns_backend:
+                update_entries_graph(
+                    [item for item in batch if item[0].namespace == namespace], ns_backend, config=resolved_config
+                )
+
+    return _dispatch_graph_worker(f"batch-{batch[0][0].id}", backend, run)
+
+
+def _dispatch_graph_worker(label: str, backend: StorageBackend, run: Callable[[], None]) -> bool:
     def worker() -> None:
         try:
-            _run_scheduled_graph_update(entry, resolved_config, embedding)
+            run()
         except (StorageError, sqlite3.Error, ValueError):
-            logger.warning("graph_update_background_failed", entry_id=entry.id, exc_info=True)
+            logger.warning("graph_update_background_failed", entry_id=label, exc_info=True)
         finally:
             _untrack_graph_thread(threading.current_thread())
 
-    thread = threading.Thread(
-        target=worker,
-        name=f"trw-memory-graph-{entry.id}",
-        daemon=True,
-    )
+    thread = threading.Thread(target=worker, name=f"trw-memory-graph-{label}", daemon=True)
     _track_graph_thread(thread, owner=backend)
     try:
         thread.start()
     except RuntimeError:
         _untrack_graph_thread(thread)
-        logger.warning("graph_update_dispatch_failed", entry_id=entry.id, exc_info=True)
+        logger.warning("graph_update_dispatch_failed", entry_id=label, exc_info=True)
         return False
     return True
 
@@ -163,70 +192,12 @@ def update_entry_graph(
     embedding: list[float] | None = None,
     config: MemoryConfig | None = None,
 ) -> dict[str, int]:
-    """Best-effort graph enrichment for a freshly written entry.
+    """Best-effort graph enrichment for one freshly written entry (``update_entries_graph`` of one)."""
+    return update_entries_graph([(entry, embedding)], backend, config=config)
 
-    The graph is a secondary index over the canonical memory row. If the active
-    backend does not expose a SQLite connection, graph updates are skipped
-    without affecting the primary write path.
-    """
-    raw_conn = getattr(backend, "_conn", None)
-    if not callable(getattr(raw_conn, "execute", None)) or not callable(getattr(raw_conn, "commit", None)):
-        logger.debug("graph_update_skipped", entry_id=entry.id, reason="no_sqlite_connection")
-        return {"similarity_edges": 0, "tag_edges": 0, "consolidation_edges": 0}
-    # Optional DB-API drivers are structurally compatible but have no shared
-    # nominal Connection base class. Capability checks above guard this narrow
-    # dynamic boundary before the SQLite graph helpers use it.
-    conn: Any = raw_conn
 
-    candidate_entries = backend.list_entries(
-        status=MemoryStatus.ACTIVE,
-        namespace=entry.namespace,
-        limit=CANDIDATE_LIMIT,
-    )
-    candidate_ids = [candidate.id for candidate in candidate_entries if candidate.id != entry.id]
-    candidate_embeddings = (
-        list(backend.get_stored_embeddings(candidate_ids).items()) if embedding is not None and candidate_ids else None
-    )
-    lock = getattr(backend, "_lock", None)
-
-    similarity_edges = create_similarity_edges(
-        entry,
-        conn,
-        embedding=embedding,
-        candidate_embeddings=candidate_embeddings,
-        lock=lock,
-    )
-    consolidation_edges = create_consolidation_edges(
-        entry,
-        conn,
-        lock=lock,
-    )
-    co_anchored_edges = create_co_anchored_edges(
-        conn,
-        entry.id,
-        list(dict.fromkeys(anchor.file for anchor in entry.anchors)),
-        namespace=entry.namespace,
-        lock=lock,
-        min_shared_anchors=3,
-    )
-    cross_validated_projects = _apply_cross_project_validation(
-        entry,
-        backend,
-        conn,
-        embedding=embedding,
-        config=config,
-    )
-    return {
-        "similarity_edges": similarity_edges,
-        # PRD-CORE-245 FR07: tag co-occurrence is no longer materialised. The
-        # inverted index behind the derivation is maintained by the write path
-        # in ``storage/_crud_ops.py``, so there is nothing for this pass to do
-        # and nothing to count.
-        "consolidation_edges": consolidation_edges,
-        "co_anchored_edges": co_anchored_edges,
-        "cross_validated_projects": cross_validated_projects,
-    }
-
+# Batched enrichment (one pass per write batch) lives in _graph_batch.py.
+from trw_memory._graph_batch import update_entries_graph as update_entries_graph  # noqa: E402
 
 # Cross-project validation cluster extracted to _graph_cross_project.py
 # (PRD-DIST-245 batch 93). Re-exports preserve back-compat names.
@@ -236,6 +207,7 @@ from trw_memory._graph_cross_project import (  # noqa: E402
     append_cross_validation as _append_cross_validation,
     apply_cross_project_validation as _apply_cross_project_validation,
     backend_update_guard as _backend_update_guard,
+    cross_validate_entries as cross_validate_entries,
     cross_validation_prefix as _cross_validation_prefix,
     entry_has_cross_validation as _entry_has_cross_validation,
     entry_update_lock as _entry_update_lock,
@@ -371,6 +343,8 @@ def detect_cross_validation(
     conn: sqlite3.Connection,
     embedding: list[float] | None = None,
     remote_entries: list[tuple[str, str, list[float]]] | None = None,
+    *,
+    threshold: float = CROSS_VALIDATION_THRESHOLD,
 ) -> bool:
     """Check if entry is cross-validated by another project.
 
@@ -379,6 +353,7 @@ def detect_cross_validation(
         conn: SQLite connection.
         embedding: Entry's embedding.
         remote_entries: List of (entry_id, project_id, embedding) from other projects.
+        threshold: Similarity to exceed, in the scale of the compared vectors.
 
     Returns:
         True if cross-validation detected.
@@ -388,7 +363,7 @@ def detect_cross_validation(
 
     for _remote_id, project_id, remote_emb in remote_entries:
         sim = _safe_cosine_similarity(embedding, remote_emb)
-        if sim > CROSS_VALIDATION_THRESHOLD:
+        if sim > threshold:
             logger.debug(
                 "cross_validation_detected",
                 entry_id=entry.id,

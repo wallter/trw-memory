@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-import threading
 from collections.abc import Iterator
 from contextlib import closing
 from pathlib import Path
@@ -17,11 +16,20 @@ from typing import TYPE_CHECKING, cast
 
 import structlog
 
+from trw_memory.lifecycle.tiers._warm_sidecar_cache import (
+    ParsedSidecar,
+    SidecarCache,
+    SidecarRows,
+    access_only_change,
+    parse_sidecar,
+    sidecar_key,
+)
+from trw_memory.lifecycle.tiers._warm_space import admit_warm_hits, admit_warm_vectors
 from trw_memory.namespaces.validation import DEFAULT_NAMESPACE
-from trw_memory.storage._vector_ops import get_stored_embeddings
 from trw_memory.storage.persistence import lock_for_rmw
 
 if TYPE_CHECKING:
+    from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
     from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 logger = structlog.get_logger(__name__)
@@ -47,12 +55,10 @@ class WarmTierStore:
         # Cached SQLiteBackend to avoid open/close per operation
         self._warm_backend: SQLiteBackend | None = None
         self._warm_backend_dim: int | None = None
-        # Parsed-sidecar cache keyed on (mtime_ns, size). Every write path goes
-        # through the RMW lock and changes both, so a stale hit is impossible
-        # in-process and across processes; a hit skips re-parsing N JSON rows
-        # per recall (tier discovery re-reads the whole sidecar on every call).
-        self._sidecar_cache: tuple[tuple[int, int], list[tuple[int, dict[str, object]]]] | None = None
-        self._sidecar_cache_lock = threading.Lock()
+        # Parsed-sidecar cache keyed on (mtime_ns, size, inode); writers re-seed it
+        # under the RMW lock so a recall's access-time mirror does not force
+        # the next read to re-parse the file (see _warm_sidecar_cache).
+        self._sidecar_cache = SidecarCache()
 
     def _get_warm_backend(self, dim: int | None = None) -> SQLiteBackend | None:
         """Lazy-init and cache a SQLiteBackend for warm tier operations.
@@ -117,69 +123,29 @@ class WarmTierStore:
         file. ``\r`` from CRLF-terminated rows is stripped, matching the prior
         ``str.splitlines`` behaviour.
 
-        Parsed rows are cached against the file's ``(mtime_ns, size)``; a
+        Only live rows are yielded: a row superseded by a later row with the
+        same id (the append-log layout, see ``_warm_sidecar_cache``) is not.
+        Parsed rows are cached against the file's ``(mtime_ns, size, inode)``; a
         cache hit yields shallow copies so callers may annotate records
         without poisoning the cache. Corrupt-row warnings therefore fire once
-        per file version, not once per read.
+        per file version, not once per read. Writers re-seed the cache with
+        the rows they wrote, so the first read after a write is a hit too.
         """
-        try:
-            stat = sidecar.stat()
-            key = (stat.st_mtime_ns, stat.st_size)
-        except OSError:
-            key = None
-        with self._sidecar_cache_lock:
-            cached = self._sidecar_cache
-        if key is not None and cached is not None and cached[0] == key:
-            for line_number, rec in cached[1]:
-                yield line_number, dict(rec)
-            return
-        parsed: list[tuple[int, dict[str, object]]] = []
-        for line_number, rec in self._parse_sidecar_records(sidecar):
-            parsed.append((line_number, rec))
+        for line_number, rec in self._current_parse(sidecar).rows:
             yield line_number, dict(rec)
-        if key is not None:
-            with self._sidecar_cache_lock:
-                self._sidecar_cache = (key, parsed)
 
-    def _parse_sidecar_records(self, sidecar: Path) -> Iterator[tuple[int, dict[str, object]]]:
+    def _current_parse(self, sidecar: Path) -> ParsedSidecar:
+        """Return the parse of the sidecar's current bytes, from the cache when it is still valid."""
+        key = sidecar_key(sidecar)
+        parsed = self._sidecar_cache.get(key)
+        if parsed is None:
+            parsed = self._parse_sidecar_records(sidecar)
+            self._sidecar_cache.put(key, parsed)
+        return parsed
+
+    def _parse_sidecar_records(self, sidecar: Path) -> ParsedSidecar:
         """Parse the sidecar from disk (see ``_iter_sidecar_records`` for the contract)."""
-        for line_number, byte_line in enumerate(sidecar.read_bytes().split(b"\n"), start=1):
-            if not byte_line.strip():
-                continue
-            try:
-                line_s = byte_line.decode("utf-8").strip()
-            except UnicodeDecodeError as exc:
-                logger.warning(
-                    "warm_tier_sidecar_corrupt_record_skipped",
-                    path=str(sidecar),
-                    line_number=line_number,
-                    error_class=type(exc).__name__,
-                )
-                continue
-            if not line_s:
-                continue
-            try:
-                rec = json.loads(line_s)
-            except json.JSONDecodeError as exc:
-                logger.warning(
-                    "warm_tier_sidecar_corrupt_record_skipped",
-                    path=str(sidecar),
-                    line_number=line_number,
-                    error_class=type(exc).__name__,
-                )
-                continue
-            if not isinstance(rec, dict):
-                # Structurally valid JSON that is not a record object (e.g. a
-                # bare list or scalar) cannot satisfy the row schema; treat it
-                # as corrupt so callers never have to guard ``rec.get(...)``.
-                logger.warning(
-                    "warm_tier_sidecar_corrupt_record_skipped",
-                    path=str(sidecar),
-                    line_number=line_number,
-                    error_class="NotAnObject",
-                )
-                continue
-            yield line_number, cast("dict[str, object]", rec)
+        return parse_sidecar(sidecar)
 
     def get_embedding(self, entry_id: str) -> list[float] | None:
         """Return the stored warm-tier embedding for *entry_id*, if present."""
@@ -193,11 +159,14 @@ class WarmTierStore:
         entry_id: str,
         entry_data: dict[str, object],
         embedding: list[float] | None,
+        *,
+        provenance: VectorProvenance | None = None,
     ) -> None:
         """Insert or replace an entry in the warm store.
 
         When embedding is provided and sqlite-vec is available, stores the
-        vector. Always writes to the JSONL sidecar for keyword search fallback.
+        vector with its *provenance* (without it the vector is never
+        dense-scored). Always writes to the JSONL sidecar for keyword search.
 
         Args:
             entry_id: Memory entry identifier.
@@ -208,7 +177,8 @@ class WarmTierStore:
             try:
                 backend = self._get_warm_backend(dim=len(embedding))
                 if backend is not None:
-                    backend.upsert_vector(entry_id, embedding, namespace=WARM_TIER_NAMESPACE)
+                    proof = {"provenance": provenance} if provenance is not None else {}
+                    backend.upsert_vector(entry_id, embedding, namespace=WARM_TIER_NAMESPACE, **proof)
             except (OSError, ValueError):
                 logger.debug("warm_tier_vec_upsert_failed", entry_id=entry_id, exc_info=True)
 
@@ -227,8 +197,9 @@ class WarmTierStore:
         back into the warm tier to refresh ``last_accessed_at``, so a 50-result
         recall over a 400-row sidecar was 50 parses + 50 rewrites -- measured at
         ~80% of recall latency (2.1 s of 2.6 s) on the LOCOMO benchmark. This
-        path parses and rewrites once for the whole batch; the resulting file
-        is identical to applying ``warm_add`` in order.
+        path writes once for the whole batch (an append for new ids and
+        access-only refreshes); the resulting live rows are identical to
+        applying ``warm_add`` in order.
         """
         if not items:
             return
@@ -266,9 +237,11 @@ class WarmTierStore:
     def _warm_sidecar_upsert_many(self, records: dict[str, dict[str, object]]) -> None:
         """Upsert *records* (keyed by entry id) into the sidecar in one pass.
 
-        Optimized: ids not already in the sidecar are appended without
-        rewriting the file. When at least one id is already present the
-        surviving rows plus every new record are rewritten once.
+        New ids and access-only refreshes (recall's ``last_accessed_at`` mirror,
+        see ``ACCESS_FIELDS``) are APPENDED: O(len(records)) bytes and encoding,
+        with the superseded rows left as compaction debt. Any other change to an
+        existing row -- or debt past the compaction threshold -- rewrites the
+        live rows once, atomically, so stale content never outlives an update.
         """
         sidecar = self._warm_sidecar_path()
         sidecar.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -276,40 +249,45 @@ class WarmTierStore:
         # The entire read-modify-write must be serialized: two concurrent
         # upserts (or an upsert racing purge_sidecar_entry) would otherwise
         # read the same snapshot and clobber each other's rows on rewrite, or
-        # interleave the existence-check with another writer's append. The
+        # interleave the supersede decision with another writer's append. The
         # advisory lock is both in-process and cross-process (fcntl), matching
         # yaml_backend's RMW discipline.
         with lock_for_rmw(sidecar):
-            new_lines = "".join(json.dumps(r) + "\n" for r in records.values())
-            # Fast path: no sidecar yet -- every record is new.
+            dumped = [json.dumps(r) for r in records.values()]
+            # What a parse of the new lines yields; the cache is re-seeded with
+            # it below (still under the lock) so the next read is not a re-parse.
+            new_rows = [cast("dict[str, object]", json.loads(line)) for line in dumped]
             if not sidecar.exists():
-                sidecar.write_text(new_lines, encoding="utf-8")
+                self._replace_sidecar(sidecar, new_rows)
                 return
-
-            # Single pass through the parsing Seam: collect surviving records while
-            # detecting whether any incoming id is already present.
-            survivors: list[dict[str, object]] = []
-            any_exists = False
-            for _line_number, rec in self._iter_sidecar_records(sidecar):
-                if str(rec.get("id", "")) in records:
-                    any_exists = True
-                else:
-                    survivors.append(rec)
-
-            if not any_exists:
-                # Append-only: O(1) write for new entries (leaves existing rows,
-                # including any corrupt ones, untouched on disk).
-                with sidecar.open("a", encoding="utf-8") as f:
-                    f.write(new_lines)
+            parsed = self._current_parse(sidecar)
+            content_changed = False
+            for rec in new_rows:
+                old = parsed.live(str(rec.get("id", "")))
+                if old is not None and not access_only_change(old, rec):
+                    content_changed = True
+                    break
+            if content_changed or parsed.compaction_due_after(new_rows):
+                # Survivors keep their order; updated rows move to the end.
+                self._replace_sidecar(sidecar, parsed.merged(new_rows))
                 return
+            # A torn tail (crash mid-append) is terminated first so the new
+            # rows do not fuse with it; the fragment stays a skipped line.
+            with sidecar.open("a", encoding="utf-8") as fh:
+                fh.write(("\n" if parsed.torn_tail else "") + "".join(line + "\n" for line in dumped))
+            self._sidecar_cache.record_append(sidecar, parsed, new_rows)
 
-            # Update path: rewrite surviving records plus the incoming ones
-            # (O(N) once per batch). Corrupt rows are dropped by the Seam.
-            # Written to a sibling and renamed so a concurrent reader (and the
-            # (mtime_ns, size) parse cache) never sees a half-written file.
-            tmp = sidecar.with_name(sidecar.name + ".tmp")
-            tmp.write_text("".join(json.dumps(r) + "\n" for r in survivors) + new_lines, encoding="utf-8")
-            os.replace(tmp, sidecar)
+    def _replace_sidecar(self, sidecar: Path, rows: list[dict[str, object]]) -> None:
+        """Atomically replace the sidecar with *rows* (caller holds the RMW lock).
+
+        Written to a sibling and renamed so a concurrent reader (and the parse
+        cache) never sees a half-written file. Corrupt and superseded lines are
+        dropped: this is also the compaction path.
+        """
+        tmp = sidecar.with_name(sidecar.name + ".tmp")
+        tmp.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        os.replace(tmp, sidecar)
+        self._sidecar_cache.record_rewrite(sidecar, rows)
 
     def warm_remove(self, entry_id: str) -> bool:
         """Delete an entry from the warm store and sidecar.
@@ -359,30 +337,50 @@ class WarmTierStore:
         # concurrent upserts or one side's write is lost.
         with lock_for_rmw(sidecar):
             if sidecar.exists():
-                survivors: list[dict[str, object]] = []
-                for _line_number, rec in self._iter_sidecar_records(sidecar):
-                    if str(rec.get("id", "")) != entry_id:
-                        survivors.append(rec)
-                    else:
-                        sidecar_removed = True
-                sidecar.write_text(
-                    "\n".join(json.dumps(r) for r in survivors) + "\n" if survivors else "",
-                    encoding="utf-8",
-                )
+                parsed = self._current_parse(sidecar)
+                if parsed.live(entry_id) is not None:
+                    # A rewrite, not an appended tombstone: erasure must physically
+                    # remove every copy, superseded ones included.
+                    rows = [rec for _line, rec in parsed.rows if str(rec.get("id", "")) != entry_id]
+                    self._replace_sidecar(sidecar, rows)
+                    sidecar_removed = True
         return sidecar_removed
 
-    def discovery_entries(self, query_embedding: list[float] | None) -> list[dict[str, object]]:
+    def discovery_entries(
+        self,
+        query_embedding: list[float] | None,
+        *,
+        covered_ids: frozenset[str] = frozenset(),
+        namespace: str | None = None,
+        query_space: EmbeddingSpace | None = None,
+    ) -> list[dict[str, object]]:
         """Read full sidecars and uncapped vectors without a writable backend.
 
         SQLite mode=ro may create WAL coordination sidefiles; records, schema,
         archive contents and lifecycle access metadata are never written here.
+
+        Every sidecar row is returned except those named in *covered_ids*: rows
+        the caller already ranked from the primary store, which tier discovery
+        would drop anyway. They are neither copied nor vector-scored, so a recall
+        whose hybrid pool held the whole namespace pays per UNCOVERED row, not
+        per sidecar row (a full copy was ~12 ms at 5,000 rows, ~60 ms at
+        20,000). A covered row is still checked to belong to *namespace* when
+        one is given (``NamespaceScopeError`` otherwise), as discovery checks
+        every row it receives. Only vectors recorded in *query_space* are
+        scored (``_space_gate``); ``None`` scores none.
         """
         sidecar = self._base_dir / "memory" / "warm.jsonl"
         if not sidecar.exists():
             return []
-        entries = self._warm_sidecar_entries_by_id()
+        parsed = self._current_parse(sidecar)
+        if namespace is not None and parsed.names_other_namespace(namespace):
+            from trw_memory.security.namespace_scope import NamespaceScopeError
+
+            raise NamespaceScopeError("tier snapshot outside authorized namespace")
+        entries = self._entries_by_id(parsed.rows_except(covered_ids))
         db_path = sidecar.with_suffix(".db")
-        if query_embedding is None or not db_path.exists():
+        scored_ids = list(entries)
+        if query_embedding is None or not scored_ids or not db_path.exists():
             return list(entries.values())
         try:
             import sqlite_vec
@@ -400,7 +398,7 @@ class WarmTierStore:
                     from trw_memory.security.namespace_scope import NamespaceScopeError
 
                     raise NamespaceScopeError("warm vector index contains foreign namespace")
-                vectors = get_stored_embeddings(conn, threading.Lock(), vec_available=True, entry_ids=list(entries))
+                vectors = admit_warm_vectors(conn, scored_ids, query_space)
             for entry_id, vector in vectors.items():
                 if len(vector) != len(query_embedding):
                     continue
@@ -415,11 +413,14 @@ class WarmTierStore:
         query_tokens: list[str],
         query_embedding: list[float] | None,
         top_k: int = 25,
+        *,
+        query_space: EmbeddingSpace | None = None,
     ) -> list[dict[str, object]]:
         """Search the warm tier for relevant entries.
 
-        Performs dense vector search when embedding is available; falls back
-        to JSONL keyword search when embedding is None.
+        Performs dense vector search when embedding is available, keeping only
+        hits whose stored vector is in *query_space* (``None`` keeps none);
+        falls back to JSONL keyword search when no vector hit survives.
 
         Args:
             query_tokens: Tokenized query for keyword fallback.
@@ -438,7 +439,7 @@ class WarmTierStore:
             try:
                 backend = self._get_warm_backend(dim=len(query_embedding))
                 if backend is not None:
-                    raw = backend.search_vectors(query_embedding, top_k=top_k)
+                    raw = admit_warm_hits(backend, backend.search_vectors(query_embedding, top_k=top_k), query_space)
                     if raw:
                         results: list[dict[str, object]] = []
                         for eid, dist in raw:
@@ -503,12 +504,16 @@ class WarmTierStore:
 
     def _warm_sidecar_entries_by_id(self) -> dict[str, dict[str, object]]:
         """Hydrate the full entry payloads stored alongside the warm index."""
-        entries: dict[str, dict[str, object]] = {}
         sidecar = self._warm_sidecar_path()
         if not sidecar.exists():
-            return entries
+            return {}
+        return self._entries_by_id(self._current_parse(sidecar).rows)
 
-        for _line_number, rec in self._iter_sidecar_records(sidecar):
+    @staticmethod
+    def _entries_by_id(rows: SidecarRows) -> dict[str, dict[str, object]]:
+        """Entry payloads (fresh copies, safe to annotate) of *rows*, keyed by id."""
+        entries: dict[str, dict[str, object]] = {}
+        for _line_number, rec in rows:
             entry_id = str(rec.get("id", ""))
             if not entry_id:
                 continue

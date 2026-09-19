@@ -89,6 +89,7 @@ def test_absent_cache_stays_network_capable_and_discloses_once(
     assert len(attempts) == 1
 
 
+@pytest.mark.perf
 def test_cache_probe_runs_once_per_instance(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -103,14 +103,6 @@ def test_daemon_model_fixture_is_local_and_never_contacts_hub(tmp_path: Path, mo
     assert network_calls == []
 
 
-def _wait_for_exit(proc: subprocess.Popen[str]) -> int | None:
-    """Block until the daemon exits on its idle window, or the ceiling passes."""
-    try:
-        return proc.wait(timeout=_SHUTDOWN_DEADLINE_SECONDS)
-    except subprocess.TimeoutExpired:
-        return None
-
-
 def _await_discovery(paths: DaemonPaths, proc: subprocess.Popen[str]) -> DaemonInfo:
     deadline = time.monotonic() + _START_DEADLINE_SECONDS
     while time.monotonic() < deadline:
@@ -151,25 +143,30 @@ def running_daemon(user_dir: Path, paths: DaemonPaths) -> Iterator[tuple[subproc
 #: listener took longer than the previous bound (2026-09-17, v0.19.0 sync CI).
 _CONNECT_ATTEMPTS = 40
 _CONNECT_RETRY_DELAY_S = 0.5
+#: Ceiling on one tool call once connected. Without it a daemon that drops a
+#: request mid-flight leaves the client awaiting forever, to the pytest timeout.
+_CALL_TIMEOUT_S = 60.0
 
 
 async def _call(info: DaemonInfo, name: str, arguments: dict[str, object], *, token: str | None = None) -> object:
-    import asyncio
-
     import httpx
     from fastmcp import Client
     from fastmcp.client.transports import StreamableHttpTransport
 
     transport = StreamableHttpTransport(url=info.url, auth=token if token is not None else info.token)
+
+    async def _once() -> object:
+        async with Client(transport) as client:
+            result = await client.call_tool(name, arguments)
+        return result.data
+
     # The daemon fixture returns as soon as the discovery record exists; the
     # listener can still be a few hundred ms behind on a loaded CI runner
     # (observed: ConnectError on GitHub-hosted ubuntu). Bounded retry, connect
     # errors only — every other failure (401, tool errors) surfaces unchanged.
     for attempt in range(_CONNECT_ATTEMPTS):
         try:
-            async with Client(transport) as client:
-                result = await client.call_tool(name, arguments)
-            return result.data
+            return await asyncio.wait_for(_once(), _CALL_TIMEOUT_S)
         except (httpx.ConnectError, RuntimeError) as exc:
             # fastmcp wraps the transport's ConnectError in RuntimeError("Client
             # failed to connect: ..."); anything else is a real failure.
@@ -237,8 +234,9 @@ async def test_loopback_daemon_single_instance_token_and_idle_shutdown(
     assert read_discovery(paths) == info, "the second start rewrote the first daemon's record"
 
     # Property 5: the idle window elapses, the process exits and cleans up.
-    exit_code = await asyncio.to_thread(_wait_for_exit, proc)
-    assert exit_code == 0, "the daemon did not exit on its idle window"
+    # A daemon that never idles out raises TimeoutExpired here.
+    exit_code = await asyncio.to_thread(proc.wait, _SHUTDOWN_DEADLINE_SECONDS)
+    assert exit_code == 0, f"the daemon exited {exit_code} on its idle window"
     assert read_discovery(paths) is None
     assert not paths.discovery.exists()
 
@@ -257,6 +255,73 @@ async def test_a_wrong_token_reads_and_writes_nothing(
     # The store directory for that namespace was never created, which is only
     # possible if no tool body ran.
     assert not (paths.user_memory_dir / namespace.replace(":", "_")).exists()
+
+
+class _StubServer:
+    """The one attribute of ``uvicorn.Server`` the idle watchdog touches."""
+
+    should_exit = False
+
+
+async def _noop_receive() -> dict[str, object]:
+    return {"type": "http.disconnect"}
+
+
+async def _noop_send(message: object) -> None:
+    return None
+
+
+async def test_idle_watchdog_waits_for_an_in_flight_request() -> None:
+    """A tool call longer than the idle window must finish before the daemon exits.
+
+    Regression: the tracker stamped only request ARRIVAL, so a first call that
+    ran past the window (8.6 s against a 6 s window on a loaded macOS host) had
+    its server shut down underneath it and the caller never got a response.
+    """
+    from trw_memory.daemon._serve import _IdleTracker, _watch_idle
+
+    window = 0.2
+    release = asyncio.Event()
+
+    async def slow_app(scope: object, receive: object, send: object) -> None:
+        await release.wait()
+
+    tracker = _IdleTracker(slow_app)
+    server = _StubServer()
+    request = asyncio.create_task(tracker({"type": "http"}, _noop_receive, _noop_send))
+    watchdog = asyncio.create_task(_watch_idle(tracker, server, window))  # type: ignore[arg-type]
+    try:
+        await asyncio.sleep(window * 4)
+        assert not server.should_exit, "the watchdog shut the server down under an in-flight request"
+        release.set()
+        await asyncio.wait_for(request, 5)
+        # Completion counts as activity: the window restarts from it.
+        assert not server.should_exit
+        await asyncio.wait_for(watchdog, 5)
+        assert server.should_exit
+    finally:
+        release.set()
+        watchdog.cancel()
+
+
+async def test_idle_watchdog_ignores_the_lifespan_scope() -> None:
+    """The lifespan call spans the server's life; counting it would pin the daemon forever."""
+    from trw_memory.daemon._serve import _IdleTracker, _watch_idle
+
+    forever = asyncio.Event()
+
+    async def lifespan_app(scope: object, receive: object, send: object) -> None:
+        await forever.wait()
+
+    tracker = _IdleTracker(lifespan_app)
+    server = _StubServer()
+    lifespan = asyncio.create_task(tracker({"type": "lifespan"}, _noop_receive, _noop_send))
+    try:
+        await asyncio.wait_for(_watch_idle(tracker, server, 0.2), 5)  # type: ignore[arg-type]
+        assert server.should_exit
+    finally:
+        forever.set()
+        await lifespan
 
 
 def test_stale_lock_reaped_only_when_pid_is_dead(paths: DaemonPaths) -> None:

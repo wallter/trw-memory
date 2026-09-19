@@ -47,6 +47,7 @@ def test_fr05_salvage_semantics_unchanged(tmp_path: Path, monkeypatch: pytest.Mo
     assert _TIMESTAMPED_BACKUP_RE.fullmatch(Path(entry["backup"]).name) is not None
 
 
+@pytest.mark.perf
 def test_nfr01_rotation_latency_bounded(tmp_path: Path) -> None:
     for i in range(50):
         _write_timestamped_backup(tmp_path, f"2026-04-10T00-00-{i % 60:02d}Z-{i}")

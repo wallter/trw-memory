@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from trw_memory.embeddings._query_prompts import embed_query
 from trw_memory.lifecycle._recall import FUSED_SCORE_KEY
 from trw_memory.lifecycle.scoring import entry_utility
 from trw_memory.models.config import MemoryConfig
@@ -87,7 +88,7 @@ def build_scored_candidates(
                 prefix_stripped=rewrite.prefix_stripped,
                 surface="memory_recall_tool",
             )
-        query_embedding = embedder.embed(retrieval_query) if embedder is not None else None
+        query_embedding = embed_query(embedder, retrieval_query) if embedder is not None else None
         # dense_search() needs the stored vector map, not just the entry IDs, so
         # tool recall must hydrate the embeddings before calling hybrid_search().
         # Forward the stripped-query embedding so dense search uses the same

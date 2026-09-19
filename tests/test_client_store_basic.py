@@ -31,6 +31,7 @@ class TestStore:
         with pytest.raises(SchemaValidationError, match="content"):
             await client.store("   ")
 
+    @pytest.mark.perf
     async def test_store_embedding_does_not_block_event_loop(self, client: MemoryClient) -> None:
         started = threading.Event()
         release = threading.Event()

@@ -113,6 +113,7 @@ def hybrid_search_scored(
     rerank_local_only: bool = False,
     collapse_hype: object = _RETIRED_UNSET,
     dense_observer: Callable[[tuple[tuple[str, float], ...]], None] | None = None,
+    bridge_hop: bool = False,
 ) -> list[ScoredCandidate]:
     """Hybrid BM25 + vector search with configurable rank fusion.
 
@@ -220,6 +221,12 @@ def hybrid_search_scored(
             cross-encoder.  Re-ranking all candidates is expensive; limiting
             to the top-50 captures the quality gain at reasonable latency.
             Ignored when ``rerank=False``.
+        bridge_hop: When ``True`` and the cross-encoder scored the pool, run
+            the LLM-free entity-bridge second hop
+            (:func:`~trw_memory.retrieval.bridge.extend_with_bridge`): rare
+            terms of the top re-ranked rows retrieve further tail candidates,
+            which the cross-encoder scores against the same query. Default
+            ``False``; ``MemoryClient.recall`` turns it on with re-ranking.
 
     Returns:
         Up to *top_k* :class:`ScoredCandidate` objects ordered by descending
@@ -391,6 +398,22 @@ def hybrid_search_scored(
         scored = cross_encode_scores(
             effective_rerank_query, rerank_input, model_name=rerank_model, local_only=rerank_local_only
         )
+        # Entity-bridge second hop: salient terms of the best first-hop rows
+        # pull further candidates out of the un-reranked tail, scored against
+        # the same query so the cross-encoder still decides where they land.
+        bridged = False
+        if scored and bridge_hop:
+            from trw_memory.retrieval.bridge import extend_with_bridge
+
+            scored, tail, bridged = extend_with_bridge(
+                query,
+                scored,
+                tail,
+                entries,
+                score=lambda fresh: cross_encode_scores(
+                    effective_rerank_query, fresh, model_name=rerank_model, local_only=rerank_local_only
+                ),
+            )
         if scored is None:
             pass  # cross-encoder unavailable: keep fusion order and every candidate
         elif rerank_min_score is None:
@@ -406,7 +429,8 @@ def hybrid_search_scored(
         # PRD-CORE-278: a reorder OR a cut means the fused numbers no longer
         # explain the returned list, so the scores below switch to position.
         reranked = scored is not None and (
-            [entry.id for entry in fused_entries[: len(pre_rerank_order)]] != pre_rerank_order
+            bridged
+            or [entry.id for entry in fused_entries[: len(pre_rerank_order)]] != pre_rerank_order
             or len(fused_entries) != len(pre_rerank_order) + len(tail)
         )
 

@@ -16,6 +16,7 @@ from typing import Literal, NamedTuple
 import httpx
 import structlog
 
+from trw_memory.embeddings._similarity_calibration import calibrated_threshold
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -112,12 +113,13 @@ def _dedupe_shared_results(
         remote_vectors = vectors[len(local_entries) :]
         if not local_vectors:
             return remote_candidates
+        threshold = calibrated_threshold(dedup_threshold, embedder)
 
         for result, remote_vector in zip(remote_candidates, remote_vectors, strict=False):
             if remote_vector is None:
                 filtered.append(result)
                 continue
-            if any(cosine_similarity(remote_vector, local_vector) > dedup_threshold for local_vector in local_vectors):
+            if any(cosine_similarity(remote_vector, local_vector) > threshold for local_vector in local_vectors):
                 continue
             filtered.append(result)
     except Exception:

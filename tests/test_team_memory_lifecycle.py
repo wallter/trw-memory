@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.namespaces.manager import NamespaceManager
@@ -132,6 +134,7 @@ def test_team_namespace_repeat_consolidation_skips_after_completion(tmp_path: Pa
     assert second["promoted_count"] == 0
 
 
+@pytest.mark.perf
 def test_team_namespace_consolidation_completes_under_five_seconds_for_200_entries(tmp_path: Path) -> None:
     # Run the 200-entry consolidation under CI too (it covers the write/
     # provenance/security paths the INFRA-020 90%-branch gate needs) but only

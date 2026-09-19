@@ -15,7 +15,7 @@ from typing import ParamSpec, TypeVar, cast, overload
 
 import structlog
 
-from trw_memory.cli_client import handle_forget, handle_recall, handle_search, handle_store
+from trw_memory.cli_client import handle_forget, handle_recall, handle_reembed, handle_search, handle_store
 from trw_memory.cli_formatters import (
     StatusDict,
     entry_to_export_dict,
@@ -192,6 +192,11 @@ async def _handle_forget(args: argparse.Namespace) -> int:
 
 
 @_cli_error_boundary
+async def _handle_reembed(args: argparse.Namespace) -> int:
+    return await handle_reembed(args, client_cls=MemoryClient)
+
+
+@_cli_error_boundary
 def _handle_restore(args: argparse.Namespace) -> int:
     return handle_restore(args, config_cls=MemoryConfig)
 
@@ -263,6 +268,7 @@ async def _dispatch(args: argparse.Namespace) -> int:
         "import": _handle_import,
         "status": _handle_status,
         "forget": _handle_forget,
+        "reembed": _handle_reembed,
         "restore": _handle_restore,
         "snapshot": _handle_snapshot,
         "namespace": _handle_namespace,

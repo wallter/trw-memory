@@ -537,7 +537,28 @@ def score_entry_anomaly(
 ) -> tuple[str, float] | None:
     """Return the strongest anomaly dimension for *entry*, or ``None``."""
     clean_reference = [candidate for candidate in reference_entries if candidate.metadata.get("quarantined") != "true"]
-    if len(clean_reference) < MIN_ANOMALY_BASELINE:
+    return score_series_anomaly(
+        entry,
+        lengths=[float(len(candidate.content) + len(candidate.detail)) for candidate in clean_reference],
+        tag_counts=[float(len(candidate.tags)) for candidate in clean_reference],
+        z_threshold=z_threshold,
+    )
+
+
+def score_series_anomaly(
+    entry: MemoryEntry,
+    *,
+    lengths: list[float],
+    tag_counts: list[float],
+    z_threshold: float,
+) -> tuple[str, float] | None:
+    """``score_entry_anomaly`` over a reference already reduced to its two series.
+
+    *lengths* (``len(content) + len(detail)``) and *tag_counts* hold one value
+    per clean reference entry, in the same order. The runtime store path keeps
+    these series cached per namespace instead of re-reading the entries.
+    """
+    if len(lengths) < MIN_ANOMALY_BASELINE:
         # Statistical anomaly detection needs a stable baseline (>=10 clean
         # entries) before z-scores are meaningful. New / freshly-purged
         # namespaces fall below it, so they get no statistical protection —
@@ -549,22 +570,14 @@ def score_entry_anomaly(
             "anomaly_detection_skipped_insufficient_baseline",
             op="poisoning",
             namespace=entry.namespace,
-            sample_count=len(clean_reference),
+            sample_count=len(lengths),
             min_baseline=MIN_ANOMALY_BASELINE,
         )
         return None
 
     candidates: list[tuple[str, float, list[float]]] = [
-        (
-            "entry_length",
-            float(len(entry.content) + len(entry.detail)),
-            [float(len(candidate.content) + len(candidate.detail)) for candidate in clean_reference],
-        ),
-        (
-            "tag_count",
-            float(len(entry.tags)),
-            [float(len(candidate.tags)) for candidate in clean_reference],
-        ),
+        ("entry_length", float(len(entry.content) + len(entry.detail)), lengths),
+        ("tag_count", float(len(entry.tags)), tag_counts),
     ]
 
     strongest: tuple[str, float] | None = None

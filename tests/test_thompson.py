@@ -458,6 +458,7 @@ def test_exposure_count_increments() -> None:
         assert selector._arms["arm-a"].exposure_count == i + 1
 
 
+@pytest.mark.perf
 def test_select_latency_p95_under_5ms_for_50_arms() -> None:
     """Propensity estimation stays within the PRD latency budget."""
     selector = BanditSelector(cold_start_min=0)

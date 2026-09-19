@@ -17,6 +17,7 @@ import math
 
 import structlog
 
+from trw_memory.embeddings._query_prompts import embed_query
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.exceptions import DimensionMismatchError
 
@@ -100,7 +101,7 @@ def dense_search(
         # embedder is not None here (guarded above)
         assert embedder is not None  # noqa: S101 — mypy narrowing guard; embedder is not None here: the early-return guard above (line ~89) exits when embedder is None and query_embedding is also None
         try:
-            q_vec = embedder.embed(query)
+            q_vec = embed_query(embedder, query)
         except (RuntimeError, ValueError, TypeError) as exc:
             # Structural telemetry only — query text may carry secrets or
             # proprietary memory contents, so never log it (raw or preview).

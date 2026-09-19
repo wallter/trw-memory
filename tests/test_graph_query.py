@@ -211,6 +211,7 @@ class TestGraphQueryEdgeCases:
 
 
 class TestGraphQueryPerformance:
+    @pytest.mark.perf
     def test_graph_query_p95_under_100ms_for_1000_nodes_and_5000_edges(self) -> None:
         conn = _make_conn()
         for node in range(1000):

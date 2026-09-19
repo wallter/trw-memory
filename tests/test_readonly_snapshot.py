@@ -95,6 +95,7 @@ def test_invalid_budget_is_rejected(tmp_path: Path, budget: float) -> None:
             pytest.fail("Invalid budget accepted")
 
 
+@pytest.mark.perf
 def test_exclusive_lock_times_out_without_leaking_copy(tmp_path: Path) -> None:
     source = tmp_path / "locked.db"
     with closing(sqlite3.connect(source)) as writer:

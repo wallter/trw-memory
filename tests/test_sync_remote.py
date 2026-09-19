@@ -33,6 +33,7 @@ from ._test_sync_support import (
 )
 
 
+@pytest.mark.perf
 def test_local_only_blocks_immediately() -> None:
     cfg = _make_config(local_only=True)
     entry = _make_entry()

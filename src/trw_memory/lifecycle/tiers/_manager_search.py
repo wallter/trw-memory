@@ -187,8 +187,15 @@ def discover_candidates(
     query_embedding: list[float] | None,
     config: MemoryConfig,
     top_k: int,
+    covered_ids: frozenset[str] = frozenset(),
 ) -> list[LocalCandidate]:
-    """Resolve authoritative entries before admission, scoring, or pool caps."""
+    """Resolve authoritative entries before admission, scoring, or pool caps.
+
+    *covered_ids* names primary-backend rows the caller has already ranked for
+    this query (the hybrid candidate pool). Such a row can only duplicate a
+    candidate the caller holds, so it is dropped before the canonical lookup;
+    the namespace containment assertion still runs on it first.
+    """
 
     def candidates() -> Iterable[LocalCandidate]:
         seen: set[str] = set()
@@ -196,6 +203,8 @@ def discover_candidates(
             if "namespace" in data and str(data["namespace"]) != invocation.namespace:
                 raise NamespaceScopeError("tier snapshot outside authorized namespace")
             entry_id = str(data.get("id", ""))
+            if entry_id in covered_ids:
+                continue
             canonical = resolve_entry(entry_id)
             if canonical is None:
                 if "created_at" not in data:

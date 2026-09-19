@@ -23,6 +23,7 @@ Public surface (delegated from ``MemoryClient._try_hybrid_recall``):
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime
 from time import perf_counter
 from typing import TYPE_CHECKING
@@ -30,6 +31,8 @@ from typing import TYPE_CHECKING
 import structlog
 
 from trw_memory._client_distilled_tiering import entry_to_result as _entry_to_result
+from trw_memory.embeddings._query_prompts import embed_query
+from trw_memory.embeddings._space_gate import active_embedding_space, admit_space_vectors
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocation
 from trw_memory.security.namespace_scope import NamespaceScopeError, authorize_namespaces
@@ -39,6 +42,24 @@ if TYPE_CHECKING:
     from trw_memory.client import MemoryClient, MemoryResultDict
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclass
+class HybridPool:
+    """Out-parameter: the candidate pool ``try_hybrid_recall`` ranked.
+
+    ``entry_ids`` is every entry the pool held (namespace scan plus FTS
+    augmentation). ``complete`` is True when the namespace scan returned fewer
+    rows than the pool cap -- the cap did not bind, so every row the scan admits
+    was ranked. Left at its defaults when the pipeline is unavailable.
+    """
+
+    entry_ids: frozenset[str] = frozenset()
+    complete: bool = False
+
+    def covered_ids(self) -> frozenset[str]:
+        """Rows a complete pool already ranked; empty when the cap may have cut some."""
+        return self.entry_ids if self.complete else frozenset()
 
 
 async def try_hybrid_recall(
@@ -51,8 +72,12 @@ async def try_hybrid_recall(
     as_of: datetime | None = None,
     include_superseded: bool = False,
     invocation: RecallInvocation | None = None,
+    pool: HybridPool | None = None,
 ) -> list[MemoryResultDict] | list[LocalCandidate] | None:
     """Hybrid pipeline (BM25 + dense + RRF). Returns None to signal fallback.
+
+    When *pool* is given it is filled with the loaded candidate pool (see
+    :class:`HybridPool`) so the caller can skip re-discovering those rows.
 
     PRD-DIST-2047 Phase 2 (recall-latency telemetry): emits a structlog event
     ``hybrid_recall_complete`` carrying per-call timings + namespace shape +
@@ -105,6 +130,7 @@ async def try_hybrid_recall(
                 exclude_superseded=not include_superseded and as_of is None,
             )
         list_entries_ms = (perf_counter() - list_entries_start) * 1000.0
+        scan_complete = len(all_entries) < candidate_pool_size
 
         # FTS5 augmentation: inject text-matching entries that rank past the
         # recency-ordered list_entries pool. At enterprise scale (100K+ entries),
@@ -148,7 +174,13 @@ async def try_hybrid_recall(
             except Exception:
                 logger.debug("fts5_augmentation_failed", exc_info=True)
 
-        stored_embeddings = backend.get_stored_embeddings([entry.id for entry in all_entries])
+        # Vectors are read with their provenance; which of them may be dense-
+        # scored is decided below, once the active embedder's space is known.
+        vector_records = backend.get_vector_records([entry.id for entry in all_entries], namespace=client._namespace)
+
+    if pool is not None:
+        pool.entry_ids = frozenset(entry.id for entry in all_entries)
+        pool.complete = scan_complete
 
     namespace_size = len(all_entries)
     if not all_entries:
@@ -168,6 +200,15 @@ async def try_hybrid_recall(
         return None
 
     embedder = client._get_embedder()
+    # Only vectors from the active embedder's space are dense-scored; the rest
+    # stay in the pool for BM25 (embeddings/_space_gate.py).
+    stored_embeddings = (
+        admit_space_vectors(
+            vector_records, active_embedding_space(embedder), namespace=client._namespace, surface="hybrid_recall"
+        )
+        if embedder is not None and vector_records
+        else {}
+    )
     # PRD-DIST-2047 c796: auto-scale bm25/vector candidate caps to namespace
     # size so the 50-default acts as a FLOOR, not a CEILING. Eliminates the
     # structural cap on recall@10 for namespaces > 50 records.
@@ -229,7 +270,7 @@ async def try_hybrid_recall(
         # stripping only affects BM25 while dense similarity keeps the semantic
         # drift the rewrite was meant to remove.
         try:
-            effective_query_embedding = await asyncio.to_thread(embedder.embed, retrieval_query)
+            effective_query_embedding = await asyncio.to_thread(embed_query, embedder, retrieval_query)
         except (RuntimeError, ValueError, TypeError):
             logger.warning(
                 "hybrid_recall_temporal_embedding_failed",
@@ -269,6 +310,10 @@ async def try_hybrid_recall(
             rerank_min_score=client._config.recall_rerank_min_score,
             rerank_min_keep=client._config.recall_rerank_min_keep,
             rerank_local_only=client._config.local_only,
+            # The entity-bridge second hop only runs when the cross-encoder
+            # scored the pool (MEMORY_RECALL_RERANK=false turns both off);
+            # MEMORY_RECALL_BRIDGE_HOP=false turns off just the hop.
+            bridge_hop=client._config.recall_bridge_hop,
             # When prefix was stripped, the cross-encoder also uses the
             # stripped query — passing the original "latest guidance on X"
             # confuses the ms-marco reranker because memory entries don't

@@ -51,6 +51,21 @@ class EntryCursor:
         return cls(updated_at=entry.updated_at.isoformat(), entry_id=entry.id)
 
 
+@dataclass(frozen=True)
+class NamespaceChangeToken:
+    """A cheap position in one namespace's write history.
+
+    Equal tokens mean nothing a :meth:`StorageBackend.entries_changed_since`
+    feed would report has happened in between. ``store`` identifies the
+    database, so instances opened on one file compare equal.
+    """
+
+    store: str
+    insert_seq: int
+    top_updated_at: str
+    delete_epoch: int
+
+
 class StorageBackend(ABC):
     """Abstract base class for memory storage backends.
 
@@ -376,6 +391,27 @@ class StorageBackend(ABC):
         """
         return {}
 
+    def namespace_change_token(self, namespace: str) -> NamespaceChangeToken | None:
+        """Return a token that changes whenever *namespace* is written, or ``None``.
+
+        Optional capability for callers that keep a view derived from a
+        namespace's recent rows. ``None`` (this default) means "no cheap token":
+        such callers re-read what they need on every call.
+        """
+        return None
+
+    def entries_changed_since(
+        self, namespace: str, token: NamespaceChangeToken, *, limit: int
+    ) -> list[MemoryEntry] | None:
+        """Return the rows of *namespace* (any status) written since *token*, newest first.
+
+        ``None`` when the backend has no change feed, or when more than *limit*
+        rows changed: the caller must then re-read rather than trust a partial
+        feed. Only meaningful for a token this backend's
+        :meth:`namespace_change_token` returned.
+        """
+        return None
+
     def supports_vectors(self) -> bool:
         """Return whether this backend can persist and search dense vectors.
 
@@ -496,6 +532,17 @@ class StorageBackend(ABC):
         unqualified legacy vectors into trusted evidence.
         """
         return {}
+
+    def recent_vector_records(self, *, namespace: str, limit: int) -> dict[str, StoredVector]:
+        """Vectors of the *limit* most recently updated ACTIVE entries of *namespace*.
+
+        The candidate set is exactly ``list_entries(status=ACTIVE,
+        namespace=namespace, limit=limit)``; entries without a vector are absent.
+        Backends that can select those ids without decoding every row override
+        this (graph enrichment reads it for every namespace in the store).
+        """
+        entries = self.list_entries(status=MemoryStatus.ACTIVE, namespace=namespace, limit=limit)
+        return self.get_vector_records([entry.id for entry in entries], namespace=namespace)
 
     def hype_sibling_ids(self, parent_id: str, *, namespace: str) -> list[str]:
         """Enumerate legacy derived vectors; check supports_vectors() first."""

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import os
 import re
@@ -110,6 +111,30 @@ async def ingest(client: Any, conversation: dict[str, Any], context_turns: int =
     return n
 
 
+async def ingest_product(client: Any, conversation: dict[str, Any], context_turns: int = 1) -> int:
+    """Ingest exactly as the product does: ``conversation_requests`` (the shaping
+    behind ``MemoryClient.store_conversation``) per session, so context turns and
+    session date words match the REST shim; only ``dia_id`` is added per row."""
+    from trw_memory._client_conversation import conversation_requests
+
+    sessions: dict[str, list[tuple[datetime | None, str, str]]] = defaultdict(list)
+    for key, _date, dt, dia_id, text in iter_turns(conversation):
+        sessions[key].append((dt, dia_id, text))
+    n = 0
+    for turns in sessions.values():
+        observed = turns[0][0].isoformat() if turns[0][0] else None
+        requests = conversation_requests(
+            [{"content": text} for _dt, _d, text in turns], context_turns=context_turns, observed_at=observed
+        )
+        requests = [
+            dataclasses.replace(req, metadata={**(req.metadata or {}), "dia_id": dia_id})
+            for req, (_dt, dia_id, _text) in zip(requests, turns, strict=True)
+        ]
+        await client.bulk_store(requests)
+        n += len(requests)
+    return n
+
+
 async def run(args: argparse.Namespace) -> None:
     os.environ["MEMORY_STORAGE_PATH"] = resolve_path(args.store)
     from trw_memory.client import MemoryClient
@@ -133,7 +158,10 @@ async def run(args: argparse.Namespace) -> None:
             if count:
                 await client.clear() if hasattr(client, "clear") else None
             t = time.monotonic()
-            n = await ingest(client, conv, context_turns=args.context)
+            if args.product:
+                n = await ingest_product(client, conv, context_turns=args.context or 1)
+            else:
+                n = await ingest(client, conv, context_turns=args.context)
             print(f"conv {ci}: ingested {n} turns in {time.monotonic() - t:.1f}s", file=sys.stderr)
         else:
             print(f"conv {ci}: reusing {count} stored turns", file=sys.stderr)
@@ -198,6 +226,9 @@ def main() -> None:
     p.add_argument("--reingest", action="store_true")
     p.add_argument("--ingest-only", action="store_true", help="populate the store, skip scoring")
     p.add_argument("--context", type=int, default=0, help="preceding turns carried in detail at ingest")
+    p.add_argument(
+        "--product", action="store_true", help="ingest through store_conversation's shaping (context + date words)"
+    )
     p.add_argument("--label", default="")
     p.add_argument("--out", default="")
     asyncio.run(run(p.parse_args()))

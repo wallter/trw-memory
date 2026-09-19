@@ -424,6 +424,10 @@ def delete_by_namespace(backend: SQLiteBackend, namespace: str) -> int:
         with backend._lock:
             cursor = backend._conn.execute("DELETE FROM memories WHERE namespace = ?", (namespace,))
             deleted = cursor.rowcount
+            if deleted > 0:
+                from trw_memory.storage._change_feed import note_delete  # _change_feed imports this module
+
+                note_delete(backend)
             # Remove FTS5 ghost rows: FTS5 does not cascade from the memories
             # DELETE, so orphan rows accumulate and inflate search results.
             # Anti-join against the remaining memories table removes exactly

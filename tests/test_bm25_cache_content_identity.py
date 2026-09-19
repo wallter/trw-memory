@@ -1,5 +1,7 @@
 """Updating recalled knowledge must invalidate its cached lexical evidence."""
 
+from collections import OrderedDict
+
 import pytest
 
 from trw_memory.models.memory import MemoryEntry
@@ -9,7 +11,12 @@ from trw_memory.retrieval import bm25
 @pytest.fixture(autouse=True)
 def isolated_cache(monkeypatch):
     pytest.importorskip("rank_bm25")
-    monkeypatch.setattr(bm25, "_bm25_cache", None)
+    monkeypatch.setattr(bm25, "_bm25_cache", OrderedDict())
+
+
+def newest_model():
+    """The model the most recent search built or reused."""
+    return next(reversed(bm25._bm25_cache.values()))[0]
 
 
 @pytest.mark.parametrize("field", ["content", "detail", "tags"])
@@ -28,15 +35,15 @@ def test_same_ids_updated_lexical_field_changes_winner(field):
 def test_unchanged_reordered_corpus_reuses_model():
     entries = [MemoryEntry(id="one", content="telemetry"), MemoryEntry(id="two", content="apples")]
     before = bm25.bm25_search("telemetry", entries)
-    model = bm25._bm25_cache[1]
+    model = newest_model()
     assert bm25.bm25_search("telemetry", list(reversed(entries))) == before
-    assert bm25._bm25_cache[1] is model
+    assert newest_model() is model
 
 
 def test_nonlexical_update_does_not_rebuild_model():
     entries = [MemoryEntry(id="one", content="telemetry"), MemoryEntry(id="two", content="apples")]
     before = bm25.bm25_search("telemetry", entries)
-    model = bm25._bm25_cache[1]
+    model = newest_model()
     changed = [entry.model_copy(update={"importance": 0.99}) for entry in entries]
     assert bm25.bm25_search("telemetry", changed) == before
-    assert bm25._bm25_cache[1] is model
+    assert newest_model() is model

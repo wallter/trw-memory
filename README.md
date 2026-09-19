@@ -157,6 +157,9 @@ trw-memory import memories.json --namespace project:new-app
 # Forget an entry by ID
 trw-memory forget M-abc12345 --namespace project:my-app
 
+# Re-encode stored vectors after an embedding-model change (idempotent, resumable)
+trw-memory reembed --namespace project:my-app
+
 # Rebuild the SQLite DB from the cold YAML tier or a snapshot
 trw-memory restore --from-cold
 trw-memory restore --from-snapshot latest
@@ -461,7 +464,7 @@ trw-memory is **local-first**: with the default configuration all data lives in 
 
 | Surface | When | Default | Opt-out / control |
 |---------|------|---------|-------------------|
-| **Embedding model download** | Only when `all-MiniLM-L6-v2` is **not** already complete in your local Hugging Face cache. A complete cached snapshot makes **zero** huggingface.co requests — the loader probes the cache before deciding, and forces `local_files_only=True` unconditionally when the snapshot is complete (only with the `[embeddings]` extra installed) | enabled when the extra is present | `TRW_OFFLINE=1` / `HF_HUB_OFFLINE=1`, or `local_only: true` (alias `memory_local_only`) — forces `local_files_only` so no download is attempted; a disclosure log line precedes any network-capable load |
+| **Embedding model download** | Only when the embedding model — `BAAI/bge-small-en-v1.5` by default (33M parameters, 384-dim, about 130 MB of weights; set `MEMORY_EMBEDDING_MODEL` to change it) — is **not** already complete in your local Hugging Face cache. A complete cached snapshot makes **zero** huggingface.co requests — the loader probes the cache before deciding, and forces `local_files_only=True` unconditionally when the snapshot is complete (only with the `[embeddings]` extra installed) | enabled when the extra is present | `TRW_OFFLINE=1` / `HF_HUB_OFFLINE=1`, or `local_only: true` (alias `memory_local_only`) — forces `local_files_only` so no download is attempted; a disclosure log line precedes any network-capable load |
 | **Cross-encoder model download** (re-ranker, on by default since 0.19.0) | Only when `cross-encoder/ms-marco-MiniLM-L-6-v2` is not in your local Hugging Face cache and the `[embeddings]` extra is installed; the same offline switches force `local_files_only=True`, in which case an uncached model means recall keeps fusion order (no download, no error) | enabled when the extra is present | `TRW_OFFLINE=1` / `HF_HUB_OFFLINE=1`, `local_only: true`, or `MEMORY_RECALL_RERANK=false`; a disclosure log line precedes any network-capable load |
 | **Remote sync / publish** | Only when `sync_enabled=true` AND `local_only=false` | **off** (`sync_enabled` defaults `false`) | leave sync disabled, or set `local_only: true` to hard-block all egress |
 
@@ -477,6 +480,7 @@ With an offline switch engaged (`TRW_OFFLINE` / `HF_HUB_OFFLINE`) **or** `local_
 |----------|---------|---------|
 | `TRW_OFFLINE` | Master offline switch — blocks the huggingface.co embedding-model and re-ranker model downloads | unset |
 | `HF_HUB_OFFLINE` | Upstream huggingface_hub offline switch — also honored | unset |
+| `MEMORY_EMBEDDING_MODEL` | Sentence-transformers model used for dense vectors. Changing it leaves stored vectors in the old model's space until `trw-memory reembed` re-encodes them (see [Upgrading from all-MiniLM-L6-v2](#upgrading-from-all-minilm-l6-v2)) | `BAAI/bge-small-en-v1.5` (33M params, 384-dim, ~130 MB) |
 | `MEMORY_*` | Engine knobs validated by `MemoryConfig` (e.g. `MEMORY_LOCAL_ONLY`, `MEMORY_EMBEDDING_TRUST_REMOTE_CODE`, retrieval + lifecycle tuning) | per-field |
 
 ### Security defaults
@@ -504,9 +508,29 @@ export TRW_OFFLINE=1   # block the huggingface.co model download (local_files_on
 local_only: true       # hard-block all remote sync + model download
 ```
 
-For hybrid recall offline, populate the model cache **before** enabling either switch, in the same environment: `python -c "from sentence_transformers import SentenceTransformer, CrossEncoder; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2'); CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"`. Otherwise the first embedding load raises `LocalOnlyViolationError` (an uncached re-ranker is skipped silently and recall keeps fusion order). To run keyword-only without that error, omit the `[embeddings]` extra entirely. Verify the on-disk `memory.db` is mode `0600` and that no outbound connection is attempted on first use.
+For hybrid recall offline, populate the model cache **before** enabling either switch, in the same environment: `python -c "from sentence_transformers import SentenceTransformer, CrossEncoder; SentenceTransformer('BAAI/bge-small-en-v1.5'); CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"`. Otherwise the first embedding load raises `LocalOnlyViolationError` (an uncached re-ranker is skipped silently and recall keeps fusion order). To run keyword-only without that error, omit the `[embeddings]` extra entirely. Verify the on-disk `memory.db` is mode `0600` and that no outbound connection is attempted on first use.
 
 ## Migration notes
+
+### Upgrading from all-MiniLM-L6-v2
+
+The default embedding model is now `BAAI/bge-small-en-v1.5` (same 384 dimensions; queries carry the model's search instruction, stored documents do not). Vectors written by `all-MiniLM-L6-v2` — or written before vectors recorded which model produced them — live in a different embedding space, so dense recall **ignores them** rather than scoring a new-model query against old-model vectors. Until they are re-encoded:
+
+- BM25 still ranks every row, so recall keeps working, with keyword-only relevance for the old rows;
+- each recall logs one `dense_vectors_excluded_embedding_space` warning with the number of vectors it held back.
+
+Re-encode each namespace once (idempotent and resumable — rows already in the active space are skipped, and each batch commits on its own):
+
+```bash
+trw-memory reembed --namespace default            # --batch-size 64, --format json
+```
+
+```python
+async with MemoryClient(namespace="default") as client:
+    counts = await client.reembed()
+```
+
+The re-embed honours `TRW_OFFLINE` / `HF_HUB_OFFLINE` / `local_only` like every other load: with a switch set and the model not cached it raises `LocalOnlyViolationError` instead of downloading, so pre-download `BAAI/bge-small-en-v1.5` first. To keep the previous model instead, set `MEMORY_EMBEDDING_MODEL=all-MiniLM-L6-v2` (or `embedding_model` in config); it keeps working, without a query instruction. A process only ever scores vectors from the exact space its embedder reports, so switching models back and forth never mixes spaces — it just needs another `reembed`.
 
 ### Retired hypothetical expansion (unreleased)
 
@@ -626,7 +650,7 @@ python -m pytest tests/test_storage_sqlite_*.py -v
 | Extra | Packages | Purpose |
 |-------|----------|---------|
 | `[encryption]` | sqlcipher3, keyring, cryptography | Encrypted-at-rest DB (SQLCipher) + key storage |
-| `[embeddings]` | sentence-transformers | Dense vector embeddings (all-MiniLM-L6-v2, 384-dim) |
+| `[embeddings]` | sentence-transformers | Dense vector embeddings (`BAAI/bge-small-en-v1.5` by default, 384-dim) |
 | `[vectors]` | sqlite-vec | Vector similarity search in SQLite |
 | `[bm25]` | rank-bm25 | BM25 keyword search |
 | `[all]` | embeddings + vectors + bm25 | The full retrieval stack |

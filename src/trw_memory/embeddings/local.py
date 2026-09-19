@@ -23,16 +23,19 @@ from collections.abc import Iterator
 
 import structlog
 
+from trw_memory.embeddings._declared_space import declared_embedding_space, snapshot_revision
 from trw_memory.embeddings._hf_cache import CacheProbe, CacheState, probe_model_cache
 from trw_memory.embeddings._loaded_state import dependency_versions, loaded_state_digest
+from trw_memory.embeddings._query_prompts import query_prefix
 from trw_memory.embeddings._runtime_identity import capture_runtime_identity, runtime_identity_matches
+from trw_memory.embeddings._similarity_calibration import register_space_model
 from trw_memory.embeddings.provenance import EmbeddingSpace
 from trw_memory.exceptions import LocalOnlyViolationError, RemoteCodeNotPermittedError
 from trw_memory.models.config import MemoryConfig
 
 logger = structlog.get_logger(__name__)
 
-_DEFAULT_MODEL = "all-MiniLM-L6-v2"
+_DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 _DEFAULT_DIM = 384
 _TORCHCODEC_MODULE_PREFIX = "torchcodec"
 _MISSING = object()
@@ -175,8 +178,14 @@ class LocalEmbeddingProvider:
 
     Args:
         model_name: HuggingFace model identifier.  Defaults to
-            ``"all-MiniLM-L6-v2"`` (384-dimensional, fast, good quality).
+            ``"BAAI/bge-small-en-v1.5"`` (384-dimensional, 33M parameters).
         dim: Expected output dimensionality.  Must match the chosen model.
+
+    Texts have a role. :meth:`embed` and :meth:`embed_batch` encode DOCUMENTS
+    verbatim (the historical contract every external caller relies on);
+    :meth:`embed_query` encodes a search QUERY, prepending the model's query
+    instruction when it has one (see ``_query_prompts``). Symmetric models such
+    as ``all-MiniLM-L6-v2`` encode both roles identically.
     """
 
     def __init__(
@@ -186,6 +195,7 @@ class LocalEmbeddingProvider:
     ) -> None:
         self._model_name = model_name
         self._dim = dim
+        self._query_prefix = query_prefix(model_name)
         # PRD-CORE-279 NFR01: one provider is now shared by every worker
         # thread, and ``SentenceTransformer.encode`` is not a read-only call --
         # it moves the module to a device, flips it to eval, and mutates the
@@ -199,6 +209,7 @@ class LocalEmbeddingProvider:
         self._identity_model: object | None = None
         self._embedding_space: EmbeddingSpace | None = None
         self._identity_guard: object | None = None
+        self._declared_space: EmbeddingSpace | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -332,6 +343,19 @@ class LocalEmbeddingProvider:
                     encoding=f"trw-loaded-encoder-v2:{manifest_digest}",
                     dimensions=self._dim,
                 )
+            if self._embedding_space is None:
+                # No measured identity (accelerator-resident or non-BERT encoder):
+                # record the declared one so vectors are never written unqualified.
+                # A load that just downloaded the snapshot re-probes once to learn
+                # its revision; an uninspectable cache stays revision-less.
+                cold = probe.state in (CacheState.ABSENT, CacheState.INCOMPLETE)
+                revision = probe.snapshot_path if cache_first else (self._probe_cache().snapshot_path if cold else "")
+                self._declared_space = declared_embedding_space(
+                    self._model_name, snapshot_revision(revision), self._dim
+                )
+            loaded_space = self._embedding_space or self._declared_space
+            if loaded_space is not None:
+                register_space_model(loaded_space, self._model_name)
             logger.debug(
                 "embedding_model_loaded",
                 model=self._model_name,
@@ -381,8 +405,14 @@ class LocalEmbeddingProvider:
         Only the exact loaded object and unchanged supported encoding settings
         retain the descriptor. Arbitrary in-place weight/tokenizer mutation is outside this immutable
         provider-lifetime contract; producers must not mutate loaded encoders.
+
+        When the loaded state could not be measured at all, the declared space
+        (model id + snapshot revision, ``_declared_space``) is returned instead.
+        A measured identity that is later invalidated never falls back to it.
         """
-        if self._model is not self._identity_model or self._embedding_space is None:
+        if self._embedding_space is None:
+            return self._declared_space if self._model is not None else None
+        if self._model is not self._identity_model:
             return None
         if not runtime_identity_matches(self._model, self._dim, self._identity_guard):
             return None
@@ -415,6 +445,12 @@ class LocalEmbeddingProvider:
                 exc_info=True,
             )
             return None
+
+    def embed_query(self, text: str) -> list[float] | None:
+        """Embed *text* as a search query, with the model's query instruction."""
+        if not text.strip():
+            return None
+        return self.embed(self._query_prefix + text)
 
     def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
         """Generate embeddings for multiple texts in one model call.
@@ -497,3 +533,8 @@ class LocalEmbeddingProvider:
     def dim(self) -> int:
         """Return the dimensionality of vectors produced by this provider."""
         return self._dim
+
+    @property
+    def model_name(self) -> str:
+        """Model id this provider encodes with (keys model-aware similarity thresholds)."""
+        return self._model_name

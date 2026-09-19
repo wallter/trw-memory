@@ -8,6 +8,10 @@ Two primitives shared by every helper cluster:
   wrapper that returns 0.0 on dimension mismatch instead of raising.
 - ``_upsert_edge`` — INSERT/UPDATE edge row in ``memory_graph_edges``
   with edge-type validation and 4096-byte metadata cap.
+- ``CandidateVectors`` — a candidate set normalised ONCE and scored against
+  many query vectors (graph enrichment compares every written entry with up to
+  ``CANDIDATE_LIMIT`` vectors per namespace; one pure-Python cosine per pair
+  was ~0.35 ms, so a 10-namespace store spent ~1.7 s per write on it).
 
 Validates ``edge_type`` against ``VALID_EDGE_TYPES`` imported lazily
 from the parent ``graph`` module so test patches on
@@ -18,8 +22,13 @@ Extracted as PRD-DIST-245 Phase 2 batch 98.
 
 from __future__ import annotations
 
+import importlib
 import json
+import math
+import operator
 import sqlite3
+from collections.abc import Iterable, Sequence
+from typing import Any, Protocol
 
 import structlog
 
@@ -90,3 +99,86 @@ def _upsert_edge(
         "DO UPDATE SET weight = ?, edge_metadata = ?",
         (namespace, source_id, target_id, edge_type, weight, created_at, meta_json, weight, meta_json),
     )
+
+
+def _numpy() -> Any | None:
+    """numpy when installed (it ships with the embeddings extra), else ``None``."""
+    try:
+        return importlib.import_module("numpy")
+    except (
+        ImportError
+    ):  # trw-fail-silent-allow: numpy is an optional accelerator; CandidateVectors has an exact pure-Python path
+        return None
+
+
+class ScoredCandidates(Protocol):
+    """A candidate set graph enrichment scores query vectors against (``CandidateVectors`` or an index view)."""
+
+    def above(self, query: Sequence[float], threshold: float) -> list[tuple[str, float]]: ...
+
+
+class CandidateVectors:
+    """Unit-normalised candidate vectors, scored against query vectors in one pass.
+
+    Scores equal :func:`_safe_cosine_similarity` for every candidate: zero
+    vectors score 0.0 and a candidate of a different dimension than the query
+    is never returned (the helper scores it 0.0, which no positive threshold
+    admits). Candidates are normalised once here instead of once per pair.
+
+    ``compact=True`` holds the matrix as float32 (half the memory) for sets
+    that are CACHED across writes; stored vectors are float32 already, so only
+    the dot product's accumulation loses precision (~1e-7).
+    """
+
+    def __init__(self, vectors: Iterable[tuple[str, Sequence[float]]], *, compact: bool = False) -> None:
+        by_dim: dict[int, tuple[list[str], list[Sequence[float]]]] = {}
+        for candidate_id, vector in vectors:
+            ids, rows = by_dim.setdefault(len(vector), ([], []))
+            ids.append(candidate_id)
+            rows.append(vector)
+        self._np = _numpy()
+        self._dtype = None if self._np is None else (self._np.float32 if compact else self._np.float64)
+        self._groups: dict[int, tuple[list[str], Any]] = {
+            dim: self._normalised(ids, rows) for dim, (ids, rows) in by_dim.items()
+        }
+
+    def _normalised(self, ids: list[str], rows: list[Sequence[float]]) -> tuple[list[str], Any]:
+        """Unit rows (zero vectors dropped) as a matrix, or as lists without numpy."""
+        np = self._np
+        if np is not None:
+            matrix = np.asarray(rows, dtype=np.float64)
+            norms = np.sqrt((matrix * matrix).sum(axis=1))
+            keep = norms > 0.0
+            kept = [candidate_id for candidate_id, ok in zip(ids, keep.tolist(), strict=True) if ok]
+            return kept, (matrix[keep] / norms[keep, None]).astype(self._dtype, copy=False)
+        kept, units = [], []
+        for candidate_id, row in zip(ids, rows, strict=True):
+            norm = math.sqrt(sum(x * x for x in row))
+            if norm != 0.0:
+                kept.append(candidate_id)
+                units.append([x / norm for x in row])
+        return kept, units
+
+    def __len__(self) -> int:
+        return sum(len(ids) for ids, _rows in self._groups.values())
+
+    @property
+    def nbytes(self) -> int:
+        """Approximate memory held by the normalised vectors (a pure-Python float is ~32 bytes)."""
+        if self._np is not None:
+            return sum(int(rows.nbytes) for _ids, rows in self._groups.values())
+        return sum(len(ids) * dim * 32 for dim, (ids, _rows) in self._groups.items())
+
+    def above(self, query: Sequence[float], threshold: float) -> list[tuple[str, float]]:
+        """``(candidate_id, cosine)`` for every candidate scoring above *threshold*, in insertion order."""
+        group = self._groups.get(len(query))
+        norm = math.sqrt(sum(x * x for x in query))
+        if group is None or norm == 0.0:
+            return []
+        ids, rows = group
+        unit = [x / norm for x in query]
+        if self._np is not None:
+            scores: list[float] = (rows @ self._np.asarray(unit, dtype=self._dtype)).tolist()
+        else:
+            scores = [sum(map(operator.mul, row, unit)) for row in rows]
+        return [(candidate_id, score) for candidate_id, score in zip(ids, scores, strict=True) if score > threshold]

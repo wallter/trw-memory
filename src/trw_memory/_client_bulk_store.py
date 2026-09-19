@@ -31,15 +31,17 @@ import structlog
 from trw_memory._client_store import _build_store_entry, _existing_entry_for_namespace
 from trw_memory.embeddings.provenance import generation_provenance_kwargs
 from trw_memory.exceptions import MemoryNotFoundError, SchemaValidationError, SecurityDependencyError, StorageError
-from trw_memory.graph import schedule_graph_update
+from trw_memory.graph import schedule_graph_update_many
 from trw_memory.lifecycle.tiers._runtime import embedding_has_consumer, remember_entry_in_tiers
 from trw_memory.models.memory import Assertion, MemoryEntry
 from trw_memory.namespaces.manager import NamespaceManager
+from trw_memory.security._runtime_anomaly import shared_anomaly_reference
 from trw_memory.security.poisoning import validate_store_inputs
 from trw_memory.security.rbac import Permission
 from trw_memory.security.runtime import (
     append_audit_event,
     prepare_entry_for_store,
+    single_write_operation,
     store_quarantined_entry,
 )
 
@@ -65,6 +67,8 @@ class BulkStoreRequest:
     metadata: dict[str, str] | None = None
     source: Literal["human", "agent", "tool", "consolidated"] = "agent"
     source_identity: str = ""
+    #: Writer session. Keys the write-rate limiter, which charges a whole
+    #: ``bulk_store`` call ONE write per distinct session (not one per row).
     session_id: str | None = None
     entry_id: str | None = None
     evidence: list[str] | None = None
@@ -91,7 +95,14 @@ class BulkStoreItemResult:
 
 @dataclass
 class BulkStoreSummary:
-    """Aggregate + per-item result of a ``MemoryClient.bulk_store(...)`` call."""
+    """Aggregate + per-item result of a ``MemoryClient.bulk_store(...)`` call.
+
+    A rejected row is data the caller asked to keep and did not get, so it is
+    never only a per-item status: ``rejected_reasons`` counts rejections by
+    reason class (``"RateLimitError"``, ``"schema_invalid"``, ``"PIIBlockError"``
+    ...) and ``bulk_store`` logs a ``bulk_store_rows_rejected`` warning with the
+    same counts. Check ``rejected`` (or ``rejected_reasons``) after every call.
+    """
 
     total: int
     stored: int
@@ -100,6 +111,7 @@ class BulkStoreSummary:
     rejected: int
     duration_ms: float
     items: list[BulkStoreItemResult] = field(default_factory=list)
+    rejected_reasons: dict[str, int] = field(default_factory=dict)
 
     @property
     def succeeded(self) -> int:
@@ -162,77 +174,81 @@ async def bulk_store_impl(
         now = datetime.now(timezone.utc)
 
         decisions: list[Any] = [None] * len(prepared)
-        for i, (req, validation_error) in enumerate(prepared):
-            if validation_error is not None:
-                item_slots[i] = BulkStoreItemResult(
-                    memory_id=req.entry_id or "",
-                    status="rejected",
-                    skipped_reason=validation_error,
-                )
-                continue
+        # Every row is scored before any is persisted, so all rows of the batch
+        # share one anomaly reference window: read (and record) it once. The
+        # batch is also ONE write per writer session for the rate limiter.
+        with shared_anomaly_reference(), single_write_operation():
+            for i, (req, validation_error) in enumerate(prepared):
+                if validation_error is not None:
+                    item_slots[i] = BulkStoreItemResult(
+                        memory_id=req.entry_id or "",
+                        status="rejected",
+                        skipped_reason=validation_error,
+                    )
+                    continue
 
-            memory_id = req.entry_id or _make_id()
-            try:
-                existing = (
-                    _existing_entry_for_namespace(backend, memory_id, client._namespace)
-                    if req.entry_id is not None
-                    else None
-                )
-            except MemoryNotFoundError:
-                item_slots[i] = BulkStoreItemResult(
-                    memory_id=memory_id, status="rejected", skipped_reason="entry_not_found"
-                )
-                continue
-            entry = _build_store_entry(
-                memory_id=memory_id,
-                existing=existing,
-                content=req.content,
-                detail=req.detail,
-                tags=req.tags,
-                evidence=req.evidence,
-                importance=req.importance,
-                namespace=client._namespace,
-                metadata=req.metadata,
-                expires=req.expires,
-                assertions=req.assertions,
-                source=req.source,
-                source_identity=req.source_identity,
-                now=now,
-                installation_id=client._installation_id,
-                local_node_id=client._local_node_id,
-            )
-
-            try:
-                decision = prepare_entry_for_store(
-                    entry,
-                    backend=backend,
-                    config=client._config,
-                    session_id=req.session_id,
-                )
-            except SecurityDependencyError:
-                raise
-            except Exception as exc:
-                item_slots[i] = BulkStoreItemResult(
+                memory_id = req.entry_id or _make_id()
+                try:
+                    existing = (
+                        _existing_entry_for_namespace(backend, memory_id, client._namespace)
+                        if req.entry_id is not None
+                        else None
+                    )
+                except MemoryNotFoundError:
+                    item_slots[i] = BulkStoreItemResult(
+                        memory_id=memory_id, status="rejected", skipped_reason="entry_not_found"
+                    )
+                    continue
+                entry = _build_store_entry(
                     memory_id=memory_id,
-                    status="rejected",
-                    skipped_reason=f"{type(exc).__name__}:{str(exc)[:80]}",
+                    existing=existing,
+                    content=req.content,
+                    detail=req.detail,
+                    tags=req.tags,
+                    evidence=req.evidence,
+                    importance=req.importance,
+                    namespace=client._namespace,
+                    metadata=req.metadata,
+                    expires=req.expires,
+                    assertions=req.assertions,
+                    source=req.source,
+                    source_identity=req.source_identity,
+                    now=now,
+                    installation_id=client._installation_id,
+                    local_node_id=client._local_node_id,
                 )
-                continue
 
-            if decision.quarantined:
-                store_quarantined_entry(client._config, decision.entry)
-                item_slots[i] = BulkStoreItemResult(
-                    memory_id=decision.entry.id,
-                    status="quarantined",
-                    quarantined=True,
-                    anomaly_dimension=decision.anomaly_dimension,
-                    z_score=decision.anomaly_z_score,
-                )
-                continue
+                try:
+                    decision = prepare_entry_for_store(
+                        entry,
+                        backend=backend,
+                        config=client._config,
+                        session_id=req.session_id,
+                    )
+                except SecurityDependencyError:
+                    raise
+                except Exception as exc:
+                    item_slots[i] = BulkStoreItemResult(
+                        memory_id=memory_id,
+                        status="rejected",
+                        skipped_reason=f"{type(exc).__name__}:{str(exc)[:80]}",
+                    )
+                    continue
 
-            accepted_indices.append(i)
-            accepted_entries.append(decision.entry)
-            decisions[i] = decision
+                if decision.quarantined:
+                    store_quarantined_entry(client._config, decision.entry)
+                    item_slots[i] = BulkStoreItemResult(
+                        memory_id=decision.entry.id,
+                        status="quarantined",
+                        quarantined=True,
+                        anomaly_dimension=decision.anomaly_dimension,
+                        z_score=decision.anomaly_z_score,
+                    )
+                    continue
+
+                accepted_indices.append(i)
+                accepted_entries.append(decision.entry)
+                decisions[i] = decision
 
         embeddings: list[list[float] | None] = []
         # Provider acquisition can load a model. Like single-store, acquire
@@ -256,65 +272,72 @@ async def bulk_store_impl(
         else:
             embeddings = [None] * len(accepted_entries)
 
-        for j, (orig_i, entry) in enumerate(zip(accepted_indices, accepted_entries, strict=False)):
-            decision = decisions[orig_i]
-            assert decision is not None  # noqa: S101
-            embedding = embeddings[j] if j < len(embeddings) else None
+        # Graph enrichment runs ONCE for the batch (one background pass reading
+        # the candidate set and sibling project stores once), not once per row:
+        # per-row enrichment made ingest cost grow with the store (see _graph_batch).
+        graph_items: list[tuple[MemoryEntry, list[float] | None]] = []
+        try:
+            for j, (orig_i, entry) in enumerate(zip(accepted_indices, accepted_entries, strict=False)):
+                decision = decisions[orig_i]
+                assert decision is not None  # noqa: S101
+                embedding = embeddings[j] if j < len(embeddings) else None
+                proof = (
+                    generation_provenance_kwargs(embedder, f"{entry.content} {entry.detail}", embedding)
+                    if embedding is not None
+                    else {}
+                )
 
-            if client._namespace.startswith("team:"):
-                NamespaceManager(backend).ensure_team_namespace(client._namespace, created_at=now)
+                if client._namespace.startswith("team:"):
+                    NamespaceManager(backend).ensure_team_namespace(client._namespace, created_at=now)
 
-            # S1 fix (mirrors _client_store): per-entry row+vector atomicity.
-            # Each entry keeps its own commit granularity (matching the prior
-            # per-entry commit), but row and vector now land in ONE transaction
-            # so a crash between them can't leave a row with no vector. No manual
-            # compensating delete — the block's ROLLBACK handles failure.
-            try:
-                with backend.transaction():
-                    backend.store(entry)
-                    if embedding is not None:
-                        backend.upsert_vector(
-                            entry.id,
-                            embedding,
-                            namespace=entry.namespace,
-                            **generation_provenance_kwargs(embedder, f"{entry.content} {entry.detail}", embedding),
-                        )
-            except Exception as exc:
-                raise StorageError(f"failed to persist entry+vector for {entry.id!r}; transaction rolled back") from exc
+                # S1 fix (mirrors _client_store): per-entry row+vector atomicity.
+                # Each entry keeps its own commit granularity (matching the prior
+                # per-entry commit), but row and vector now land in ONE transaction
+                # so a crash between them can't leave a row with no vector. No manual
+                # compensating delete — the block's ROLLBACK handles failure.
+                try:
+                    with backend.transaction():
+                        backend.store(entry)
+                        if embedding is not None:
+                            backend.upsert_vector(entry.id, embedding, namespace=entry.namespace, **proof)
+                except Exception as exc:
+                    raise StorageError(
+                        f"failed to persist entry+vector for {entry.id!r}; transaction rolled back"
+                    ) from exc
 
-            try:
-                schedule_graph_update(entry, backend, embedding=embedding, config=client._config)
-            except RuntimeError:
-                logger.warning(
-                    "bulk_store_graph_schedule_failed",
+                graph_items.append((entry, embedding))
+
+                remember_entry_in_tiers(client._config, client._namespace, entry, embedding, proof.get("provenance"))
+
+                if not skip_audit_per_item:
+                    append_audit_event(
+                        client._config,
+                        decision.op,
+                        entry_id=entry.id,
+                        actor=entry.source_identity or entry.source,
+                        namespace=client._namespace,
+                        data={
+                            "status": "updated" if decision.op == "update" else "stored",
+                            "session_id": prepared[orig_i][0].session_id,
+                            "pii_types": sorted({m.pii_type for m in decision.pii_matches}),
+                            "quarantined": False,
+                        },
+                    )
+
+                item_slots[orig_i] = BulkStoreItemResult(
                     memory_id=entry.id,
-                    exc_info=True,
+                    status="updated" if decision.op == "update" else "stored",
                 )
 
-            remember_entry_in_tiers(client._config, client._namespace, entry, embedding)
-
-            if not skip_audit_per_item:
-                append_audit_event(
-                    client._config,
-                    decision.op,
-                    entry_id=entry.id,
-                    actor=entry.source_identity or entry.source,
-                    namespace=client._namespace,
-                    data={
-                        "status": "updated" if decision.op == "update" else "stored",
-                        "session_id": prepared[orig_i][0].session_id,
-                        "pii_types": sorted({m.pii_type for m in decision.pii_matches}),
-                        "quarantined": False,
-                    },
-                )
-
-            item_slots[orig_i] = BulkStoreItemResult(
-                memory_id=entry.id,
-                status="updated" if decision.op == "update" else "stored",
-            )
-
-            if not skip_remote_publish and client._should_attempt_remote_publish(entry):
-                client._schedule_background_task(client._publish_entry(entry, embedding))
+                if not skip_remote_publish and client._should_attempt_remote_publish(entry):
+                    client._schedule_background_task(client._publish_entry(entry, embedding))
+        finally:
+            # Also for the rows persisted before a mid-batch StorageError.
+            if graph_items:
+                try:
+                    schedule_graph_update_many(graph_items, backend, config=client._config)
+                except RuntimeError:
+                    logger.warning("bulk_store_graph_schedule_failed", count=len(graph_items), exc_info=True)
 
     if any(item is None for item in item_slots):
         raise RuntimeError("bulk_store did not produce a result for every request")
@@ -323,6 +346,11 @@ async def bulk_store_impl(
     updated_count = sum(1 for it in items if it.status == "updated")
     quarantined_count = sum(1 for it in items if it.status == "quarantined")
     rejected_count = sum(1 for it in items if it.status == "rejected")
+    rejected_reasons: dict[str, int] = {}
+    for it in items:
+        if it.status == "rejected":
+            reason = it.skipped_reason.split(":", 1)[0] or "unknown"
+            rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
     end_ts = datetime.now(timezone.utc)
     duration_ms = (end_ts - start_ts).total_seconds() * 1000.0
 
@@ -343,10 +371,19 @@ async def bulk_store_impl(
             },
         )
 
+    if rejected_count:
+        logger.warning(
+            "bulk_store_rows_rejected",
+            op="bulk_store",
+            namespace=client._namespace,
+            total=len(requests),
+            rejected=rejected_count,
+            reasons=rejected_reasons,
+        )
     logger.info(
         "memory_bulk_stored",
         op="bulk_store",
-        outcome="success",
+        outcome="partial" if rejected_count else "success",
         namespace=client._namespace,
         total=len(requests),
         stored=stored_count,
@@ -364,6 +401,7 @@ async def bulk_store_impl(
         rejected=rejected_count,
         duration_ms=duration_ms,
         items=items,
+        rejected_reasons=rejected_reasons,
     )
 
 

@@ -38,6 +38,18 @@ python retrieval_eval.py --store /tmp/locomo-store --context 1 --k 10,50
 python component_eval.py --store /tmp/locomo-store --conversations 0,1,2 --by-category
 ```
 
+No local GPU? Point the answerer, the judge and mem0's extraction at any
+OpenAI-compatible endpoint (OpenRouter shown; saved retrievals can be re-judged
+with `--evaluate-only --rejudge`, so trying another judge never re-ingests):
+
+```bash
+export LLM_BASE_URL=https://openrouter.ai/api/v1 LLM_API_KEY=$OPENROUTER_API_KEY
+export ANSWERER_MODEL=meta-llama/llama-3.3-70b-instruct JUDGE_MODEL=openai/gpt-4o
+# mem0's extraction LLM (only needed when ingesting with the mem0 backend)
+export BENCH_EXTRACT_BASE_URL=$LLM_BASE_URL BENCH_EXTRACT_API_KEY=$LLM_API_KEY LLM_MODEL=meta-llama/llama-3.1-8b-instruct
+./run.sh trw my-run --conversations 0 --top-k 50 --top-k-cutoffs 10,50
+```
+
 `run.sh` puts *this checkout's* `trw-memory/src` on `PYTHONPATH`; the shared
 venv's editable install points at the main tree otherwise.
 

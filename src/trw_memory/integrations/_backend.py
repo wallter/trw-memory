@@ -10,6 +10,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -26,11 +27,14 @@ if TYPE_CHECKING:
     from trw_memory.storage.interface import StorageBackend
 
 __all__ = [
+    "NamespaceStoreLocation",
     "config_for_storage_path",
     "create_backend",
     "create_backend_from_config",
     "discover_namespace_backends",
     "make_entry",
+    "namespace_store_locations",
+    "open_namespace_store",
     "resolve_backend",
     "resolve_backend_db_path",
     "resolve_backend_location",
@@ -256,6 +260,56 @@ def create_backend_from_config(
     return YAMLBackend(entries_dir=entries_dir)
 
 
+@dataclass(frozen=True)
+class NamespaceStoreLocation:
+    """One on-disk SQLite namespace store: its file and the key that opens it."""
+
+    db_path: Path
+    sqlcipher_key_hex: str | None = None
+
+
+def namespace_store_locations(config: MemoryConfig) -> list[NamespaceStoreLocation]:
+    """Every on-disk SQLite namespace store, found WITHOUT opening any of them.
+
+    Costs a directory listing plus a stat per store, so a per-write caller
+    (cross-project validation) can enumerate siblings and open only the ones it
+    must read. The namespaces a store holds are only known once it is opened
+    (:func:`open_namespace_store` + ``list_namespaces``); a folder name is a
+    lossy encoding of them. Non-SQLite backends have no vector stores to find.
+    """
+    if config.memory_single_store_path:
+        # One file holds every namespace; directory scanning would find nothing
+        # (the store is a FILE in ``base``). Keyless is only correct because the
+        # guard proves the store is not encrypted -- a keyless open of an
+        # ENCRYPTED store would fail rather than read plaintext.
+        _refuse_encrypted_single_store(config)
+        single = Path(config.memory_single_store_path)
+        return [NamespaceStoreLocation(single)] if single.exists() else []
+    base = Path(config.storage_path)
+    if config.storage_backend != "sqlite" or not base.exists():
+        return []
+    master_key: bytes | None = get_master_key(config) if config.encryption_enabled else None
+    locations: list[NamespaceStoreLocation] = []
+    for candidate in sorted(base.iterdir()):
+        db_path = candidate / config.sqlite_db_name
+        if not candidate.is_dir() or not db_path.exists():
+            continue
+        sqlcipher_key_hex: str | None = None
+        if master_key is not None:
+            namespace = _read_namespace_metadata(candidate)
+            if namespace is None:
+                logger.warning("encrypted_namespace_discovery_skipped", path=str(candidate))
+                continue
+            sqlcipher_key_hex = derive_namespace_key(master_key, namespace)
+        locations.append(NamespaceStoreLocation(db_path, sqlcipher_key_hex))
+    return locations
+
+
+def open_namespace_store(config: MemoryConfig, location: NamespaceStoreLocation) -> StorageBackend:
+    """Open the store at *location* (a context manager, like every backend)."""
+    return _create_sqlite_backend(config, location.db_path, sqlcipher_key_hex=location.sqlcipher_key_hex)
+
+
 @contextmanager
 def discover_namespace_backends(
     config: MemoryConfig,
@@ -269,68 +323,35 @@ def discover_namespace_backends(
     """
     from contextlib import ExitStack
 
-    base = Path(config.storage_path)
-
-    if config.memory_single_store_path:
-        # One file, every namespace. Directory scanning finds nothing here (the
-        # store is a FILE in ``base``, not a subdirectory), so discovery has to
-        # ask the store which namespaces it holds -- which is the truthful
-        # source anyway, since the namespace is a column and not a filename.
-        _refuse_encrypted_single_store(config)
-        single = Path(config.memory_single_store_path)
-        if not single.exists():
-            yield []
-            return
+    if config.memory_single_store_path or config.storage_backend == "sqlite":
         with ExitStack() as stack:
-            # Keyless is only correct because the guard above proved the store is
-            # not encrypted. Passing None to an ENCRYPTED store would not read
-            # plaintext -- it would fail to open, which is a confusing way to
-            # report a configuration that should never have been accepted.
-            store = stack.enter_context(_create_sqlite_backend(config, single, sqlcipher_key_hex=None))
-            namespaces = store.list_namespaces()
-            yield [(namespaces, store)] if namespaces else []
+            stores: list[tuple[list[str], StorageBackend]] = []
+            for location in namespace_store_locations(config):
+                store = stack.enter_context(open_namespace_store(config, location))
+                namespaces = store.list_namespaces()
+                if namespaces:
+                    stores.append((namespaces, store))
+            yield stores
         return
 
+    base = Path(config.storage_path)
     if not base.exists():
         yield []
         return
 
+    from trw_memory.storage.yaml_backend import YAMLBackend
+
     with ExitStack() as stack:
-        stores: list[tuple[list[str], StorageBackend]] = []
-
-        if config.storage_backend == "sqlite":
-            master_key: bytes | None = get_master_key(config) if config.encryption_enabled else None
-
-            for candidate in sorted(base.iterdir()):
-                db_path = candidate / config.sqlite_db_name
-                if not candidate.is_dir() or not db_path.exists():
-                    continue
-                sqlcipher_key_hex: str | None = None
-                if master_key is not None:
-                    namespace = _read_namespace_metadata(candidate)
-                    if namespace is None:
-                        logger.warning("encrypted_namespace_discovery_skipped", path=str(candidate))
-                        continue
-                    sqlcipher_key_hex = derive_namespace_key(master_key, namespace)
-                store_backend = stack.enter_context(
-                    _create_sqlite_backend(config, db_path, sqlcipher_key_hex=sqlcipher_key_hex)
-                )
-                namespaces = store_backend.list_namespaces()
-                if namespaces:
-                    stores.append((namespaces, store_backend))
-        else:
-            from trw_memory.storage.yaml_backend import YAMLBackend
-
-            for candidate in sorted(base.iterdir()):
-                entries_dir = candidate / "entries"
-                if not candidate.is_dir() or not entries_dir.is_dir():
-                    continue
-                yaml_backend: StorageBackend = stack.enter_context(YAMLBackend(entries_dir=entries_dir))
-                namespaces = yaml_backend.list_namespaces()
-                if namespaces:
-                    stores.append((namespaces, yaml_backend))
-
-        yield stores
+        yaml_stores: list[tuple[list[str], StorageBackend]] = []
+        for candidate in sorted(base.iterdir()):
+            entries_dir = candidate / "entries"
+            if not candidate.is_dir() or not entries_dir.is_dir():
+                continue
+            yaml_backend: StorageBackend = stack.enter_context(YAMLBackend(entries_dir=entries_dir))
+            namespaces = yaml_backend.list_namespaces()
+            if namespaces:
+                yaml_stores.append((namespaces, yaml_backend))
+        yield yaml_stores
 
 
 def make_entry(

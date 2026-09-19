@@ -213,8 +213,10 @@ class TestBulkStoreVectorUpsert:
 
 class TestBulkStoreGraphScheduleFailure:
     async def test_graph_update_runtime_error_is_logged(self, isolated_client: MemoryClient) -> None:
-        """schedule_graph_update raises RuntimeError → warning logged, continues (lines 287-288)."""
-        with patch("trw_memory._client_bulk_store.schedule_graph_update", side_effect=RuntimeError("graph locked")):
+        """schedule_graph_update_many raises RuntimeError → warning logged, continues (lines 287-288)."""
+        with patch(
+            "trw_memory._client_bulk_store.schedule_graph_update_many", side_effect=RuntimeError("graph locked")
+        ):
             summary = await isolated_client.bulk_store([BulkStoreRequest(content="graph test", detail="d")])
 
         assert summary.stored == 1  # entry still stored despite graph failure

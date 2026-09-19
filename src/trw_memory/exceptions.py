@@ -48,6 +48,10 @@ class LocalOnlyViolationError(MemoryError):
     """Raised when a network-capable operation is attempted in local-only mode."""
 
 
+class EmbeddingUnavailableError(MemoryError):
+    """Raised when an operation needs an identifiable embedding model and has none."""
+
+
 class RemoteCodeNotPermittedError(MemoryError):
     """Raised when loading a model would execute repo-supplied code without consent.
 

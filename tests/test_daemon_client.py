@@ -80,7 +80,7 @@ def _record_an_unreachable_daemon(paths: DaemonPaths) -> None:
 
 
 @pytest.fixture
-def running_daemon(paths: DaemonPaths) -> Iterator[DaemonInfo]:
+def running_daemon(paths: DaemonPaths, provisioned_embedding_cache: str) -> Iterator[DaemonInfo]:
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -91,7 +91,11 @@ def running_daemon(paths: DaemonPaths) -> Iterator[DaemonInfo]:
             "--idle-shutdown-seconds",
             str(_TEST_IDLE_SECONDS),
         ],
-        env={**os.environ, "TRW_USER_DIR": str(paths.user_memory_dir.parent)},
+        env={
+            **os.environ,
+            "TRW_USER_DIR": str(paths.user_memory_dir.parent),
+            "HF_HUB_CACHE": provisioned_embedding_cache,
+        },
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

@@ -296,6 +296,7 @@ class TestFtsSpecialChars:
 
 
 class TestFtsScaleGuard:
+    @pytest.mark.perf
     def test_fts_faster_than_like_at_10k(self, tmp_path: Path) -> None:
         import random
         import time
@@ -319,6 +320,10 @@ class TestFtsScaleGuard:
         for _ in range(runs):
             db.search(rare, top_k=25)
         like_ms = (time.perf_counter() - t0) / runs * 1000
+
+        # A broken/disabled FTS path returning [] must not win by doing no work.
+        results = db.search_fts(rare, top_k=25)
+        assert any(entry.id == entries[42].id for entry in results)
 
         # FTS5 should be measurably faster than LIKE at 10K entries for rare terms
         assert fts_ms < like_ms, f"FTS5 ({fts_ms:.2f}ms) should be faster than LIKE ({like_ms:.2f}ms) at 10K entries"

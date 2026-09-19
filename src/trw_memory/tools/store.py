@@ -301,6 +301,11 @@ def memory_store_impl(
                 embedding = embedder.embed(f"{entry.content} {entry.detail}")
             except Exception as exc:
                 raise StorageError(f"failed to compute embedding for {entry_id!r}; entry was not written") from exc
+        proof = (
+            generation_provenance_kwargs(embedder, f"{entry.content} {entry.detail}", embedding)
+            if embedding is not None
+            else {}
+        )
         # S1-parity fix: commit the row + its vector in ONE transaction so a crash
         # between the two writes can no longer leave a row with no vector, and a
         # vector failure rolls the row back automatically. This matches
@@ -310,12 +315,7 @@ def memory_store_impl(
             with backend.transaction():
                 backend.store(entry)
                 if embedding is not None:
-                    backend.upsert_vector(
-                        entry.id,
-                        embedding,
-                        namespace=entry.namespace,
-                        **generation_provenance_kwargs(embedder, f"{entry.content} {entry.detail}", embedding),
-                    )
+                    backend.upsert_vector(entry.id, embedding, namespace=entry.namespace, **proof)
         except Exception as exc:
             raise StorageError(f"failed to persist entry+vector for {entry_id!r}; transaction rolled back") from exc
         if enrich_after_store:
@@ -326,7 +326,7 @@ def memory_store_impl(
             except RuntimeError:
                 logger.warning("memory_store_graph_schedule_failed", entry_id=entry_id, exc_info=True)
             if supports_tier_runtime(backend):
-                remember_entry_in_tiers(cfg, namespace, entry, embedding)
+                remember_entry_in_tiers(cfg, namespace, entry, embedding, proof.get("provenance"))
         append_audit_event(
             cfg,
             decision.op,
@@ -407,6 +407,7 @@ def register_store_tool(mcp: McpServer) -> None:
         Returns:
             {"memory_id": str, "status": "stored", "namespace": str}
         """
+
         def _run() -> dict[str, object]:
             # PRD-CORE-279 FR04: backend open, write and close all happen in ONE
             # worker thread, so the SQLite connection never crosses threads.

@@ -11,6 +11,7 @@ from typing import overload
 import structlog
 from typing_extensions import TypedDict
 
+from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.lifecycle.tiers._manager import TierManager
 from trw_memory.models.config import MemoryConfig
@@ -162,15 +163,20 @@ def remember_entry_in_tiers(
     namespace: str,
     entry: MemoryEntry,
     embedding: list[float] | None = None,
+    provenance: VectorProvenance | None = None,
 ) -> None:
-    """Mirror a freshly written entry into the runtime tier system."""
+    """Mirror a freshly written entry into the runtime tier system.
+
+    *provenance* is the embedding's generation record; a warm vector without it
+    is kept for keyword search but never dense-scored.
+    """
     if not tier_runtime_enabled(config):
         return
     with _TIER_MANAGER_CACHE_LOCK:
         manager = get_tier_manager(config, namespace)
         manager.hot_put(entry.id, entry)
         try:
-            manager.warm_add(entry.id, entry.model_dump(mode="json"), embedding)
+            manager.warm_add(entry.id, entry.model_dump(mode="json"), embedding, provenance=provenance)
         except (OSError, ValueError):
             logger.warning("tier_warm_mirror_failed", namespace=namespace, entry_id=entry.id, exc_info=True)
 
@@ -261,7 +267,9 @@ def tier_candidates(
     tags: list[str] | None,
     limit: int,
     query_embedding: list[float] | None = None,
+    query_space: EmbeddingSpace | None = None,
     invocation: None = None,
+    covered_ids: frozenset[str] = frozenset(),
 ) -> list[dict[str, object]]: ...
 
 
@@ -275,7 +283,9 @@ def tier_candidates(
     tags: list[str] | None,
     limit: int,
     query_embedding: list[float] | None = None,
+    query_space: EmbeddingSpace | None = None,
     invocation: RecallInvocation,
+    covered_ids: frozenset[str] = frozenset(),
 ) -> list[LocalCandidate]: ...
 
 
@@ -288,9 +298,15 @@ def tier_candidates(
     tags: list[str] | None,
     limit: int,
     query_embedding: list[float] | None = None,
+    query_space: EmbeddingSpace | None = None,
     invocation: RecallInvocation | None = None,
+    covered_ids: frozenset[str] = frozenset(),
 ) -> list[dict[str, object]] | list[LocalCandidate]:
-    """Collect full-entry candidates from the tier runtime."""
+    """Collect full-entry candidates from the tier runtime.
+
+    *covered_ids* (discovery mode only) names primary rows the caller already
+    ranked for this query; see :meth:`TierManager.search`.
+    """
     if not tier_runtime_enabled(config):
         return []
     with _TIER_MANAGER_CACHE_LOCK:
@@ -304,10 +320,12 @@ def tier_candidates(
         return manager.search(
             query_tokens,
             query_embedding=query_embedding,
+            query_space=query_space,
             tags=tags,
             top_k=max(limit * 2, config.hot_max_entries),
             invocation=invocation,
             resolve_entry=lambda entry_id: backend.get(entry_id, namespace=namespace),
+            covered_ids=covered_ids,
             **_restoration_callbacks(config, namespace, backend),
         )
 

@@ -327,7 +327,11 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
         (PRD-DIST-246 batch 104). See that helper's docstring for full
         arg/return semantics. Trades per-item audit + remote-publish
         overhead for throughput; per-item security checks (PII /
-        poisoning) still run on every record.
+        poisoning) still run on every record. The write-rate limiter charges
+        the call ONE write per distinct ``session_id`` (not one per row); if a
+        session is over its budget, every row of that session is rejected.
+        Rejections are reported in ``BulkStoreSummary.rejected`` /
+        ``rejected_reasons`` and logged as ``bulk_store_rows_rejected``.
         """
         return await _bulk_store_impl(
             self, requests, skip_audit_per_item=skip_audit_per_item, skip_remote_publish=skip_remote_publish
@@ -351,6 +355,11 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
         Implementation lives in ``_client_conversation.store_conversation_impl``;
         see that module for why turns are kept verbatim (no ingest-time LLM)
         and what ``context_turns`` / ``preceding`` do for chunked feeds.
+        ``session_id`` names the recorded conversation (row metadata +
+        provenance); it does not meter the ingest against the per-session
+        write-rate limiter. Rows rejected for any other reason (PII,
+        poisoning, schema) are counted in the returned summary's
+        ``rejected`` / ``rejected_reasons`` and logged as a warning.
         """
         from trw_memory._client_conversation import store_conversation_impl as _impl
 
@@ -514,10 +523,11 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
         query_embedding: list[float] | None = None,
         *,
         invocation: RecallInvocation | None = None,
+        covered_ids: frozenset[str] = frozenset(),
     ) -> list[MemoryResultDict] | list[LocalCandidate]:
         from trw_memory._client_recall import tier_results as _impl
 
-        return _impl(self, backend, query, tags, limit, query_embedding, invocation=invocation)
+        return _impl(self, backend, query, tags, limit, query_embedding, invocation=invocation, covered_ids=covered_ids)
 
     def _remember_results_in_tiers(self, results: list[MemoryResultDict]) -> None:
         from trw_memory._client_recall import remember_results_in_tiers as _impl

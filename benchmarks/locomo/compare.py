@@ -42,7 +42,7 @@ def mcnemar(b: int, c: int) -> float:
     if n == 0:
         return 1.0
     k = min(b, c)
-    tail = sum(math.comb(n, i) for i in range(0, k + 1)) / 2**n
+    tail = sum(math.comb(n, i) for i in range(k + 1)) / 2**n
     return min(1.0, 2 * tail)
 
 
@@ -56,7 +56,11 @@ def main() -> None:
     A, B = load(args.a), load(args.b)
     ids = sorted(set(A) & set(B))
     print(f"paired questions: {len(ids)}  ({args.label_a}: {len(A)} judged, {args.label_b}: {len(B)} judged)")
-    cutoffs = sorted({c for q in ids for c in A[q]["cutoff_results"]} & {c for q in ids for c in B[q]["cutoff_results"]})
+    # Only cutoffs judged for EVERY paired question on both sides: a run judged
+    # at fewer cutoffs (e.g. top-10 only) must not be compared at a missing one.
+    cutoffs = sorted(
+        set.intersection(*(set(A[q]["cutoff_results"]) & set(B[q]["cutoff_results"]) for q in ids)) if ids else set()
+    )
     for cut in cutoffs:
         rows = defaultdict(lambda: [0, 0, 0, 0, 0])  # n, a_correct, b_correct, b(A only), c(B only)
         for q in ids:

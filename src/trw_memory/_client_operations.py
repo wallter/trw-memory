@@ -13,6 +13,7 @@ from trw_memory.security.rbac import Permission
 from trw_memory.storage.interface import StorageBackend
 
 if TYPE_CHECKING:
+    from trw_memory._client_reembed import ReembedResultDict
     from trw_memory.client import ForgetResultDict, MemoryClient, MemoryResultDict
 
 logger = structlog.get_logger(__name__)
@@ -107,3 +108,17 @@ class ClientOperationsMixin:
             reviewer_id=reviewer_id,
             namespace=self._namespace,
         )
+
+    async def reembed(self, *, batch_size: int = 64) -> ReembedResultDict:
+        """Re-encode this namespace's vectors into the active embedder's space.
+
+        Dense recall scores only vectors recorded in the active embedding space;
+        after an ``embedding_model`` change (or for vectors written before
+        provenance existed) rows are BM25-only until this runs. Idempotent and
+        resumable: rows already in the active space are skipped, and every
+        ``batch_size`` page commits on its own. Honours ``TRW_OFFLINE`` /
+        ``HF_HUB_OFFLINE`` / ``local_only`` exactly as recall does.
+        """
+        from trw_memory._client_reembed import reembed_namespace
+
+        return await reembed_namespace(cast("MemoryClient", self), batch_size=batch_size)
