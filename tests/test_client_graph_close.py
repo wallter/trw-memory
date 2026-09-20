@@ -3,17 +3,26 @@
 import asyncio
 import shutil
 import threading
+import time
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
+import trw_memory._graph_worker_pool as pool
 import trw_memory.graph as graph
 from trw_memory._graph_threads import _GraphThreadRegistry
 from trw_memory.client import MemoryClient
 from trw_memory.exceptions import MemoryConnectionError
+from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+from .conftest import make_entry
 
 
 def test_registered_but_unstarted_worker_is_not_reported_finished() -> None:
@@ -164,3 +173,203 @@ async def test_backend_close_failure_keeps_retry_handle(client: MemoryClient, mo
         assert attempts == 2
     finally:
         original_close()
+
+
+# --- PRD-FIX-143: one persistent worker (and one backend open) per store ---------
+
+
+@pytest.fixture
+def fresh_pool() -> Iterator[None]:
+    pool._reset_graph_worker_pool_for_tests()
+    yield
+    graph.wait_for_graph_updates(timeout=5.0)
+    pool._reset_graph_worker_pool_for_tests()
+
+
+@pytest.fixture
+def backend_opens(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Path, str]]:
+    """Every SQLiteBackend construction from here on: (db path, constructing thread name)."""
+    opened: list[tuple[Path, str]] = []
+    real_init = SQLiteBackend.__init__
+
+    def counting_init(self: SQLiteBackend, db_path: Path, *args: Any, **kwargs: Any) -> None:
+        opened.append((Path(db_path), threading.current_thread().name))
+        real_init(self, db_path, *args, **kwargs)
+
+    monkeypatch.setattr(SQLiteBackend, "__init__", counting_init)
+    return opened
+
+
+def _store_config(root: Path) -> MemoryConfig:
+    return MemoryConfig(storage_backend="sqlite", storage_path=str(root))
+
+
+def _db_path(config: MemoryConfig) -> Path:
+    return Path(config.storage_path) / "default" / config.sqlite_db_name
+
+
+def _wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.005)
+    return True
+
+
+@pytest.mark.usefixtures("fresh_pool")
+def test_schedule_graph_update_reuses_one_worker_backend_across_rows(
+    tmp_path: Path, backend_opens: list[tuple[Path, str]]
+) -> None:
+    config = _store_config(tmp_path / "store")
+    with create_backend_from_config(config, "default") as owner:
+        backend_opens.clear()  # the owner's own open is not a graph-worker open
+        for index in range(25):
+            entry = make_entry(entry_id=f"M-row-{index}", content=f"graph worker row {index}")
+            owner.store(entry)
+            assert graph.schedule_graph_update(entry, owner, config=config)
+        graph.wait_for_graph_updates(timeout=10.0, owner=owner)
+        batch: list[tuple[MemoryEntry, list[float] | None]] = [
+            (make_entry(entry_id=f"M-batch-{index}", content=f"batch row {index}"), None) for index in range(3)
+        ]
+        for entry, _embedding in batch:
+            owner.store(entry)
+        assert graph.schedule_graph_update_many(batch, owner, config=config)
+        graph.wait_for_graph_updates(timeout=10.0, owner=owner)
+
+    # 25 single-row jobs plus one batch job for the same file: ONE open, on the worker thread.
+    assert [path for path, _thread in backend_opens] == [_db_path(config)]
+    assert backend_opens[0][1].startswith("trw-memory-graph-worker-")
+    assert pool._POOL.live_worker_count() == 1
+
+
+@pytest.mark.usefixtures("fresh_pool")
+def test_idle_worker_self_evicts_and_next_job_reopens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_opens: list[tuple[Path, str]]
+) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(pool, "_clock", lambda: now[0])
+    monkeypatch.setattr(pool, "_IDLE_POLL_SECONDS", 0.005)
+    config = _store_config(tmp_path / "store")
+    with create_backend_from_config(config, "default") as owner:
+        backend_opens.clear()
+        assert graph.schedule_graph_update(make_entry(entry_id="M-idle-1"), owner, config=config)
+        graph.wait_for_graph_updates(timeout=5.0, owner=owner)
+        worker = pool._POOL.worker_for(config, "default")
+        assert worker is not None
+        assert pool._POOL.open_backend_count() == 1
+
+        # Idle for just under the window: many polls later it is still registered.
+        now[0] += pool._GRAPH_WORKER_IDLE_EVICT_SECONDS - 0.5
+        time.sleep(0.1)
+        assert pool._POOL.worker_for(config, "default") is worker
+        assert worker.thread.is_alive()
+
+        # Past the window it closes its backend and leaves the registry by itself.
+        now[0] += 1.0
+        assert _wait_until(lambda: not worker.thread.is_alive())
+        assert pool._POOL.worker_for(config, "default") is None
+        assert pool._POOL.live_worker_count() == 0
+        assert pool._POOL.open_backend_count() == 0
+        assert len(backend_opens) == 1
+
+        # The next job gets a new worker and a real, fresh open (and quick_check).
+        assert graph.schedule_graph_update(make_entry(entry_id="M-idle-2"), owner, config=config)
+        graph.wait_for_graph_updates(timeout=5.0, owner=owner)
+        replacement = pool._POOL.worker_for(config, "default")
+        assert replacement is not None
+        assert replacement is not worker
+        assert [path for path, _thread in backend_opens] == [_db_path(config)] * 2
+
+
+@pytest.mark.usefixtures("fresh_pool")
+def test_worker_cap_evicts_only_idle_workers_and_never_drops_a_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pool, "_GRAPH_WORKER_MAX_COUNT", 2)
+    gates = {name: threading.Event() for name in ("a", "b", "c", "d")}
+    started = {name: threading.Event() for name in gates}
+    ran: list[str] = []
+
+    def held_worker(entry: MemoryEntry, config: MemoryConfig, embedding: list[float] | None) -> None:
+        started[entry.id].set()
+        assert gates[entry.id].wait(5)
+        ran.append(entry.id)
+
+    monkeypatch.setattr(graph, "_run_scheduled_graph_update", held_worker)
+    owner = MagicMock()
+    configs = {name: _store_config(tmp_path / name) for name in gates}
+
+    def schedule(name: str) -> None:
+        assert graph.schedule_graph_update(make_entry(entry_id=name), owner, config=configs[name])
+
+    def worker_of(name: str) -> pool._GraphWorker | None:
+        return pool._POOL.worker_for(configs[name], "default")
+
+    schedule("a")  # stays busy
+    assert started["a"].wait(5)
+    gates["b"].set()
+    schedule("b")
+    assert _wait_until(lambda: (worker := worker_of("b")) is not None and worker.pending == 0)
+    worker_a = worker_of("a")
+    assert worker_a is not None
+
+    schedule("c")  # at the cap: retires idle b, never busy a
+    assert worker_of("b") is None
+    assert worker_of("a") is worker_a
+    assert started["c"].wait(5)
+
+    schedule("d")  # a and c are both busy: exceed the cap rather than block or drop
+    assert worker_of("a") is worker_a
+    assert worker_of("c") is not None
+    assert worker_of("d") is not None
+
+    for gate in gates.values():
+        gate.set()
+    graph.wait_for_graph_updates(timeout=5.0, owner=owner)
+    assert sorted(ran) == ["a", "b", "c", "d"]
+
+
+@pytest.mark.usefixtures("fresh_pool")
+def test_worker_registry_reset_hook_closes_all_workers(tmp_path: Path) -> None:
+    owners = []
+    for name in ("one", "two", "three"):
+        config = _store_config(tmp_path / name)
+        owner = create_backend_from_config(config, "default")
+        owners.append(owner)
+        assert graph.schedule_graph_update(make_entry(entry_id=f"M-{name}"), owner, config=config)
+    graph.wait_for_graph_updates(timeout=10.0)
+    assert pool._POOL.live_worker_count() == 3
+    assert pool._POOL.open_backend_count() == 3
+    worker_threads = [t for t in threading.enumerate() if t.name.startswith("trw-memory-graph-worker-")]
+    assert len(worker_threads) == 3
+
+    pool._reset_graph_worker_pool_for_tests()
+
+    assert pool._POOL.live_worker_count() == 0
+    assert pool._POOL.open_backend_count() == 0
+    assert not any(thread.is_alive() for thread in worker_threads)
+    for owner in owners:
+        owner.close()
+
+
+@pytest.mark.usefixtures("fresh_pool")
+def test_concurrent_producers_create_exactly_one_worker_per_path(
+    tmp_path: Path, backend_opens: list[tuple[Path, str]]
+) -> None:
+    config = _store_config(tmp_path / "store")
+    producers = 16
+    barrier = threading.Barrier(producers)
+    with create_backend_from_config(config, "default") as owner:
+        backend_opens.clear()
+
+        def produce(index: int) -> bool:
+            barrier.wait(5)
+            return graph.schedule_graph_update(make_entry(entry_id=f"M-race-{index}"), owner, config=config)
+
+        with ThreadPoolExecutor(max_workers=producers) as executor:
+            assert all(executor.map(produce, range(producers)))
+        graph.wait_for_graph_updates(timeout=10.0, owner=owner)
+
+    assert [path for path, _thread in backend_opens] == [_db_path(config)]
+    assert pool._POOL.live_worker_count() == 1

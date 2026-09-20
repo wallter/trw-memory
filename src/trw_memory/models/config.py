@@ -23,6 +23,8 @@ from trw_memory.models._config_sources import (
     _check_retired_hype_environment,
     _check_retired_hype_settings,
     _TRWConfigYamlSource,
+    _warn_retired_rerank_environment,
+    _warn_retired_rerank_settings,
 )
 from trw_memory.models._config_storage import _StorageConfigMixin
 
@@ -144,6 +146,8 @@ class MemoryConfig(
         _check_retired_hype_settings(init_settings(), source="constructor")
         # Inspect source data before Pydantic drops aliases of removed fields.
         _check_retired_hype_environment(dotenv_settings)
+        _warn_retired_rerank_settings(init_settings(), source="constructor")
+        _warn_retired_rerank_environment(dotenv_settings)
         return (
             init_settings,
             env_settings,

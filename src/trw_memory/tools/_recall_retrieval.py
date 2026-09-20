@@ -110,7 +110,7 @@ def build_scored_candidates(
             recency_halflife_days=cfg.recall_recency_halflife_days,
             fusion_mode=cfg.recall_fusion_mode,
             validity_age_decay=cfg.recall_validity_age_decay,
-            rerank=cfg.recall_rerank,
+            rerank=True,  # PRD-CORE-284: unconditional; no confidence floor on this path
             rerank_model=cfg.recall_rerank_model,
             rerank_candidates=cfg.recall_rerank_candidates,
             # rerank_query omitted intentionally: when temporal boilerplate is

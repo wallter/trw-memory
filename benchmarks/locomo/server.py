@@ -31,14 +31,20 @@ Env knobs::
                        OpenAI-compatible endpoint for mem0 extraction (default: local Ollama)
     OLLAMA_BASE_URL    default http://localhost:11434
     BENCH_TRW_CONTEXT  preceding turns carried as context per stored turn (default 1)
+    BENCH_EXTRACT_REASONING / BENCH_EXTRACT_REASONING_EFFORT
+                       1: mark the extraction model as a reasoning model (mem0's is_reasoning_model)
+    BENCH_MEM0_SESSION_DATE  1 (default): give mem0's extraction the session date
+                       instead of the wall clock; 0 restores stock OSS behaviour
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -48,6 +54,9 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
+
+sys.path.insert(0, str(Path(__file__).parent))
+from mem0_dates import mem0_extraction_date
 
 log = logging.getLogger("bench-shim")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -70,10 +79,49 @@ def _mem0_llm_config() -> dict[str, Any]:
     api_key = os.getenv("BENCH_EXTRACT_API_KEY", "").strip()
     if not api_key:
         raise SystemExit("BENCH_EXTRACT_API_KEY is required with BENCH_EXTRACT_BASE_URL")
-    return {
-        "provider": "openai",
-        "config": {"model": LLM_MODEL, "openai_base_url": base_url, "api_key": api_key, "temperature": 0.1},
+    config: dict[str, Any] = {"model": LLM_MODEL, "openai_base_url": base_url, "api_key": api_key, "temperature": 0.1}
+    # mem0's name heuristic misses provider-prefixed GPT-5 ids such as "openai/gpt-5-mini" and would send
+    # temperature/max_tokens; BENCH_EXTRACT_REASONING=1 uses mem0's own explicit override instead.
+    if os.getenv("BENCH_EXTRACT_REASONING", "") == "1":
+        config["is_reasoning_model"] = True
+        if os.getenv("BENCH_EXTRACT_REASONING_EFFORT"):
+            config["reasoning_effort"] = os.environ["BENCH_EXTRACT_REASONING_EFFORT"]
+    return {"provider": "openai", "config": config}
+
+
+# See mem0_dates.py. BENCH_MEM0_SESSION_DATE=0 restores stock OSS behaviour.
+SESSION_DATE_EXTRACTION = os.getenv("BENCH_MEM0_SESSION_DATE", "1") != "0"
+
+
+def _add_log(
+    user_id: str, timestamp: int | None, results: int | None, seconds: float, error: str | None, duplicate: bool = False
+) -> None:
+    """One JSONL row per mem0 write, so a monitor can see zero-yield extractions, failures and retries."""
+    row = {
+        "ts": time.time(),
+        "user_id": user_id,
+        "session_ts": timestamp,
+        "results": results,
+        "seconds": round(seconds, 2),
+        "error": error,
+        "duplicate": duplicate,
     }
+    with (DATA_DIR / "add_log.jsonl").open("a") as fh:
+        fh.write(json.dumps(row) + "\n")
+
+
+def _outcome_unknown(exc: BaseException) -> bool:
+    """A timeout or dropped connection anywhere in the chain (mem0 wraps them in its own LLMError):
+    the provider may have run, and billed, the request."""
+    unknown = {"APITimeoutError", "APIConnectionError", "TimeoutError", "ReadTimeout", "ConnectError"}
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if {cls.__name__ for cls in type(cur).__mro__} & unknown:
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
 
 
 def _epoch_to_iso(ts: int | None) -> str:
@@ -119,23 +167,53 @@ class Mem0Backend:
         # qdrant client, so serialise writes; searches can overlap.
         self._write_lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=8)
+        self._writes: dict[str, asyncio.Future[Any]] = {}
+        # The OpenAI SDK retries a timed-out completion twice by default, and a timed-out extraction may
+        # already be billed. Retries are decided here instead: never for an unknown outcome.
+        client = getattr(getattr(self.memory, "llm", None), "client", None)
+        if client is not None and hasattr(client, "with_options"):
+            self.memory.llm.client = client.with_options(max_retries=0)
         log.info("mem0 backend ready: llm=%s embedder=%s dims=%d dir=%s", LLM_MODEL, EMBED_MODEL, dims, DATA_DIR)
 
     async def add(self, messages: list[dict[str, Any]], user_id: str, timestamp: int | None) -> dict[str, Any]:
         def _do() -> Any:
             with self._write_lock:
                 kwargs: dict[str, Any] = {"user_id": user_id}
-                if timestamp is not None:
-                    # The OSS SDK rejects ``timestamp=``; upstream's docker shim
-                    # silently drops it, leaving every memory dated at ingest
-                    # time. mem0 honours a caller-supplied ``created_at`` in
-                    # metadata, so carry the session date through that route:
-                    # the answerer prompt then sees real conversation dates,
-                    # exactly as it would against Mem0 Cloud.
-                    kwargs["metadata"] = {"created_at": _epoch_to_iso(timestamp)}
-                return self.memory.add(messages, **kwargs)
+                if timestamp is None:
+                    return self.memory.add(messages, **kwargs)
+                # The OSS SDK rejects ``timestamp=``; upstream's docker shim
+                # silently drops it, leaving every memory dated at ingest
+                # time. mem0 honours a caller-supplied ``created_at`` in
+                # metadata, so carry the session date through that route:
+                # the answerer prompt then sees real conversation dates,
+                # exactly as it would against Mem0 Cloud.
+                kwargs["metadata"] = {"created_at": _epoch_to_iso(timestamp)}
+                if not SESSION_DATE_EXTRACTION:
+                    return self.memory.add(messages, **kwargs)
+                with mem0_extraction_date(_epoch_to_iso(timestamp)[:10]):
+                    return self.memory.add(messages, **kwargs)
 
-        return await asyncio.get_running_loop().run_in_executor(self._pool, _do)
+        # The runner retries a timed-out POST /memories while the first extraction is still running
+        # (and billing). An identical write joins the in-flight or finished one instead of paying again.
+        key = json.dumps([user_id, timestamp, messages], sort_keys=True)
+        if key in self._writes:
+            _add_log(user_id, timestamp, None, 0.0, None, duplicate=True)
+            return await asyncio.shield(self._writes[key])
+        fut: asyncio.Future[Any] = asyncio.get_running_loop().run_in_executor(self._pool, _do)
+        self._writes[key] = fut
+        started = time.monotonic()
+        try:
+            out = await asyncio.shield(fut)
+        except Exception as exc:
+            if not _outcome_unknown(exc):
+                del self._writes[key]  # a definite failure (e.g. HTTP 4xx/5xx) may be retried for real
+            # else: keep the failed future, so the runner's retries fail too instead of paying again;
+            # the chunk is recorded as failed and watch.py stops the phase above 1%.
+            _add_log(user_id, timestamp, None, time.monotonic() - started, repr(exc)[:300])
+            raise
+        results = out.get("results", []) if isinstance(out, dict) else []
+        _add_log(user_id, timestamp, len(results), time.monotonic() - started, None)
+        return out
 
     async def search(self, query: str, user_id: str, limit: int) -> dict[str, Any]:
         def _do() -> Any:
@@ -165,8 +243,8 @@ class TrwBackend:
     """
 
     def __init__(self) -> None:
-        os.environ.setdefault("MEMORY_STORAGE_PATH", str(DATA_DIR / "store"))
-        os.environ.setdefault("MEMORY_EMBEDDING_MODEL", EMBED_MODEL)
+        os.environ["MEMORY_STORAGE_PATH"] = str(DATA_DIR / "store")  # never an inherited store
+        os.environ["MEMORY_EMBEDDING_MODEL"] = EMBED_MODEL  # the arm's declared embedder, not an inherited one
         from trw_memory.client import MemoryClient
 
         self._client_cls = MemoryClient
@@ -263,7 +341,7 @@ class SearchRequest(BaseModel):
 
 
 app = FastAPI(title=f"bench shim ({BACKEND})")
-backend: Any = Mem0Backend() if BACKEND == "mem0" else TrwBackend()
+backend: Any = None  # built in main(), so importing this module (tests) loads no model or store
 _stats = {"add": 0, "search": 0, "add_ms": 0.0, "search_ms": 0.0}
 
 
@@ -301,12 +379,23 @@ async def delete_all(user_id: str = Query(...)) -> Any:
 
 @app.get("/health")
 def health() -> Any:
-    return {"status": "ok", "backend": BACKEND, "stats": _stats}
+    # run.sh checks backend, data_dir and pid, so a stale shim on the same port is never benchmarked.
+    return {
+        "status": "ok",
+        "backend": BACKEND,
+        "data_dir": str(DATA_DIR),
+        "pid": os.getpid(),
+        "embed_model": EMBED_MODEL,
+        "llm_model": LLM_MODEL if BACKEND == "mem0" else None,
+        "stats": _stats,
+    }
 
 
 def main() -> None:
     import uvicorn
 
+    global backend
+    backend = Mem0Backend() if BACKEND == "mem0" else TrwBackend()
     port = int(os.getenv("BENCH_PORT", "8888"))
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
 

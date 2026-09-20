@@ -124,7 +124,7 @@ def _get_model(model_name: str, *, local_only: bool = False) -> object | None:
                 "reranker_model_load_may_download",
                 model=model_name,
                 host="huggingface.co",
-                disable="TRW_OFFLINE=1 or MEMORY_RECALL_RERANK=false",
+                disable="TRW_OFFLINE=1, HF_HUB_OFFLINE=1 or local_only",
             )
         try:
             _LOADED_MODELS[key] = _cross_encoder_cls(model_name, max_length=512, local_files_only=local_files_only)

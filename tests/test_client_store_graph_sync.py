@@ -18,6 +18,8 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
+from ._optional_extras import requires_sqlite_vec
+
 
 class TestDbapiGraphCompatibility:
     def test_graph_update_accepts_dbapi_compatible_connection_proxy(self, tmp_path: Path) -> None:
@@ -191,6 +193,7 @@ class TestRbacEnforcement:
             assert stored["status"] == "stored"
             assert elapsed < _SLOW_GRAPH_SECONDS / 2
 
+    @requires_sqlite_vec
     async def test_store_cross_validates_matching_project_entries(
         self,
         tmp_path: Path,

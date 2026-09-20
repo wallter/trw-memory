@@ -94,8 +94,9 @@ async def try_hybrid_recall(
     ``None`` preserves the legacy behaviour of embedding inside the dense step.
     """
     try:
+        from trw_memory.retrieval import _adaptive_floor
         from trw_memory.retrieval.pipeline import hybrid_search
-    except ImportError:
+    except ImportError:  # trw-fail-silent-allow: optional retrieval extras absent, caller falls back to keyword recall
         return None
 
     total_start = perf_counter()
@@ -283,6 +284,7 @@ async def try_hybrid_recall(
     # so the scope is minted for exactly that one -- through the authorizer, not
     # by hand, so the RBAC check runs on this surface too.
     scope = authorize_namespaces(client._config, [client._namespace], Permission.READ, "recall")
+    floor = _adaptive_floor.adaptive_rerank_floor(limit)  # PRD-CORE-284: scales with the caller's limit
     hybrid_search_start = perf_counter()
     try:
         ranked = hybrid_search(
@@ -304,20 +306,18 @@ async def try_hybrid_recall(
             fusion_mode=client._config.recall_fusion_mode,
             validity_age_decay=client._config.recall_validity_age_decay,
             validity_reference_time=invocation.temporal.reference_time if invocation else None,
-            rerank=client._config.recall_rerank,
+            rerank=True,  # unconditional; only a missing/uncached/offline model skips it
             rerank_model=client._config.recall_rerank_model,
             rerank_candidates=client._config.recall_rerank_candidates,
-            rerank_min_score=client._config.recall_rerank_min_score,
-            rerank_min_keep=client._config.recall_rerank_min_keep,
+            rerank_min_score=floor.min_score,
+            rerank_min_keep=floor.min_keep,
             rerank_local_only=client._config.local_only,
             # The entity-bridge second hop only runs when the cross-encoder
-            # scored the pool (MEMORY_RECALL_RERANK=false turns both off);
-            # MEMORY_RECALL_BRIDGE_HOP=false turns off just the hop.
+            # scored the pool; MEMORY_RECALL_BRIDGE_HOP=false turns it off.
             bridge_hop=client._config.recall_bridge_hop,
-            # When prefix was stripped, the cross-encoder also uses the
-            # stripped query — passing the original "latest guidance on X"
-            # confuses the ms-marco reranker because memory entries don't
-            # contain "guidance" vocabulary, causing a -4.5pp T-HR regression.
+            # When prefix was stripped, the cross-encoder also uses the stripped
+            # query — the original "latest guidance on X" confuses the ms-marco
+            # reranker (entries lack "guidance" vocabulary): -4.5pp T-HR.
             # rerank_query=None → the cross-encoder inherits retrieval_query.
         )
     except NamespaceScopeError:

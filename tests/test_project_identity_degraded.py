@@ -85,6 +85,8 @@ def test_a_plain_directory_is_not_degraded_without_git(no_git: None, tmp_path: P
 
 def test_a_real_repository_resolves_through_git(tmp_path: Path) -> None:
     """With git available the ordinary path is unchanged and undegraded."""
+    if not any(parent.joinpath(".git").exists() for parent in Path(__file__).resolve().parents):
+        pytest.skip("tests are running from an exported tree, not a git work tree")
     identity = resolve_project_identity(Path(__file__).parent)
 
     assert identity.source == "git"

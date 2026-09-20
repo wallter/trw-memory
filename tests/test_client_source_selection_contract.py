@@ -122,7 +122,6 @@ async def test_reranking_cannot_promote_deferred_durable_over_live_transient(
     source_client: MemoryClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pytest.importorskip("rank_bm25")
-    monkeypatch.setattr(source_client._config, "recall_rerank", True)
     monkeypatch.setattr(source_client, "_fallback_recall", AsyncMock(side_effect=AssertionError("hybrid required")))
     reranked = []
 

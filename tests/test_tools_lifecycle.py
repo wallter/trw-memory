@@ -19,6 +19,8 @@ from trw_memory.tools.consolidate import memory_consolidate_impl
 from trw_memory.tools.status import memory_status_impl
 from trw_memory.tools.store import memory_store_impl
 
+from ._optional_extras import requires_sqlite_vec
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -205,6 +207,7 @@ class TestMemoryStoreImpl:
             ).fetchone()
             assert tuple(row) == ("sprint-37", None, "active")
 
+    @requires_sqlite_vec
     def test_store_cross_validates_matching_project_entries(self, tmp_path: Path) -> None:
         cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path), embedding_dim=4)
 

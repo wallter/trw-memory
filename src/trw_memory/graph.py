@@ -45,6 +45,7 @@ __all__ = [
 
 from trw_memory.exceptions import AuthorizationError, StorageError
 from trw_memory._graph_config import derive_graph_config as _derive_graph_config
+from trw_memory._graph_worker_pool import submit_graph_job as _submit_graph_job, worker_backend as _worker_backend
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.interface import StorageBackend
@@ -114,11 +115,9 @@ def _run_scheduled_graph_update(
     config: MemoryConfig,
     embedding: list[float] | None,
 ) -> None:
-    from trw_memory.integrations._backend import create_backend_from_config
-
-    # Reopen the namespace backend inside the worker so the caller can return
-    # immediately without sharing a soon-to-close SQLite connection across threads.
-    with create_backend_from_config(config, entry.namespace) as backend:
+    # Runs on the store's persistent worker (PRD-FIX-143), which owns one backend
+    # for its lifetime instead of reopening -- and re-running quick_check -- per row.
+    with _worker_backend(config, entry.namespace) as backend:
         update_entry_graph(entry, backend, embedding=embedding, config=config)
 
 
@@ -129,13 +128,18 @@ def schedule_graph_update(
     embedding: list[float] | None = None,
     config: MemoryConfig | None = None,
 ) -> bool:
-    """Dispatch best-effort graph enrichment off the write critical path."""
+    """Queue best-effort graph enrichment on the store's worker, off the write critical path."""
     resolved_config = _derive_graph_config(backend, config)
     if resolved_config is None:
         logger.debug("graph_update_skipped", entry_id=entry.id, reason="missing_background_config")
         return False
-    return _dispatch_graph_worker(
-        entry.id, backend, lambda: _run_scheduled_graph_update(entry, resolved_config, embedding)
+    # The lambda re-reads the module global, so tests can substitute the job body.
+    return _submit_graph_job(
+        resolved_config,
+        entry.namespace,
+        backend,
+        entry.id,
+        lambda: _run_scheduled_graph_update(entry, resolved_config, embedding),
     )
 
 
@@ -145,44 +149,23 @@ def schedule_graph_update_many(
     *,
     config: MemoryConfig | None = None,
 ) -> bool:
-    """Dispatch ONE background enrichment pass for a whole write batch (see ``_graph_batch``)."""
+    """Queue ONE enrichment pass per namespace of a write batch (see ``_graph_batch``)."""
     resolved_config = _derive_graph_config(backend, config)
     if not items or resolved_config is None:
         logger.debug("graph_update_skipped", count=len(items), reason="empty_batch_or_missing_background_config")
         return False
-    batch = list(items)
+    queued = True
+    for namespace in dict.fromkeys(entry.namespace for entry, _embedding in items):
+        sub_batch = [item for item in items if item[0].namespace == namespace]
 
-    def run() -> None:
-        from trw_memory.integrations._backend import create_backend_from_config
+        def run(
+            sub_batch: list[tuple[MemoryEntry, list[float] | None]] = sub_batch, namespace: str = namespace
+        ) -> None:
+            with _worker_backend(resolved_config, namespace) as ns_backend:
+                update_entries_graph(sub_batch, ns_backend, config=resolved_config)
 
-        # Reopen each namespace's backend inside the worker (see _run_scheduled_graph_update).
-        for namespace in dict.fromkeys(entry.namespace for entry, _embedding in batch):
-            with create_backend_from_config(resolved_config, namespace) as ns_backend:
-                update_entries_graph(
-                    [item for item in batch if item[0].namespace == namespace], ns_backend, config=resolved_config
-                )
-
-    return _dispatch_graph_worker(f"batch-{batch[0][0].id}", backend, run)
-
-
-def _dispatch_graph_worker(label: str, backend: StorageBackend, run: Callable[[], None]) -> bool:
-    def worker() -> None:
-        try:
-            run()
-        except (StorageError, sqlite3.Error, ValueError):
-            logger.warning("graph_update_background_failed", entry_id=label, exc_info=True)
-        finally:
-            _untrack_graph_thread(threading.current_thread())
-
-    thread = threading.Thread(target=worker, name=f"trw-memory-graph-{label}", daemon=True)
-    _track_graph_thread(thread, owner=backend)
-    try:
-        thread.start()
-    except RuntimeError:
-        _untrack_graph_thread(thread)
-        logger.warning("graph_update_dispatch_failed", entry_id=label, exc_info=True)
-        return False
-    return True
+        queued = _submit_graph_job(resolved_config, namespace, backend, f"batch-{sub_batch[0][0].id}", run) and queued
+    return queued
 
 
 def update_entry_graph(

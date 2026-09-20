@@ -24,6 +24,8 @@ from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.storage.yaml_backend import YAMLBackend
 
+from ._optional_extras import requires_sqlite_vec
+
 
 class _MinimalBackend(StorageBackend):
     """Smallest concrete backend — exercises the ABC's safe defaults."""
@@ -195,6 +197,7 @@ async def test_store_skips_embedder_when_no_vector_sink(client: MemoryClient, mo
     assert spy.embed_calls == []
 
 
+@requires_sqlite_vec
 async def test_store_embeds_and_upserts_when_backend_supports_vectors(
     client: MemoryClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -290,6 +293,7 @@ async def test_all_rejected_batch_never_acquires_provider(
     assert client._get_backend().count(namespace="default") == before
 
 
+@requires_sqlite_vec
 async def test_bulk_real_consumer_acquires_once_and_persists_vectors(
     client: MemoryClient,
     monkeypatch: pytest.MonkeyPatch,

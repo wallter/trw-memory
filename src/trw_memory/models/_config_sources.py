@@ -7,6 +7,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+import structlog
 from dotenv import dotenv_values
 from pydantic_settings import BaseSettings
 from pydantic_settings.sources import DotEnvSettingsSource, InitSettingsSource, PydanticBaseSettingsSource
@@ -53,20 +54,60 @@ def _check_retired_hype_settings(raw: dict[str, object], *, source: str, textual
 def _check_retired_hype_environment(dotenv_source: PydanticBaseSettingsSource) -> None:
     """Validate raw sources before ignore-empty/precedence discards evidence."""
     _check_retired_hype_settings(dict(os.environ), source="environment", textual=True)
-    if not isinstance(dotenv_source, DotEnvSettingsSource):
-        return
+    for path in _dotenv_files(dotenv_source):
+        _check_retired_hype_settings(_dotenv_raw(dotenv_source, path), source=f"dotenv {path}", textual=True)
+
+
+# PRD-CORE-284: removed settings whose behavior is now computed by
+# ``trw_memory.retrieval._adaptive_floor.adaptive_rerank_floor``. Unlike HyPE's
+# retirement this never raises (operator decision): any legacy value, neutral or
+# not, logs one structured warning per (setting, source) per process.
+_RETIRED_RERANK_SETTINGS = frozenset({"recall_rerank", "recall_rerank_min_score", "recall_rerank_min_keep"})
+_RERANK_REPLACEMENT = (
+    "reranking always runs; the confidence floor is adaptive_rerank_floor(limit): "
+    "score >= -8.0, top max(5, ceil(limit * 0.5)) rows always kept"
+)
+_warned_rerank_settings: set[tuple[str, str]] = set()
+_logger = structlog.get_logger(__name__)
+
+
+def _warn_retired_rerank_settings(raw: dict[str, object], *, source: str) -> None:
+    """Warn (never raise) about a leftover removed rerank setting in one source."""
+    for key in raw:
+        if not isinstance(key, str):
+            continue
+        name = key.lower().removeprefix("memory_")
+        if name not in _RETIRED_RERANK_SETTINGS or (name, source) in _warned_rerank_settings:
+            continue
+        _warned_rerank_settings.add((name, source))
+        _logger.warning(
+            "retired_setting_ignored",
+            setting=key,
+            source=source,
+            prd="PRD-CORE-284",
+            replacement=_RERANK_REPLACEMENT,
+        )
+
+
+def _dotenv_files(dotenv_source: PydanticBaseSettingsSource) -> list[Path]:
+    """Existing dotenv files a settings source would load."""
+    if not isinstance(dotenv_source, DotEnvSettingsSource) or dotenv_source.env_file is None:
+        return []
     files = dotenv_source.env_file
-    if files is None:
-        return
     paths = [files] if isinstance(files, (str, os.PathLike)) else files
-    for path in paths:
-        expanded = Path(path).expanduser()
-        if expanded.is_file():
-            _check_retired_hype_settings(
-                dict(dotenv_values(expanded, encoding=dotenv_source.env_file_encoding or "utf-8")),
-                source=f"dotenv {expanded}",
-                textual=True,
-            )
+    return [p for p in (Path(path).expanduser() for path in paths) if p.is_file()]
+
+
+def _dotenv_raw(dotenv_source: PydanticBaseSettingsSource, path: Path) -> dict[str, object]:
+    encoding = getattr(dotenv_source, "env_file_encoding", None) or "utf-8"
+    return dict(dotenv_values(path, encoding=encoding))
+
+
+def _warn_retired_rerank_environment(dotenv_source: PydanticBaseSettingsSource) -> None:
+    """Inspect the environment and dotenv files before Pydantic drops the aliases."""
+    _warn_retired_rerank_settings(dict(os.environ), source="environment")
+    for path in _dotenv_files(dotenv_source):
+        _warn_retired_rerank_settings(_dotenv_raw(dotenv_source, path), source=f"dotenv {path}")
 
 
 def _read_trw_config_yaml() -> dict[str, object]:
@@ -99,6 +140,7 @@ def _first_truthy_item(values: object) -> object | None:
 
 def _map_trw_config_yaml_to_memory_settings(raw: dict[str, object]) -> dict[str, Any]:
     _check_retired_hype_settings(raw, source=".trw/config.yaml")
+    _warn_retired_rerank_settings(raw, source=".trw/config.yaml")
     mapped: dict[str, Any] = {}
 
     # PRD-SEC-004-FR06: derive sync_enabled (learning-content sync) from the

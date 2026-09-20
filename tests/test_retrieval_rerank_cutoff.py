@@ -6,8 +6,10 @@ from unittest.mock import patch
 
 import pytest
 
+from trw_memory.client import MemoryClient
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.retrieval._adaptive_floor import RERANK_MIN_SCORE, adaptive_rerank_floor
 from trw_memory.retrieval.pipeline import hybrid_search
 from trw_memory.security.namespace_scope import authorize_namespaces
 from trw_memory.security.rbac import Permission
@@ -87,17 +89,84 @@ def test_unavailable_cross_encoder_keeps_fusion_order_and_count() -> None:
     assert len(out) == 8
 
 
-def test_config_defaults_and_env_alias() -> None:
-    cfg = MemoryConfig()
-    assert cfg.recall_rerank_min_score == -8.0 and cfg.recall_rerank_min_keep == 5
-    assert MemoryConfig(recall_rerank_min_score=None).recall_rerank_min_score is None
+def test_rerank_knobs_are_no_longer_config_fields() -> None:
+    """PRD-CORE-284 FR04: the floor is computed, not configured."""
+    for field in ("recall_rerank", "recall_rerank_min_score", "recall_rerank_min_keep"):
+        assert field not in MemoryConfig.model_fields
+
+
+@pytest.mark.parametrize("limit", range(1, 11))
+def test_adaptive_rerank_floor_matches_legacy_min_keep_for_limit_1_to_10(limit: int) -> None:
+    """PRD-CORE-284 FR01/NFR01: exhaustive identity with the legacy fixed min_keep=5."""
+    floor = adaptive_rerank_floor(limit)
+    assert floor == (-8.0, 5)
+    assert floor.min_score == RERANK_MIN_SCORE == -8.0
+    assert floor.min_keep == 5
+
+
+@pytest.mark.parametrize(
+    ("limit", "min_keep"),
+    # 11 and 13 are the first limits where ceil(limit/2) passes 5 (the PRD's
+    # switch-matrix row "13 -> 5" contradicts its own formula; the formula wins).
+    [(11, 6), (13, 7), (25, 13), (50, 25), (100, 50), (0, 0), (-3, 0)],
+)
+def test_adaptive_rerank_floor_scales_above_ten_and_is_empty_below_one(limit: int, min_keep: int) -> None:
+    assert adaptive_rerank_floor(limit) == (-8.0, min_keep)
+
+
+def _recall_client(tmp_path, monkeypatch, n: int) -> MemoryClient:
+    monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "mem"))
+    monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+    client = MemoryClient(namespace="default", mode="local")
+    backend = client._get_backend()
+    for i in range(n):
+        backend.store(MemoryEntry(id=f"r{i:02d}", content=f"zebra fact number {i} about stripes", namespace="default"))
+    return client
+
+
+@pytest.mark.parametrize(("limit", "expected"), [(10, 5), (50, 25), (3, 3)])
+async def test_recall_keeps_the_adaptive_min_keep_when_everything_is_below_the_floor(
+    tmp_path, monkeypatch, limit: int, expected: int
+) -> None:
+    """End to end: MemoryClient.recall(limit) returns exactly adaptive min_keep rows
+    when the cross-encoder scores every candidate below -8."""
+    pytest.importorskip("rank_bm25")
+    client = _recall_client(tmp_path, monkeypatch, 60)
+
+    def all_low(query, entries, **kwargs):
+        return [(e, -20.0 - i * 0.01) for i, e in enumerate(entries)]
+
+    with patch("trw_memory.retrieval.reranker.cross_encode_scores", side_effect=all_low):
+        rows = await client.recall("zebra stripes", limit=limit, include_org_memories=False)
+    assert len(rows) == expected
+
+
+async def test_unavailable_cross_encoder_on_recall_returns_the_full_limit(tmp_path, monkeypatch) -> None:
+    """FR03: with the model uncached under TRW_OFFLINE, recall keeps fusion order and
+    count -- the automatic "off" path, with no floor applied."""
+    from trw_memory.retrieval import reranker
+
+    pytest.importorskip("rank_bm25")
+    client = _recall_client(tmp_path, monkeypatch, 60)
+
+    class Uncached:
+        def __init__(self, name, **kwargs):
+            assert kwargs["local_files_only"] is True  # offline: never a download
+            raise OSError("not in local cache")
+
+    monkeypatch.setenv("TRW_OFFLINE", "1")
+    monkeypatch.setattr(reranker, "_import_cross_encoder", lambda: True)
+    monkeypatch.setattr(reranker, "_cross_encoder_cls", Uncached)
+    monkeypatch.setattr(reranker, "_LOADED_MODELS", {})
+    rows = await client.recall("zebra stripes", limit=50, include_org_memories=False)
+    assert len(rows) == 50
 
 
 def test_confidence_bounded_merge_holds_tier_rows_to_the_same_floor() -> None:
     from trw_memory._client_recall_helpers import merge_local_candidates
     from trw_memory.retrieval.recall_selection import LocalCandidate
 
-    cfg = MemoryConfig(recall_rerank=True, recall_rerank_min_score=-8.0)
+    cfg = MemoryConfig()
     local = [LocalCandidate(MemoryEntry(id="h1", content="hybrid hit", namespace=NS), 1.0)]
     noise = LocalCandidate(MemoryEntry(id="w1", content="warm noise", namespace=NS), 0.4)
     good = LocalCandidate(MemoryEntry(id="w2", content="warm good", namespace=NS), 0.4)
@@ -111,7 +180,7 @@ def test_confidence_bounded_merge_holds_tier_rows_to_the_same_floor() -> None:
         merged = merge_local_candidates(local, [noise, good, cold], 10, ["hit"], cfg, None, query="hit")
     assert [c.entry.id for c in merged] == ["h1", "w2", "c1"]
     assert all(c.tier_fallback for c in merged[1:])
-    # legacy callers (no query) and a disabled floor keep every tier row
+    # legacy callers (no query) keep every tier row
     legacy = merge_local_candidates(local, [noise, good, cold], 10, ["hit"], cfg, None)
     assert [c.entry.id for c in legacy] == ["h1", "w1", "w2", "c1"]
 
@@ -158,10 +227,3 @@ def test_offline_switch_forces_local_files_only_and_never_downloads(monkeypatch,
     assert calls[-1]["local_files_only"] is True
     reranker._get_model("some/model")  # online: a network-capable load is allowed
     assert calls[-1]["local_files_only"] is False
-
-
-def test_min_keep_must_be_at_least_one() -> None:
-    import pytest
-
-    with pytest.raises(ValueError):
-        MemoryConfig(recall_rerank_min_keep=0)

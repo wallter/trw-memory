@@ -32,6 +32,8 @@ from trw_memory.retrieval.dense import cosine_similarity
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.storage.yaml_backend import YAMLBackend
 
+from ._optional_extras import requires_bm25
+
 # ---------------------------------------------------------------------------
 # Shared fixture — entry factory
 # ---------------------------------------------------------------------------
@@ -445,6 +447,7 @@ class TestBm25FallbackJaccard:
         for _, score in results:
             assert 0.0 <= score <= 1.0
 
+    @requires_bm25
     def test_fallback_non_matching_entries_excluded(self) -> None:
         """Entries with zero overlap must not appear in fallback results."""
         e1 = self._make_entry("j-match", "python testing patterns")

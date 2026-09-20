@@ -1,20 +1,41 @@
 name: CI
 
-# A push to main is only ever a release sync from the monorepo, whose tree has
-# already passed this same workflow in `make release-check` (a faithful local
-# replay of these jobs) before it was cut; re-running it here doubled every
-# release's wall time (2026-09-17: two 20-minute reruns for test-only syncs).
-# Pull requests still run it, and it can be started by hand. The tag-triggered
-# release.yml keeps the multi-OS install smoke, which is the cross-platform
-# check that matters for a published wheel.
+# What runs where (PRD-INFRA-188 Amendment 01):
+# - Pull requests and manual dispatches run this workflow at the package baseline
+#   suite (full). A dispatch can pick either suite.
+# - The tag-triggered release.yml calls this workflow with suite=full, and publish
+#   waits for it: the package's full pytest suite on Linux gates every release.
+# - A push to main (a release sync) does not run it; the monorepo's
+#   `release_public.py check` replays these steps locally before the cut, and its
+#   Linux leg runs the full suite in a container when Docker is available.
+# - release.yml also keeps the multi-OS installed-wheel smoke test.
 on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      suite:
+        description: "unit or full"
+        type: choice
+        options: [unit, full]
+        default: full
+      correlation_id:
+        description: "set by release_public.py all so it can find this exact run"
+        type: string
+        default: ""
+  workflow_call:
+    inputs:
+      suite:
+        type: string
+        default: full
+
+run-name: ${{ inputs.correlation_id && format('CI {0}', inputs.correlation_id) || github.event.pull_request.title || 'CI' }}
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      TRW_SUITE: ${{ inputs.suite || 'full' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -89,11 +110,20 @@ jobs:
       # measured; measuring the whole package from startup also removes the
       # mid-collection numpy import that run needed a warm-up plugin for.
       - name: Test with coverage
+        if: env.TRW_SUITE == 'full'
         run: >-
           pytest tests/ -q
           --cov=trw_memory
           --cov-branch
           --cov-report=xml:coverage.xml
+          --junitxml=junit.xml
+          && echo full > suite-ran.txt
+      # A dispatch with suite=unit only; the coverage gates below need the full suite.
+      - name: Test (unit tier)
+        if: env.TRW_SUITE != 'full'
+        run: pytest tests/ -m unit -q --junitxml=junit.xml && echo unit > suite-ran.txt
+      - name: Verify the requested suite ran
+        run: python .github/scripts/verify_suite.py --requested "$TRW_SUITE" --junit junit.xml --marker suite-ran.txt
       - name: Upload coverage XML
         if: always()
         uses: actions/upload-artifact@v4
@@ -101,6 +131,7 @@ jobs:
           name: coverage-xml
           path: coverage.xml
       - name: Coverage gate (85%, lines + branches)
+        if: env.TRW_SUITE == 'full'
         run: coverage report --fail-under=85
       # INFRA-020 security coverage gate. Threshold calibrated 90 -> 88
       # (2026-06-16): the standalone CI env (full real dep set incl. pynacl and an
@@ -109,4 +140,5 @@ jobs:
       # not execute on a headless runner. FOLLOW-UP: targeted trw_memory.security
       # branch tests to restore a 90% floor.
       - name: INFRA-020 security coverage gate (88%, lines + branches)
+        if: env.TRW_SUITE == 'full'
         run: coverage report --include='*/trw_memory/security/*' --fail-under=88

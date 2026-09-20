@@ -26,6 +26,8 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.interface import StorageBackend
 
+from ._optional_extras import requires_sqlite_vec
+
 DIM = 8
 SPACE = EmbeddingSpace("a" * 64, "test-encoder:graph-batch", DIM)
 OTHER_SPACE = EmbeddingSpace("b" * 64, "test-encoder:other", DIM)
@@ -104,6 +106,7 @@ class TestCandidateVectors:
 
 
 class TestUpdateEntriesGraph:
+    @requires_sqlite_vec
     def test_batch_writes_exactly_the_edges_brute_force_predicts(self, tmp_path: Path) -> None:
         ns = "project:alpha"
         vectors = _cluster_vectors(24, seed=11)
@@ -127,6 +130,7 @@ class TestUpdateEntriesGraph:
             assert edges[key] == pytest.approx(round(sim, 4), abs=1e-4)
         assert counts["similarity_edges"] >= len(expected)
 
+    @requires_sqlite_vec
     def test_candidates_outside_the_entry_space_get_no_edge(self, tmp_path: Path) -> None:
         ns = "project:alpha"
         vec = [1.0] + [0.0] * (DIM - 1)
@@ -158,6 +162,7 @@ class TestUpdateEntriesGraph:
 
 
 class TestCrossValidateEntries:
+    @requires_sqlite_vec
     def test_one_sibling_walk_per_batch_and_matches_still_validate(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
         match = [0.0] * (DIM - 1) + [1.0]
@@ -219,6 +224,7 @@ class TestBulkStoreSchedulesOnePass:
 
 
 class TestRecentVectorRecords:
+    @requires_sqlite_vec
     def test_sqlite_selects_exactly_the_list_entries_candidate_set(self, tmp_path: Path) -> None:
         from datetime import datetime, timedelta, timezone
 

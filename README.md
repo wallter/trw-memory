@@ -21,6 +21,7 @@ Designed as the storage backend for [trw-mcp](https://github.com/wallter/trw-mcp
 - **Local-first.** With the default configuration all data lives in a local SQLite store (plus an optional YAML sidecar). There is no usage tracking or content phone-home; the only network-capable surfaces are optional model downloads and opt-in remote sync. See [Telemetry and network behavior](#telemetry-and-network-behavior).
 - **No generative LLM call at write time.** `store_conversation()` stores every turn verbatim with its date and the turn it replied to. Ingest never calls a generative model (the optional local embedding model still encodes each turn); recall does the work.
 - **Hybrid retrieval, optional.** With the retrieval extras installed: BM25 (with stemming) + dense vectors via sqlite-vec + Reciprocal Rank Fusion + a cross-encoder re-ranker. Without them, retrieval degrades gracefully to the backend's built-in keyword search.
+- **Measured on public benchmarks.** With no LLM in the loop, the gold evidence turn lands in the top 10 for **85.7%** of [LOCOMO](#benchmarks) questions (n = 1,540) and **93.8%** of LongMemEval_S questions (n = 470); top 50: 92.7% and 97.4%. Write and recall costs stay flat as the store and the number of projects sharing it grow. See [Benchmarks](#benchmarks) for method and caveats.
 - **Works offline.** `TRW_OFFLINE=1` / `HF_HUB_OFFLINE=1` block model downloads; `local_only: true` hard-blocks all remote sync and model download. Hybrid retrieval offline needs the models already in the local cache.
 - **MCP memory server included.** `trw-memory-server` exposes store, recall, search, consolidate, forget and more as MCP tools over stdio, or over a per-user loopback HTTP daemon.
 - **Evaluating a mem0 alternative?** Using mem0's open-source evaluation suite on one LOCOMO conversation (n = 152 questions per system, one run each, local `llama3.1` as answerer, judge and mem0's extraction model), neither paired test detected a statistically significant accuracy difference between trw-memory and mem0 (OSS), and trw-memory called no generative LLM to ingest the conversation. That does not establish equivalence or superiority; read the [numbers and caveats](#single-conversation-comparison-with-mem0-oss-using-mem0s-evaluation-suite) first.
@@ -29,7 +30,7 @@ Designed as the storage backend for [trw-mcp](https://github.com/wallter/trw-mcp
 ## Features: hybrid retrieval, knowledge graph, lifecycle, security
 
 - **MemoryClient SDK** -- High-level async Python client with store/bulk_store/store_many/recall/search/search_fts/forget plus audit_learning and review_quarantined
-- **Hybrid Search (BM25 + vector)** -- BM25 keyword matching + dense vector similarity via sqlite-vec, combined with Reciprocal Rank Fusion (RRF). [Learn more](https://trwframework.com/docs)
+- **Hybrid Search (BM25 + vector + re-ranker)** -- BM25 keyword matching + dense vector similarity via sqlite-vec, combined with Reciprocal Rank Fusion (RRF), then a cross-encoder re-rank with a confidence floor that scales with the requested limit. [Learn more](https://trwframework.com/docs)
 - **FTS5 keyword search** -- `MemoryClient.search_fts()` runs indexed SQLite FTS5 keyword search with BM25 ranking over content/detail/tags for pure-keyword queries that don't need hybrid ranking; degrades to an empty result when FTS5 is unavailable
 - **Hybrid order preservation by default** -- recall preserves the hybrid BM25+dense+RRF order when enough local candidates are already available, avoiding a legacy score-scale mismatch in tier merging. To restore the legacy tier rescore for a workload, set `MEMORY_RECALL_PRESERVE_HYBRID_ORDER=false`.
 - **Tiered Storage** -- Hot/warm/cold tiers for fast recall, warm-sidecar persistence, recall-time cold promotion, and explicit sweep-based archiving/purging. [Architecture details](https://trwframework.com/docs)
@@ -47,7 +48,7 @@ Designed as the storage backend for [trw-mcp](https://github.com/wallter/trw-mcp
 
 ## How trw-memory fits into TRW Framework
 
-trw-memory is the standalone memory engine for [TRW (The Real Work)](https://trwframework.com) — a methodology layer for AI-assisted development that provides stateless agents with a persistent memory layer **designed to enable self-improvement across sessions** via [knowledge compounding](https://trwframework.com/docs). *The outcome effect of cross-session memory on coding tasks is an open empirical question; early SWE-bench single-shot runs (n≥40) produced null. See the [verification docs](https://trwframework.com/docs/verification) for the current methodology and evidence posture.* It works alongside [trw-mcp](https://github.com/wallter/trw-mcp), the MCP server that builds its tooling on this engine.
+trw-memory is the standalone memory engine for [TRW (The Real Work)](https://trwframework.com) — a methodology layer for AI-assisted development that provides stateless agents with a persistent memory layer **designed to enable self-improvement across sessions** via [knowledge compounding](https://trwframework.com/docs). *Cross-session recall is measured to let an agent finish work it otherwise cannot; broad coding-task lift is not established, and the measured SWE-bench Verified result is unfavourable (56 vs 79 of 112 paired-valid problems). See the [verification docs](https://trwframework.com/docs/verification) for the current methodology and evidence posture.* It works alongside [trw-mcp](https://github.com/wallter/trw-mcp), the MCP server that builds its tooling on this engine.
 
 - **trw-memory** (this repo): Standalone AI agent memory engine with hybrid retrieval, scoring, and lifecycle
 - **trw-mcp**: MCP server for AI coding agents — uses trw-memory as its backend
@@ -227,9 +228,23 @@ Ingestion measurements for the same run (419 turns, one machine, single run):
 
 These measurements do not establish total operating cost: recall and answer generation are not included, and "top k" counts stored items, not equal token budgets (a verbatim turn and an extracted fact are different units). Verbatim storage avoids generative rewriting during ingestion; it does not guarantee correct input metadata, retrieval, or answers.
 
-How trw-memory gets there without a generative model at write time: `store_conversation()` keeps each turn verbatim with its conversational context, and recall does the work (BM25 with stemming + dense vectors + rank fusion + a cross-encoder re-ranker that drops low-confidence rows). Evidence retrieval over all ten LOCOMO conversations (**n = 1,540** questions, no LLM in the loop): the gold evidence turn is in the top 10 for **84.0%** of questions and in the top 50 for **90.5%**.
+How trw-memory gets there without a generative model at write time: `store_conversation()` keeps each turn verbatim with its conversational context, and recall does the work (BM25 with stemming + dense vectors + rank fusion + a cross-encoder re-ranker that drops low-confidence rows). Evidence retrieval over all ten LOCOMO conversations (**n = 1,540** questions, no LLM in the loop): the gold evidence turn is in the top 10 for **85.7%** of questions and in the top 50 for **92.7%** (mean reciprocal rank 60.3).
 
-An additional, non-default configuration (`MEMORY_RECALL_RERANK_MIN_SCORE=-5`) scored 92.1% at top 10 and 95.4% at top 50 on the same questions. That threshold was chosen after inspecting misses on this same conversation, so it is an exploratory result, not an independently validated improvement. Method, scripts and the paired-comparison tool: [`benchmarks/locomo/`](https://github.com/wallter/trw-memory/blob/main/benchmarks/locomo/README.md).
+A second, independent LLM-free benchmark runs the same way: **LongMemEval_S** (cleaned, HF revision `98d7416c`), **n = 470** non-abstention questions, each with its own haystack of 38-62 sessions. An answer-bearing turn is in the top 10 for **93.8%** of questions (Wilson 95% CI 90.6-95.1, first run of this configuration) and in the top 50 for **97.4%**; the answer *session* is in the top 10 for 93.3%. Weakest question type: single-session preference, 73.3% (n = 30). Harness: [`benchmarks/longmemeval/`](https://github.com/wallter/trw-memory/blob/main/benchmarks/longmemeval/README.md).
+
+Both benchmarks are the inner loop for retrieval changes, and a change ships only if it is non-inferior on **both**. Measured that way, paired question-by-question against the previous defaults:
+
+| Change | LOCOMO (n = 1,540) | LongMemEval (n = 470) |
+|---|---|---|
+| `bge-small-en-v1.5` replaces `all-MiniLM-L6-v2`; session dates indexed with each turn | hit@10 84.0% -> 85.1% (McNemar p = 0.044) | not run for this change |
+| Entity-bridge second hop after re-ranking | hit@10 85.1% -> 85.6% (p = 0.022); multi-hop recall@10 49.9% -> 51.3% (p = 0.020) | no question changed outcome |
+| Confidence floor scales with the requested limit | hit@50 92.5% -> 92.7% (p = 0.25, **not significant**) | hit@50 95.3% -> 97.4% (p = 0.002); rows returned at limit 50: min 5 -> 25 |
+
+Measured and **rejected** on the same harnesses, so they are not in the product: CombMax fusion, larger candidate pools, a different RRF constant, and MMR / Dartboard diversity re-ranking (no significant gain on both; diversity cut LOCOMO temporal recall), plus pseudo-relevance feedback, larger cross-encoders, `bge-base` and `mxbai-embed-xsmall`.
+
+### Where this sits against other memory systems
+
+Published LOCOMO numbers for mem0, Zep, Memobase, MemOS and LightMem are **LLM-judged answer accuracy** for a whole retrieve-then-generate pipeline. The retrieval rates above measure something narrower: whether the gold evidence reached the top k, with no model in the loop. **They are not comparable**, and a table placing them side by side would mislead. Two further cautions: the LOCOMO judged-accuracy literature is actively disputed between vendors, and in mem0's own paper a full-context baseline with no memory at all (72.9%) scores above mem0 itself (66.9%). The only like-for-like comparison here is the paired table above, where both systems ran inside mem0's harness with the same answerer and judge.
 
 ### Hybrid retrieval beats either ranker alone
 
@@ -258,7 +273,22 @@ Hybrid retrieval surfaced more of these previously stored duplicates; this evalu
 
 On a controlled recall-dependent benchmark (H1-MEMORY-BENCH), agents **with** memory solved every task that required recalling a fact established in an earlier session — **58/58** — while agents **without** memory solved **0/50** (the fact is absent by construction). Paired McNemar **p = 3.6×10⁻¹⁵** across **49 matched pairs** (exceeds the pre-registered n ≥ 30), replicated on a second model family.
 
-> **Scope, honestly.** This demonstrates the *mechanism*: cross-session recall lets an agent complete work it otherwise cannot. Whether that compounds into broad, end-to-end coding-task improvement is a separate, still-open question — early SWE-bench single-shot runs (n ≥ 40) produced null. See the [verification docs](https://trwframework.com/docs/verification) for the full evidence posture.
+> **Scope, honestly.** This demonstrates the *mechanism*: cross-session recall lets an agent complete work it otherwise cannot. Whether that compounds into broad, end-to-end coding-task improvement is a separate question, and the measured answer so far is unfavourable: on SWE-bench Verified, TRW solved 56 of 112 paired-valid problems against the baseline's 79 (McNemar p = 6.6×10⁻⁵). That surface is treated as contaminated and settles nothing in either direction, but no general outcome-lift claim is supported. See the [verification docs](https://trwframework.com/docs/verification) for the full evidence posture.
+
+### Cost that does not grow with the store
+
+Recall and write paths were profiled and the terms that scaled with store size were removed. One Apple-silicon machine, single runs under load, before and after the 2026-09 changes:
+
+| Operation | Before | After |
+|---|---|---|
+| Ingest per row, 4th LOCOMO conversation into a shared store | 1,464 ms | 15 ms |
+| Store one entry with 20 sibling project namespaces present | 708 ms | 15 ms |
+| Access-time sidecar write per recall, 5,000 / 20,000 rows | 144 / 289 ms | 1.2 / 1.3 ms |
+| Warm-row scan per recall, 5,000 / 20,000 rows | 11.3 / 60.5 ms | 0.3 / 3.2 ms |
+| Store + background graph enrichment, rows 901-1,200 | 15.85 +/- 0.98 ms | 8.38 +/- 0.79 ms |
+| Similarity-edge enrichment at 10,000 rows | 12.4 ms | 2.3 ms |
+
+The shape matters more than any single row: these costs used to rise with the number of stored rows and with the number of projects sharing a store, and are now flat. Similarity edges are searched over the whole namespace instead of the newest 500 rows, and bytes written per recall fell from megabytes to about 18 KB.
 
 *Throughput (historical single-run baseline, not CI-backed, measured before cross-encoder re-ranking became the default; re-ranking adds roughly 30-300 ms per recall on CPU): sub-millisecond store (p95 ≈ 0.31 ms) and ~116 ms hybrid recall p95 at 1,000 entries; on-disk footprint ≈ 1.2 MB per 1k entries.*
 
@@ -335,7 +365,7 @@ Query --> BM25 (keyword, rank-bm25) --+
 Query --> Dense (cosine, sqlite-vec) --+
 ```
 
-BM25 drops function words from the query and suffix-stems tokens on both sides ("researched" meets "research"); after fusion a cross-encoder re-ranks the top `recall_rerank_candidates` (default on, `MEMORY_RECALL_RERANK=false` to disable for latency-critical paths). The RRF constant `k` is configurable via `MemoryConfig.rrf_k` (env `MEMORY_RRF_K`); the shipped default is tuned by the memory meta-harness loop and may change between releases, so treat the exact value as a default rather than a contract.
+BM25 drops function words from the query and suffix-stems tokens on both sides ("researched" meets "research"); after fusion a cross-encoder re-ranks the top `recall_rerank_candidates` on every `MemoryClient.recall()` and drops rows it scores below -8, except the top `max(5, ceil(limit / 2))`, which are always kept (`adaptive_rerank_floor`: 5 rows at the default `limit=10`, 25 at `limit=50`). There is no switch to turn re-ranking off; it is skipped only when `sentence-transformers` or the cached model is unavailable, in which case recall keeps fusion order. The RRF constant `k` is configurable via `MemoryConfig.rrf_k` (env `MEMORY_RRF_K`); the shipped default is tuned by the memory meta-harness loop and may change between releases, so treat the exact value as a default rather than a contract.
 
 The pipeline gracefully degrades: if BM25 is unavailable, only dense search runs (and vice versa). If neither is available, falls back to the storage backend's built-in keyword search (case-insensitive `LIKE` matching).
 
@@ -465,7 +495,7 @@ trw-memory is **local-first**: with the default configuration all data lives in 
 | Surface | When | Default | Opt-out / control |
 |---------|------|---------|-------------------|
 | **Embedding model download** | Only when the embedding model — `BAAI/bge-small-en-v1.5` by default (33M parameters, 384-dim, about 130 MB of weights; set `MEMORY_EMBEDDING_MODEL` to change it) — is **not** already complete in your local Hugging Face cache. A complete cached snapshot makes **zero** huggingface.co requests — the loader probes the cache before deciding, and forces `local_files_only=True` unconditionally when the snapshot is complete (only with the `[embeddings]` extra installed) | enabled when the extra is present | `TRW_OFFLINE=1` / `HF_HUB_OFFLINE=1`, or `local_only: true` (alias `memory_local_only`) — forces `local_files_only` so no download is attempted; a disclosure log line precedes any network-capable load |
-| **Cross-encoder model download** (re-ranker, on by default since 0.19.0) | Only when `cross-encoder/ms-marco-MiniLM-L-6-v2` is not in your local Hugging Face cache and the `[embeddings]` extra is installed; the same offline switches force `local_files_only=True`, in which case an uncached model means recall keeps fusion order (no download, no error) | enabled when the extra is present | `TRW_OFFLINE=1` / `HF_HUB_OFFLINE=1`, `local_only: true`, or `MEMORY_RECALL_RERANK=false`; a disclosure log line precedes any network-capable load |
+| **Cross-encoder model download** (re-ranker, on by default since 0.19.0) | Only when `cross-encoder/ms-marco-MiniLM-L-6-v2` is not in your local Hugging Face cache and the `[embeddings]` extra is installed; the same offline switches force `local_files_only=True`, in which case an uncached model means recall keeps fusion order (no download, no error) | enabled when the extra is present | `TRW_OFFLINE=1` / `HF_HUB_OFFLINE=1`, or `local_only: true`; a disclosure log line precedes any network-capable load |
 | **Remote sync / publish** | Only when `sync_enabled=true` AND `local_only=false` | **off** (`sync_enabled` defaults `false`) | leave sync disabled, or set `local_only: true` to hard-block all egress |
 
 **A warm cache performs no Hub request, and embedding egress is independent of the consent flags.** A fetch is attempted only when the cached snapshot is incomplete or absent **and** no offline switch is engaged; in exactly that case one structured disclosure log names the host and the switch that would block it. `learning_sharing_enabled` and `platform_telemetry_enabled` govern learning-content publishing and usage telemetry respectively — **neither gates the embedding model fetch**. Embedding egress is governed by the local cache, the offline switches, and `local_only`.
@@ -678,7 +708,7 @@ A persistent, local-first memory engine for AI agents. It stores memories in SQL
 
 ### Does trw-memory need an LLM to store memories?
 
-No. `store_conversation()` stores every turn verbatim and calls no generative LLM at ingest time; the reader does the inference at recall time. There is also no `[llm]` extra and no LLM-backed consolidation: consolidation summarises a cluster with a longest-content heuristic. Dense retrieval uses a local sentence-transformers embedding model (`all-MiniLM-L6-v2`) from the optional `[embeddings]` extra.
+No. `store_conversation()` stores every turn verbatim and calls no generative LLM at ingest time; the reader does the inference at recall time. There is also no `[llm]` extra and no LLM-backed consolidation: consolidation summarises a cluster with a longest-content heuristic. Dense retrieval uses a local sentence-transformers embedding model (`BAAI/bge-small-en-v1.5` by default) and a local cross-encoder re-ranker, both from the optional `[embeddings]` extra.
 
 ### Does it work offline?
 
@@ -690,7 +720,7 @@ One small, scoped comparison exists. Using mem0's open-source evaluation suite, 
 
 ### Does recall search every stored memory?
 
-Not on a very large namespace. Each namespace contributes at most `max(limit * 5, hybrid_search_candidate_pool_size)` entries (default 1000) to a search, chosen as the most recently updated rows, so on a larger namespace older entries are not searched and an empty result is not evidence of absence. `MEMORY_HYBRID_SEARCH_CANDIDATE_POOL_SIZE` widens it at a latency cost. With re-ranking on (the default), `recall(limit=N)` can also return fewer than N rows: results the cross-encoder scores below `MEMORY_RECALL_RERANK_MIN_SCORE` are dropped.
+Not on a very large namespace. Each namespace contributes at most `max(limit * 5, hybrid_search_candidate_pool_size)` entries (default 1000) to a search, chosen as the most recently updated rows, so on a larger namespace older entries are not searched and an empty result is not evidence of absence. `MEMORY_HYBRID_SEARCH_CANDIDATE_POOL_SIZE` widens it at a latency cost. `recall(limit=N)` can also return fewer than N rows: results the cross-encoder scores below -8 are dropped, though the top `min(N, max(5, ceil(N / 2)))` are always kept.
 
 ### Where is my data stored?
 

@@ -70,8 +70,17 @@ jobs:
               print(f'vec_available={b._vec_available}')
           "
 
+  full-suite:
+    # PRD-INFRA-188 FR05: publish waits for the package's full pytest suite on
+    # Linux. The tag is already public when this runs, so a red suite leaves a tag
+    # with no package; recovery is a new version. Never deselect or skip tests to
+    # turn this green: fix the cause or record a reviewed exception in the PRD.
+    uses: ./.github/workflows/ci.yml
+    with:
+      suite: full
+
   publish:
-    needs: [build, smoke-test]
+    needs: [build, smoke-test, full-suite]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

@@ -72,7 +72,8 @@ async def _client_with_rows(
     """
     monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
     monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
-    monkeypatch.setenv("MEMORY_RECALL_RERANK", "false")
+    # Rerank is unconditional (PRD-CORE-284); an unavailable model keeps fusion order.
+    monkeypatch.setattr("trw_memory.retrieval.reranker.cross_encode_scores", lambda *a, **k: None)
     client = MemoryClient(namespace="default", mode="local")
     with patch.object(client, "_get_embedder", return_value=embedder):
         stored = [await client.store(f"needle lesson number {i}", importance=0.5) for i in range(ROWS)]

@@ -20,6 +20,8 @@ from trw_memory.retrieval.pipeline import ScoredCandidate
 from trw_memory.tools.recall import memory_recall_impl
 from trw_memory.tools.store import memory_store_impl
 
+from ._optional_extras import requires_sqlite_vec
+
 
 def _scored(entries: list[MemoryEntry]) -> list[ScoredCandidate]:
     """Wrap entries as the pipeline's scored candidates (PRD-CORE-278 FR01).
@@ -119,6 +121,7 @@ async def test_client_store_rolls_back_when_vector_upsert_fails(client: MemoryCl
     backend.delete.assert_not_called()
 
 
+@requires_sqlite_vec
 async def test_client_recall_passes_stored_embeddings_to_hybrid_search(client: MemoryClient) -> None:
     """MemoryClient.recall feeds backend vectors into the hybrid pipeline."""
     backend = client._get_backend()
@@ -306,7 +309,6 @@ def test_memory_recall_impl_forwards_retrieval_config_to_hybrid_search() -> None
         recall_recency_halflife_days=9.0,
         recall_fusion_mode="combmax",
         recall_validity_age_decay=True,
-        recall_rerank=True,
         recall_rerank_model="cross-encoder/custom",
         recall_rerank_candidates=12,
     )

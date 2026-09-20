@@ -127,6 +127,20 @@ class DedupResult(NamedTuple):
     similarity: float
 
 
+def _validated_thresholds(cfg: MemoryConfig, embedder: EmbeddingProvider | None) -> tuple[float, float]:
+    """(skip, merge) for one dedup pass, shared by every dedup entry point (PRD-CORE-042).
+
+    Merge must be strictly below skip; otherwise a WARNING is logged and both reset
+    to the defaults (0.95, 0.85). Thresholds are stated on the reference-encoder
+    scale and returned in this encoder's.
+    """
+    skip, merge = cfg.dedup_skip_threshold, cfg.dedup_merge_threshold
+    if merge >= skip:
+        logger.warning("dedup_threshold_invalid", merge=merge, skip=skip)
+        skip, merge = 0.95, 0.85
+    return calibrated_threshold(skip, embedder), calibrated_threshold(merge, embedder)
+
+
 def check_duplicate(
     content: str,
     entries: list[MemoryEntry],
@@ -158,22 +172,8 @@ def check_duplicate(
         and similarity score.
     """
     cfg = config or MemoryConfig()
-    skip_threshold = cfg.dedup_skip_threshold
-    merge_threshold = cfg.dedup_merge_threshold
+    skip_threshold, merge_threshold = _validated_thresholds(cfg, embedder)
     lexical_fallback = cfg.dedup_lexical_fallback
-
-    # Validate thresholds — merge must be strictly less than skip
-    if merge_threshold >= skip_threshold:
-        logger.warning(
-            "dedup_threshold_invalid",
-            merge=merge_threshold,
-            skip=skip_threshold,
-        )
-        skip_threshold = 0.95
-        merge_threshold = 0.85
-    # Thresholds are on the reference-encoder scale; compare in this encoder's.
-    skip_threshold = calibrated_threshold(skip_threshold, embedder)
-    merge_threshold = calibrated_threshold(merge_threshold, embedder)
 
     # Check embedder availability. When embeddings are unavailable, fall back to
     # an exact normalized-text match (zero false-positive risk) instead of a
@@ -376,14 +376,7 @@ def batch_dedup(
         }
 
     cfg = config or MemoryConfig()
-    skip_threshold = cfg.dedup_skip_threshold
-    merge_threshold = cfg.dedup_merge_threshold
-
-    if merge_threshold >= skip_threshold:
-        skip_threshold = 0.95
-        merge_threshold = 0.85
-    skip_threshold = calibrated_threshold(skip_threshold, embedder)
-    merge_threshold = calibrated_threshold(merge_threshold, embedder)
+    skip_threshold, merge_threshold = _validated_thresholds(cfg, embedder)
 
     # Collect active entries then batch-embed in a single model call so the
     # embedding provider (sentence-transformers, etc.) can process all texts

@@ -103,7 +103,8 @@ def cfg_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("MEMORY_STORAGE_PATH", str(storage))
     monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
     monkeypatch.setenv("MEMORY_EMBEDDING_DIM", "3")
-    monkeypatch.setenv("MEMORY_RECALL_RERANK", "false")
+    # Rerank is unconditional (PRD-CORE-284); an unavailable model keeps fusion order.
+    monkeypatch.setattr("trw_memory.retrieval.reranker.cross_encode_scores", lambda *a, **k: None)
     return storage
 
 

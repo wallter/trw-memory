@@ -92,8 +92,9 @@ $PY retrieval_eval.py --store /tmp/lme-store --question-types multi-session,temp
 
 # the full scored set, saved for paired comparison
 $PY retrieval_eval.py --store /tmp/lme-store --workers 4 --label base --out /tmp/lme-base.json
-MEMORY_RECALL_RERANK=false $PY retrieval_eval.py --store /tmp/lme-store --workers 4 \
-  --label norerank --out /tmp/lme-norerank.json   # reuses the stores; no re-embedding
+# after a code change: same stores (no re-embedding), then a paired comparison
+$PY retrieval_eval.py --store /tmp/lme-store --workers 4 --label new --out /tmp/lme-new.json
+$PY ../retrieval_paired_compare.py /tmp/lme-base.json /tmp/lme-new.json --latency --rows
 ```
 
 `--limit-questions N` draws a stratified sample. Each question type gets a
@@ -123,12 +124,12 @@ its own embedder and reranker, and the stores never overlap.
   argument also keys the write rate limiter (10 writes per minute per session
   by default). In one call it silently rejects every turn after the tenth.
   This harness therefore puts the session id in metadata instead.
-- **By default, `@50` is really "whatever recall returned".** The rerank
-  confidence floor (`MEMORY_RECALL_RERANK_MIN_SCORE`, default -8) truncates
-  results. On `longmemeval_s_cleaned`, recall returned 5-44 rows (median 10),
-  so the default `hit@50` measures the product's actual answer set, not a
-  top-50 list. To score a true top-k, pass
-  `MEMORY_RECALL_RERANK_MIN_SCORE=-1000`. The stores are reused, so that run
-  takes about two minutes. `n_returned` is recorded per question.
+- **`@50` is really "whatever recall returned".** The rerank confidence
+  floor drops rows scored below -8 but always keeps the top
+  `min(limit, max(5, ceil(limit / 2)))` (`adaptive_rerank_floor`, 25 at
+  `limit=50`; before PRD-CORE-284 it was a fixed 5, and on
+  `longmemeval_s_cleaned` recall returned 5-44 rows, median 10). So `hit@50`
+  measures the product's actual answer set, not a full top-50 list. The floor
+  is not configurable. `n_returned` is recorded per question.
 - Retrieval quality is not QA accuracy. The paper's end-to-end numbers need an
   answerer and a GPT-4o judge, and this benchmark measures neither.

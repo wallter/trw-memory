@@ -88,7 +88,10 @@ def use_fixture_cache(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
     a stub ``model.safetensors``). The monkeypatched constant is restored on
     teardown, so the override is scoped to the test.
     """
-    from huggingface_hub import constants
+    constants = pytest.importorskip(
+        "huggingface_hub.constants",
+        reason="the cache probe walks the real hub layout via huggingface_hub; install trw-memory[embeddings]",
+    )
 
     monkeypatch.setenv("HF_HOME", str(root))
     monkeypatch.setattr(constants, "HF_HUB_CACHE", str(root / "hub"))

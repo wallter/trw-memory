@@ -175,9 +175,13 @@ async def run(args: argparse.Namespace) -> None:
             if cat not in (1, 2, 3, 4):
                 continue
             evidence = set(qa.get("evidence", []))
+            tq = time.monotonic()
             rows = await client.recall(qa["question"], limit=kmax, include_org_memories=False)
+            query_s = round(time.monotonic() - tq, 3)
             ranked = [(r.get("metadata") or {}).get("dia_id", "") for r in rows]
             rec: dict[str, Any] = {"conv": ci, "q": qi, "category": cat, "n_evidence": len(evidence)}
+            rec["n_returned"] = len(rows)
+            rec["query_s"] = query_s
             first = next((i for i, d in enumerate(ranked) if d in evidence), None)
             rec["mrr"] = 1.0 / (first + 1) if first is not None else 0.0
             for k in ks:

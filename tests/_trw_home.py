@@ -42,7 +42,9 @@ none of the four currently depends on the real operator HOME being reachable
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -66,6 +68,12 @@ def isolated_trw_home(
     # pytest owns the directory (no rmtree call of our own at teardown: installer
     # tests monkeypatch shutil.rmtree with a one-argument stand-in), and it sits
     # beside — never inside — the test's own tmp_path.
+    # The HF model cache must survive the HOME redirect: the embedding fixture is
+    # provisioned into the real ~/.cache/huggingface, and an offline CI replay
+    # (HF_HUB_OFFLINE=1) cannot re-download it into the temp home. Pin HF_HOME to
+    # the pre-redirect location unless the caller already set one.
+    if not os.environ.get("HF_HOME"):
+        monkeypatch.setenv("HF_HOME", str(Path.home() / ".cache" / "huggingface"))
     home_dir = tmp_path_factory.mktemp("trw-home")
     home_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(home_dir))

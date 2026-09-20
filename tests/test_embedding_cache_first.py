@@ -208,7 +208,10 @@ class TestCacheProbeStates:
         assert probe_model_cache(DEFAULT_REPO_ID).state is CacheState.INCOMPLETE
 
     def test_huggingface_hub_absent_is_unknown(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        use_fixture_cache(monkeypatch, tmp_path)
+        # Env only, not use_fixture_cache: this case must run where huggingface_hub is absent.
+        monkeypatch.setenv("HF_HOME", str(tmp_path))
+        for var in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "TRW_OFFLINE", "HF_HUB_OFFLINE", "MEMORY_LOCAL_ONLY"):
+            monkeypatch.delenv(var, raising=False)
         build_model_cache(tmp_path)
 
         def _no_hub(repo_id: str, cache_dir: str | None) -> Path | None:

@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 
 if TYPE_CHECKING:
-    from trw_memory.embeddings.provenance import StoredVector, VectorProvenance
+    from trw_memory.embeddings.provenance import EmbeddingSpace, StoredVector, VectorProvenance
     from trw_memory.retrieval.temporal_selection import TemporalSelection
 
 
@@ -532,6 +532,15 @@ class StorageBackend(ABC):
         unqualified legacy vectors into trusted evidence.
         """
         return {}
+
+    def vector_space_census(self, *, namespace: str) -> dict[EmbeddingSpace | None, int] | None:
+        """Count *namespace*'s stored vectors by claimed embedding space, reading no vector blobs.
+
+        ``None`` key: NULL or malformed provenance. ``None`` result: this backend
+        cannot take a census -- callers must treat that as unknown, never as
+        "every vector is in the loaded space".
+        """
+        return None
 
     def recent_vector_records(self, *, namespace: str, limit: int) -> dict[str, StoredVector]:
         """Vectors of the *limit* most recently updated ACTIVE entries of *namespace*.

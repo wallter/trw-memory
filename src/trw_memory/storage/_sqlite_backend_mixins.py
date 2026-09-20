@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
-from trw_memory.embeddings.provenance import StoredVector, VectorProvenance
+from trw_memory.embeddings.provenance import EmbeddingSpace, StoredVector, VectorProvenance
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage._change_feed import change_token, entries_changed_since
@@ -24,6 +24,7 @@ from trw_memory.storage._vector_ops import (
     search_vectors,
     upsert_vector,
     vector_exists,
+    vector_space_census,
 )
 from trw_memory.storage._wal_checkpoint import CheckpointResult
 from trw_memory.storage.interface import NamespaceChangeToken
@@ -150,6 +151,10 @@ class SQLiteCheckpointVectorMixin:
             return get_vector_records(
                 self._conn, self._lock, vec_available=self._vec_available, entry_ids=entry_ids, namespace=namespace
             )
+
+    def vector_space_census(self, *, namespace: str) -> dict[EmbeddingSpace | None, int] | None:
+        with self._fresh_connection():
+            return vector_space_census(self._conn, self._lock, vec_available=self._vec_available, namespace=namespace)
 
     def recent_vector_records(self, *, namespace: str, limit: int) -> dict[str, StoredVector]:
         """``StorageBackend.recent_vector_records`` selecting ids only (same order as ``list_entries``)."""

@@ -6,13 +6,14 @@ import contextlib
 import sys
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 
 from trw_memory.embeddings._declared_space import DECLARED_ENCODING_PREFIX, declared_embedding_space
 from trw_memory.embeddings._hf_cache import CacheProbe, CacheState
 from trw_memory.embeddings._loaded_state import _PACKAGES, dependency_versions, loaded_state_digest
 from trw_memory.embeddings.local import LocalEmbeddingProvider
+
+np = pytest.importorskip("numpy", reason="needs numpy; install trw-memory[embeddings]")
 
 
 class FakeTensor:

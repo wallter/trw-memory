@@ -173,25 +173,17 @@ class _RetrievalConfigMixin(BaseModel):
             "scores are equal. Fusion order is otherwise preserved. Default True."
         ),
     )
-    # Cross-encoder re-ranking (optional; requires sentence-transformers)
-    recall_rerank: bool = Field(
-        default=True,
-        validation_alias=AliasChoices("recall_rerank", "memory_recall_rerank"),
-        description=(
-            "When True (default), apply cross-encoder re-ranking after RRF fusion using "
-            "recall_rerank_model. Requires sentence-transformers and a cached model; "
-            "silently falls back to fusion order when either is unavailable. On LOCOMO "
-            "evidence retrieval the reranker lifts hit@10 from 73.5% to 80.3% and doubles "
-            "MRR (385 questions, benchmarks/locomo, 2026-09-17) for ~30-300 ms per recall "
-            "at 50 candidates depending on CPU load. Set False for latency-critical paths."
-        ),
-    )
+    # Cross-encoder re-ranking runs on every MemoryClient.recall() (requires
+    # sentence-transformers and a cached model; falls back to fusion order when
+    # either is unavailable or offline mode blocks a download). Its confidence
+    # floor scales with the requested limit -- retrieval/_adaptive_floor.py,
+    # PRD-CORE-284, which removed recall_rerank / recall_rerank_min_score /
+    # recall_rerank_min_keep (a leftover value logs one warning and is ignored).
     recall_rerank_model: str = Field(
         default="cross-encoder/ms-marco-MiniLM-L-6-v2",
         validation_alias=AliasChoices("recall_rerank_model", "memory_recall_rerank_model"),
         description=(
-            "HuggingFace model id for cross-encoder re-ranking. Default is the "
-            "66M-param ms-marco passage re-ranker. Ignored when recall_rerank=False."
+            "HuggingFace model id for cross-encoder re-ranking. Default is the 66M-param ms-marco passage re-ranker."
         ),
     )
     recall_rerank_candidates: int = Field(
@@ -200,28 +192,8 @@ class _RetrievalConfigMixin(BaseModel):
         validation_alias=AliasChoices("recall_rerank_candidates", "memory_recall_rerank_candidates"),
         description=(
             "Number of top-fusion candidates to pass to the cross-encoder. "
-            "Limiting to top-50 captures the quality gain at reasonable latency. "
-            "Ignored when recall_rerank=False."
+            "Limiting to top-50 captures the quality gain at reasonable latency."
         ),
-    )
-    recall_rerank_min_score: float | None = Field(
-        default=-8.0,
-        validation_alias=AliasChoices("recall_rerank_min_score", "memory_recall_rerank_min_score"),
-        description=(
-            "Confidence-bounded recall: after re-ranking, drop candidates whose "
-            "cross-encoder logit is below this value (ms-marco MiniLM scale, about "
-            "-11 for unrelated text, +10 for an exact answer). Recall returns FEWER "
-            "than `limit` rows when the store holds fewer plausible answers, so a "
-            "reader is not handed noise. -8 shrank LOCOMO top-50 lists to 34 rows "
-            "while keeping 99% of their evidence; None disables the cut. Ignored "
-            "when recall_rerank=False or the cross-encoder is unavailable."
-        ),
-    )
-    recall_rerank_min_keep: int = Field(
-        default=5,
-        ge=1,
-        validation_alias=AliasChoices("recall_rerank_min_keep", "memory_recall_rerank_min_keep"),
-        description="Minimum rows kept regardless of recall_rerank_min_score, so a low-confidence query still answers.",
     )
     recall_auto_temporal: bool = Field(
         default=True,

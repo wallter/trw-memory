@@ -4,7 +4,8 @@
 #   run.sh <mem0|trw> <project-name> [extra runner args...]
 #
 # Env (all optional):
-#   BENCH_DIR        memory-benchmarks checkout   (default: ../../../scratch/memory-benchmarks)
+#   BENCH_DIR        memory-benchmarks checkout   (default: ~/.cache/trw-bench/memory-benchmarks,
+#                    outside any worktree so results survive worktree cleanup)
 #   BENCH_PY         python interpreter           (default: python)
 #   LLM_MODEL        answerer + judge model        (default: llama3.1:latest)
 #   ANSWERER_MODEL / JUDGE_MODEL   override either role (default: LLM_MODEL)
@@ -20,7 +21,7 @@ set -euo pipefail
 BACKEND="${1:?mem0|trw}"; shift
 PROJECT="${1:?project name}"; shift
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BENCH_DIR="${BENCH_DIR:-$HERE/../../../scratch/memory-benchmarks}"
+BENCH_DIR="${BENCH_DIR:-$HOME/.cache/trw-bench/memory-benchmarks}"
 BENCH_PY="${BENCH_PY:-python}"
 LLM_MODEL="${LLM_MODEL:-llama3.1:latest}"
 OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://localhost:11434}"
@@ -31,17 +32,34 @@ export BENCH_LLM_MODEL="$LLM_MODEL" OLLAMA_BASE_URL
 # Run against THIS checkout of trw-memory, not whatever editable install the venv points at.
 export PYTHONPATH="$HERE/../../src${PYTHONPATH:+:$PYTHONPATH}"
 
-"$HERE/bootstrap.sh" "$BENCH_DIR" >/dev/null
+[ -n "${BENCH_SKIP_BOOTSTRAP:-}" ] || "$HERE/bootstrap.sh" "$BENCH_DIR" >/dev/null
 
-mkdir -p "$BENCH_DIR/logs"
-"$BENCH_PY" "$HERE/server.py" >"$BENCH_DIR/logs/shim-$BACKEND-$PROJECT.log" 2>&1 &
+# Never benchmark a stale shim: the port must be free, and /health must come from the child we start.
+if curl -sf "http://127.0.0.1:$BENCH_PORT/health" >/dev/null 2>&1; then
+  echo "port $BENCH_PORT already serves a shim; stop it or pick another BENCH_PORT"; exit 1
+fi
+mkdir -p "$BENCH_DIR/logs" "$BENCH_DATA_DIR"
+SHIM_LOG="$BENCH_DIR/logs/shim-$BACKEND-$PROJECT-$BENCH_PORT.log"
+"$BENCH_PY" "$HERE/server.py" >>"$SHIM_LOG" 2>&1 &
 SHIM=$!
 trap 'kill $SHIM 2>/dev/null || true' EXIT
+DATA_REAL="$(cd "$BENCH_DATA_DIR" && pwd -P)"
 for _ in $(seq 1 180); do
-  curl -sf "http://127.0.0.1:$BENCH_PORT/health" >/dev/null && break
+  kill -0 "$SHIM" 2>/dev/null || { echo "shim exited during startup; see $SHIM_LOG"; exit 1; }
+  health="$(curl -sf "http://127.0.0.1:$BENCH_PORT/health" 2>/dev/null || true)"
+  [ -n "$health" ] && break
   sleep 1
 done
-curl -sf "http://127.0.0.1:$BENCH_PORT/health" >/dev/null || { echo "shim failed to start; see logs/shim-$BACKEND-$PROJECT.log"; exit 1; }
+"$BENCH_PY" - "$health" "$SHIM" "$BACKEND" "$DATA_REAL" <<'EOF' || exit 1
+import json, os, sys
+raw, pid, backend, data_dir = sys.argv[1:]
+h = json.loads(raw or "{}")
+want = {"pid": int(pid), "backend": backend, "data_dir": os.path.realpath(data_dir)}
+got = {"pid": h.get("pid"), "backend": h.get("backend"), "data_dir": os.path.realpath(h.get("data_dir") or "")}
+if got != want:
+    sys.exit(f"shim identity mismatch: want {want}, got {got}")
+print(f"shim ok: {backend} pid {pid} embed={h.get('embed_model')} llm={h.get('llm_model')} data={data_dir}")
+EOF
 
 cd "$BENCH_DIR"
 # Answerer + judge endpoint. Default: local Ollama. For a hosted OpenAI-compatible

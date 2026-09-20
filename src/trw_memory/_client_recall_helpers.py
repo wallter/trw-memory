@@ -313,25 +313,25 @@ def merge_local_candidates(
 ) -> list[LocalCandidate]:
     """Merge acquired entries without a requested-result cut or source weighting.
 
-    Under confidence-bounded recall (``recall_rerank`` with a
-    ``recall_rerank_min_score``) tier-only rows are held to the same bar as
-    the hybrid pool: when *query* is given they are scored by the cross-encoder
-    and only those at or above the floor may refill; cold hits are exempt
+    Tier-only rows are held to the hybrid pool's confidence floor
+    (``adaptive_rerank_floor(limit)``, PRD-CORE-284): when *query* is given the
+    cross-encoder scores them and only those at or above it may refill; cold hits are exempt
     because an archived entry is invisible to the hybrid pool and this is its
     only way back. Without *query* (legacy callers) refill is unchanged.
     """
     seen = {(c.entry.namespace, c.entry.id) for c in local}
     content = {c.entry.content for c in local}
     added = [c for c in tiers if (c.entry.namespace, c.entry.id) not in seen and c.entry.content not in content]
-    floor = config.recall_rerank_min_score if config.recall_rerank else None
     # The floor is applied only when a hybrid pool exists to compare against.
     # With an EMPTY hybrid pool the tier rows are the only evidence there is,
     # and a warm-tier dense hit ("opaque title" that only its vector matches)
     # is exactly the case tier discovery exists for; a text cross-encoder
     # that never saw the vector must not be allowed to erase it.
-    if added and local and query is not None and floor is not None:
+    if added and local and query is not None:
+        from trw_memory.retrieval._adaptive_floor import adaptive_rerank_floor
         from trw_memory.retrieval.reranker import cross_encode_scores
 
+        floor = adaptive_rerank_floor(limit).min_score
         warm = [c for c in added if not c.cold]
         scored = cross_encode_scores(
             query, [c.entry for c in warm], model_name=config.recall_rerank_model, local_only=config.local_only

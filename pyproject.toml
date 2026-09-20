@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "trw-memory"
-version = "1.0.0"
+version = "2.0.0"
 description = "Persistent memory engine with hybrid retrieval, tiered storage, and semantic dedup for AI agents"
 readme = "README.md"
 license = "BUSL-1.1"
@@ -311,6 +311,12 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "sentence_transformers.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Pulled in only by the [embeddings] extra; _hf_cache imports it lazily and
+# treats ImportError as "cache state unknown".
+module = "huggingface_hub"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

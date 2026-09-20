@@ -36,7 +36,7 @@ from typing import Any
 import structlog
 
 from trw_memory._hype_ids import parent_of_hype_id
-from trw_memory.embeddings.provenance import StoredVector, VectorProvenance
+from trw_memory.embeddings.provenance import EmbeddingSpace, StoredVector, VectorProvenance
 from trw_memory.storage._sql_utils import iter_bind_chunks
 
 logger = structlog.get_logger(__name__)
@@ -544,6 +544,49 @@ def get_stored_embeddings(
         dim_len = len(blob) // 4
         embeddings[str(row[0])] = list(struct.unpack(f"{dim_len}f", blob))
     return embeddings
+
+
+def vector_space_census(
+    conn: Any,
+    lock: _thread.LockType | _thread.RLock,
+    *,
+    vec_available: bool,
+    namespace: str,
+) -> dict[EmbeddingSpace | None, int] | None:
+    """Count *namespace*'s stored vectors by the embedding space their provenance claims.
+
+    Reads only ``vec_index.provenance_json`` -- no vector blob is loaded -- and
+    classifies each row with :meth:`VectorProvenance.from_json`, so a NULL,
+    malformed or wrongly-shaped record counts under ``None`` (unknown space),
+    never as any real space. Keys compare the FULL :class:`EmbeddingSpace`
+    identity. This is the provenance CLAIM: unlike :func:`get_vector_records`
+    it does not re-hash blobs against ``vector_sha256``, so a claim that
+    disagrees with its bytes is counted under the claimed space.
+
+    ``None`` means the census could not be taken (sqlite-vec unavailable or a
+    SQL error): callers must not read it as "no stale vectors".
+    """
+    if not isinstance(namespace, str):
+        raise TypeError("vector_space_census requires an explicit namespace string")
+    if not vec_available:
+        return None
+    try:
+        with lock:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(vec_index)").fetchall()}
+            proof_column = "provenance_json" if "provenance_json" in columns else "NULL"
+            rows = conn.execute(
+                f"SELECT {proof_column} FROM vec_index WHERE namespace = ?",  # noqa: S608 -- fixed local SQL fragment only
+                (namespace,),
+            ).fetchall()
+    except sqlite3.Error:  # trw-fail-silent-allow: None is the typed "no census" signal; logged at warning
+        logger.warning("vector_space_census_error", exc_info=True)
+        return None
+    census: dict[EmbeddingSpace | None, int] = {}
+    for (raw,) in rows:
+        proof = VectorProvenance.from_json(raw)
+        space = proof.space if proof is not None else None
+        census[space] = census.get(space, 0) + 1
+    return census
 
 
 def get_vector_records(

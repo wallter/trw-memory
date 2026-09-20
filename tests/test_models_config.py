@@ -278,3 +278,77 @@ def test_memory_config_consolidation_similarity_threshold_invalid_raises(
     monkeypatch.setenv("MEMORY_CONSOLIDATION_SIMILARITY_THRESHOLD", "1.5")
     with pytest.raises(ValidationError):
         MemoryConfig()
+
+
+# PRD-CORE-284 FR04: the three rerank knobs are removed; a leftover value in any
+# settings source logs exactly one structured warning and never raises.
+_RETIRED_RERANK = {
+    # name: (neutral legacy default, non-neutral legacy value)
+    "recall_rerank": ("true", "false"),
+    "recall_rerank_min_score": ("-8.0", "-5"),
+    "recall_rerank_min_keep": ("5", "0"),
+}
+
+
+@pytest.fixture()
+def fresh_rerank_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trw_memory.models import _config_sources
+
+    monkeypatch.setattr(_config_sources, "_warned_rerank_settings", set())
+    for name in _RETIRED_RERANK:
+        for spelling in (name, f"memory_{name}"):
+            monkeypatch.delenv(spelling.upper(), raising=False)
+            monkeypatch.delenv(spelling, raising=False)
+
+
+def _rerank_warnings(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [e for e in logs if e["event"] == "retired_setting_ignored"]
+
+
+@pytest.mark.usefixtures("fresh_rerank_warnings")
+@pytest.mark.parametrize("name", sorted(_RETIRED_RERANK))
+@pytest.mark.parametrize("prefix", ["", "memory_"])
+@pytest.mark.parametrize("neutral", [True, False], ids=["neutral", "non_neutral"])
+@pytest.mark.parametrize("source", ["constructor", "environment", "dotenv", "yaml"])
+def test_recall_rerank_fields_are_retired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, prefix: str, neutral: bool, source: str
+) -> None:
+    from structlog.testing import capture_logs
+
+    monkeypatch.chdir(tmp_path)
+    key = prefix + name
+    value = _RETIRED_RERANK[name][0 if neutral else 1]
+    kwargs: dict[str, object] = {}
+    if source == "constructor":
+        kwargs[key] = value
+    elif source == "environment":
+        monkeypatch.setenv(key.upper(), value)
+    elif source == "dotenv":
+        env_file = tmp_path / "legacy.env"
+        env_file.write_text(f"{key.upper()}={value}\n", encoding="utf-8")
+        kwargs["_env_file"] = env_file
+    else:
+        _write_trw_config(tmp_path, [f"{key}: {value}"])
+    with capture_logs() as logs:
+        cfg = MemoryConfig(**kwargs)  # never raises, for neutral and non-neutral alike
+        MemoryConfig(**kwargs)  # a second construction does not repeat the warning
+    warned = _rerank_warnings(logs)
+    assert len(warned) == 1, warned
+    assert warned[0]["log_level"] == "warning"
+    assert str(warned[0]["setting"]).lower() == key
+    assert str(warned[0]["source"]).split(" ")[0] == {"yaml": ".trw/config.yaml"}.get(source, source)
+    assert "adaptive_rerank_floor" in str(warned[0]["replacement"])
+    for field in _RETIRED_RERANK:
+        assert field not in MemoryConfig.model_fields
+        assert not hasattr(cfg, field)
+    assert "recall_rerank_model" in MemoryConfig.model_fields  # model/candidates knobs stay
+
+
+@pytest.mark.usefixtures("fresh_rerank_warnings")
+def test_absent_recall_rerank_settings_are_silent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from structlog.testing import capture_logs
+
+    monkeypatch.chdir(tmp_path)
+    with capture_logs() as logs:
+        MemoryConfig()
+    assert _rerank_warnings(logs) == []

@@ -5,7 +5,10 @@ PRD-CORE-086 FR04: verify_assertions() for grep_absent type.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+import pytest
 
 from trw_memory.lifecycle.verification import verify_assertions
 from trw_memory.models.memory import Assertion, AssertionType
@@ -81,6 +84,7 @@ class TestAbsenceIsNotProvenByNotLooking:
     Reported by a cross-family audit 2026-09-12.
     """
 
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores mode 000; the file is never unreadable")
     def test_an_unreadable_file_makes_absence_unverified(self, tmp_path: Path) -> None:
         (tmp_path / "readable.py").write_text("safe code")
         unreadable = tmp_path / "unreadable.py"
