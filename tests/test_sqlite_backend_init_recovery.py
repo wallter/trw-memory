@@ -277,3 +277,120 @@ def test_corrupt_state_diagnostics_are_content_free(tmp_path: Path) -> None:
         assert secret_marker not in rendered
         assert str(state_path) not in rendered
         assert state_path.name not in rendered
+
+
+# --- SQLITE_IOERR is not corruption (trw-memory 3.1.0, L-8QV8) ---------------------
+
+
+def _io_error(message: str = "vtable constructor failed: memories_fts") -> sqlite3.OperationalError:
+    """What the 6.0.0 Linux leg's daemon got from ``quick_check``: an I/O error, not a malformed image."""
+    exc = sqlite3.OperationalError(message)
+    exc.sqlite_errorcode = 10 | (13 << 8)  # type: ignore[attr-defined]  # SQLITE_IOERR_SHORT_READ-style extended code
+    return exc
+
+
+class _FlakyBackend(_FakeBackend):
+    """Raises its error for the first *failures* opens, then opens cleanly."""
+
+    def __init__(self, exc: sqlite3.DatabaseError, failures: int) -> None:
+        super().__init__(exc)
+        self.failures = failures
+        self.opens = 0
+
+    def _open_and_configure(self, _db_path: Path, **_: object) -> Any:
+        self.opens += 1
+        if self.opens <= self.failures:
+            raise self.exc
+        return sqlite3.connect(":memory:")
+
+
+@pytest.fixture
+def no_backoff(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    sleeps: list[float] = []
+    monkeypatch.setattr("trw_memory.storage._init_helpers.time.sleep", sleeps.append)
+    return sleeps
+
+
+def _open(backend: object, db_path: Path) -> tuple[Any, bool, bool]:
+    return open_connection_with_recovery(
+        backend,  # type: ignore[arg-type]
+        db_path,
+        dbapi=sqlite3,
+        sqlcipher_key_hex=None,
+        recovery_policy="strict",
+        corrupt_backup_keep=5,
+        rebuild_from_cold=True,
+    )
+
+
+def test_a_transient_io_error_is_retried_into_a_checked_open(tmp_path: Path, no_backoff: list[float]) -> None:
+    backend = _FlakyBackend(_io_error(), failures=1)
+
+    conn, integrity_warning, recovered = _open(backend, tmp_path / "memory.db")
+
+    conn.close()
+    assert backend.opens == 2
+    assert no_backoff, "the retry waits before opening again"
+    assert (integrity_warning, recovered, backend.recover_called, backend.open_without_called) == (
+        False,
+        False,
+        False,
+        False,
+    )
+    assert not recovery_state_path(tmp_path / "memory.db").exists()
+
+
+@pytest.mark.parametrize("has_data", [True, None, False])
+def test_a_persistent_io_error_degrades_and_never_quarantines(
+    tmp_path: Path, no_backoff: list[float], has_data: bool | None
+) -> None:
+    """Even a store whose probe says "no rows" is left in place: an I/O error says nothing about its content."""
+    backend = _FlakyBackend(_io_error(), failures=99)
+    backend.has_data = has_data
+
+    conn, integrity_warning, recovered = _open(backend, tmp_path / "memory.db")
+
+    conn.close()
+    assert backend.recover_called is False, "an I/O error sent a store down the destructive recovery path"
+    assert backend.open_without_called is True
+    assert (integrity_warning, recovered) == (True, False)
+    assert backend.opens == 3
+    state = classify_recovery_preflight(tmp_path / "memory.db", inline_max_bytes=1024)
+    assert state.classification != "hard_fail"
+
+
+def test_a_malformed_image_is_still_recovered_not_retried(tmp_path: Path, no_backoff: list[float]) -> None:
+    """Non-vacuity partner: only the I/O error class changed; real corruption still recovers at once."""
+    backend = _FlakyBackend(sqlite3.DatabaseError("database disk image is malformed (quick_check failed twice)"), 99)
+
+    _open(backend, tmp_path / "memory.db")
+
+    assert backend.recover_called is True
+    assert backend.opens == 1
+    assert no_backoff == []
+
+
+def test_a_real_store_that_hits_io_errors_keeps_its_file_and_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_backoff: list[float]
+) -> None:
+    """End to end on a real file: the group A store stays where it is, readable, with no .corrupt.bak."""
+    from trw_memory.models.memory import MemoryEntry
+    from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+    db_path = tmp_path / "memory.db"
+    seeded = SQLiteBackend(db_path)
+    for n in range(3):
+        seeded.store(MemoryEntry(id=f"L-{n}", content=f"row {n}"))
+    seeded.close()
+    inode = db_path.stat().st_ino
+
+    def io_error(*_a: object, **_k: object) -> Any:
+        raise _io_error()
+
+    monkeypatch.setattr(SQLiteBackend, "_open_and_configure", staticmethod(io_error))
+    reopened = SQLiteBackend(db_path)
+
+    assert reopened.count() == 3
+    reopened.close()
+    assert db_path.stat().st_ino == inode, "the live store was replaced"
+    assert list(tmp_path.glob("memory.db.corrupt*")) == []

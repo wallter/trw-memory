@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 import structlog
 
-from trw_memory.embeddings import get_local_embedder
+from trw_memory.embeddings import get_local_embedder, keyword_only_on_refusal
 from trw_memory.exceptions import AuthorizationError, ConfigError, StorageError
 from trw_memory.integrations._backend import discover_namespace_backends
 from trw_memory.lifecycle.consolidation import consolidate_cycle
@@ -261,7 +261,9 @@ def memory_consolidate_impl(
 
     require_namespace_permission(cfg, namespace, Permission.WRITE, "consolidate")
 
-    embedder = get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim)
+    embedder, _ = keyword_only_on_refusal(
+        lambda: get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim), surface="memory_consolidate"
+    )
 
     try:
         result = consolidate_cycle(

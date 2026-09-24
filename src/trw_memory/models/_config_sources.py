@@ -80,6 +80,10 @@ _RETIRED_SETTINGS: dict[str, tuple[str, str]] = {
         "backup/checkpoint/rekey helpers) was retired — the operator does not use key "
         "rotation. At-rest encryption itself (encryption_enabled) is unaffected.",
     ),
+    "q_learning_rate": (
+        "PRD-CORE-293",
+        "none; nothing has read it since the Q-learning reward loop was removed in trw-memory 3.0.0",
+    ),
 }
 _warned_retired_settings: set[tuple[str, str]] = set()
 _logger = structlog.get_logger(__name__)

@@ -278,16 +278,19 @@ def test_pyproject_declares_current_optional_extras_and_scripts() -> None:
         "sqlite-fix",
         "encryption",
         "embeddings",
-        "vectors",
         "bm25",
         "all",
         "dev",
     }
-    assert optional["all"] == ["trw-memory[embeddings,vectors,bm25]"]
+    assert optional["all"] == ["trw-memory[embeddings,bm25]"]
+    # sqlite-vec is a base dependency (3.1.0): vectors are on for every install,
+    # and a platform without a wheel (musl, Windows ARM) fails at pip time
+    # rather than silently losing dense recall.
+    assert "sqlite-vec>=0.1.5" in project["dependencies"]
     # The retired extras must not come back by name without a deliberate edit
     # here: each one either shipped a dependency nothing imported or pulled a
     # package with an unpatched advisory into a public install.
-    for retired in ("llm", "langchain", "llamaindex", "crewai", "all-integrations"):
+    for retired in ("llm", "langchain", "llamaindex", "crewai", "all-integrations", "vectors"):
         assert retired not in optional, f"the [{retired}] extra was removed; re-adding it needs a PRD"
     declared = "\n".join(str(value) for value in optional.values())
     assert "chromadb" not in declared, "chromadb has no patched release for GHSA-36p7-vc44-83pf"

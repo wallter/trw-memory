@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 import structlog
 
 from trw_memory.daemon._offload import run_offloaded
-from trw_memory.embeddings import get_local_embedder
+from trw_memory.embeddings import get_local_embedder, keyword_only_on_refusal
 from trw_memory.embeddings._space_gate import active_embedding_space, admit_space_vectors
 from trw_memory.embeddings.provenance import StoredVector
 from trw_memory.exceptions import ConfigError
@@ -232,7 +232,13 @@ def memory_recall_impl(
     # a reserved, empty namespace used to return instantly and leave the model
     # cold, so the first real call paid the 5s load (sub_6PZlZpuFaO90dcFq). An
     # empty query still resolves nothing: there is nothing to embed.
-    embedder = get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim) if query else None
+    embedder, dense_refused = (
+        keyword_only_on_refusal(
+            lambda: get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim), surface="memory_recall"
+        )
+        if query
+        else (None, "")
+    )
     # Dense-score only vectors from the active embedder's space, reported once
     # per namespace; excluded rows stay in the pool for BM25.
     stored_embeddings: dict[str, list[float]] = {}
@@ -423,6 +429,9 @@ def memory_recall_impl(
         )
         response["partial"] = True
         response["namespaces_omitted"] = {"denied": scope.denied, "expired": expired_skipped}
+    if dense_refused:
+        # Keyword-only this call: said in the answer, not just the log (PRD-SEC-014 NFR02).
+        response["dense"] = f"unavailable: {dense_refused}"
 
     # Graph traversal for related entries
     if graph_depth > 0 and result_dicts:

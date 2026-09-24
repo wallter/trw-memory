@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict
 
 from trw_memory._client_store import _existing_entry_for_namespace
 from trw_memory.daemon._offload import run_offloaded
-from trw_memory.embeddings import get_local_embedder
+from trw_memory.embeddings import get_local_embedder, keyword_only_on_refusal
 from trw_memory.embeddings.provenance import generation_provenance_kwargs
 from trw_memory.exceptions import (
     AuthorizationError,
@@ -271,7 +271,10 @@ def memory_store_impl(
         # Resolve the embedder only when a vector sink can consume the result;
         # otherwise the embed call is wasted on a no-op upsert_vector.
         embedder = (
-            get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim)
+            keyword_only_on_refusal(
+                lambda: get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim),
+                surface="memory_store",
+            )[0]
             if embedding_has_consumer(cfg, backend)
             else None
         )

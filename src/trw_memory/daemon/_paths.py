@@ -69,6 +69,7 @@ _EISDIR = _errno.EISDIR
 
 _STORE_FILE_NAME = "memory.db"
 _DISCOVERY_FILE_NAME = "daemon.json"
+_START_LOG_NAME = "daemon-start.log"
 _TOKEN_FILE_NAME = "daemon-token"  # noqa: S105 - a filename, not a credential
 _GRANTS_FILE_NAME = "daemon-grants.json"
 #: ``lock_for_rmw(path)`` locks ``<path>.lock``, so the anchor is the stem.
@@ -112,6 +113,11 @@ class DaemonPaths:
         return self.user_memory_dir / _LOCK_ANCHOR_NAME
 
     @property
+    def start_log(self) -> Path:
+        """The 0600 stderr of the last auto-started daemon, rewritten on each start."""
+        return self.user_memory_dir / _START_LOG_NAME
+
+    @property
     def lock(self) -> Path:
         """The advisory single-instance lock file itself."""
         return self.user_memory_dir / f"{_LOCK_ANCHOR_NAME}.lock"
@@ -124,6 +130,17 @@ def _harden_dir(directory: Path) -> None:
         directory.chmod(SECRET_DIR_MODE)
     except OSError as exc:  # pragma: no cover - platform-dependent
         logger.warning("daemon_dir_chmod_failed", path=str(directory), error=type(exc).__name__)
+
+
+def open_private_log(path: Path) -> int:
+    """Open *path* for writing at mode 0600, emptied, refusing a symlink; returns the descriptor.
+
+    Its parent is created and hardened to 0700 first.
+    """
+    _harden_dir(path.parent)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _NOFOLLOW, SECRET_FILE_MODE)
+    os.fchmod(fd, SECRET_FILE_MODE)
+    return fd
 
 
 def write_secret_file(path: Path, content: str) -> None:

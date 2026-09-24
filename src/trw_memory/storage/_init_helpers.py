@@ -8,7 +8,8 @@ that mutate the backend instance.
 
 - ``open_connection_with_recovery`` — open + WAL + auto-recovery on
   quick_check corruption failures; explicit lock/busy failures may still
-  fall back to opening without a quick_check after a data-presence probe.
+  fall back to opening without a quick_check after a data-presence probe,
+  and an I/O error is retried, then opened the same way, never recovered.
   Returns ``(conn, integrity_warning, recovered)``.
 - ``load_vec_extension`` — load sqlite-vec when available; populate
   vec_index/vec_memories tables; flip ``_vec_available``.
@@ -21,13 +22,14 @@ Extracted as PRD-DIST-245 Phase 1 batch 88.
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from trw_memory.exceptions import CorruptDatabaseUnsalvageableError
-from trw_memory.storage._connection import is_lock_contention_error
+from trw_memory.storage._connection import is_io_error, is_lock_contention_error
 from trw_memory.storage._recovery import classify_recovery_preflight, write_recovery_state
 from trw_memory.storage._schema import ensure_schema, ensure_vec_table
 
@@ -47,6 +49,28 @@ logger = structlog.get_logger(__name__)
 #: together, and the whole defect was the two halves disagreeing.
 _is_lock_contention_error = is_lock_contention_error
 
+#: Opens tried when the checked open fails with an I/O error, and the wait before each retry (x attempt).
+_IO_ERROR_ATTEMPTS = 3
+_IO_ERROR_BACKOFF_SECONDS = 0.5
+
+
+def _open_checked(backend: SQLiteBackend, db_path: Path, *, dbapi: Any, sqlcipher_key_hex: str | None) -> Any:
+    """The integrity-checked open, retried while it fails with an I/O error."""
+    once = getattr(backend, "_check_integrity_once", False)
+    for attempt in range(1, _IO_ERROR_ATTEMPTS + 1):
+        try:
+            if sqlcipher_key_hex is None:
+                return backend._open_and_configure(db_path, check_once=once)
+            return backend._open_and_configure(
+                db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex, check_once=once
+            )
+        except sqlite3.DatabaseError as exc:
+            if not is_io_error(exc) or attempt == _IO_ERROR_ATTEMPTS:
+                raise
+            logger.warning("db_open_io_error_retry", db=str(db_path), attempt=attempt, error=str(exc))
+            time.sleep(_IO_ERROR_BACKOFF_SECONDS * attempt)
+    raise AssertionError("unreachable: the last attempt returns or raises")  # pragma: no cover
+
 
 def open_connection_with_recovery(
     backend: SQLiteBackend,
@@ -64,8 +88,9 @@ def open_connection_with_recovery(
     Returns ``(conn, integrity_warning, recovered)``. A failed ``PRAGMA
     quick_check`` after retry is treated as corruption even when rows remain
     readable; a row-count probe proves data exists, not that the B-tree is
-    healthy. Only explicit lock/busy failures keep the old non-destructive
-    fallback path.
+    healthy. Explicit lock/busy failures keep the non-destructive fallback
+    path, and so does an I/O error that outlasts its retries: it is never
+    corruption, so the store is opened unchecked and never quarantined.
     """
     integrity_warning = False
     recovered = False
@@ -77,14 +102,27 @@ def open_connection_with_recovery(
             backup_path=preflight.state_path,
         )
     try:
-        once = getattr(backend, "_check_integrity_once", False)
-        if sqlcipher_key_hex is None:
-            conn = backend._open_and_configure(db_path, check_once=once)
-        else:
-            conn = backend._open_and_configure(
-                db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex, check_once=once
-            )
+        conn = _open_checked(backend, db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
     except sqlite3.DatabaseError as exc:
+        if is_io_error(exc):
+            # Never the recovery branch, whatever the probe says: renaming a store
+            # because a read failed is how a healthy one was lost (L-8QV8).
+            logger.warning(
+                "db_integrity_check_io_error",
+                db=str(db_path),
+                action="open_anyway",
+                error=str(exc),
+                hint="quick_check hit an I/O error on every attempt; opening without it, the file untouched",
+            )
+            write_recovery_state(
+                db_path,
+                status="degraded_open_with_background_recovery",
+                reason="sqlite_io_error",
+                db_size_bytes=preflight.db_size_bytes,
+            )
+            conn = backend._open_without_integrity_check(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
+            ensure_schema(conn)
+            return conn, True, False
         # `is not False`, deliberately, not a truth test. Under contention the
         # PROBE is locked too and returns None (UNKNOWN), and the safe reading of
         # "I could not check" is "assume there is something to lose" — the

@@ -31,7 +31,6 @@ def test_memory_config_defaults() -> None:
     assert cfg.warm_archive_max_score == 0.22
     assert cfg.cold_purge_max_score == 0.1
     assert cfg.decay_half_life_days == 14.0
-    assert cfg.q_learning_rate == 0.15
     assert cfg.consolidation_enabled is True
     assert cfg.consolidation_max_per_cycle == 50
     assert cfg.local_only is False
@@ -289,7 +288,7 @@ def fresh_rerank_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
     from trw_memory.models import _config_sources
 
     monkeypatch.setattr(_config_sources, "_warned_retired_settings", set())
-    for name in (*_RETIRED_RERANK, "lifecycle_use_fsrs", "key_rotation_backup"):
+    for name in (*_RETIRED_RERANK, "lifecycle_use_fsrs", "key_rotation_backup", "q_learning_rate"):
         for spelling in (name, f"memory_{name}"):
             monkeypatch.delenv(spelling.upper(), raising=False)
             monkeypatch.delenv(spelling, raising=False)
@@ -391,6 +390,29 @@ def test_key_rotation_backup_is_retired_with_a_warning(
     assert warned[0]["prd"] == "PRD-CORE-293"
     assert "key_rotation_backup" not in MemoryConfig.model_fields
     assert not hasattr(cfg, "key_rotation_backup")
+
+
+@pytest.mark.usefixtures("fresh_rerank_warnings")
+@pytest.mark.parametrize("source", ["yaml", "environment"])
+def test_q_learning_rate_is_retired_with_a_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    """q_learning_rate had no reader after PRD-CORE-293; a leftover value must say so, not vanish."""
+    from structlog.testing import capture_logs
+
+    monkeypatch.chdir(tmp_path)
+    if source == "environment":
+        monkeypatch.setenv("MEMORY_Q_LEARNING_RATE", "0.2")
+    else:
+        _write_trw_config(tmp_path, ["q_learning_rate: 0.2"])
+    with capture_logs() as logs:
+        cfg = MemoryConfig()
+    warned = _rerank_warnings(logs)
+    assert len(warned) == 1, warned
+    assert str(warned[0]["setting"]).lower().removeprefix("memory_") == "q_learning_rate"
+    assert warned[0]["prd"] == "PRD-CORE-293"
+    assert "q_learning_rate" not in MemoryConfig.model_fields
+    assert not hasattr(cfg, "q_learning_rate")
 
 
 @pytest.mark.usefixtures("fresh_rerank_warnings")

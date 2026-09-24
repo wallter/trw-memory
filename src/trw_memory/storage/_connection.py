@@ -307,6 +307,24 @@ def check_integrity(
                 conn.close()
 
 
+#: SQLite's primary result code for an I/O error; every extended IOERR code keeps it in the low byte.
+_SQLITE_IOERR = 10
+
+
+def is_io_error(exc: BaseException) -> bool:
+    """True for ``SQLITE_IOERR`` and its extended codes: a read or write failed.
+
+    An I/O error says nothing about what the file holds, so it is never grounds
+    for treating a store as corrupt. It is how SQLite below 3.51.3 reports the
+    WAL-reset race when two processes write one WAL store (L-8QV8): ``quick_check``
+    raised ``vtable constructor failed: memories_fts`` on a healthy store, and
+    recovery then quarantined it. Needs ``sqlite_errorcode`` (Python 3.11+); on
+    3.10 no error reads as I/O, which is the behaviour before 3.1.0.
+    """
+    code = getattr(exc, "sqlite_errorcode", None)
+    return isinstance(code, int) and code & 0xFF == _SQLITE_IOERR
+
+
 def is_lock_contention_error(exc: sqlite3.Error) -> bool:
     """True for SQLite lock/busy errors, not structural corruption.
 

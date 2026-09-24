@@ -3535,7 +3535,7 @@ wheels = [
 
 [[package]]
 name = "trw-memory"
-version = "3.0.0"
+version = "3.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
@@ -3549,6 +3549,7 @@ dependencies = [
     { name = "pynacl" },
     { name = "python-multipart" },
     { name = "ruamel-yaml" },
+    { name = "sqlite-vec" },
     { name = "starlette" },
     { name = "structlog" },
     { name = "typing-extensions" },
@@ -3561,7 +3562,6 @@ all = [
     { name = "rank-bm25" },
     { name = "sentence-transformers" },
     { name = "setuptools" },
-    { name = "sqlite-vec" },
     { name = "torch" },
     { name = "transformers" },
 ]
@@ -3600,9 +3600,6 @@ encryption = [
 sqlite-fix = [
     { name = "pysqlite3-binary", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
-vectors = [
-    { name = "sqlite-vec" },
-]
 
 [package.metadata]
 requires-dist = [
@@ -3635,17 +3632,17 @@ requires-dist = [
     { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=2.0.0" },
     { name = "setuptools", marker = "extra == 'embeddings'", specifier = ">=83.0.0" },
     { name = "sqlcipher3", marker = "extra == 'encryption'", specifier = ">=0.5.0" },
-    { name = "sqlite-vec", marker = "extra == 'vectors'", specifier = ">=0.1.0" },
+    { name = "sqlite-vec", specifier = ">=0.1.5" },
     { name = "starlette", specifier = ">=1.3.1" },
     { name = "structlog", specifier = ">=24.0.0" },
     { name = "tomli", marker = "python_full_version < '3.11' and extra == 'dev'", specifier = ">=2.0.1" },
     { name = "torch", marker = "extra == 'embeddings'", specifier = ">=2.13.0" },
     { name = "transformers", marker = "extra == 'embeddings'", specifier = ">=5.10.0" },
-    { name = "trw-memory", extras = ["embeddings", "vectors", "bm25"], marker = "extra == 'all'" },
+    { name = "trw-memory", extras = ["embeddings", "bm25"], marker = "extra == 'all'" },
     { name = "typing-extensions", specifier = ">=4.6.0" },
     { name = "vulture", marker = "extra == 'dev'", specifier = ">=2.11" },
 ]
-provides-extras = ["sqlite-fix", "encryption", "embeddings", "vectors", "bm25", "all", "dev"]
+provides-extras = ["sqlite-fix", "encryption", "embeddings", "bm25", "all", "dev"]
 
 [[package]]
 name = "typer"

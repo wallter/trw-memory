@@ -1,6 +1,6 @@
 # trw-memory: persistent, local-first memory for AI agents
 
-**trw-memory is a persistent memory engine for AI agents**: an agent memory layer that gives LLM agents long-term memory across sessions, stored locally in SQLite. Use it as an async Python SDK, a CLI, or an MCP memory server. The core install recalls with keyword search; optional extras add hybrid retrieval (BM25 + dense vectors via sqlite-vec, fused with Reciprocal Rank Fusion) and cross-encoder reranking, alongside lifecycle scoring, tiered storage, and a knowledge graph. It is the standalone memory backend of [TRW Framework](https://trwframework.com) and works without it.
+**trw-memory is a persistent memory engine for AI agents**: an agent memory layer that gives LLM agents long-term memory across sessions, stored locally in SQLite. Use it as an async Python SDK, a CLI, or an MCP memory server. The core install recalls with keyword search; optional extras add hybrid retrieval (BM25 + dense vectors, stored with sqlite-vec from the core install, fused with Reciprocal Rank Fusion) and cross-encoder reranking, alongside lifecycle scoring, tiered storage, and a knowledge graph. It is the standalone memory backend of [TRW Framework](https://trwframework.com) and works without it.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-orange.svg)](https://trwframework.com/license)
@@ -8,7 +8,25 @@
 
 > **Release status:** Alpha and source-available under BSL 1.1. The public API may change before 1.0; evaluate upgrades in a test environment before production rollout.
 
-**[Why trw-memory](#why-trw-memory)** · **[Quick start](#install-and-quick-start)** · **[Python API](#memoryclient-recommended)** · **[Conversation memory](#conversation-memory-without-an-llm-call-at-write-time)** · **[CLI](#cli)** · **[Benchmarks](#benchmarks)** · **[mem0 comparison](#single-conversation-comparison-with-mem0-oss-using-mem0s-evaluation-suite)** · **[MCP server](#mcp-memory-server)** · **[Security and network behavior](#telemetry-and-network-behavior)** · **[FAQ](#faq)** · **[Development](#development)**
+**[What's new in 3.0.0](#whats-new-in-300)** · **[Upgrading from 2.0.0](#upgrading-from-200)** · **[Why trw-memory](#why-trw-memory)** · **[Quick start](#install-and-quick-start)** · **[Python API](#memoryclient-recommended)** · **[Conversation memory](#conversation-memory-without-an-llm-call-at-write-time)** · **[CLI](#cli)** · **[Benchmarks](#benchmarks)** · **[mem0 comparison](#single-conversation-comparison-with-mem0-oss-using-mem0s-evaluation-suite)** · **[MCP server](#mcp-memory-server)** · **[Security and network behavior](#telemetry-and-network-behavior)** · **[FAQ](#faq)** · **[Development](#development)**
+
+## What's new in 3.0.0
+
+trw-memory 3.0.0 was released on 2026-09-24, together with trw-mcp 6.0.0. What changes for you:
+
+- **Ranking no longer uses reward feedback.** The Q-value blend and the FSRS scoring path are removed. A row's base impact now decays with how often it has been recalled (`0.95 ** recall_count`, by default never below half), so the same store can rank differently after the upgrade.
+- **`MemoryEntry` drops the reward fields** `q_value`, `q_observations`, `helpful_count` and `unhelpful_count`.
+- **The store upgrade is one-way.** 3.0.0 opens a 2.0.0 store in place without changing its schema, but 2.0.0 cannot open a store that 3.0.0 created (`no such column: q_value`). Export first if you want a way back; see [Upgrading from 2.0.0](#upgrading-from-200).
+- **The CLI runs over the daemon.** `store`, `recall`, `search`, `forget`, `consolidate`, `export` and `status` have no local mode: they start a daemon if none runs and present this checkout's grant (minted by `trw-mcp memory token`). `--namespace` defaults to the checkout's pinned `project_namespace`, not `default`.
+- **Store-file commands refuse while a daemon runs.** `import`, `reembed`, `restore` and `snapshot create` name the daemon's pid; stop it first.
+- **`trw-memory search` loses `--min-importance` and `--since`** and gains `--status`.
+- **`trw-memory import` keeps export-format rows whole** (id and every field), re-screens every row through the write gate, writes rejected rows to `<file>.rejected.jsonl` and exits 1 when any row is rejected.
+- **The daemon's `memory_recall` ranks the same way as trw-mcp's `trw_recall`** and also finds older rows that full-text search matches, beyond the recency pool. On EngMem at 5,000 and 20,000 rows, complete@10 went from 0/16 to 10/16 and 14/16 (single pass).
+- **`memory_store` reports a refused write as a status** (`invalid`, `blocked` or `rate_limited`) instead of an MCP error.
+- **Security settings are daemon-wide.** RBAC, the recall filter, canary, poisoning, trust-scoring and provenance settings come from the daemon's environment; `memory_status(security_settings_only=True)` reports them.
+- **Unused public APIs are removed**, among them `PoisoningDetector`, `ProvenanceChain`, `rotate_master_key`, `security.encryption.rotate_key`, `seed_canaries`, `verify_canaries`, the bandit selectors and `trw_memory.adapters`. A leftover `lifecycle_use_fsrs` or `key_rotation_backup` setting logs `retired_setting_ignored` and is ignored.
+
+Everything else, including the new daemon tools, is in the [CHANGELOG](https://github.com/wallter/trw-memory/blob/main/CHANGELOG.md).
 
 ## What is trw-memory?
 
@@ -21,7 +39,7 @@ Designed as the storage backend for [trw-mcp](https://github.com/wallter/trw-mcp
 - **Local-first.** With the default configuration all data lives in a local SQLite store (plus an optional YAML sidecar). There is no usage tracking or content phone-home; the only network-capable surfaces are optional model downloads and opt-in remote sync. See [Telemetry and network behavior](#telemetry-and-network-behavior).
 - **No generative LLM call at write time.** `store_conversation()` stores every turn verbatim with its date and the turn it replied to. Ingest never calls a generative model (the optional local embedding model still encodes each turn); recall does the work.
 - **Hybrid retrieval, optional.** With the retrieval extras installed: BM25 (with stemming) + dense vectors via sqlite-vec + Reciprocal Rank Fusion + a cross-encoder re-ranker. Without them, retrieval degrades gracefully to the backend's built-in keyword search.
-- **Measured on public benchmarks.** With no LLM in the loop, the gold evidence turn lands in the top 10 for **85.7%** of [LOCOMO](#benchmarks) questions (n = 1,540) and **93.8%** of LongMemEval_S questions (n = 470); top 50: 92.7% and 97.4%. Write and recall costs stay flat as the store and the number of projects sharing it grow. See [Benchmarks](#benchmarks) for method and caveats.
+- **Measured on public benchmarks.** With no LLM in the loop and trw-memory 2.0.0 defaults (`BAAI/bge-small-en-v1.5` embeddings), the gold evidence turn lands in the top 10 for **85.7%** of [LOCOMO](#benchmarks) questions (n = 1,540) and **93.8%** of LongMemEval_S questions (n = 470); top 50: 92.7% and 97.4%. Not yet re-run on 3.0.0. Write and recall costs stay flat as the store and the number of projects sharing it grow. See [Benchmarks](#benchmarks) for method and caveats.
 - **Works offline.** `TRW_OFFLINE=1` / `HF_HUB_OFFLINE=1` block model downloads; `local_only: true` hard-blocks all remote sync and model download. Hybrid retrieval offline needs the models already in the local cache.
 - **MCP memory server included.** `trw-memory-server` exposes store, recall, search, consolidate, forget and more as MCP tools over stdio, or over a per-user loopback HTTP daemon.
 - **Evaluating a mem0 alternative?** Using mem0's open-source evaluation suite on one LOCOMO conversation (n = 152 questions per system, one run each, local `llama3.1` as answerer, judge and mem0's extraction model), neither paired test detected a statistically significant accuracy difference between trw-memory and mem0 (OSS), and trw-memory called no generative LLM to ingest the conversation. That does not establish equivalence or superiority; read the [numbers and caveats](#single-conversation-comparison-with-mem0-oss-using-mem0s-evaluation-suite) first.
@@ -37,11 +55,11 @@ Designed as the storage backend for [trw-mcp](https://github.com/wallter/trw-mcp
 - **Semantic Deduplication** -- Detects and merges near-duplicate learnings using cosine similarity (0.85 threshold)
 - **Knowledge Graph for AI** -- Tag co-occurrence and similarity edges, BFS traversal, importance boost/decay, cross-validation propagation. [Docs](https://trwframework.com/docs)
 - **Memory Consolidation** -- Episodic-to-semantic consolidation via clustering with the current shipped path using heuristic/fallback summarization
-- **Utility scoring** -- author-assigned impact with an [Ebbinghaus forgetting curve](https://trwframework.com/docs) applied at query time, boosted by recurrence and access
+- **Utility scoring** -- author-assigned impact, decayed by how often the row has been recalled, with an [Ebbinghaus forgetting curve](https://trwframework.com/docs) applied at query time and boosts for recurrence and access. No reward or feedback signal (removed in 3.0.0)
 - **Remote Sync** -- Publish/fetch learnings across installations with vector clock conflict resolution and SSE live updates
 - **Security** -- optional SQLCipher whole-database encryption at rest (AES-256-CBC, off by default), PII detection with publish-time masking, memory-poisoning anomaly detection (z-score; enforcement is opt-in), RBAC, audit trail. See [Security defaults](#security-defaults)
 - **Agent Integration** -- `register_tools()` for agents that expose a `register_tool()` or `tool()` API, `@auto_recall` decorator
-- **CLI** -- Full command-line interface for store, recall, search, forget, consolidate, export/import
+- **CLI** -- Command-line interface for store, recall, search, forget, consolidate, export/import; the everyday verbs run over the loopback daemon
 - **MCP Tools** -- store, recall, search, consolidate, forget, status, audit, review, wiki-lint, and an explicit code index (index/search/symbol) — served by `trw-memory-server`
 - **Dual Storage Backends** -- SQLite with keyword search (primary) + YAML (backup) with one-time migration
 
@@ -55,17 +73,19 @@ trw-memory is the standalone memory engine for [TRW (The Real Work)](https://trw
 ## Install and quick start
 
 ```bash
-# Core local engine (SQLite + built-in keyword search)
+# Core local engine (SQLite + keyword search + sqlite-vec vector storage)
 pip install trw-memory
 
-# Recommended hybrid retrieval
-pip install "trw-memory[embeddings,vectors,bm25]"
+# Recommended hybrid retrieval (adds the embedder and BM25)
+pip install "trw-memory[embeddings,bm25]"
 
 # The full retrieval stack (same as the line above, one name)
 pip install "trw-memory[all]"
 ```
 
-By default, memories are stored in `.memory/` relative to the current directory. Override with `MEMORY_STORAGE_PATH` env var.
+**Supported platforms:** macOS arm64/x86_64, manylinux x86_64/aarch64 and Windows x86_64 -- the platforms `sqlite-vec` (a base dependency) publishes wheels for. musl Linux (Alpine) and Windows ARM are unsupported: `sqlite-vec` has no wheel or sdist there, so `pip install` fails.
+
+By default, the Python SDK stores memories in `.memory/` relative to the current directory. Override with `MEMORY_STORAGE_PATH` env var. The loopback daemon, which the CLI and trw-mcp use, keeps every namespace in one store, by default `~/.trw/memory/memory.db`.
 
 For source development, clone the repository and run `pip install -e ".[dev]"` from `trw-memory/`. Tested on CPython 3.10 through 3.14; see [Platform and interpreter notes](#platform-and-interpreter-notes) for SQLite engine details.
 
@@ -145,7 +165,7 @@ trw-memory store "Always use connection pooling for PostgreSQL" --tags db,perfor
 trw-memory recall "database optimization" --limit 5
 
 # Search with filters
-trw-memory search --tags security --min-importance 0.7
+trw-memory search --tags security --status active
 
 # Consolidate related entries
 trw-memory consolidate --namespace project:my-app --dry-run
@@ -181,8 +201,17 @@ trw-memory code-symbol ./src MemoryClient
 trw-memory status
 ```
 
-Export enumerates the requested namespace (`default` unless specified), not the
-whole project or every namespace. Use an unchanged store for a consistent export:
+`store`, `recall`, `search`, `forget`, `consolidate`, `export` and `status` run
+over the loopback daemon (see [Loopback daemon](#loopback-daemon-serve-http)).
+They start a daemon if none is running and present this checkout's grant, which
+`trw-mcp memory token` mints; without a grant, or for a namespace outside it,
+the command prints the remedy and exits 1. `--namespace` defaults to the
+checkout's pinned `project_namespace`; pass `--namespace default` to reach the
+old default namespace. `import`, `reembed`, `restore` and `snapshot create` open
+the store file directly, so they refuse while a daemon runs: stop it first.
+
+Export enumerates the requested namespace (the checkout's pinned namespace unless
+specified), not the whole project or every namespace. Use an unchanged store for a consistent export:
 pagination is not a snapshot across concurrent writes. JSON/YAML output retains
 the entry format and is materialized in memory; it is not a streaming database
 backup and does not include arbitrary project files or stored vector indexes.
@@ -202,7 +231,7 @@ results = backend.search("query", top_k=10, namespace="default")
 
 ## Benchmarks
 
-Every number below is reported with its sample size; confidence intervals and paired tests are given where they were computed. Apart from the mem0 comparison, these are **same-harness ablations** — retrieval strategies compared on one fixed corpus and query set — not leaderboard claims against other systems. The framework's evidence posture is described in the [verification docs](https://trwframework.com/docs/verification); the mem0 comparison's method and scripts live in [`benchmarks/locomo/`](https://github.com/wallter/trw-memory/blob/main/benchmarks/locomo/README.md).
+Every number below is reported with its sample size; confidence intervals and paired tests are given where they were computed. Each result names the trw-memory version and embedding model it was measured with. **None of these results has been re-run on 3.0.0**, which changed ranking (the reward blend was removed and base impact now decays with recall count), so read them as measurements of the version named. Apart from the mem0 comparison, these are **same-harness ablations** (retrieval strategies compared on one fixed corpus and query set), not leaderboard claims against other systems. The framework's evidence posture is described in the [verification docs](https://trwframework.com/docs/verification); the mem0 comparison's method and scripts live in [`benchmarks/locomo/`](https://github.com/wallter/trw-memory/blob/main/benchmarks/locomo/README.md).
 
 ### Single-conversation comparison with mem0 (OSS), using mem0's evaluation suite
 
@@ -227,11 +256,11 @@ Ingestion measurements for the same run (419 turns, one machine, single run):
 
 These measurements do not establish total operating cost: recall and answer generation are not included, and "top k" counts stored items, not equal token budgets (a verbatim turn and an extracted fact are different units). Verbatim storage avoids generative rewriting during ingestion; it does not guarantee correct input metadata, retrieval, or answers.
 
-How trw-memory gets there without a generative model at write time: `store_conversation()` keeps each turn verbatim with its conversational context, and recall does the work (BM25 with stemming + dense vectors + rank fusion + a cross-encoder re-ranker that drops low-confidence rows). Evidence retrieval over all ten LOCOMO conversations (**n = 1,540** questions, no LLM in the loop): the gold evidence turn is in the top 10 for **85.7%** of questions and in the top 50 for **92.7%** (mean reciprocal rank 60.3).
+How trw-memory gets there without a generative model at write time: `store_conversation()` keeps each turn verbatim with its conversational context, and recall does the work (BM25 with stemming + dense vectors + rank fusion + a cross-encoder re-ranker that drops low-confidence rows). Evidence retrieval over all ten LOCOMO conversations (**n = 1,540** questions, no LLM in the loop, trw-memory 2.0.0 defaults, `BAAI/bge-small-en-v1.5`; this is a later configuration than the mem0 comparison above): the gold evidence turn is in the top 10 for **85.7%** of questions and in the top 50 for **92.7%** (mean reciprocal rank 60.3).
 
-A second, independent LLM-free benchmark runs the same way: **LongMemEval_S** (cleaned, HF revision `98d7416c`), **n = 470** non-abstention questions, each with its own haystack of 38-62 sessions. An answer-bearing turn is in the top 10 for **93.8%** of questions (Wilson 95% CI 90.6-95.1, first run of this configuration) and in the top 50 for **97.4%**; the answer *session* is in the top 10 for 93.3%. Weakest question type: single-session preference, 73.3% (n = 30). Harness: [`benchmarks/longmemeval/`](https://github.com/wallter/trw-memory/blob/main/benchmarks/longmemeval/README.md).
+A second, independent LLM-free benchmark runs the same way (trw-memory 2.0.0 defaults, `BAAI/bge-small-en-v1.5`): **LongMemEval_S** (cleaned, HF revision `98d7416c`), **n = 470** non-abstention questions, each with its own haystack of 38-62 sessions. An answer-bearing turn is in the top 10 for **93.8%** of questions (Wilson 95% CI 90.6-95.1, first run of this configuration) and in the top 50 for **97.4%**; the answer *session* is in the top 10 for 93.3%. Weakest question type: single-session preference, 73.3% (n = 30). Harness: [`benchmarks/longmemeval/`](https://github.com/wallter/trw-memory/blob/main/benchmarks/longmemeval/README.md).
 
-Both benchmarks are the inner loop for retrieval changes, and a change ships only if it is non-inferior on **both**. Measured that way, paired question-by-question against the previous defaults:
+Both benchmarks are the inner loop for retrieval changes, and a change ships only if it is non-inferior on **both**. Measured that way, paired question-by-question against the previous defaults (the first two rows shipped in trw-memory 1.0.0, the third in 2.0.0):
 
 | Change | LOCOMO (n = 1,540) | LongMemEval (n = 470) |
 |---|---|---|
@@ -247,7 +276,7 @@ Published LOCOMO numbers for mem0, Zep, Memobase, MemOS and LightMem are **LLM-j
 
 ### Hybrid retrieval beats either ranker alone
 
-On a gold set of real engineering learnings (**n = 889** typed queries), Reciprocal Rank Fusion of BM25 + dense vectors outranks either single ranker (the table below is this gold set; point estimates, no intervals computed):
+On a gold set of real engineering learnings (**n = 889** typed queries), Reciprocal Rank Fusion of BM25 + dense vectors outranks either single ranker (the table below is this gold set; point estimates, no intervals computed). This result and the two below were first published with trw-memory 0.9.12 (2026-06), before the default embedding model changed from `all-MiniLM-L6-v2` to `BAAI/bge-small-en-v1.5`:
 
 | Retriever | Recall@10 | nDCG@10 |
 |-----------|:---------:|:-------:|
@@ -276,7 +305,7 @@ On a controlled recall-dependent benchmark (H1-MEMORY-BENCH), agents **with** me
 
 ### Cost that does not grow with the store
 
-Recall and write paths were profiled and the terms that scaled with store size were removed. One Apple-silicon machine, single runs under load, before and after the 2026-09 changes:
+Recall and write paths were profiled and the terms that scaled with store size were removed. One Apple-silicon machine, single runs under load, before and after the 2026-09 changes (shipped in trw-memory 1.0.0 and 2.0.0):
 
 | Operation | Before | After |
 |---|---|---|
@@ -304,9 +333,9 @@ drift quickly.)
 | `server.py`, `tools/` | FastMCP server entry point and the MCP tool implementations (`fastmcp` is a core dependency) |
 | `storage/` | SQLite primary backend (WAL, sqlite-vec vectors, snapshots, recovery, resilient fetch) + YAML backend, behind a shared `StorageBackend` interface; `_dbapi.py` driver shim |
 | `retrieval/` | BM25 sparse, dense vector, RRF fusion, and the `hybrid_search()` pipeline + admission/source policies and token budgeting |
-| `lifecycle/` | Utility scoring (Ebbinghaus decay over impact), semantic dedup, consolidation, anchor validation, and `tiers/` hot/warm/cold management |
+| `lifecycle/` | Utility scoring (recall-frequency and Ebbinghaus decay over impact), semantic dedup, consolidation, anchor validation, and `tiers/` hot/warm/cold management |
 | `graph.py` (+ `_graph_*.py`) | Knowledge graph — similarity/tag edges, BFS traversal, clusters, conflicts, cross-project, decay |
-| `bandit/` | Change-point detection (`PageHinkleyDetector`) for non-stationary reward streams |
+| `bandit/` | `PageHinkleyDetector`, a general-purpose change-point detector for a stream of observations (its only export since the bandit selectors were removed in 3.0.0; recall ranking does not use it) |
 | `code_index/`, `wiki/` | Explicit code index (chunker/indexer/symbols/search) and wiki page indexing + lint |
 | `embeddings/` | Embedding provider protocol + local sentence-transformers provider |
 | `sync/` | Remote publish/fetch with vector clocks, three-way merge, retry queue, SSE subscriber |
@@ -330,7 +359,7 @@ drift quickly.)
 | `KnowledgeGraph` functions | `graph` | Tag/similarity edges, BFS traversal, decay |
 | `TierSweepResult` | `lifecycle.tiers` | Hot/warm/cold sweep, promote, demote, purge |
 | `DedupResult` | `lifecycle.dedup` | Duplicate detection (skip/merge/store decisions) |
-| `compute_utility_score()` | `lifecycle.scoring` | Ebbinghaus decay over impact, recurrence and access |
+| `compute_utility_score()` | `lifecycle.scoring` | Ebbinghaus decay over impact, recurrence and access (`entry_utility()` first applies the recall-frequency decay) |
 | `MemoryConfig` | `models.config` | Configuration via env vars or dict |
 | `MemoryEntry` | `models.memory` | Core data model for stored memories |
 
@@ -372,9 +401,10 @@ The pipeline gracefully degrades: if BM25 is unavailable, only dense search runs
 
 Learning utility is computed from multiple signals. [Full scoring documentation](https://trwframework.com/docs):
 
-- **Ebbinghaus forgetting curve**: Time-based [Ebbinghaus decay](https://trwframework.com/docs) applied at query time (not mutated in storage) — entries naturally fade unless reinforced by recall
+- **Ebbinghaus forgetting curve**: Time-based [Ebbinghaus decay](https://trwframework.com/docs) applied at query time (not mutated in storage); a higher recurrence count slows it
 - **Access recency boost**: Recently accessed entries score higher
 - **Impact score**: Author-assigned importance (0.0-1.0)
+- **Recall-frequency decay**: base impact is multiplied by `0.95 ** recall_count`, never below `feedback_decay_min_factor` (default 0.5). Since 3.0.0 there is no reward or helpful/unhelpful feedback signal in the score
 
 ### Tiered Storage
 
@@ -440,7 +470,10 @@ per-checkout namespace grants. The port is ephemeral by default and published in
 the store, so clients discover it rather than hardcode it.
 
 **Trust boundary: a token reaches only its grant.** `trw-mcp memory token` mints a
-token for the calling checkout's pinned project namespace plus `user:local`; the
+token for the calling checkout's project namespace plus `user:local`. Without
+`--namespace` it grants the pinned `project_namespace` only when that pin matches the
+namespace derived from the checkout's location; for a moved checkout, name it with
+`--namespace`. The
 daemon keeps only its sha256 digest in the 0600 `daemon-grants.json`, and the raw
 token lives in that checkout's `.trw/runtime/memory-token`. Every namespaced call is
 checked against the grant before RBAC, so a request for any other namespace is
@@ -461,27 +494,30 @@ removed when it names this process *and* the start time this process wrote, so a
 slow exit cannot delete a successor's record.
 
 **Maintenance.** A daemon has no session end, so decay, consolidation and WAL
-checkpointing never run on their own. `memory_maintain(namespace)` triggers them and
+checkpointing never run on their own. `memory_maintain(namespace)` triggers them (trw-mcp
+6.0.0 calls it at delivery) and
 records `last_attempted_at` / `last_maintained_at` per namespace in `maintenance.json`
 beside the store. Scope is not uniform: consolidation is namespace-scoped, while the
 decay pass and the WAL checkpoint act on the whole store.
 
-**Recall is bounded.** Each namespace contributes at most
-`max(limit * 5, hybrid_search_candidate_pool_size)` entries (default 1000) to a
-search, chosen as the most recently updated rows. On a larger namespace, older
-entries are not searched, and an empty result is not evidence of absence. Raising
-`MEMORY_HYBRID_SEARCH_CANDIDATE_POOL_SIZE` widens it at a real cost: measured on a
+**Recall is bounded.** `memory_recall` ranks `limit * 5` rows and takes its
+candidates from two places: the most recently updated rows of the namespace, up to
+`max(limit * 25, hybrid_search_candidate_pool_size)` (default 1000), plus older
+active rows that full-text search matches (since 3.0.0). An older row that shares
+no keyword with the query can still be missed, so an empty result is not evidence
+of absence. Raising `MEMORY_HYBRID_SEARCH_CANDIDATE_POOL_SIZE` widens the recency
+pool at a real cost: measured on a
 6500-row namespace, warm recall was 139.6 ms at 1000 and 1045.8 ms at 10000.
 
 ## Integration with trw-mcp
 
 [trw-mcp](https://github.com/wallter/trw-mcp) is the MCP server layer of [TRW Framework](https://trwframework.com) — it exposes a suite of tools, skills, and agents to Claude Code and other AI coding tools (see the [trw-mcp README](https://github.com/wallter/trw-mcp) for current counts). trw-memory serves as its memory backend:
 
-- `trw_learn` delegates to `SQLiteBackend.store()` via `memory_adapter.py` (YAML dual-write as backup)
-- `trw_recall` delegates to `SQLiteBackend.search()` / `list_entries()` as the sole query path
-- Scoring functions (`compute_utility_score`, `apply_time_decay`) are canonical in trw-memory and re-exported by trw-mcp
-- One-time YAML-to-SQLite migration runs automatically on first access
-- Optional vector search via `LocalEmbeddingProvider` + `rrf_fuse` when `sentence-transformers` is installed
+- Since trw-mcp 6.0.0 every checkout reaches memory through the loopback daemon: `trw_learn` writes through `memory_store`, and `trw_recall` runs `memory_recall`, which ranks with the same `retrieval.recall_policy` as `MemoryClient.recall()`.
+- One store per machine (`~/.trw/memory/memory.db` by default) holds every checkout's namespace. Each checkout has its own `project_namespace` and a grant in `.trw/runtime/memory-token`; portable learnings go to `user:local`.
+- trw-mcp no longer reads or writes a checkout's `.trw/memory/memory.db`. `trw-mcp memory migrate --to user --apply` moves an existing one into the daemon through `memory_import_checkout`.
+- The daemon-wide security settings (RBAC, recall filter, canary, poisoning, trust scoring, provenance) come from the daemon's environment, and trw-mcp refuses a daemon whose values differ from its own.
+- Dense recall needs the `[embeddings]` extra in the environment the daemon runs from (sqlite-vec is a base dependency since 3.1.0); without it the daemon recalls by keyword.
 
 [Read more about the full TRW Framework architecture](https://trwframework.com/docs).
 
@@ -541,6 +577,27 @@ For hybrid recall offline, populate the model cache **before** enabling either s
 
 ## Migration notes
 
+### Upgrading from 2.0.0
+
+If you use trw-memory through trw-mcp, upgrade both together (trw-mcp 6.0.0 requires trw-memory 3.x) and follow the steps in the [trw-mcp README](https://github.com/wallter/trw-mcp). For a standalone install:
+
+1. **Keep a way back.** The store upgrade is one-way for new stores: 3.0.0 opens a 2.0.0 store in place and never alters its schema, so 2.0.0 can still open that store afterwards, but a store that 3.0.0 creates has no legacy columns and 2.0.0 fails on it (`no such column: q_value`). Before upgrading, export each namespace with 2.0.0 (`trw-memory export --namespace <ns> --format json > <ns>.json`); to roll back, re-import into a store 2.0.0 creates. Export does not include stored vectors, and 2.0.0's `import` keeps only content, detail, tags and importance, under new ids.
+2. **Install:** `pip install -U "trw-memory==3.0.0"` (with the extras you use, for example `"trw-memory[all]==3.0.0"`).
+3. **Restart the daemon**, if one runs, so it serves 3.0.0 code, and set the daemon-wide security settings in its environment: `MEMORY_RBAC_ENABLED`, `MEMORY_DEFAULT_ROLE`, `MEMORY_NAMESPACE_ROLES`, `MEMORY_ENABLE_RECALL_FILTER`, `MEMORY_RECALL_FILTER_MODE`, `MEMORY_CANARY_FAIL_MODE`, `MEMORY_POISONING_DETECTION_MODE`, `MEMORY_ENABLE_TRUST_SCORING`, `MEMORY_TRUST_SCORING_MODE` and `MEMORY_PROVENANCE_REQUIRED`.
+4. **Update scripts that call the CLI.** `store`, `recall`, `search`, `forget`, `consolidate`, `export` and `status` need a checkout grant (`trw-mcp memory token`). Pass `--namespace default` where you relied on the old default. Replace `search --min-importance` and `--since`. Stop the daemon before `import`, `reembed`, `restore` or `snapshot create`. Treat exit 1 from `import` as "some rows were rejected" and read `<file>.rejected.jsonl`.
+5. **Update code that uses the Python API:**
+   - Stop reading or writing `q_value`, `q_observations`, `helpful_count` and `unhelpful_count` on `MemoryEntry`.
+   - Drop the `learning_id=` keyword from `compute_anchor_validity()`.
+   - Pass `namespace=` to `increment_recall_access`, `increment_session_counts` and `record_recall_access`.
+   - Call `acquire_candidates(limit=..., config=...)` in place of `pool_size` / `fts_top_k`.
+   - Pass `admit=store_gate(config, backend)` to `fetch_shared_memories` in place of `backend=`.
+   - Replace `apply_source_policy()` with `SourcePolicy.resolve(...).apply(rows)`, and `count_with_assertions` with `entries_with_assertions`.
+   - Branch on `memory_store`'s `status` (`invalid`, `blocked`, `rate_limited`) where you caught an MCP error.
+   - Remove imports of the deleted APIs listed in the [CHANGELOG](https://github.com/wallter/trw-memory/blob/main/CHANGELOG.md).
+6. **Remove retired settings:** `lifecycle_use_fsrs`, `key_rotation_backup` and `concurrent_writer_warn_threshold` (`memory_concurrent_writer_warn_threshold`). There is no key-rotation path any more; at-rest encryption (`encryption_enabled`) is unchanged.
+
+Expect recall order to change on the same store: ranking no longer blends in reward feedback.
+
 ### Upgrading from all-MiniLM-L6-v2
 
 The default embedding model is now `BAAI/bge-small-en-v1.5` (same 384 dimensions; queries carry the model's search instruction, stored documents do not). Vectors written by `all-MiniLM-L6-v2` — or written before vectors recorded which model produced them — live in a different embedding space, so dense recall **ignores them** rather than scoring a new-model query against old-model vectors. Until they are re-encoded:
@@ -559,9 +616,9 @@ async with MemoryClient(namespace="default") as client:
     counts = await client.reembed()
 ```
 
-The re-embed honours `TRW_OFFLINE` / `HF_HUB_OFFLINE` / `local_only` like every other load: with a switch set and the model not cached it raises `LocalOnlyViolationError` instead of downloading, so pre-download `BAAI/bge-small-en-v1.5` first. To keep the previous model instead, set `MEMORY_EMBEDDING_MODEL=all-MiniLM-L6-v2` (or `embedding_model` in config); it keeps working, without a query instruction. A process only ever scores vectors from the exact space its embedder reports, so switching models back and forth never mixes spaces — it just needs another `reembed`.
+`trw-memory reembed` and `client.reembed()` re-embed a store the SDK opens in local mode (under your configured `storage_path`), not the daemon's store at `~/.trw/memory/memory.db`. Since 3.0.0 the CLI refuses while a daemon runs. 3.0.0 has no command that re-embeds the daemon's store; stopping the daemon does not change which store `reembed` writes. The re-embed honours `TRW_OFFLINE` / `HF_HUB_OFFLINE` / `local_only` like every other load: with a switch set and the model not cached it raises `LocalOnlyViolationError` instead of downloading, so pre-download `BAAI/bge-small-en-v1.5` first. To keep the previous model instead, set `MEMORY_EMBEDDING_MODEL=all-MiniLM-L6-v2` (or `embedding_model` in config); it keeps working, without a query instruction. A process only ever scores vectors from the exact space its embedder reports, so switching models back and forth never mixes spaces; it just needs another `reembed`.
 
-### Retired hypothetical expansion (unreleased)
+### Retired hypothetical expansion (0.18.0)
 
 HyPE question generation and HyDE query expansion are removed. Ordinary
 embeddings, lexical/hybrid recall, code/wiki references and Distill data are not
@@ -573,9 +630,9 @@ settings (including `memory_` aliases and environment/YAML entries).
 Explicit neutral legacy settings (`False`, `3`, `8`) and API arguments (`None`
 for the generator, `None`/blank expansion, `False` for collapse) warn temporarily;
 activation, nondefault values and invalid types fail before the operation.
-Retired settings no longer appear in emitted configuration. These tombstones
-will disappear in the next declared breaking API release **after** the retirement
-release; that release's notes must announce their removal.
+Retired settings no longer appear in emitted configuration. These tombstones are
+still present in 3.0.0; a later breaking release will remove them and its notes
+will announce it.
 
 Existing derived question vectors are not knowledge records. Recall ignores them
 by requiring canonical membership, without excluding real IDs that happen to end
@@ -652,7 +709,7 @@ SQLite, so it is an engine override, not a fix.
 ### Platform notes
 
 - **SQLite driver** — `pysqlite3-binary` is no longer a runtime dependency on any platform; it moved to the optional `[sqlite-fix]` extra, marked for x86_64 Linux (the only platform it publishes a wheel for). It used to be a hard Linux dependency, which made aarch64 Linux installs fail outright while delivering SQLite 3.51.1 — below the 3.51.3 fix it existed to provide. The runtime probe in `storage/_dbapi.py`, not the dependency name or the package version, decides and reports which engine is active.
-- **Vector search is optional** — `[vectors]` (sqlite-vec) and `[embeddings]` (sentence-transformers) are optional extras. When they are unavailable the retrieval pipeline degrades gracefully to BM25 and/or the backend's built-in keyword search rather than failing.
+- **sqlite-vec is a base dependency** (3.1.0; the `[vectors]` extra is gone). `[embeddings]` (sentence-transformers) is still an optional extra: without an embedder there are no vectors to search, and the retrieval pipeline degrades to BM25 and/or the backend's built-in keyword search rather than failing.
 
 ## Development
 
@@ -680,9 +737,8 @@ python -m pytest tests/test_storage_sqlite_*.py -v
 |-------|----------|---------|
 | `[encryption]` | sqlcipher3, keyring, cryptography | Encrypted-at-rest DB (SQLCipher) + key storage |
 | `[embeddings]` | sentence-transformers | Dense vector embeddings (`BAAI/bge-small-en-v1.5` by default, 384-dim) |
-| `[vectors]` | sqlite-vec | Vector similarity search in SQLite |
 | `[bm25]` | rank-bm25 | BM25 keyword search |
-| `[all]` | embeddings + vectors + bm25 | The full retrieval stack |
+| `[all]` | embeddings + bm25 | The full retrieval stack (sqlite-vec is in the core install) |
 | `[dev]` | pytest, mypy, ruff, coverage, pip-audit, vulture, deptry | Testing and linting |
 
 There is no `[llm]` extra and no LLM-backed consolidation. Consolidation
@@ -690,14 +746,14 @@ summarises a cluster with a longest-content heuristic; an earlier revision of
 this table advertised `[llm]`/`anthropic` "LLM-augmented consolidation", which
 this package never implemented. The `[langchain]`, `[llamaindex]`, `[crewai]`
 and `[all-integrations]` extras and their adapter modules were removed as unused
-surface — see [CHANGELOG.md](https://github.com/wallter/trw-memory/blob/main/CHANGELOG.md) `[Unreleased]` Removed.
+surface in 0.18.0; see [CHANGELOG.md](https://github.com/wallter/trw-memory/blob/main/CHANGELOG.md) `[0.18.0]`.
 
 ### Entry Points
 
 | Command | Purpose |
 |---------|---------|
-| `trw-memory` | CLI for store/recall/search/forget/consolidate/export/import, plus restore, snapshot (create/list/rotate), wiki-lint, and code-index/code-search/code-symbol |
-| `trw-memory-server` | MCP server (stdio transport) |
+| `trw-memory` | CLI for store/recall/search/forget/consolidate/export/import, plus restore, snapshot (create/list/rotate), wiki-lint, and code-index/code-search/code-symbol; the everyday verbs run over the loopback daemon |
+| `trw-memory-server` | MCP server (stdio transport; `serve http` runs the loopback daemon) |
 
 ## FAQ
 
@@ -719,11 +775,11 @@ One small, scoped comparison exists. Using mem0's open-source evaluation suite, 
 
 ### Does recall search every stored memory?
 
-Not on a very large namespace. Each namespace contributes at most `max(limit * 5, hybrid_search_candidate_pool_size)` entries (default 1000) to a search, chosen as the most recently updated rows, so on a larger namespace older entries are not searched and an empty result is not evidence of absence. `MEMORY_HYBRID_SEARCH_CANDIDATE_POOL_SIZE` widens it at a latency cost. `recall(limit=N)` can also return fewer than N rows: results the cross-encoder scores below -8 are dropped, though the top `min(N, max(5, ceil(N / 2)))` are always kept.
+Not always on a very large namespace. Recall searches the most recently updated rows (default 1000, more for a large `limit`) plus, since 3.0.0, older active rows that full-text search matches. An older row that shares no keyword with the query can be missed, so an empty result is not evidence of absence. `MEMORY_HYBRID_SEARCH_CANDIDATE_POOL_SIZE` widens the recency pool at a latency cost. `recall(limit=N)` can also return fewer than N rows: results the cross-encoder scores below -8 are dropped, though the top `min(N, max(5, ceil(N / 2)))` are always kept.
 
 ### Where is my data stored?
 
-In `.memory/` relative to the current directory by default (override with `MEMORY_STORAGE_PATH`), as a local SQLite database per namespace plus an optional YAML sidecar. Nothing leaves the machine unless you enable remote sync.
+With the Python SDK, in `.memory/` relative to the current directory by default (override with `MEMORY_STORAGE_PATH`), as a local SQLite database per namespace plus an optional YAML sidecar. The loopback daemon, which the CLI and trw-mcp use, keeps every namespace in one file, by default `~/.trw/memory/memory.db` (`$XDG_DATA_HOME/trw/memory/` or `$TRW_USER_DIR/memory/` when set). Nothing leaves the machine unless you enable remote sync.
 
 ### Can I use it as an MCP memory server?
 
@@ -731,7 +787,7 @@ Yes. Run `trw-memory-server` (stdio transport), or `trw-memory-server serve http
 
 ### What happens if sqlite-vec or sentence-transformers is not installed?
 
-`[vectors]` and `[embeddings]` are optional extras. When they are unavailable the retrieval pipeline degrades gracefully to BM25 and/or the backend's built-in keyword search rather than failing.
+sqlite-vec is a base dependency, so a supported install always has it; if its extension fails to load, the backend reports `supports_vectors()` False. `[embeddings]` is an optional extra. Without either, the retrieval pipeline degrades to BM25 and/or the backend's built-in keyword search rather than failing.
 
 ### Does agent memory improve coding-task outcomes?
 

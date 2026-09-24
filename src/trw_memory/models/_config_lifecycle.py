@@ -132,7 +132,6 @@ class _LifecycleConfigMixin(BaseModel):
             "keeps finding. 0.0 restores the unbounded pre-floor behaviour."
         ),
     )
-    q_learning_rate: float = Field(default=0.15, ge=0.0, le=1.0, description="Q-learning update rate")
     score_relevance_weight: float = Field(
         default=0.4, ge=0.0, le=1.0, description="Weight for relevance in composite score"
     )

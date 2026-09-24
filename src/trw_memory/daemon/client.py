@@ -33,6 +33,8 @@ Four behaviours, one per FR08 clause:
 
 from __future__ import annotations
 
+import contextlib
+import os
 import subprocess
 import sys
 import time
@@ -47,7 +49,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
 
 from trw_memory.daemon._discovery import DaemonInfo, DiscoveryInvalid, read_live_discovery
-from trw_memory.daemon._paths import DaemonPaths
+from trw_memory.daemon._paths import DaemonPaths, open_private_log
 from trw_memory.exceptions import DaemonAuthError, DaemonRecordInvalidError, DaemonUnreachableError
 from trw_memory.models.config import MemoryConfig
 
@@ -64,6 +66,13 @@ _MAX_ATTEMPTS = 2
 
 #: How often the auto-start wait re-reads the discovery file.
 _DISCOVERY_POLL_SECONDS = 0.05
+
+#: The auto-started daemon's argv after the interpreter: the module entry point,
+#: so auto-start does not depend on the console script being on ``PATH``.
+_DAEMON_ARGV = ("-m", "trw_memory.server", "serve", "http")
+
+#: How long a daemon that never published gets to exit on SIGTERM before SIGKILL.
+_STOP_GRACE_SECONDS = 2.0
 
 #: HTTP status the daemon returns for a missing or wrong bearer token.
 _UNAUTHORIZED_STATUS = 401
@@ -99,21 +108,45 @@ _REPLAYABLE_TOOLS = frozenset(
 )
 
 
-def start_daemon_detached(paths: DaemonPaths) -> None:
-    """Spawn a daemon in its own session, detached from this process.
+def start_daemon_detached(paths: DaemonPaths) -> subprocess.Popen[bytes]:
+    """Spawn a daemon in its own session, detached from this process, and return it.
 
-    Invoked as ``python -m trw_memory.server serve http`` rather than through
-    the console script, so auto-start does not depend on the installing
-    environment having put the script on ``PATH``.
+    Its stderr goes to :attr:`DaemonPaths.start_log`, emptied on each start, so a
+    start that stalls or crashes before publishing leaves a reason behind. The
+    daemon installs no log handlers, so stderr carries warnings and tracebacks only.
     """
     logger.info("daemon_auto_start", discovery=str(paths.discovery))
-    subprocess.Popen(
-        [sys.executable, "-m", "trw_memory.server", "serve", "http"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    log = open_private_log(paths.start_log)
+    try:
+        return subprocess.Popen(  # noqa: S603 -- fixed argv: this interpreter and a module constant
+            [sys.executable, *_DAEMON_ARGV],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=log,
+            start_new_session=True,
+        )
+    finally:
+        os.close(log)
+
+
+def _stop_unpublished(spawned: object) -> bool:
+    """Stop a daemon this client started that never published; whether one was stopped.
+
+    A daemon stuck before ``serve()`` never reaches its idle timer, so leaving it
+    means it lives until someone kills it, and the next call spawns another beside
+    it. A stub that spawned nothing (tests pass ``lambda _paths: None``) is not a process.
+    """
+    if not isinstance(spawned, subprocess.Popen) or spawned.poll() is not None:
+        return False
+    spawned.terminate()
+    try:
+        spawned.wait(timeout=_STOP_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError):  # it exited between the check and the kill
+            spawned.kill()
+        spawned.wait()
+    logger.warning("daemon_auto_start_stopped", pid=spawned.pid)
+    return True
 
 
 def _chain(exc: BaseException) -> Iterator[BaseException]:
@@ -199,7 +232,7 @@ class DaemonClient:
             return result
         if isinstance(result, DiscoveryInvalid):
             raise self._refuse_invalid(result)
-        start_daemon_detached(self._paths)
+        spawned = start_daemon_detached(self._paths)
         deadline = time.monotonic() + self._config.memory_daemon_startup_timeout_seconds
         while time.monotonic() < deadline:
             result = read_live_discovery(self._paths)
@@ -208,9 +241,12 @@ class DaemonClient:
             if isinstance(result, DiscoveryInvalid):
                 raise self._refuse_invalid(result)
             time.sleep(_DISCOVERY_POLL_SECONDS)
-        raise self._unreachable(
+        reason = (
             f"auto-start did not publish a discovery file within {self._config.memory_daemon_startup_timeout_seconds}s"
         )
+        if _stop_unpublished(spawned):
+            reason += f"; the client stopped the daemon it started, whose stderr is in {self._paths.start_log}"
+        raise self._unreachable(reason)
 
     async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
         """Call a daemon-served tool, or fail closed.

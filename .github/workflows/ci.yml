@@ -51,7 +51,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,vectors,bm25,mcp]"
+          pip install -e ".[dev,bm25]"
           # pynacl: optional Ed25519 provenance signing dep. Installed so the
           # security tests EXERCISE the real signing branches (not the
           # _NACL_AVAILABLE=False fallback) — required for the INFRA-020 branch
@@ -163,7 +163,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,vectors,bm25,mcp]"
+          pip install -e ".[dev,bm25]"
       - name: Measure host-resource budgets (non-gating)
         run: python .github/scripts/timing_job.py --out timing-results.json
       - name: Upload timing results

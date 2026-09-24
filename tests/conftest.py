@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import shutil
+import tempfile
 
 # MUST be the very first runtime import: ``trw_memory.__init__`` runs the
 # pysqlite3 shim which swaps ``sys.modules["sqlite3"]`` to pysqlite3. If
@@ -82,8 +84,45 @@ def _xdist_fanout_violation(numprocesses: object, allow_wide: bool) -> str | Non
     return None
 
 
+_MIN_FREE_GB_ENV = "TRW_PYTEST_MIN_FREE_GB"
+_DEFAULT_MIN_FREE_GB = 10.0
+
+
+def _disk_space_violation(paths: list[Path], floor_gb: float) -> str | None:
+    """Why a suite must not start on a near-full disk, else ``None`` (2026-09-23: ~100 worktrees filled it mid-suite).
+
+    Each path is checked at its nearest existing ancestor (a ``--basetemp`` need not exist yet).
+    """
+    if floor_gb <= 0:
+        return None
+    for path in paths:
+        existing = next(p for p in (path, *path.parents) if p.exists())
+        free_gb = shutil.disk_usage(existing).free / 1e9
+        if free_gb < floor_gb:
+            return f"{free_gb:.1f} GB free under {existing}, below the {floor_gb:g} GB floor"
+    return None
+
+
+def _refuse_on_low_disk(config: pytest.Config) -> None:
+    raw = os.environ.get(_MIN_FREE_GB_ENV, "")
+    try:
+        floor_gb = float(raw) if raw else _DEFAULT_MIN_FREE_GB
+    except ValueError:
+        pytest.exit(f"{_MIN_FREE_GB_ENV}={raw!r} is not a number of GB", returncode=3)
+    basetemp = getattr(config.option, "basetemp", None)
+    paths = [Path(basetemp) if basetemp else Path(tempfile.gettempdir()), config.rootpath]
+    violation = _disk_space_violation(paths, floor_gb)
+    if violation is not None:
+        pytest.exit(
+            f"{violation}. Remove merged worktrees (python scripts/worktree_gc.py --into <ref>) "
+            f"or set {_MIN_FREE_GB_ENV}=0 to run anyway",
+            returncode=3,
+        )
+
+
 def pytest_configure(config: pytest.Config) -> None:
-    """Refuse a wide xdist fan-out before it OOMs the workstation again."""
+    """Refuse a wide xdist fan-out before it OOMs the workstation again, and a near-full disk."""
+    _refuse_on_low_disk(config)
     allow_wide = os.environ.get(_ALLOW_WIDE_XDIST_ENV) == "1"
     violation = _xdist_fanout_violation(getattr(config.option, "numprocesses", None), allow_wide)
     if violation is not None:

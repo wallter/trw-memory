@@ -259,9 +259,9 @@ def entry_utility(
       is not decayed away before the fix is confirmed.
     * **per-type half-life, access-count and source-type terms** (from the
       trw-mcp side).
-    * **feedback-aware decay** (PRD-CORE-132, from the trw-memory side) — the
-      term ``trw_learn``'s own docstring credits ``feedback`` with, which the
-      live ranker ignored for its entire life.
+    * **recall-frequency decay** (PRD-CORE-132, from the trw-memory side) —
+      ``importance * max(min_factor, 0.95 ** recall_count)``. It is a plain
+      recall-count penalty; no usefulness feedback reaches it (PRD-CORE-293).
 
     Field names are read alias-tolerantly because the two callers serialize
     different models: ``importance``/``impact``, ``source``/``source_type``.

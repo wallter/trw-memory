@@ -1,5 +1,7 @@
 """Embedding providers for trw-memory."""
 
+from collections.abc import Callable
+
 import structlog
 
 from trw_memory.embeddings._provider_cache import cached_local_embedder, reset_provider_cache
@@ -17,6 +19,7 @@ __all__ = [
     "calibrated_threshold",
     "embed_query",
     "get_local_embedder",
+    "keyword_only_on_refusal",
     "query_prefix",
     "reset_provider_cache",
 ]
@@ -57,3 +60,22 @@ def get_local_embedder(
         return None
 
     return cached_local_embedder(key, _build)
+
+
+def keyword_only_on_refusal(
+    load: Callable[[], EmbeddingProvider | None], *, surface: str
+) -> tuple[EmbeddingProvider | None, str]:
+    """``load()``'s embedder, or ``(None, why)`` when an offline policy refused its model.
+
+    ``get_local_embedder`` reports a local-only refusal (``TRW_OFFLINE``,
+    ``HF_HUB_OFFLINE`` or ``local_only`` with the model not cached) by raising, as
+    PRD-SEC-014 NFR02 requires. The daemon's tools turn that one refusal into a
+    keyword-only answer, logged and handed back as *why*, so an offline machine
+    still recalls and stores (L-0P5T). ``RemoteCodeNotPermittedError`` still
+    raises: a model that needs remote code is a configuration to fix, not a mode.
+    """
+    try:
+        return load(), ""
+    except LocalOnlyViolationError as exc:
+        logger.warning("embedder_refused_keyword_only", surface=surface, reason=str(exc))
+        return None, str(exc)

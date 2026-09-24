@@ -17,5 +17,5 @@ requires_bm25 = pytest.mark.skipif(
 )
 requires_sqlite_vec = pytest.mark.skipif(
     find_spec("sqlite_vec") is None,
-    reason="needs sqlite-vec: the SQLite backend reports supports_vectors() False without it; install trw-memory[vectors]",
+    reason="needs sqlite-vec: the SQLite backend reports supports_vectors() False without it; it is a base dependency, so reinstall trw-memory",
 )
