@@ -23,12 +23,12 @@ from trw_memory.models._config_sources import (
     _check_retired_hype_environment,
     _check_retired_hype_settings,
     _TRWConfigYamlSource,
-    _warn_retired_rerank_environment,
-    _warn_retired_rerank_settings,
+    _warn_retired_environment,
+    _warn_retired_settings,
 )
 from trw_memory.models._config_storage import _StorageConfigMixin
 
-__all__ = ["MemoryConfig"]
+__all__ = ["DAEMON_WIDE_SECURITY_KEYS", "MemoryConfig", "daemon_wide_security"]
 
 
 class MemoryConfig(
@@ -146,8 +146,8 @@ class MemoryConfig(
         _check_retired_hype_settings(init_settings(), source="constructor")
         # Inspect source data before Pydantic drops aliases of removed fields.
         _check_retired_hype_environment(dotenv_settings)
-        _warn_retired_rerank_settings(init_settings(), source="constructor")
-        _warn_retired_rerank_environment(dotenv_settings)
+        _warn_retired_settings(init_settings(), source="constructor")
+        _warn_retired_environment(dotenv_settings)
         return (
             init_settings,
             env_settings,
@@ -155,3 +155,25 @@ class MemoryConfig(
             dotenv_settings,
             file_secret_settings,
         )
+
+
+#: Settings one daemon enforces for every client it serves (PRD-CORE-298 FR07).
+#: The daemon resolves them from its own environment, so a client resolving a
+#: different value would lose that policy without a sign; the client refuses.
+DAEMON_WIDE_SECURITY_KEYS = (
+    "rbac_enabled",
+    "default_role",
+    "namespace_roles",
+    "enable_recall_filter",
+    "recall_filter_mode",
+    "canary_fail_mode",
+    "poisoning_detection_mode",
+    "enable_trust_scoring",
+    "trust_scoring_mode",
+    "provenance_required",
+)
+
+
+def daemon_wide_security(config: MemoryConfig) -> dict[str, object]:
+    """The daemon-wide security settings *config* resolves, by field name."""
+    return {key: getattr(config, key) for key in DAEMON_WIDE_SECURITY_KEYS}

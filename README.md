@@ -37,11 +37,10 @@ Designed as the storage backend for [trw-mcp](https://github.com/wallter/trw-mcp
 - **Semantic Deduplication** -- Detects and merges near-duplicate learnings using cosine similarity (0.85 threshold)
 - **Knowledge Graph for AI** -- Tag co-occurrence and similarity edges, BFS traversal, importance boost/decay, cross-validation propagation. [Docs](https://trwframework.com/docs)
 - **Memory Consolidation** -- Episodic-to-semantic consolidation via clustering with the current shipped path using heuristic/fallback summarization
-- **Outcome-based memory scoring** -- outcome-driven utility (Q-value) scoring with EMA updates, [Ebbinghaus forgetting curve](https://trwframework.com/docs) applied at query time, Bayesian MACLA calibration
+- **Utility scoring** -- author-assigned impact with an [Ebbinghaus forgetting curve](https://trwframework.com/docs) applied at query time, boosted by recurrence and access
 - **Remote Sync** -- Publish/fetch learnings across installations with vector clock conflict resolution and SSE live updates
-- **Security** -- optional AES-256-GCM field encryption (off by default), PII detection with publish-time masking, memory-poisoning anomaly detection (z-score; enforcement is opt-in), RBAC, audit trail. See [Security defaults](#security-defaults)
+- **Security** -- optional SQLCipher whole-database encryption at rest (AES-256-CBC, off by default), PII detection with publish-time masking, memory-poisoning anomaly detection (z-score; enforcement is opt-in), RBAC, audit trail. See [Security defaults](#security-defaults)
 - **Agent Integration** -- `register_tools()` for agents that expose a `register_tool()` or `tool()` API, `@auto_recall` decorator
-- **Framework Integrations** -- VS Code interface contract and an OpenAI-compatible adapter
 - **CLI** -- Full command-line interface for store, recall, search, forget, consolidate, export/import
 - **MCP Tools** -- store, recall, search, consolidate, forget, status, audit, review, wiki-lint, and an explicit code index (index/search/symbol) — served by `trw-memory-server`
 - **Dual Storage Backends** -- SQLite with keyword search (primary) + YAML (backup) with one-time migration
@@ -305,14 +304,14 @@ drift quickly.)
 | `server.py`, `tools/` | FastMCP server entry point and the MCP tool implementations (`fastmcp` is a core dependency) |
 | `storage/` | SQLite primary backend (WAL, sqlite-vec vectors, snapshots, recovery, resilient fetch) + YAML backend, behind a shared `StorageBackend` interface; `_dbapi.py` driver shim |
 | `retrieval/` | BM25 sparse, dense vector, RRF fusion, and the `hybrid_search()` pipeline + admission/source policies and token budgeting |
-| `lifecycle/` | Utility scoring (Q-learning, Ebbinghaus decay, Bayesian calibration), semantic dedup, consolidation, anchor validation, and `tiers/` hot/warm/cold management |
+| `lifecycle/` | Utility scoring (Ebbinghaus decay over impact), semantic dedup, consolidation, anchor validation, and `tiers/` hot/warm/cold management |
 | `graph.py` (+ `_graph_*.py`) | Knowledge graph — similarity/tag edges, BFS traversal, clusters, conflicts, cross-project, decay |
-| `bandit/` | Bandit selectors (Thompson, contextual, change-detection) for adaptive ranking |
+| `bandit/` | Change-point detection (`PageHinkleyDetector`) for non-stationary reward streams |
 | `code_index/`, `wiki/` | Explicit code index (chunker/indexer/symbols/search) and wiki page indexing + lint |
 | `embeddings/` | Embedding provider protocol + local sentence-transformers provider |
 | `sync/` | Remote publish/fetch with vector clocks, three-way merge, retry queue, SSE subscriber |
-| `security/` | AES-256-GCM field encryption, PII detection/redaction, poisoning/anomaly defense, RBAC, provenance, audit, trust scoring, quarantine |
-| `integrations/`, `adapters/` | VS Code integration (plus the adapter factory) and an OpenAI-compatible adapter |
+| `security/` | SQLCipher whole-database encryption at rest (AES-256-CBC), PII detection/redaction, poisoning/anomaly defense, RBAC, provenance, audit, trust scoring, quarantine |
+| `integrations/` | Shared sync backend bridge used internally by `trw_memory` |
 | `models/`, `namespaces/`, `migration/`, `utils/` | Pydantic models/config, namespace lifecycle + validation + path mapping, YAML→SQLite migration, and shared utilities |
 
 ## API Reference
@@ -331,7 +330,7 @@ drift quickly.)
 | `KnowledgeGraph` functions | `graph` | Tag/similarity edges, BFS traversal, decay |
 | `TierSweepResult` | `lifecycle.tiers` | Hot/warm/cold sweep, promote, demote, purge |
 | `DedupResult` | `lifecycle.dedup` | Duplicate detection (skip/merge/store decisions) |
-| `compute_utility_score()` | `lifecycle.scoring` | Q-learning + Ebbinghaus + Bayesian scoring |
+| `compute_utility_score()` | `lifecycle.scoring` | Ebbinghaus decay over impact, recurrence and access |
 | `MemoryConfig` | `models.config` | Configuration via env vars or dict |
 | `MemoryEntry` | `models.memory` | Core data model for stored memories |
 
@@ -373,11 +372,9 @@ The pipeline gracefully degrades: if BM25 is unavailable, only dense search runs
 
 Learning utility is computed from multiple signals. [Full scoring documentation](https://trwframework.com/docs):
 
-- **Q-learning**: Exponential moving average updated from outcome events (success/failure/mixed)
 - **Ebbinghaus forgetting curve**: Time-based [Ebbinghaus decay](https://trwframework.com/docs) applied at query time (not mutated in storage) — entries naturally fade unless reinforced by recall
 - **Access recency boost**: Recently accessed entries score higher
 - **Impact score**: Author-assigned importance (0.0-1.0)
-- **Bayesian calibration**: MACLA calibration for impact score accuracy
 
 ### Tiered Storage
 
@@ -395,12 +392,12 @@ The latency column is the design target for the tier lookup itself, not end-to-e
 
 | Feature | Implementation |
 |---------|---------------|
-| Field encryption | AES-256-GCM with HKDF-SHA256 per-namespace key derivation |
+| Encryption at rest | SQLCipher whole-database encryption (AES-256-CBC), keyed by an HKDF-SHA256 per-namespace derivation from the master key |
 | PII detection | Regex patterns (email, phone, SSN, credit card, API keys) + Shannon entropy analysis. Store path **blocks** API-key/token writes and **records** every other detection as metadata — it does not rewrite your stored text. Masking happens at the publish boundary (`strip_pii`), where the local copy still holds the original |
 | Poisoning defense | Z-score anomaly detection on frequency, size, and content patterns — **observe mode by default** (records + telemetry, does not quarantine); `enforce` is opt-in |
 | Access control | Role-based (admin/editor/viewer) per namespace |
 | Audit trail | Append-only security event log |
-| Key management | Master key derivation, per-namespace keys, rotation support |
+| Key management | Master key derivation, per-namespace keys (no rotation path — retired, the operator does not use key rotation) |
 
 ## MCP memory server
 
@@ -438,15 +435,17 @@ To wire it into an MCP client (Claude Code, Cursor, Claude Desktop and others us
 ### Loopback daemon (`serve http`)
 
 `trw-memory-server serve http` runs one process per operating-system user, serving
-the same MCP tool surface over `streamable-http` on 127.0.0.1 with a per-user bearer
-token. The port is ephemeral by default and published in a 0600 `daemon.json` beside
+the same MCP tool surface over `streamable-http` on 127.0.0.1, authenticated by
+per-checkout namespace grants. The port is ephemeral by default and published in a 0600 `daemon.json` beside
 the store, so clients discover it rather than hardcode it.
 
-**Trust boundary: one principal.** The daemon authenticates the token file, not the
-caller. Anyone who can read `~/.trw/memory/daemon-token` is fully authorized for
-every namespace in that store; a `namespace` argument selects scope, not permission.
-The boundary is therefore the user account, and that is deliberate — this transport
-is for one user's agents and applications, not for mutually distrusting tenants.
+**Trust boundary: a token reaches only its grant.** `trw-mcp memory token` mints a
+token for the calling checkout's pinned project namespace plus `user:local`; the
+daemon keeps only its sha256 digest in the 0600 `daemon-grants.json`, and the raw
+token lives in that checkout's `.trw/runtime/memory-token`. Every namespaced call is
+checked against the grant before RBAC, so a request for any other namespace is
+refused even with RBAC off. A Slice A `daemon-token` (one all-namespace bearer) makes
+the daemon refuse to start; `trw-mcp memory token --migrate` deletes it.
 
 **Concurrency: four workers.** Each served `memory_recall`, `memory_store` and
 `memory_maintain` call runs its synchronous work in a bounded thread pool
@@ -480,7 +479,7 @@ entries are not searched, and an empty result is not evidence of absence. Raisin
 
 - `trw_learn` delegates to `SQLiteBackend.store()` via `memory_adapter.py` (YAML dual-write as backup)
 - `trw_recall` delegates to `SQLiteBackend.search()` / `list_entries()` as the sole query path
-- Scoring functions (`compute_utility_score`, `update_q_value`, `apply_time_decay`, `bayesian_calibrate`) are canonical in trw-memory and re-exported by trw-mcp
+- Scoring functions (`compute_utility_score`, `apply_time_decay`) are canonical in trw-memory and re-exported by trw-mcp
 - One-time YAML-to-SQLite migration runs automatically on first access
 - Optional vector search via `LocalEmbeddingProvider` + `rrf_fuse` when `sentence-transformers` is installed
 
@@ -517,8 +516,8 @@ With an offline switch engaged (`TRW_OFFLINE` / `HF_HUB_OFFLINE`) **or** `local_
 
 | Capability | Default | Notes |
 |-----------|---------|-------|
-| Field-level encryption | **off** (`encryption_enabled=False`) | opt-in (AES-256-GCM per-namespace keys) |
-| PII detection | **on** (`pii_enabled=True`) | always scans `content`/`detail`/`tags`/`evidence[]`/`Assertion.last_evidence` on the store path; the configurable `pii_action` default is `warn` for the public `check_entry_pii` helper. On the runtime store path, detected **API keys / tokens block the write** (`PIIBlockError`); every other type is recorded in the `pii_types` metadata and stored **verbatim** — heuristic detectors do not get to irreversibly rewrite local text. Emails, IPs, SSNs, phone numbers and credit-card shapes are masked at the publish boundary instead. Set `pii_custom_patterns` to opt in to local masking with your own regexes |
+| Encryption at rest | **off** (`encryption_enabled=False`) | opt-in — SQLCipher whole-database encryption (AES-256-CBC), HKDF-SHA256 per-namespace keys |
+| PII detection | **on** (`pii_enabled=True`) | always scans `content`/`detail`/`tags`/`evidence[]`/`Assertion.last_evidence` on the store path. On the runtime store path, detected **API keys / tokens block the write** (`PIIBlockError`); every other type is recorded in the `pii_types` metadata and stored **verbatim** — heuristic detectors do not get to irreversibly rewrite local text. Emails, IPs, SSNs, phone numbers and credit-card shapes are masked at the publish boundary instead. Set `pii_custom_patterns` to opt in to local masking with your own regexes |
 | Poisoning / size-anomaly detection | **observe** (`poisoning_detection_mode="observe"`) | the SEC-001 statistical size/tag-count detector records anomaly stats + telemetry but does **not** quarantine by default; `enforce` is opt-in. There is no per-source exemption: a caller-supplied `metadata['source']` cannot skip enforce-mode quarantine |
 | Trust scoring | **observe** (`trust_scoring_mode="observe"`) | logs intake trust decisions; `enforce`/`strict` are opt-in |
 | Provenance signing | **required** (`provenance_required=True`) | persisted rows carry a signed provenance hash-chain |

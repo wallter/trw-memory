@@ -38,6 +38,14 @@ _BOOKKEEPING_FIELDS: frozenset[str] = frozenset(
     }
 )
 
+#: Upper bound for the monotonic recall/session/access counters. These only
+#: ever increment (one per recall/session), so an adversary replaying access
+#: could otherwise grow them without limit and skew utility/decay scoring. The
+#: cap is far above any legitimate usage and keeps the values comfortably within
+#: SQLite's signed-64-bit integer range. Shared by ``_crud_ops.py`` and
+#: ``_crud_counters.py`` (PRD-CORE-291 slice 3).
+_MAX_COUNTER = 1_000_000_000
+
 #: All column/field names on MemoryEntry, in canonical order.
 #: Used by SQLiteBackend for SELECT/INSERT column lists.
 ENTRY_COLUMNS: tuple[str, ...] = (
@@ -58,8 +66,6 @@ ENTRY_COLUMNS: tuple[str, ...] = (
     "invalidated_by",
     "access_count",
     "session_count",
-    "q_value",
-    "q_observations",
     "source",
     "source_identity",
     "client_profile",
@@ -91,8 +97,6 @@ ENTRY_COLUMNS: tuple[str, ...] = (
     "sync_seq",
     "last_synced_at",
     "recall_count",
-    "helpful_count",
-    "unhelpful_count",
     "verification_status",
     "verification_checked_at",
 )

@@ -14,19 +14,30 @@ import httpx
 import pytest
 
 from trw_memory.decisions import (
-    DEFAULT_BASE_URL,
-    DEFAULT_MODEL,
     ChoiceQuestion,
-    JevHttpJudge,
+    DecisionFailure,
+    DecisionResult,
     NoulQuestion,
     NullJudge,
     ScoreQuestion,
     judge_from_env,
 )
 from trw_memory.decisions._dotenv import parse_dotenv_subset
+from trw_memory.decisions._jev_http import DEFAULT_BASE_URL, DEFAULT_MODEL, JevHttpJudge
 from trw_memory.decisions._wire import normalize_noul_criteria
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture
+def _isolated_home(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """An empty HOME (no ``.trw/config.yaml``), for tests exercising user-scope enablement
+    hermetically rather than against whatever the real machine happens to have configured.
+    """
+    home = tmp_path / "home"
+    (home / ".trw").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    return home
 
 
 def _judge(handler, **kwargs) -> JevHttpJudge:
@@ -186,7 +197,7 @@ def test_retry_after_429_then_success() -> None:
     assert result.backend == "jev"
 
 
-def test_retryable_status_exhausted_after_one_retry_returns_none() -> None:
+def test_retryable_status_exhausted_after_one_retry_is_provider_error() -> None:
     calls = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -197,14 +208,46 @@ def test_retryable_status_exhausted_after_one_retry_returns_none() -> None:
     result = judge.decide("state", {"q": NoulQuestion(instructions="Q?")})
 
     assert calls["n"] == 2  # exactly ONE retry, never more
-    assert result is None
+    assert isinstance(result, DecisionFailure) and result.kind == "provider_error"
+
+
+def test_retry_is_skipped_when_retry_after_would_exhaust_the_call_budget() -> None:
+    """The timeout bounds the whole call: no retry that could only start after the budget is spent."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(503, headers={"retry-after": "3"})
+
+    started = time.monotonic()
+    result = _judge(handler).decide("state", {"q": NoulQuestion(instructions="Q?")}, timeout_s=1.0)
+
+    assert calls["n"] == 1
+    assert time.monotonic() - started < 1.0
+    assert isinstance(result, DecisionFailure) and result.kind == "provider_error"
+
+
+def test_retry_gets_only_the_remaining_budget() -> None:
+    timeouts: list[object] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        timeouts.append(request.extensions["timeout"]["read"])
+        if len(timeouts) == 1:
+            return httpx.Response(429, headers={"retry-after": "0.2"})
+        return httpx.Response(200, json={"model": "m", "answers": {"q": {"type": "noul", "noul": 0.4}}})
+
+    result = _judge(handler).decide("state", {"q": NoulQuestion(instructions="Q?")}, timeout_s=2.0)
+
+    assert isinstance(result, DecisionResult)
+    assert timeouts[0] == 2.0
+    assert 0 < float(timeouts[1]) < 1.8
 
 
 # -- Non-retryable errors abstain immediately ------------------------------
 
 
-@pytest.mark.parametrize("status", [401, 422])
-def test_client_errors_return_none_without_retry(status: int) -> None:
+@pytest.mark.parametrize(("status", "kind"), [(401, "auth"), (422, "invalid_request")])
+def test_client_errors_fail_typed_without_retry(status: int, kind: str) -> None:
     calls = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -214,28 +257,28 @@ def test_client_errors_return_none_without_retry(status: int) -> None:
     judge = _judge(handler)
     result = judge.decide("state", {"q": NoulQuestion(instructions="Q?")})
 
-    assert result is None
+    assert isinstance(result, DecisionFailure) and result.kind == kind
     assert calls["n"] == 1  # 401/422 are not retryable
 
 
-def test_timeout_returns_none() -> None:
+def test_timeout_is_a_timeout_failure() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.TimeoutException("timed out", request=request)
 
     judge = _judge(handler)
     result = judge.decide("state", {"q": NoulQuestion(instructions="Q?")})
 
-    assert result is None
+    assert isinstance(result, DecisionFailure) and result.kind == "timeout"
 
 
-def test_malformed_response_returns_none() -> None:
+def test_malformed_response_is_a_malformed_failure() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"not json")
 
     judge = _judge(handler)
     result = judge.decide("state", {"q": NoulQuestion(instructions="Q?")})
 
-    assert result is None
+    assert isinstance(result, DecisionFailure) and result.kind == "malformed_response"
 
 
 # -- No network when disabled ----------------------------------------------
@@ -244,7 +287,7 @@ def test_malformed_response_returns_none() -> None:
 def test_null_judge_never_makes_a_network_call() -> None:
     judge = NullJudge()
     result = judge.decide("anything", {"q": NoulQuestion(instructions="Q?")})
-    assert result is None
+    assert isinstance(result, DecisionFailure) and result.kind == "disabled"
 
 
 def test_judge_from_env_disabled_returns_null_judge_no_network(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -298,8 +341,12 @@ def test_judge_from_env_takes_only_the_api_key_from_the_dotenv(tmp_path) -> None
     assert judge._model == DEFAULT_MODEL
 
 
-def test_dotenv_cannot_enable_the_jev_backend(tmp_path) -> None:
-    """release-verify R1: enablement is process-env only, so a cloned repo cannot opt in for you."""
+def test_dotenv_path_alone_cannot_enable_the_jev_backend(tmp_path) -> None:
+    """``dotenv_path`` with no ``project_root`` stays key-only: passing a bare dotenv path (the
+    shape every pre-2026-09-23 caller uses) must not newly start reading it for enablement too.
+    Project-scope enablement is opt-in via ``project_root`` — see
+    ``test_project_root_enables_via_its_trw_config_yaml`` and friends below.
+    """
     dotenv = tmp_path / ".env"
     dotenv.write_text(
         "TRW_JEV_ENABLED=true\nOPENROUTER_API_KEY=sk-operator-real-secret\n",
@@ -309,7 +356,292 @@ def test_dotenv_cannot_enable_the_jev_backend(tmp_path) -> None:
     judge = judge_from_env(env={}, dotenv_path=dotenv)
 
     assert isinstance(judge, NullJudge)
-    assert judge.decide("state", {"q": NoulQuestion(instructions="Q?")}) is None
+    assert judge.decide("state", {"q": NoulQuestion(instructions="Q?")}).kind == "disabled"
+
+
+# -- Enablement precedence via resolve_backend_enablement (2026-09-23 operator decision) ----------
+
+
+def test_project_root_enables_via_its_trw_config_yaml(tmp_path, _isolated_home) -> None:
+    """A project may now enable the backend from its own ``.trw/config.yaml`` — the prior rule
+    (project files may only disable) is relaxed; the key still comes from the project ``.env``.
+    """
+    project = tmp_path / "project"
+    (project / ".trw").mkdir(parents=True)
+    (project / ".trw" / "config.yaml").write_text("assess_enabled: true\n", encoding="utf-8")
+    (project / ".env").write_text("OPENROUTER_API_KEY=sk-project-key\n", encoding="utf-8")
+
+    judge = judge_from_env(env={}, dotenv_path=project / ".env", project_root=project)
+
+    assert isinstance(judge, JevHttpJudge)
+    assert judge._api_key == "sk-project-key"
+
+
+def test_project_root_enables_via_its_dotenv(tmp_path, _isolated_home) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".env").write_text("TRW_JEV_ENABLED=true\nOPENROUTER_API_KEY=sk-project-key\n", encoding="utf-8")
+
+    judge = judge_from_env(env={}, dotenv_path=project / ".env", project_root=project)
+
+    assert isinstance(judge, JevHttpJudge)
+
+
+def test_process_env_beats_project_root(tmp_path, _isolated_home) -> None:
+    project = tmp_path / "project"
+    (project / ".trw").mkdir(parents=True)
+    (project / ".trw" / "config.yaml").write_text("assess_enabled: true\n", encoding="utf-8")
+
+    judge = judge_from_env(env={"TRW_JEV_ENABLED": "false"}, project_root=project)
+
+    assert isinstance(judge, NullJudge)
+
+
+def test_project_root_beats_user_scope(tmp_path, _isolated_home) -> None:
+    (_isolated_home / ".trw" / "config.yaml").write_text("assess_enabled: true\n", encoding="utf-8")
+    project = tmp_path / "project"
+    (project / ".trw").mkdir(parents=True)
+    (project / ".trw" / "config.yaml").write_text("assess_enabled: false\n", encoding="utf-8")
+
+    judge = judge_from_env(env={}, project_root=project)
+
+    assert isinstance(judge, NullJudge)
+
+
+def test_user_scope_enables_with_no_project_root(_isolated_home) -> None:
+    (_isolated_home / ".trw" / "config.yaml").write_text("assess_enabled: true\n", encoding="utf-8")
+
+    judge = judge_from_env(env={"OPENROUTER_API_KEY": "sk-machine-key"})
+
+    assert isinstance(judge, JevHttpJudge)
+
+
+def test_nothing_configured_resolves_off(_isolated_home) -> None:
+    assert isinstance(judge_from_env(env={}), NullJudge)
+
+
+# -- resolve_backend_enablement: fail-closed on a present-but-broken layer, and lazy evaluation ---
+
+
+#: Round 3 review: table-driven coverage of every project-YAML outcome, each checked against a
+#: PERMISSIVE user-scope ``assess_enabled: true`` -- only "absent" may legitimately cascade to it.
+_PROJECT_YAML_CASES: list[tuple[str, object, tuple[bool, str]]] = [
+    ("absent", None, (True, "~/.trw/config.yaml")),  # no .trw dir at all: genuinely absent
+    ("refused_non_utf8", b"assess_enabled: true\n\xff\xfe\x00binary\n", (False, "project .trw/config.yaml")),
+    ("refused_oversized", ("assess_enabled: true\n" + "#" * (65 * 1024)).encode(), (False, "project .trw/config.yaml")),
+    ("malformed", "assess_enabled: [unterminated\n", (False, "project .trw/config.yaml")),
+    ("not_a_mapping", "- just\n- a\n- list\n", (False, "project .trw/config.yaml")),
+    ("blank", 'assess_enabled: ""\n', (False, "project .trw/config.yaml")),
+    ("null", "assess_enabled:\n", (False, "project .trw/config.yaml")),
+    ("non_bool_int", "assess_enabled: 1\n", (False, "project .trw/config.yaml")),
+    ("key_missing", "some_other_key: 1\n", (True, "~/.trw/config.yaml")),  # valid file, no opinion
+    ("explicit_false", "assess_enabled: false\n", (False, "project .trw/config.yaml")),
+]
+
+
+@pytest.mark.parametrize(("case", "content", "expected"), _PROJECT_YAML_CASES, ids=[c[0] for c in _PROJECT_YAML_CASES])
+def test_project_yaml_layer_table(
+    tmp_path, _isolated_home, case: str, content: object, expected: tuple[bool, str]
+) -> None:
+    from trw_memory.decisions._enablement import resolve_backend_enablement
+
+    (_isolated_home / ".trw" / "config.yaml").write_text("assess_enabled: true\n", encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    if content is not None:
+        (project / ".trw").mkdir()
+        target = project / ".trw" / "config.yaml"
+        if isinstance(content, bytes):
+            target.write_bytes(content)
+        else:
+            target.write_text(content, encoding="utf-8")
+
+    assert resolve_backend_enablement(project, env={}) == expected
+
+
+def test_project_yaml_unreadable_lstat_fails_closed(tmp_path, _isolated_home, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round 3 review: ``lstat`` itself can fail for a reason OTHER than absence (e.g.
+    ``PermissionError`` on a parent directory) -- that must fail closed too, not read as absent.
+    """
+    from pathlib import Path
+
+    import trw_memory.decisions._enablement as enablement_mod
+
+    (_isolated_home / ".trw" / "config.yaml").write_text("assess_enabled: true\n", encoding="utf-8")
+    project = tmp_path / "project"
+    (project / ".trw").mkdir(parents=True)
+    target_path = project / ".trw" / "config.yaml"
+    target_path.write_text("assess_enabled: true\n", encoding="utf-8")
+
+    real_lstat = enablement_mod.os.lstat
+
+    def _guarded_lstat(path, *a, **kw):  # type: ignore[no-untyped-def]
+        if Path(path) == target_path:
+            raise PermissionError(13, "Permission denied")
+        return real_lstat(path, *a, **kw)
+
+    monkeypatch.setattr(enablement_mod.os, "lstat", _guarded_lstat)
+
+    assert enablement_mod.resolve_backend_enablement(project, env={}) == (False, "project .trw/config.yaml")
+
+
+def test_project_yaml_symlink_fails_closed(tmp_path, _isolated_home) -> None:
+    """A symlinked ``.trw/config.yaml`` EXISTS (``lstat`` succeeds on the link itself) but the
+    hardened reader refuses to follow it -- refused, not absent.
+    """
+    from trw_memory.decisions._enablement import resolve_backend_enablement
+
+    (_isolated_home / ".trw" / "config.yaml").write_text("assess_enabled: true\n", encoding="utf-8")
+    project = tmp_path / "project"
+    (project / ".trw").mkdir(parents=True)
+    target = tmp_path / "elsewhere.yaml"
+    target.write_text("assess_enabled: true\n", encoding="utf-8")
+    (project / ".trw" / "config.yaml").symlink_to(target)
+
+    assert resolve_backend_enablement(project, env={}) == (False, "project .trw/config.yaml")
+
+
+#: Same table shape, for the project ``.env`` layer -- only the cases that structurally apply to a
+#: line-based KEY=value file (no "not a mapping"/"null" equivalent; a dotenv value is always text).
+_PROJECT_DOTENV_CASES: list[tuple[str, bytes | None, tuple[bool, str]]] = [
+    ("absent", None, (True, "~/.trw/config.yaml")),
+    ("refused_non_utf8", b"TRW_JEV_ENABLED=true\n\xff\xfe\x00binary\n", (False, "project .env")),
+    ("refused_oversized", ("TRW_JEV_ENABLED=true\n" + "#" * (65 * 1024)).encode(), (False, "project .env")),
+    # Round 4 review: the key is NAMED (well-formed or not), so every one of these is explicit
+    # False, never absent -- unlike a genuinely absent key, which the last row below still cascades.
+    ("blank", b"TRW_JEV_ENABLED=\n", (False, "project .env")),
+    ("blank_export", b"export TRW_JEV_ENABLED=\n", (False, "project .env")),
+    ("no_equals_sign", b"TRW_JEV_ENABLED true\n", (False, "project .env")),
+    ("bare_key_no_value", b"TRW_JEV_ENABLED\n", (False, "project .env")),
+    # Round 5 review: an '=' further along the line (a garbled tail) must not let the "no '='
+    # anywhere" check miss this -- the key's own leading token is what decides.
+    ("garbled_tail_with_equals", b"TRW_JEV_ENABLED true=1\n", (False, "project .env")),
+    ("quoted_but_broken_value", b'TRW_JEV_ENABLED="unterminated\n', (False, "project .env")),
+    ("non_truthy_string", b"TRW_JEV_ENABLED=maybe\n", (False, "project .env")),
+    ("key_missing", b"OTHER_KEY=1\n", (True, "~/.trw/config.yaml")),
+    ("explicit_false", b"TRW_JEV_ENABLED=false\n", (False, "project .env")),
+    # A DIFFERENT key that merely shares TRW_JEV_ENABLED as a textual prefix must never be
+    # mistaken for a malformed mention of it -- the leading-token match is exact, not a prefix.
+    ("unrelated_key_sharing_a_prefix", b"TRW_JEV_ENABLED_OTHER=true\n", (True, "~/.trw/config.yaml")),
+]
+
+
+@pytest.mark.parametrize(
+    ("case", "content", "expected"), _PROJECT_DOTENV_CASES, ids=[c[0] for c in _PROJECT_DOTENV_CASES]
+)
+def test_project_dotenv_layer_table(
+    tmp_path, _isolated_home, case: str, content: bytes | None, expected: tuple[bool, str]
+) -> None:
+    from trw_memory.decisions._enablement import resolve_backend_enablement
+
+    (_isolated_home / ".trw" / "config.yaml").write_text("assess_enabled: true\n", encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    if content is not None:
+        (project / ".env").write_bytes(content)
+
+    assert resolve_backend_enablement(project, env={}) == expected
+
+
+def test_project_dotenv_unreadable_lstat_fails_closed(
+    tmp_path, _isolated_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pathlib import Path
+
+    import trw_memory.decisions._enablement as enablement_mod
+
+    (_isolated_home / ".trw" / "config.yaml").write_text("assess_enabled: true\n", encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    target_path = project / ".env"
+    target_path.write_text("TRW_JEV_ENABLED=true\n", encoding="utf-8")
+
+    real_lstat = enablement_mod.os.lstat
+
+    def _guarded_lstat(path, *a, **kw):  # type: ignore[no-untyped-def]
+        if Path(path) == target_path:
+            raise PermissionError(13, "Permission denied")
+        return real_lstat(path, *a, **kw)
+
+    monkeypatch.setattr(enablement_mod.os, "lstat", _guarded_lstat)
+
+    assert enablement_mod.resolve_backend_enablement(project, env={}) == (False, "project .env")
+
+
+def test_malformed_user_yaml_fails_closed(tmp_path, _isolated_home) -> None:
+    (_isolated_home / ".trw" / "config.yaml").write_text("assess_enabled: [unterminated\n", encoding="utf-8")
+
+    from trw_memory.decisions._enablement import resolve_backend_enablement
+
+    assert resolve_backend_enablement(None, env={}) == (False, "~/.trw/config.yaml")
+
+
+def test_blank_process_env_still_cascades_unlike_a_blank_yaml_or_dotenv_value(tmp_path, _isolated_home) -> None:
+    """Blank-as-unset applies ONLY to a raw process-env value (an unresolved ``${env:X}``
+    template a client forwards) -- not to a present blank YAML value, nor (round 4) to a
+    human-written dotenv line naming the key with a blank assignment, both of which are now
+    explicit False since round 2/4.
+    """
+    from trw_memory.decisions._enablement import resolve_backend_enablement
+
+    (_isolated_home / ".trw" / "config.yaml").write_text("assess_enabled: true\n", encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+
+    assert resolve_backend_enablement(project, env={"TRW_JEV_ENABLED": ""}) == (True, "~/.trw/config.yaml")
+
+    (project / ".env").write_text("TRW_JEV_ENABLED=\n", encoding="utf-8")
+    assert resolve_backend_enablement(project, env={}) == (False, "project .env")
+
+
+def test_an_explicit_process_env_setting_reads_no_file(
+    tmp_path, _isolated_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-09-23 review fix: layers are evaluated lazily -- an explicit env value must
+    short-circuit before any project or user config file is even opened.
+    """
+    from trw_memory.decisions import _enablement
+
+    def _boom_yaml(*_a: object, **_kw: object) -> bool | None:
+        raise AssertionError("a decided process-env layer must not read any YAML file")
+
+    def _boom_dotenv(*_a: object, **_kw: object) -> bool | None:
+        raise AssertionError("a decided process-env layer must not read any dotenv file")
+
+    monkeypatch.setattr(_enablement, "_read_yaml_bool", _boom_yaml)
+    monkeypatch.setattr(_enablement, "_read_dotenv_bool", _boom_dotenv)
+    project = tmp_path / "project"
+    project.mkdir()
+
+    assert _enablement.resolve_backend_enablement(project, env={"TRW_JEV_ENABLED": "false"}) == (
+        False,
+        "TRW_JEV_ENABLED",
+    )
+    assert _enablement.resolve_backend_enablement(project, env={"TRW_JEV_ENABLED": "true"}) == (
+        True,
+        "TRW_JEV_ENABLED",
+    )
+
+
+def test_a_decided_project_layer_never_reads_the_user_yaml(
+    tmp_path, _isolated_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trw_memory.decisions import _enablement
+
+    project = tmp_path / "project"
+    (project / ".trw").mkdir(parents=True)
+    (project / ".trw" / "config.yaml").write_text("assess_enabled: true\n", encoding="utf-8")
+
+    real_read_yaml_bool = _enablement._read_yaml_bool
+
+    def _guarded(path, key):  # type: ignore[no-untyped-def]
+        if path == _isolated_home / ".trw" / "config.yaml":
+            raise AssertionError("a decided project layer must not read the user-scope file")
+        return real_read_yaml_bool(path, key)
+
+    monkeypatch.setattr(_enablement, "_read_yaml_bool", _guarded)
+
+    assert _enablement.resolve_backend_enablement(project, env={}) == (True, "project .trw/config.yaml")
 
 
 @pytest.mark.parametrize(
@@ -344,7 +676,7 @@ def test_judge_from_env_abstains_on_a_rejected_base_url(base_url: str, monkeypat
 
     assert isinstance(judge, NullJudge)
     # NullJudge holds no key and opens no client; the abstention is the proof no request was built.
-    assert judge.decide("state", {"q": NoulQuestion(instructions="Q?")}) is None
+    assert judge.decide("state", {"q": NoulQuestion(instructions="Q?")}).kind == "disabled"
 
 
 @pytest.mark.parametrize(
@@ -486,7 +818,7 @@ def test_failure_logs_carry_only_the_exception_type(monkeypatch: pytest.MonkeyPa
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"model": "m", "answers": {"q": {"type": "bogus", "leak": "MARKER-SECRET"}}})
 
-    assert _judge(handler).decide("MARKER-STATE", {"q": NoulQuestion(instructions="Q?")}) is None
+    assert _judge(handler).decide("MARKER-STATE", {"q": NoulQuestion(instructions="Q?")}).kind == "malformed_response"
     failures = [c for c in recorder.calls if c[1] == "jev_decision_parse_failed"]
     assert failures and failures[0][2]["error_type"] == "ValidationError"
     for _level, _event, kwargs in recorder.calls:
@@ -522,3 +854,19 @@ def test_build_payload_accepts_plain_dict_questions() -> None:
     )
     assert payload["questions"]["q"]["type"] == "noul"
     assert set(payload["questions"]["q"]["criteria"]) == {"true", "false"}
+
+
+def test_a_live_provider_call_is_blocked_and_recorded(_no_live_decision_backend: list[str]) -> None:
+    """The conftest guard: a judge on the production transport never reaches openrouter.ai."""
+    judge = JevHttpJudge("sk-test-key")  # no mock transport, default openrouter.ai URL
+
+    result = judge.decide("state", {"q": NoulQuestion(instructions="Q?")}, timeout_s=2.0)
+
+    assert isinstance(result, DecisionFailure) and result.kind == "provider_error"
+    assert _no_live_decision_backend == [f"POST {DEFAULT_BASE_URL}"]
+    _no_live_decision_backend.clear()  # this test proves the guard; any other test fails at teardown
+
+
+def test_jev_env_is_cleared_for_every_test(_isolated_home) -> None:
+    assert not any(os.environ.get(name) for name in ("TRW_JEV_ENABLED", "OPENROUTER_API_KEY"))
+    assert isinstance(judge_from_env(), NullJudge)

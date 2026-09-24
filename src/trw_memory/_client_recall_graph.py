@@ -30,24 +30,6 @@ logger = structlog.get_logger(__name__)
 _GRAPH_SCORE_DISCOUNT: float = 0.5
 
 
-def graph_expand_results(
-    client: MemoryClient, results: list[MemoryResultDict], *, depth: int = 1
-) -> list[MemoryResultDict]:
-    """Compatibility projection for direct callers of the old private helper."""
-    backend = client._backend
-    if backend is None or getattr(backend, "_conn", None) is None:
-        return results
-    candidates = []
-    for result in results:
-        entry = backend.get(result["memory_id"], namespace=client._namespace)
-        if entry is not None:
-            candidates.append(LocalCandidate(entry, result["score"]))
-    expanded = graph_expand_candidates(client, candidates, depth=depth)
-    from trw_memory._client_distilled_tiering import candidate_to_result
-
-    return [*results, *[candidate_to_result(c) for c in expanded[len(candidates) :]]]
-
-
 def graph_expand_candidates(
     client: MemoryClient,
     results: list[LocalCandidate],
@@ -182,4 +164,4 @@ def filter_conflicting_results(
     ]
 
 
-__all__ = ["filter_conflicting_results", "graph_expand_results"]
+__all__ = ["filter_conflicting_results"]

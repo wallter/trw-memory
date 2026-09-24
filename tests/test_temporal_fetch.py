@@ -10,7 +10,7 @@ from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.temporal_selection import TemporalSelection
 from trw_memory.storage._resilient_fetch import FetchQuery
 from trw_memory.storage._shared import ENTRY_COLUMNS
-from trw_memory.storage._temporal_fetch import fetch_temporal_selection
+from trw_memory.storage._temporal_fetch import _fetch_selection
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 
@@ -36,7 +36,7 @@ def test_stream_selects_beyond_prefix_and_recovers_bytes(tmp_path: Path, corrupt
                 connection.execute("UPDATE memories SET content=CAST(X'FF' AS TEXT) WHERE id='old020'")
                 connection.commit()  # Recovery connection must observe the committed corrupt row.
             query = FetchQuery(select_columns_sql=", ".join(ENTRY_COLUMNS), order_by="importance DESC, id")
-            hits, delta = fetch_temporal_selection(
+            hits, delta = _fetch_selection(
                 connection,
                 db_path=path,
                 dbapi=sqlite3,
@@ -55,7 +55,7 @@ def test_stream_selects_beyond_prefix_and_recovers_bytes(tmp_path: Path, corrupt
 def test_rejects_prefilter_limit_before_execution(tmp_path: Path) -> None:
     with sqlite3.connect(":memory:") as connection:
         with pytest.raises(ValueError, match="pre-eligibility"):
-            fetch_temporal_selection(
+            _fetch_selection(
                 connection,
                 db_path=tmp_path / "unused",
                 dbapi=sqlite3,
@@ -79,7 +79,7 @@ def test_secondary_failure_is_not_successful_empty_result(tmp_path: Path, monkey
     monkeypatch.setattr(_temporal_fetch, "_select_stream", corrupt_stream)
     with sqlite3.connect(":memory:") as connection:
         with pytest.raises(sqlite3.OperationalError, match="secondary unavailable"):
-            fetch_temporal_selection(
+            _fetch_selection(
                 connection,
                 db_path=tmp_path / "unused",
                 dbapi=Unavailable,
@@ -127,7 +127,7 @@ def test_fetch_is_batched_and_cursor_closes_on_early_exit_or_error(tmp_path: Pat
         with sqlite3.connect(path) as connection:
 
             def run():
-                return fetch_temporal_selection(
+                return _fetch_selection(
                     TrackedConnection(connection),
                     db_path=path,
                     dbapi=sqlite3,
@@ -182,7 +182,7 @@ def test_only_useful_candidates_are_constructed_and_bad_rows_do_not_fill_quota(
             connection.execute("UPDATE memories SET status='invalid-schema-status' WHERE id='old000'")
             connection.commit()
             monkeypatch.setattr(_resilient_fetch, "row_to_entry", observed)
-            hits, _ = fetch_temporal_selection(
+            hits, _ = _fetch_selection(
                 connection,
                 db_path=path,
                 dbapi=sqlite3,
@@ -207,3 +207,33 @@ def test_selector_programming_error_is_not_quarantined_as_bad_data(tmp_path: Pat
         _decode_bytes_rows(
             [()], column_names=(), db_path=tmp_path / "unused", table="memories", retain_row=broken_selector
         )
+
+
+def test_keyword_search_replays_the_exact_query_after_a_decode_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A decode failure replays the same SQL, so order and namespace filter survive the retry."""
+    from trw_memory.storage import _temporal_fetch
+
+    backend = SQLiteBackend(tmp_path / "memory.db")
+    try:
+        backend.store(MemoryEntry(id="one", content="telemetry", importance=0.95))
+        backend.store(MemoryEntry(id="both", content="telemetry discovery", importance=0.6))
+        original = _temporal_fetch._select_stream
+        calls = []
+
+        def fail_first(connection, query, *args, **kwargs):  # type: ignore[no-untyped-def]
+            calls.append(query.build())
+            if len(calls) == 1:
+                raise sqlite3.OperationalError("Could not decode to UTF-8")
+            return original(connection, query, *args, **kwargs)
+
+        monkeypatch.setattr(_temporal_fetch, "_select_stream", fail_first)
+        results = backend.search("unused", keyword_tokens=["telemetry", "discovery"], top_k=1, namespace="default")
+
+        assert [entry.id for entry in results] == ["both"]
+        assert len(calls) == 2
+        assert calls[0] == calls[1]
+        assert "namespace = ?" in calls[0][0]
+    finally:
+        backend.close()

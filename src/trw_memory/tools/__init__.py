@@ -14,6 +14,7 @@ from trw_memory.tools._contract import (
     SearchImpl,
     StatusImpl,
     StoreImpl,
+    UpdateImpl,
 )
 from trw_memory.tools._types import McpServer
 from trw_memory.tools.audit import memory_audit_impl, register_audit_tool
@@ -27,6 +28,7 @@ from trw_memory.tools.review import memory_review_impl, register_review_tool
 from trw_memory.tools.search import memory_search_impl, register_search_tool
 from trw_memory.tools.status import memory_status_impl, register_status_tool
 from trw_memory.tools.store import memory_store_impl, register_store_tool
+from trw_memory.tools.update import memory_update_impl, register_update_tool
 
 __all__ = [
     "McpServer",
@@ -39,6 +41,7 @@ __all__ = [
     "memory_search_impl",
     "memory_status_impl",
     "memory_store_impl",
+    "memory_update_impl",
     "register_audit_tool",
     "register_consolidate_tool",
     "register_forget_tool",
@@ -47,6 +50,7 @@ __all__ = [
     "register_search_tool",
     "register_status_tool",
     "register_store_tool",
+    "register_update_tool",
 ]
 
 if TYPE_CHECKING:  # pragma: no cover - static conformance proof (PRD-CORE-251 FR01)
@@ -57,6 +61,7 @@ if TYPE_CHECKING:  # pragma: no cover - static conformance proof (PRD-CORE-251 F
     _recall_conforms: RecallImpl = memory_recall_impl
     _search_conforms: SearchImpl = memory_search_impl
     _forget_conforms: ForgetImpl = memory_forget_impl
+    _update_conforms: UpdateImpl = memory_update_impl
     _consolidate_conforms: ConsolidateImpl = memory_consolidate_impl
     _status_conforms: StatusImpl = memory_status_impl
     _review_conforms: ReviewImpl = memory_review_impl

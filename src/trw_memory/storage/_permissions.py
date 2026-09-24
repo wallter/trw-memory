@@ -60,7 +60,12 @@ def prepare_db_file_mode(db_path: Path | str) -> None:
         try:
             parent_fd = os.open(path.parent, parent_flags)
         except OSError as exc:
-            raise StorageError(f"Cannot securely open SQLite parent: {exc}", path=str(path.parent)) from exc
+            hint = (
+                " (the directory is a symlink; the store refuses to follow one -- point at the real directory)"
+                if path.parent.is_symlink()
+                else ""
+            )
+            raise StorageError(f"Cannot securely open SQLite parent: {exc}{hint}", path=str(path.parent)) from exc
         try:
             parent_stat = os.fstat(parent_fd)
             parent_mode = parent_stat.st_mode

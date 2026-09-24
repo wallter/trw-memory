@@ -385,7 +385,7 @@ class TestF008BatchedRecallAccess:
 
             backend._conn = _CountingConn()
             try:
-                record_recall_access(backend, ids)
+                record_recall_access(backend, ids, namespace="default")
             finally:
                 backend._conn = real_conn
 
@@ -401,7 +401,7 @@ class TestF008BatchedRecallAccess:
             for eid in ["r-a", "r-b"]:
                 backend.store(MemoryEntry(id=eid, content="recall"))
 
-            record_recall_access(backend, ["r-a", "r-b"])
+            record_recall_access(backend, ["r-a", "r-b"], namespace="default")
 
             for eid in ["r-a", "r-b"]:
                 loaded = backend.get(eid, namespace="default")
@@ -417,7 +417,7 @@ class TestF008BatchedRecallAccess:
         try:
             backend.store(MemoryEntry(id="r-dup", content="dedup"))
 
-            record_recall_access(backend, ["r-dup", "r-dup", "r-dup"])
+            record_recall_access(backend, ["r-dup", "r-dup", "r-dup"], namespace="default")
 
             loaded = backend.get("r-dup", namespace="default")
             assert loaded is not None
@@ -432,7 +432,7 @@ class TestF008BatchedRecallAccess:
             backend.store(MemoryEntry(id="r-acc", content="accumulate"))
 
             for _ in range(3):
-                record_recall_access(backend, ["r-acc"])
+                record_recall_access(backend, ["r-acc"], namespace="default")
 
             loaded = backend.get("r-acc", namespace="default")
             assert loaded is not None
@@ -444,7 +444,7 @@ class TestF008BatchedRecallAccess:
     def test_empty_ids_is_noop(self) -> None:
         backend = SQLiteBackend(Path(":memory:"))
         try:
-            assert backend.increment_recall_access([]) == 0
+            assert backend.increment_recall_access([], namespace="default") == 0
         finally:
             backend.close()
 
@@ -454,8 +454,26 @@ class TestF008BatchedRecallAccess:
             backend.store(MemoryEntry(id="r-x", content="x"))
             backend.store(MemoryEntry(id="r-y", content="y"))
             # r-missing does not exist — not counted.
-            updated = backend.increment_recall_access(["r-x", "r-y", "r-missing"])
+            updated = backend.increment_recall_access(["r-x", "r-y", "r-missing"], namespace="default")
             assert updated == 2
+        finally:
+            backend.close()
+
+    def test_an_ids_twin_in_another_namespace_is_left_alone(self) -> None:
+        """PRD-CORE-245 FR03: a bare id does not identify a row, so both counters take the namespace."""
+        backend = SQLiteBackend(Path(":memory:"))
+        try:
+            for namespace in ("project:a", "user:local"):
+                backend.store(MemoryEntry(id="r-twin", content="twin", namespace=namespace))
+
+            assert backend.increment_recall_access(["r-twin"], namespace="project:a") == 1
+            assert backend.increment_session_counts(["r-twin"], namespace="project:a") == 1
+
+            counted = backend.get("r-twin", namespace="project:a")
+            twin = backend.get("r-twin", namespace="user:local")
+            assert counted is not None and twin is not None
+            assert (counted.access_count, counted.recall_count, counted.session_count) == (1, 1, 1)
+            assert (twin.access_count, twin.recall_count, twin.session_count) == (0, 0, 0)
         finally:
             backend.close()
 

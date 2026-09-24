@@ -4,81 +4,52 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from trw_memory.cli import main
+from trw_memory.exceptions import DaemonUnreachableError
 
-from ._test_cli_support import _CLI, _mock_entry, _real_import_target, _reopen_import_target
+from ._test_cli_support import (
+    _CLI,
+    _DAEMON_CLIENT,
+    _exporting_client,
+    _mock_client,
+    _mock_entry,
+    _real_import_target,
+    _reopen_import_target,
+)
 
 
 class TestExportCommand:
-    @patch(f"{_CLI}._create_local_backend")
-    @patch(f"{_CLI}.MemoryConfig")
-    def test_export_json_stdout(
-        self,
-        mock_config_cls: MagicMock,
-        mock_backend_fn: MagicMock,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        mock_config_cls.return_value = MagicMock()
-        mock_backend = MagicMock()
-        mock_backend.list_entries.return_value = [_mock_entry()]
-        mock_backend_fn.return_value = mock_backend
-
-        ret = main(["export"])
+    def test_export_json_stdout(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with patch(_DAEMON_CLIENT, return_value=_exporting_client(_mock_entry())):
+            ret = main(["export", "--namespace", "default"])
         assert ret == 0
-        captured = capsys.readouterr()
-        parsed = json.loads(captured.out)
+        parsed = json.loads(capsys.readouterr().out)
         assert len(parsed) == 1
         assert parsed[0]["id"] == "M-001"
 
-    @patch(f"{_CLI}._create_local_backend")
-    @patch(f"{_CLI}.MemoryConfig")
-    def test_export_json_to_file(
-        self,
-        mock_config_cls: MagicMock,
-        mock_backend_fn: MagicMock,
-        tmp_path: Path,
-    ) -> None:
-        mock_config_cls.return_value = MagicMock()
-        mock_backend = MagicMock()
-        mock_backend.list_entries.return_value = [_mock_entry()]
-        mock_backend_fn.return_value = mock_backend
-
+    def test_export_json_to_file(self, tmp_path: Path) -> None:
         out_path = str(tmp_path / "out.json")
-        ret = main(["export", "--output", out_path])
+        with patch(_DAEMON_CLIENT, return_value=_exporting_client(_mock_entry())):
+            ret = main(["export", "--namespace", "default", "--output", out_path])
         assert ret == 0
         data = json.loads(Path(out_path).read_text())
         assert len(data) == 1
 
-    @patch(f"{_CLI}._create_local_backend")
-    @patch(f"{_CLI}.MemoryConfig")
-    def test_export_empty(
-        self,
-        mock_config_cls: MagicMock,
-        mock_backend_fn: MagicMock,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        mock_config_cls.return_value = MagicMock()
-        mock_backend = MagicMock()
-        mock_backend.list_entries.return_value = []
-        mock_backend_fn.return_value = mock_backend
-
-        ret = main(["export"])
+    def test_export_empty(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with patch(_DAEMON_CLIENT, return_value=_exporting_client()):
+            ret = main(["export", "--namespace", "default"])
         assert ret == 0
-        captured = capsys.readouterr()
-        parsed = json.loads(captured.out)
-        assert parsed == []
+        assert json.loads(capsys.readouterr().out) == []
 
-    @patch(f"{_CLI}.MemoryConfig", side_effect=RuntimeError("fail"))
-    def test_export_error(
-        self,
-        mock_config_cls: MagicMock,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        ret = main(["export"])
+    def test_export_error(self, capsys: pytest.CaptureFixture[str]) -> None:
+        client = _mock_client()
+        client.list_page = AsyncMock(side_effect=DaemonUnreachableError("the daemon is gone"))
+        with patch(_DAEMON_CLIENT, return_value=client):
+            ret = main(["export", "--namespace", "default"])
         assert ret == 1
         assert "Error:" in capsys.readouterr().err
 

@@ -66,15 +66,21 @@ class ScoredCandidate:
 def hybrid_search(
     query: str,
     entries: list[MemoryEntry],
+    *,
+    score_observer: Callable[[tuple[ScoredCandidate, ...]], None] | None = None,
     **kwargs: object,
 ) -> list[MemoryEntry]:
     """Entry-only view of :func:`hybrid_search_scored` (unchanged contract).
 
     Kept as the package's stable surface: callers that only need the ranking
-    order — including ``trw_mcp.state._memory_queries`` — are unaffected by
-    PRD-CORE-278's scored boundary.
+    order are unaffected by PRD-CORE-278's scored boundary. A caller that also
+    needs the scores (trw-mcp's recall, PRD-CORE-292) passes ``score_observer``
+    and receives the scored candidates exactly as ranked, before the entry view.
     """
-    return [candidate.entry for candidate in hybrid_search_scored(query, entries, **kwargs)]  # type: ignore[arg-type]
+    scored = hybrid_search_scored(query, entries, **kwargs)  # type: ignore[arg-type]
+    if score_observer is not None:
+        score_observer(tuple(scored))
+    return [candidate.entry for candidate in scored]
 
 
 def hybrid_search_scored(

@@ -9,11 +9,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from trw_memory.cli_formatters import StatusDict
 from trw_memory.cli_json_input import JsonInputError, load_json_document, read_source_text
 from trw_memory.models.config import MemoryConfig
+from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.validation import validate_namespace
-from trw_memory.storage.interface import EntryCursor, StorageBackend
+from trw_memory.storage.interface import StorageBackend
 
 
 def open_validated_backend(
@@ -38,86 +38,25 @@ def resolve_base_and_db(args: argparse.Namespace, *, config_cls: type[MemoryConf
     return base_dir, db_path
 
 
-def handle_consolidate(
-    args: argparse.Namespace,
-    *,
-    config_cls: type[MemoryConfig],
-    backend_factory: Callable[[MemoryConfig, str], StorageBackend],
-    embedder_factory: Callable[..., object],
-    consolidate_fn: Callable[..., dict[str, Any]],
-) -> int:
-    config = config_cls()
-    namespace, backend = open_validated_backend(config, args.namespace, backend_factory=backend_factory)
-    try:
-        embedder = embedder_factory(model_name=config.embedding_model, dim=config.embedding_dim)
-        result = consolidate_fn(
-            storage=backend,
-            embedder=embedder,
-            dry_run=args.dry_run,
-            namespace=namespace,
-            config=config,
-        )
-        print(json.dumps(result, indent=2, default=str))
-        return 0
-    finally:
-        backend.close()
+def write_export(args: argparse.Namespace, data: list[dict[str, Any]], export_summary: Callable[..., str]) -> None:
+    """Write fully materialized export rows to ``--output`` or stdout, then the summary to stderr."""
+    if args.fmt == "yaml":
+        from ruamel.yaml import YAML
 
-
-_EXPORT_PAGE_SIZE = 10000
-
-
-def handle_export(
-    args: argparse.Namespace,
-    *,
-    config_cls: type[MemoryConfig],
-    backend_factory: Callable[[MemoryConfig, str], StorageBackend],
-    entry_to_export_dict: Callable[[Any], dict[str, Any]],
-    export_summary: Callable[..., str],
-) -> int:
-    config = config_cls()
-    namespace, backend = open_validated_backend(config, args.namespace, backend_factory=backend_factory)
-    try:
-        # Materialize before opening output: a later acquisition failure must
-        # not replace an existing export with an apparently successful prefix.
-        # Pages preserve backend order; this is not a cross-page snapshot.
-        data: list[dict[str, Any]] = []
-        cursor: EntryCursor | None = None
-        while True:
-            entries = backend.list_entries(namespace=namespace, limit=_EXPORT_PAGE_SIZE, after=cursor)
-            if not entries:
-                break
-            next_cursor = EntryCursor.from_entry(entries[-1])
-            if cursor is not None and (next_cursor.updated_at, next_cursor.entry_id) >= (
-                cursor.updated_at,
-                cursor.entry_id,
-            ):
-                raise RuntimeError("Export cursor did not advance; no output written")
-            data.extend(entry_to_export_dict(entry) for entry in entries)
-            if len(entries) < _EXPORT_PAGE_SIZE:
-                break
-            cursor = next_cursor
-
-        if args.fmt == "yaml":
-            from ruamel.yaml import YAML
-
-            yaml = YAML()
-            yaml.default_flow_style = False
-            if args.output:
-                with open(args.output, "w", encoding="utf-8") as handle:
-                    yaml.dump(data, handle)
-            else:
-                yaml.dump(data, sys.stdout)
+        yaml = YAML()
+        yaml.default_flow_style = False
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as handle:
+                yaml.dump(data, handle)
         else:
-            text = json.dumps(data, indent=2, default=str)
-            if args.output:
-                Path(args.output).write_text(text, encoding="utf-8")
-            else:
-                print(text)
-
-        print(export_summary(len(data), args.output), file=sys.stderr)
-        return 0
-    finally:
-        backend.close()
+            yaml.dump(data, sys.stdout)
+    else:
+        text = json.dumps(data, indent=2, default=str)
+        if args.output:
+            Path(args.output).write_text(text, encoding="utf-8")
+        else:
+            print(text)
+    print(export_summary(len(data), args.output), file=sys.stderr)
 
 
 def _load_yaml_document(path: Path, *, source: str) -> Any:
@@ -139,6 +78,38 @@ def _load_yaml_document(path: Path, *, source: str) -> Any:
         raise JsonInputError(f"{source} is not valid YAML ({type(exc).__name__})") from exc
 
 
+#: The fields a foreign-format row keeps; everything else it carries is reported as dropped.
+_FOREIGN_KEPT = frozenset({"content", "detail", "tags", "importance"})
+
+
+def _is_own_export(row: dict[str, Any]) -> bool:
+    """A row written by ``trw-memory export`` (``MemoryEntry.to_dict``) rather than a foreign format."""
+    return isinstance(row.get("id"), str) and "created_at" in row and "vector_clock" in row
+
+
+def _rebuild_own_export(row: dict[str, Any], namespace: str) -> MemoryEntry:
+    """Rebuild an exported entry whole. The file's provenance is kept as data, never as trust.
+
+    The write gate re-attests provenance to this import (a file's provenance can be forged), so the
+    original provenance/trust keys are preserved under ``imported_provenance`` instead.
+    """
+    entry = MemoryEntry.model_validate(row)
+    original = {k: v for k, v in entry.metadata.items() if k.startswith(("provenance_", "trust_"))}
+    # Every attested key leaves active metadata: the gate overwrites only the keys it writes, so a
+    # prefixed key it does not write would otherwise survive as unearned trust.
+    metadata = {k: v for k, v in entry.metadata.items() if k not in original}
+    if original:
+        metadata["imported_provenance"] = json.dumps(original, sort_keys=True)
+    return entry.model_copy(update={"namespace": namespace, "metadata": metadata})
+
+
+def _report_rejection(sink: list[dict[str, Any]], index: int, row: dict[str, Any], reason: object) -> None:
+    """Name the rejected row by id and reason class on stderr (never its content); keep it for the sidecar."""
+    label = type(reason).__name__ if isinstance(reason, Exception) else str(reason)
+    print(f"Rejected entry {index} ({row.get('id') or 'no id'}): {label}", file=sys.stderr)
+    sink.append({"index": index, "id": row.get("id"), "reason": f"{label}: {reason}", "row": row})
+
+
 def handle_import(
     args: argparse.Namespace,
     *,
@@ -149,18 +120,27 @@ def handle_import(
 ) -> int:
     """Bulk-load a JSON/YAML array of entries through the SEC-001 store gate.
 
+    Screened import: a row in trw-memory's own export format is rebuilt whole (same id, every field)
+    and re-screened by the write gate like any write. Any other
+    row keeps only content/detail/tags/importance under a new id, and the output names the
+    fields that were dropped.
+
     Rejection policy — deliberately different from the single-entry surfaces:
     a security rejection SKIPS the row and the import continues. Aborting a
     1000-row file on row 900 leaves the operator with a half-loaded store and no
     way to resume, which is worse than dropping the one hostile row. Rejections
     are counted SEPARATELY from ``skipped`` (blank content / merge duplicates) so
     a blocked injection payload is never reported as a benign duplicate, each one
-    prints its index and reason class to stderr, and a non-zero exit code makes
-    the outcome visible to a script that only checks status.
+    prints its index, id and reason class to stderr (never its content), the
+    rejected rows go to ``<file>.rejected.jsonl`` so nothing is lost silently, and a
+    non-zero exit code makes the outcome visible to a script that only checks status.
     """
+    from trw_memory.cli_client import refused_beside_daemon
     from trw_memory.exceptions import PIIBlockError, PoisoningError, RateLimitError, SchemaValidationError
     from trw_memory.security.write_gate import guarded_store
 
+    if refused_beside_daemon("import"):
+        return 1
     file_path = Path(args.path)
     try:
         if file_path.suffix in (".yaml", ".yml"):
@@ -179,7 +159,8 @@ def handle_import(
     namespace, backend = open_validated_backend(config, args.namespace, backend_factory=backend_factory)
     imported = 0
     skipped = 0
-    rejected = 0
+    foreign_dropped: set[str] = set()
+    rejected_rows: list[dict[str, Any]] = []
     try:
         for index, entry_data in enumerate(data):
             if not isinstance(entry_data, dict):
@@ -198,55 +179,47 @@ def handle_import(
                 skipped += 1
                 continue
 
-            tags = entry_data.get("tags", [])
-            if not isinstance(tags, list):
-                tags = []
-            entry = make_entry(
-                content=content,
-                namespace=namespace,
-                tags=tags,
-                importance=float(entry_data.get("importance", 0.5)),
-                detail=str(entry_data.get("detail", "")),
-            )
+            try:
+                if _is_own_export(entry_data):
+                    # Screened import of trw-memory's own export: rebuild the entry whole, id and every field kept.
+                    entry = _rebuild_own_export(entry_data, namespace)
+                else:
+                    tags = entry_data.get("tags", [])
+                    entry = make_entry(
+                        content=content,
+                        namespace=namespace,
+                        tags=tags if isinstance(tags, list) else [],
+                        importance=float(entry_data.get("importance", 0.5)),
+                        detail=str(entry_data.get("detail", "")),
+                    )
+                    foreign_dropped.update(set(entry_data) - _FOREIGN_KEPT)
+            except (TypeError, ValueError) as exc:
+                # A corrupt export row or a foreign row whose importance will not convert is this row's
+                # rejection, not an abort that loses every later row and the sidecar.
+                _report_rejection(rejected_rows, index, entry_data, exc)
+                continue
             # Never echo the offending row: an injection payload printed to a
             # terminal or CI log is the same payload, one hop further along.
             try:
                 result = guarded_store(backend, entry, config=config)
             except (PoisoningError, PIIBlockError, RateLimitError, SchemaValidationError) as exc:
-                rejected += 1
-                print(f"Rejected entry {index}: {type(exc).__name__}", file=sys.stderr)
+                _report_rejection(rejected_rows, index, entry_data, exc)
                 continue
             if not result.stored:
-                rejected += 1
-                print(f"Rejected entry {index}: quarantined for review", file=sys.stderr)
+                _report_rejection(rejected_rows, index, entry_data, "quarantined for review")
                 continue
             imported += 1
 
-        print(import_summary(imported, skipped, rejected=rejected))
-        return 1 if rejected else 0
-    finally:
-        backend.close()
-
-
-def handle_status(
-    args: argparse.Namespace,
-    *,
-    config_cls: type[MemoryConfig],
-    backend_factory: Callable[[MemoryConfig, str], StorageBackend],
-    status_dict_cls: Callable[..., StatusDict],
-    format_status: Callable[..., str],
-) -> int:
-    config = config_cls()
-    namespace, backend = open_validated_backend(config, args.namespace, backend_factory=backend_factory)
-    try:
-        status_info = status_dict_cls(
-            namespace=namespace,
-            entry_count=backend.count(namespace=namespace),
-            backend=config.storage_backend,
-            storage_path=config.storage_path,
-        )
-        print(format_status(status_info, fmt=args.fmt))
-        return 0
+        if rejected_rows:
+            # Nothing is lost silently: every rejected row goes to a sidecar the operator can fix and re-import.
+            sidecar = file_path.with_name(file_path.name + ".rejected.jsonl")
+            sidecar.write_text("".join(json.dumps(r, default=str) + "\n" for r in rejected_rows), encoding="utf-8")
+            print(f"{len(rejected_rows)} rejected row(s) written to {sidecar}", file=sys.stderr)
+        if foreign_dropped:
+            # Not trw-memory's own export: only content/detail/tags/importance survive, and a new id.
+            print(f"Foreign format: fields dropped: {', '.join(sorted(foreign_dropped))}", file=sys.stderr)
+        print(import_summary(imported, skipped, rejected=len(rejected_rows)))
+        return 1 if rejected_rows else 0
     finally:
         backend.close()
 
@@ -256,6 +229,7 @@ def handle_restore(
     *,
     config_cls: type[MemoryConfig],
 ) -> int:
+    from trw_memory.cli_client import refused_beside_daemon
     from trw_memory.storage._cold_rebuild import rebuild_from_cold
     from trw_memory.storage._schema import ensure_schema
     from trw_memory.storage._snapshot import (
@@ -266,6 +240,8 @@ def handle_restore(
         snapshots_base_dir,
     )
 
+    if refused_beside_daemon("restore"):
+        return 1
     base_dir, db_path = resolve_base_and_db(args, config_cls=config_cls)
     if getattr(args, "from_snapshot", None) is not None:
         target = str(args.from_snapshot).strip()
@@ -316,6 +292,7 @@ def handle_snapshot(
     *,
     config_cls: type[MemoryConfig],
 ) -> int:
+    from trw_memory.cli_client import refused_beside_daemon
     from trw_memory.storage._snapshot import (
         list_snapshots,
         rotate_snapshots,
@@ -327,6 +304,9 @@ def handle_snapshot(
     config = config_cls()
     action = args.snapshot_action
     if action == "create":
+        # A snapshot copies every namespace in the file, so it is an operator action with the daemon stopped.
+        if refused_beside_daemon("snapshot create"):
+            return 1
         if not db_path.exists():
             print(f"Source DB does not exist: {db_path}", file=sys.stderr)
             return 1

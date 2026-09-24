@@ -35,10 +35,9 @@ class TestEntryColumnsCount:
     """Verify ENTRY_COLUMNS tuple size matches expectations."""
 
     def test_entry_columns_count_matches_schema(self) -> None:
-        # 56 = 52 prior + 3 bi-temporal validity columns (valid_from,
-        # invalid_from, invalidated_by) from PRD-CORE-194 (commit 59439beb6)
-        # + verification_status from PRD-CORE-231-FR02.
-        assert len(ENTRY_COLUMNS) == 54
+        # 50 = 54 prior - 4 removed Q-learning/feedback fields (q_value,
+        # q_observations, helpful_count, unhelpful_count) from PRD-CORE-293.
+        assert len(ENTRY_COLUMNS) == 50
         assert ENTRY_COLUMNS[-1] == "verification_checked_at"
 
 

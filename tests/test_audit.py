@@ -12,7 +12,7 @@ import pytest
 from trw_memory.exceptions import StorageError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.security import runtime as security_runtime
-from trw_memory.security.audit import AuditLog, AuditRecord, audit_verify
+from trw_memory.security.audit import AuditLog, AuditRecord
 
 
 @pytest.fixture()
@@ -165,15 +165,6 @@ class TestAuditLogVerify:
         assert result["valid"] is False
         assert result["first_broken_at"] == 2
         assert result["broken_hash"] == tampered["hash"]
-
-    def test_audit_verify_wrapper_matches_prd_contract(self, audit_log: AuditLog, audit_path: Path) -> None:
-        audit_log.append("store", entry_id="M-001")
-        assert audit_verify(audit_path) == {
-            "valid": True,
-            "entries_checked": 1,
-            "first_broken_at": None,
-            "broken_hash": None,
-        }
 
     def test_compact_rechains_retained_suffix(self, audit_log: AuditLog, audit_path: Path) -> None:
         for index in range(3):

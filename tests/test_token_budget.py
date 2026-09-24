@@ -18,6 +18,8 @@ from trw_memory.retrieval.token_budget import (
     estimate_tokens,
 )
 
+from ._timing import assert_budget
+
 # ---------------------------------------------------------------------------
 # estimate_tokens tests (FR01)
 # ---------------------------------------------------------------------------
@@ -295,7 +297,7 @@ class TestTokenEstimationAccuracy:
 class TestTokenBudgetPerformance:
     """NFR01: Performance benchmarks for token estimation and budget-fitting."""
 
-    @pytest.mark.perf
+    @pytest.mark.requires_local_timing
     def test_estimate_tokens_under_1ms_per_call(self) -> None:
         """estimate_tokens completes in < 1ms for text up to 10,000 words."""
         import time
@@ -306,9 +308,9 @@ class TestTokenBudgetPerformance:
             estimate_tokens(text)
         elapsed_ms = (time.perf_counter() - start) * 1000 / 100
 
-        assert elapsed_ms < 1.0, f"estimate_tokens took {elapsed_ms:.3f}ms per call (limit: 1ms)"
+        assert_budget("estimate_tokens_per_call", elapsed_ms, 1.0, "ms")
 
-    @pytest.mark.perf
+    @pytest.mark.requires_local_timing
     def test_apply_token_budget_under_5ms_for_1000_entries(self) -> None:
         """Budget-fitting loop completes in < 5ms for 1000 entries (NFR01 SLO)."""
         import time
@@ -327,7 +329,7 @@ class TestTokenBudgetPerformance:
             apply_token_budget(entries, token_budget=5000)
         elapsed_ms = (time.perf_counter() - start) * 1000 / 10
 
-        assert elapsed_ms < 5.0, f"apply_token_budget took {elapsed_ms:.1f}ms for 1000 entries (limit: 5ms)"
+        assert_budget("apply_token_budget_1000_entries", elapsed_ms, 5.0, "ms")
 
 
 # ---------------------------------------------------------------------------

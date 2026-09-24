@@ -19,6 +19,7 @@ a malformed payload -- is treated as a refusal rather than a pass.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, NamedTuple
 
 import structlog
@@ -31,9 +32,9 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-__all__ = ["SHARED_NAMESPACE", "AdmissionOutcome", "admit_remote_results"]
+__all__ = ["SHARED_NAMESPACE", "AdmissionOutcome", "Gate", "admit_remote_results", "store_gate"]
 
-#: Namespace the gate evaluates peer content under. A real namespace in the
+#: Namespace the gate evaluates peer content under when the caller names none. A real namespace in the
 #: existing grammar (``org:`` scope), not a carve-out: a caller that wants shared
 #: results must hold it in its ``NamespaceScope`` like any other (PRD-CORE-245
 #: FR06). The RESPONSE still labels these results ``shared`` -- that is a display
@@ -41,7 +42,7 @@ __all__ = ["SHARED_NAMESPACE", "AdmissionOutcome", "admit_remote_results"]
 SHARED_NAMESPACE = "org:shared"
 
 
-def _lift(result: dict[str, object]) -> MemoryEntry | None:
+def _lift(result: dict[str, object], namespace: str) -> MemoryEntry | None:
     """Build the MemoryEntry the gate evaluates, or None if the payload cannot be read.
 
     Deliberately minimal: it carries the fields the gate actually inspects
@@ -57,10 +58,10 @@ def _lift(result: dict[str, object]) -> MemoryEntry | None:
             content=str(summary or ""),
             detail=str(result.get("detail", "")),
             tags=[str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else [],
-            namespace=SHARED_NAMESPACE,
+            namespace=namespace,
             source="agent",
         )
-    except (TypeError, ValueError):
+    except (TypeError, ValueError):  # trw-fail-silent-allow: None is counted as a refusal by the caller (fail-closed)
         logger.debug("remote_admission_unliftable", exc_info=True)
         return None
 
@@ -90,12 +91,15 @@ def admit_remote_results(
     *,
     config: MemoryConfig,
     backend: StorageBackend,
+    namespace: str = SHARED_NAMESPACE,
 ) -> AdmissionOutcome:
     """Return the results the admission gate passed, with the refusal counts.
 
     A refused item is never returned to a caller and therefore never reaches an
     agent's context, and a quarantine record exists for it so the refusal is
-    auditable rather than silent.
+    auditable rather than silent. Items are evaluated, and refusals quarantined,
+    under *namespace*: a store's gate passes its own, so the refusal is listed
+    through the same grant that asked for the fetch (PRD-CORE-280 FR01).
     """
     from trw_memory.security.runtime import prepare_entry_for_store, store_quarantined_entry
 
@@ -103,7 +107,7 @@ def admit_remote_results(
     refused = 0
     gate_errors = 0
     for result in results:
-        entry = _lift(result)
+        entry = _lift(result, namespace)
         if entry is None:
             refused += 1
             continue
@@ -122,3 +126,16 @@ def admit_remote_results(
     if refused:
         logger.info("remote_admission_refused", refused=refused, admitted=len(admitted), gate_errors=gate_errors)
     return AdmissionOutcome(admitted, refused, gate_errors)
+
+
+#: Admits fetched remote results: the gate a store runs them through (PRD-CORE-280 FR01).
+Gate = Callable[[list[dict[str, object]]], AdmissionOutcome]
+
+
+def store_gate(config: MemoryConfig, backend: StorageBackend, namespace: str = SHARED_NAMESPACE) -> Gate:
+    """The admission gate over *backend*, quarantining under *namespace*, for a caller that holds the store."""
+
+    def admit(results: list[dict[str, object]]) -> AdmissionOutcome:
+        return admit_remote_results(results, config=config, backend=backend, namespace=namespace)
+
+    return admit

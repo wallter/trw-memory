@@ -24,6 +24,7 @@ from ._test_sqlite_backend_recovery_support import (
     _write_legacy_backup,
     _write_timestamped_backup,
 )
+from ._timing import assert_budget
 
 
 def test_fr05_salvage_semantics_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -47,14 +48,14 @@ def test_fr05_salvage_semantics_unchanged(tmp_path: Path, monkeypatch: pytest.Mo
     assert _TIMESTAMPED_BACKUP_RE.fullmatch(Path(entry["backup"]).name) is not None
 
 
-@pytest.mark.perf
+@pytest.mark.requires_local_timing
 def test_nfr01_rotation_latency_bounded(tmp_path: Path) -> None:
     for i in range(50):
         _write_timestamped_backup(tmp_path, f"2026-04-10T00-00-{i % 60:02d}Z-{i}")
     start = time.perf_counter()
     SQLiteBackend._prune_corrupt_backups(tmp_path, keep_n=5)
     elapsed_ms = (time.perf_counter() - start) * 1000
-    assert elapsed_ms < 100, f"pruning took {elapsed_ms:.2f}ms (target <20ms, hard cap 100ms)"
+    assert_budget("corrupt_backup_pruning", elapsed_ms, 100, "ms")
 
 
 def test_nfr02_filename_collision_same_second(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

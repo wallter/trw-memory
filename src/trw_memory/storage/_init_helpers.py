@@ -12,8 +12,6 @@ that mutate the backend instance.
   Returns ``(conn, integrity_warning, recovered)``.
 - ``load_vec_extension`` — load sqlite-vec when available; populate
   vec_index/vec_memories tables; flip ``_vec_available``.
-- ``register_writer_registry`` — PRD-INFRA-064 advisory writer
-  registry (fail-open: never blocks open).
 - ``start_integrity_scheduler`` — PRD-INFRA-063 periodic quick_check
   scheduler (fail-open).
 
@@ -79,10 +77,13 @@ def open_connection_with_recovery(
             backup_path=preflight.state_path,
         )
     try:
+        once = getattr(backend, "_check_integrity_once", False)
         if sqlcipher_key_hex is None:
-            conn = backend._open_and_configure(db_path)
+            conn = backend._open_and_configure(db_path, check_once=once)
         else:
-            conn = backend._open_and_configure(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
+            conn = backend._open_and_configure(
+                db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex, check_once=once
+            )
     except sqlite3.DatabaseError as exc:
         # `is not False`, deliberately, not a truth test. Under contention the
         # PROBE is locked too and returns None (UNKNOWN), and the safe reading of
@@ -189,32 +190,6 @@ def load_vec_extension(conn: Any, db_path: Path, dim: int) -> bool:
             hint=("Python lacks SQLite load_extension support; vector search disabled, BM25 still works"),
         )
         return False
-
-
-def register_writer_registry(db_path: Path, warn_threshold: int) -> Any:
-    """PRD-INFRA-064 advisory writer registry (fail-open).
-
-    Skipped for an in-memory database. The registry is a directory sibling of the
-    DB file (``<db_path>.writers/``), and ``":memory:"`` has no parent — so it
-    resolved against the CURRENT WORKING DIRECTORY and created a literal
-    ``./:memory:.writers/`` directory wherever the process happened to be running.
-    That polluted this repo (the stray directory is what surfaced it) and would
-    litter a user's project the same way.
-
-    It is also meaningless work: the registry exists to count peer *processes*
-    sharing one DB file, and an in-memory database is private to its connection.
-    """
-    if str(db_path) == ":memory:":
-        return None
-    try:
-        from trw_memory.storage._writer_registry import WriterRegistry
-
-        registry = WriterRegistry(db_path, warn_threshold=warn_threshold)
-        registry.register()
-        return registry
-    except Exception:  # justified: advisory-only invariant — never block open
-        logger.debug("writer_registry_unavailable", db=str(db_path), exc_info=True)
-        return None
 
 
 def start_integrity_scheduler(

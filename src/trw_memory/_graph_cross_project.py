@@ -16,8 +16,7 @@ validation:
   importance boost.
 - ``cross_validate_entries`` — top-level orchestrator that scores a written
   batch against every sibling project namespace's cached candidates
-  (``_graph_sibling_index``) and applies validations bidirectionally
-  (``apply_cross_project_validation`` is its one-entry form).
+  (``_graph_sibling_index``) and applies validations bidirectionally.
 
 Extracted as PRD-DIST-245 Phase 2 batch 93.
 """
@@ -27,7 +26,6 @@ from __future__ import annotations
 import contextlib
 import functools
 import os
-import sqlite3
 import threading
 import weakref
 from collections.abc import Sequence
@@ -158,25 +156,6 @@ def merge_cross_validated_entry(
         persist_cross_validated_entry(backend, current, updated)
         reloaded = backend.get(entry_id, namespace=namespace)
         return (reloaded or updated), True
-
-
-def apply_cross_project_validation(
-    entry: MemoryEntry,
-    backend: StorageBackend,
-    conn: sqlite3.Connection,
-    *,
-    embedding: list[float] | None = None,
-    config: MemoryConfig | None = None,
-    space: EmbeddingSpace | None = None,
-) -> int:
-    """Cross-validate one entry against sibling project stores (see :func:`cross_validate_entries`).
-
-    *conn* is unused and kept for signature compatibility.
-    """
-    del conn
-    if embedding is None:
-        return 0
-    return cross_validate_entries([(entry, embedding, space)], backend, config=config).get(entry.id, 0)
 
 
 def _open_sibling(

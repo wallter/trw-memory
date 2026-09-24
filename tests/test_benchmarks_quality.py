@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from benchmarks.bench_latency import LATENCY_THRESHOLDS
+from benchmarks.bench_memory import MEMORY_THRESHOLDS, _get_rss_kb
 from benchmarks.bench_quality import (
     QualityBenchmark,
     mean_reciprocal_rank,
@@ -16,8 +21,10 @@ from benchmarks.bench_quality import (
     recall_at_k,
     reciprocal_rank,
 )
+from benchmarks.bench_throughput import THROUGHPUT_THRESHOLDS
 from benchmarks.corpus import create_golden_set
 from benchmarks.runner import check_thresholds, run_benchmarks
+from tests._timing import assert_budget
 
 # The threshold gate includes wall-clock throughput SLOs (read_queries_per_sec
 # >= 100) measured against whatever else the box is doing right now. Verified
@@ -151,36 +158,159 @@ class TestQualityBenchmarkIntegration:
         for key in ("precision_at_5", "recall_at_10", "mrr", "ndcg_at_10"):
             assert 0.0 <= results[key] <= 1.0, f"{key} = {results[key]}"
 
-    @pytest.mark.skipif(
-        os.environ.get("CI") == "true",
-        reason=(
-            "check_thresholds gates wall-clock throughput SLOs "
-            "(read_queries_per_sec >= 100) that are unreliable on shared "
-            "2-core CI runners; the quality-metric correctness is covered by "
-            "test_quality_benchmark_runs and the metric unit tests"
-        ),
-    )
-    # Timing gates measure the shipped runtime, not coverage tracing overhead.
-    # The test and thresholds still run; other tests supply aggregate coverage.
-    @pytest.mark.no_cover
-    @pytest.mark.perf
-    def test_run_benchmarks_meets_thresholds_with_bundled_fixtures(self, tmp_path: Path) -> None:
-        """Bundled benchmark fixtures clear the default threshold gate.
+    def test_bundled_fixtures_meet_quality_thresholds(self, tmp_path: Path) -> None:
+        """Retrieval quality on the bundled golden set clears its thresholds (deterministic, gating)."""
+        golden_path = tmp_path / "golden.json"
+        create_golden_set(golden_path)
+        quality = QualityBenchmark(golden_set_path=golden_path, db_dir=tmp_path / "quality").run()
 
-        See ``_MAX_THRESHOLD_ATTEMPTS`` above for why this retries: the gate
-        includes wall-clock throughput, which a single measurement can miss
-        under transient box contention with no code regression involved.
+        assert check_thresholds({"suites": {"quality": quality}}) == []
+
+    # Timing gates measure the shipped runtime, not coverage tracing overhead.
+    @pytest.mark.no_cover
+    @pytest.mark.requires_local_timing
+    def test_bundled_fixtures_meet_latency_and_throughput_budgets(self, tmp_path: Path) -> None:
+        """Latency p95 and throughput on the bundled fixtures stay within budget (host-resource).
+
+        See ``_MAX_THRESHOLD_ATTEMPTS`` above for why this retries: a genuine regression drags
+        every attempt over budget, transient contention does not.
         """
         golden_path = tmp_path / "golden.json"
         create_golden_set(golden_path)
 
-        violations: list[dict[str, Any]] = []
+        suites: dict[str, Any] = {}
         for _attempt in range(_MAX_THRESHOLD_ATTEMPTS):
-            report = run_benchmarks(sizes=[100], golden_set_path=golden_path)
-            violations = check_thresholds(report)
-            if not violations:
+            suites = run_benchmarks(sizes=[100], golden_set_path=golden_path)["suites"]
+            timing = {"latency": suites["latency"], "throughput": suites["throughput"]}
+            if not check_thresholds({"suites": timing}):
                 break
 
-        assert violations == [], (
-            f"threshold violations persisted across {_MAX_THRESHOLD_ATTEMPTS} attempts: {violations}"
+        for bench, metrics in suites["latency"].items():
+            for key, limit in LATENCY_THRESHOLDS.items():
+                prefix, _, metric = key.rpartition("_p")
+                if prefix == bench and isinstance(metrics, dict) and f"p{metric}" in metrics:
+                    assert_budget(f"latency.{bench}.p{metric}", float(metrics[f"p{metric}"]), limit, "ms")
+        for bench, metrics in suites["throughput"].items():
+            for key, limit in THROUGHPUT_THRESHOLDS.items():
+                kind, _, metric = key.partition("_")
+                if bench.startswith(kind + "_") and isinstance(metrics, dict) and metric in metrics:
+                    assert_budget(f"throughput.{bench}.{metric}", float(metrics[metric]), limit, "ops/s", at_least=True)
+
+    @pytest.mark.requires_local_timing
+    def test_rss_per_1000_entries_within_budget_in_a_fresh_process(self) -> None:
+        """RSS growth per 1,000 stored entries, measured where earlier tests cannot inflate the peak."""
+        measured = _measure_rss_in_subprocess(size=1000)
+
+        assert_budget(
+            "rss_per_1000_entries",
+            measured["per_1000_rss_mb"],
+            MEMORY_THRESHOLDS["rss_per_1000_entries_mb"],
+            "MB",
         )
+
+
+class TestRssSubprocess:
+    """PRD-QUAL-141-FR03: the RSS measurement runs in a fresh process, and its failures are visible."""
+
+    def test_subprocess_failure_propagates_with_its_stderr(self) -> None:
+        with pytest.raises(RuntimeError, match="boom-from-child"):
+            _run_measurement("raise SystemExit('boom-from-child')")
+
+    def test_child_does_not_inherit_the_parents_peak(self) -> None:
+        ballast = bytearray(256 * 1024 * 1024)  # raise THIS process's peak RSS by ~256 MB
+        ballast[::4096] = b"x" * len(ballast[::4096])
+        parent_peak_kb = _get_rss_kb()
+
+        child = _run_measurement(
+            "from benchmarks.bench_memory import _get_rss_kb; print(json.dumps({'kb': _get_rss_kb()}))"
+        )
+
+        assert child["kb"] < parent_peak_kb - 128 * 1024, (child["kb"], parent_peak_kb)
+        del ballast
+
+    def test_linux_reads_the_peak_of_this_program_not_the_one_exec_replaced(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On Linux ``ru_maxrss`` survives ``execve`` (the kernel carries the replaced
+        program's peak into it), so a spawned child reports its PARENT's peak; ``VmHWM``
+        belongs to the new address space. Found by the Linux replay leg, 2026-09-23."""
+        import benchmarks.bench_memory as bench_memory
+
+        status = tmp_path / "status"
+        status.write_text(
+            "Name:\tpython\nVmPeak:\t 900000 kB\nVmHWM:\t    9088 kB\nVmRSS:\t 9000 kB\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(bench_memory.sys, "platform", "linux")
+        monkeypatch.setattr(bench_memory, "_PROC_STATUS", status, raising=False)
+
+        assert _get_rss_kb() == 9088
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        None,  # no /proc
+        b"Name:\tpython\nVmRSS:\t 9000 kB\n",  # no VmHWM line
+        b"VmHWM:\t lots kB\n",  # malformed value
+        b"VmHWM:\n",  # value missing
+        b"Name:\t\xff\xfeproc\nVmHWM:\t 9088 kB\n",  # non-ASCII process name: still read
+    ],
+    ids=["no-proc", "no-vmhwm", "malformed", "empty", "non-ascii-name"],
+)
+def test_linux_peak_rss_falls_back_to_ru_maxrss_only_when_vmhwm_is_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: bytes | None
+) -> None:
+    import benchmarks.bench_memory as bench_memory
+
+    path = tmp_path / "status"
+    if status is not None:
+        path.write_bytes(status)
+    monkeypatch.setattr(bench_memory.sys, "platform", "linux")
+    monkeypatch.setattr(bench_memory, "_PROC_STATUS", path)
+    monkeypatch.setattr(bench_memory._resource, "getrusage", lambda _who: type("U", (), {"ru_maxrss": 4242})())
+
+    expected = 9088 if status is not None and b"9088" in status else 4242
+    assert _get_rss_kb() == expected
+
+
+def test_macos_peak_rss_converts_ru_maxrss_bytes_to_kilobytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    import benchmarks.bench_memory as bench_memory
+
+    monkeypatch.setattr(bench_memory.sys, "platform", "darwin")
+    monkeypatch.setattr(bench_memory._resource, "getrusage", lambda _who: type("U", (), {"ru_maxrss": 5 * 1024})())
+
+    assert _get_rss_kb() == 5
+
+
+_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _run_measurement(snippet: str) -> dict[str, Any]:
+    """Run ``snippet`` in a fresh interpreter rooted at the package; return its last stdout line as JSON."""
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(
+            filter(None, [str(_PACKAGE_ROOT), str(_PACKAGE_ROOT / "src"), os.environ.get("PYTHONPATH")])
+        ),
+    }
+    proc = subprocess.run(
+        [sys.executable, "-c", f"import json\n{snippet}"],
+        cwd=_PACKAGE_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"measurement subprocess exited {proc.returncode}: {proc.stderr.strip()[-2000:]}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def _measure_rss_in_subprocess(size: int) -> dict[str, Any]:
+    return _run_measurement(
+        "import tempfile, pathlib\n"
+        "from benchmarks.bench_memory import MemoryBenchmark\n"
+        "with tempfile.TemporaryDirectory() as tmp:\n"
+        f"    print(json.dumps(MemoryBenchmark(db_dir=pathlib.Path(tmp)).run([{size}])['memory_{size}']))"
+    )

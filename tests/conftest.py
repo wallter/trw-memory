@@ -35,6 +35,7 @@ import pytest
 # silently miss them. Pulling trw_memory in here at the top of conftest
 # guarantees the swap is in place before any test module is loaded.
 import trw_memory as _trw_memory_shim_trigger  # noqa: F401
+from tests._timing import apply_timing_policy, pytest_runtest_logreport, pytest_sessionfinish  # noqa: F401
 from tests._trw_home import isolated_trw_home  # noqa: F401  (canonical copy; see that module's docstring)
 from trw_memory.client import MemoryClient
 from trw_memory.embeddings import reset_provider_cache
@@ -503,3 +504,86 @@ def provisioned_embedding_cache() -> str:
     from trw_memory.embeddings._hf_cache import _resolve_cache_dir
 
     return _resolve_cache_dir() or str(Path.home() / ".cache" / "huggingface" / "hub")
+
+
+#: Every env var that can switch on or point the Jev decision backend.
+_JEV_ENV = ("TRW_JEV_ENABLED", "TRW_JEV_BASE_URL", "TRW_JEV_MODEL", "OPENROUTER_API_KEY")
+
+
+@pytest.fixture(autouse=True)
+def _no_live_decision_backend(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
+    """No test may reach the live Jev provider: cost, flakiness, and an API key leaving the machine.
+
+    Clearing the env is sufficient to keep a bare ``judge_from_env(env={})`` off in THIS fixture's
+    scope: with no ``project_root``, only the process env and the operator's own
+    ``~/.trw/config.yaml`` machine switch are consulted (``resolve_backend_enablement``), and this
+    fixture does not touch HOME -- tests that need a hermetic machine-switch layer pin HOME
+    themselves (e.g. the decisions module's own ``_isolated_home`` fixture). The transport guard is
+    the backstop for a test that builds a live judge directly. It records rather than raises,
+    because the judge turns every transport exception into a ``provider_error`` and a raise alone
+    would be swallowed; the test fails at teardown instead. Yields the record so the test that
+    proves the guard can inspect it.
+    """
+    import httpx
+
+    for name in _JEV_ENV:
+        monkeypatch.delenv(name, raising=False)
+    attempted: list[str] = []
+
+    def _guard(real: Any) -> Any:
+        def handle(self: Any, request: httpx.Request) -> Any:
+            host = request.url.host or ""
+            if host == "openrouter.ai" or host.endswith(".openrouter.ai"):
+                attempted.append(f"{request.method} {request.url}")
+                raise httpx.ConnectError("blocked in tests: live Jev provider", request=request)
+            return real(self, request)
+
+        return handle
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _guard(httpx.HTTPTransport.handle_request))
+    monkeypatch.setattr(
+        httpx.AsyncHTTPTransport, "handle_async_request", _guard(httpx.AsyncHTTPTransport.handle_async_request)
+    )
+    yield attempted
+    assert not attempted, f"test tried to reach the live Jev provider: {attempted}"
+
+
+def _require_this_checkout(module_name: str, src: Path) -> None:
+    """Stop collection when ``module_name`` comes from a DIFFERENT source checkout.
+
+    The shared ``.venv`` holds editable installs of the main checkout, so tests run from a git
+    worktree silently exercise main's code unless the worktree's ``src`` is on the path; then
+    passes and failures both mislead (three agents hit it on 2026-09-22). An installed wheel
+    (no ``src/`` under a ``pyproject.toml``) is not a checkout mix-up and passes.
+    """
+    import importlib
+
+    origin = Path(importlib.import_module(module_name).__file__ or "").resolve()
+    if origin.is_relative_to(src.resolve()):
+        return
+    other = next((p for p in origin.parents if p.name == "src" and (p.parent / "pyproject.toml").is_file()), None)
+    if other is not None:
+        pytest.exit(
+            f"{module_name} is imported from {other}, not from this checkout's {src}. Run with "
+            f"PYTHONPATH={src} (plus any sibling package src you changed), or install this checkout editable.",
+            returncode=4,
+        )
+
+
+_PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+_require_this_checkout("trw_memory", _PACKAGE_ROOT / "src")
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Host-resource budgets are skipped on CI runners; the timing job measures them (PRD-QUAL-141)."""
+    apply_timing_policy(items)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_user_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test sees the machine's real user directory, so a daemon the operator runs never changes an outcome.
+
+    ``trw-memory import`` and ``reembed`` refuse while a daemon record exists
+    (PRD-CORE-298 FR02); without this, a developer's live daemon would fail them.
+    """
+    monkeypatch.setenv("TRW_USER_DIR", str(tmp_path / "trw-user"))

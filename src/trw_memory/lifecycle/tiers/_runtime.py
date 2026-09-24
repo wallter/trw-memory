@@ -6,7 +6,7 @@ import threading
 from collections import OrderedDict
 from collections.abc import Callable
 from pathlib import Path
-from typing import overload
+from typing import cast, overload
 
 import structlog
 from typing_extensions import TypedDict
@@ -15,7 +15,7 @@ from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.lifecycle.tiers._manager import TierManager
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import MemoryEntry
+from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocation
 from trw_memory.security.namespace_scope import NamespaceScopeError
 from trw_memory.storage.interface import StorageBackend
@@ -149,7 +149,9 @@ def warmup_tier_manager(
         # runtime a migration path without forcing users to rewrite their store
         # first.
         try:
-            entries = backend.list_entries(namespace=namespace, limit=max(config.hot_max_entries * 8, 200))
+            entries = backend.list_entries(
+                namespace=namespace, limit=max(config.hot_max_entries * 8, 200), status=MemoryStatus.ACTIVE
+            )
         except Exception:
             logger.warning("tier_warmup_backend_scan_failed", namespace=namespace, exc_info=True)
             return manager
@@ -317,7 +319,7 @@ def tier_candidates(
         )
         query_tokens = [token for token in query.lower().split() if token]
 
-        return manager.search(
+        found = manager.search(
             query_tokens,
             query_embedding=query_embedding,
             query_space=query_space,
@@ -328,6 +330,12 @@ def tier_candidates(
             covered_ids=covered_ids,
             **_restoration_callbacks(config, namespace, backend),
         )
+    if invocation is not None:
+        return found  # discovery admits only active canonical rows (RecallInvocation.allows_entry)
+    # The mirror keeps a row as it was when stored or recalled; recall is active-only
+    # (PRD-CORE-294 FR03), so a row retired since then must not come back through it.
+    rows = cast("list[dict[str, object]]", found)
+    return [row for row in rows if row.get("status", MemoryStatus.ACTIVE.value) == MemoryStatus.ACTIVE.value]
 
 
 class _RestorationCallbacks(TypedDict):

@@ -69,8 +69,8 @@ class TestCreateConsolidatedEntry:
     def test_creates_entry_with_correct_fields(self) -> None:
         storage = _InMemoryBackend()
         cluster = [
-            _make_entry("e1", importance=0.8, tags=["a", "b"], evidence=["ev1"], recurrence=2, q_value=0.7),
-            _make_entry("e2", importance=0.6, tags=["b", "c"], evidence=["ev2"], recurrence=3, q_value=0.5),
+            _make_entry("e1", importance=0.8, tags=["a", "b"], evidence=["ev1"], recurrence=2),
+            _make_entry("e2", importance=0.6, tags=["b", "c"], evidence=["ev2"], recurrence=3),
         ]
         result = _create_consolidated_entry(cluster, "summary text", "detail text", storage)
         assert result.id.startswith("M-")
@@ -81,7 +81,6 @@ class TestCreateConsolidatedEntry:
         assert result.tags == ["a", "b", "c"]
         assert result.evidence == ["ev1", "ev2"]
         assert result.recurrence == 5
-        assert result.q_value == 0.7
         assert set(result.consolidated_from) == {"e1", "e2"}
 
     def test_entry_persisted_in_storage(self) -> None:

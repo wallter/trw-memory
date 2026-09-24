@@ -6,9 +6,19 @@ import time
 
 import pytest
 
+from tests._timing import assert_budget
 from trw_memory.graph import graph_query
 
 from ._test_graph_support import _insert_edge, _insert_memory_row, _make_conn
+
+
+def _dense_graph_conn():
+    conn = _make_conn()
+    for node in range(1000):
+        for edge_idx in range(5):
+            target = (node + edge_idx + 1) % 1000
+            _insert_edge(conn, f"n{node}", f"n{target}", "similarity", 0.9)
+    return conn
 
 
 class TestGraphQuery:
@@ -114,8 +124,8 @@ class TestGraphQueryNamespaceIsolation:
         _insert_memory_row(conn, "B", namespace="project:a")
         _insert_memory_row(conn, "X", namespace="project:b")
         # A -> B (same ns) and A -> X (cross-namespace leak edge)
-        _insert_edge(conn, "A", "B", "similarity", 0.9)
-        _insert_edge(conn, "A", "X", "similarity", 0.9)
+        _insert_edge(conn, "A", "B", "similarity", 0.9, namespace="project:a")
+        _insert_edge(conn, "A", "X", "similarity", 0.9, namespace="project:a")
 
         results = graph_query(conn, ["A"], depth=2, namespace="project:a")
 
@@ -211,21 +221,21 @@ class TestGraphQueryEdgeCases:
 
 
 class TestGraphQueryPerformance:
-    @pytest.mark.perf
-    def test_graph_query_p95_under_100ms_for_1000_nodes_and_5000_edges(self) -> None:
-        conn = _make_conn()
-        for node in range(1000):
-            for edge_idx in range(5):
-                target = (node + edge_idx + 1) % 1000
-                _insert_edge(conn, f"n{node}", f"n{target}", "similarity", 0.9)
+    def test_graph_query_returns_results_for_1000_nodes_and_5000_edges(self) -> None:
+        conn = _dense_graph_conn()
+        results = graph_query(conn, ["n0"], depth=3)
+        assert results
+
+    @pytest.mark.requires_local_timing
+    def test_graph_query_p95_under_100ms_for_1000_nodes_and_5000_edges_budget(self) -> None:
+        conn = _dense_graph_conn()
 
         timings_ms: list[float] = []
         for _ in range(20):
             started = time.perf_counter()
-            results = graph_query(conn, ["n0"], depth=3)
+            graph_query(conn, ["n0"], depth=3)
             timings_ms.append((time.perf_counter() - started) * 1000)
-            assert results
 
         p95_index = max(int(len(timings_ms) * 0.95) - 1, 0)
         p95_ms = sorted(timings_ms)[p95_index]
-        assert p95_ms < 100
+        assert_budget("graph_query_p95", p95_ms, 100, "ms")

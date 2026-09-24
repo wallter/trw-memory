@@ -102,6 +102,48 @@ DecisionAnswer = Annotated[
 ]
 
 
+#: Substring of a failure's ``detail`` when a request was refused for exceeding the token
+#: ceiling. Lives here (not ``_jev_http.py``) so ``toolkit.py`` can test for it without importing
+#: httpx on the disabled path.
+OVER_CEILING_HINT = "request exceeds the token ceiling; trim state or split the batch"
+
+
+#: Why a judge produced no answer. ``invalid_request`` and ``auth`` are the caller's
+#: to fix; ``rate_limited``/``timeout``/``provider_error`` are transient or upstream;
+#: ``disabled`` is the configured-off path; ``malformed_response`` is a 200 whose body
+#: could not be trusted.
+FailureKind = Literal[
+    "invalid_request",
+    "auth",
+    "rate_limited",
+    "timeout",
+    "provider_error",
+    "disabled",
+    "malformed_response",
+]
+
+
+class DecisionFailure(BaseModel):
+    """Why no answer came back. A caller must be able to tell its own bug from an outage.
+
+    ``detail`` is a short, non-echoing description: a status code and error type, never
+    the state or the response body, both of which may carry the caller's data.
+    """
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    kind: FailureKind
+    detail: str = ""
+
+    @property
+    def is_caller_error(self) -> bool:
+        return self.kind in ("invalid_request", "auth")
+
+    @property
+    def retryable(self) -> bool:
+        return self.kind in ("rate_limited", "timeout", "provider_error")
+
+
 class DecisionResult(BaseModel):
     """The outcome of one judge call: every question answered in one pass.
 
@@ -118,14 +160,27 @@ class DecisionResult(BaseModel):
     usage: dict[str, JsonValue] = Field(default_factory=dict)
     backend: str
     latency_ms: float = Field(ge=0.0)
+    #: Question ids whose answer member failed validation. The envelope was fine and the valid
+    #: siblings are in ``answers``; one bad member must not erase them.
+    malformed_ids: list[str] = Field(default_factory=list)
+    #: Exception class name from the first malformed member (type only, never the value).
+    malformed_error_type: str = ""
+
+
+#: What a detailed decide returns: every question answered, or one reason nothing was.
+DecisionOutcome = DecisionResult | DecisionFailure
 
 
 __all__ = [
+    "OVER_CEILING_HINT",
     "ChoiceAnswer",
     "ChoiceQuestion",
     "DecisionAnswer",
+    "DecisionFailure",
+    "DecisionOutcome",
     "DecisionQuestion",
     "DecisionResult",
+    "FailureKind",
     "NoulAnswer",
     "NoulQuestion",
     "ScoreAnswer",

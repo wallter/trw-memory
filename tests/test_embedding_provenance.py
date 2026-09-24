@@ -84,3 +84,22 @@ def test_known_descriptor_binds_generated_input_and_wrong_shape_stays_unknown() 
     result = generation_provenance_kwargs(Known(), "document", [1.0, 0.0])
     assert result["provenance"].matches(_space(), "document", [1.0, 0.0])
     assert generation_provenance_kwargs(Known(), "document", [1.0]) == {}
+
+
+def test_a_space_recorded_without_model_id_loads_with_none() -> None:
+    proof = VectorProvenance.for_vector(_space(), "document", [1.0, 0.0])
+    record = json.loads(proof.to_json())
+
+    recovered = VectorProvenance.from_json(json.dumps(record))
+
+    assert "model_id" not in record["space"]
+    assert recovered is not None and recovered.space.model_id is None
+
+
+def test_model_id_is_a_label_not_part_of_the_identity() -> None:
+    named = EmbeddingSpace("a" * 64, _space().encoding, 2, model_id="BAAI/bge-small-en-v1.5")
+    proof = VectorProvenance.for_vector(named, "document", [1.0, 0.0])
+
+    assert named == _space() and hash(named) == hash(_space())
+    assert proof.matches(_space(), "document", [1.0, 0.0])
+    assert "model_id" not in proof.to_json()

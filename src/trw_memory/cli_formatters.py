@@ -56,7 +56,7 @@ def format_results(results: Sequence[Mapping[str, object]], fmt: str = "table") 
     if fmt == "compact":
         lines: list[str] = []
         for r in results:
-            mid = r.get("memory_id", "?")
+            mid = r.get("memory_id") or r.get("id", "?")
             score = r.get("score", 0.0)
             content = _truncate(str(r.get("content", "")), 80)
             lines.append(f"{mid}  score={score:.2f}  {content}")
@@ -67,7 +67,7 @@ def format_results(results: Sequence[Mapping[str, object]], fmt: str = "table") 
     sep = "-" * len(header)
     rows: list[str] = [header, sep]
     for r in results:
-        mid = str(r.get("memory_id", "?"))[:12]
+        mid = str(r.get("memory_id") or r.get("id", "?"))[:12]
         score = float(str(r.get("score", 0.0)))
         importance = float(str(r.get("importance", 0.0)))
         raw_tags = r.get("tags", [])
@@ -148,8 +148,7 @@ def format_import_summary(imported: int, skipped: int, rejected: int = 0) -> str
 def entry_to_export_dict(entry: MemoryEntry) -> dict[str, object]:
     """Convert a MemoryEntry to a serializable dict for lossless export.
 
-    Includes every field returned by :meth:`MemoryEntry.to_dict`. The ordinary
-    import command ingests content as new entries; it is not an identity-preserving
-    inverse. Use the SQLite snapshot/restore commands for database recovery.
+    Includes every field returned by :meth:`MemoryEntry.to_dict`; ``trw-memory import``
+    rebuilds such rows whole (same id, every field), so export then import is lossless.
     """
     return entry.to_dict()

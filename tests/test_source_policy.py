@@ -8,7 +8,12 @@ from typing import Any, cast
 import pytest
 
 from trw_memory.client import MemoryClient, MemoryResultDict
-from trw_memory.retrieval.source_policy import apply_source_policy, classify_source_family
+from trw_memory.retrieval.source_policy import SourcePolicy, classify_source_family
+
+
+def _apply(rows: Any, **options: Any) -> list[dict[str, Any]]:
+    """Admission plus the source-weighted order, as ``MemoryClient.recall`` applies it."""
+    return SourcePolicy.resolve(**options).apply(rows)
 
 
 def _result(
@@ -73,7 +78,7 @@ def test_apply_source_policy_filters_expired_transient_records() -> None:
         ),
     ]
 
-    out = apply_source_policy(cast("list[dict[str, Any]]", results))
+    out = _apply(cast("list[dict[str, Any]]", results))
 
     assert [result["memory_id"] for result in out] == ["curated", "fresh-episode"]
 
@@ -85,7 +90,7 @@ def test_apply_source_policy_respects_family_filters_and_weights() -> None:
         _result(memory_id="semantic", score=0.85, metadata={"source_kind": "semantic_memory"}),
     ]
 
-    out = apply_source_policy(
+    out = _apply(
         cast("list[dict[str, Any]]", results),
         include_source_kinds=["instruction_rule", "semantic_memory"],
         source_weights={"semantic_memory": 0.5},
@@ -106,7 +111,7 @@ def test_apply_source_policy_prioritizes_durable_context_over_transient_by_defau
         ),
     ]
 
-    out = apply_source_policy(cast("list[dict[str, Any]]", results))
+    out = _apply(cast("list[dict[str, Any]]", results))
 
     assert [result["memory_id"] for result in out] == ["durable", "transient"]
 
@@ -122,7 +127,7 @@ def test_apply_source_policy_allows_explicit_transient_weight_override() -> None
         ),
     ]
 
-    out = apply_source_policy(
+    out = _apply(
         cast("list[dict[str, Any]]", results),
         source_weights={"lifecycle": 2.0},
     )
@@ -185,7 +190,7 @@ def test_apply_source_policy_exclude_source_kinds() -> None:
         _result(memory_id="ins", score=0.9, metadata={"source_kind": "instruction_rule"}),
         _result(memory_id="sem", score=0.8, metadata={"source_kind": "semantic_memory"}),
     ]
-    out = apply_source_policy(
+    out = _apply(
         cast("list[dict[str, Any]]", results),
         exclude_source_kinds=["semantic_memory"],
     )
@@ -197,7 +202,7 @@ def test_apply_source_policy_distilled_weight_override() -> None:
         _result(memory_id="git", score=1.0, metadata={"source": "distilled:git:aaa..bbb"}),
         _result(memory_id="ins", score=1.0, metadata={"source_kind": "instruction_rule"}),
     ]
-    out = apply_source_policy(
+    out = _apply(
         cast("list[dict[str, Any]]", results),
         distilled_weight=2.0,
     )
@@ -238,7 +243,7 @@ def test_apply_source_policy_include_distilled_false_excludes_git() -> None:
         _result(memory_id="git", score=0.9, metadata={"source": "distilled:git:aaa..bbb"}),
         _result(memory_id="ins", score=0.7, metadata={"source_kind": "instruction_rule"}),
     ]
-    out = apply_source_policy(
+    out = _apply(
         cast("list[dict[str, Any]]", results),
         include_distilled=False,
     )
@@ -275,7 +280,7 @@ def test_apply_source_policy_org_source_containment_bucket() -> None:
             "metadata": {"source_kind": "semantic_memory"},
         },
     ]
-    out = apply_source_policy(cast("list[dict[str, Any]]", results_raw))
+    out = _apply(cast("list[dict[str, Any]]", results_raw))
     # local_entry has bucket=0, org_entry has bucket=1 → local first at equal score
     assert out[0]["memory_id"] == "local_entry"
     assert out[1]["memory_id"] == "org_entry"
@@ -286,7 +291,7 @@ def test_apply_source_policy_zero_weight_excludes_family() -> None:
         _result(memory_id="git", score=0.9, metadata={"source": "distilled:git:aaa..bbb"}),
         _result(memory_id="ins", score=0.7, metadata={"source_kind": "instruction_rule"}),
     ]
-    out = apply_source_policy(
+    out = _apply(
         cast("list[dict[str, Any]]", results),
         source_weights={"git_distilled": 0.0},
     )
@@ -389,7 +394,7 @@ def test_resolved_policy_captures_one_clock_and_admission_never_reads_score(monk
         {"distilled_weight": 0.0},
     ],
 )
-def test_resolved_admission_and_legacy_weighted_apply_agree(options: dict[str, Any]) -> None:
+def test_resolved_admission_and_weighted_apply_agree(options: dict[str, Any]) -> None:
     from datetime import datetime, timezone
 
     from trw_memory.retrieval.source_policy import SourcePolicy
@@ -405,7 +410,6 @@ def test_resolved_admission_and_legacy_weighted_apply_agree(options: dict[str, A
     policy = SourcePolicy.resolve(reference_time=now, **options)
     applied = policy.apply(rows)
     assert {row["memory_id"] for row in applied} == {row["memory_id"] for row in rows if policy.allows(row)}
-    assert applied == apply_source_policy(rows, reference_time=now, **options)
     assert all(row["score"] in (1.0, 2.0, 3.0) for row in rows)  # inputs unchanged
     if options == {}:
         assert [row["memory_id"] for row in applied] == ["unknown", "tie", "git", "episode"]

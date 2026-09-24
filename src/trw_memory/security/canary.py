@@ -17,18 +17,13 @@ import hashlib
 from types import MappingProxyType
 from typing import Protocol
 
-import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "CanaryLearning",
     "CanaryStore",
     "CanaryVerificationResult",
-    "seed_canaries",
-    "verify_canaries",
 ]
-
-_LOG = structlog.get_logger(__name__)
 
 
 # The fixture corpus. In-code constants (NOT DB-loaded) per FR-009.
@@ -86,59 +81,3 @@ class CanaryStore(Protocol):
     def seed(self, canary_id: str, content: str) -> None: ...
 
     def read(self, canary_id: str) -> str | None: ...
-
-
-def seed_canaries(memory_store: CanaryStore, count: int = 10) -> list[CanaryLearning]:
-    """Insert up to *count* canary learnings into *memory_store*.
-
-    Returns the list of canaries seeded. The pinned hash table is NOT
-    written to the store — it lives only in process memory at
-    :data:`PINNED_HASHES`.
-    """
-    limit = max(0, min(count, len(_CANARY_FIXTURES)))
-    seeded: list[CanaryLearning] = []
-    for canary_id, content in _CANARY_FIXTURES[:limit]:
-        memory_store.seed(canary_id, content)
-        seeded.append(
-            CanaryLearning(
-                canary_id=canary_id,
-                content=content,
-                expected_hash=PINNED_HASHES[canary_id],
-            )
-        )
-    _LOG.info("canary.seed", count=len(seeded))
-    return seeded
-
-
-def verify_canaries(memory_store: CanaryStore) -> CanaryVerificationResult:
-    """Read every pinned canary from *memory_store* and compare hashes.
-
-    Tampered canaries (hash mismatch) and missing canaries (not found)
-    are both reported. Emits a ``canary.verify`` structlog event.
-    """
-    tampered: list[str] = []
-    missing: list[str] = []
-    ok = 0
-    for canary_id, expected in PINNED_HASHES.items():
-        got_content = memory_store.read(canary_id)
-        if got_content is None:
-            missing.append(canary_id)
-            continue
-        if _sha(got_content) != expected:
-            tampered.append(canary_id)
-            continue
-        ok += 1
-    result = CanaryVerificationResult(
-        total=len(PINNED_HASHES),
-        ok=ok,
-        tampered=tampered,
-        missing=missing,
-    )
-    _LOG.info(
-        "canary.verify",
-        total=result.total,
-        ok=result.ok,
-        tampered_count=len(tampered),
-        missing_count=len(missing),
-    )
-    return result

@@ -163,13 +163,15 @@ class TestRbacEnforcement:
         assert tuple(row) == ("sprint-24", None, "active")
         await client.close()
 
-    @pytest.mark.perf
     async def test_store_returns_before_graph_update_finishes(
         self,
         client: MemoryClient,
     ) -> None:
         release_update = threading.Event()
 
+        # PRD-QUAL-141: correctness deadline, not a host-resource budget — this
+        # proves `store` returns before the background graph update finishes
+        # (a non-blocking property) rather than measuring this machine's speed.
         # Same reasoning as test_store_does_not_wait_for_remote_publish_completion
         # below: the property is that store RETURNS BEFORE the background graph
         # update finishes, so the budget must be a fraction of the block it is
@@ -303,7 +305,6 @@ class TestRbacEnforcement:
         lines = (Path(tmp_path) / "storage" / "sync_queue.jsonl").read_text(encoding="utf-8").splitlines()
         assert stored["memory_id"] in lines[0]
 
-    @pytest.mark.perf
     async def test_store_does_not_wait_for_remote_publish_completion(
         self,
         tmp_path: Path,

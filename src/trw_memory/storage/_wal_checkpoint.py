@@ -19,11 +19,10 @@ they are not equal:
     ``lock_for_rmw(<db>.checkpoint)``. That lock serialises checkpoint against checkpoint
     — including across processes — and nothing more. It
     does NOT exclude an ordinary write: ``SQLiteBackend.transaction()`` is a
-    plain ``BEGIN IMMEDIATE``/``COMMIT`` that never takes it, and
-    ``WriterRegistry`` is an advisory head-count, not mutual exclusion. On a
-    store with five to eight live server processes — the normal case, not an
-    edge case — a checkpoint and an unrelated write in another process still
-    overlap. An earlier version of this docstring credited (a) with removing
+    plain ``BEGIN IMMEDIATE``/``COMMIT`` that never takes it. On a store with
+    several live writer processes (an unmigrated checkout before PRD-CORE-298
+    FR01 phase two made the daemon the one writer), a checkpoint and an
+    unrelated write in another process still overlap. An earlier version of this docstring credited (a) with removing
     the race outright; that was an overstatement (reported 2026-09-16,
     sub_ETsiykrdS-wM_Te8, verified against the source).
 

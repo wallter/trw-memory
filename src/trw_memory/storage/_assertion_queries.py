@@ -1,8 +1,8 @@
 """Assertion-bearing entry queries — the PRD-CORE-086 FR07 read path.
 
 Belongs to the ``sqlite_backend.py`` facade; ``SQLiteBackend.entries_with_assertions``
-(and its ``count_with_assertions`` alias) delegate here. Split out of
-``_query_ops.py``, which measured 382 effective LOC against the 350 gate.
+delegates here. Split out of ``_query_ops.py``, which measured 382 effective
+LOC against the 350 gate.
 
 This pair travels together and nothing else calls either: ``entries_with_assertions``
 is the only caller of ``_refill_verification_entries``, and the split page-refill

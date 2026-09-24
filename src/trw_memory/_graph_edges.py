@@ -25,7 +25,6 @@ from __future__ import annotations
 import sqlite3
 import threading
 from datetime import datetime, timezone
-from typing import Any
 
 import structlog
 
@@ -35,13 +34,6 @@ from trw_memory.models.memory import MemoryEntry
 logger = structlog.get_logger(__name__)
 
 SIMILARITY_THRESHOLD = 0.75
-
-
-def _graph_module() -> Any:
-    """Return the parent graph module for indirection lookups."""
-    from trw_memory import graph as _graph
-
-    return _graph
 
 
 def create_similarity_edges(
@@ -68,7 +60,8 @@ def create_similarity_edges(
     if embedding is None or (candidate_embeddings is None and candidates is None):
         return 0
 
-    g = _graph_module()
+    from trw_memory import graph as g
+
     if candidates is None:
         candidates = CandidateVectors(candidate_embeddings or [])
     hits = candidates.above(embedding, threshold)
@@ -79,9 +72,9 @@ def create_similarity_edges(
         for cand_id, sim in hits:
             if cand_id == entry.id:
                 continue
-            g._upsert_edge(conn, entry.id, cand_id, "similarity", round(sim, 4), now, namespace=entry.namespace)
-            g._upsert_edge(conn, cand_id, entry.id, "similarity", round(sim, 4), now, namespace=entry.namespace)
-            created += 2
+            weight = round(sim, 4)
+            created += g._upsert_edge(conn, entry.id, cand_id, "similarity", weight, now, namespace=entry.namespace)
+            created += g._upsert_edge(conn, cand_id, entry.id, "similarity", weight, now, namespace=entry.namespace)
         conn.commit()
     logger.debug("similarity_edges_created", entry_id=entry.id, count=created)
     return created
@@ -97,7 +90,8 @@ def create_consolidation_edges(
     if not entry.consolidated_from:
         return 0
 
-    g = _graph_module()
+    from trw_memory import graph as g
+
     created = 0
     now = datetime.now(timezone.utc).isoformat()
 
@@ -109,8 +103,7 @@ def create_consolidation_edges(
             if row is None:
                 logger.debug("consolidation_edge_skip_missing", source_id=source_id)
                 continue
-            g._upsert_edge(conn, entry.id, source_id, "consolidation", 1.0, now, namespace=entry.namespace)
-            created += 1
+            created += g._upsert_edge(conn, entry.id, source_id, "consolidation", 1.0, now, namespace=entry.namespace)
         conn.commit()
     logger.debug("consolidation_edges_created", entry_id=entry.id, count=created)
     return created

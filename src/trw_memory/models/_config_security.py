@@ -156,36 +156,7 @@ class _SecurityConfigMixin(BaseModel):
         ),
     )
 
-    # Multi-writer advisory registry (PRD-INFRA-064 / B3)
-    memory_concurrent_writer_warn_threshold: int = Field(
-        default=4,
-        ge=1,
-        le=100,
-        validation_alias=AliasChoices(
-            "memory_concurrent_writer_warn_threshold",
-            "concurrent_writer_warn_threshold",
-        ),
-        description=(
-            "When the count of live writer pids registered in <db_path>.writers/ exceeds this "
-            "value, log at WARNING level. Advisory ONLY — the registry NEVER refuses open(). "
-            "The 2026-04-12 incident involved 9 concurrent writers; default 4 surfaces the "
-            "pattern without being noisy for 1-3 writer workloads."
-        ),
-    )
-
     # Snapshot rotation (PRD-INFRA-065 / B4)
-    memory_snapshot_enabled: bool = Field(
-        default=False,
-        validation_alias=AliasChoices(
-            "memory_snapshot_enabled",
-            "snapshot_enabled",
-        ),
-        description=(
-            "Reserved opt-in for automatic snapshots; no automatic scheduler or deliver "
-            "hook is currently wired. Setting this flag alone does not create backups. "
-            "Explicit `trw-memory snapshot` commands run independently of this flag."
-        ),
-    )
     memory_snapshot_daily_keep: int = Field(
         default=7,
         ge=1,
@@ -205,20 +176,6 @@ class _SecurityConfigMixin(BaseModel):
             "snapshot_weekly_keep",
         ),
         description="Number of weekly snapshots retained under snapshots/weekly/ before oldest-by-filename eviction.",
-    )
-
-    # Off-box snapshot hash publish (PRD-INFRA-066 / C1)
-    memory_snapshot_publish_hash: bool = Field(
-        default=False,
-        validation_alias=AliasChoices(
-            "memory_snapshot_publish_hash",
-            "snapshot_publish_hash",
-        ),
-        description=(
-            "When True AND sync_enabled=True AND NOT local_only, publish SHA-256 hash of the "
-            "latest snapshot (plus size and timestamp metadata — NEVER contents) to the platform "
-            "for drift notification on restore. Opt-in. Ignored silently under local_only=True."
-        ),
     )
 
     # Sync configuration (PRD-CORE-047)

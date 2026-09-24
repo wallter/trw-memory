@@ -72,7 +72,6 @@ def test_recent_fields_live_in_their_owning_mixins() -> None:
     cfg = MemoryConfig()
     assert not any("hype" in key for key in cfg.model_dump())
     assert cfg.cold_search_cache_max == 1000
-    assert cfg.lifecycle_use_fsrs is False
 
 
 # ===========================================================================
@@ -341,12 +340,6 @@ class TestSecurityConfig:
             _SecurityModel(memory_integrity_check_interval_minutes=1441)
         with pytest.raises(ValidationError):
             _SecurityModel(memory_integrity_check_interval_minutes=-1)
-
-    def test_concurrent_writer_threshold_bounds(self) -> None:
-        with pytest.raises(ValidationError):
-            _SecurityModel(memory_concurrent_writer_warn_threshold=0)
-        with pytest.raises(ValidationError):
-            _SecurityModel(memory_concurrent_writer_warn_threshold=101)
 
     def test_snapshot_keep_bounds(self) -> None:
         with pytest.raises(ValidationError):

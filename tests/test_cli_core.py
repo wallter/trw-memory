@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from trw_memory.cli import main
 from trw_memory.cli_parser import build_parser
 
-from ._test_cli_support import _CLI, _mock_client
+from ._test_cli_support import _DAEMON_CLIENT, _mock_client
 
 
 class TestBuildParser:
@@ -25,7 +25,7 @@ class TestBuildParser:
         assert args.command == "store"
         assert args.summary == "test"
         assert args.importance == 0.5
-        assert args.namespace == "default"
+        assert args.namespace is None, "the daemon verbs default to this checkout's project identity"
 
     def test_store_all_args(self) -> None:
         parser = build_parser()
@@ -67,10 +67,10 @@ class TestBuildParser:
 
     def test_search_command(self) -> None:
         parser = build_parser()
-        args = parser.parse_args(["search", "--tags", "py", "--min-importance", "0.5"])
+        args = parser.parse_args(["search", "--tags", "py", "--status", "active"])
         assert args.command == "search"
         assert args.tags == ["py"]
-        assert args.min_importance == 0.5
+        assert args.status == "active"
 
     def test_consolidate_command(self) -> None:
         parser = build_parser()
@@ -115,46 +115,43 @@ class TestMainNoCommand:
         assert "trw-memory" in captured.out
 
 
+@pytest.fixture
+def daemon(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """The daemon client every daemon verb reaches."""
+    client = _mock_client()
+    monkeypatch.setattr(_DAEMON_CLIENT, lambda: client)
+    return client
+
+
 class TestStoreCommand:
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_store_success(self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
-        client = _mock_client()
-        mock_cls.return_value = client
-        ret = main(["store", "--summary", "Test content"])
+    def test_store_success(self, daemon: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
+        ret = main(["store", "--summary", "Test content", "--namespace", "project:a-11111111"])
         assert ret == 0
-        captured = capsys.readouterr()
-        assert "Stored:" in captured.out
-        assert "M-abc12345" in captured.out
-        client.store.assert_awaited_once()
-        client.close.assert_awaited_once()
+        assert "Stored: M-abc12345" in capsys.readouterr().out
+        daemon.store.assert_awaited_once_with(
+            "Test content", "project:a-11111111", tags=None, importance=0.5, detail=""
+        )
 
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_store_with_tags(self, mock_cls: MagicMock) -> None:
-        client = _mock_client()
-        mock_cls.return_value = client
-        main(["store", "--summary", "test", "--tags", "py", "--tags", "sql"])
-        call_kwargs = client.store.call_args
-        assert call_kwargs is not None
-        assert call_kwargs.kwargs.get("tags") == ["py", "sql"]
+    def test_store_with_tags_and_importance(self, daemon: MagicMock) -> None:
+        main(["store", "--summary", "t", "--tags", "py", "--tags", "sql", "--importance", "0.9", "--namespace", "n"])
+        assert daemon.store.call_args.kwargs["tags"] == ["py", "sql"]
+        assert daemon.store.call_args.kwargs["importance"] == 0.9
 
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_store_with_importance(self, mock_cls: MagicMock) -> None:
-        client = _mock_client()
-        mock_cls.return_value = client
-        main(["store", "--summary", "test", "--importance", "0.9"])
-        call_kwargs = client.store.call_args
-        assert call_kwargs is not None
-        assert call_kwargs.kwargs.get("importance") == 0.9
+    def test_the_namespace_defaults_to_the_project_identity(self, daemon: MagicMock) -> None:
+        from trw_memory.namespaces.identity import resolve_project_identity
 
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_store_error(self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
-        client = _mock_client()
-        client.store = AsyncMock(side_effect=ValueError("empty content"))
-        mock_cls.return_value = client
-        ret = main(["store", "--summary", ""])
+        main(["store", "--summary", "t"])
+        assert daemon.store.call_args.args[1] == resolve_project_identity().namespace
+
+    def test_a_refused_store_exits_1_without_a_traceback(
+        self, daemon: MagicMock, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        daemon.store = AsyncMock(return_value={"status": "invalid", "error": "content must be non-empty"})
+        ret = main(["store", "--summary", "", "--namespace", "n"])
+        err = capsys.readouterr().err
         assert ret == 1
-        captured = capsys.readouterr()
-        assert "Error:" in captured.err
+        assert "content must be non-empty" in err
+        assert "Traceback" not in err
 
     def test_store_missing_summary(self) -> None:
         with pytest.raises(SystemExit):
@@ -162,138 +159,67 @@ class TestStoreCommand:
 
 
 class TestRecallCommand:
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_recall_table(self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
-        client = _mock_client()
-        mock_cls.return_value = client
-        ret = main(["recall", "test query"])
+    def test_recall_table(self, daemon: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
+        ret = main(["recall", "test query", "--namespace", "n"])
         assert ret == 0
-        captured = capsys.readouterr()
-        assert "M-abc12345" in captured.out
-        client.recall.assert_awaited_once()
+        assert "M-abc12345" in capsys.readouterr().out
+        daemon.recall.assert_awaited_once_with("test query", "n", limit=10, tags=None)
 
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_recall_json(self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
-        client = _mock_client()
-        mock_cls.return_value = client
-        ret = main(["recall", "test query", "--format", "json"])
-        assert ret == 0
-        captured = capsys.readouterr()
-        parsed = json.loads(captured.out)
-        assert isinstance(parsed, list)
+    def test_recall_json(self, daemon: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
+        assert main(["recall", "q", "--format", "json", "--namespace", "n"]) == 0
+        assert isinstance(json.loads(capsys.readouterr().out), list)
 
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_recall_compact(self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
-        client = _mock_client()
-        mock_cls.return_value = client
-        ret = main(["recall", "q", "--format", "compact"])
-        assert ret == 0
-        captured = capsys.readouterr()
-        assert "score=" in captured.out
+    def test_recall_compact(self, daemon: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
+        assert main(["recall", "q", "--format", "compact", "--namespace", "n"]) == 0
+        assert "score=" in capsys.readouterr().out
 
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_recall_with_tags(self, mock_cls: MagicMock) -> None:
-        client = _mock_client()
-        mock_cls.return_value = client
-        main(["recall", "q", "--tags", "py"])
-        call_kwargs = client.recall.call_args
-        assert call_kwargs is not None
-        assert call_kwargs.kwargs.get("tags") == ["py"]
+    def test_recall_with_tags_and_limit(self, daemon: MagicMock) -> None:
+        main(["recall", "q", "--tags", "py", "--limit", "5", "--namespace", "n"])
+        assert daemon.recall.call_args.kwargs == {"limit": 5, "tags": ["py"]}
 
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_recall_with_limit(self, mock_cls: MagicMock) -> None:
-        client = _mock_client()
-        mock_cls.return_value = client
-        main(["recall", "q", "--limit", "5"])
-        call_kwargs = client.recall.call_args
-        assert call_kwargs is not None
-        assert call_kwargs.kwargs.get("limit") == 5
+    def test_an_unreachable_daemon_names_the_start_command(
+        self, daemon: MagicMock, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from trw_memory.daemon import DAEMON_START_COMMAND
+        from trw_memory.exceptions import DaemonUnreachableError
 
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_recall_error(self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
-        client = _mock_client()
-        client.recall = AsyncMock(side_effect=RuntimeError("backend down"))
-        mock_cls.return_value = client
-        ret = main(["recall", "q"])
+        daemon.recall = AsyncMock(
+            side_effect=DaemonUnreachableError(f"unreachable. Start it with: {DAEMON_START_COMMAND}")
+        )
+        ret = main(["recall", "q", "--namespace", "n"])
+        err = capsys.readouterr().err
         assert ret == 1
-        captured = capsys.readouterr()
-        assert "Error:" in captured.err
+        assert DAEMON_START_COMMAND in err
+        assert "Traceback" not in err
 
 
 class TestSearchCommand:
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_search_success(self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
-        client = _mock_client()
-        mock_cls.return_value = client
-        ret = main(["search", "--tags", "py"])
+    def test_search_success(self, daemon: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
+        ret = main(["search", "--tags", "py", "--status", "active", "--namespace", "n"])
         assert ret == 0
-        captured = capsys.readouterr()
-        assert "M-abc12345" in captured.out
+        assert "M-abc12345" in capsys.readouterr().out
+        daemon.search.assert_awaited_once_with("n", tags=["py"], status="active", limit=50)
 
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_search_with_since(self, mock_cls: MagicMock) -> None:
-        client = _mock_client()
-        mock_cls.return_value = client
-        ret = main(["search", "--since", "2026-01-01T00:00:00"])
-        assert ret == 0
+    def test_search_json_format(self, daemon: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
+        assert main(["search", "--format", "json", "--namespace", "n"]) == 0
+        assert isinstance(json.loads(capsys.readouterr().out), list)
 
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_search_invalid_since(self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
-        client = _mock_client()
-        mock_cls.return_value = client
-        ret = main(["search", "--since", "not-a-date"])
-        assert ret == 1
-        captured = capsys.readouterr()
-        assert "Error:" in captured.err
-
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_search_json_format(self, mock_cls: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
-        client = _mock_client()
-        mock_cls.return_value = client
-        ret = main(["search", "--format", "json"])
-        assert ret == 0
-        parsed = json.loads(capsys.readouterr().out)
-        assert isinstance(parsed, list)
-
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_search_with_min_importance(self, mock_cls: MagicMock) -> None:
-        client = _mock_client()
-        mock_cls.return_value = client
-        main(["search", "--min-importance", "0.8"])
-        call_kwargs = client.search.call_args
-        assert call_kwargs is not None
-        assert call_kwargs.kwargs.get("min_importance") == 0.8
+    def test_the_local_only_filters_are_gone(self) -> None:
+        with pytest.raises(SystemExit):
+            main(["search", "--min-importance", "0.8"])
 
 
 class TestForgetCommand:
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_forget_success(
-        self,
-        mock_cls: MagicMock,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        client = _mock_client()
-        mock_cls.return_value = client
-        ret = main(["forget", "M-abc123"])
+    def test_forget_success(self, daemon: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
+        ret = main(["forget", "M-abc123", "--namespace", "n"])
         assert ret == 0
-        captured = capsys.readouterr()
-        assert "Deleted:" in captured.out
-        client.forget.assert_awaited_once_with("M-abc123")
+        assert "Deleted: M-abc123" in capsys.readouterr().out
+        daemon.forget.assert_awaited_once_with("M-abc123", "n")
 
-    @patch(f"{_CLI}.MemoryClient", autospec=False)
-    def test_forget_not_found(
-        self,
-        mock_cls: MagicMock,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        from trw_memory.exceptions import MemoryNotFoundError
-
-        client = _mock_client()
-        client.forget = AsyncMock(side_effect=MemoryNotFoundError("not found"))
-        mock_cls.return_value = client
-        ret = main(["forget", "M-nonexistent"])
-        assert ret == 1
-        assert "Error:" in capsys.readouterr().err
+    def test_forget_not_found(self, daemon: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
+        daemon.forget = AsyncMock(return_value={"deleted": 0, "status": "not_found"})
+        assert main(["forget", "M-nonexistent", "--namespace", "n"]) == 1
+        assert "not_found" in capsys.readouterr().err
 
     def test_forget_missing_id(self) -> None:
         with pytest.raises(SystemExit):

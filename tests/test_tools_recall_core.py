@@ -62,17 +62,17 @@ class TestMemoryRecallImpl:
         # Sanity: the old hardcoded value is no longer used.
         assert kwargs["limit"] != 10_000
 
-    def test_candidate_pool_floor_is_limit_times_five(self) -> None:
-        """When the configured pool is small, the floor is limit*5 (matches SDK)."""
+    def test_candidate_pool_floor_scales_with_the_ranking_depth(self) -> None:
+        """When the configured pool is small, the floor is five times trw_recall's depth (limit * 5)."""
         backend = _mock_backend([_make_entry("M-1")])
         cfg = MemoryConfig(hybrid_search_candidate_pool_size=10)
 
         memory_recall_impl(
-            "needle", "project:default", backend=backend, config=cfg, limit=40, include_org_memories=False
+            "needle", "project:default", backend=backend, config=cfg, limit=8, include_org_memories=False
         )
 
         _, kwargs = backend.list_entries.call_args
-        assert kwargs["limit"] == 200  # max(40*5, 10)
+        assert kwargs["limit"] == 200  # max(8 * 5 * 5, 10)
 
     def test_sec001_filter_runs_before_limit_cap(self) -> None:
         """trw-memory-3: SEC-001 filtering must run BEFORE the limit cap so the
@@ -368,7 +368,7 @@ class TestMemoryRecallImpl:
             )
 
             @contextmanager
-            def fake_discover(_cfg: MemoryConfig) -> Iterator[object]:
+            def fake_discover(_cfg: MemoryConfig, **_: object) -> Iterator[object]:
                 yield [(["project:other"], remote_backend)]
 
             with patch("trw_memory.integrations._backend.discover_namespace_backends", fake_discover):
@@ -415,7 +415,7 @@ class TestMemoryRecallImpl:
             )
 
             @contextmanager
-            def fake_discover(_cfg: MemoryConfig) -> Iterator[object]:
+            def fake_discover(_cfg: MemoryConfig, **_: object) -> Iterator[object]:
                 yield [(["project:other"], remote_backend)]
 
             with patch("trw_memory.integrations._backend.discover_namespace_backends", fake_discover):

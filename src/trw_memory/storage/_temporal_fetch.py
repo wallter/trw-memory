@@ -129,33 +129,6 @@ def _fetch_selection(
         secondary.close()
 
 
-def fetch_temporal_selection(
-    connection: _ConnectionLike,
-    *,
-    db_path: Path,
-    dbapi: _DBAPILike,
-    query: FetchQuery,
-    selection: TemporalSelection | None,
-    limit: int,
-    batch_size: int = 256,
-    entry_filter: Callable[[MemoryEntry], bool] | None = None,
-) -> tuple[list[MemoryEntry], int]:
-    """Public stream helper preserving callback exception identity across replay."""
-    try:
-        return _fetch_selection(
-            connection,
-            db_path=db_path,
-            dbapi=dbapi,
-            query=query,
-            selection=selection,
-            limit=limit,
-            batch_size=batch_size,
-            entry_filter=entry_filter,
-        )
-    except _EntryFilterFailure as exc:
-        raise exc.error from None
-
-
 def execute_temporal_query(
     backend: SQLiteBackend,
     query: FetchQuery,

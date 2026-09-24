@@ -21,11 +21,9 @@ from trw_memory.lifecycle.protection import (
 )
 from trw_memory.lifecycle.scoring import (
     apply_time_decay,
-    bayesian_calibrate,
     compute_utility_score,
     enforce_tier_distribution,
     entry_utility,
-    update_q_value,
 )
 from trw_memory.lifecycle.tiers import TierManager, TierSweepResult
 
@@ -37,7 +35,6 @@ __all__ = [
     "_redact_paths",
     "apply_time_decay",
     "batch_dedup",
-    "bayesian_calibrate",
     "check_duplicate",
     "complete_linkage_cluster",
     "compute_utility_score",
@@ -50,6 +47,5 @@ __all__ = [
     "merge_entries",
     "prune_threshold_multiplier",
     "rank_by_utility",
-    "update_q_value",
     "utility_based_prune_candidates",
 ]

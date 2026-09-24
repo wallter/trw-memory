@@ -128,8 +128,6 @@ def test_from_learning_entry_all_fields() -> None:
         "last_accessed_at": date(2026, 2, 20),
         "recurrence": 4,
         "access_count": 7,
-        "q_value": 0.75,
-        "q_observations": 12,
         "namespace": "project",
         "source": "human",
         "source_identity": "tyler",
@@ -148,8 +146,6 @@ def test_from_learning_entry_all_fields() -> None:
     assert entry.status == MemoryStatus.RESOLVED
     assert entry.recurrence == 4
     assert entry.access_count == 7
-    assert entry.q_value == 0.75
-    assert entry.q_observations == 12
     assert entry.namespace == "project"
     assert entry.source == "human"
     assert entry.source_identity == "tyler"

@@ -7,7 +7,6 @@ Supports 13 typed edge types (PRD-CORE-107).  Graph traversal via BFS up to dept
 from __future__ import annotations
 
 import contextlib
-import sqlite3
 import threading
 from collections import deque
 from collections.abc import Callable, Iterator
@@ -25,11 +24,11 @@ __all__ = [
     "VALID_EDGE_TYPES",
     "apply_importance_boost",
     "apply_importance_decay",
+    "backfill_graph_page",
     "create_co_anchored_edges",
     "create_consolidation_edges",
     "create_similarity_edges",
     "detect_clusters",
-    "detect_cross_validation",
     "filter_conflicts",
     "get_conflicts",
     "graph_query",
@@ -70,7 +69,6 @@ _BACKGROUND_GRAPH_THREADS_GUARD = _GRAPH_THREAD_REGISTRY._guard
 logger = structlog.get_logger(__name__)
 
 SIMILARITY_THRESHOLD = 0.75
-CROSS_VALIDATION_THRESHOLD = 0.92
 CANDIDATE_LIMIT = 500
 IMPORTANCE_BOOST = 0.05
 DECAY_DELTA = 0.1
@@ -182,20 +180,16 @@ def update_entry_graph(
 # Batched enrichment (one pass per write batch) lives in _graph_batch.py.
 from trw_memory._graph_batch import update_entries_graph as update_entries_graph  # noqa: E402
 
+# One resumable page of the forced sweep over existing rows lives in _graph_backfill.py.
+from trw_memory._graph_backfill import backfill_graph_page as backfill_graph_page  # noqa: E402
+
 # Cross-project validation cluster extracted to _graph_cross_project.py
 # (PRD-DIST-245 batch 93). Re-exports preserve back-compat names.
 from trw_memory._graph_cross_project import (  # noqa: E402
     _ENTRY_UPDATE_LOCKS as _ENTRY_UPDATE_LOCKS,
     _ENTRY_UPDATE_LOCKS_GUARD as _ENTRY_UPDATE_LOCKS_GUARD,
-    append_cross_validation as _append_cross_validation,
-    apply_cross_project_validation as _apply_cross_project_validation,
-    backend_update_guard as _backend_update_guard,
     cross_validate_entries as cross_validate_entries,
-    cross_validation_prefix as _cross_validation_prefix,
-    entry_has_cross_validation as _entry_has_cross_validation,
-    entry_update_lock as _entry_update_lock,
     merge_cross_validated_entry as _merge_cross_validated_entry,
-    persist_cross_validated_entry as _persist_cross_validated_entry,
     project_scope_key as _project_scope_key,
 )
 
@@ -247,8 +241,11 @@ def list_org_shared_entries(
     exclude_keys: set[tuple[str, str]] | None = None,
     invocation: RecallInvocation | None = None,
     entry_filter: Callable[[MemoryEntry], bool] | None = None,
+    open_backend: StorageBackend | None = None,
 ) -> list[MemoryEntry]:
     """Acquire authorized sibling entries; native policy precedes every pool cap.
+
+    *open_backend* is the caller's open store, reused instead of reopened.
 
     Native paging bounds retained page/final references, not database scans or
     total work. No-invocation callers retain the legacy per-namespace 10k cut.
@@ -263,7 +260,7 @@ def list_org_shared_entries(
     seen = set(exclude_keys or set())
 
     def candidates() -> Iterator[MemoryEntry]:
-        with discover_namespace_backends(config) as stores:
+        with discover_namespace_backends(config, reuse=open_backend) as stores:
             for namespaces, backend in stores:
                 for candidate_namespace in namespaces:
                     project_id = _project_scope_key(candidate_namespace)
@@ -319,43 +316,6 @@ def list_org_shared_entries(
             limit, candidates(), key=lambda entry: invocation.rank_key(entry, entry.importance, source="org")
         )
     return sorted(candidates(), key=lambda entry: (entry.importance, entry.updated_at), reverse=True)[:limit]
-
-
-def detect_cross_validation(
-    entry: MemoryEntry,
-    conn: sqlite3.Connection,
-    embedding: list[float] | None = None,
-    remote_entries: list[tuple[str, str, list[float]]] | None = None,
-    *,
-    threshold: float = CROSS_VALIDATION_THRESHOLD,
-) -> bool:
-    """Check if entry is cross-validated by another project.
-
-    Args:
-        entry: The entry to check.
-        conn: SQLite connection.
-        embedding: Entry's embedding.
-        remote_entries: List of (entry_id, project_id, embedding) from other projects.
-        threshold: Similarity to exceed, in the scale of the compared vectors.
-
-    Returns:
-        True if cross-validation detected.
-    """
-    if embedding is None or remote_entries is None:
-        return False
-
-    for _remote_id, project_id, remote_emb in remote_entries:
-        sim = _safe_cosine_similarity(embedding, remote_emb)
-        if sim > threshold:
-            logger.debug(
-                "cross_validation_detected",
-                entry_id=entry.id,
-                project_id=project_id,
-                similarity=round(sim, 4),
-            )
-            return True
-
-    return False
 
 
 # Graph primitives extracted to _graph_primitives.py (PRD-DIST-245 batch 98).

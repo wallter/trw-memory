@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from trw_memory.exceptions import SchemaValidationError
+from trw_memory.exceptions import PIIBlockError, RateLimitError, SchemaValidationError
 from trw_memory.tools.store import memory_store_impl
 
 from ._test_tools_support import _mock_backend
@@ -128,8 +126,8 @@ class TestStoreGraphScheduleFailure:
 
 
 class TestStoreSchemaValidationErrorInnerBlock:
-    def test_schema_error_from_prepare_entry_returns_invalid_when_not_raising(self) -> None:
-        """SchemaValidationError from prepare_entry_for_store with raise_security_errors=False → return invalid (lines 212-214)."""
+    def test_schema_error_from_prepare_entry_returns_invalid(self) -> None:
+        """SchemaValidationError from prepare_entry_for_store → return invalid."""
         from trw_memory.models.config import MemoryConfig
 
         backend = _mock_backend()
@@ -142,26 +140,34 @@ class TestStoreSchemaValidationErrorInnerBlock:
                 "project:default",
                 backend=backend,
                 config=cfg,
-                raise_security_errors=False,
             )
 
         assert result["status"] == "invalid"
         assert "inner schema error" in str(result.get("error", ""))
 
-    def test_schema_error_from_prepare_entry_re_raises_when_raise_security_errors_true(self) -> None:
-        """SchemaValidationError from prepare_entry_for_store with raise_security_errors=True → re-raises (line 212-213)."""
+
+class TestRefusalStatusesSeparateTransientFromPermanent:
+    """A caller retries a rate limit and gives up on refused content (PRD-CORE-280 e3)."""
+
+    def test_a_rate_limit_is_its_own_retryable_status(self) -> None:
         from trw_memory.models.config import MemoryConfig
 
-        backend = _mock_backend()
-        cfg = MemoryConfig()
+        limited = RateLimitError("write rate exceeded", retry_after=12.0)
+        with patch("trw_memory.tools.store.prepare_entry_for_store", side_effect=limited):
+            result = memory_store_impl(
+                "valid content", "project:default", backend=_mock_backend(), config=MemoryConfig()
+            )
 
-        exc = SchemaValidationError("inner schema error", failed_fields=["content"])
-        with patch("trw_memory.tools.store.prepare_entry_for_store", side_effect=exc):
-            with pytest.raises(SchemaValidationError, match="inner schema error"):
-                memory_store_impl(
-                    "valid content",
-                    "project:default",
-                    backend=backend,
-                    config=cfg,
-                    raise_security_errors=True,
-                )
+        assert result["status"] == "rate_limited"
+        assert result["retry_after"] == 12.0
+
+    def test_refused_content_stays_blocked(self) -> None:
+        from trw_memory.models.config import MemoryConfig
+
+        refused = PIIBlockError("contains a secret")
+        with patch("trw_memory.tools.store.prepare_entry_for_store", side_effect=refused):
+            result = memory_store_impl(
+                "valid content", "project:default", backend=_mock_backend(), config=MemoryConfig()
+            )
+
+        assert result["status"] == "blocked"

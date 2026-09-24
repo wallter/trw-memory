@@ -41,12 +41,18 @@ def normalize_noul_criteria(criteria: Mapping[str, JsonValue] | None) -> dict[st
     otherwise have their question rejected by the transport; this fills the
     other side with a neutral, generated description instead.
     """
-    if criteria is None:
+    if criteria is None or len(criteria) == 0:
         return None
     true_value = criteria.get("true")
     false_value = criteria.get("false")
     if true_value is None and false_value is None:
-        return None
+        # Sending the question with no rubric would still return a plausible probability;
+        # descriptive criteria are the largest measured quality lever (AUC 0.955 vs 0.737),
+        # so a misspelt key is a caller error, not something to paper over (learning L-BPZq).
+        raise ValueError(
+            f"noul criteria must use the keys 'true' and 'false'; got {sorted(map(str, criteria))}. "
+            "Other keys would be discarded on the wire, leaving the question with no rubric."
+        )
     if true_value is None:
         true_value = f"Not: {_stringify(false_value)}"
     if false_value is None:
@@ -94,8 +100,18 @@ def build_payload(
 
 def parse_response(body: Mapping[str, Any], *, backend: str, latency_ms: float) -> DecisionResult:
     """Parse a decoded JSON response body into a typed :class:`DecisionResult`."""
-    raw_answers = body.get("answers") or {}
-    answers = {question_id: _ANSWER_ADAPTER.validate_python(raw) for question_id, raw in raw_answers.items()}
+    raw_answers = body.get("answers")
+    if not isinstance(raw_answers, Mapping):
+        raise TypeError("response has no answers object")
+    answers: dict[str, DecisionAnswer] = {}
+    malformed: list[str] = []
+    error_type = ""
+    for question_id, raw in raw_answers.items():
+        try:
+            answers[str(question_id)] = _ANSWER_ADAPTER.validate_python(raw)
+        except Exception as exc:  # trw:intentional one bad member is reported by id, not allowed to sink the siblings
+            malformed.append(str(question_id))
+            error_type = error_type or type(exc).__name__
     usage = body.get("usage") or {}
     return DecisionResult(
         model=str(body.get("model", "")),
@@ -103,6 +119,8 @@ def parse_response(body: Mapping[str, Any], *, backend: str, latency_ms: float) 
         usage=dict(usage),
         backend=backend,
         latency_ms=latency_ms,
+        malformed_ids=malformed,
+        malformed_error_type=error_type,
     )
 
 

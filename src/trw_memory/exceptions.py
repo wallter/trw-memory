@@ -83,10 +83,6 @@ class EncryptionUnavailableError(MemoryError):
     """Raised when an encryption-required runtime dependency is unavailable."""
 
 
-class KeyRotationError(MemoryError):
-    """Raised when key rotation fails or cannot be safely completed."""
-
-
 class SchemaValidationError(MemoryError):
     """Raised when a memory entry fails the write-time schema/policy contract."""
 

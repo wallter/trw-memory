@@ -1,15 +1,11 @@
 """Utility-based scoring for the trw-memory lifecycle layer.
 
 Core scoring functions:
-- update_q_value: MemRL exponential moving average Q-learning
-- compute_utility_score: Ebbinghaus decay + Q-value composite
+- compute_utility_score: Ebbinghaus decay over base impact
 - apply_time_decay: Linear time decay with 0.3 floor
-- bayesian_calibrate: MACLA Bayesian impact calibration
 
 Research basis:
-- MemRL Q-values (arXiv:2601.03192)
 - Ebbinghaus forgetting curve
-- MACLA Bayesian selection (arXiv:2512.18950)
 
 Scoring math is identical to trw-mcp scoring.py — adapted to use MemoryConfig
 and MemoryEntry field names (importance vs impact, source vs source_type,
@@ -45,12 +41,13 @@ def _int_field(entry: dict[str, object], key: str, default: int) -> int:
     return int(str(entry.get(key, default)))
 
 
-#: Floor on the feedback-decay FACTOR. With ``helpful_count`` at 0 corpus-wide
-#: the term degenerates to ``0.95 ** recall_count``, which is unbounded below;
-#: 0.5 caps the worst case at halving importance. Chosen as the largest penalty
-#: that is still recoverable by a single round of real feedback rather than by a
-#: measured optimum — no calibration data exists, because the signal it bounds
-#: has never once been supplied. Overridable per call and via
+#: Floor on the recall-frequency decay FACTOR, which is ``0.95 ** recall_count``
+#: and unbounded below; 0.5 caps the worst case at halving importance. Chosen as
+#: the largest penalty that would still be recoverable by a single round of real
+#: usefulness feedback rather than by a measured optimum -- no calibration data
+#: exists, because PRD-CORE-293 confirmed the ``helpful_count``/``unhelpful_count``
+#: signal this floor used to be sized against was never once supplied (0 of
+#: 1,617 rows) and removed its only writer. Overridable per call and via
 #: ``MemoryConfig.feedback_decay_min_factor``.
 _DEFAULT_FEEDBACK_DECAY_MIN_FACTOR = 0.5
 
@@ -83,7 +80,6 @@ def utility_params_from_config(config: MemoryConfig) -> UtilityParams:
     return UtilityParams(
         half_life_days=config.decay_half_life_days,
         use_exponent=config.decay_use_exponent,
-        use_fsrs=config.lifecycle_use_fsrs,
         feedback_decay_min_factor=config.feedback_decay_min_factor,
     )
 
@@ -98,34 +94,6 @@ def _ensure_utc(ts: datetime) -> datetime:
     if ts.tzinfo is None:
         return ts.replace(tzinfo=timezone.utc)
     return ts
-
-
-# ---------------------------------------------------------------------------
-# Q-learning update
-# ---------------------------------------------------------------------------
-
-
-def update_q_value(
-    q_old: float,
-    reward: float,
-    alpha: float = 0.15,
-    recurrence_bonus: float = 0.0,
-) -> float:
-    """Update Q-value using MemRL exponential moving average.
-
-    Formula: Q_new = Q_old + alpha * (reward - Q_old) + recurrence_bonus
-
-    Args:
-        q_old: Current Q-value (0.0-1.0).
-        reward: Observed reward in [-1.0, 1.0].
-        alpha: Learning rate. Default 0.15.
-        recurrence_bonus: Small additive bonus for repeated recall.
-
-    Returns:
-        Updated Q-value clamped to [0.0, 1.0].
-    """
-    q_new = q_old + alpha * (reward - q_old) + recurrence_bonus
-    return _clamp01(q_new)
 
 
 # ---------------------------------------------------------------------------
@@ -161,36 +129,33 @@ def apply_time_decay(impact: float, created_at: datetime) -> float:
 
 
 def compute_utility_score(
-    q_value: float,
     days_since_last_access: int,
     recurrence_count: int,
     base_impact: float,
-    q_observations: int,
     *,
     half_life_days: float = 14.0,
     use_exponent: float = 0.6,
-    cold_start_threshold: int = 3,
     access_count: int = 0,
     source_type: str = "agent",
     access_count_boost_cap: float = 0.15,
     source_human_boost: float = 0.1,
 ) -> float:
-    """Compute composite utility score combining Q-value with Ebbinghaus decay.
+    """Compute composite utility: importance under Ebbinghaus decay, plus boosts.
 
     Formula:
         retention = recurrence_strength * exp(-effective_decay * days)
-        effective_q = blend(impact, q_value, q_observations)
-        utility = effective_q * retention + access_boost + source_boost
+        utility = base_impact * retention + access_boost + source_boost
+
+    PRD-CORE-293: the Q-value blend that used to replace ``base_impact`` after
+    enough outcome observations is gone with the reward loop (no observation was
+    ever recorded, so the blend always returned ``base_impact``).
 
     Args:
-        q_value: Current Q-value from outcome tracking (0.0-1.0).
         days_since_last_access: Days since last recall.
         recurrence_count: Number of times recalled (minimum 1).
         base_impact: Original static importance score (0.0-1.0).
-        q_observations: Number of outcome observations.
         half_life_days: Days until retention halves. Default 14.
         use_exponent: Sub-linear recurrence exponent. Default 0.6.
-        cold_start_threshold: Q-observations before trusting q_value. Default 3.
         access_count: Number of times recalled (for sub-linear boost).
         source_type: 'human' or 'agent'.
         access_count_boost_cap: Maximum boost from access frequency.
@@ -199,12 +164,7 @@ def compute_utility_score(
     Returns:
         Composite utility score in [0.0, 1.0].
     """
-    # Cold-start blending: transition from impact to q_value
-    if q_observations < cold_start_threshold:
-        w = q_observations / max(cold_start_threshold, 1)
-        effective_q = (1.0 - w) * base_impact + w * q_value
-    else:
-        effective_q = q_value
+    effective_q = base_impact
 
     # Ebbinghaus decay rate from half-life: lambda = ln(2) / half_life
     decay_rate = math.log(2) / max(half_life_days, 0.1)
@@ -231,54 +191,49 @@ def compute_utility_score(
 
 
 # ---------------------------------------------------------------------------
-# Feedback-aware dynamic scoring (PRD-CORE-132 FR04)
+# Recall-frequency decay (PRD-CORE-132 FR04, rewritten by PRD-CORE-293 FR02)
 # ---------------------------------------------------------------------------
 
 
-def feedback_decay_score(
+def recall_frequency_decay_score(
     importance: float,
     recall_count: int,
-    helpful_count: int,
     *,
     min_factor: float = _DEFAULT_FEEDBACK_DECAY_MIN_FACTOR,
 ) -> float:
-    """Compute feedback-aware decay score.
+    """Decay importance by how often an entry was recalled, with a floor.
 
-    Learnings recalled often but never marked helpful decay faster.
-    Helpful feedback counteracts decay.
+    Formula: ``importance * max(min_factor, 0.95 ** recall_count)``
 
-    Formula: ``importance * max(min_factor, 0.95 ** (recall_count / max(1, helpful_count)))``
+    PRD-CORE-293 FR02: this was named ``feedback_decay_score`` and took a
+    ``helpful_count`` argument, with the exponent
+    ``recall_count / max(1, helpful_count)``. ``helpful_count`` was written only
+    by ``trw_learn_update(feedback=...)``, which no caller ever issued (0 of
+    1,617 rows measured 2026-09-22) -- so the exponent always degenerated to
+    plain ``recall_count`` and the "feedback-aware" name was never true of any
+    observed call. Dropping the parameter changes nothing about the live
+    formula's OUTPUT (every prior call site passed ``helpful_count=0``,
+    ``max(1, 0) == 1``, same ``0.95 ** recall_count``); it removes an argument
+    that could never carry a value.
 
-    **Why the floor exists (PRD-CORE-244 FR11 residual).** The exponent is
-    ``recall_count / max(1, helpful_count)`` and ``helpful_count`` is 0 on 100%
-    of the 9,366-row corpus, so in practice the term is not "feedback-aware
-    decay" at all — it is a *pure recall-count penalty*, ``0.95 ** recall_count``,
-    unbounded below. An entry surfaced 100 times decays to 0.6% of its
-    importance on retrieval frequency alone, and PRD-QUAL-032/D1 already
-    established that being surfaced in a result set is not evidence of use. That
-    turns the one term crediting feedback into a mechanism that buries whatever
-    the retriever keeps finding — the same "optimises the wrong objective"
-    failure FR04 exists to correct, arriving from the opposite direction.
-
-    ``min_factor`` bounds the damage a *missing* signal can do while leaving the
-    signal itself intact: helpful feedback still lifts an entry above a
-    same-recall sibling at every count (the factor is monotone in
-    ``helpful_count`` until it saturates), so the incentive the formula encodes
-    is unchanged. The default halves importance at worst, which is a large
-    penalty for an unrated entry and a recoverable one.
+    **Why the floor exists (PRD-CORE-244 FR11 residual).** Without it, being
+    recalled often is a pure penalty, unbounded below: an entry surfaced 100
+    times decays to 0.6% of its importance on retrieval frequency alone, and
+    PRD-QUAL-032/D1 already established that being surfaced in a result set is
+    not evidence of use. ``min_factor`` bounds that damage -- the default halves
+    importance at worst, a large but recoverable penalty for a heavily-recalled
+    entry.
 
     Args:
         importance: Base importance/impact score (0.0-1.0).
         recall_count: Number of times this entry was recalled.
-        helpful_count: Number of times this entry was marked helpful.
         min_factor: Lower bound on the decay FACTOR (not the score). 0.0
             restores the pre-floor behaviour exactly.
 
     Returns:
         Decayed score in [0.0, 1.0].
     """
-    exponent = recall_count / max(1, helpful_count)
-    return _clamp01(importance * max(min_factor, 0.95**exponent))
+    return _clamp01(importance * max(min_factor, 0.95**recall_count))
 
 
 def entry_utility(
@@ -345,25 +300,13 @@ def entry_utility(
     # because compute_utility_score() already applies Ebbinghaus exponential
     # decay internally via retention = exp(-decay_rate * days).
 
-    # PRD-CORE-132 FR04: feedback-aware decay of base_impact.
+    # PRD-CORE-132 FR04 / PRD-CORE-293 FR02: recall-frequency decay of base_impact.
     recall_ct = _int_field(entry, "recall_count", 0)
-    helpful_ct = _int_field(entry, "helpful_count", 0)
     if recall_ct > 0:
-        base_impact = feedback_decay_score(
+        base_impact = recall_frequency_decay_score(
             base_impact,
             recall_ct,
-            helpful_ct,
             min_factor=effective_params.feedback_decay_min_factor,
-        )
-
-    if effective_params.use_fsrs:
-        # FSRS measures retrieval practice count; recall_count (incremented by
-        # the recall API) is more accurate than recurrence (re-store count).
-        # Fall back to recurrence when recall_count is zero (cold-start entry).
-        return compute_fsrs_utility_score(
-            importance=base_impact,
-            elapsed_days=float(days_unused),
-            recurrence=max(recall_ct, recurrence),
         )
 
     half_life = effective_params.half_life_for(
@@ -371,71 +314,16 @@ def entry_utility(
         str(entry.get("confidence", "unverified")),
     )
     return compute_utility_score(
-        # trw:intentional CORE268: historical rewards are retained data, not
-        # default importance evidence. The explicit historical API remains.
-        q_value=base_impact,
         days_since_last_access=days_unused,
         recurrence_count=recurrence,
         base_impact=base_impact,
-        q_observations=0,
         half_life_days=half_life,
         use_exponent=effective_params.use_exponent,
-        cold_start_threshold=effective_params.cold_start_threshold,
         access_count=access_count,
         source_type=source_type,
         access_count_boost_cap=effective_params.access_count_boost_cap,
         source_human_boost=effective_params.source_human_boost,
     )
-
-
-# ---------------------------------------------------------------------------
-# Bayesian impact calibration
-# ---------------------------------------------------------------------------
-
-
-def bayesian_calibrate(
-    user_impact: float,
-    org_mean: float = 0.5,
-    user_weight: float = 1.0,
-    org_weight: float = 0.5,
-) -> float:
-    """Compute Bayesian posterior impact score.
-
-    Formula: (user_impact * user_weight + org_mean * org_weight) / (user_weight + org_weight)
-
-    Args:
-        user_impact: Score assigned by user (0.0-1.0).
-        org_mean: Average importance across all entries (default 0.5).
-        user_weight: User calibration accuracy weight.
-        org_weight: Org evidence weight (capped at 2.0).
-
-    Returns:
-        Calibrated impact score (0.0-1.0).
-    """
-    if user_weight + org_weight == 0:
-        return user_impact
-
-    # Cap org_weight at 2.0
-    org_weight = min(org_weight, 2.0)
-
-    posterior = (user_impact * user_weight + org_mean * org_weight) / (user_weight + org_weight)
-    return max(0.0, min(1.0, posterior))
-
-
-def compute_calibration_accuracy(recall_stats: dict[str, object]) -> float:
-    """Compute the recall-history weight consumed by TRW's Bayesian calibrator."""
-    total = int(str(recall_stats.get("total_recalls", 0)))
-    positive = int(str(recall_stats.get("positive_outcomes", 0)))
-    if total == 0:
-        return 1.0
-    ratio = positive / total
-    if ratio >= 0.75:
-        return 2.0
-    if ratio >= 0.50:
-        return 1.5
-    if ratio >= 0.25:
-        return 1.0
-    return 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -557,76 +445,3 @@ def enforce_tier_distribution(
             )
 
     return demotions
-
-
-# ---------------------------------------------------------------------------
-# Recall ranking
-# ---------------------------------------------------------------------------
-
-_FSRS_DECAY: float = -0.5  # power-law decay exponent (FSRS-4.5 default)
-# FSRS-4.5 forgetting-curve FACTOR. Derived so that R(t=S, S) == 0.9 exactly:
-#   (1 + FACTOR) ** DECAY == 0.9  =>  FACTOR == 0.9 ** (1/DECAY) - 1 == 19/81.
-# (The 0.9 *target retrievability* is encoded in this constant, not stored as
-# the FACTOR itself — a common point of confusion when transcribing the paper.)
-_FSRS_FACTOR: float = 0.9 ** (1.0 / _FSRS_DECAY) - 1.0  # == 19/81 ~= 0.234568
-_FSRS_DEFAULT_STABILITY: float = 1.0  # initial stability in days
-
-
-def fsrs_retrievability(elapsed_days: float, stability: float) -> float:
-    """FSRS power-law retention: R(t, S) = (1 + FACTOR * t / S)^DECAY.
-
-    Gives R=1.0 at t=0, R~=0.9 at t=S, R->0 as t->inf.
-
-    Args:
-        elapsed_days: Days since the memory was last reviewed or created.
-        stability: Current stability S in days (the interval at which R~=0.9).
-
-    Returns:
-        Retrievability in [0, 1].
-    """
-    if stability <= 0.0:
-        stability = _FSRS_DEFAULT_STABILITY
-    t = max(0.0, elapsed_days)
-    return float((1.0 + _FSRS_FACTOR * t / stability) ** _FSRS_DECAY)
-
-
-def compute_fsrs_utility_score(
-    importance: float,
-    elapsed_days: float,
-    recurrence: int = 1,
-    *,
-    stability: float | None = None,
-    difficulty: float = 5.0,
-) -> float:
-    """FSRS-powered utility score replacing Ebbinghaus decay.
-
-    Blends FSRS retrievability R(t, S) with the entry's importance
-    and recurrence to produce a single [0, 1] utility score.
-
-        utility = R(t, S) * sqrt(importance) * (1 + log1p(recurrence) / 10)
-
-    The recurrence bonus is capped at 1.5x to prevent viral entries
-    from permanently dominating the utility ranking.
-
-    Args:
-        importance: Entry importance in [0, 1].
-        elapsed_days: Days since last recall / creation.
-        recurrence: Number of times the entry has been recalled (>=1).
-        stability: FSRS stability S in days.  When ``None``, estimated
-            from recurrence: S ~= 1.0 * (recurrence ** 0.3) * 7 (heuristic
-            that gives S=7 at recurrence=1, S~=14 at recurrence=3).
-        difficulty: Entry difficulty in [1, 10] (used when stability is None).
-
-    Returns:
-        Utility score in [0, 1].
-    """
-    if stability is None:
-        # Heuristic: more recalls -> longer stability
-        stability = max(
-            _FSRS_DEFAULT_STABILITY,
-            (max(1, recurrence) ** 0.3) * 7.0 / (difficulty / 5.0),
-        )
-    r = fsrs_retrievability(elapsed_days, stability)
-    imp_factor = math.sqrt(max(0.0, min(1.0, importance)))
-    rec_bonus = min(1.5, 1.0 + math.log1p(max(0, recurrence - 1)) / 10.0)
-    return _clamp01(r * imp_factor * rec_bonus)

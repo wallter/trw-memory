@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import timezone
 from typing import Any
-from unittest.mock import MagicMock
 
 from trw_memory.integrations._backend import create_backend, make_entry
 
@@ -33,27 +32,6 @@ class TestBackendHelper:
         backend = create_backend("test", storage_path=str(tmp_path))
         try:
             assert isinstance(backend, StorageBackend)
-        finally:
-            backend.close()
-
-    def test_resolve_backend_with_provided_backend(self) -> None:
-        """resolve_backend returns provided backend without ownership."""
-        from trw_memory.integrations._backend import resolve_backend
-
-        mock_backend = MagicMock()
-        backend, owns = resolve_backend("ns", None, mock_backend)
-        assert backend is mock_backend
-        assert not owns
-
-    def test_resolve_backend_creates_new_backend(self, tmp_path: Any) -> None:
-        """resolve_backend creates and owns backend when none provided."""
-        from trw_memory.integrations._backend import resolve_backend
-        from trw_memory.storage.interface import StorageBackend
-
-        backend, owns = resolve_backend("test", str(tmp_path), None)
-        try:
-            assert isinstance(backend, StorageBackend)
-            assert owns
         finally:
             backend.close()
 

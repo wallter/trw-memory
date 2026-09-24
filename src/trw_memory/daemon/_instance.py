@@ -19,8 +19,8 @@ mechanism enters the tree:
 5. write the discovery record naming this pid and the bound port, then release.
 
 Ownership is the discovery record rather than a held file lock, because the
-lock has to be released for the daemon's whole serving life anyway (a client
-generating its first token takes the same lock). The record is strictly better
+lock has to be released for the daemon's whole serving life anyway (minting a
+grant takes the same lock). The record is strictly better
 evidence: it carries the pid that liveness is checked against.
 """
 
@@ -57,13 +57,12 @@ class InstanceClaim:
     info: DaemonInfo
 
 
-def claim_single_instance(paths: DaemonPaths, *, port: int, token: str, version: str) -> InstanceClaim:
+def claim_single_instance(paths: DaemonPaths, *, port: int, version: str) -> InstanceClaim:
     """Claim sole ownership of the store's daemon slot and bind its socket.
 
     Args:
         paths: Resolved daemon file locations.
         port: TCP port to bind, or 0 for an operating-system assignment.
-        token: The per-user bearer token to advertise.
         version: trw-memory version string to advertise.
 
     Returns:
@@ -101,7 +100,7 @@ def claim_single_instance(paths: DaemonPaths, *, port: int, token: str, version:
 
         sock = bind_loopback_socket(port)
         try:
-            info = write_discovery(paths, url=endpoint_url(sock), token=token, version=version)
+            info = write_discovery(paths, url=endpoint_url(sock), version=version)
         except BaseException:
             sock.close()
             raise

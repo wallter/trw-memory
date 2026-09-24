@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from tests._timing import assert_budget
 from trw_memory.graph import DERIVED_EDGE_TYPE, VALID_EDGE_TYPES, graph_query
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -168,7 +169,7 @@ def test_default_traversal_returns_no_derived_edge(tmp_path: Path) -> None:
         backend.close()
 
 
-@pytest.mark.perf
+@pytest.mark.requires_local_timing
 def test_derivation_latency_budget(tmp_path: Path) -> None:
     """NFR01: bounded single-root derivation stays at or below the 15 ms p50 budget."""
     backend = SQLiteBackend(tmp_path / "latency.db")
@@ -186,7 +187,7 @@ def test_derivation_latency_budget(tmp_path: Path) -> None:
             timings.append((time.perf_counter() - start) * 1000.0)
 
         p50 = statistics.median(timings)
-        assert p50 <= 15.0, f"derivation p50 {p50:.2f} ms exceeds the 15 ms budget over {len(timings)} roots"
+        assert_budget("derivation_p50", p50, 15.0, "ms")
     finally:
         backend.close()
 

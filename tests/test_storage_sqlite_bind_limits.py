@@ -79,12 +79,10 @@ def test_recall_access_and_namespace_filters_stay_below_bind_ceiling() -> None:
     recording = _RecordingConnection(real)
     backend._conn = recording  # type: ignore[assignment]
     try:
-        assert backend.increment_recall_access(ids) == 899
-        # 899 and 2, not 900 and 3: PRD-CORE-278 FR06 dropped ``updated_at = ?``
-        # from the recall-access UPDATE, so each chunk binds one value fewer.
-        # ``reserved_bindings=2`` is kept deliberately conservative, which is
-        # why the chunk SIZES are unchanged.
-        assert recording.bound_writes == [899, 2]
+        assert backend.increment_recall_access(ids, namespace="default") == 899
+        # Each chunk binds ``last_accessed_at`` and the namespace besides its ids
+        # (``reserved_bindings=2``), so a full chunk reaches the ceiling exactly.
+        assert recording.bound_writes == [900, 3]
         assert backend.list_namespaces(required_namespaces=["default", *[f"missing-{i}" for i in range(900)]]) == [
             "default"
         ]
@@ -102,7 +100,7 @@ def test_recall_access_rolls_back_when_later_chunk_fails() -> None:
     backend._conn = _RecordingConnection(real, fail_second_write=True)  # type: ignore[assignment]
     try:
         with pytest.raises(StorageError, match="too many SQL variables"):
-            backend.increment_recall_access(ids)
+            backend.increment_recall_access(ids, namespace="default")
     finally:
         backend._conn = real  # type: ignore[assignment]
 

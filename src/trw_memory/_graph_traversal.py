@@ -92,6 +92,7 @@ def graph_query(
     namespace: str | None = None,
     max_nodes: int | None = None,
     config: MemoryConfig | None = None,
+    active_only: bool = False,
 ) -> list[dict[str, str | int | float]]:
     """BFS traversal from root nodes up to specified depth.
 
@@ -118,6 +119,8 @@ def graph_query(
             vector-ops path).
         max_nodes: Optional hard cap on discovered nodes. ``None`` preserves
             the legacy internal traversal contract; public adapters set a cap.
+        active_only: With *namespace*, follow only edges whose target row is
+            ACTIVE, so an obsolete node neither fills *max_nodes* nor is walked through.
 
     Returns:
         List of {"id": str, "depth": int, "edge_type": str, "weight": float}
@@ -138,6 +141,16 @@ def graph_query(
     derived: list[dict[str, str | int | float]] = []
     if edge_types is not None and DERIVED_EDGE_TYPE in edge_types:
         derived = _derive_tag_edges(conn, root_ids, namespace=namespace, config=config)
+        if active_only and namespace is not None and derived:
+            placeholders = ", ".join("?" for _ in derived)
+            active = {
+                str(row[0])
+                for row in conn.execute(
+                    f"SELECT id FROM memories WHERE namespace = ? AND status = 'active' AND id IN ({placeholders})",  # noqa: S608
+                    (namespace, *(str(d["id"]) for d in derived)),
+                )
+            }
+            derived = [d for d in derived if str(d["id"]) in active]
         edge_types = [edge_type for edge_type in edge_types if edge_type != DERIVED_EDGE_TYPE]
         if not edge_types:
             return derived[:max_nodes] if max_nodes is not None else derived
@@ -169,50 +182,49 @@ def graph_query(
     ns_param: tuple[str, ...] = ()
     if namespace is not None:
         ns_clause = (
-            " AND EXISTS (SELECT 1 FROM memories m WHERE m.id = memory_graph_edges.target_id AND m.namespace = ?)"
+            " AND EXISTS (SELECT 1 FROM memories m WHERE m.id = memory_graph_edges.target_id AND m.namespace = ?"  # noqa: S608
+            + (" AND m.status = 'active')" if active_only else ")")
         )
         ns_param = (namespace,)
+        # The edge itself must belong to *namespace* too: with one id in two
+        # namespaces, another namespace's edge between those ids would pass the
+        # target check alone. A pre-schema-5 table has no edge namespace to test.
+        if "namespace" in {str(row[1]) for row in conn.execute("PRAGMA table_info(memory_graph_edges)")}:
+            ns_clause += " AND memory_graph_edges.namespace = ?"
+            ns_param = (namespace, namespace)
 
+    # One row per distinct target, first-written first: two edge types to one
+    # target must not spend two places of the window. Public callers pass a node
+    # cap, so each page is bounded before Python applies the traversal budget;
+    # a page that ran into visited targets is followed by the next, so the cap
+    # counts new nodes only. Visited targets are roots or results, so the extra
+    # pages are bounded by the cap too.
+    type_clause = f" AND edge_type IN ({', '.join('?' for _ in edge_types)})" if edge_types else ""
+    sql = (
+        "SELECT target_id, edge_type, MAX(weight) FROM memory_graph_edges "  # noqa: S608 — only ? placeholders are interpolated; values are parameterized
+        f"WHERE source_id = ?{type_clause}{ns_clause} GROUP BY target_id ORDER BY MIN(rowid)"
+        + (" LIMIT ? OFFSET ?" if max_nodes is not None else "")
+    )
     while queue:
         node_id, current_depth = queue.popleft()
         if current_depth >= depth:
             continue
-
-        remaining = max_nodes - len(results) if max_nodes is not None else None
-        limit_clause = " LIMIT ?" if remaining is not None else ""
-
-        # Build query with optional edge type filter. Public callers pass a
-        # node cap, so the storage query itself cannot materialize an unbounded
-        # high-fanout row set before Python applies the traversal budget.
-        if edge_types:
-            placeholders = ", ".join("?" for _ in edge_types)
-            sql = (
-                f"SELECT target_id, edge_type, weight FROM memory_graph_edges "  # noqa: S608 — placeholders is ? repeated (no user input in SQL structure); values are parameterized
-                f"WHERE source_id = ? AND edge_type IN ({placeholders}){ns_clause}{limit_clause}"
-            )
-            params: tuple[str | int, ...] = (node_id, *edge_types, *ns_param, *((remaining,) if remaining else ()))
-        else:
-            sql = (
-                f"SELECT target_id, edge_type, weight FROM memory_graph_edges "  # noqa: S608 — ns_clause uses a parameterized ? placeholder; no user input in SQL structure
-                f"WHERE source_id = ?{ns_clause}{limit_clause}"
-            )
-            params = (node_id, *ns_param, *((remaining,) if remaining else ()))
-
-        for row in conn.execute(sql, params):
-            target_id, edge_type, weight = row
-            if target_id not in visited:
+        offset = 0
+        while True:
+            remaining = max_nodes - len(results) if max_nodes is not None else None
+            page_params = (remaining, offset) if remaining is not None else ()
+            rows = conn.execute(sql, (node_id, *(edge_types or ()), *ns_param, *page_params)).fetchall()
+            for target_id, edge_type, weight in rows:
+                if target_id in visited:
+                    continue
                 visited.add(target_id)
-                results.append(
-                    {
-                        "id": target_id,
-                        "depth": current_depth + 1,
-                        "edge_type": edge_type,
-                        "weight": weight,
-                    }
-                )
+                results.append({"id": target_id, "depth": current_depth + 1, "edge_type": edge_type, "weight": weight})
                 if max_nodes is not None and len(results) >= max_nodes:
                     return [*results, *derived][:max_nodes]
                 queue.append((target_id, current_depth + 1))
+            if remaining is None or len(rows) < remaining:
+                break
+            offset += len(rows)
 
     # Derived tag neighbours are appended AFTER every materialised edge, so the
     # explicit ordering rule in FR07 holds regardless of what the index returned.

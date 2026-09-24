@@ -12,6 +12,7 @@ from typing import Literal
 from uuid import uuid4
 
 import structlog
+from pydantic import BaseModel, ConfigDict
 
 from trw_memory._client_store import _existing_entry_for_namespace
 from trw_memory.daemon._offload import run_offloaded
@@ -66,7 +67,6 @@ def memory_store_impl(
     assertions: list[Assertion] | None = None,
     client_profile: str | None = None,
     model_id: str | None = None,
-    q_value: float | None = None,
     type: MemoryType | str | None = None,
     nudge_line: str | None = None,
     confidence: Confidence | str | None = None,
@@ -79,9 +79,6 @@ def memory_store_impl(
     anchors: list[Anchor] | None = None,
     anchor_validity: float | None = None,
     trw_dir: Path | None = None,
-    enrich_after_store: bool = True,
-    raise_security_errors: bool = False,
-    raise_storage_errors: bool = False,
 ) -> dict[str, object]:
     """Core implementation of memory_store (callable without MCP).
 
@@ -98,7 +95,6 @@ def memory_store_impl(
         assertions: Optional machine-verifiable grounding assertions.
         client_profile: Writer's client profile, when known.
         model_id: Writer's model identifier, when known.
-        q_value: Pre-seeded Q-value; ``None`` leaves the model default.
         type: Entry classification (PRD-CORE-110).
         nudge_line: Short nudge text rendered from this entry.
         confidence: Validation confidence (PRD-CORE-110).
@@ -111,26 +107,12 @@ def memory_store_impl(
         anchors: Code-symbol anchors (PRD-CORE-111).
         anchor_validity: Computed anchor-validity score.
         trw_dir: Ceremony directory the SEC-001 intake anchors provenance to.
-        enrich_after_store: When False the CALLER owns the post-write
-            enrichment for this entry -- the embedding + vector upsert, the
-            graph update and the tier runtime are all skipped here. trw-mcp
-            passes False because it enriches on its OWN singleton connection:
-            ``schedule_graph_update`` re-opens a backend at
-            ``storage_path/<namespace>/`` while the trw-mcp singleton holds
-            ``.trw/memory/memory.db`` directly, so edges written here would land
-            in a different file than the one that server reads
-            (PRD-FIX-COMPOUNDING-2).
-        raise_security_errors: Re-raise schema/PII/poisoning/rate-limit
-            failures instead of returning a result dict. An authorization
-            refusal raises either way.
-        raise_storage_errors: Re-raise storage failures instead of returning
-            ``{"status": "error"}``. trw-mcp passes True because it owns a
-            corruption-recovery retry that can only key on the exception type
-            (PRD-CORE-251 FR03).
 
     Returns:
-        {"memory_id": str, "status": "stored", "namespace": str}
-        or {"error": str, "status": "invalid"} on validation failure.
+        {"memory_id": str, "status": "stored", "namespace": str}; a refusal is a
+        status, never a raise: "invalid" (schema), "blocked" (PII, poisoning),
+        "rate_limited" (retry after ``retry_after`` seconds), "error" (storage).
+        Only an authorization refusal raises.
 
     The status vocabulary this returns is mapped -- explicitly and under test --
     onto the trw-mcp learning vocabulary by
@@ -172,8 +154,6 @@ def memory_store_impl(
             namespace=namespace,
             data={"reason": "schema_invalid", "failed_fields": exc.failed_fields, "session_id": session_id},
         )
-        if raise_security_errors:
-            raise
         return {"error": str(exc), "status": "invalid", "namespace": namespace}
 
     entry_id = entry_id or ("M-" + uuid4().hex[:16])
@@ -198,7 +178,6 @@ def memory_store_impl(
         for name, value in (
             ("client_profile", client_profile),
             ("model_id", model_id),
-            ("q_value", q_value),
             ("type", type),
             ("nudge_line", nudge_line),
             ("confidence", confidence),
@@ -293,7 +272,7 @@ def memory_store_impl(
         # otherwise the embed call is wasted on a no-op upsert_vector.
         embedder = (
             get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim)
-            if enrich_after_store and embedding_has_consumer(cfg, backend)
+            if embedding_has_consumer(cfg, backend)
             else None
         )
         if embedder is not None:
@@ -318,15 +297,14 @@ def memory_store_impl(
                     backend.upsert_vector(entry.id, embedding, namespace=entry.namespace, **proof)
         except Exception as exc:
             raise StorageError(f"failed to persist entry+vector for {entry_id!r}; transaction rolled back") from exc
-        if enrich_after_store:
-            try:
-                # Graph enrichment is a secondary index over the stored entry, so we
-                # dispatch it after the canonical row/vector write succeeds.
-                schedule_graph_update(entry, backend, embedding=embedding, config=cfg)
-            except RuntimeError:
-                logger.warning("memory_store_graph_schedule_failed", entry_id=entry_id, exc_info=True)
-            if supports_tier_runtime(backend):
-                remember_entry_in_tiers(cfg, namespace, entry, embedding, proof.get("provenance"))
+        try:
+            # Graph enrichment is a secondary index over the stored entry, so we
+            # dispatch it after the canonical row/vector write succeeds.
+            schedule_graph_update(entry, backend, embedding=embedding, config=cfg)
+        except RuntimeError:
+            logger.warning("memory_store_graph_schedule_failed", entry_id=entry_id, exc_info=True)
+        if supports_tier_runtime(backend):
+            remember_entry_in_tiers(cfg, namespace, entry, embedding, proof.get("provenance"))
         append_audit_event(
             cfg,
             decision.op,
@@ -341,17 +319,14 @@ def memory_store_impl(
             },
         )
     except SchemaValidationError as exc:
-        if raise_security_errors:
-            raise
         return {"error": str(exc), "status": "invalid", "namespace": namespace}
-    except (PIIBlockError, PoisoningError, RateLimitError) as exc:
-        if raise_security_errors:
-            raise
+    except RateLimitError as exc:
+        # Transient: the window clears, so a caller retries rather than giving up on the content.
+        return {"error": str(exc), "status": "rate_limited", "namespace": namespace, "retry_after": exc.retry_after}
+    except (PIIBlockError, PoisoningError) as exc:
         return {"error": str(exc), "status": "blocked", "namespace": namespace}
     except (StorageError, RuntimeError, ValueError) as exc:
         logger.exception("memory_store_failed", entry_id=entry_id, error=str(exc))
-        if raise_storage_errors:
-            raise
         return {"error": f"storage error: {exc}", "status": "error"}
 
     logger.info(
@@ -366,6 +341,32 @@ def memory_store_impl(
         "status": "updated" if decision.op == "update" else "stored",
         "namespace": namespace,
     }
+
+
+class LearningFields(BaseModel):
+    """The typed learning fields ``memory_store`` forwards to :func:`memory_store_impl` (PRD-CORE-294 FR07a).
+
+    One optional object instead of ten parameters keeps the tool definition small;
+    an unknown key is refused rather than silently dropped.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: MemoryType | None = None
+    confidence: Confidence | None = None
+    task_type: str | None = None
+    domain: list[str] | None = None
+    phase_origin: str | None = None
+    phase_affinity: list[str] | None = None
+    team_origin: str | None = None
+    protection_tier: ProtectionTier | None = None
+    anchors: list[Anchor] | None = None
+    nudge_line: str | None = None
+    # PRD-CORE-298 FR01: provenance the daemon store forwards for trw-mcp writes.
+    source: Literal["human", "agent", "tool", "consolidated", "team_sync", "company_sync"] | None = None
+    client_profile: str | None = None
+    model_id: str | None = None
+    anchor_validity: float | None = None
 
 
 def register_store_tool(mcp: McpServer) -> None:
@@ -390,6 +391,7 @@ def register_store_tool(mcp: McpServer) -> None:
         evidence: list[str] | None = None,
         expires: str = "",
         assertions: list[Assertion] | None = None,
+        learning: LearningFields | None = None,
     ) -> dict[str, object]:
         """Store a new memory entry in the memory system.
 
@@ -403,6 +405,10 @@ def register_store_tool(mcp: McpServer) -> None:
             evidence: Optional source references supporting the entry.
             expires: Optional expiration date or condition.
             assertions: Optional machine-verifiable grounding assertions.
+            learning: Optional typed fields (type, confidence, task_type, domain,
+                phase_origin, phase_affinity, team_origin, protection_tier, anchors,
+                nudge_line, source, client_profile, model_id, anchor_validity);
+                unknown keys are rejected.
 
         Returns:
             {"memory_id": str, "status": "stored", "namespace": str}
@@ -412,6 +418,7 @@ def register_store_tool(mcp: McpServer) -> None:
             # PRD-CORE-279 FR04: backend open, write and close all happen in ONE
             # worker thread, so the SQLite connection never crosses threads.
             cfg = MemoryConfig()
+            typed = learning or LearningFields()
             with create_backend_from_config(cfg, namespace) as backend:
                 return memory_store_impl(
                     content,
@@ -428,7 +435,20 @@ def register_store_tool(mcp: McpServer) -> None:
                     evidence=evidence,
                     expires=expires,
                     assertions=assertions,
-                    raise_security_errors=True,
+                    source=typed.source or "tool",
+                    client_profile=typed.client_profile,
+                    model_id=typed.model_id,
+                    anchor_validity=typed.anchor_validity,
+                    type=typed.type,
+                    confidence=typed.confidence,
+                    task_type=typed.task_type,
+                    domain=typed.domain,
+                    phase_origin=typed.phase_origin,
+                    phase_affinity=typed.phase_affinity,
+                    team_origin=typed.team_origin,
+                    protection_tier=typed.protection_tier,
+                    anchors=typed.anchors,
+                    nudge_line=typed.nudge_line,
                 )
 
         return await run_offloaded(_run)

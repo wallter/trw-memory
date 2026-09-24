@@ -75,7 +75,7 @@ def test_list_org_shared_pushes_min_importance_into_backend(monkeypatch: Any) ->
     spy = _SpyBackend(sibling_entries)
 
     @contextmanager
-    def _fake_discover(_config: MemoryConfig) -> Any:
+    def _fake_discover(_config: MemoryConfig, **_: object) -> Any:
         yield [([sibling_ns], spy)]
 
     monkeypatch.setattr(
@@ -107,7 +107,7 @@ def test_list_org_shared_filters_below_threshold(monkeypatch: Any) -> None:
     spy = _SpyBackend([_xv(make_entry(content="weak", namespace=sibling_ns, importance=0.5))])
 
     @contextmanager
-    def _fake_discover(_config: MemoryConfig) -> Any:
+    def _fake_discover(_config: MemoryConfig, **_: object) -> Any:
         yield [([sibling_ns], spy)]
 
     monkeypatch.setattr(
@@ -126,7 +126,7 @@ def test_list_org_shared_omits_sibling_without_read_permission(monkeypatch: Any)
     spy = _SpyBackend([_xv(make_entry(content="secret", namespace=secret_ns, importance=0.95))])
 
     @contextmanager
-    def _fake_discover(_config: MemoryConfig) -> Any:
+    def _fake_discover(_config: MemoryConfig, **_: object) -> Any:
         yield [([secret_ns], spy)]
 
     monkeypatch.setattr("trw_memory.integrations._backend.discover_namespace_backends", _fake_discover)

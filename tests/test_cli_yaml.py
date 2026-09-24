@@ -12,49 +12,31 @@ from ruamel.yaml import YAML
 
 from trw_memory.cli import main
 
-from ._test_cli_support import _CLI, _mock_entry, _real_import_target, _reopen_import_target
+from ._test_cli_support import (
+    _CLI,
+    _DAEMON_CLIENT,
+    _exporting_client,
+    _mock_entry,
+    _real_import_target,
+    _reopen_import_target,
+)
 
 
 class TestYamlExport:
-    @patch(f"{_CLI}._create_local_backend")
-    @patch(f"{_CLI}.MemoryConfig")
-    def test_export_yaml_to_file(
-        self,
-        mock_config_cls: MagicMock,
-        mock_backend_fn: MagicMock,
-        tmp_path: Path,
-    ) -> None:
-        mock_config_cls.return_value = MagicMock()
-        mock_backend = MagicMock()
-        mock_backend.list_entries.return_value = [_mock_entry()]
-        mock_backend_fn.return_value = mock_backend
-
+    def test_export_yaml_to_file(self, tmp_path: Path) -> None:
         out_path = str(tmp_path / "out.yaml")
-        ret = main(["export", "--format", "yaml", "--output", out_path])
+        with patch(_DAEMON_CLIENT, return_value=_exporting_client(_mock_entry())):
+            ret = main(["export", "--namespace", "default", "--format", "yaml", "--output", out_path])
         assert ret == 0
-        yaml = YAML()
-        data = yaml.load(Path(out_path))
+        data = YAML().load(Path(out_path))
         assert len(data) == 1
         assert data[0]["id"] == "M-001"
 
-    @patch(f"{_CLI}._create_local_backend")
-    @patch(f"{_CLI}.MemoryConfig")
-    def test_export_yaml_stdout(
-        self,
-        mock_config_cls: MagicMock,
-        mock_backend_fn: MagicMock,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        mock_config_cls.return_value = MagicMock()
-        mock_backend = MagicMock()
-        mock_backend.list_entries.return_value = [_mock_entry()]
-        mock_backend_fn.return_value = mock_backend
-
-        ret = main(["export", "--format", "yaml"])
+    def test_export_yaml_stdout(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with patch(_DAEMON_CLIENT, return_value=_exporting_client(_mock_entry())):
+            ret = main(["export", "--namespace", "default", "--format", "yaml"])
         assert ret == 0
-        captured = capsys.readouterr()
-        yaml = YAML()
-        data = yaml.load(StringIO(captured.out))
+        data = YAML().load(StringIO(capsys.readouterr().out))
         assert len(data) == 1
         assert data[0]["id"] == "M-001"
 
@@ -124,15 +106,10 @@ class TestExportImportRoundTrip:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        mock_config_cls.return_value = MagicMock()
-        mock_backend = MagicMock()
-        mock_backend.list_entries.return_value = [
-            _mock_entry(entry_id="M-round", content="roundtrip test", tags=["rt"])
-        ]
-        mock_backend_fn.return_value = mock_backend
-
+        exported = _exporting_client(_mock_entry(entry_id="M-round", content="roundtrip test", tags=["rt"]))
         out_path = str(tmp_path / "roundtrip.json")
-        ret = main(["export", "--output", out_path])
+        with patch(_DAEMON_CLIENT, return_value=exported):
+            ret = main(["export", "--namespace", "default", "--output", out_path])
         assert ret == 0
 
         data = json.loads(Path(out_path).read_text())
@@ -164,13 +141,10 @@ class TestExportImportRoundTrip:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        mock_config_cls.return_value = MagicMock()
-        mock_backend = MagicMock()
-        mock_backend.list_entries.return_value = [_mock_entry(entry_id="M-yaml", content="yaml roundtrip", tags=["yr"])]
-        mock_backend_fn.return_value = mock_backend
-
+        exported = _exporting_client(_mock_entry(entry_id="M-yaml", content="yaml roundtrip", tags=["yr"]))
         out_path = str(tmp_path / "roundtrip.yaml")
-        ret = main(["export", "--format", "yaml", "--output", out_path])
+        with patch(_DAEMON_CLIENT, return_value=exported):
+            ret = main(["export", "--namespace", "default", "--format", "yaml", "--output", out_path])
         assert ret == 0
 
         yaml = YAML()

@@ -265,7 +265,7 @@ class TestSQLiteChangeFeed:
         backend = SQLiteBackend(tmp_path / "mem.db")
         backend.store(MemoryEntry(id="A", content="a", namespace=NS))
         token = backend.namespace_change_token(NS)
-        backend.increment_recall_access(["A"])
+        backend.increment_recall_access(["A"], namespace=NS)
         backend.store(MemoryEntry(id="Z", content="other namespace", namespace="project:other"))
 
         assert backend.namespace_change_token(NS) == token
@@ -355,7 +355,7 @@ class TestAnomalyStatsFile:
         # Row 15 was scored against rows 1-14; that deferred snapshot is written by close().
         assert persisted["sample_count"] == 14
 
-        _anomaly_reference.reset_reference_cache()  # the next process starts cold
+        _anomaly_reference._CACHE.clear()  # the next process starts cold
         with create_backend_from_config(config, NS) as backend:
             expected = _fresh(backend).stats  # what the 16th row is scored against: a full read of rows 1-15
         _config, recovered = await store_rows(range(15, 16))

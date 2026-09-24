@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.models.memory import Confidence, MemoryEntry, MemoryStatus, MemoryType
 
 from ._test_embedding_support import StubEmbedder as StubEmbedder
 
@@ -19,6 +19,8 @@ def make_entry(
     status: MemoryStatus = MemoryStatus.ACTIVE,
     recurrence: int = 1,
     merged_from: list[str] | None = None,
+    confidence: Confidence = Confidence.UNVERIFIED,
+    type: MemoryType = MemoryType.PATTERN,
 ) -> MemoryEntry:
     now = datetime.now(timezone.utc)
     return MemoryEntry(
@@ -31,6 +33,8 @@ def make_entry(
         status=status,
         recurrence=recurrence,
         merged_from=merged_from or [],
+        confidence=confidence,
+        type=type,
         created_at=now,
         updated_at=now,
     )

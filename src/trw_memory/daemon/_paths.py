@@ -1,14 +1,13 @@
 """Daemon file locations and the hardened writes that create them.
 
-PRD-CORE-253 FR03/NFR03. Four files live beside the user-space store:
+PRD-CORE-253 FR03/NFR03, PRD-CORE-298 FR02. Files beside the user-space store:
 
-``memory.db``      the store the daemon serves
-``daemon.json``    the discovery file: pid, url, token, start time, version
-``daemon-token``   the bearer token every request must carry
-``daemon.lock``    the advisory single-instance lock (``lock_for_rmw``)
+``memory.db``            the store the daemon serves
+``daemon.json``          the discovery file: pid, url, start time, version
+``daemon-grants.json``   token digest -> granted namespaces
+``daemon.lock``          the advisory single-instance lock (``lock_for_rmw``)
 
-The token and the discovery file both carry the bearer token, so both are
-secrets. They are created with ``O_CREAT|O_EXCL`` (plus ``O_NOFOLLOW`` where
+The grants file and each checkout's token are secrets. They are created with ``O_CREAT|O_EXCL`` (plus ``O_NOFOLLOW`` where
 the platform has it) at mode 0600 into a private temporary name, then moved
 into place with an atomic ``os.replace``. Two properties follow that a plain
 ``write_text`` does not give:
@@ -23,7 +22,7 @@ Reads of those files use ``O_NOFOLLOW`` for the same reason, and a read that is
 refused RAISES rather than answering ``None``. ``None`` is reserved for "the
 file does not exist", because that is the answer every caller responds to by
 creating the file -- and creating a token over one that merely could not be
-read rotates the secret a live daemon is still authenticating against.
+read revokes grants a live daemon is still authenticating against.
 """
 
 from __future__ import annotations
@@ -71,6 +70,7 @@ _EISDIR = _errno.EISDIR
 _STORE_FILE_NAME = "memory.db"
 _DISCOVERY_FILE_NAME = "daemon.json"
 _TOKEN_FILE_NAME = "daemon-token"  # noqa: S105 - a filename, not a credential
+_GRANTS_FILE_NAME = "daemon-grants.json"
 #: ``lock_for_rmw(path)`` locks ``<path>.lock``, so the anchor is the stem.
 _LOCK_ANCHOR_NAME = "daemon"
 
@@ -98,8 +98,13 @@ class DaemonPaths:
 
     @property
     def token(self) -> Path:
-        """The 0600 bearer-token file."""
+        """The retired Slice A all-namespace bearer; its presence refuses startup (PRD-CORE-298 FR02)."""
         return self.user_memory_dir / _TOKEN_FILE_NAME
+
+    @property
+    def grants(self) -> Path:
+        """The 0600 map of token digest to granted namespaces (PRD-CORE-298 FR02)."""
+        return self.user_memory_dir / _GRANTS_FILE_NAME
 
     @property
     def lock_anchor(self) -> Path:

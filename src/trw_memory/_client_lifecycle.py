@@ -34,8 +34,9 @@ from datetime import datetime, timezone
 from math import isfinite
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
+from trw_memory._client_backend import client_logger as _client_logger
 from trw_memory._client_backend import create_local_backend as _create_local_backend
 from trw_memory._client_sse import (
     cache_shared_event as cache_shared_event,
@@ -65,13 +66,6 @@ if TYPE_CHECKING:
     from trw_memory.storage.interface import StorageBackend
 
 SHARED_EVENT_CACHE_MAX = 256
-
-
-def _client_logger() -> Any:
-    """Parent-module logger lookup so test patches on ``trw_memory.client.logger`` propagate."""
-    from trw_memory import client as _c
-
-    return _c.logger
 
 
 # ---------------------------------------------------------------------------

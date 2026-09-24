@@ -49,8 +49,6 @@ def memory_entry_to_dict(entry: MemoryEntry, *, fields: set[str] | None = None) 
         "invalidated_by": entry.invalidated_by,
         "access_count": entry.access_count,
         "session_count": entry.session_count,
-        "q_value": entry.q_value,
-        "q_observations": entry.q_observations,
         "source": entry.source,
         "source_identity": entry.source_identity,
         "client_profile": entry.client_profile,
@@ -86,8 +84,6 @@ def memory_entry_to_dict(entry: MemoryEntry, *, fields: set[str] | None = None) 
         "verification_status": entry.verification_status,
         "verification_checked_at": entry.verification_checked_at,
         "recall_count": entry.recall_count,
-        "helpful_count": entry.helpful_count,
-        "unhelpful_count": entry.unhelpful_count,
     }
     if fields is not None:
         return {key: value for key, value in full.items() if key in fields}

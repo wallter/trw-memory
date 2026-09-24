@@ -331,7 +331,7 @@ class TestStoreGateTotality:
         keys = {call.key for call in store_calls}
         assert ("tools/store.py", "memory_store_impl") in keys
         assert ("_client_store.py", "store_impl") in keys
-        assert ("security/keys.py", "rotate_master_key") in keys
+        assert ("security/_runtime_canary.py", "_store_pinned_canary") in keys
         assert len(store_calls) >= 10, f"only {len(store_calls)} store call sites found — scanner likely broken"
 
     def test_known_guarded_sites_are_classified_guarded(self, store_calls: list[StoreCall]) -> None:
@@ -342,8 +342,10 @@ class TestStoreGateTotality:
         assert by_key[("_client_bulk_store.py", "bulk_store_impl")].gate == "prepare_entry_for_store"
 
     def test_security_package_sites_are_not_reported(self, store_calls: list[StoreCall]) -> None:
-        """Precision: key rotation re-encrypts in place and must not be flagged."""
-        rotation = next(call for call in store_calls if call.key == ("security/keys.py", "rotate_master_key"))
+        """Precision: canary seeding writes in place and must not be flagged."""
+        rotation = next(
+            call for call in store_calls if call.key == ("security/_runtime_canary.py", "_store_pinned_canary")
+        )
         assert rotation.in_security_package
         assert rotation not in _bypasses(store_calls)
 
@@ -360,7 +362,6 @@ class TestStoreGateTotality:
         surviving surface delegates to the seam, and neither appears as a bypass.
         """
         repaired = {
-            "integrations/vscode.py": "LocalMemoryAdapter.store_selection",
             "cli_storage.py": "handle_import",
         }
         bypass_modules = {call.module for call in _bypasses(store_calls)}

@@ -11,6 +11,7 @@ os.path.getsize of the database file as a proxy.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from benchmarks.corpus import generate_corpus
@@ -25,14 +26,31 @@ except ImportError:
     _HAS_RESOURCE = False
 
 
-def _get_rss_kb() -> int:
-    """Return current process RSS in kilobytes.
+#: Linux per-process status; ``VmHWM`` is the peak RSS of the current address space.
+_PROC_STATUS = Path("/proc/self/status")
 
-    Uses resource.getrusage on Unix/WSL. Returns 0 if unavailable.
+
+def _get_rss_kb() -> int:
+    """Return this process's peak RSS in kilobytes, 0 if unavailable.
+
+    It is a process-lifetime peak, so a meaningful delta needs a fresh process. On
+    Linux that means ``VmHWM``: ``ru_maxrss`` survives ``execve`` (the kernel carries
+    the replaced program's peak into it), so a freshly spawned child would report its
+    parent's peak. Elsewhere ``ru_maxrss``, which is kilobytes on Linux but BYTES on
+    macOS; normalized so every figure derived from it (``per_1000_rss_mb``) has one
+    unit on every platform.
     """
+    if sys.platform.startswith("linux"):
+        try:
+            # A process name is arbitrary bytes; never let it skip the fallback.
+            for line in _PROC_STATUS.read_text(encoding="ascii", errors="replace").splitlines():
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1])
+        except (OSError, ValueError, IndexError):  # trw-fail-silent-allow: fall back to ru_maxrss below
+            pass
     if _HAS_RESOURCE:
-        usage = _resource.getrusage(_resource.RUSAGE_SELF)
-        return int(usage.ru_maxrss)
+        peak = int(_resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss)
+        return peak // 1024 if sys.platform == "darwin" else peak
     return 0
 
 

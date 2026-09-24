@@ -17,8 +17,8 @@ import pytest
 from trw_memory.models.config import MemoryConfig
 from trw_memory.namespaces.identity import (
     SLUG_MAX_CHARS,
-    canonical_project_root,
     project_slug,
+    resolve_project_identity,
     resolve_project_namespace,
 )
 from trw_memory.namespaces.validation import validate_namespace
@@ -71,7 +71,7 @@ def test_a_worktree_resolves_to_the_main_checkouts_namespace(tmp_path: Path) -> 
     _git("worktree", "add", "-q", "-b", "feature", str(linked), cwd=main)
 
     assert resolve_project_namespace(linked) == resolve_project_namespace(main)
-    assert canonical_project_root(linked) == main.resolve()
+    assert resolve_project_identity(linked).canonical_root == main.resolve()
 
 
 def test_a_symlinked_checkout_resolves_to_the_same_namespace(tmp_path: Path) -> None:
@@ -109,7 +109,7 @@ def test_a_non_git_directory_resolves_without_error(tmp_path: Path) -> None:
     namespace = resolve_project_namespace(plain)
 
     assert namespace == f"project:not-a-repo-{namespace.rsplit('-', 1)[1]}"
-    assert canonical_project_root(plain) == plain.resolve()
+    assert resolve_project_identity(plain).canonical_root == plain.resolve()
 
 
 def test_resolution_defaults_to_trw_project_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -245,12 +245,12 @@ def test_daemon_config_fields_are_typed_and_bounded() -> None:
 
 
 def test_git_timeout_does_not_leak_the_environments_project_root(tmp_path: Path) -> None:
-    """canonical_project_root of a file (not a directory) degrades, never raises."""
+    """The project root of a file (not a directory) degrades, never raises."""
     target = tmp_path / "afile"
     target.write_text("x", encoding="utf-8")
 
-    assert canonical_project_root(target) == target.resolve()
-    assert os.path.isabs(str(canonical_project_root(target)))
+    assert resolve_project_identity(target).canonical_root == target.resolve()
+    assert os.path.isabs(str(resolve_project_identity(target).canonical_root))
 
 
 # ---------------------------------------------------------------------------

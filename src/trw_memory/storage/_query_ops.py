@@ -14,7 +14,6 @@ that pass the backend handle.
 - ``count`` — namespace-scoped or global COUNT(*).
 - ``entries_with_assertions`` — PRD-CORE-086 FR07 query for
   ``trw_session_start`` assertion-health summary.
-- ``count_with_assertions`` — backward-compat alias.
 - ``list_entries`` — filter-clause + ORDER BY updated_at DESC, id DESC,
   with optional keyset (``after=``) paging.
 - ``list_namespaces`` — distinct namespace query.
@@ -49,25 +48,33 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-_SAFE_TAGS_JSON = (
-    "CASE WHEN json_valid(tags) THEN CASE WHEN json_type(tags) = 'array' THEN tags ELSE '[]' END ELSE '[]' END"
-)
+
+def _safe_tags_json(column: str = "tags") -> str:
+    return f"CASE WHEN json_valid({column}) THEN CASE WHEN json_type({column}) = 'array' THEN {column} ELSE '[]' END ELSE '[]' END"
+
+
+_SAFE_TAGS_JSON = _safe_tags_json()
 _TAG_KEYWORD_CLAUSE = (
     f"EXISTS (SELECT 1 FROM json_each({_SAFE_TAGS_JSON}) AS query_tag "  # noqa: S608 - fixed internal SQL
     "WHERE CAST(query_tag.value AS TEXT) LIKE ? ESCAPE '\\')"
 )
-_EXACT_TAG_CLAUSE = (
-    f"EXISTS (SELECT 1 FROM json_each({_SAFE_TAGS_JSON}) AS required_tag "  # noqa: S608 - fixed internal SQL
-    "WHERE required_tag.type = 'text' AND required_tag.value = ?)"
-)
 
 
-def _append_exact_tag_filters(where_sql: str, params: list[object], tags: list[str] | None) -> str:
+def _exact_tag_clause(column_prefix: str = "") -> str:
+    return (
+        f"EXISTS (SELECT 1 FROM json_each({_safe_tags_json(f'{column_prefix}tags')}) AS required_tag "  # noqa: S608 - fixed internal SQL
+        "WHERE required_tag.type = 'text' AND required_tag.value = ?)"
+    )
+
+
+def _append_exact_tag_filters(
+    where_sql: str, params: list[object], tags: list[str] | None, *, column_prefix: str = ""
+) -> str:
     """Add exact JSON-array membership predicates for every required tag."""
     if not tags:
         return where_sql
     params.extend(tags)
-    return f"({where_sql}) AND " + " AND ".join([_EXACT_TAG_CLAUSE] * len(tags))
+    return f"({where_sql}) AND " + " AND ".join([_exact_tag_clause(column_prefix)] * len(tags))
 
 
 def _execute_resilient(

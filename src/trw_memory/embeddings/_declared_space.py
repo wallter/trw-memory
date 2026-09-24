@@ -62,4 +62,5 @@ def declared_embedding_space(model_name: str, revision: str, dimensions: int) ->
         artifact_sha256=hashlib.sha256(contract.encode("utf-8")).hexdigest(),
         encoding=f"{DECLARED_ENCODING_PREFIX}{model_name}",
         dimensions=dimensions,
+        model_id=model_name,
     )

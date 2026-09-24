@@ -2,11 +2,9 @@
 
 Covers:
 - clamp01, ensure_utc helpers
-- update_q_value: EMA formula, clamping, recurrence bonus
 - compute_utility_score: cold-start blending, Ebbinghaus decay, access boost,
   source boost, clamp behaviour
 - apply_time_decay: linear decay, 0.3 floor, naive/aware datetime handling
-- bayesian_calibrate: weighted average, org_weight cap
 - enforce_tier_distribution: demotion logic, small-set no-op
 - rank_by_utility: relevance+utility blending, wildcard query
 - entry_utility: field extraction from MemoryEntry dict
@@ -23,12 +21,9 @@ import pytest
 from trw_memory.lifecycle import rank_by_utility, utility_based_prune_candidates
 from trw_memory.lifecycle.scoring import (
     apply_time_decay,
-    bayesian_calibrate,
-    compute_calibration_accuracy,
     compute_utility_score,
     enforce_tier_distribution,
     entry_utility,
-    update_q_value,
 )
 from trw_memory.models.config import MemoryConfig
 
@@ -69,40 +64,6 @@ def _entry(
         "last_accessed_at": last_accessed_at.isoformat() if last_accessed_at else None,
         "status": status,
     }
-
-
-# ---------------------------------------------------------------------------
-# update_q_value
-# ---------------------------------------------------------------------------
-
-
-def test_update_q_value_basic() -> None:
-    q = update_q_value(0.5, 0.8, alpha=0.15)
-    expected = 0.5 + 0.15 * (0.8 - 0.5)
-    assert abs(q - expected) < 1e-9
-
-
-def test_update_q_value_clamp_upper() -> None:
-    # 0.0 + 0.9*(1.0 - 0.0) = 0.9 — use q_old=0.0 to guarantee hitting the cap path
-    # Test clamping via recurrence_bonus pushing above 1.0
-    q = update_q_value(0.99, 1.0, alpha=1.0)
-    assert q == 1.0
-
-
-def test_update_q_value_clamp_lower() -> None:
-    q = update_q_value(0.01, -1.0, alpha=0.9)
-    assert q == 0.0
-
-
-def test_update_q_value_recurrence_bonus() -> None:
-    q = update_q_value(0.5, 0.5, alpha=0.15, recurrence_bonus=0.05)
-    # No shift from alpha (reward == q_old), but bonus adds
-    assert abs(q - 0.55) < 1e-9
-
-
-def test_update_q_value_zero_alpha() -> None:
-    q = update_q_value(0.5, 0.8, alpha=0.0)
-    assert q == 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -149,171 +110,43 @@ def test_apply_time_decay_clamps_output() -> None:
 
 
 def test_compute_utility_score_cold_start_uses_impact() -> None:
-    # q_observations=0 → fully trust base_impact (w=0)
-    score = compute_utility_score(
-        q_value=0.0,
-        days_since_last_access=0,
-        recurrence_count=1,
-        base_impact=0.8,
-        q_observations=0,
-        cold_start_threshold=3,
-    )
+    score = compute_utility_score(days_since_last_access=0, recurrence_count=1, base_impact=0.8)
     # With 0 days decay and recurrence 1, retention ~1.0
     assert score > 0.5
 
 
-def test_compute_utility_score_high_q_after_cold_start() -> None:
-    score = compute_utility_score(
-        q_value=0.9,
-        days_since_last_access=0,
-        recurrence_count=1,
-        base_impact=0.5,
-        q_observations=5,
-        cold_start_threshold=3,
-    )
-    assert score > 0.7
-
-
 def test_compute_utility_score_decay_reduces_score() -> None:
-    fresh = compute_utility_score(
-        q_value=0.8,
-        days_since_last_access=0,
-        recurrence_count=1,
-        base_impact=0.8,
-        q_observations=10,
-    )
-    old = compute_utility_score(
-        q_value=0.8,
-        days_since_last_access=100,
-        recurrence_count=1,
-        base_impact=0.8,
-        q_observations=10,
-    )
+    fresh = compute_utility_score(days_since_last_access=0, recurrence_count=1, base_impact=0.8)
+    old = compute_utility_score(days_since_last_access=100, recurrence_count=1, base_impact=0.8)
     assert fresh > old
 
 
 def test_compute_utility_score_access_boost() -> None:
-    without_boost = compute_utility_score(
-        q_value=0.5,
-        days_since_last_access=0,
-        recurrence_count=1,
-        base_impact=0.5,
-        q_observations=5,
-        access_count=0,
-    )
-    with_boost = compute_utility_score(
-        q_value=0.5,
-        days_since_last_access=0,
-        recurrence_count=1,
-        base_impact=0.5,
-        q_observations=5,
-        access_count=100,
-    )
+    without_boost = compute_utility_score(days_since_last_access=0, recurrence_count=1, base_impact=0.5, access_count=0)
+    with_boost = compute_utility_score(days_since_last_access=0, recurrence_count=1, base_impact=0.5, access_count=100)
     assert with_boost > without_boost
 
 
 def test_compute_utility_score_human_source_boost() -> None:
     agent_score = compute_utility_score(
-        q_value=0.5,
-        days_since_last_access=0,
-        recurrence_count=1,
-        base_impact=0.5,
-        q_observations=5,
-        source_type="agent",
+        days_since_last_access=0, recurrence_count=1, base_impact=0.5, source_type="agent"
     )
     human_score = compute_utility_score(
-        q_value=0.5,
-        days_since_last_access=0,
-        recurrence_count=1,
-        base_impact=0.5,
-        q_observations=5,
-        source_type="human",
+        days_since_last_access=0, recurrence_count=1, base_impact=0.5, source_type="human"
     )
     assert human_score > agent_score
 
 
 def test_compute_utility_score_clamped() -> None:
     score = compute_utility_score(
-        q_value=1.0,
-        days_since_last_access=0,
-        recurrence_count=100,
-        base_impact=1.0,
-        q_observations=100,
-        access_count=1000,
-        source_type="human",
+        days_since_last_access=0, recurrence_count=100, base_impact=1.0, access_count=1000, source_type="human"
     )
     assert 0.0 <= score <= 1.0
 
 
 def test_compute_utility_score_minimum_zero() -> None:
-    score = compute_utility_score(
-        q_value=0.0,
-        days_since_last_access=10000,
-        recurrence_count=1,
-        base_impact=0.0,
-        q_observations=10,
-    )
+    score = compute_utility_score(days_since_last_access=10000, recurrence_count=1, base_impact=0.0)
     assert score >= 0.0
-
-
-# ---------------------------------------------------------------------------
-# bayesian_calibrate
-# ---------------------------------------------------------------------------
-
-
-def test_bayesian_calibrate_basic() -> None:
-    result = bayesian_calibrate(0.8, org_mean=0.5, user_weight=1.0, org_weight=0.5)
-    expected = (0.8 * 1.0 + 0.5 * 0.5) / (1.0 + 0.5)
-    assert abs(result - expected) < 1e-9
-
-
-def test_bayesian_calibrate_org_weight_cap() -> None:
-    # org_weight > 2.0 should be capped at 2.0
-    uncapped = bayesian_calibrate(0.9, org_mean=0.5, user_weight=1.0, org_weight=2.0)
-    capped = bayesian_calibrate(0.9, org_mean=0.5, user_weight=1.0, org_weight=10.0)
-    assert abs(uncapped - capped) < 1e-9
-
-
-def test_bayesian_calibrate_zero_weights_returns_user_impact() -> None:
-    result = bayesian_calibrate(0.7, org_mean=0.5, user_weight=0.0, org_weight=0.0)
-    assert result == 0.7
-
-
-def test_bayesian_calibrate_clamp() -> None:
-    result = bayesian_calibrate(1.0, org_mean=1.0, user_weight=100.0, org_weight=0.0)
-    assert 0.0 <= result <= 1.0
-
-
-# ---------------------------------------------------------------------------
-# compute_calibration_accuracy
-# (restored release-verify 2026-07-17 P1: b6237f80d9 deleted these as "unused",
-#  but b918df2f19 restored the function — it is a load-bearing cross-package
-#  import consumed by trw-mcp _learning_helpers — without re-adding the tests.)
-# ---------------------------------------------------------------------------
-
-
-def test_calibration_accuracy_no_recalls() -> None:
-    assert compute_calibration_accuracy({"total_recalls": 0, "positive_outcomes": 0}) == 1.0
-
-
-def test_calibration_accuracy_high() -> None:
-    acc = compute_calibration_accuracy({"total_recalls": 100, "positive_outcomes": 80})
-    assert acc == 2.0  # >= 75% positive
-
-
-def test_calibration_accuracy_medium_high() -> None:
-    acc = compute_calibration_accuracy({"total_recalls": 100, "positive_outcomes": 60})
-    assert acc == 1.5  # >= 50%
-
-
-def test_calibration_accuracy_medium() -> None:
-    acc = compute_calibration_accuracy({"total_recalls": 100, "positive_outcomes": 30})
-    assert acc == 1.0  # >= 25%
-
-
-def test_calibration_accuracy_low() -> None:
-    acc = compute_calibration_accuracy({"total_recalls": 100, "positive_outcomes": 10})
-    assert acc == 0.5  # < 25%
 
 
 # ---------------------------------------------------------------------------
@@ -506,13 +339,7 @@ def test_apply_time_decay_future_timestamp_not_penalized() -> None:
 
 def test_compute_utility_score_extreme_age_bounded() -> None:
     # Very large age must not produce NaN/negative; retention -> 0.
-    score = compute_utility_score(
-        q_value=0.9,
-        days_since_last_access=10_000_000,
-        recurrence_count=1,
-        base_impact=0.9,
-        q_observations=10,
-    )
+    score = compute_utility_score(days_since_last_access=10_000_000, recurrence_count=1, base_impact=0.9)
     assert 0.0 <= score <= 1.0
     assert score == score  # not NaN
 
@@ -664,35 +491,30 @@ def test_prune_candidates_deduplicates_by_id() -> None:
 class TestFeedbackDecayFloor:
     """PRD-CORE-244 FR11 residual — a missing signal must not bury an entry.
 
-    ``helpful_count`` is 0 on 100% of the 9,366-row corpus, so the exponent
-    ``recall_count / max(1, helpful_count)`` degenerates to ``recall_count`` and
-    the term becomes a pure recall-FREQUENCY penalty with no lower bound — on a
+    PRD-CORE-293 FR02 renamed ``feedback_decay_score`` to
+    ``recall_frequency_decay_score`` and dropped its dead ``helpful_count``
+    parameter (0 of 1,617 rows measured 2026-09-22; nothing writes it now that
+    ``trw_learn_update(feedback=...)`` is gone). The exponent was already always
+    plain ``recall_count`` in practice, so this is a signature-only change: the
+    formula becomes a pure recall-FREQUENCY penalty with no lower bound — on a
     counter PRD-QUAL-032/D1 established is not evidence of use. The floor bounds
-    what an ABSENT rating can cost without weakening the rating itself.
+    what heavy recall can cost.
     """
 
-    def test_heavily_recalled_unrated_entry_does_not_sink_below_the_floor(self) -> None:
-        from trw_memory.lifecycle.scoring import feedback_decay_score
+    def test_heavily_recalled_entry_does_not_sink_below_the_floor(self) -> None:
+        from trw_memory.lifecycle.scoring import recall_frequency_decay_score
 
         importance = 0.8
         for recalls in (10, 50, 100, 1000):
-            score = feedback_decay_score(importance, recalls, 0)
+            score = recall_frequency_decay_score(importance, recalls)
             assert score >= importance * 0.5 - 1e-9, f"{recalls} recalls sank it to {score}"
 
     def test_the_floor_is_what_bounds_it_not_the_clamp(self) -> None:
         """Without the floor the same entry collapses to under 1% of importance."""
-        from trw_memory.lifecycle.scoring import feedback_decay_score
+        from trw_memory.lifecycle.scoring import recall_frequency_decay_score
 
-        assert feedback_decay_score(0.8, 100, 0, min_factor=0.0) < 0.01
-        assert feedback_decay_score(0.8, 100, 0) == pytest.approx(0.4)
-
-    def test_helpful_feedback_still_lifts_an_entry_above_its_sibling(self) -> None:
-        """The floor must not flatten the signal it bounds."""
-        from trw_memory.lifecycle.scoring import feedback_decay_score
-
-        rated = feedback_decay_score(0.8, 40, 20)
-        unrated = feedback_decay_score(0.8, 40, 0)
-        assert rated > unrated
+        assert recall_frequency_decay_score(0.8, 100, min_factor=0.0) < 0.01
+        assert recall_frequency_decay_score(0.8, 100) == pytest.approx(0.4)
 
     def test_a_cold_start_entry_survives_pure_recall_frequency_on_the_live_path(self) -> None:
         """End to end through entry_utility: heavy recall, no ratings, no observations."""
@@ -721,12 +543,13 @@ class TestFeedbackDecayFloor:
         assert surfaced >= never * 0.5 - 1e-9
         assert surfaced > 0.4
 
-    def test_zero_floor_restores_the_previous_behaviour_exactly(self) -> None:
-        from trw_memory.lifecycle.scoring import feedback_decay_score
+    def test_zero_floor_pins_the_formula_exactly(self) -> None:
+        """PRD-CORE-293 FR02: ``importance * 0.95 ** recall_count``, unfloored."""
+        from trw_memory.lifecycle.scoring import recall_frequency_decay_score
 
-        for recalls, helpful in ((5, 0), (5, 5), (100, 3)):
-            expected = 0.8 * (0.95 ** (recalls / max(1, helpful)))
-            assert feedback_decay_score(0.8, recalls, helpful, min_factor=0.0) == pytest.approx(expected)
+        for importance, recalls in ((0.8, 5), (0.8, 40), (0.8, 100), (1.0, 0), (0.5, 1000)):
+            expected = importance * (0.95**recalls)
+            assert recall_frequency_decay_score(importance, recalls, min_factor=0.0) == pytest.approx(expected)
 
 
 class TestNativePruneHonoursProtectionTier:

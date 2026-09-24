@@ -127,7 +127,7 @@ def test_filter_survives_real_bytes_replay(tmp_path):
 def test_callback_replayed_only_after_real_decode_failure(tmp_path):
     from trw_memory.storage._resilient_fetch import FetchQuery
     from trw_memory.storage._shared import ENTRY_COLUMNS
-    from trw_memory.storage._temporal_fetch import fetch_temporal_selection
+    from trw_memory.storage._temporal_fetch import _fetch_selection
 
     path = tmp_path / "repeat.db"
     backend = SQLiteBackend(path)
@@ -145,7 +145,7 @@ def test_callback_replayed_only_after_real_decode_failure(tmp_path):
                 seen.append(e.id)
                 return e.id == "keep"
 
-            rows, quarantined = fetch_temporal_selection(
+            rows, quarantined = _fetch_selection(
                 connection,
                 db_path=path,
                 dbapi=sqlite3,

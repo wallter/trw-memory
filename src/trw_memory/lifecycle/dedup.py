@@ -17,7 +17,7 @@ from trw_memory.embeddings._similarity_calibration import calibrated_threshold
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.exceptions import DimensionMismatchError
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import Assertion, MemoryEntry, MemoryStatus, ProtectionTier
+from trw_memory.models.memory import Assertion, MemoryEntry, MemoryStatus, MemoryType, ProtectionTier
 from trw_memory.retrieval.dense import cosine_similarity
 
 logger = structlog.get_logger(__name__)
@@ -65,15 +65,10 @@ def _lexical_duplicate(
     return None
 
 
-# Strength ordering for protection-preserving merges (higher index = stronger).
-_PROTECTION_TIER_ORDER: tuple[str, ...] = (
-    ProtectionTier.LOW.value,
-    ProtectionTier.NORMAL.value,
-    ProtectionTier.HIGH.value,
-    ProtectionTier.CRITICAL.value,
-    ProtectionTier.PROTECTED.value,
-    ProtectionTier.PERMANENT.value,
-)
+# Strength orderings for protection-preserving merges (higher index = stronger),
+# one merge semantics for every caller (PRD-CORE-291; trw-mcp adapts onto this module).
+_PROTECTION_TIER_ORDER: tuple[str, ...] = ("low", "normal", "high", "critical", "protected", "permanent")
+_CONFIDENCE_ORDER: tuple[str, ...] = ("unverified", "low", "medium", "high", "verified")
 
 
 def _tier_value(tier: ProtectionTier | str) -> str:
@@ -81,24 +76,22 @@ def _tier_value(tier: ProtectionTier | str) -> str:
     return tier.value if isinstance(tier, ProtectionTier) else str(tier)
 
 
-def _stronger_protection_tier(
-    existing: ProtectionTier | str,
-    incoming: ProtectionTier | str,
-) -> str:
-    """Return the string value of the stronger of two protection tiers.
+def _stronger(existing_val: str, new_val: str, order: tuple[str, ...], default: str) -> str:
+    """Return whichever of *existing_val* / *new_val* ranks higher in *order*.
 
-    Unknown tiers fall back to NORMAL's rank so an unrecognised value never
-    outranks a known stronger tier.
+    Unknown values fall back to *default*'s rank so an unrecognised value
+    never outranks a known stronger one.
     """
-    normal_rank = _PROTECTION_TIER_ORDER.index(ProtectionTier.NORMAL.value)
 
-    def rank(t: ProtectionTier | str) -> int:
-        v = _tier_value(t)
-        return _PROTECTION_TIER_ORDER.index(v) if v in _PROTECTION_TIER_ORDER else normal_rank
+    def rank(v: str) -> int:
+        return order.index(v) if v in order else order.index(default)
 
-    existing_v = _tier_value(existing)
-    incoming_v = _tier_value(incoming)
-    return incoming_v if rank(incoming) > rank(existing) else existing_v
+    return new_val if rank(new_val) > rank(existing_val) else existing_val
+
+
+def _stronger_protection_tier(existing: ProtectionTier | str, incoming: ProtectionTier | str) -> str:
+    """Return the string value of the stronger of two protection tiers."""
+    return _stronger(_tier_value(existing), _tier_value(incoming), _PROTECTION_TIER_ORDER, ProtectionTier.NORMAL.value)
 
 
 def _union_assertions(existing: list[Assertion], incoming: list[Assertion]) -> list[Assertion]:
@@ -241,15 +234,21 @@ def merge_entries(
     existing: MemoryEntry,
     new_entry: MemoryEntry,
 ) -> MemoryEntry:
-    """Merge a new memory entry into an existing entry.
+    """Merge a new memory entry into an existing entry (PRD-CORE-291: the one
+    dedup/merge implementation, adopting trw_mcp.state.dedup's lossless semantics).
 
     Merge strategy:
     - Tags: union of both sets (existing order preserved, new-only appended)
     - Evidence: union of both sets
     - Importance: max(existing, new)
     - Recurrence: existing + 1
-    - Detail: if new detail is longer, append new detail to existing with audit trail
-    - merged_from: append new entry's ID (no duplicates)
+    - Content: survivor keeps its own; a differing incoming content rides an audit
+      header appended to detail
+    - Detail: the incoming detail is ALWAYS appended under that header (never
+      dropped for being shorter), unless already present verbatim in the survivor
+    - merged_from: append new entry's ID and its own merged_from (no duplicates)
+    - protection_tier / confidence: keep the stronger of the two
+    - type: upgrade pattern -> incident when the incoming entry is an incident
     - updated_at: now
 
     Args:
@@ -273,38 +272,43 @@ def merge_entries(
     # Recurrence: increment
     merged_recurrence = existing.recurrence + 1
 
-    # Detail: append if new detail is longer, with audit trail
+    # Detail + content audit trail (bug fix, learning L-bvnz): a shorter incoming
+    # detail used to be silently dropped and new_entry.content was never looked
+    # at. Now the survivor keeps its content; a differing incoming content rides
+    # the audit header, and the incoming detail is ALWAYS appended (whatever its
+    # length) unless it is already present verbatim.
     existing_detail = existing.detail
     new_detail = new_entry.detail
-    if len(new_detail) > len(existing_detail):
-        today = datetime.now(timezone.utc).date().isoformat()
-        audit_marker = f"\n---\nMerged from {new_entry.id} on {today}:\n"
-        if existing_detail:
-            merged_detail = existing_detail + audit_marker + new_detail
-        else:
-            merged_detail = new_detail
+    today = datetime.now(timezone.utc).date().isoformat()
+    new_content = " ".join(new_entry.content.split())
+    kept_content = new_content if new_content and new_content != " ".join(existing.content.split()) else ""
+    if new_detail and new_detail in existing_detail:
+        new_detail = ""  # already present verbatim: skipping it is lossless
+    if new_detail or kept_content:
+        header = f"Merged from {new_entry.id} on {today}:" + (f" {kept_content}" if kept_content else "")
+        body = f"{header}\n{new_detail}" if new_detail else header
+        merged_detail = f"{existing_detail}\n---\n{body}" if existing_detail else (body if kept_content else new_detail)
     else:
         merged_detail = existing_detail
 
-    # merged_from: append new entry ID (no duplicates)
+    # merged_from: the incoming id, then the incoming entry's own ancestry, so a
+    # chained merge keeps provenance (no duplicates, never the survivor itself).
     existing_merged = list(existing.merged_from)
-    if new_entry.id and new_entry.id not in existing_merged:
-        existing_merged.append(new_entry.id)
+    for ancestor in (new_entry.id, *new_entry.merged_from):
+        if ancestor and ancestor != existing.id and ancestor not in existing_merged:
+            existing_merged.append(ancestor)
 
     # Accumulation fields — mirror consolidation._create_consolidated_entry so
-    # merges don't silently discard Q-learning history or feedback counters:
-    #   q_value: max (best observed signal survives)
-    #   q_observations / access_count / recall_count / helpful_count / unhelpful_count: sum
-    #     (cumulative counters)
-    #   protection_tier: keep the stronger tier
+    # merges don't silently discard usage counters:
+    #   access_count / recall_count: sum (cumulative counters)
+    #   protection_tier / confidence: keep the stronger; type: pattern -> incident upgrade
     #   assertions: union by (type, pattern, target)
-    merged_q_value = max(existing.q_value, new_entry.q_value)
-    merged_q_observations = existing.q_observations + new_entry.q_observations
     merged_access_count = existing.access_count + new_entry.access_count
     merged_recall_count = existing.recall_count + new_entry.recall_count
-    merged_helpful_count = existing.helpful_count + new_entry.helpful_count
-    merged_unhelpful_count = existing.unhelpful_count + new_entry.unhelpful_count
     merged_protection_tier = _stronger_protection_tier(existing.protection_tier, new_entry.protection_tier)
+    merged_confidence = _stronger(str(existing.confidence), str(new_entry.confidence), _CONFIDENCE_ORDER, "unverified")
+    is_incident_upgrade = str(new_entry.type) == "incident" and str(existing.type) != "incident"
+    merged_type = MemoryType.INCIDENT.value if is_incident_upgrade else existing.type
     merged_assertions = _union_assertions(existing.assertions, new_entry.assertions)
 
     logger.debug(
@@ -322,13 +326,11 @@ def merge_entries(
             "recurrence": merged_recurrence,
             "detail": merged_detail,
             "merged_from": existing_merged,
-            "q_value": merged_q_value,
-            "q_observations": merged_q_observations,
             "access_count": merged_access_count,
             "recall_count": merged_recall_count,
-            "helpful_count": merged_helpful_count,
-            "unhelpful_count": merged_unhelpful_count,
             "protection_tier": merged_protection_tier,
+            "confidence": merged_confidence,
+            "type": merged_type,
             "assertions": merged_assertions,
             "updated_at": datetime.now(timezone.utc),
         }

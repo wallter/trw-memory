@@ -2,8 +2,8 @@
 
 ``<user_memory_dir>/daemon.json`` is how a client finds the daemon: nothing
 hardcodes a port, because the daemon asks the operating system for an ephemeral
-one by default. The record is a secret (it carries the bearer token) and is
-written through the hardened 0600 path in :mod:`trw_memory.daemon._paths`.
+one by default. The record carries no credential (PRD-CORE-298 FR02) and is
+still written through the hardened 0600 path in :mod:`trw_memory.daemon._paths`.
 
 Every read is defensive, but defensive is not the same as permissive, and a
 read answers one of THREE things rather than two:
@@ -39,7 +39,7 @@ from pydantic import BaseModel, Field
 
 from trw_memory.daemon._paths import DaemonPaths, read_secret_file, write_secret_file
 from trw_memory.exceptions import DaemonSecretUnreadableError
-from trw_memory.storage._writer_registry import _pid_is_live
+from trw_memory.storage._pid_liveness import _pid_is_live
 
 __all__ = [
     "DISCOVERY_SCHEMA_VERSION",
@@ -47,7 +47,6 @@ __all__ = [
     "DiscoveryAbsent",
     "DiscoveryInvalid",
     "DiscoveryRead",
-    "read_discovery",
     "read_discovery_result",
     "read_live_discovery",
     "write_discovery",
@@ -67,15 +66,8 @@ class DaemonInfo(BaseModel):
     schema_version: int = Field(default=DISCOVERY_SCHEMA_VERSION, description="Discovery record generation")
     pid: int = Field(gt=0, description="Process id of the serving daemon")
     url: str = Field(description="Loopback MCP endpoint, e.g. http://127.0.0.1:41234/mcp")
-    token: str = Field(description="Bearer token every request must carry; never logged")
     started_at: str = Field(description="ISO-8601 UTC timestamp of the bind")
     version: str = Field(description="trw-memory version serving this endpoint")
-
-    def __repr__(self) -> str:
-        """Redact the token so no diagnostic path can print it (NFR03)."""
-        return f"DaemonInfo(pid={self.pid}, url={self.url!r}, started_at={self.started_at!r}, version={self.version!r})"
-
-    __str__ = __repr__
 
     def is_live(self, lock_file: Path) -> bool:
         """Whether the recorded process is still running.
@@ -119,12 +111,21 @@ class DiscoveryInvalid:
 DiscoveryRead = DaemonInfo | DiscoveryAbsent | DiscoveryInvalid
 
 
-def write_discovery(paths: DaemonPaths, *, url: str, token: str, version: str) -> DaemonInfo:
+#: The record THIS process published, so its answers can say which daemon gave them.
+_published: DaemonInfo | None = None
+
+
+def this_daemon() -> tuple[int, str] | None:
+    """This process's published ``(pid, started_at)``, or ``None`` when it is not a daemon."""
+    return (_published.pid, _published.started_at) if _published is not None else None
+
+
+def write_discovery(paths: DaemonPaths, *, url: str, version: str) -> DaemonInfo:
     """Write the discovery record for THIS process at mode 0600."""
-    info = DaemonInfo(
+    global _published
+    info = _published = DaemonInfo(
         pid=os.getpid(),
         url=url,
-        token=token,
         started_at=datetime.now(timezone.utc).isoformat(),
         version=version,
     )
@@ -164,20 +165,6 @@ def _invalid(paths: DaemonPaths, reason: str, event: str) -> DiscoveryInvalid:
     """Build the untrusted-record answer, logging it once where it is decided."""
     logger.warning(event, path=str(paths.discovery), reason=reason)
     return DiscoveryInvalid(path=paths.discovery, reason=reason)
-
-
-def read_discovery(paths: DaemonPaths) -> DaemonInfo | None:
-    """Return the recorded daemon, or ``None`` when no record can be trusted.
-
-    A PROBE, for read-only diagnostics that report on the record and act on
-    nothing. It collapses "absent" and "invalid" into ``None``, which is
-    exactly the conflation that must never reach a caller deciding whether to
-    bind a port, spawn a daemon or delete a file -- those use
-    :func:`read_discovery_result` and refuse on
-    :class:`DiscoveryInvalid`.
-    """
-    result = read_discovery_result(paths)
-    return result if isinstance(result, DaemonInfo) else None
 
 
 def read_live_discovery(paths: DaemonPaths) -> DiscoveryRead:

@@ -179,7 +179,7 @@ async def test_recall_uses_the_adaptive_floor_helper(wired_client: MemoryClient)
 
     Patching the helper alone -- no config mutation -- must move the SDK hybrid
     call AND the tier-merge refill bound; the bundled ``memory_recall`` tool
-    path reranks unconditionally and (as before) applies no floor.
+    path applies the same floor through ``ranking_arguments``.
     """
     from trw_memory._client_recall_helpers import merge_local_candidates
     from trw_memory.models.memory import MemoryEntry
@@ -234,13 +234,41 @@ async def test_recall_uses_the_adaptive_floor_helper(wired_client: MemoryClient)
     assert [c.entry.id for c in real] == ["h1", "w1"]
     assert [c.entry.id for c in patched] == ["h1"]
 
-    # memory_recall tool path: rerank=True literal, no floor keywords.
+    # memory_recall tool path: the same floor, through the shared ranking arguments (PRD-CORE-298 FR05).
     entry = MemoryEntry(id="t1", content="tool path entry", namespace=ns)
     scope = authorize_namespaces(MemoryConfig(rbac_enabled=False), [ns], Permission.READ, "test")
-    with patch("trw_memory.tools.recall.hybrid_search_scored", return_value=[]) as scored_mock:
+    with (
+        patch.object(_adaptive_floor, "adaptive_rerank_floor", side_effect=fake_floor),
+        patch("trw_memory.tools.recall.hybrid_search_scored", return_value=[]) as scored_mock,
+    ):
         build_scored_candidates(
             "tool path", [entry], cfg=cfg, scope=scope, embedder=None, stored_embeddings={}, limit=7, tags=None
         )
     kwargs = scored_mock.call_args.kwargs
     assert kwargs["rerank"] is True
-    assert "rerank_min_score" not in kwargs and "rerank_min_keep" not in kwargs
+    assert (kwargs["rerank_min_score"], kwargs["rerank_min_keep"]) == (-3.0, 2)
+
+
+async def test_recall_logs_fts_leg_outcome(wired_client: MemoryClient) -> None:
+    """PRD-FIX-148 FR04: the FTS augmentation leg reports what it did on every recall."""
+    import structlog
+
+    await wired_client.store("token refresh drains in-flight work in session.py")
+
+    def all_high(query, entries, **kwargs):
+        return [(e, 1.0) for e in entries]
+
+    async def outcomes(query: str) -> list[str]:
+        with (
+            patch("trw_memory.retrieval.reranker.cross_encode_scores", side_effect=all_high),
+            structlog.testing.capture_logs() as events,
+        ):
+            await wired_client.recall(query)
+        return [e["outcome"] for e in events if e.get("event") == "fts5_leg"]
+
+    assert await outcomes("token refresh") in (["augmented"], ["no_new_entries"])
+    assert await outcomes("zzqx nothing matches this") == ["no_rows"]
+    assert await outcomes("") == ["not_consulted"]
+    backend = wired_client._get_backend()
+    with patch.object(backend, "_fts_available", False):
+        assert await outcomes("token refresh") == ["unavailable"]

@@ -108,7 +108,7 @@ import trw_memory.daemon._serve as serve_mod
 from trw_memory.daemon._paths import DaemonPaths
 
 
-def _explode(_token):
+def _explode(_paths):
     raise RuntimeError("app build failed")
 
 
@@ -150,13 +150,13 @@ def test_startup_failure_after_claim_releases_it(tmp_path):
 def test_release_leaves_a_successor_record_alone(tmp_path):
     """FR06 negative: a record written by another claim is never deleted."""
     paths = _paths(tmp_path)
-    claim = claim_single_instance(paths, port=0, token="t0ken", version="test")
+    claim = claim_single_instance(paths, port=0, version="test")
     try:
         first = claim.info
         # A second claim from the SAME pid is permitted by design, and rewrites
         # the record. A late release from the first claim must not delete it.
         time.sleep(0.01)
-        successor = write_discovery(paths, url="http://127.0.0.1:1/mcp", token="t0ken", version="test")
+        successor = write_discovery(paths, url="http://127.0.0.1:1/mcp", version="test")
         assert successor.started_at != first.started_at
 
         release_single_instance(paths, claimed=first)
@@ -175,7 +175,6 @@ def test_release_leaves_another_pids_record_alone(tmp_path):
     other = DaemonInfo(
         pid=os.getpid() + 1,
         url="http://127.0.0.1:2/mcp",
-        token="t0ken",
         started_at="2026-09-17T00:00:00+00:00",
         version="test",
     )
@@ -190,7 +189,7 @@ def test_release_leaves_another_pids_record_alone(tmp_path):
 def test_release_without_a_claim_still_removes_our_own_record(tmp_path):
     """Backward compatibility: the one-argument call keeps its old behaviour."""
     paths = _paths(tmp_path)
-    claim = claim_single_instance(paths, port=0, token="t0ken", version="test")
+    claim = claim_single_instance(paths, port=0, version="test")
     try:
         release_single_instance(paths)
         assert not paths.discovery.exists()
@@ -199,14 +198,13 @@ def test_release_without_a_claim_still_removes_our_own_record(tmp_path):
 
 
 def test_trust_boundary_is_documented():
-    """NFR03: the single-principal property is stated where the daemon runs."""
+    """PRD-CORE-298 FR02: the per-grant boundary is stated where the daemon runs, and the old one is gone."""
     import trw_memory.daemon._serve as serve_mod
 
-    doc = serve_mod.serve_loopback.__doc__ or ""
-    assert "one principal" in doc.lower()
-    assert "every namespace" in doc.lower()
-
-    readme = Path(__file__).resolve().parents[1] / "README.md"
-    text = readme.read_text()
-    assert "Loopback daemon" in text
-    assert "one principal" in text.lower()
+    doc = (serve_mod.serve_loopback.__doc__ or "").lower()
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text().lower()
+    assert "loopback daemon" in readme
+    for text in (doc, readme):
+        assert "grant" in text
+        assert "one principal" not in text
+        assert "fully authorised for every namespace" not in text

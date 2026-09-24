@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 _CLI = "trw_memory.cli"
+_DAEMON_CLIENT = "trw_memory.cli_client.daemon_client"
 
 
 def _real_import_target(tmp_path: Path) -> tuple[Any, Any]:
@@ -69,22 +70,30 @@ def _make_recall_result(
     }
 
 
-def _make_forget_result(memory_id: str = "M-abc12345") -> dict[str, str]:
-    return {
-        "memory_id": memory_id,
-        "status": "deleted",
-        "namespace": "default",
-    }
-
-
 def _mock_client() -> MagicMock:
-    """Create a mock MemoryClient with async method stubs."""
+    """A ``DaemonClient`` stand-in answering in the daemon tools' result shapes."""
     client = MagicMock()
     client.store = AsyncMock(return_value=_make_store_result())
-    client.recall = AsyncMock(return_value=[_make_recall_result()])
-    client.search = AsyncMock(return_value=[_make_recall_result()])
-    client.forget = AsyncMock(return_value=_make_forget_result())
-    client.close = AsyncMock()
+    client.recall = AsyncMock(return_value={"memories": [_make_recall_result()], "total_matches": 1})
+    client.search = AsyncMock(return_value={"entries": [_make_recall_result()], "total": 1})
+    client.forget = AsyncMock(return_value={"deleted": 1, "status": "ok"})
+    client.consolidate = AsyncMock(return_value={"clusters_found": 2, "entries_consolidated": 3, "dry_run": False})
+    client.list_page = AsyncMock(return_value={"status": "ok", "entries": [], "next": None})
+    client.status = AsyncMock(return_value={"total_entries": 0, "config": {"storage_backend": "sqlite"}})
+    client.paths.store = Path("/daemon/memory.db")
+    return client
+
+
+def _exporting_client(*entries: Any) -> MagicMock:
+    """A daemon client whose one list page holds *entries* (``_mock_entry`` stand-ins) as ``MemoryEntry`` JSON."""
+    from trw_memory.models.memory import MemoryEntry
+
+    rows = [
+        MemoryEntry(id=entry.id, content=entry.content, tags=list(entry.tags)).model_dump(mode="json")
+        for entry in entries
+    ]
+    client = _mock_client()
+    client.list_page = AsyncMock(return_value={"status": "ok", "entries": rows, "next": None})
     return client
 
 

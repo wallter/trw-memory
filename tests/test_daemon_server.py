@@ -28,12 +28,12 @@ from trw_memory.daemon import (
     DaemonPaths,
     bind_loopback_socket,
     claim_single_instance,
-    ensure_token,
-    read_discovery,
+    mint_grant,
     require_loopback,
-    tokens_match,
 )
 from trw_memory.exceptions import ConfigError, DaemonAlreadyRunningError, DaemonSecretUnreadableError
+
+from ._test_daemon_support import read_discovery
 
 pytest.importorskip("fastmcp")
 
@@ -148,12 +148,12 @@ _CONNECT_RETRY_DELAY_S = 0.5
 _CALL_TIMEOUT_S = 60.0
 
 
-async def _call(info: DaemonInfo, name: str, arguments: dict[str, object], *, token: str | None = None) -> object:
+async def _call(info: DaemonInfo, name: str, arguments: dict[str, object], *, token: str) -> object:
     import httpx
     from fastmcp import Client
     from fastmcp.client.transports import StreamableHttpTransport
 
-    transport = StreamableHttpTransport(url=info.url, auth=token if token is not None else info.token)
+    transport = StreamableHttpTransport(url=info.url, auth=token)
 
     async def _once() -> object:
         async with Client(transport) as client:
@@ -185,12 +185,13 @@ async def test_loopback_daemon_single_instance_token_and_idle_shutdown(
 ) -> None:
     """FR03 end to end: discovery, token, first call, second start, idle exit."""
     proc, info = running_daemon
+    token = mint_grant(paths, ["project:daemon-aaaaaaaa", "project:second-bbbbbbbb", "user:local"])
 
     # Property 1 + 2: a loopback URL on an OS-assigned port, published at 0600.
     assert info.url.startswith(f"http://{LOOPBACK_HOST}:")
     assert info.url.split(":")[2].split("/")[0] != "0"
     assert paths.discovery.stat().st_mode & 0o777 == 0o600
-    assert paths.token.stat().st_mode & 0o777 == 0o600
+    assert paths.grants.stat().st_mode & 0o777 == 0o600
     assert paths.user_memory_dir.stat().st_mode & 0o777 == 0o700
 
     # The first served call succeeds over the transport.
@@ -198,14 +199,15 @@ async def test_loopback_daemon_single_instance_token_and_idle_shutdown(
         info,
         "memory_store",
         {"content": "a learning served over loopback", "namespace": "project:daemon-aaaaaaaa"},
+        token=token,
     )
     assert isinstance(stored, dict) and stored["status"] == "stored"
 
     # Property 3: a wrong token is rejected before any tool body runs.
-    before = paths.token.read_text(encoding="utf-8")
+    before = paths.grants.read_text(encoding="utf-8")
     with pytest.raises(Exception, match="401"):
         await _call(info, "memory_status", {}, token="definitely-not-the-token")
-    assert paths.token.read_text(encoding="utf-8") == before, "a rejection must not rotate the token"
+    assert paths.grants.read_text(encoding="utf-8") == before, "a rejection must not touch the grants"
 
     # FR01: EVERY namespace landed in the ONE user-space file. This is the
     # assertion the review asked for, and it is the one that fails if the daemon
@@ -213,7 +215,9 @@ async def test_loopback_daemon_single_instance_token_and_idle_shutdown(
     # its own SQLite file under the user directory and ``DaemonPaths.store`` is
     # a path no write path ever opens.
     for namespace in ("project:second-bbbbbbbb", "user:local"):
-        landed = await _call(info, "memory_store", {"content": f"row for {namespace}", "namespace": namespace})
+        landed = await _call(
+            info, "memory_store", {"content": f"row for {namespace}", "namespace": namespace}, token=token
+        )
         assert isinstance(landed, dict) and landed["status"] == "stored"
     # Scoped to the MEMORY store filename: the tier layer keeps its own
     # ``warm.db`` sidecars, which are not the corpus this requirement is about.
@@ -332,15 +336,13 @@ def test_stale_lock_reaped_only_when_pid_is_dead(paths: DaemonPaths) -> None:
     is exercised with the parent pid: a process that is definitely alive and
     definitely not us.
     """
-    token = ensure_token(paths)
-
-    live = claim_single_instance(paths, port=0, token=token, version="test")
+    live = claim_single_instance(paths, port=0, version="test")
     try:
         held_by_another = live.info.model_copy(update={"pid": os.getppid()})
         paths.discovery.write_text(held_by_another.model_dump_json(), encoding="utf-8")
 
         with pytest.raises(DaemonAlreadyRunningError, match="already running"):
-            claim_single_instance(paths, port=0, token=token, version="test")
+            claim_single_instance(paths, port=0, version="test")
         assert read_discovery(paths) == held_by_another, "a refused start must not touch the record"
     finally:
         live.sock.close()
@@ -348,7 +350,7 @@ def test_stale_lock_reaped_only_when_pid_is_dead(paths: DaemonPaths) -> None:
     # Now record a pid that cannot be alive; the next claim reaps and rebinds.
     paths.discovery.write_text(live.info.model_copy(update={"pid": _unused_pid()}).model_dump_json(), encoding="utf-8")
 
-    reclaimed = claim_single_instance(paths, port=0, token=token, version="test")
+    reclaimed = claim_single_instance(paths, port=0, version="test")
     try:
         assert reclaimed.info.pid == os.getpid()
     finally:
@@ -393,20 +395,6 @@ def test_bound_socket_reports_an_ephemeral_loopback_port() -> None:
         sock.close()
 
 
-def test_token_is_generated_once_at_0600_and_compared_in_constant_time(paths: DaemonPaths) -> None:
-    """FR03 property 3 + FR08 clause 2."""
-    assert not paths.token.exists()
-
-    token = ensure_token(paths)
-
-    assert len(token) >= 32
-    assert paths.token.stat().st_mode & 0o777 == 0o600
-    assert ensure_token(paths) == token, "a second call must not mint a new token"
-    assert tokens_match(token, token)
-    assert not tokens_match(token, "wrong")
-    assert not tokens_match("", token)
-
-
 def test_discovery_read_is_defensive(paths: DaemonPaths) -> None:
     """Malformed, wrong-schema and absent records are all 'no daemon'."""
     assert read_discovery(paths) is None
@@ -422,13 +410,14 @@ def test_discovery_read_is_defensive(paths: DaemonPaths) -> None:
     assert read_discovery(paths) is None
 
 
-def test_discovery_repr_redacts_the_token() -> None:
-    """NFR03: the token is never printed by a diagnostic path."""
-    info = DaemonInfo(pid=1, url="http://127.0.0.1:1/mcp", token="s3cr3t", started_at="now", version="0")
+def test_the_discovery_record_carries_no_credential() -> None:
+    """PRD-CORE-298 FR02: the record names an endpoint; a Slice A record's token is ignored."""
+    info = DaemonInfo.model_validate(
+        {"pid": 1, "url": "http://127.0.0.1:1/mcp", "token": "s3cr3t", "started_at": "now", "version": "0"}
+    )
 
-    assert "s3cr3t" not in repr(info)
-    assert "s3cr3t" not in str(info)
-    assert "s3cr3t" not in f"{info}"
+    assert "token" not in info.model_dump()
+    assert "s3cr3t" not in info.model_dump_json()
 
 
 def test_secret_files_are_written_through_an_exclusive_temp_and_renamed(paths: DaemonPaths, tmp_path: Path) -> None:

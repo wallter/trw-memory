@@ -231,7 +231,7 @@ class TestInitAutoRecovery:
         # Simulate a quick_check failure after retries. _db_has_data returns
         # True for this DB, but that only proves row readability, not B-tree
         # health; init should recover instead of opening the file anyway.
-        def _failing_open(db_path_arg: Path) -> None:
+        def _failing_open(db_path_arg: Path, **_: object) -> None:
             raise sqlite3.DatabaseError("database disk image is malformed (quick_check failed twice)")
 
         with patch.object(SQLiteBackend, "_open_and_configure", staticmethod(_failing_open)):

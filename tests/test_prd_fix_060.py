@@ -74,8 +74,6 @@ class TestFR02EntryToDict:
             updated_at=now,
             last_accessed_at=now,
             access_count=5,
-            q_value=0.7,
-            q_observations=10,
             source="agent",
             source_identity="test-agent",
             merged_from=["M-OLD-001"],
@@ -115,8 +113,6 @@ class TestFR02EntryToDict:
             "updated_at",
             "last_accessed_at",
             "access_count",
-            "q_value",
-            "q_observations",
             "source",
             "source_identity",
             "client_profile",
@@ -152,16 +148,16 @@ class TestFR02EntryToDict:
             "team_origin",
             "protection_tier",
             "recall_count",
-            "helpful_count",
-            "unhelpful_count",
             "session_count",
             "verification_status",
             "verification_checked_at",
         }
         assert set(result.keys()) == expected_keys
-        # PRD-CORE-244-FR08 dropped three unproduced attribution fields and
-        # PRD-CORE-244-FR03 added verification_checked_at, in the schema-5 rebuild.
-        assert len(result) == 54
+        # PRD-CORE-244-FR08 dropped three unproduced attribution fields,
+        # PRD-CORE-244-FR03 added verification_checked_at (schema-5 rebuild),
+        # and PRD-CORE-293 removed q_value/q_observations/helpful_count/
+        # unhelpful_count (Q-learning/feedback fields, never populated).
+        assert len(result) == 50
 
         # Verify types of serialized values
         assert result["id"] == "M-TEST-001"
@@ -326,8 +322,6 @@ class TestFR05BooleanConversion:
             None,  # invalidated_by (PRD-CORE-194)
             0,  # access_count
             0,  # session_count
-            0.5,  # q_value
-            0,  # q_observations
             "agent",  # source
             "",  # source_identity
             "",  # client_profile
@@ -359,8 +353,6 @@ class TestFR05BooleanConversion:
             0,  # sync_seq (PRD-INFRA-051)
             None,  # last_synced_at (PRD-INFRA-051)
             0,  # recall_count (PRD-CORE-132)
-            0,  # helpful_count (PRD-CORE-132)
-            0,  # unhelpful_count (PRD-CORE-132)
             None,  # verification_status (PRD-CORE-231-FR02)
             "",  # verification_checked_at (PRD-CORE-244-FR03)
         )
@@ -393,8 +385,6 @@ class TestFR05BooleanConversion:
             None,  # invalidated_by (PRD-CORE-194)
             0,  # access_count
             0,  # session_count
-            0.5,
-            0,
             "agent",
             "",
             "",  # client_profile
@@ -426,8 +416,6 @@ class TestFR05BooleanConversion:
             0,  # sync_seq (PRD-INFRA-051)
             None,  # last_synced_at (PRD-INFRA-051)
             0,  # recall_count (PRD-CORE-132)
-            0,  # helpful_count (PRD-CORE-132)
-            0,  # unhelpful_count (PRD-CORE-132)
             None,  # verification_status (PRD-CORE-231-FR02)
             "",  # verification_checked_at (PRD-CORE-244-FR03)
         )

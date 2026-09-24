@@ -7,7 +7,6 @@ import pytest
 
 from trw_memory.lifecycle import utility_based_prune_candidates
 from trw_memory.lifecycle.scoring import (
-    compute_utility_score,
     entry_utility,
 )
 from trw_memory.lifecycle.tiers._scoring import compute_importance_score
@@ -63,13 +62,3 @@ def test_prune_nominations_ignore_q_without_changing_protection(protection: str)
         assert actual == []
     else:
         assert [candidate["id"] for candidate in actual] == ["low"]
-
-
-def test_explicit_historical_utility_api_retains_its_semantics() -> None:
-    assert compute_utility_score(
-        q_value=0.0, days_since_last_access=0, recurrence_count=1, base_impact=0.5, q_observations=10
-    ) < (
-        compute_utility_score(
-            q_value=1.0, days_since_last_access=0, recurrence_count=1, base_impact=0.5, q_observations=10
-        )
-    )

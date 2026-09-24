@@ -54,12 +54,12 @@ class TestCliErrorBoundarySystemExitReRaise:
     async def test_async_handler_systemexit_is_reraised(self) -> None:
         """async inner fn raises SystemExit → async_wrapper re-raises (line 69).
 
-        Patch the inner `handle_store` (not the wrapped `_handle_store`) so
+        Patch the inner `handle_daemon_verb` (not the wrapped `_handle_daemon_verb`) so
         the SystemExit bubbles through async_wrapper's re-raise path, then
         _dispatch catches it and converts to return code.
         """
         args = argparse.Namespace(command="store")
-        with patch("trw_memory.cli.handle_store", side_effect=SystemExit(42)):
+        with patch("trw_memory.cli.handle_daemon_verb", side_effect=SystemExit(42)):
             # _dispatch catches the re-raised SystemExit and returns its code
             rc = await _dispatch(args)
         assert rc == 42

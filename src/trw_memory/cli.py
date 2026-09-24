@@ -15,30 +15,19 @@ from typing import ParamSpec, TypeVar, cast, overload
 
 import structlog
 
-from trw_memory.cli_client import handle_forget, handle_recall, handle_reembed, handle_search, handle_store
+from trw_memory.cli_client import handle_daemon_verb, handle_reembed
 from trw_memory.cli_formatters import (
-    StatusDict,
-    entry_to_export_dict,
-    format_export_summary,
     format_import_summary,
-    format_results,
-    format_status,
-    format_store_result,
 )
 from trw_memory.cli_json_input import JsonInputError, json_type_name, load_json_array
 from trw_memory.cli_namespace import handle_namespace
 from trw_memory.cli_parser import build_parser
 from trw_memory.cli_storage import (
-    handle_consolidate,
-    handle_export,
     handle_import,
     handle_restore,
     handle_snapshot,
-    handle_status,
 )
 from trw_memory.client import MemoryClient, _create_local_backend
-from trw_memory.embeddings import get_local_embedder
-from trw_memory.lifecycle.consolidation import consolidate_cycle
 from trw_memory.models.config import MemoryConfig
 from trw_memory.tools.code_index import memory_code_index_impl, memory_code_search_impl, memory_code_symbol_impl
 from trw_memory.tools.wiki_lint import memory_wiki_lint_impl
@@ -122,44 +111,8 @@ def _cli_error_boundary(fn: Callable[P, object]) -> Callable[P, object]:
 
 
 @_cli_error_boundary
-async def _handle_store(args: argparse.Namespace) -> int:
-    return await handle_store(
-        args,
-        client_cls=MemoryClient,
-        format_store_result=format_store_result,
-    )
-
-
-@_cli_error_boundary
-async def _handle_recall(args: argparse.Namespace) -> int:
-    return await handle_recall(args, client_cls=MemoryClient, format_results=format_results)
-
-
-@_cli_error_boundary
-async def _handle_search(args: argparse.Namespace) -> int:
-    return await handle_search(args, client_cls=MemoryClient, format_results=format_results)
-
-
-@_cli_error_boundary
-def _handle_consolidate(args: argparse.Namespace) -> int:
-    return handle_consolidate(
-        args,
-        config_cls=MemoryConfig,
-        backend_factory=_create_local_backend,
-        embedder_factory=get_local_embedder,
-        consolidate_fn=consolidate_cycle,
-    )
-
-
-@_cli_error_boundary
-def _handle_export(args: argparse.Namespace) -> int:
-    return handle_export(
-        args,
-        config_cls=MemoryConfig,
-        backend_factory=_create_local_backend,
-        entry_to_export_dict=entry_to_export_dict,
-        export_summary=format_export_summary,
-    )
+async def _handle_daemon_verb(args: argparse.Namespace) -> int:
+    return await handle_daemon_verb(args)
 
 
 @_cli_error_boundary
@@ -173,22 +126,6 @@ def _handle_import(args: argparse.Namespace) -> int:
         make_entry=make_entry,
         import_summary=format_import_summary,
     )
-
-
-@_cli_error_boundary
-def _handle_status(args: argparse.Namespace) -> int:
-    return handle_status(
-        args,
-        config_cls=MemoryConfig,
-        backend_factory=_create_local_backend,
-        status_dict_cls=StatusDict,
-        format_status=format_status,
-    )
-
-
-@_cli_error_boundary
-async def _handle_forget(args: argparse.Namespace) -> int:
-    return await handle_forget(args, client_cls=MemoryClient)
 
 
 @_cli_error_boundary
@@ -260,14 +197,14 @@ def _handle_code_symbol(args: argparse.Namespace) -> int:
 
 async def _dispatch(args: argparse.Namespace) -> int:
     handlers: dict[str, Callable[..., object]] = {
-        "store": _handle_store,
-        "recall": _handle_recall,
-        "search": _handle_search,
-        "consolidate": _handle_consolidate,
-        "export": _handle_export,
+        "store": _handle_daemon_verb,
+        "recall": _handle_daemon_verb,
+        "search": _handle_daemon_verb,
+        "consolidate": _handle_daemon_verb,
+        "export": _handle_daemon_verb,
         "import": _handle_import,
-        "status": _handle_status,
-        "forget": _handle_forget,
+        "status": _handle_daemon_verb,
+        "forget": _handle_daemon_verb,
         "reembed": _handle_reembed,
         "restore": _handle_restore,
         "snapshot": _handle_snapshot,

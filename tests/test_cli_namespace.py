@@ -21,9 +21,11 @@ from pathlib import Path
 import pytest
 
 from trw_memory.cli_namespace import handle_namespace
-from trw_memory.daemon import DaemonInfo, DaemonPaths, read_discovery
+from trw_memory.daemon import DaemonInfo, DaemonPaths, mint_grant
 from trw_memory.daemon.client import DaemonClient
 from trw_memory.models.config import MemoryConfig
+
+from ._test_daemon_support import read_discovery
 
 pytest.importorskip("fastmcp")
 
@@ -89,7 +91,9 @@ def daemon(paths: DaemonPaths, provisioned_embedding_cache: str) -> Iterator[Dae
 
 @pytest.fixture
 def client(paths: DaemonPaths) -> DaemonClient:
-    return DaemonClient(config=MemoryConfig(memory_daemon_startup_timeout_seconds=1.0), paths=paths)
+    return DaemonClient(
+        mint_grant(paths, [OLD, NEW]), config=MemoryConfig(memory_daemon_startup_timeout_seconds=1.0), paths=paths
+    )
 
 
 def _args(action: str, **fields: str) -> argparse.Namespace:
@@ -172,13 +176,12 @@ async def test_an_unreachable_daemon_is_reported_with_the_remedy(
         Info(
             pid=os.getpid(),
             url=f"http://127.0.0.1:{dead_port}/mcp",
-            token="t",
             started_at="2026-09-03T00:00:00+00:00",
             version="test",
         ).model_dump_json(),
         encoding="utf-8",
     )
-    offline = DaemonClient(config=MemoryConfig(memory_daemon_startup_timeout_seconds=1.0), paths=paths)
+    offline = DaemonClient("any-grant", config=MemoryConfig(memory_daemon_startup_timeout_seconds=1.0), paths=paths)
 
     exit_code = await handle_namespace(_args("doctor", namespace=NEW), client=offline)
 

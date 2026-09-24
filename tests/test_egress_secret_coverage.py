@@ -31,6 +31,7 @@ from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.pii import detect_pii, strip_pii
 from trw_memory.security.write_gate import guarded_store
 from trw_memory.storage.sqlite_backend import SQLiteBackend
+from trw_memory.sync import store_gate
 from trw_memory.sync._remote_fetch import fetch_shared_memories
 
 from ._test_scope_support import gate_backend
@@ -170,7 +171,9 @@ class TestSearchQueryIsSanitizedOnTheWire:
         secret = PROVIDER_SECRETS["stripe_live"]
         with patch("trw_memory.sync._remote_fetch.httpx.Client") as mock_cls:
             client = _mock_client(mock_cls)
-            fetch_shared_memories(f"why did {secret} start 401ing", SYNC_CONFIG, backend=gate_backend())
+            fetch_shared_memories(
+                f"why did {secret} start 401ing", SYNC_CONFIG, admit=store_gate(SYNC_CONFIG, gate_backend())
+            )
 
         body = json.dumps(client.post.call_args.kwargs["json"])
         assert secret not in body
@@ -179,7 +182,11 @@ class TestSearchQueryIsSanitizedOnTheWire:
     def test_email_in_the_query_never_reaches_the_request_body(self) -> None:
         with patch("trw_memory.sync._remote_fetch.httpx.Client") as mock_cls:
             client = _mock_client(mock_cls)
-            fetch_shared_memories("ask alice@example.com about the retry budget", SYNC_CONFIG, backend=gate_backend())
+            fetch_shared_memories(
+                "ask alice@example.com about the retry budget",
+                SYNC_CONFIG,
+                admit=store_gate(SYNC_CONFIG, gate_backend()),
+            )
 
         body = json.dumps(client.post.call_args.kwargs["json"])
         assert "alice@example.com" not in body
@@ -204,7 +211,7 @@ class TestSearchQueryIsSanitizedOnTheWire:
     def test_a_legitimate_search_term_is_transmitted_unchanged(self, query: str) -> None:
         with patch("trw_memory.sync._remote_fetch.httpx.Client") as mock_cls:
             client = _mock_client(mock_cls)
-            fetch_shared_memories(query, SYNC_CONFIG, backend=gate_backend())
+            fetch_shared_memories(query, SYNC_CONFIG, admit=store_gate(SYNC_CONFIG, gate_backend()))
 
         assert client.post.call_args.kwargs["json"]["query"] == query
 
@@ -222,7 +229,7 @@ class TestFailedFetchIsDistinguishableFromAnEmptyCorpus:
         with patch("trw_memory.sync._remote_fetch.httpx.Client") as mock_cls:
             _mock_client(mock_cls, status_code=401)
             with patch("trw_memory.sync._remote_fetch.logger") as mock_logger:
-                fetched = fetch_shared_memories("anything", SYNC_CONFIG, backend=gate_backend())
+                fetched = fetch_shared_memories("anything", SYNC_CONFIG, admit=store_gate(SYNC_CONFIG, gate_backend()))
 
         assert (fetched.results, fetched.status) == ([], "fetch_failed")
         mock_logger.warning.assert_called_once()
@@ -232,7 +239,7 @@ class TestFailedFetchIsDistinguishableFromAnEmptyCorpus:
         with patch("trw_memory.sync._remote_fetch.httpx.Client") as mock_cls:
             _mock_client(mock_cls, payload="not-a-container")
             with patch("trw_memory.sync._remote_fetch.logger") as mock_logger:
-                fetched = fetch_shared_memories("anything", SYNC_CONFIG, backend=gate_backend())
+                fetched = fetch_shared_memories("anything", SYNC_CONFIG, admit=store_gate(SYNC_CONFIG, gate_backend()))
 
         assert (fetched.results, fetched.status) == ([], "fetch_failed")
         mock_logger.warning.assert_called_once()
@@ -242,7 +249,7 @@ class TestFailedFetchIsDistinguishableFromAnEmptyCorpus:
         with patch("trw_memory.sync._remote_fetch.httpx.Client") as mock_cls:
             _mock_client(mock_cls, payload=[])
             with patch("trw_memory.sync._remote_fetch.logger") as mock_logger:
-                fetched = fetch_shared_memories("anything", SYNC_CONFIG, backend=gate_backend())
+                fetched = fetch_shared_memories("anything", SYNC_CONFIG, admit=store_gate(SYNC_CONFIG, gate_backend()))
 
         # Same empty list as the two failures above, and now a different status.
         assert (fetched.results, fetched.status) == ([], "ok")

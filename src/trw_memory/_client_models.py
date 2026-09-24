@@ -36,8 +36,6 @@ class MemoryResultDict(TypedDict):
     namespace: str
     source: str
     last_accessed_at: NotRequired[str]
-    q_value: NotRequired[float]
-    q_observations: NotRequired[int]
     recurrence: NotRequired[int]
     access_count: NotRequired[int]
     expires: NotRequired[str]

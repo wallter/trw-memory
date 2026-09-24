@@ -66,8 +66,8 @@ def _upsert_edge(
     *,
     namespace: str,
     metadata: dict[str, str] | None = None,
-) -> None:
-    """Insert or update an edge in the graph.
+) -> bool:
+    """Insert or update an edge in the graph; ``True`` when a row was written, ``False`` when a canary refused it.
 
     Args:
         namespace: The namespace both endpoints belong to. Schema 5 keys edge
@@ -90,15 +90,33 @@ def _upsert_edge(
         raise ValueError(f"edge metadata exceeds 4096 byte limit ({len(meta_json)} bytes)")
     # PRD-CORE-245 FR02: the uniqueness constraint is namespace-qualified under
     # schema 5, so the ON CONFLICT target must name the same columns or SQLite
-    # rejects the statement outright.
-    conn.execute(
+    # rejects the statement outright. Every edge is written here, so this is the
+    # one place a system canary is kept out of the graph: no edge may touch one,
+    # whichever enrichment path proposed it, or the decoy would surface as a neighbour.
+    cursor = conn.execute(
         "INSERT INTO memory_graph_edges "
         "(namespace, source_id, target_id, edge_type, weight, created_at, edge_metadata) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT (namespace, source_id, target_id, edge_type) "
+        "SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
+        "  SELECT 1 FROM memories m WHERE m.namespace = ? AND m.id IN (?, ?)"
+        "  AND json_valid(m.metadata) AND json_extract(m.metadata, '$.system_canary') = 'true'"
+        ") ON CONFLICT (namespace, source_id, target_id, edge_type) "
         "DO UPDATE SET weight = ?, edge_metadata = ?",
-        (namespace, source_id, target_id, edge_type, weight, created_at, meta_json, weight, meta_json),
+        (
+            namespace,
+            source_id,
+            target_id,
+            edge_type,
+            weight,
+            created_at,
+            meta_json,
+            namespace,
+            source_id,
+            target_id,
+            weight,
+            meta_json,
+        ),
     )
+    return cursor.rowcount > 0
 
 
 def _numpy() -> Any | None:

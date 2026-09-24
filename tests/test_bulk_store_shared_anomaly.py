@@ -87,7 +87,7 @@ def test_inside_the_scope_one_read_and_one_write_per_namespace(
         )[0]
         for i in range(3)
     ]
-    _anomaly_reference.reset_reference_cache()
+    _anomaly_reference._CACHE.clear()
     _CountingBackend.list_calls = 0
 
     with shared_anomaly_reference():

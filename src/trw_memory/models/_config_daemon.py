@@ -72,3 +72,13 @@ class _DaemonConfigMixin(BaseModel):
             "path and the start command, never a silent fallback to a local store."
         ),
     )
+    project_root: str = Field(
+        default="",
+        description=(
+            "Absolute path to the repository the stored assertions and anchors describe "
+            "(PRD-CORE-294 FR07(b)). When set to an existing directory, memory_maintain runs "
+            "the verification pass against it and persists each entry's verdict; empty (the "
+            "default) skips that pass, so nothing is ever recorded as verified without a tree "
+            "to check it against. Env: MEMORY_PROJECT_ROOT."
+        ),
+    )

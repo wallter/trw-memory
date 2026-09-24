@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import structlog
 
-from trw_memory.exceptions import ConfigError
+from trw_memory.exceptions import AuthorizationError, ConfigError
 from trw_memory.integrations._backend import discover_namespace_backends
-from trw_memory.models.config import MemoryConfig
+from trw_memory.models.config import MemoryConfig, daemon_wide_security
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.validation import validate_namespace
+from trw_memory.security.rbac import Permission, require_namespace_permission, transport_grant, within_grant
 from trw_memory.security.runtime import list_quarantined_entries, security_maintenance_status
+from trw_memory.storage._namespace_health import namespace_health
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools._types import McpServer
 
 logger = structlog.get_logger(__name__)
@@ -32,9 +35,13 @@ def _quarantine_count(cfg: MemoryConfig) -> int | None:
 
 
 def _security_posture(cfg: MemoryConfig) -> dict[str, object] | None:
-    """Return compact posture only when security is degraded or non-default."""
+    """Return compact posture only when security is degraded or non-default.
+
+    The maintenance queue is process-wide, shared by every tenant the daemon
+    serves, so a granted token gets no ``maintenance`` signal (PRD-CORE-298 FR02).
+    """
     quarantine_count = _quarantine_count(cfg)
-    maintenance = security_maintenance_status()
+    maintenance = security_maintenance_status() if transport_grant() is None else {}
     signals: dict[str, object] = {
         "recall_filter_mode": "disabled" if not cfg.enable_recall_filter else cfg.recall_filter_mode,
         "trust_scoring_mode": "disabled" if not cfg.enable_trust_scoring else cfg.trust_scoring_mode,
@@ -42,8 +49,9 @@ def _security_posture(cfg: MemoryConfig) -> dict[str, object] | None:
         "canary_status": "halt" if cfg.canary_fail_mode == "halt" else f"degraded:{cfg.canary_fail_mode}",
         "provenance_mode": "required" if cfg.provenance_required else "optional",
         "pii_mode": "disabled" if not cfg.pii_enabled else cfg.pii_action,
-        "maintenance": maintenance,
     }
+    if maintenance:
+        signals["maintenance"] = maintenance
     queued_raw = maintenance.get("queued", 0)
     queued_count = queued_raw if isinstance(queued_raw, int) else 0
     quarantine_degraded = quarantine_count is None or quarantine_count > 0
@@ -107,7 +115,8 @@ def memory_status_impl(
         config: MemoryConfig for the configuration summary. Uses defaults if None.
 
     Returns:
-        {"total_entries": int, "namespaces": dict, "config": dict}
+        {"total_entries": int, "namespaces": dict, "config": dict}, plus ``health``
+        (``storage._namespace_health.namespace_health``) for one namespace of a SQLite store
         or {"error": str, "status": "invalid"} on validation failure.
     """
     cfg = config or MemoryConfig()
@@ -116,19 +125,25 @@ def memory_status_impl(
     if namespace is not None:
         try:
             validate_namespace(namespace)
+            require_namespace_permission(cfg, namespace, Permission.READ, "status")
         except ConfigError as exc:
             return {"error": str(exc), "status": "invalid"}
+        except AuthorizationError as exc:
+            return {"error": str(exc), "status": "forbidden"}
 
     # Build namespace breakdown
     namespaces: dict[str, int] = {}
+    health: dict[str, object] | None = None
     if namespace is not None:
         try:
             total_entries = backend.count(namespace=namespace)
+            if isinstance(backend, SQLiteBackend):
+                health = namespace_health(backend, namespace, cfg)
         except Exception as exc:  # broad catch: tool error boundary
             logger.exception("memory_status_count_failed", error=str(exc))
             return {"error": f"storage error: {exc}", "status": "error"}
         namespaces[namespace] = total_entries
-    elif config is None:
+    elif config is None and transport_grant() is None:
         try:
             total_entries = backend.count(namespace=None)
         except Exception as exc:  # broad catch: tool error boundary
@@ -158,18 +173,19 @@ def memory_status_impl(
             active_entry_count = 0
             with discover_namespace_backends(cfg) as stores:
                 for store_namespaces, store_backend in stores:
-                    for store_namespace in store_namespaces:
+                    # Over the daemon, only the token's grant (PRD-CORE-298 FR02).
+                    for store_namespace in filter(within_grant, store_namespaces):
                         ns_count = store_backend.count(namespace=store_namespace)
                         total_entries += ns_count
                         existing = namespaces.get(store_namespace, 0)
                         namespaces[store_namespace] = int(existing) + ns_count
-
-                    active_entry_count += len(
-                        store_backend.list_entries(
-                            status=MemoryStatus.ACTIVE,
-                            limit=10_000,
+                        active_entry_count += len(
+                            store_backend.list_entries(
+                                status=MemoryStatus.ACTIVE,
+                                namespace=store_namespace,
+                                limit=10_000,
+                            )
                         )
-                    )
         except Exception as exc:  # broad catch: tool error boundary
             logger.exception("memory_status_count_failed", error=str(exc))
             return {"error": f"storage error: {exc}", "status": "error"}
@@ -201,6 +217,8 @@ def memory_status_impl(
     }
     if security_posture is not None:
         result["security_posture"] = security_posture
+    if health is not None:
+        result["health"] = health
     return result
 
 
@@ -215,17 +233,27 @@ def register_status_tool(mcp: McpServer) -> None:
     @mcp.tool()
     async def memory_status(
         namespace: str | None = None,
+        security_settings_only: bool = False,
     ) -> dict[str, object]:
         """Report the current state of the memory store.
 
         Args:
             namespace: If provided, scope to this namespace (e.g., 'project:default').
                 When None, reports across all namespaces.
+            security_settings_only: Answer only ``{"security_settings": ..., "daemon": ...}``,
+                the daemon-wide settings (PRD-CORE-298 FR07) and the ``[pid, started_at]``
+                of the daemon that answered. It opens no store and needs no READ
+                permission, so any valid grant can compare before attaching.
 
         Returns:
-            {"total_entries": int, "namespaces": dict, "config": dict}
+            {"total_entries": int, "namespaces": dict, "config": dict}, plus ``health``
+        (``storage._namespace_health.namespace_health``) for one namespace of a SQLite store
         """
         cfg = MemoryConfig()
+        if security_settings_only:
+            from trw_memory.daemon._discovery import this_daemon
+
+            return {"security_settings": daemon_wide_security(cfg), "daemon": this_daemon()}
         backend_namespace = namespace or "default"
         with create_backend_from_config(cfg, backend_namespace) as backend:
             return memory_status_impl(

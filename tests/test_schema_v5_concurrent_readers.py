@@ -84,26 +84,6 @@ def test_reader_survives_migration(tmp_path: Path) -> None:
     assert set(observations) == {200}
 
 
-def test_writer_registry_locks_are_untouched(tmp_path: Path) -> None:
-    """NFR04: the migration must not delete, rewrite or ignore another process's PID lock."""
-    db = tmp_path / "locks.db"
-    _v4_store(db, 20)
-
-    holder = SQLiteBackend(db)  # registers this process in the writers sidecar
-    try:
-        writers_dir = Path(f"{db}.writers")
-        before = sorted(p.name for p in writers_dir.iterdir()) if writers_dir.is_dir() else []
-
-        conn = sqlite3.connect(db, timeout=30)
-        ensure_schema(conn)
-        conn.close()
-
-        after = sorted(p.name for p in writers_dir.iterdir()) if writers_dir.is_dir() else []
-        assert after == before
-    finally:
-        holder.close()
-
-
 def test_a_newer_store_refuses_an_older_build_with_an_actionable_message(tmp_path: Path) -> None:
     """An older build opening a migrated store fails loudly, and says what to do about it.
 

@@ -23,6 +23,7 @@ from __future__ import annotations
 import contextlib
 import sqlite3
 import threading
+from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 from typing import Final
 
@@ -105,8 +106,12 @@ def memory_decay_pass(
     batch_size: int = 1000,
     *,
     lock: threading.Lock | None = None,
+    namespaces: Collection[str] | None = None,
 ) -> dict[str, int]:
     """Lower the importance of memories unused for *cutoff_days*.
+
+    *namespaces* narrows the pass to those namespaces (a daemon token's grant,
+    PRD-CORE-298 FR02); ``None`` decays the whole store.
 
     The caller owns the connection and the lock. ``cutoff_days`` and
     ``batch_size`` are supplied by the production caller from typed config
@@ -121,6 +126,10 @@ def memory_decay_pass(
 
     effective_batch_size = min(batch_size, 1000)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=cutoff_days)).isoformat()
+    scope = sorted(namespaces) if namespaces is not None else []
+    predicate = _DECAY_PREDICATE
+    if namespaces is not None:
+        predicate += f" AND namespace IN ({', '.join('?' * len(scope)) or 'NULL'})"
 
     # Acquire the lock BEFORE both SELECT statements so concurrent backend
     # writes that hold the same lock cannot interleave on the shared connection
@@ -137,13 +146,13 @@ def memory_decay_pass(
             # drift between them would report a "remaining" computed over
             # different rows than "processed", the class of silent miscount FR09
             # exists to remove.
-            f"SELECT namespace, id, importance FROM memories WHERE {_DECAY_PREDICATE} LIMIT ?",  # noqa: S608
-            (cutoff, effective_batch_size),
+            f"SELECT namespace, id, importance FROM memories WHERE {predicate} LIMIT ?",  # noqa: S608
+            (cutoff, *scope, effective_batch_size),
         ).fetchall()
 
         total = conn.execute(
-            f"SELECT COUNT(*) FROM memories WHERE {_DECAY_PREDICATE}",  # noqa: S608
-            (cutoff,),
+            f"SELECT COUNT(*) FROM memories WHERE {predicate}",  # noqa: S608
+            (cutoff, *scope),
         ).fetchone()
         total_qualifying = total[0] if total else 0
         try:

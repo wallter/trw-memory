@@ -11,16 +11,27 @@ from __future__ import annotations
 
 import contextlib
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 
 if TYPE_CHECKING:
     from trw_memory.embeddings.provenance import EmbeddingSpace, StoredVector, VectorProvenance
     from trw_memory.retrieval.temporal_selection import TemporalSelection
+
+
+class GraphEdge(NamedTuple):
+    """One knowledge-graph edge, apart from the namespace it is filed under."""
+
+    source_id: str
+    target_id: str
+    edge_type: str
+    weight: float
+    created_at: str
+    metadata: str = "{}"
 
 
 @dataclass(frozen=True)
@@ -295,14 +306,18 @@ class StorageBackend(ABC):
         """
         return 0
 
-    def increment_session_counts(self, entry_ids: list[str], *, updated_at: datetime | None = None) -> int:
-        """Increment ``session_count`` for multiple entries.
+    def increment_session_counts(
+        self, entry_ids: list[str], *, namespace: str, updated_at: datetime | None = None
+    ) -> int:
+        """Increment ``session_count`` of *namespace*'s rows among *entry_ids*.
 
         Backends that support bulk mutation should override this to perform the
         work in a single transaction. The default is a safe no-op.
 
         Args:
             entry_ids: Distinct entry ids to increment.
+            namespace: The namespace whose rows are counted (PRD-CORE-245 FR03:
+                a bare id does not identify a row).
             updated_at: Optional timestamp to stamp onto updated rows.
 
         Returns:
@@ -310,19 +325,10 @@ class StorageBackend(ABC):
         """
         return 0
 
-    def _locate_unscoped(self, entry_id: str) -> MemoryEntry | None:
-        """Namespace-blind lookup used ONLY by the bulk-counter fallback below.
-
-        :meth:`get` requires a namespace (PRD-CORE-245 FR03) because a bare id
-        does not identify a row. The counter fallback is handed a flat id list
-        that an already namespace-scoped recall produced, so it resolves the
-        row by id and lets :meth:`update` re-qualify the write from the row it
-        found. Deliberately protected: this is not part of the read surface.
-        """
-        return None
-
-    def increment_recall_access(self, entry_ids: list[str], *, accessed_at: datetime | None = None) -> int:
-        """Increment ``access_count`` and ``recall_count`` for recalled entries.
+    def increment_recall_access(
+        self, entry_ids: list[str], *, namespace: str, accessed_at: datetime | None = None
+    ) -> int:
+        """Increment ``access_count`` and ``recall_count`` of *namespace*'s recalled rows.
 
         F-008: backends that support bulk mutation should override this to do
         the work in a single statement / commit. The default falls back to a
@@ -331,23 +337,20 @@ class StorageBackend(ABC):
 
         Args:
             entry_ids: Entry ids that were surfaced by recall (may contain dups).
+            namespace: The namespace whose rows are counted; a twin elsewhere is left alone.
             accessed_at: Timestamp to stamp onto ``last_accessed_at``.
 
         Returns:
             Number of entries updated.
         """
-        seen: set[str] = set()
         updated = 0
-        for entry_id in entry_ids:
-            if entry_id in seen:
-                continue
-            seen.add(entry_id)
-            entry = self._locate_unscoped(entry_id)
+        for entry_id in dict.fromkeys(entry_ids):
+            entry = self.get(entry_id, namespace=namespace)
             if entry is None:
                 continue
             self.update(
                 entry_id,
-                namespace=entry.namespace,
+                namespace=namespace,
                 access_count=entry.access_count + 1,
                 recall_count=entry.recall_count + 1,
                 last_accessed_at=accessed_at,
@@ -411,6 +414,34 @@ class StorageBackend(ABC):
         :meth:`namespace_change_token` returned.
         """
         return None
+
+    def graph_edges(self, namespace: str) -> list[GraphEdge]:
+        """Every knowledge-graph edge filed under *namespace*; a backend without a graph holds none."""
+        return []
+
+    def add_graph_edges(self, namespace: str, edges: Sequence[GraphEdge]) -> None:
+        """File *edges* under *namespace*, keeping any already there.
+
+        Raises:
+            StorageError: If this backend keeps no graph and *edges* is not empty -- they would be lost.
+        """
+        if edges:
+            from trw_memory.exceptions import StorageError
+
+            raise StorageError(f"{type(self).__name__} keeps no knowledge graph; {len(edges)} edges would be lost")
+
+    def find_active_by_content(self, content: str, detail: str, *, namespace: str = "default") -> str | None:
+        """Id of an ACTIVE entry of *namespace* whose content and detail match exactly, or ``None``.
+
+        A scan over the namespace's active rows; SQLite answers it with one indexed query.
+        """
+        match = self.list_entries(
+            status=MemoryStatus.ACTIVE,
+            namespace=namespace,
+            limit=1_000_000,
+            entry_filter=lambda entry: (entry.content, entry.detail) == (content, detail),
+        )
+        return match[0].id if match else None
 
     def supports_vectors(self) -> bool:
         """Return whether this backend can persist and search dense vectors.
@@ -586,6 +617,7 @@ class StorageBackend(ABC):
         status: MemoryStatus | None = None,
         min_importance: float = 0.0,
         namespace: str | None = None,
+        tags: list[str] | None = None,
         temporal_selection: TemporalSelection | None = None,
         entry_filter: Callable[[MemoryEntry], bool] | None = None,
     ) -> list[MemoryEntry]:
@@ -601,6 +633,8 @@ class StorageBackend(ABC):
             status: If provided, filter to entries with this status.
             min_importance: Lower bound on importance (inclusive).
             namespace: If provided, restrict to this namespace.
+            tags: If provided, every returned entry carries ALL of them, applied
+                before *top_k*, exactly as ``list_entries`` applies it.
 
         Returns:
             Up to *top_k* matching entries. Empty if the backend has no FTS

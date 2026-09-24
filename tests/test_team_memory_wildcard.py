@@ -151,9 +151,10 @@ def test_team_wildcard_continues_when_one_namespace_fails(
         source_backend: StorageBackend,
         *,
         target_backend: StorageBackend | None = None,
+        target_namespace: str = "project:default",
         promotion_threshold: float = 0.7,
     ) -> dict[str, object]:
-        del source_backend, target_backend, promotion_threshold
+        del source_backend, target_backend, target_namespace, promotion_threshold
         if namespace == "team:sprint-37-impl":
             raise StorageError("promotion failed")
         return {

@@ -236,7 +236,7 @@ def test_increment_session_counts_inside_transaction_defers_commit(tmp_path: Pat
                 "SELECT COALESCE(session_count, 0) FROM memories WHERE id = ?", ("M-sess",)
             ).fetchone()[0]
             with backend.transaction():
-                backend.increment_session_counts(["M-sess"])
+                backend.increment_session_counts(["M-sess"], namespace="default")
                 seen_mid = observer.execute(
                     "SELECT COALESCE(session_count, 0) FROM memories WHERE id = ?", ("M-sess",)
                 ).fetchone()[0]
@@ -251,8 +251,8 @@ def test_increment_session_counts_inside_transaction_defers_commit(tmp_path: Pat
         backend.close()
 
 
-def test_increment_access_counts_inside_transaction_defers_commit(tmp_path: Path) -> None:
-    """increment_access_counts() must not commit prematurely in a transaction."""
+def test_increment_recall_access_inside_transaction_defers_commit(tmp_path: Path) -> None:
+    """increment_recall_access() must not commit prematurely in a transaction."""
     import sqlite3
 
     db_path = tmp_path / "inc_acc.db"
@@ -265,7 +265,7 @@ def test_increment_access_counts_inside_transaction_defers_commit(tmp_path: Path
                 "SELECT COALESCE(access_count, 0) FROM memories WHERE id = ?", ("M-acc",)
             ).fetchone()[0]
             with backend.transaction():
-                backend.increment_access_counts(["M-acc"])
+                backend.increment_recall_access(["M-acc"], namespace="default")
                 seen_mid = observer.execute(
                     "SELECT COALESCE(access_count, 0) FROM memories WHERE id = ?", ("M-acc",)
                 ).fetchone()[0]
@@ -369,8 +369,8 @@ def test_increment_counts_are_bounded_at_max(tmp_path: Path) -> None:
             )
             backend._conn.commit()
 
-        backend.increment_session_counts(["M-cap"])
-        backend.increment_access_counts(["M-cap"])
+        backend.increment_session_counts(["M-cap"], namespace="default")
+        backend.increment_recall_access(["M-cap"], namespace="default")
 
         with backend._lock:
             session_count, access_count = backend._conn.execute(
@@ -812,7 +812,7 @@ def test_standalone_mutator_cannot_join_rolling_back_transaction(tmp_path: Path)
         def outsider() -> None:
             transaction_open.wait(timeout=5)
             try:
-                outsider_results.append(backend.increment_access_counts(["M-victim"]))
+                outsider_results.append(backend.increment_recall_access(["M-victim"], namespace="default"))
             except BaseException as exc:
                 with errors_lock:
                     thread_errors.append(exc)
@@ -850,7 +850,7 @@ def test_transaction_adopts_and_commits_existing_implicit_transaction(tmp_path: 
         assert backend._conn.in_transaction
 
         with backend.transaction():
-            backend.increment_access_counts(["M-victim"])
+            backend.increment_recall_access(["M-victim"], namespace="default")
 
         victim = backend.get("M-victim", namespace="default")
         assert victim is not None

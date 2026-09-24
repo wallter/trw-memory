@@ -6,7 +6,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import Any, cast
+from typing import cast
 
 from trw_memory.retrieval.validity_prior import expiry_has_passed
 
@@ -150,32 +150,9 @@ class SourcePolicy:
         return [dict(result, score=-key[1]) for key, result in ranked]
 
 
-def apply_source_policy(
-    results: Sequence[Mapping[str, Any]],
-    *,
-    include_distilled: bool = True,
-    distilled_weight: float | None = None,
-    include_source_kinds: list[str] | None = None,
-    exclude_source_kinds: list[str] | None = None,
-    source_weights: dict[str, float] | None = None,
-    exclude_expired: bool = True,
-    reference_time: datetime | None = None,
-) -> list[dict[str, Any]]:
-    return SourcePolicy.resolve(
-        include_distilled=include_distilled,
-        distilled_weight=distilled_weight,
-        include_source_kinds=include_source_kinds,
-        exclude_source_kinds=exclude_source_kinds,
-        source_weights=source_weights,
-        exclude_expired=exclude_expired,
-        reference_time=reference_time,
-    ).apply(results)
-
-
 __all__ = [
     "DEFAULT_SOURCE_WEIGHTS",
     "SourcePolicy",
-    "apply_source_policy",
     "classify_source_family",
     "is_expired_result",
     "resolve_expiry",

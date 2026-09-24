@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import sqlite3
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -13,6 +14,7 @@ from trw_memory.embeddings.provenance import EmbeddingSpace, StoredVector, Vecto
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage._change_feed import change_token, entries_changed_since
+from trw_memory.storage._crud_index_ops import insert_edges, read_edges
 from trw_memory.storage._vector_ops import (
     delete_hype_siblings,
     delete_vector,
@@ -27,7 +29,7 @@ from trw_memory.storage._vector_ops import (
     vector_space_census,
 )
 from trw_memory.storage._wal_checkpoint import CheckpointResult
-from trw_memory.storage.interface import NamespaceChangeToken
+from trw_memory.storage.interface import GraphEdge, NamespaceChangeToken
 
 if TYPE_CHECKING:
     from trw_memory.storage.sqlite_backend import SQLiteBackend
@@ -87,6 +89,16 @@ class SQLiteCheckpointVectorMixin:
         except OSError as exc:
             logger.warning("wal_checkpoint_lock_failed", error_type=type(exc).__name__, db=str(self._db_path))
             return CheckpointResult(busy=1, checkpointed=0, log_frames=0, mode="error")
+
+    def graph_edges(self, namespace: str) -> list[GraphEdge]:
+        with self._fresh_connection(), self._lock:
+            return read_edges(cast("SQLiteBackend", self), namespace)
+
+    def add_graph_edges(self, namespace: str, edges: Sequence[GraphEdge]) -> None:
+        with self._fresh_connection(), self._lock:
+            insert_edges(cast("SQLiteBackend", self), namespace, edges)
+            if self._skip_commit_depth == 0:
+                self._conn.commit()
 
     def _delete_vector(self, entry_id: str, namespace: str) -> None:
         delete_vector_internal(self._conn, entry_id, namespace)
@@ -151,6 +163,21 @@ class SQLiteCheckpointVectorMixin:
             return get_vector_records(
                 self._conn, self._lock, vec_available=self._vec_available, entry_ids=entry_ids, namespace=namespace
             )
+
+    def vector_records_or_raise(self, entry_ids: list[str], *, namespace: str) -> dict[str, StoredVector]:
+        """``get_vector_records``, but a failed read raises ``StorageError`` instead of returning none."""
+        try:
+            with self._fresh_connection():
+                return get_vector_records(
+                    self._conn,
+                    self._lock,
+                    vec_available=self._vec_available,
+                    entry_ids=entry_ids,
+                    namespace=namespace,
+                    strict=True,
+                )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Failed to read vectors of {namespace}: {exc}", path=str(self._db_path)) from exc
 
     def vector_space_census(self, *, namespace: str) -> dict[EmbeddingSpace | None, int] | None:
         with self._fresh_connection():

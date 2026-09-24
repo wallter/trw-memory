@@ -38,17 +38,6 @@ _MAX_LIVE_RATE_LIMIT_SESSIONS = 10_000
 logger = structlog.get_logger(__name__)
 
 
-# Anomaly-stats helpers extracted to _runtime_anomaly.py
-# (PRD-DIST-245 batch 102). Re-exports preserve back-compat names.
-from trw_memory.security._runtime_anomaly import (
-    AnomalyStats as AnomalyStats,
-    build_anomaly_stats as _build_anomaly_stats,
-    score_anomaly as _score_entry_anomaly,
-    series_stats as _series_stats,
-    write_anomaly_stats as _write_anomaly_stats,
-)
-
-
 def get_audit_log(config: MemoryConfig) -> AuditLog:
     """Return the configured audit log."""
     return AuditLog(Path(config.audit_log_path), fsync=config.fsync_on_append)
@@ -184,16 +173,7 @@ def _charge_write_slot(config: MemoryConfig, session_id: str) -> None:
 # ``hash_path_components`` / ``redaction_marker`` were deleted with the
 # write-path redaction action (2026-07-25) — see _runtime_pii.REDACTED_PII_TYPES.
 from trw_memory.security._runtime_pii import (
-    apply_runtime_pii_policy as _apply_runtime_pii_policy,
     flag_code_snippet as _flag_code_snippet,
-    replace_pii as _replace_pii,
-)
-
-
-from trw_memory.security._runtime_quarantine import (
-    open_quarantine_backend as _open_quarantine_backend,
-    quarantine_namespace_dir as _quarantine_namespace_dir,
-    read_namespace_metadata as _read_namespace_metadata,
 )
 
 
@@ -269,7 +249,6 @@ def security_maintenance_status() -> dict[str, object]:
 
 
 from trw_memory.security._runtime_quarantine import (
-    append_review_log as _append_review_log,
     get_status_history as get_status_history,
     review_quarantined_entry as review_quarantined_entry,
 )
@@ -328,7 +307,6 @@ def audit_entry(
 
 # Canary FR-007 helpers extracted to _runtime_canary.py (PRD-DIST-245 batch 101).
 from trw_memory.security._runtime_canary import (
-    CANARY_STATE as _CANARY_STATE,
     initialize_canaries as initialize_canaries,
     probe_canaries as probe_canaries,
     should_halt_recalls as should_halt_recalls,

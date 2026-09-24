@@ -45,11 +45,6 @@ class _StorageConfigMixin(BaseModel):
         validation_alias=AliasChoices("auto_generate_key", "memory_auto_generate_key"),
         description="Generate and persist a master key if none exists",
     )
-    key_rotation_backup: bool = Field(
-        default=True,
-        validation_alias=AliasChoices("key_rotation_backup", "memory_key_rotation_backup"),
-        description="Create a backup before key rotation work",
-    )
 
     # Local-only mode
     local_only: bool = Field(

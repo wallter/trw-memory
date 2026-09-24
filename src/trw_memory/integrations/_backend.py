@@ -7,6 +7,7 @@ async.  This module provides a thin sync wrapper around
 
 from __future__ import annotations
 
+import os
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -35,7 +36,6 @@ __all__ = [
     "make_entry",
     "namespace_store_locations",
     "open_namespace_store",
-    "resolve_backend",
     "resolve_backend_db_path",
     "resolve_backend_location",
 ]
@@ -86,6 +86,7 @@ def _create_sqlite_backend(
     db_path: Path,
     *,
     sqlcipher_key_hex: str | None,
+    check_integrity_once: bool = False,
 ) -> StorageBackend:
     """Create SQLite storage with the canonical recovery and dimension settings."""
     from trw_memory.storage.sqlite_backend import SQLiteBackend
@@ -98,6 +99,7 @@ def _create_sqlite_backend(
         corrupt_backup_keep=config.memory_corrupt_backup_keep,
         rebuild_from_cold=config.memory_recovery_rebuild_from_cold,
         recovery_inline_max_bytes=config.memory_recovery_inline_max_bytes,
+        check_integrity_once=check_integrity_once,
     )
 
 
@@ -165,29 +167,6 @@ def resolve_backend_location(config: MemoryConfig, namespace: str) -> Path:
     return Path(config.storage_path) / namespace.replace(":", "_") / "entries"
 
 
-def resolve_backend(
-    namespace: str,
-    storage_path: str | None,
-    backend: StorageBackend | None,
-) -> tuple[StorageBackend, bool]:
-    """Return a ``(backend, owns_backend)`` pair.
-
-    If *backend* is provided, returns it without ownership.  Otherwise
-    creates a new backend from *namespace* and *storage_path*.
-
-    Args:
-        namespace: Storage namespace.
-        storage_path: Override for storage directory (or ``None``).
-        backend: Pre-existing backend (for testing), or ``None``.
-
-    Returns:
-        Tuple of ``(backend_instance, owns_backend)``.
-    """
-    if backend is not None:
-        return backend, False
-    return create_backend(namespace, storage_path), True
-
-
 def create_backend(
     namespace: str,
     storage_path: str | None = None,
@@ -217,8 +196,13 @@ def create_backend_from_config(
     config: MemoryConfig,
     namespace: str,
     db_path_override: Path | str | None = None,
+    *,
+    check_integrity_once: bool = False,
 ) -> StorageBackend:
     """Create a sync :class:`StorageBackend` from an existing config object.
+
+    ``check_integrity_once`` is for the daemon's recall path only; see
+    ``storage._connection.open_and_configure``.
 
     When ``db_path_override`` is provided (SQLite only), the explicit file path
     is used directly and the ``base / namespace_dir / sqlite_db_name`` join is
@@ -250,7 +234,9 @@ def create_backend_from_config(
             _refuse_encrypted_single_store(config)
             master_key = get_master_key(config)
             sqlcipher_key_hex = derive_namespace_key(master_key, namespace)
-        return _create_sqlite_backend(config, db_path, sqlcipher_key_hex=sqlcipher_key_hex)
+        return _create_sqlite_backend(
+            config, db_path, sqlcipher_key_hex=sqlcipher_key_hex, check_integrity_once=check_integrity_once
+        )
 
     from trw_memory.storage.yaml_backend import YAMLBackend
 
@@ -313,6 +299,8 @@ def open_namespace_store(config: MemoryConfig, location: NamespaceStoreLocation)
 @contextmanager
 def discover_namespace_backends(
     config: MemoryConfig,
+    *,
+    reuse: StorageBackend | None = None,
 ) -> Iterator[list[tuple[list[str], StorageBackend]]]:
     """Open every on-disk namespace store and expose its actual namespaces.
 
@@ -320,14 +308,23 @@ def discover_namespace_backends(
     name is a lossy encoding of the namespace string. To build truthful
     cross-namespace views we must open each store and read the stored namespace
     value rather than guessing it from the folder name.
+
+    *reuse* is a backend the caller already holds open. A store at its file is
+    served by it, not opened a second time, and the caller keeps closing it
+    (PRD-CORE-298 FR05: under the single store every recall opened it twice).
     """
     from contextlib import ExitStack
 
+    reuse_path = getattr(reuse, "db_path", None)
+    reuse_file = os.path.realpath(reuse_path) if reuse_path is not None else None
     if config.memory_single_store_path or config.storage_backend == "sqlite":
         with ExitStack() as stack:
             stores: list[tuple[list[str], StorageBackend]] = []
             for location in namespace_store_locations(config):
-                store = stack.enter_context(open_namespace_store(config, location))
+                if reuse is not None and os.path.realpath(location.db_path) == reuse_file:
+                    store = reuse
+                else:
+                    store = stack.enter_context(open_namespace_store(config, location))
                 namespaces = store.list_namespaces()
                 if namespaces:
                     stores.append((namespaces, store))

@@ -70,7 +70,6 @@ __all__ = [
     "PROJECT_NAMESPACE_DOMAIN",
     "SLUG_MAX_CHARS",
     "ProjectIdentity",
-    "canonical_project_root",
     "project_slug",
     "resolve_project_identity",
     "resolve_project_namespace",
@@ -174,24 +173,6 @@ def _resolved_start(start: Path | str | None) -> Path:
     if env_root:
         return Path(env_root).resolve()
     return Path.cwd().resolve()
-
-
-def canonical_project_root(start: Path | str | None = None) -> Path:
-    """Resolve the canonical root that identifies *start*'s project.
-
-    Args:
-        start: Directory to resolve from. Defaults to ``TRW_PROJECT_ROOT`` or
-            the current working directory.
-
-    Returns:
-        The realpath of the repository's common git directory's parent when
-        *start* is inside a git repository (so every linked worktree of one
-        repository shares one root), otherwise the realpath of *start* itself.
-
-    See :func:`resolve_project_identity` when the caller needs to know whether
-    that root was actually established or only fallen back to.
-    """
-    return _canonical_root(_resolved_start(start))[0]
 
 
 def _canonical_root(root: Path) -> tuple[Path, IdentitySource, str | None]:

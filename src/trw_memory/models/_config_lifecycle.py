@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 __all__ = ["_LifecycleConfigMixin"]
 
@@ -121,23 +121,13 @@ class _LifecycleConfigMixin(BaseModel):
     # Scoring
     decay_half_life_days: float = Field(default=14.0, gt=0.0, description="Half-life in days for recency decay")
     decay_use_exponent: float = Field(default=0.6, ge=0.0, le=1.0, description="Exponent for utility-based decay")
-    lifecycle_use_fsrs: bool = Field(
-        default=False,
-        validation_alias=AliasChoices("lifecycle_use_fsrs", "memory_lifecycle_use_fsrs"),
-        description=(
-            "When True, entry_utility() uses FSRS-4.5 power-law retention "
-            "(R(t,S)=(1+FACTOR*t/S)^DECAY) instead of the Ebbinghaus exponential. "
-            "FSRS models spaced-repetition dynamics more accurately for entries "
-            "that have been recalled multiple times."
-        ),
-    )
     feedback_decay_min_factor: float = Field(
         default=0.5,
         ge=0.0,
         le=1.0,
         description=(
             "Floor on the PRD-CORE-132 feedback-decay factor (PRD-CORE-244 FR11 residual). "
-            "With helpful_count at 0 corpus-wide the term is a pure recall-frequency penalty "
+            "The term is a pure recall-frequency penalty "
             "of 0.95**recall_count with no lower bound, which buries whatever the retriever "
             "keeps finding. 0.0 restores the unbounded pre-floor behaviour."
         ),
@@ -162,7 +152,6 @@ class _LifecycleConfigMixin(BaseModel):
     consolidation_max_per_cycle: int = Field(
         default=50, gt=0, description="Maximum entries to evaluate in one consolidation cycle"
     )
-    consolidation_interval_days: int = Field(default=7, gt=0, description="Days between consolidation sweeps")
 
     # Audit
     audit_enabled: bool = Field(default=True, description="Enable audit logging of all memory operations")

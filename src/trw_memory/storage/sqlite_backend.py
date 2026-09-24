@@ -135,7 +135,6 @@ from trw_memory.storage._query_ops import (
 from trw_memory.storage._crud_ops import (
     delete as _crud_ops_delete,
     get as _crud_ops_get,
-    increment_access_counts as _crud_ops_increment_access_counts,
     increment_recall_access as _crud_ops_increment_recall_access,
     increment_session_counts as _crud_ops_increment_session_counts,
     store as _crud_ops_store,
@@ -147,7 +146,6 @@ from trw_memory.storage._crud_ops import (
 from trw_memory.storage._init_helpers import (
     load_vec_extension as _init_load_vec_extension,
     open_connection_with_recovery as _init_open_connection_with_recovery,
-    register_writer_registry as _init_register_writer_registry,
     start_integrity_scheduler as _init_start_integrity_scheduler,
 )
 
@@ -189,9 +187,12 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         rebuild_from_cold: bool = True,
         recovery_inline_max_bytes: int = 64 * 1024 * 1024,
         integrity_check_interval_minutes: int = 0,
-        concurrent_writer_warn_threshold: int = 4,
+        check_integrity_once: bool = False,
     ) -> None:
         self._db_path = db_path
+        #: PRD-CORE-298 FR05: skip quick_check when this process already verified
+        #: the file. Only the daemon's recall path asks; see ``open_and_configure``.
+        self._check_integrity_once = check_integrity_once
         self._dim = dim
         # Re-entrant because transaction() holds this lock for its full body;
         # delegated operations re-acquire it on the same thread. Other threads
@@ -207,7 +208,6 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         self._corrupt_backup_keep = corrupt_backup_keep
         self._rebuild_from_cold = rebuild_from_cold
         self._integrity_check_interval_minutes = integrity_check_interval_minutes
-        self._concurrent_writer_warn_threshold = concurrent_writer_warn_threshold
         db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         _prepare_db_file_mode(db_path)
 
@@ -270,9 +270,6 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         from trw_memory.storage._schema import ensure_fts_table as _ensure_fts_table
 
         self._fts_available: bool = _ensure_fts_table(self._conn)
-
-        # PRD-INFRA-064 (B3): multi-writer advisory registry (fail-open)
-        self._writer_registry = _init_register_writer_registry(db_path, self._concurrent_writer_warn_threshold)
 
         # PRD-INFRA-063 (B2): periodic integrity scheduler (fail-open)
         self._integrity_scheduler = _init_start_integrity_scheduler(
@@ -491,19 +488,18 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
             raise StorageError(f"Failed to update entry {entry_id}: {exc}", path=str(self._db_path)) from exc
         return updated
 
-    def increment_session_counts(self, entry_ids: list[str], *, updated_at: datetime | None = None) -> int:
-        """Increment session_count for multiple entries in one transaction."""
+    def increment_session_counts(
+        self, entry_ids: list[str], *, namespace: str, updated_at: datetime | None = None
+    ) -> int:
+        """Increment session_count for *namespace*'s rows among *entry_ids* in one transaction."""
         with self._fresh_connection():
-            return _crud_ops_increment_session_counts(self, entry_ids, updated_at=updated_at)
+            return _crud_ops_increment_session_counts(self, entry_ids, namespace=namespace, updated_at=updated_at)
 
-    def increment_access_counts(self, entry_ids: list[str], *, accessed_at: datetime | None = None) -> int:
-        """Increment access_count and last_accessed_at in one transaction."""
-        with self._fresh_connection():
-            return _crud_ops_increment_access_counts(self, entry_ids, accessed_at=accessed_at)
-
-    def increment_recall_access(self, entry_ids: list[str], *, accessed_at: datetime | None = None) -> int:
-        """F-008: increment access_count + recall_count + last_accessed_at in ONE commit."""
-        return _crud_ops_increment_recall_access(self, entry_ids, accessed_at=accessed_at)
+    def increment_recall_access(
+        self, entry_ids: list[str], *, namespace: str, accessed_at: datetime | None = None
+    ) -> int:
+        """F-008: increment access_count + recall_count + last_accessed_at of *namespace*'s rows in ONE commit."""
+        return _crud_ops_increment_recall_access(self, entry_ids, namespace=namespace, accessed_at=accessed_at)
 
     def delete(self, entry_id: str, *, namespace: str) -> bool:
         """Remove the ``(namespace, entry_id)`` entry and every sidecar row it owns."""
@@ -628,9 +624,6 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
                 after=after,
             )
 
-    # Backward-compat alias for PRD-CORE-086 FR07 traceability.
-    count_with_assertions = entries_with_assertions
-
     def list_entries(
         self,
         *,
@@ -701,15 +694,11 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
             return list(query_wiki_inbound_refs(self, target_slug, namespace=namespace))
 
     def close(self) -> None:
-        """Stop integrity scheduler + writer registry, then close connection."""
+        """Stop integrity scheduler, then close connection."""
         if self._integrity_scheduler is not None:
             with contextlib.suppress(Exception):
                 self._integrity_scheduler.stop(timeout=2.0)
             self._integrity_scheduler = None
-        if self._writer_registry is not None:
-            with contextlib.suppress(Exception):
-                self._writer_registry.close()
-            self._writer_registry = None
         with self._lock, contextlib.suppress(sqlite3.Error):
             self._conn.close()
         logger.debug("sqlite_backend_closed", db=str(self._db_path))

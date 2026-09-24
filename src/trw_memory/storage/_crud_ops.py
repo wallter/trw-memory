@@ -14,12 +14,21 @@ that pass the backend handle.
   whitelisted column validation + JSON serialization for list/dict
   fields. Suppresses commit when within a ``transaction()`` block
   via ``backend._skip_commit_depth``.
-- ``increment_session_counts`` — bulk session_count++.
-- ``increment_access_counts`` — bulk access_count++ + last_accessed_at.
+- ``increment_session_counts`` — bulk session_count++ in one namespace.
+- ``increment_recall_access`` — bulk access/recall count++ + last_accessed_at in one namespace.
 - ``delete`` — DELETE WHERE id, with vector cleanup when available.
 
 Each helper takes a ``backend`` argument exposing the instance state
 (_conn, _lock, _db_path, _skip_commit_depth, _vec_available, _delete_vector).
+
+The ``memory_tags``/``memory_graph_edges`` sidecar-index maintenance
+(``_replace_tag_postings``, ``purge_tag_postings_for``, ``purge_edges_for``,
+``purge_orphan_edges``) moved to the sibling ``_crud_index_ops.py``, and the
+bulk ``increment_session_counts``
+moved to the sibling ``_crud_counters.py`` — both split out (PRD-CORE-291
+slice 3) when this module crossed the effective-LOC ceiling. Both are
+re-exported here so every existing
+``from trw_memory.storage._crud_ops import <name>`` call site keeps working.
 
 Extracted as PRD-DIST-245 Phase 1 batch 87.
 """
@@ -29,7 +38,6 @@ from __future__ import annotations
 import contextlib
 import json
 import sqlite3
-from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -38,9 +46,17 @@ import structlog
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage._change_feed import note_delete
+from trw_memory.storage._crud_counters import increment_session_counts
+from trw_memory.storage._crud_index_ops import (
+    _replace_tag_postings,
+    purge_edges_for,
+    purge_orphan_edges,
+    purge_tag_postings_for,
+)
 from trw_memory.storage._row_mapper import entry_to_row, row_to_entry
 from trw_memory.storage._shared import (
     _BOOKKEEPING_FIELDS,
+    _MAX_COUNTER,
     DICT_FIELDS,
     LIST_FIELDS,
     serialize_update_value,
@@ -50,17 +66,23 @@ from trw_memory.storage._sql_utils import iter_bind_chunks
 from trw_memory.storage._utf8_validator import validate_entry_utf8, validate_utf8_fields
 from trw_memory.sync.delta import DeltaTracker
 
+__all__ = [
+    "delete",
+    "get",
+    "increment_recall_access",
+    "increment_session_counts",
+    "purge_edges_for",
+    "purge_orphan_edges",
+    "purge_tag_postings_for",
+    "store",
+    "store_many",
+    "update",
+]
+
 if TYPE_CHECKING:
     from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 logger = structlog.get_logger(__name__)
-
-# Upper bound for the monotonic recall/session/access counters. These only
-# ever increment (one per recall/session), so an adversary replaying access
-# could otherwise grow them without limit and skew utility/decay scoring. The
-# cap is far above any legitimate usage and keeps the values comfortably within
-# SQLite's signed-64-bit integer range.
-_MAX_COUNTER = 1_000_000_000
 
 # F11: statuses that retire an entry from active recall. When an update
 # transitions an entry into one of these, its dense vector is removed from
@@ -89,40 +111,6 @@ def _fts_row(entry: MemoryEntry) -> tuple[str, str, str, str, str]:
     """Return the ``memories_fts`` row tuple for *entry* (namespace-qualified)."""
     tags_json = json.dumps(entry.tags) if isinstance(entry.tags, list) else (entry.tags or "[]")
     return (entry.id, entry.namespace, entry.content, entry.detail or "", tags_json)
-
-
-def _replace_tag_postings(backend: SQLiteBackend, namespace: str, entry_id: str, tags: Sequence[str]) -> None:
-    """Re-point the ``memory_tags`` inverted index at *entry_id*'s current tags.
-
-    PRD-CORE-245 FR07: this index is what the bounded tag derivation queries in
-    place of the 98,288 materialised ``tag_cooccurrence`` edges the schema-5
-    migration deleted. It is maintained beside the FTS row on every write and
-    pruned beside the edges on every delete, so it can never drift from the
-    ``tags`` column it mirrors.
-    """
-    backend._conn.execute(
-        "DELETE FROM memory_tags WHERE namespace = ? AND entry_id = ?",
-        (namespace, entry_id),
-    )
-    rows = [(namespace, tag, entry_id) for tag in dict.fromkeys(tags) if str(tag).strip()]
-    if rows:
-        backend._conn.executemany("INSERT OR IGNORE INTO memory_tags(namespace, tag, entry_id) VALUES(?, ?, ?)", rows)
-
-
-def purge_tag_postings_for(backend: SQLiteBackend, namespace: str, entry_ids: Sequence[str]) -> None:
-    """Drop every ``memory_tags`` posting for *entry_ids* within *namespace*.
-
-    CONTRACT: mirrors :func:`purge_edges_for` — the caller already holds
-    ``backend._lock`` and owns the commit.
-    """
-    if not entry_ids:
-        return
-    for chunk in iter_bind_chunks(list(entry_ids), reserved_bindings=1):
-        placeholders = ",".join("?" for _ in chunk)
-        backend._conn.execute(
-            f"DELETE FROM memory_tags WHERE namespace = ? AND entry_id IN ({placeholders})",  # noqa: S608 — placeholders is ? repeated; ids are parameterized
-            (namespace, *chunk),
-        )
 
 
 def store(
@@ -398,98 +386,14 @@ def update(
         ) from exc
 
 
-def increment_session_counts(
-    backend: SQLiteBackend,
-    entry_ids: list[str],
-    *,
-    updated_at: datetime | None = None,
-) -> int:
-    """Increment session_count for multiple entries in one transaction."""
-    if not entry_ids:
-        return 0
-
-    # PRD-CORE-278 FR06: session bookkeeping no longer stamps ``updated_at``.
-    # ``updated_at`` is kept as the parameter name because callers pass it, and
-    # because a future content-bearing use of this path would want it.
-    _ = updated_at
-    values = [(entry_id,) for entry_id in entry_ids]
-
-    try:
-        sql = f"""
-            UPDATE memories
-            SET session_count = MIN(COALESCE(session_count, 0) + 1, {_MAX_COUNTER}),
-                sync_seq = COALESCE(sync_seq, 0) + 1,
-                last_synced_at = NULL
-            WHERE id = ?
-        """  # noqa: S608 — _MAX_COUNTER is a module-level int constant, not user input.
-        with backend._lock:
-            before = backend._conn.total_changes
-            backend._conn.executemany(sql, values)
-            # Suppress the commit inside a ``transaction()`` block so this
-            # batches into the caller's outermost COMMIT instead of prematurely
-            # committing their open transaction (matches store()/update()).
-            if backend._skip_commit_depth == 0:
-                backend._conn.commit()
-            return int(backend._conn.total_changes - before)
-    except sqlite3.Error as exc:
-        if backend._skip_commit_depth == 0:
-            with backend._lock, contextlib.suppress(sqlite3.Error):
-                backend._conn.rollback()
-        raise StorageError(
-            f"Failed to increment session counts: {exc}",
-            path=str(backend._db_path),
-        ) from exc
-
-
-def increment_access_counts(
-    backend: SQLiteBackend,
-    entry_ids: list[str],
-    *,
-    accessed_at: datetime | None = None,
-) -> int:
-    """Increment access_count and last_accessed_at for entries in one transaction."""
-    if not entry_ids:
-        return 0
-
-    now = accessed_at or datetime.now(timezone.utc)
-    # PRD-CORE-278 FR06: ``last_accessed_at`` IS the access stamp; ``updated_at``
-    # is content time and is left alone.
-    values = [(now.isoformat(), entry_id) for entry_id in entry_ids]
-
-    try:
-        sql = f"""
-            UPDATE memories
-            SET access_count = MIN(COALESCE(access_count, 0) + 1, {_MAX_COUNTER}),
-                last_accessed_at = ?,
-                sync_seq = COALESCE(sync_seq, 0) + 1,
-                last_synced_at = NULL
-            WHERE id = ?
-        """  # noqa: S608 — _MAX_COUNTER is a module-level int constant, not user input.
-        with backend._lock:
-            before = backend._conn.total_changes
-            backend._conn.executemany(sql, values)
-            # Defer the commit inside a ``transaction()`` block (see
-            # increment_session_counts) to preserve caller transaction atomicity.
-            if backend._skip_commit_depth == 0:
-                backend._conn.commit()
-            return int(backend._conn.total_changes - before)
-    except sqlite3.Error as exc:
-        if backend._skip_commit_depth == 0:
-            with backend._lock, contextlib.suppress(sqlite3.Error):
-                backend._conn.rollback()
-        raise StorageError(
-            f"Failed to increment access counts: {exc}",
-            path=str(backend._db_path),
-        ) from exc
-
-
 def increment_recall_access(
     backend: SQLiteBackend,
     entry_ids: list[str],
     *,
+    namespace: str,
     accessed_at: datetime | None = None,
 ) -> int:
-    """F-008: batch recall bookkeeping in ONE UPDATE / one commit.
+    """F-008: batch recall bookkeeping in ONE UPDATE / one commit, on *namespace*'s rows only.
 
     Increments ``access_count`` AND ``recall_count`` and stamps
     ``last_accessed_at`` for every id in ``entry_ids`` using a single
@@ -517,70 +421,15 @@ def increment_recall_access(
                         last_accessed_at = ?,
                         sync_seq = COALESCE(sync_seq, 0) + 1,
                         last_synced_at = NULL
-                    WHERE id IN ({placeholders})
+                    WHERE namespace = ? AND id IN ({placeholders})
                 """  # noqa: S608
-                backend._conn.execute(sql, [now_iso, *chunk])
+                backend._conn.execute(sql, [now_iso, namespace, *chunk])
             return int(backend._conn.total_changes - before)
     except sqlite3.Error as exc:
         raise StorageError(
             f"Failed to increment recall access: {exc}",
             path=str(backend._db_path),
         ) from exc
-
-
-# memory_graph_edges binds each purged id twice (source + target), so chunking
-# keeps each statement below SQLite's conservative bind ceiling. All deletes
-# run inside the caller's held lock and transaction, so the net effect remains
-# atomic.
-
-
-def purge_edges_for(backend: SQLiteBackend, entry_ids: Sequence[str], namespace: str) -> None:
-    """Delete knowledge-graph edges referencing any of *entry_ids* in *namespace*.
-
-    ``memory_graph_edges`` declares no FK cascade (``PRAGMA foreign_keys`` is
-    off process-wide), so orphan edges must be pruned explicitly whenever their
-    endpoint rows are deleted. A single ``DELETE`` with ``OR`` covers both sides
-    of a directed edge. Shared by the per-row :func:`delete` and the bulk
-    ``delete_by_namespace`` paths — one source of truth for edge cleanup.
-
-    CONTRACT: the caller MUST already hold ``backend._lock`` and own the commit.
-    This helper neither acquires the lock nor commits, so the edge purge batches
-    into the caller's outermost ``COMMIT`` and preserves transaction atomicity
-    (test_storage_transaction_atomicity.py).
-    """
-    if not entry_ids:
-        return
-    ids = list(entry_ids)
-    for chunk in iter_bind_chunks(ids, bindings_per_item=2, reserved_bindings=1):
-        placeholders = ",".join("?" for _ in chunk)
-        backend._conn.execute(
-            f"DELETE FROM memory_graph_edges WHERE namespace = ? AND (source_id IN ({placeholders}) "  # noqa: S608 — placeholders is ? repeated; ids are parameterized values
-            f"OR target_id IN ({placeholders}))",
-            (namespace, *chunk, *chunk),
-        )
-
-
-def purge_orphan_edges(backend: SQLiteBackend) -> None:
-    """Delete every edge whose source or target row no longer exists.
-
-    :func:`purge_edges_for` is namespace-qualified (PRD-CORE-245 FR02) because a
-    per-row delete knows exactly which namespace it is addressing. A bulk
-    ``delete_by_namespace`` needs the complementary guarantee: an edge that
-    names a row which is now gone is dangling regardless of which namespace the
-    edge itself is filed under, and a BFS that follows it lands on a ghost node.
-    This is the edge-table twin of the ``memories_fts`` ghost-row anti-join.
-
-    CONTRACT: caller holds ``backend._lock`` and owns the commit.
-    """
-    backend._conn.execute(
-        "DELETE FROM memory_graph_edges WHERE NOT EXISTS ("
-        "  SELECT 1 FROM memories m WHERE m.namespace = memory_graph_edges.namespace"
-        "    AND m.id = memory_graph_edges.source_id"
-        ") OR NOT EXISTS ("
-        "  SELECT 1 FROM memories m WHERE m.namespace = memory_graph_edges.namespace"
-        "    AND m.id = memory_graph_edges.target_id"
-        ")"
-    )
 
 
 def delete(backend: SQLiteBackend, entry_id: str, namespace: str) -> bool:

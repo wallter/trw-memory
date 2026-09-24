@@ -30,41 +30,22 @@ class TestDecayScoring:
         assert decay_old >= 0.3
         assert decay_old == pytest.approx(0.3, abs=0.01)
 
-    def test_q_learning_convergence(self) -> None:
-        """2.2 — Q-learning updates converge toward target reward."""
-        from trw_memory.lifecycle.scoring import update_q_value
-
-        q_new = update_q_value(q_old=0.5, reward=1.0, alpha=0.15)
-        assert q_new == pytest.approx(0.575, abs=0.01)
-
-        q_neg = update_q_value(q_old=0.5, reward=0.0, alpha=0.15)
-        assert q_neg == pytest.approx(0.425, abs=0.01)
-
-        q_value = 0.5
-        for _ in range(50):
-            q_value = update_q_value(q_value, reward=0.8, alpha=0.15)
-        assert abs(q_value - 0.8) < 0.05
-
     def test_composite_utility_score_ordering(self) -> None:
         """2.3 — High-impact recent entries score higher than low-impact old ones."""
         from trw_memory.lifecycle.scoring import compute_utility_score
 
         score_high = compute_utility_score(
-            q_value=0.85,
             days_since_last_access=1,
             recurrence_count=10,
             base_impact=0.9,
-            q_observations=10,
             access_count=10,
             source_type="human",
             half_life_days=14.0,
         )
         score_low = compute_utility_score(
-            q_value=0.1,
             days_since_last_access=300,
             recurrence_count=1,
             base_impact=0.2,
-            q_observations=2,
             access_count=0,
             source_type="agent",
             half_life_days=14.0,
@@ -167,21 +148,17 @@ class TestHumanSourceBoost:
         from trw_memory.lifecycle.scoring import compute_utility_score
 
         score_human = compute_utility_score(
-            q_value=0.5,
             days_since_last_access=30,
             recurrence_count=1,
             base_impact=0.5,
-            q_observations=3,
             access_count=1,
             source_type="human",
             half_life_days=14.0,
         )
         score_agent = compute_utility_score(
-            q_value=0.5,
             days_since_last_access=30,
             recurrence_count=1,
             base_impact=0.5,
-            q_observations=3,
             access_count=1,
             source_type="agent",
             half_life_days=14.0,

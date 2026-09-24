@@ -250,7 +250,6 @@ def _create_consolidated_entry(
     - tags: sorted union of all tags
     - evidence: union of all evidence (deduplicated)
     - recurrence: sum of cluster recurrences
-    - q_value: max of cluster q_values
 
     Writes the entry via storage.store().
 
@@ -302,12 +301,8 @@ def _create_consolidated_entry(
             "tags": sorted({t for e in cluster for t in e.tags}),
             "evidence": list(dict.fromkeys(ev for e in cluster for ev in e.evidence)),
             "recurrence": sum(e.recurrence for e in cluster),
-            "q_value": max(e.q_value for e in cluster),
-            "q_observations": sum(e.q_observations for e in cluster),
             "access_count": sum(e.access_count for e in cluster),
             "recall_count": sum(e.recall_count for e in cluster),
-            "helpful_count": sum(e.helpful_count for e in cluster),
-            "unhelpful_count": sum(e.unhelpful_count for e in cluster),
             "protection_tier": protection_tier,
             "assertions": assertions,
             "status": MemoryStatus.ACTIVE,

@@ -75,6 +75,11 @@ def test_the_bound_is_what_the_description_says_it_is(tmp_path):
         backend.close()
 
 
+#: With a configured pool of 10 and ``limit=2`` the scan reads max(2 * 25, 10) = 50
+#: rows, so 59 newer fillers push the needle past it.
+_FILLERS = 59
+
+
 def _seed_namespace(backend: SQLiteBackend, fillers: int) -> None:
     """One old needle, then ``fillers`` newer rows, all in project:default."""
     base = datetime.now(timezone.utc) - timedelta(days=30)
@@ -127,9 +132,11 @@ def _recall_needle(backend: SQLiteBackend, config: MemoryConfig) -> tuple[list[b
     return pool, list(result["memories"])
 
 
-def test_entries_past_the_bound_are_not_searched(tmp_path, monkeypatch):
-    """FR07: the truthful shape of the limit -- an old row outside both the
-    store-scan bound and the tier index is not searched.
+def test_entries_past_the_bound_and_missed_by_full_text_are_not_searched(tmp_path, monkeypatch):
+    """FR07: the truthful shape of the limit -- an old row outside the
+    store-scan bound, missed by full-text search and absent from the tier
+    index is not searched. (A row full-text search does find is searched:
+    PRD-CORE-298 FR05, ``test_recall_tool_candidate_policy.py``.)
 
     Uses a small configured bound so the property is observable without
     building a 6500-row store; the mechanism is identical. The tier runtime
@@ -141,8 +148,9 @@ def test_entries_past_the_bound_are_not_searched(tmp_path, monkeypatch):
     monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "store"))
     monkeypatch.setattr("trw_memory.tools.recall.supports_tier_runtime", lambda backend: False)
     backend = SQLiteBackend(tmp_path / "m.db")
+    monkeypatch.setattr(backend, "search_fts", lambda *args, **kwargs: [])
     try:
-        _seed_namespace(backend, fillers=39)
+        _seed_namespace(backend, fillers=_FILLERS)
         config = MemoryConfig()
         assert config.hybrid_search_candidate_pool_size == 10
 
@@ -162,9 +170,9 @@ def test_the_tier_index_is_the_documented_carve_out(tmp_path, monkeypatch):
     monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "store"))
     backend = SQLiteBackend(tmp_path / "m.db")
     try:
-        _seed_namespace(backend, fillers=39)
+        _seed_namespace(backend, fillers=_FILLERS)
         config = MemoryConfig()
-        assert 40 <= max(config.hot_max_entries * 8, 200), "fixture must sit inside the warmup seed"
+        assert _FILLERS + 1 <= max(config.hot_max_entries * 8, 200), "fixture must sit inside the warmup seed"
 
         pool, memories = _recall_needle(backend, config)
 
@@ -175,7 +183,7 @@ def test_the_tier_index_is_the_documented_carve_out(tmp_path, monkeypatch):
 
 
 def test_a_large_limit_lifts_the_bound(tmp_path):
-    """FR07: the disclosed max(limit * 5, pool) is what recall really asks for.
+    """FR07: the disclosed max(limit * 25, pool) is what recall really asks for.
 
     Observed through the backend, not recomputed in the test: a limit large
     enough to beat the configured pool must widen the loaded population.
@@ -202,7 +210,7 @@ def test_a_large_limit_lifts_the_bound(tmp_path):
             return original(**kwargs)
 
         backend.list_entries = _spy  # type: ignore[method-assign]
-        big = config.hybrid_search_candidate_pool_size  # limit * 5 beats the pool
+        big = config.hybrid_search_candidate_pool_size // 5  # limit * 25 beats the pool
         memory_recall_impl(
             "alpha",
             "project:default",
@@ -212,6 +220,6 @@ def test_a_large_limit_lifts_the_bound(tmp_path):
             config=config,
         )
         backend.list_entries = original  # type: ignore[method-assign]
-        assert observed[0] == big * 5, f"recall asked for {observed[0]}, not limit*5"
+        assert observed[0] == big * 25, f"recall asked for {observed[0]}, not limit*25"
     finally:
         backend.close()

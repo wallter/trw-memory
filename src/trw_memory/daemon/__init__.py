@@ -1,13 +1,13 @@
 """One loopback daemon in front of the user-space memory store.
 
 PRD-CORE-253 FR03 and FR08. ``trw-memory-server serve http`` runs a
-streamable-HTTP MCP endpoint on 127.0.0.1 with a per-user bearer token, an
+streamable-HTTP MCP endpoint on 127.0.0.1 with per-checkout namespace grants, an
 ephemeral port published through a 0600 discovery file, a single-instance
 claim, and an idle shutdown. :class:`DaemonClient` attaches to it and fails
 closed -- for reads as well as writes -- when it cannot.
 
 The narrow interface is everything below; the modules behind it
-(``_loopback``, ``_instance``, ``_token``, ``_discovery``, ``_serve``) are
+(``_loopback``, ``_instance``, ``_grants``, ``_discovery``, ``_serve``) are
 implementation and may be reshaped freely.
 """
 
@@ -18,14 +18,13 @@ from trw_memory.daemon._discovery import (
     DiscoveryAbsent,
     DiscoveryInvalid,
     DiscoveryRead,
-    read_discovery,
     read_discovery_result,
     read_live_discovery,
 )
+from trw_memory.daemon._grants import mint_grant, read_checkout_grant, read_checkout_pin, write_checkout_grant
 from trw_memory.daemon._instance import claim_single_instance, release_single_instance
 from trw_memory.daemon._loopback import LOOPBACK_HOST, bind_loopback_socket, require_loopback
 from trw_memory.daemon._paths import DaemonPaths
-from trw_memory.daemon._token import ensure_token, read_token, tokens_match
 
 __all__ = [
     "DAEMON_START_COMMAND",
@@ -39,16 +38,16 @@ __all__ = [
     "DiscoveryRead",
     "bind_loopback_socket",
     "claim_single_instance",
-    "ensure_token",
-    "read_discovery",
+    "mint_grant",
+    "read_checkout_grant",
+    "read_checkout_pin",
     "read_discovery_result",
     "read_live_discovery",
-    "read_token",
     "release_single_instance",
     "require_loopback",
     "serve_loopback",
     "start_daemon_detached",
-    "tokens_match",
+    "write_checkout_grant",
 ]
 
 
@@ -56,7 +55,7 @@ def __getattr__(name: str) -> object:
     """Defer the fastmcp-dependent surface until it is actually asked for.
 
     ``fastmcp`` is the optional ``[mcp]`` extra, and ``uvicorn`` arrives with
-    it. Importing this package for a path resolution, a token or a discovery
+    it. Importing this package for a path resolution, a grant or a discovery
     read must not require either, so the serving loop and the client are loaded
     on first attribute access instead of at import time.
     """

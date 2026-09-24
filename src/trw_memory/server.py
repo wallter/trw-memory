@@ -42,47 +42,80 @@ SERVE_MODES = ("stdio", "http")
 #: directions -- so adding a tool is one edit here rather than a hunt through
 #: test files, and a tool that appears without an edit fails loudly.
 REGISTERED_TOOL_NAMES: tuple[str, ...] = (
+    "memory_assertion_health",
     "memory_audit",
     "memory_code_index",
     "memory_code_search",
     "memory_code_symbol",
     "memory_consolidate",
+    "memory_list_page",
+    "memory_find_duplicate",
+    "memory_graph_backfill",
+    "memory_graph_related",
     "memory_forget",
+    "memory_get",
     "memory_maintain",
     "memory_namespace_diagnose",
     "memory_namespace_merge",
     "memory_namespace_rename",
     "memory_quarantine_list",
     "memory_recall",
+    "memory_record_surfaced",
     "memory_review",
     "memory_search",
     "memory_status",
     "memory_store",
+    "memory_update",
+    "memory_sync_dirty_page",
+    "memory_sync_mark_synced",
+    "memory_sync_find",
+    "memory_sync_apply",
+    "memory_admit_shared",
+    "memory_vectors",
+    "memory_similar",
+    "memory_verify",
+    "memory_import_checkout",
     "memory_wiki_lint",
 )
 
 
 def _register_tools() -> None:
     from trw_memory.tools.audit import register_audit_tool
+    from trw_memory.tools.checkout_import import register_checkout_import_tools
     from trw_memory.tools.code_index import register_code_index_tools
     from trw_memory.tools.consolidate import register_consolidate_tool
+    from trw_memory.tools.entry import register_entry_tools
     from trw_memory.tools.forget import register_forget_tool
+    from trw_memory.tools.listing import register_list_page_tool
     from trw_memory.tools.maintain import register_maintain_tool
     from trw_memory.tools.namespace_admin import register_namespace_admin_tools
     from trw_memory.tools.recall import register_recall_tool
+    from trw_memory.tools.recall_support import register_recall_support_tools
     from trw_memory.tools.review import register_quarantine_list_tool, register_review_tool
     from trw_memory.tools.search import register_search_tool
+    from trw_memory.tools.similar import register_similar_tool
     from trw_memory.tools.status import register_status_tool
     from trw_memory.tools.store import register_store_tool
+    from trw_memory.tools.sync import register_sync_tools
+    from trw_memory.tools.update import register_update_tool
+    from trw_memory.tools.verify import register_verify_tool
     from trw_memory.tools.wiki_lint import register_wiki_lint_tool
 
     register_store_tool(mcp)
     register_recall_tool(mcp)
+    register_recall_support_tools(mcp)
+    register_similar_tool(mcp)
+    register_verify_tool(mcp)
+    register_checkout_import_tools(mcp)
     register_audit_tool(mcp)
     register_review_tool(mcp)
     register_quarantine_list_tool(mcp)
     register_namespace_admin_tools(mcp)
     register_forget_tool(mcp)
+    register_entry_tools(mcp)
+    register_list_page_tool(mcp)
+    register_sync_tools(mcp)
+    register_update_tool(mcp)
     register_consolidate_tool(mcp)
     register_maintain_tool(mcp)
     register_search_tool(mcp)

@@ -11,7 +11,7 @@ from unittest.mock import patch
 from structlog.testing import capture_logs
 
 from trw_memory.sync._remote_publish import _drain_retry_queue_with_ids
-from trw_memory.sync.remote import clear_retry_queue, drain_retry_queue
+from trw_memory.sync.remote import drain_retry_queue
 from trw_memory.sync.retry_queue import MAX_QUEUE_BYTES, MAX_QUEUE_DEPTH, MAX_RETRIES, RetryQueue
 
 from ._test_sync_support import make_sync_config as _make_config
@@ -496,15 +496,6 @@ class TestRetryQueue:
             "remote_ids": {},
         }
         assert queue.depth() == 1
-
-    def test_clear_retry_queue_helper_empties_file(self, tmp_path: Path) -> None:
-        """The remote helper delegates to the queue clear operation."""
-        queue = RetryQueue(tmp_path / "queue.jsonl")
-        queue.enqueue("M-001", {"summary": "test"})
-
-        clear_retry_queue(queue)
-
-        assert queue.depth() == 0
 
 
 class TestModuleConstants:

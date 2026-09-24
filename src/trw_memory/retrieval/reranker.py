@@ -29,11 +29,15 @@ Performance notes
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import structlog
 
+# The embedder's offline switches (PRD-QUAL-110-FR04) govern the reranker too:
+# any truthy one forces ``local_files_only=True`` so an air-gapped deployer can
+# prove zero huggingface.co egress. ``local_only`` (config) is threaded in by
+# the caller for the same effect.
+from trw_memory.embeddings.local import _offline_download_blocked
 from trw_memory.models.memory import MemoryEntry
 
 logger = structlog.get_logger(__name__)
@@ -91,18 +95,6 @@ def __getattr__(name: str) -> object:
     if name == "_CROSS_ENCODER_AVAILABLE":
         return _import_cross_encoder()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-# Same offline switches as ``embeddings/local.py`` (PRD-QUAL-110-FR04): any
-# truthy value forces ``local_files_only=True`` so an air-gapped deployer can
-# prove zero huggingface.co egress. ``local_only`` (config) is threaded in by
-# the caller for the same effect.
-_OFFLINE_ENV_VARS = ("TRW_OFFLINE", "HF_HUB_OFFLINE")
-_TRUTHY = ("1", "true", "yes", "on")
-
-
-def _offline_download_blocked() -> bool:
-    return any(os.environ.get(name, "").strip().lower() in _TRUTHY for name in _OFFLINE_ENV_VARS)
 
 
 def _get_model(model_name: str, *, local_only: bool = False) -> object | None:

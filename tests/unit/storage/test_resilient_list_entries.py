@@ -17,16 +17,26 @@ import structlog.testing
 
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.storage import _resilient_fetch
 from trw_memory.storage._resilient_fetch import (
     FetchQuery,
     fetch_rows_resilient,
     fetch_rows_via_bytes_fallback,
-    get_bytes_fallback_failures,
-    get_schema_row_quarantines,
     is_utf8_decode_error,
     reset_bytes_fallback_failures,
 )
 from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+
+def _bytes_fallback_failures() -> int:
+    """Direct module-state read replacing the removed public getter."""
+    return _resilient_fetch._fallback_metrics.bytes_fallback_failures
+
+
+def _schema_row_quarantines() -> int:
+    """Direct module-state read replacing the removed public getter."""
+    return _resilient_fetch._fallback_metrics.schema_row_quarantines
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -74,14 +84,14 @@ def _inject_bad_utf8_row(
         INSERT OR REPLACE INTO memories (
             id, content, detail, tags, evidence, importance, status,
             recurrence, namespace, created_at, updated_at, access_count,
-            session_count, q_value, q_observations, source,
+            session_count, source,
             source_identity, client_profile, model_id,
             merged_from, consolidated_from, outcome_history,
             assertions, anchors, anchor_validity,
             type, nudge_line, expires_at, confidence,
             task_type, domain, phase_origin, phase_affinity,
             team_origin, protection_tier, sync_hash, sync_seq,
-            recall_count, helpful_count, unhelpful_count,
+            recall_count,
             vector_clock, metadata,
             published_to_platform, pending_delete, cross_validated
         ) VALUES (
@@ -90,7 +100,7 @@ def _inject_bad_utf8_row(
         + """' AS TEXT),
             '[]', '[]', 0.5, ?,
             1, ?, '2024-01-01T00:00:00+00:00', ?, 0,
-            0, 0.5, 0, 'agent',
+            0, 'agent',
             '', '', '',
             '[]', '[]', '[]',
             '[]', '[]', 1.0,
@@ -98,7 +108,7 @@ def _inject_bad_utf8_row(
             '', '[]', '', '[]',
             '', 'standard',
             '', 0,
-            0, 0, 0,
+            0,
             '{}', '{}',
             0, 0, 0
         )
@@ -421,7 +431,7 @@ def test_bytes_fallback_failure_increments_distinct_counter(tmp_path: Path) -> N
             raise sqlite3.OperationalError("unable to open database file")
 
     reset_bytes_fallback_failures()
-    assert get_bytes_fallback_failures() == 0
+    assert _bytes_fallback_failures() == 0
 
     query = FetchQuery(select_columns_sql="id, content", where_sql="1", limit=10)
     for _ in range(3):
@@ -434,7 +444,7 @@ def test_bytes_fallback_failure_increments_distinct_counter(tmp_path: Path) -> N
         assert delta == 0  # per-row quarantine delta stays 0 (fail-open preserved)
 
     # The distinct counter makes the otherwise-invisible drop countable.
-    assert get_bytes_fallback_failures() == 3
+    assert _bytes_fallback_failures() == 3
 
 
 def test_bytes_fallback_success_does_not_increment_failure_counter(tmp_path: Path) -> None:
@@ -452,7 +462,7 @@ def test_bytes_fallback_success_does_not_increment_failure_counter(tmp_path: Pat
     results = backend2.list_entries(limit=100)
 
     assert {e.id for e in results} == {"M-good-001"}
-    assert get_bytes_fallback_failures() == 0, "Working fallback must not count as a failure"
+    assert _bytes_fallback_failures() == 0, "Working fallback must not count as a failure"
     # Note: backend2._conn is the _ExecuteRaisesConn stub (no close()), matching
     # the sibling execute-time test which also leaves the stub un-closed.
 
@@ -470,23 +480,23 @@ def _inject_malformed_status_row(db_path: Path | str, entry_id: str) -> None:
         INSERT OR REPLACE INTO memories (
             id, content, detail, tags, evidence, importance, status,
             recurrence, namespace, created_at, updated_at, access_count,
-            session_count, q_value, q_observations, source,
+            session_count, source,
             source_identity, client_profile, model_id,
             merged_from, consolidated_from, outcome_history,
             assertions, anchors, anchor_validity,
             type, nudge_line, expires_at, confidence,
             task_type, domain, phase_origin, phase_affinity,
             team_origin, protection_tier, sync_hash, sync_seq,
-            recall_count, helpful_count, unhelpful_count,
+            recall_count,
             vector_clock, metadata,
             published_to_platform, pending_delete, cross_validated
         ) VALUES (
             ?, ?, 'd', '[]', '[]', 0.5, 'NOT_A_VALID_STATUS',
             1, 'default', '2024-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00', 0,
-            0, 0.5, 0, 'agent', '', '', '',
+            0, 'agent', '', '', '',
             '[]', '[]', '[]', '[]', '[]', 1.0,
             'fact', '', '', 'medium', '', '[]', '', '[]',
-            '', 'standard', '', 0, 0, 0, 0,
+            '', 'standard', '', 0, 0,
             '{}', '{}', 0, 0, 0
         )
         """,
@@ -518,7 +528,7 @@ def test_bytes_fallback_quarantines_unmappable_row(tmp_path: Path) -> None:
     assert len(schema_logs) == 1
     assert schema_logs[0]["column"] == "row_to_entry"
     assert schema_logs[0]["reason"] == "schema_validation"
-    assert get_schema_row_quarantines() == 1
+    assert _schema_row_quarantines() == 1
     backend2.close()
 
 
@@ -551,7 +561,7 @@ def test_fast_path_quarantines_unmappable_row_without_utf8_corruption(tmp_path: 
     assert len(schema_logs) == 1
     assert schema_logs[0]["event"] == "db_invalid_row_quarantined"
     assert schema_logs[0]["column"] == "row_to_entry"
-    assert get_schema_row_quarantines() == 1
+    assert _schema_row_quarantines() == 1
     backend2.close()
 
 
@@ -760,14 +770,14 @@ def test_entries_with_assertions_survives_bad_utf8_row(tmp_path: Path) -> None:
         INSERT OR REPLACE INTO memories (
             id, content, detail, tags, evidence, importance, status,
             recurrence, namespace, created_at, updated_at, access_count,
-            session_count, q_value, q_observations, source,
+            session_count, source,
             source_identity, client_profile, model_id,
             merged_from, consolidated_from, outcome_history,
             assertions, anchors, anchor_validity,
             type, nudge_line, expires_at, confidence,
             task_type, domain, phase_origin, phase_affinity,
             team_origin, protection_tier, sync_hash, sync_seq,
-            recall_count, helpful_count, unhelpful_count,
+            recall_count,
             vector_clock, metadata,
             published_to_platform, pending_delete, cross_validated
         ) VALUES (
@@ -776,10 +786,10 @@ def test_entries_with_assertions_survives_bad_utf8_row(tmp_path: Path) -> None:
         + """' AS TEXT),
             '[]', '[]', 0.5, 'active',
             1, 'default', '2024-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00', 0,
-            0, 0.5, 0, 'agent', '', '', '',
+            0, 'agent', '', '', '',
             '[]', '[]', '[]', '[{"kind":"file_exists","value":"x"}]', '[]', 1.0,
             'fact', '', '', 'medium', '', '[]', '', '[]',
-            '', 'standard', '', 0, 0, 0, 0,
+            '', 'standard', '', 0, 0,
             '{}', '{}', 0, 0, 0
         )
         """,

@@ -40,21 +40,6 @@ class ClientContextMixin:
 
         await close_client(self._client())
 
-    def _should_start_retry_drain(self) -> bool:
-        from trw_memory._client_lifecycle import should_start_retry_drain
-
-        return should_start_retry_drain(self._client())
-
-    def _should_start_sse_subscription(self) -> bool:
-        from trw_memory._client_lifecycle import should_start_sse_subscription
-
-        return should_start_sse_subscription(self._client())
-
-    def _maybe_start_sse_subscription(self) -> None:
-        from trw_memory._client_lifecycle import maybe_start_sse_subscription
-
-        maybe_start_sse_subscription(self._client())
-
     def _maybe_start_retry_drain(self) -> None:
         from trw_memory._client_lifecycle import maybe_start_retry_drain
 
@@ -64,16 +49,6 @@ class ClientContextMixin:
         from trw_memory._client_lifecycle import handle_sse_event
 
         handle_sse_event(self._client(), event)
-
-    def _cache_shared_event(self, event: dict[str, object]) -> None:
-        from trw_memory._client_lifecycle import cache_shared_event
-
-        cache_shared_event(self._client(), event)
-
-    async def _drain_retry_queue(self) -> None:
-        from trw_memory._client_lifecycle import drain_retry_queue_impl
-
-        await drain_retry_queue_impl(self._client())
 
     async def _retire_remote_entry(self, memory_id: str, remote_id: str) -> None:
         from trw_memory._client_lifecycle import retire_remote_entry

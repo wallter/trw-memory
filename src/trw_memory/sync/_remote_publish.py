@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import cast
 
 import httpx
@@ -22,7 +19,6 @@ from trw_memory.sync._remote_common import (
     AnonymizedEntry,
     PublishResult,
     RetryDrainResult,
-    SnapshotHashPayload,
     _raise_local_only_violation,
     build_platform_headers,
     encode_learning_api_v1,
@@ -117,17 +113,6 @@ def publish_memory_result(
     return _publish_payload_result(cast("dict[str, object]", payload), cfg, entry_id=entry.id)
 
 
-def publish_memory(
-    entry: MemoryEntry,
-    cfg: MemoryConfig,
-    *,
-    embedding: list[float] | None = None,
-    project_root: str = "",
-) -> bool:
-    result = publish_memory_result(entry, cfg, embedding=embedding, project_root=project_root)
-    return result["success"] or not result["retryable"]
-
-
 def drain_retry_queue(queue: RetryQueue, cfg: MemoryConfig) -> RetryDrainResult:
     result, _ = _drain_retry_queue_with_ids(queue, cfg)
     return result
@@ -178,70 +163,6 @@ def _drain_retry_queue_with_ids(
         "skipped": drain_result["skipped"],
         "remote_ids": remote_ids,
     }, published_entry_ids
-
-
-def clear_retry_queue(queue: RetryQueue) -> None:
-    queue.clear()
-
-
-def publish_snapshot_hash(
-    snapshot_path: Path,
-    cfg: MemoryConfig,
-    *,
-    installation_id: str = "",
-) -> PublishResult:
-    if cfg.local_only:
-        logger.warning("snapshot_hash_publish_blocked_local_only", snapshot=str(snapshot_path))
-        _raise_local_only_violation()
-    if not cfg.sync_enabled or not cfg.memory_snapshot_publish_hash:
-        return {"success": False, "remote_id": None, "retryable": False}
-    if not cfg.platform_url:
-        return {"success": False, "remote_id": None, "retryable": False}
-    if not is_valid_platform_url(cfg.platform_url):
-        logger.warning("snapshot_hash_publish_invalid_platform_url", snapshot=str(snapshot_path))
-        return {"success": False, "remote_id": None, "retryable": False}
-    if not snapshot_path.exists() or not snapshot_path.is_file():
-        logger.debug("snapshot_hash_publish_missing_file", snapshot=str(snapshot_path))
-        return {"success": False, "remote_id": None, "retryable": False}
-
-    try:
-        digest, size_bytes = _hash_snapshot_file(snapshot_path)
-    except OSError as exc:
-        logger.debug("snapshot_hash_publish_read_failed", snapshot=str(snapshot_path), error=str(exc))
-        return {"success": False, "remote_id": None, "retryable": True}
-
-    payload: SnapshotHashPayload = {
-        "digest": digest,
-        "size_bytes": size_bytes,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "installation_id": anonymize_installation_id(installation_id or ""),
-    }
-
-    try:
-        with httpx.Client(timeout=PUBLISH_TIMEOUT) as client:
-            resp = client.post(
-                f"{cfg.platform_url.rstrip('/')}/v1/memory/snapshot-hash",
-                json=cast("dict[str, object]", payload),
-                headers=build_platform_headers(cfg.platform_api_key),
-            )
-            if 200 <= resp.status_code < 300:
-                logger.debug("snapshot_hash_published", digest=digest, size_bytes=size_bytes)
-                return {"success": True, "remote_id": None, "retryable": False}
-            logger.warning("snapshot_hash_publish_failed", status=resp.status_code, digest=digest)
-            return {"success": False, "remote_id": None, "retryable": True}
-    except (httpx.HTTPError, OSError, ConnectionError):
-        logger.debug("snapshot_hash_publish_error", exc_info=True)
-        return {"success": False, "remote_id": None, "retryable": True}
-
-
-def _hash_snapshot_file(path: Path, chunk_size: int = 65536) -> tuple[str, int]:
-    hasher = hashlib.sha256()
-    size = 0
-    with path.open("rb") as fh:
-        while chunk := fh.read(chunk_size):
-            hasher.update(chunk)
-            size += len(chunk)
-    return hasher.hexdigest(), size
 
 
 def retire_remote_memory(remote_id: str, cfg: MemoryConfig) -> bool:

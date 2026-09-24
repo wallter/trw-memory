@@ -4,7 +4,10 @@ Decay, consolidation and WAL checkpointing are triggered by a *session* ending
 in the framework host (``trw_deliver`` and friends). A daemon serving an
 application has no sessions, so a store that only the daemon touches is never
 maintained (field report sub_nq63Eql-xQ8IWsdL). This tool is that trigger, and
-nothing more: it calls the three existing passes and records when it ran.
+nothing more: it calls the existing passes and records when it ran. The
+verification pass (PRD-CORE-294 FR07(b)) is the same
+``trw_memory.lifecycle.verification_pass.run_maintain_verify`` trw-mcp's
+``maintain-verify`` calls, and runs only when ``project_root`` is configured.
 
 Two truths the response and the tool description must carry, because getting
 them wrong would be worse than not having the tool:
@@ -13,7 +16,9 @@ them wrong would be worse than not having the tool:
 decay pass and the WAL checkpoint act on the whole STORE -- and on the daemon,
 one store holds every namespace. Calling this for five namespaces therefore
 runs one namespace's consolidation five times and the store-wide passes five
-times too.
+times too. Over the daemon the decay pass narrows to the token's granted
+namespaces (PRD-CORE-298 FR02); the WAL checkpoint is a file operation that
+reads and changes no row.
 
 **A returned value is not a success.** ``memory_consolidate_impl`` reports an
 error by returning ``{"status": "error"}`` and ``checkpoint_wal`` reports one as
@@ -42,7 +47,7 @@ import structlog
 from trw_memory.exceptions import ConfigError, StorageError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.namespaces.validation import validate_namespace
-from trw_memory.security.rbac import Permission, require_namespace_permission
+from trw_memory.security.rbac import Permission, require_namespace_permission, transport_grant, transport_root
 from trw_memory.storage.persistence import lock_for_rmw
 from trw_memory.tools._types import McpServer
 
@@ -51,7 +56,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = structlog.get_logger(__name__)
 
-__all__ = ["MAINTENANCE_STATE_FILE", "memory_maintain_impl", "register_maintain_tool"]
+__all__ = ["GRAPH_BACKFILL_PAGE_MAX", "MAINTENANCE_STATE_FILE", "memory_maintain_impl", "register_maintain_tool"]
+
+#: The most rows one ``memory_graph_backfill`` call reads (trw-mcp's list page).
+GRAPH_BACKFILL_PAGE_MAX = 10_000
 
 #: Where the per-namespace stamps live: beside the store, because the stamp
 #: describes THAT store. A store replaced underneath a stale file is why the
@@ -151,12 +159,13 @@ def _run_decay(backend: StorageBackend) -> dict[str, object]:
     if conn is None:
         return {"status": _SKIPPED, "reason": "backend_not_sqlite"}
     lock = getattr(backend, "_lock", None)
+    granted = transport_grant()
     try:
-        result = memory_decay_pass(conn, lock=lock)
+        result = memory_decay_pass(conn, lock=lock, namespaces=granted)
     except (sqlite3.Error, ValueError) as exc:
         logger.warning("maintenance_decay_failed", error=str(exc))
         return {"status": _ERROR, "reason": type(exc).__name__}
-    return {"status": _OK, "scope": "store", **result}
+    return {"status": _OK, "scope": "store" if granted is None else "grant", **result}
 
 
 def _run_consolidation(namespace: str, backend: StorageBackend, config: MemoryConfig) -> dict[str, object]:
@@ -198,13 +207,52 @@ def _run_checkpoint(backend: StorageBackend) -> dict[str, object]:
     return {"status": _ERROR if failed else _OK, "scope": "store", **result}
 
 
+def _run_verification(namespace: str, backend: StorageBackend, config: MemoryConfig) -> dict[str, object]:
+    """Verify *namespace*'s assertions/anchors against ``config.project_root``.
+
+    Without a usable root nothing is checked: no entry becomes verified and
+    any prior "verified" verdict is cleared, since it can no longer be re-checked.
+    """
+    from trw_memory.lifecycle import verification_pass
+
+    root = Path(config.project_root) if config.project_root else None
+    usable = root is not None and root.is_dir()
+    try:
+        # Runs even without a usable root: the sweep then clears any prior
+        # "verified" verdict it can no longer re-check.
+        summary = verification_pass.run_maintain_verify(
+            backend, project_root=root if usable else None, namespace=namespace
+        )
+    except Exception as exc:  # justified: one failing pass must not abort the others
+        logger.warning("maintenance_verification_failed", namespace=namespace, error=str(exc))
+        return {"status": _ERROR, "reason": type(exc).__name__}
+    counts = summary.as_dict()
+    # Sweep failures outrank the no-root skip: the verdict-clearing sweep ran
+    # either way, and a skip would report ok and advance last_maintained_at.
+    # A configured root that is missing is a misconfiguration, not a skip.
+    checks = (
+        ("entry_failures", counts["entry_failures"]),
+        ("persist_failures", counts["persist_failures"]),
+        ("project_root_not_a_directory", root is not None and not usable),
+    )
+    failure = next((reason for reason, failed in checks if failed), "")
+    if root is None and not failure:
+        return {"status": _SKIPPED, "reason": "no project_root", **counts}
+    return {
+        "status": _ERROR if failure else _OK,
+        "scope": "namespace",
+        **counts,
+        **({"reason": failure} if failure else {}),
+    }
+
+
 def memory_maintain_impl(
     namespace: str,
     *,
     backend: StorageBackend,
     config: MemoryConfig | None = None,
 ) -> dict[str, object]:
-    """Run decay, consolidation and a WAL checkpoint, and record the attempt.
+    """Run decay, consolidation, verification and a WAL checkpoint; record the attempt.
 
     Args:
         namespace: Namespace to consolidate and to stamp.
@@ -229,6 +277,7 @@ def memory_maintain_impl(
     passes: dict[str, object] = {
         "decay": _run_decay(backend),
         "consolidation": _run_consolidation(namespace, backend, cfg),
+        "verification": _run_verification(namespace, backend, cfg),
         "wal_checkpoint": _run_checkpoint(backend),
     }
     succeeded = all(str(p.get("status")) != _ERROR for p in passes.values() if isinstance(p, dict))
@@ -263,11 +312,11 @@ def register_maintain_tool(mcp: McpServer) -> None:
         mcp: FastMCP server instance (imported lazily to keep fastmcp optional).
     """
     from trw_memory.daemon._offload import run_offloaded
-    from trw_memory.integrations._backend import create_backend_from_config
+    from trw_memory.tools.entry import in_namespace
 
     @mcp.tool()
     async def memory_maintain(namespace: str = "project:default") -> dict[str, object]:
-        """Run memory maintenance now: decay, consolidation and a WAL checkpoint.
+        """Run memory maintenance now: decay, consolidation, verification, WAL checkpoint.
 
         Intended for a long-lived server, which has no session end to hang
         maintenance off. Cost is proportional to the store: consolidation
@@ -277,8 +326,9 @@ def register_maintain_tool(mcp: McpServer) -> None:
 
         Scope is NOT uniform. Consolidation applies to *namespace*. The decay
         pass and the WAL checkpoint apply to the whole store, which on the
-        loopback daemon is every namespace. Decay is skipped, with a reason,
-        when the store holds one entry id in more than one namespace.
+        loopback daemon is every namespace. Verification re-checks the
+        namespace's stored assertions against MEMORY_PROJECT_ROOT; without a
+        root it is skipped and verdicts stay unknown.
 
         Args:
             namespace: Namespace to consolidate and stamp.
@@ -291,8 +341,54 @@ def register_maintain_tool(mcp: McpServer) -> None:
         """
 
         def _run() -> dict[str, object]:
+            # Over the transport the sweep verifies the checkout the grant records, never the daemon's root.
             cfg = MemoryConfig()
-            with create_backend_from_config(cfg, namespace) as backend:
-                return memory_maintain_impl(namespace, backend=backend, config=cfg)
+            on_transport, granted_root = transport_root()
+            if on_transport:
+                cfg = cfg.model_copy(update={"project_root": granted_root or ""})
+            return in_namespace(
+                namespace,
+                Permission.WRITE,
+                "maintain",
+                lambda backend, _config: memory_maintain_impl(namespace, backend=backend, config=cfg),
+            )
 
         return await run_offloaded(_run)
+
+    @mcp.tool()
+    async def memory_graph_backfill(
+        namespace: str,
+        after: dict[str, str] | None = None,
+        limit: int = 500,
+        deadline_seconds: float | None = None,
+    ) -> dict[str, object]:
+        """Build the knowledge-graph edges of one page of *namespace*'s existing rows, listed after *after*.
+
+        The resume point is the caller's: pass back ``next`` until ``complete``.
+        *deadline_seconds* is a soft budget counted from before the page is read:
+        once spent no further row starts, so at most one row's enrichment overruns
+        it, and the next call resumes from ``next``.
+        Returns {"status", "processed", "edges_built", "skipped", "failed", "next", "complete"}.
+        """
+        from trw_memory.graph import backfill_graph_page
+        from trw_memory.storage.interface import EntryCursor
+
+        try:
+            cursor = EntryCursor(**after) if after else None
+        except TypeError as exc:
+            return {"error": f"invalid cursor: {exc}", "status": "invalid"}
+        if not 1 <= limit <= GRAPH_BACKFILL_PAGE_MAX or (deadline_seconds is not None and deadline_seconds < 0):
+            return {"error": f"invalid page: limit={limit}, deadline_seconds={deadline_seconds}", "status": "invalid"}
+        return await run_offloaded(
+            lambda: in_namespace(
+                namespace,
+                Permission.WRITE,
+                "graph_backfill",
+                lambda backend, config: {
+                    "status": _OK,
+                    **backfill_graph_page(
+                        backend, namespace, after=cursor, limit=limit, deadline_seconds=deadline_seconds, config=config
+                    ),
+                },
+            )
+        )

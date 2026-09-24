@@ -2,9 +2,7 @@
 
 ``memory_store_impl`` was the only sanctioned write path but could not express
 what the trw-mcp learning path writes: the PRD-CORE-110 classification fields,
-the PRD-CORE-111 anchors, the SEC-001 provenance anchor directory, and the two
-error/enrichment ownership choices a caller with its own singleton connection
-and its own corruption-recovery retry has to make. Those were a *signature* gap,
+the PRD-CORE-111 anchors and the SEC-001 provenance anchor directory. Those were a *signature* gap,
 not a model gap -- every field below has been first-class on ``MemoryEntry``
 since PRD-CORE-110/111.
 """
@@ -43,11 +41,9 @@ class TestTypedLearningFields:
             backend=backend,
             config=cfg,
             entry_id="M-typed-1",
-            enrich_after_store=False,
             evidence=["tests/test_store_delegated_surface.py"],
             client_profile="claude-code",
             model_id="opus-5",
-            q_value=0.725,
             type=MemoryType.INCIDENT,
             nudge_line="watch the write path",
             confidence=Confidence.VERIFIED,
@@ -66,7 +62,6 @@ class TestTypedLearningFields:
         assert entry is not None
         assert entry.client_profile == "claude-code"
         assert entry.model_id == "opus-5"
-        assert entry.q_value == pytest.approx(0.725)
         assert entry.type == MemoryType.INCIDENT.value
         assert entry.nudge_line == "watch the write path"
         assert entry.confidence == Confidence.VERIFIED.value
@@ -93,7 +88,6 @@ class TestTypedLearningFields:
             backend=backend,
             config=cfg,
             entry_id="M-typed-2",
-            enrich_after_store=False,
             # A ``verified`` entry with no evidence is refused by the poisoning
             # gate (min_evidence_items_for_verified), which would make the
             # "update" below a first store and this test vacuous.
@@ -111,7 +105,6 @@ class TestTypedLearningFields:
             backend=backend,
             config=cfg,
             entry_id="M-typed-2",
-            enrich_after_store=False,
         )
 
         assert result["status"] == "updated"
@@ -131,7 +124,6 @@ class TestTypedLearningFields:
             backend=backend,
             config=cfg,
             entry_id="M-typed-3",
-            enrich_after_store=False,
             type=MemoryType.INCIDENT,
         )
         memory_store_impl(
@@ -140,7 +132,6 @@ class TestTypedLearningFields:
             backend=backend,
             config=cfg,
             entry_id="M-typed-3",
-            enrich_after_store=False,
             type=MemoryType.CONVENTION,
         )
 
@@ -150,41 +141,30 @@ class TestTypedLearningFields:
 
 
 class TestEnrichmentOwnership:
-    def test_enrich_after_store_false_skips_embedder_and_graph(
+    def test_the_graph_update_reuses_the_one_vector_the_store_embedded(
         self, backend: SQLiteBackend, cfg: MemoryConfig, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The caller that owns the connection owns the enrichment.
+        """PRD-FIX-COMPOUNDING-2 FR01/FR02: the stored row is graphed with its own vector; one embed per store."""
+        embedded: list[str] = []
+        graphed: list[tuple[str, object]] = []
 
-        Without this the trw-mcp store path would load an embedding model it has
-        configured OFF and dispatch a graph update against a per-namespace
-        database file its own singleton never reads.
-        """
-        calls: list[str] = []
-        monkeypatch.setattr(
-            "trw_memory.tools.store.get_local_embedder",
-            lambda **_kwargs: calls.append("embedder") or None,  # type: ignore[func-returns-value]
-        )
+        class _Embedder:
+            def embed(self, text: str) -> list[float]:
+                embedded.append(text)
+                return [0.1, 0.2, 0.3]
+
+        monkeypatch.setattr("trw_memory.tools.store.get_local_embedder", lambda **_kwargs: _Embedder())
+        monkeypatch.setattr("trw_memory.tools.store.embedding_has_consumer", lambda *_args: True)
+        monkeypatch.setattr(backend, "upsert_vector", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(
             "trw_memory.tools.store.schedule_graph_update",
-            lambda *_a, **_k: calls.append("graph"),
-        )
-        monkeypatch.setattr(
-            "trw_memory.tools.store.remember_entry_in_tiers",
-            lambda *_a, **_k: calls.append("tiers"),
+            lambda entry, _backend, *, embedding, config: graphed.append((entry.id, embedding)),
         )
 
-        result = memory_store_impl(
-            "no enrichment here",
-            "default",
-            backend=backend,
-            config=cfg,
-            entry_id="M-noenrich",
-            enrich_after_store=False,
-        )
+        memory_store_impl("graph me", "default", backend=backend, config=cfg, entry_id="M-graphed")
 
-        assert result["status"] == "stored"
-        assert calls == []
-        assert backend.get("M-noenrich", namespace="default") is not None
+        assert graphed == [("M-graphed", [0.1, 0.2, 0.3])]
+        assert len(embedded) == 1
 
     def test_enrichment_runs_by_default(
         self, backend: SQLiteBackend, cfg: MemoryConfig, monkeypatch: pytest.MonkeyPatch
@@ -208,32 +188,6 @@ class TestEnrichmentOwnership:
 
 
 class TestErrorOwnership:
-    def test_raise_storage_errors_propagates_for_the_recovery_owner(
-        self, backend: SQLiteBackend, cfg: MemoryConfig, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """trw-mcp's corruption-recovery retry can only key on the exception.
-
-        Swallowing a ``StorageError`` into ``{"status": "error"}`` erases the
-        type, and with it the ability to tell "the database is corrupt, reset the
-        singleton and retry" from "the disk is full".
-        """
-
-        def _boom(*_a: object, **_k: object) -> None:
-            raise StorageError("database disk image is malformed")
-
-        monkeypatch.setattr(backend, "store", _boom)
-
-        with pytest.raises(StorageError):
-            memory_store_impl(
-                "will fail",
-                "default",
-                backend=backend,
-                config=cfg,
-                entry_id="M-raise",
-                enrich_after_store=False,
-                raise_storage_errors=True,
-            )
-
     def test_storage_errors_still_default_to_a_result_dict(
         self, backend: SQLiteBackend, cfg: MemoryConfig, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -248,7 +202,6 @@ class TestErrorOwnership:
             backend=backend,
             config=cfg,
             entry_id="M-dict",
-            enrich_after_store=False,
         )
 
         assert result["status"] == "error"
@@ -276,7 +229,6 @@ class TestUnauthorizedStoreIsAudited:
                     backend=store,
                     config=cfg,
                     entry_id="M-denied",
-                    enrich_after_store=False,
                 )
         finally:
             store.close()

@@ -147,12 +147,6 @@ def reference_view(namespace: str, backend: StorageBackend) -> ReferenceView:
         return slot.window.view
 
 
-def reset_reference_cache() -> None:
-    """Forget every cached window (tests; a process that swapped its database files)."""
-    with _CACHE_LOCK:
-        _CACHE.clear()
-
-
 def _slot(key: tuple[str, str]) -> _Slot:
     with _CACHE_LOCK:
         slot = _CACHE.get(key)

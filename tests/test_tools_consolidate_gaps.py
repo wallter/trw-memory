@@ -52,7 +52,9 @@ class TestConsolidateTeamNamespaceContinue:
                 config=cfg,
             )
 
-        promote.assert_called_once_with("team:my-team", backend, target_backend=backend)
+        promote.assert_called_once_with(
+            "team:my-team", backend, target_backend=backend, target_namespace="project:default"
+        )
         assert result["promoted_count"] == 2
         assert [item["namespace_id"] for item in result["namespaces"]] == ["team:my-team"]
 

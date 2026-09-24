@@ -24,8 +24,9 @@ Extracted as PRD-DIST-246 batch 109.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
+from trw_memory._client_backend import client_logger as _client_logger
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.recall_selection import LocalCandidate
 
@@ -33,13 +34,6 @@ if TYPE_CHECKING:
     from trw_memory.client import MemoryResultDict
 
 DEFAULT_DISTILLED_RECALL_WEIGHT: float = 0.75
-
-
-def _client_logger() -> Any:
-    """Parent-module logger lookup so test patches on ``trw_memory.client.logger`` propagate."""
-    from trw_memory import client as _c
-
-    return _c.logger
 
 
 def get_distilled_recall_weight() -> float:
@@ -137,8 +131,6 @@ def entry_to_result(entry: MemoryEntry, score: float = 0.0) -> MemoryResultDict:
         "namespace": entry.namespace,
         "source": "local",
         "last_accessed_at": entry.last_accessed_at.isoformat() if entry.last_accessed_at is not None else "",
-        "q_value": entry.q_value,
-        "q_observations": entry.q_observations,
         "recurrence": entry.recurrence,
         "access_count": entry.access_count,
         "_relevance_hint": score,

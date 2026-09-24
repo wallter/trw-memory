@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import structlog
 
-from trw_memory._client_store import _build_store_entry, _existing_entry_for_namespace
+from trw_memory._client_store import _build_store_entry, _existing_entry_for_namespace, _make_id
 from trw_memory.embeddings.provenance import generation_provenance_kwargs
 from trw_memory.exceptions import MemoryNotFoundError, SchemaValidationError, SecurityDependencyError, StorageError
 from trw_memory.graph import schedule_graph_update_many
@@ -122,12 +122,6 @@ class BulkStoreSummary:
     def per_item_ms(self) -> float:
         """Mean wall-time per record across the whole batch."""
         return self.duration_ms / self.total if self.total else 0.0
-
-
-def _make_id() -> str:
-    from trw_memory.client import _make_id as _client_make_id
-
-    return _client_make_id()
 
 
 async def bulk_store_impl(

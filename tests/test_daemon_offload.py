@@ -198,7 +198,6 @@ async def test_registered_store_tool_offloads(tmp_path, monkeypatch):
     assert observed[0].startswith("trw-memory-tool")
 
 
-@pytest.mark.perf
 async def test_shutdown_is_bounded_when_a_worker_will_not_stop():
     """NFR04: a stuck call must not hold shutdown open indefinitely."""
     release = threading.Event()

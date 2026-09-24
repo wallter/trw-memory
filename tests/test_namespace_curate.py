@@ -446,3 +446,44 @@ def test_a_merge_that_leaves_rows_behind_raises_instead_of_reporting_merged(tmp_
         assert store.count(namespace=NEW) == 0
     finally:
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# graph edges travel with their rows
+# ---------------------------------------------------------------------------
+
+
+def _edge(backend: SQLiteBackend, namespace: str, source: str, target: str) -> None:
+    from trw_memory._graph_primitives import _upsert_edge
+
+    with backend._lock:
+        _upsert_edge(backend._conn, source, target, "related_to", 0.8, "2026-09-23T00:00:00+00:00", namespace=namespace)
+        backend._conn.commit()
+
+
+def test_a_rename_carries_the_graph_edges(backend: SQLiteBackend) -> None:
+    _seed(backend, OLD, ["M-1", "M-2", "M-3"])
+    _edge(backend, OLD, "M-1", "M-2")
+    _edge(backend, OLD, "M-2", "M-3")
+
+    rename_namespace(NamespaceStores.shared(backend), OLD, NEW)
+
+    assert sorted((e.source_id, e.target_id) for e in backend.graph_edges(NEW)) == [("M-1", "M-2"), ("M-2", "M-3")]
+    assert backend.graph_edges(OLD) == []
+
+
+def test_a_cross_store_merge_carries_the_moved_rows_edges(tmp_path: Path) -> None:
+    source, destination = SQLiteBackend(tmp_path / "project.db"), SQLiteBackend(tmp_path / "user.db")
+    try:
+        _seed(source, "default", ["M-1", "M-2"])
+        _edge(source, "default", "M-1", "M-2")
+
+        merge_namespace(NamespaceStores(source=source, destination=destination), "default", NEW)
+        again = merge_namespace(NamespaceStores(source=source, destination=destination), "default", NEW)
+
+        (edge,) = destination.graph_edges(NEW)
+        assert (edge.source_id, edge.target_id, edge.edge_type, edge.weight) == ("M-1", "M-2", "related_to", 0.8)
+        assert again.status == "noop"
+    finally:
+        source.close()
+        destination.close()

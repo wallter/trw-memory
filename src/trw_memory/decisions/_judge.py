@@ -3,8 +3,8 @@
 Every call site that wants a calibrated decision talks to this Protocol, never
 to a concrete backend. The default is :class:`NullJudge`, which answers
 nothing and costs nothing — a caller must always have a deterministic or prose
-fallback for ``None`` per the Jev decision-backend design ("every Jev
-call site needs a deterministic or local fallback").
+fallback for a :class:`DecisionFailure` ("every Jev call site needs a
+deterministic or local fallback").
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import JsonValue
 
-from trw_memory.decisions._models import DecisionQuestion, DecisionResult
+from trw_memory.decisions._models import DecisionFailure, DecisionOutcome, DecisionQuestion
 
 #: State sent to a judge: a string, a JSON object, or a JSON array — exactly
 #: the three shapes the OpenRouter Decisions API accepts as ``state``.
@@ -23,12 +23,11 @@ DecisionState = str | dict[str, JsonValue] | list[JsonValue]
 
 @runtime_checkable
 class DecisionJudge(Protocol):
-    """A backend that answers typed questions about a state, or abstains.
+    """A backend that answers typed questions about a state, or says why it did not.
 
     Implementations MUST NOT raise: every error — timeout, transport failure,
-    malformed response, disabled config — is reported as ``None``, never an
-    exception. Callers branch on ``None`` exactly like an abstention; there is
-    no separate error channel to handle.
+    malformed response, disabled config — is returned as a :class:`DecisionFailure`
+    naming its kind, never an exception.
     """
 
     def decide(
@@ -38,7 +37,7 @@ class DecisionJudge(Protocol):
         *,
         timeout_s: float = 10.0,
         session_id: str | None = None,
-    ) -> DecisionResult | None: ...
+    ) -> DecisionOutcome: ...
 
 
 class NullJudge:
@@ -57,8 +56,10 @@ class NullJudge:
         *,
         timeout_s: float = 10.0,
         session_id: str | None = None,
-    ) -> DecisionResult | None:
-        return None
+    ) -> DecisionOutcome:
+        return DecisionFailure(
+            kind="disabled", detail="no judge configured (TRW_JEV_ENABLED / OPENROUTER_API_KEY unset)"
+        )
 
 
 __all__ = ["DecisionJudge", "DecisionState", "NullJudge"]

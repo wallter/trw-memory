@@ -1,11 +1,17 @@
 """Source expiry and temporal eligibility share CORE-244's date convention."""
 
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 
-from trw_memory.retrieval.source_policy import apply_source_policy, is_expired_result
+from trw_memory.retrieval.source_policy import SourcePolicy, is_expired_result
 from trw_memory.retrieval.validity_prior import expiry_has_passed
+
+
+def _apply(rows: Any, **options: Any) -> list[dict[str, Any]]:
+    """Admission plus the source-weighted order, as ``MemoryClient.recall`` applies it."""
+    return SourcePolicy.resolve(**options).apply(rows)
 
 
 @pytest.mark.parametrize(
@@ -48,9 +54,9 @@ def test_source_policy_filters_against_explicit_reference(family: str) -> None:
         {"memory_id": "same-day", "score": 0.7, "tags": [f"source_kind:{family}"], "expires": "2024-01-02"},
     ]
     reference = datetime(2024, 1, 2, tzinfo=timezone.utc)
-    kept = apply_source_policy(rows, reference_time=reference)
+    kept = _apply(rows, reference_time=reference)
     assert [row["memory_id"] for row in kept] == ["same-day"]
-    all_rows = apply_source_policy(rows, exclude_expired=False, reference_time=reference)
+    all_rows = _apply(rows, exclude_expired=False, reference_time=reference)
     assert [row["memory_id"] for row in all_rows] == ["expired", "same-day"]
 
 

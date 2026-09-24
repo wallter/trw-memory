@@ -2,11 +2,12 @@
 
 ``trw-memory-server serve http`` lands here. The sequence is deliberate:
 
-1. resolve the daemon's file locations and ensure the per-user token exists;
+1. resolve the daemon's file locations and refuse a retired Slice A bearer;
 2. claim the single-instance slot AND bind the loopback socket under one lock,
    so a second start refuses before it can bind (see :mod:`._instance`);
-3. build the fastmcp streamable-HTTP app with the token verifier attached, so
-   an unauthenticated request never reaches a tool body; and
+3. build the fastmcp streamable-HTTP app with the grant verifier attached, so
+   an unauthenticated request never reaches a tool body and an authenticated
+   one reaches only its granted namespaces (PRD-CORE-298 FR02); and
 4. serve on the already-bound socket, exiting after the idle window and
    removing the discovery record on the way out.
 
@@ -34,8 +35,8 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from trw_memory.daemon._instance import claim_single_instance, release_single_instance
 from trw_memory.daemon._offload import shutdown_offload_pool
 from trw_memory.daemon._paths import DaemonPaths
-from trw_memory.daemon._token import ensure_token
 from trw_memory.daemon._verifier import LoopbackTokenVerifier
+from trw_memory.exceptions import ConfigError
 from trw_memory.models.config import MemoryConfig
 
 __all__ = ["DaemonServeOptions", "serve_loopback"]
@@ -159,11 +160,11 @@ async def _watch_idle(tracker: _IdleTracker, server: uvicorn.Server, idle_shutdo
             return
 
 
-def _build_app(token: str) -> ASGIApp:
-    """Return the streamable-HTTP app with the token verifier attached."""
+def _build_app(paths: DaemonPaths) -> ASGIApp:
+    """Return the streamable-HTTP app with the grant verifier attached."""
     from trw_memory.server import mcp
 
-    mcp.auth = LoopbackTokenVerifier(token)
+    mcp.auth = LoopbackTokenVerifier(paths)
     return mcp.http_app(transport="streamable-http")
 
 
@@ -219,14 +220,10 @@ def _redeliver(captured: list[signal.Signals]) -> None:
 async def serve_loopback(options: DaemonServeOptions, *, paths: DaemonPaths | None = None) -> None:
     """Run the loopback daemon until its idle window elapses or it is signalled.
 
-    The daemon serves ONE principal: the operating-system user who can read the
-    0600 token file beside the store. Every request carrying that token is
-    fully authorised for every namespace in the store -- there is no per-caller
-    identity, and a namespace argument is a scope, not a permission. That is a
-    stated property of this program, not an oversight: the endpoint is bound to
-    loopback and the token is per-user, so the trust boundary is the user
-    account. Serving several mutually distrusting tenants from one daemon is
-    outside what this transport offers.
+    Each request carries a checkout's token, and that token reaches only the
+    namespaces its grant names (PRD-CORE-298 FR02); there is no store-wide
+    bearer. A retired Slice A ``daemon-token`` refuses startup rather than
+    being honoured, so an old all-namespace secret cannot outlive the upgrade.
 
     Args:
         options: Port and idle window for this invocation.
@@ -240,7 +237,11 @@ async def serve_loopback(options: DaemonServeOptions, *, paths: DaemonPaths | No
     resolved = paths or DaemonPaths.resolve()
     os.environ.setdefault(_STORAGE_PATH_ENV, str(resolved.user_memory_dir))
     os.environ.setdefault(_SINGLE_STORE_ENV, str(resolved.store))
-    token = ensure_token(resolved)
+    if resolved.token.exists() or resolved.token.is_symlink():
+        raise ConfigError(
+            f"refusing to start: {resolved.token} is a retired all-namespace bearer (PRD-CORE-298 FR02). "
+            f"Run `trw-mcp memory token --migrate` to delete it; each checkout then mints its own grant."
+        )
     # Signal recording starts BEFORE the claim. The record is published by
     # ``claim_single_instance``, so a SIGTERM that lands between publication and
     # handler installation would otherwise kill the process with the default
@@ -249,7 +250,6 @@ async def serve_loopback(options: DaemonServeOptions, *, paths: DaemonPaths | No
         claim = claim_single_instance(
             resolved,
             port=options.port,
-            token=token,
             version=_package_version(),
         )
         watchdog: asyncio.Task[None] | None = None
@@ -257,7 +257,7 @@ async def serve_loopback(options: DaemonServeOptions, *, paths: DaemonPaths | No
             # Everything past the claim is inside the try: a failure while
             # building the app or the server is the case that used to leak a
             # record naming a process that never served (FR06).
-            tracker = _IdleTracker(_build_app(token))
+            tracker = _IdleTracker(_build_app(resolved))
             server = uvicorn.Server(uvicorn.Config(tracker, log_config=None, lifespan="on"))
             logger.info("daemon_serving", url=claim.info.url, pid=claim.info.pid)
             watchdog = asyncio.create_task(_watch_idle(tracker, server, options.idle_shutdown_seconds))

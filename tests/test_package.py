@@ -97,7 +97,6 @@ def test_core_exports_exist() -> None:
     from trw_memory import (
         ConfigError,
         EncryptionUnavailableError,
-        KeyRotationError,
         MasterKeyNotFoundError,
         MemoryConfig,
         MemoryEntry,
@@ -113,7 +112,6 @@ def test_core_exports_exist() -> None:
 
     assert issubclass(ConfigError, Exception)
     assert issubclass(EncryptionUnavailableError, Exception)
-    assert issubclass(KeyRotationError, Exception)
     assert issubclass(MemoryConfig, object)
     assert issubclass(MemoryEntry, object)
     assert issubclass(MemoryError, Exception)
@@ -145,7 +143,6 @@ def test_all_exports_complete() -> None:
         "DimensionMismatchError",
         "LocalOnlyViolationError",
         "EncryptionUnavailableError",
-        "KeyRotationError",
         "MasterKeyNotFoundError",
         "MemoryClient",
         "MemoryConfig",
@@ -178,7 +175,6 @@ def test_exceptions_inherit_properly() -> None:
         ConfigError,
         DimensionMismatchError,
         EncryptionUnavailableError,
-        KeyRotationError,
         LocalOnlyViolationError,
         MasterKeyNotFoundError,
         MemoryConnectionError,
@@ -202,7 +198,6 @@ def test_exceptions_inherit_properly() -> None:
     assert issubclass(DimensionMismatchError, MemoryError)
     assert issubclass(LocalOnlyViolationError, MemoryError)
     assert issubclass(EncryptionUnavailableError, MemoryError)
-    assert issubclass(KeyRotationError, MemoryError)
     assert issubclass(MasterKeyNotFoundError, MemoryError)
     # Store-path exceptions are now top-level exported so callers can catch them
     # without reaching into trw_memory.exceptions (they all subclass MemoryError).

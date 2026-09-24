@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +19,7 @@ from trw_memory.tools.recall import memory_recall_impl
 from trw_memory.tools.store import memory_store_impl
 
 from ._test_team_memory_support import _make_entry
+from ._timing import assert_budget
 
 
 def test_sqlite_team_lifecycle_supports_multiple_namespaces_without_yaml_sidecar(tmp_path: Path) -> None:
@@ -134,11 +134,31 @@ def test_team_namespace_repeat_consolidation_skips_after_completion(tmp_path: Pa
     assert second["promoted_count"] == 0
 
 
-@pytest.mark.perf
 def test_team_namespace_consolidation_completes_under_five_seconds_for_200_entries(tmp_path: Path) -> None:
-    # Run the 200-entry consolidation under CI too (it covers the write/
-    # provenance/security paths the INFRA-020 90%-branch gate needs) but only
-    # enforce the wall-clock SLO off-CI — shared 2-core runners flake it.
+    # Run the 200-entry consolidation (it covers the write/provenance/security
+    # paths the INFRA-020 90%-branch gate needs); the wall-clock SLO is checked
+    # separately by the _budget twin below.
+    cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path))
+
+    team_backend = create_backend_from_config(cfg, "team:sprint-37")
+    try:
+        for idx in range(200):
+            team_backend.store(_make_entry(f"e{idx}", importance=0.8))
+
+        result = memory_consolidate_impl(
+            "team:sprint-37",
+            backend=team_backend,
+            config=cfg,
+            namespace_backend_factory=lambda ns: create_backend_from_config(cfg, ns),
+        )
+    finally:
+        team_backend.close()
+
+    assert result["promoted_count"] == 200
+
+
+@pytest.mark.requires_local_timing
+def test_team_namespace_consolidation_completes_under_five_seconds_for_200_entries_budget(tmp_path: Path) -> None:
     cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path))
 
     team_backend = create_backend_from_config(cfg, "team:sprint-37")
@@ -147,7 +167,7 @@ def test_team_namespace_consolidation_completes_under_five_seconds_for_200_entri
             team_backend.store(_make_entry(f"e{idx}", importance=0.8))
 
         started = time.perf_counter()
-        result = memory_consolidate_impl(
+        memory_consolidate_impl(
             "team:sprint-37",
             backend=team_backend,
             config=cfg,
@@ -157,9 +177,7 @@ def test_team_namespace_consolidation_completes_under_five_seconds_for_200_entri
     finally:
         team_backend.close()
 
-    assert result["promoted_count"] == 200
-    if os.environ.get("CI") != "true":
-        assert elapsed < 5.0
+    assert_budget("team_namespace_consolidation_200_entries", elapsed, 5.0, "s")
 
 
 def test_namespace_isolation_holds_across_store_recall_delete_and_consolidate(tmp_path: Path) -> None:

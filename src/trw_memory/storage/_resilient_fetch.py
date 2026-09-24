@@ -67,25 +67,9 @@ class _FallbackMetrics:
 _fallback_metrics = _FallbackMetrics()
 
 
-def get_bytes_fallback_failures() -> int:
-    """Return the number of bytes-mode fallback connections that failed open.
-
-    Each increment corresponds to one ``fetch_rows_via_bytes_fallback`` call
-    whose secondary connection raised ``sqlite3.Error`` — i.e. rows that were
-    silently dropped (not row-level quarantined). Monitoring can poll this to
-    detect a degraded backend that the per-row quarantine counter cannot see.
-    """
-    return _fallback_metrics.bytes_fallback_failures
-
-
 def reset_bytes_fallback_failures() -> None:
     """Reset the fallback-failure counter (test isolation / monitoring window)."""
     _fallback_metrics.bytes_fallback_failures = 0
-
-
-def get_schema_row_quarantines() -> int:
-    """Return cleanly decoded rows skipped because their schema was invalid."""
-    return _fallback_metrics.schema_row_quarantines
 
 
 def reset_schema_row_quarantines() -> None:

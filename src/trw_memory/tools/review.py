@@ -7,6 +7,7 @@ maintainer could only resolve an id some other channel had already given them.
 
 from __future__ import annotations
 
+import getpass
 from typing import Literal
 
 from trw_memory.exceptions import AuthorizationError, ConfigError
@@ -44,20 +45,36 @@ def memory_review_impl(
         )
 
 
+def authenticated_principal() -> str:
+    """Who is calling, as the server itself established it (PRD-CORE-294 FR07c).
+
+    Over HTTP that is the verified bearer token's ``client_id``; in-process (stdio)
+    the caller runs as the OS user. A name the caller supplies is never trusted.
+    """
+    from fastmcp.server.dependencies import get_access_token
+
+    token = get_access_token()
+    if token is not None and token.client_id:
+        return f"token:{token.client_id}"
+    return f"os:{getpass.getuser()}"
+
+
 def register_review_tool(mcp: McpServer) -> None:
     @mcp.tool()
     async def memory_review(
         learning_id: str,
         decision: Literal["approve", "reject"],
-        reviewer_id: str,
         namespace: str = "default",
     ) -> dict[str, str]:
-        """Resolve a quarantined memory row once, immutably."""
+        """Use when resolving a quarantined memory row: approve or reject it once, immutably.
+
+        The review is recorded under the caller's authenticated identity.
+        """
 
         return memory_review_impl(
             learning_id,
             decision=decision,
-            reviewer_id=reviewer_id,
+            reviewer_id=authenticated_principal(),
             namespace=namespace,
         )
 
@@ -102,8 +119,9 @@ def memory_quarantine_list_impl(
             return {"error": str(exc), "status": "invalid"}
         except AuthorizationError as exc:
             return {"error": str(exc), "status": "forbidden"}
-    candidates = list_quarantined_entries(cfg, namespace=namespace or None, limit=limit)
-    permitted = [entry for entry in candidates if _may_admin(cfg, entry.namespace)]
+    permitted = list_quarantined_entries(
+        cfg, namespace=namespace or None, limit=limit, admits=lambda candidate: _may_admin(cfg, candidate)
+    )
     return {
         "entries": [_quarantine_row(entry) for entry in permitted],
         "count": len(permitted),

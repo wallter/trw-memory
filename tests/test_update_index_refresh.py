@@ -42,7 +42,7 @@ def _postings(backend: SQLiteBackend, namespace: str) -> list[str]:
 @pytest.mark.parametrize(
     "fields",
     [
-        {"q_value": 0.8, "q_observations": 2, "outcome_history": ["success"]},
+        {"outcome_history": ["success"]},
         {"metadata": {"source": "test"}},
         {"importance": 0.9},
     ],

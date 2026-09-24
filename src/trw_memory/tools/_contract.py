@@ -19,16 +19,10 @@ purpose — that is a backward-compatible extension.  Removing or renaming a
 parameter, changing its kind, or changing a return type is what this contract
 exists to fail on.
 
-**``memory_update_impl`` is deliberately absent.**  PRD-CORE-251 FR07 adds it
-in Phase 5, and the operator decision of 2026-09-03 fixed its shape: it takes a
-TYPED update model rather than a free-form field dict, so the permission check
-and the audit event can name what changed.  It is not declared here yet because
-FR01's own acceptance criterion requires every member of this Protocol to
-resolve to a public callable exported by ``trw_memory.tools``, and the PRD's
-phasing (section 9, Phase 1) never authorises a declared-but-unimplemented
-member.  A ``NotImplementedError`` stub would satisfy the letter of the
-Protocol while making the contract test vacuous for that member.  FR07 adds
-both the implementation and its ``UpdateImpl`` member in the same change.
+``memory_update_impl`` (PRD-CORE-251 FR07, delivered by PRD-CORE-294 FR03) takes
+a TYPED ``LearningPatch`` rather than a free-form field dict, per the operator
+decision of 2026-09-03, so the permission check and the audit event can name
+what changed.
 """
 
 from __future__ import annotations
@@ -40,6 +34,7 @@ from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 if TYPE_CHECKING:  # pragma: no cover - typing-only imports
     from pathlib import Path
 
+    from trw_memory.lifecycle.correction import LearningPatch
     from trw_memory.models.config import MemoryConfig
     from trw_memory.models.memory import Anchor, Assertion, Confidence, MemoryType, ProtectionTier
     from trw_memory.storage.interface import StorageBackend
@@ -68,7 +63,6 @@ class StoreImpl(Protocol):
         assertions: list[Assertion] | None = None,
         client_profile: str | None = None,
         model_id: str | None = None,
-        q_value: float | None = None,
         type: MemoryType | str | None = None,
         nudge_line: str | None = None,
         confidence: Confidence | str | None = None,
@@ -81,9 +75,6 @@ class StoreImpl(Protocol):
         anchors: list[Anchor] | None = None,
         anchor_validity: float | None = None,
         trw_dir: Path | None = None,
-        enrich_after_store: bool = True,
-        raise_security_errors: bool = False,
-        raise_storage_errors: bool = False,
     ) -> dict[str, object]: ...
 
 
@@ -107,11 +98,10 @@ class RecallImpl(Protocol):
         token_budget: int | None = None,
         config: MemoryConfig | None = None,
         include_distilled: bool = True,
-        distilled_weight: float | None = None,
         include_source_kinds: list[str] | None = None,
         exclude_source_kinds: list[str] | None = None,
-        source_weights: dict[str, float] | None = None,
         exclude_expired: bool = True,
+        status: str | None = "active",
     ) -> dict[str, object]: ...
 
 
@@ -146,6 +136,21 @@ class ForgetImpl(Protocol):
         config: MemoryConfig | None = None,
         actor: str | None = None,
     ) -> dict[str, object]: ...
+
+
+class UpdateImpl(Protocol):
+    """Contract for :func:`trw_memory.tools.update.memory_update_impl`."""
+
+    def __call__(
+        self,
+        entry_id: str,
+        patch: LearningPatch,
+        namespace: str,
+        *,
+        backend: StorageBackend,
+        config: MemoryConfig | None = None,
+        actor: str | None = None,
+    ) -> dict[str, str]: ...
 
 
 class ConsolidateImpl(Protocol):
@@ -223,6 +228,7 @@ class MemoryToolSurface(Protocol):
     memory_recall_impl: RecallImpl
     memory_search_impl: SearchImpl
     memory_forget_impl: ForgetImpl
+    memory_update_impl: UpdateImpl
     memory_consolidate_impl: ConsolidateImpl
     memory_status_impl: StatusImpl
     memory_review_impl: ReviewImpl

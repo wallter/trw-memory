@@ -12,7 +12,8 @@ delegators.
 - ``connect`` — base ``dbapi.connect`` with WAL/synchronous defaults
   + sqlcipher key-pragma application when ``sqlcipher_key_hex`` is
   provided.
-- ``open_and_configure`` — open + WAL mode + retry-once quick_check.
+- ``open_and_configure`` — open + WAL mode + retry-once quick_check (once
+  per process per store file when the caller asks for ``check_once``).
 - ``open_without_integrity_check`` — open without quick_check (reserved
   for explicit SQLite lock/busy contention; structural quick_check failures
   must recover instead of continuing against a damaged B-tree).
@@ -26,7 +27,9 @@ Extracted as PRD-DIST-245 Phase 1 batch 82.
 from __future__ import annotations
 
 import contextlib
+import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -137,13 +140,45 @@ def connect(
     return conn
 
 
+#: Store files whose ``quick_check`` passed in this process: (realpath, st_dev, st_ino).
+_VERIFIED_STORES: set[tuple[str, int, int]] = set()
+_VERIFIED_LOCK = threading.Lock()
+
+
+def _store_identity(db_path: Path) -> tuple[str, int, int] | None:
+    """The file's identity, or ``None`` when it cannot be stat'ed (checked on every open)."""
+    try:
+        stat = os.stat(db_path)
+    except (OSError, ValueError):  # trw-fail-silent-allow: no identity means the check runs every time
+        return None
+    return (os.path.realpath(db_path), stat.st_dev, stat.st_ino)
+
+
+def forget_verified_stores() -> None:
+    """Test seam: make the next open of every store run ``quick_check`` again."""
+    with _VERIFIED_LOCK:
+        _VERIFIED_STORES.clear()
+
+
 def open_and_configure(
     db_path: Path,
     *,
     dbapi: Any = sqlite3,
     sqlcipher_key_hex: str | None = None,
+    check_once: bool = False,
 ) -> Any:
     """Open a connection with WAL mode and run a quick integrity check.
+
+    ``PRAGMA quick_check`` reads the whole file: about 320 ms per open at 20,000
+    rows. Every open runs it by default, so a writer never opens a store that
+    has gone bad since. ``check_once`` is for the daemon's recall path
+    (PRD-CORE-298 FR05), which opened the store twice per call. There the check
+    runs once per process per store file -- realpath, device and inode, so a
+    replaced file is checked again. A failed check is never recorded, so a
+    corrupt store fails on every open. The trade-off, in one sentence: a store
+    corrupted in place after this process verified it is not caught by a
+    ``check_once`` open, including the recall's access-count update, until the
+    next default open, the stale-handle probe, or the opt-in background checker.
 
     Retries once on quick_check failure to handle transient WAL contention
     (e.g., MCP server mid-checkpoint while trw-maintain opens the DB).
@@ -161,10 +196,16 @@ def open_and_configure(
     )
     try:
         apply_open_pragmas(conn, verify=True)
+        identity = _store_identity(db_path)
+        if check_once and identity is not None and identity in _VERIFIED_STORES:
+            return conn
 
         for attempt in range(2):
             rows = conn.execute("PRAGMA quick_check").fetchall()
             if len(rows) == 1 and rows[0][0] == "ok":
+                if identity is not None:
+                    with _VERIFIED_LOCK:
+                        _VERIFIED_STORES.add(identity)
                 return conn
             if attempt == 0:
                 logger.warning(

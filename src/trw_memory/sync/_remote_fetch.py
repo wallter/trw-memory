@@ -22,8 +22,7 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.dense import cosine_similarity
 from trw_memory.security.pii import mask_query_credentials
-from trw_memory.storage.interface import StorageBackend
-from trw_memory.sync._remote_admission import admit_remote_results
+from trw_memory.sync._remote_admission import Gate
 from trw_memory.sync._remote_common import (
     FETCH_TIMEOUT,
     _raise_local_only_violation,
@@ -132,7 +131,7 @@ def fetch_shared_memories(
     query: str,
     cfg: MemoryConfig,
     *,
-    backend: StorageBackend,
+    admit: Gate,
     embedding: list[float] | None = None,
     limit: int = 10,
     local_entries: list[MemoryEntry] | None = None,
@@ -141,9 +140,10 @@ def fetch_shared_memories(
 ) -> SharedFetchResult:
     """Fetch shared memories from the platform, admitting only what the gate passes.
 
-    ``backend`` is required, not optional: it is what the admission gate needs to
-    evaluate a candidate, and a fetch that cannot be gated must not happen at all
-    (PRD-CORE-245 FR06, NFR03 fail-closed). This is the ONE path to
+    ``admit`` is required, not optional: it is the admission gate every candidate
+    passes, run by whoever holds the store (``store_gate`` over a local backend, or
+    the daemon's ``memory_admit_shared``), and a fetch that cannot be gated must not
+    happen at all (PRD-CORE-245 FR06, NFR03 fail-closed; PRD-CORE-280 FR01). This is the ONE path to
     ``/v1/learnings/search`` in either package; the duplicate client in
     ``trw_mcp.telemetry.remote_recall`` was deleted with the same change.
 
@@ -207,7 +207,7 @@ def fetch_shared_memories(
     # PRD-CORE-245 FR06: the admission gate runs BEFORE the [shared] prefix and
     # before anything is returned, so a refused item never reaches the recall
     # response, and therefore never reaches an agent's context.
-    outcome = admit_remote_results(deduped, config=cfg, backend=backend)
+    outcome = admit(deduped)
     shared: list[dict[str, object]] = []
     for result in outcome.admitted:
         summary = result.get("summary", result.get("content", ""))

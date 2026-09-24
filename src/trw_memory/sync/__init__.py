@@ -1,5 +1,6 @@
 """Remote sync -- publish, fetch, conflict resolution, SSE subscription."""
 
+from trw_memory.sync._remote_admission import AdmissionOutcome, Gate, store_gate
 from trw_memory.sync.conflict import (
     compare_clocks,
     increment_clock,
@@ -8,12 +9,14 @@ from trw_memory.sync.conflict import (
     resolve_conflict,
 )
 from trw_memory.sync.delta import DeltaTracker
-from trw_memory.sync.remote import SharedFetchResult, fetch_shared_memories, publish_memory
+from trw_memory.sync.remote import SharedFetchResult, fetch_shared_memories
 from trw_memory.sync.retry_queue import RetryQueue
 from trw_memory.sync.subscriber import SSESubscriber
 
 __all__ = [
+    "AdmissionOutcome",
     "DeltaTracker",
+    "Gate",
     "RetryQueue",
     "SSESubscriber",
     "SharedFetchResult",
@@ -22,6 +25,6 @@ __all__ = [
     "increment_clock",
     "init_clock",
     "merge_clocks",
-    "publish_memory",
     "resolve_conflict",
+    "store_gate",
 ]

@@ -14,6 +14,7 @@ without git. No function under test is mocked.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -84,7 +85,15 @@ def test_a_plain_directory_is_not_degraded_without_git(no_git: None, tmp_path: P
 
 
 def test_a_real_repository_resolves_through_git(tmp_path: Path) -> None:
-    """With git available the ordinary path is unchanged and undegraded."""
+    """With git available the ordinary path is unchanged and undegraded.
+
+    This test exercises the ``git`` resolution path specifically (as opposed
+    to the on-disk-evidence fallback the rest of this module injects), so the
+    absence of a ``git`` executable on PATH is an environment precondition,
+    not a regression -- the fallback path is what the other tests here prove.
+    """
+    if shutil.which("git") is None:
+        pytest.skip("no git executable on PATH: this test exercises git resolution specifically")
     if not any(parent.joinpath(".git").exists() for parent in Path(__file__).resolve().parents):
         pytest.skip("tests are running from an exported tree, not a git work tree")
     identity = resolve_project_identity(Path(__file__).parent)

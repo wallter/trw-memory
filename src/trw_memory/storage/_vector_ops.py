@@ -20,6 +20,20 @@ Helpers covering vec_index/vec_memories CRUD + KNN search:
 Every helper short-circuits with the ``vec_available=False`` early-return
 so callers don't need to gate.
 
+Two sibling modules split off this one (PRD-CORE-291 slice 3) when it crossed
+the effective-LOC ceiling, and both are re-exported here so every existing
+``from trw_memory.storage._vector_ops import <name>`` call site keeps
+working:
+
+- ``_vector_hype_ops.py`` — legacy ``#hype{n}`` derived-vector cleanup
+  (``hype_sibling_ids``, ``delete_hype_siblings``). That module reaches back
+  into ``delete_vector_internal`` through this module object (not a direct
+  name import) so a test that monkeypatches
+  ``trw_memory.storage._vector_ops.delete_vector_internal`` still observes
+  the patch there.
+- ``_vector_provenance_reads.py`` — provenance-claim read queries
+  (``vector_space_census``, ``get_vector_records``).
+
 Extracted as PRD-DIST-245 Phase 1 batch 85.
 """
 
@@ -27,7 +41,6 @@ from __future__ import annotations
 
 import _thread
 import contextlib
-import hashlib
 import sqlite3
 import struct
 from collections.abc import Sequence
@@ -35,9 +48,25 @@ from typing import Any
 
 import structlog
 
-from trw_memory._hype_ids import parent_of_hype_id
-from trw_memory.embeddings.provenance import EmbeddingSpace, StoredVector, VectorProvenance
+from trw_memory.embeddings.provenance import VectorProvenance
 from trw_memory.storage._sql_utils import iter_bind_chunks
+from trw_memory.storage._vector_hype_ops import delete_hype_siblings, hype_sibling_ids
+from trw_memory.storage._vector_provenance_reads import get_vector_records, vector_space_census
+
+__all__ = [
+    "delete_hype_siblings",
+    "delete_vector",
+    "delete_vector_internal",
+    "existing_vector_ids",
+    "get_stored_embeddings",
+    "get_vector_records",
+    "hype_sibling_ids",
+    "purge_vectors_for",
+    "search_vectors",
+    "upsert_vector",
+    "vector_exists",
+    "vector_space_census",
+]
 
 logger = structlog.get_logger(__name__)
 
@@ -236,79 +265,6 @@ def existing_vector_ids(
     return {str(row[0]) for row in rows}
 
 
-def _hype_like_pattern(parent_id: str) -> str:
-    """SQL LIKE pattern matching a parent's ``{parent_id}#hype{n}`` siblings.
-
-    Parent ids are opaque caller-supplied strings, so escape every SQLite LIKE
-    metacharacter before appending the wildcard that captures ``hype{n}``.
-    """
-    escaped_parent_id = parent_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"{escaped_parent_id}#hype%"
-
-
-def hype_sibling_ids(
-    conn: Any,
-    lock: _thread.LockType | _thread.RLock,
-    *,
-    vec_available: bool,
-    parent_id: str,
-    namespace: str,
-) -> list[str]:
-    """Enumerate only namespace-owned, noncanonical legacy derived vectors.
-
-    Canonical membership, not suffix spelling, establishes ownership. Orphans
-    remain for a future canonical-index rebuild. SQL failures must propagate.
-    """
-    if not vec_available:
-        raise NotImplementedError("legacy vector cleanup unavailable: sqlite-vec is not available")
-    with lock:
-        return _legacy_sibling_ids(conn, parent_id=parent_id, namespace=namespace)
-
-
-def _legacy_sibling_ids(conn: Any, *, parent_id: str, namespace: str) -> list[str]:
-    """Caller holds the connection lock (and write transaction for deletion)."""
-    if conn.execute("SELECT 1 FROM memories WHERE namespace = ? AND id = ?", (namespace, parent_id)).fetchone() is None:
-        return []
-    rows = conn.execute(
-        "SELECT vi.entry_id FROM vec_index vi "
-        "WHERE vi.namespace = ? AND vi.entry_id LIKE ? ESCAPE '\\' "
-        "AND EXISTS (SELECT 1 FROM memories p WHERE p.id = ? AND p.namespace = vi.namespace) "
-        "AND NOT EXISTS (SELECT 1 FROM memories m "
-        "WHERE m.id = vi.entry_id AND m.namespace = vi.namespace)",
-        (namespace, _hype_like_pattern(parent_id), parent_id),
-    ).fetchall()
-    return [str(row[0]) for row in rows if parent_of_hype_id(str(row[0])) == parent_id]
-
-
-def delete_hype_siblings(
-    conn: Any,
-    lock: _thread.LockType | _thread.RLock,
-    *,
-    vec_available: bool,
-    parent_id: str,
-    namespace: str,
-    skip_commit: bool = False,
-) -> int:
-    """Delete namespace-qualified legacy vectors inside the caller's transaction.
-
-    The backend wrapper supplies a transaction even for standalone calls, so
-    canonical membership cannot change between enumeration and deletion.
-    """
-    with lock:
-        if not vec_available:
-            raise NotImplementedError("legacy vector cleanup unavailable: sqlite-vec is not available")
-        sibling_ids = _legacy_sibling_ids(conn, parent_id=parent_id, namespace=namespace)
-        try:
-            for sibling_id in sibling_ids:
-                delete_vector_internal(conn, sibling_id, namespace, allow_unavailable=False)
-            if not skip_commit:
-                conn.commit()
-        except sqlite3.Error:
-            _rollback_standalone_write(conn, skip_commit=skip_commit)
-            raise
-    return len(sibling_ids)
-
-
 def upsert_vector(
     conn: Any,
     lock: _thread.LockType | _thread.RLock,
@@ -420,13 +376,13 @@ def search_vectors(
 ) -> list[tuple[str, float]]:
     """KNN search in vec_memories. Empty list when sqlite-vec absent.
 
-    When *namespace* is provided results are scoped to that namespace, closing a
-    cross-namespace data-isolation leak: ``vec_index`` carries no namespace
-    column, so an unscoped KNN can surface entry ids whose canonical memory row
-    belongs to another tenant. sqlite-vec requires the ``k = ?`` KNN limit on
-    the MATCH scan itself (a namespace predicate cannot be pushed into that
-    scan), so we OVER-FETCH ``k`` (k * over_fetch_factor, capped), JOIN to
-    ``memories`` to filter by namespace, then truncate to ``top_k``. This keeps
+    When *namespace* is provided results are scoped to that namespace: the
+    vector's own ``vec_index.namespace``, joined to the row in that namespace,
+    so an id held in two namespaces never returns the other's vector and an
+    orphaned vector never surfaces. sqlite-vec requires the ``k = ?`` KNN limit
+    on the MATCH scan itself (a namespace predicate cannot be pushed into that
+    scan), so we OVER-FETCH ``k`` (k * over_fetch_factor, capped), filter by
+    namespace, then truncate to ``top_k``. This keeps
     the requested count met as long as the namespace holds enough near neighbours
     within the over-fetch window. ``namespace=None`` keeps the legacy behaviour.
     """
@@ -459,15 +415,15 @@ def search_vectors(
                 ).fetchall()
                 return [(str(r[0]), float(r[1])) for r in rows]
             # Over-fetch then post-filter by namespace. The KNN k applies to the
-            # MATCH scan; the namespace filter happens in the JOIN to memories.
+            # MATCH scan; the namespace filter applies after it.
             knn_k = min(max(top_k * _NAMESPACE_OVERFETCH_FACTOR, top_k), _NAMESPACE_OVERFETCH_CAP)
             rows = conn.execute(
                 """
                 SELECT vi.entry_id, vm.distance
                 FROM vec_memories vm
                 JOIN vec_index vi ON vm.rowid = vi.rowid
-                JOIN memories mem ON mem.id = vi.entry_id
-                WHERE vm.embedding MATCH ? AND k = ? AND mem.namespace = ?
+                JOIN memories mem ON mem.namespace = vi.namespace AND mem.id = vi.entry_id
+                WHERE vm.embedding MATCH ? AND k = ? AND vi.namespace = ?
                 ORDER BY vm.distance
                 """,
                 (query_bytes, knn_k, namespace),
@@ -544,100 +500,3 @@ def get_stored_embeddings(
         dim_len = len(blob) // 4
         embeddings[str(row[0])] = list(struct.unpack(f"{dim_len}f", blob))
     return embeddings
-
-
-def vector_space_census(
-    conn: Any,
-    lock: _thread.LockType | _thread.RLock,
-    *,
-    vec_available: bool,
-    namespace: str,
-) -> dict[EmbeddingSpace | None, int] | None:
-    """Count *namespace*'s stored vectors by the embedding space their provenance claims.
-
-    Reads only ``vec_index.provenance_json`` -- no vector blob is loaded -- and
-    classifies each row with :meth:`VectorProvenance.from_json`, so a NULL,
-    malformed or wrongly-shaped record counts under ``None`` (unknown space),
-    never as any real space. Keys compare the FULL :class:`EmbeddingSpace`
-    identity. This is the provenance CLAIM: unlike :func:`get_vector_records`
-    it does not re-hash blobs against ``vector_sha256``, so a claim that
-    disagrees with its bytes is counted under the claimed space.
-
-    ``None`` means the census could not be taken (sqlite-vec unavailable or a
-    SQL error): callers must not read it as "no stale vectors".
-    """
-    if not isinstance(namespace, str):
-        raise TypeError("vector_space_census requires an explicit namespace string")
-    if not vec_available:
-        return None
-    try:
-        with lock:
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(vec_index)").fetchall()}
-            proof_column = "provenance_json" if "provenance_json" in columns else "NULL"
-            rows = conn.execute(
-                f"SELECT {proof_column} FROM vec_index WHERE namespace = ?",  # noqa: S608 -- fixed local SQL fragment only
-                (namespace,),
-            ).fetchall()
-    except sqlite3.Error:  # trw-fail-silent-allow: None is the typed "no census" signal; logged at warning
-        logger.warning("vector_space_census_error", exc_info=True)
-        return None
-    census: dict[EmbeddingSpace | None, int] = {}
-    for (raw,) in rows:
-        proof = VectorProvenance.from_json(raw)
-        space = proof.space if proof is not None else None
-        census[space] = census.get(space, 0) + 1
-    return census
-
-
-def get_vector_records(
-    conn: Any,
-    lock: _thread.LockType | _thread.RLock,
-    *,
-    vec_available: bool,
-    entry_ids: list[str],
-    namespace: str,
-) -> dict[str, StoredVector]:
-    """Read scoped vector bytes and proof together; never infer legacy proof.
-
-    Read-only legacy layouts may lack the additive column. Their vectors remain
-    available as unknown evidence. Malformed or stale proof is also unknown.
-    """
-    if not isinstance(namespace, str):
-        raise TypeError("get_vector_records requires an explicit namespace string")
-    if not vec_available or not entry_ids:
-        return {}
-    try:
-        with lock:
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(vec_index)").fetchall()}
-            proof_column = "vi.provenance_json" if "provenance_json" in columns else "NULL"
-            rows = []
-            for chunk in iter_bind_chunks(entry_ids, reserved_bindings=1):
-                placeholders = ", ".join("?" for _ in chunk)
-                # Identifiers are fixed local literals; all caller values bind.
-                sql = (
-                    f"SELECT vi.entry_id, vm.embedding, {proof_column} "  # noqa: S608 -- fixed local SQL fragments only
-                    "FROM vec_memories vm JOIN vec_index vi ON vm.rowid = vi.rowid "
-                    f"WHERE vi.entry_id IN ({placeholders}) AND vi.namespace = ?"
-                )
-                rows.extend(conn.execute(sql, [*chunk, namespace]).fetchall())
-    except sqlite3.Error:  # trw-fail-silent-allow: the optional-dependency case is already gated above (`if not vec_available: return {}`), so EVERY error reaching here is real and every one is surfaced at warning -- no error is folded silently into this empty return
-        logger.warning("vector_record_load_error", exc_info=True)
-        return {}
-    records: dict[str, StoredVector] = {}
-    for entry_id, raw, proof_json in rows:
-        if raw is None:
-            continue
-        blob = bytes(raw)
-        if len(blob) % 4 != 0:
-            continue
-        embedding = tuple(struct.unpack(f"{len(blob) // 4}f", blob))
-        proof = VectorProvenance.from_json(proof_json)
-        # Same check as ``proof.matches_vector(embedding)``: the proof digests the
-        # float32 packing of the vector, which IS this blob, so hash it directly
-        # (recall reads a whole candidate pool through here).
-        if proof is not None and (
-            len(embedding) != proof.space.dimensions or hashlib.sha256(blob).hexdigest() != proof.vector_sha256
-        ):
-            proof = None
-        records[str(entry_id)] = StoredVector(embedding=embedding, provenance=proof)
-    return records

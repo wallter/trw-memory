@@ -14,7 +14,6 @@ Public surface (all delegated from ``MemoryClient``):
 - ``recall_impl`` — main async entry point.
 - ``apply_recall_security`` — recall-window filter + canary probe.
 - ``apply_budget`` — token-budget filtering (pure).
-- ``merge_org_results`` — append cross-validated sibling memories.
 - ``try_hybrid_recall`` — BM25 + dense + RRF (re-exported from
   ``_client_recall_hybrid``).
 - ``fallback_recall`` — LIKE + TF + importance scoring.
@@ -22,7 +21,6 @@ Public surface (all delegated from ``MemoryClient``):
 - ``tier_results`` — local tier candidates.
 - ``remember_results_in_tiers`` — keep tiers aligned.
 - ``merge_tier_results`` — fuse tier-only candidates (pure).
-- ``tier_result_from_entry`` — tier-entry → result-dict (pure).
 
 Extracted as PRD-DIST-246 batch 105.
 """
@@ -31,10 +29,12 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 import structlog
 
+from trw_memory._client_backend import client_logger as _client_logger
+from trw_memory._client_backend import create_local_backend as _create_local_backend
 from trw_memory._client_distilled_tiering import entry_to_result as _entry_to_result
 from trw_memory._client_recall_hybrid import HybridPool
 from trw_memory.embeddings._query_prompts import embed_query
@@ -57,23 +57,10 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
-def _client_logger() -> Any:
-    """Parent-module logger lookup so test patches on ``trw_memory.client.logger`` propagate."""
-    from trw_memory import client as _c
-
-    return _c.logger
-
-
 # Fallback recall scoring (used when hybrid retrieval pipeline is unavailable).
 _FALLBACK_TF_WEIGHT: float = 0.7
 _FALLBACK_IMPORTANCE_WEIGHT: float = 0.3
 _FALLBACK_TF_SCALE: float = 10.0
-
-
-def _create_local_backend(config: Any, namespace: str) -> Any:
-    from trw_memory.client import _create_local_backend as _impl
-
-    return _impl(config, namespace)
 
 
 async def recall_impl(
@@ -285,12 +272,11 @@ from trw_memory._client_recall_security import (  # noqa: E402
 )
 
 
-# `apply_budget` and `merge_org_results` extracted to
-# _client_recall_helpers.py (PRD-DIST-246 batch 105 sub-split).
+# `apply_budget` extracted to _client_recall_helpers.py (PRD-DIST-246 batch 105
+# sub-split).
 from trw_memory._client_recall_helpers import (  # noqa: E402
     apply_admission_filter as apply_admission_filter,
     apply_budget as apply_budget,
-    merge_org_results as merge_org_results,
 )
 
 
@@ -399,10 +385,10 @@ async def record_recall_access_impl(
     async with client._lock:
         for namespace, entry_ids in grouped.items():
             if namespace == client._namespace:
-                record_recall_access(client._get_backend(), entry_ids)
+                record_recall_access(client._get_backend(), entry_ids, namespace=namespace)
             else:
                 with _create_local_backend(client._config, namespace) as backend:
-                    record_recall_access(backend, entry_ids)
+                    record_recall_access(backend, entry_ids, namespace=namespace)
             append_audit_event(
                 client._config,
                 "access",
@@ -418,6 +404,5 @@ async def record_recall_access_impl(
 from trw_memory._client_recall_helpers import (  # noqa: E402
     merge_tier_results as merge_tier_results,
     remember_results_in_tiers as remember_results_in_tiers,
-    tier_result_from_entry as tier_result_from_entry,
     tier_results as tier_results,
 )

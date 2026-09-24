@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from tests._timing import assert_budget
 from trw_memory.models.memory import Assertion, AssertionType, MemoryStatus
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
@@ -177,7 +178,7 @@ class TestListEntries:
 
 
 class TestEntriesWithAssertions:
-    def test_count_with_assertions_returns_only_assertion_entries(self, backend: SQLiteBackend) -> None:
+    def test_entries_with_assertions_returns_only_assertion_entries(self, backend: SQLiteBackend) -> None:
         with_assertions = make_entry("a1").model_copy(
             update={"assertions": [Assertion(type=AssertionType.GLOB_EXISTS, pattern="", target="src/main.py")]}
         )
@@ -186,7 +187,7 @@ class TestEntriesWithAssertions:
         backend.store(with_assertions)
         backend.store(without_assertions)
 
-        results = backend.count_with_assertions()
+        results = backend.entries_with_assertions()
         assert len(results) == 1
         assert results[0].id == "a1"
 
@@ -230,7 +231,7 @@ class TestIncrementSessionCounts:
         backend.store(make_entry("L-sess001"))
         backend.store(make_entry("L-sess002"))
 
-        updated = backend.increment_session_counts(["L-sess001", "L-sess002"])
+        updated = backend.increment_session_counts(["L-sess001", "L-sess002"], namespace="default")
 
         assert updated == 2
         first = backend.get("L-sess001", namespace="default")
@@ -248,23 +249,34 @@ class TestIncrementSessionCounts:
         statements: list[str] = []
         backend._conn.set_trace_callback(statements.append)
         try:
-            backend.increment_session_counts(["L-batch01", "L-batch02", "L-batch03"])
+            backend.increment_session_counts(["L-batch01", "L-batch02", "L-batch03"], namespace="default")
         finally:
             backend._conn.set_trace_callback(None)
 
         commit_count = sum(1 for statement in statements if statement.upper().startswith("COMMIT"))
         assert commit_count == 1
 
-    @pytest.mark.perf
     def test_increment_session_counts_stays_under_latency_budget_for_25_rows(self, backend: SQLiteBackend) -> None:
         for index in range(25):
             backend.store(make_entry(f"L-lat{index:04d}"))
 
         entry_ids = [f"L-lat{index:04d}" for index in range(25)]
 
-        start = time.perf_counter()
-        updated = backend.increment_session_counts(entry_ids)
-        elapsed = time.perf_counter() - start
+        updated = backend.increment_session_counts(entry_ids, namespace="default")
 
         assert updated == 25
-        assert elapsed < 0.05
+
+    @pytest.mark.requires_local_timing
+    def test_increment_session_counts_stays_under_latency_budget_for_25_rows_budget(
+        self, backend: SQLiteBackend
+    ) -> None:
+        for index in range(25):
+            backend.store(make_entry(f"L-lat{index:04d}"))
+
+        entry_ids = [f"L-lat{index:04d}" for index in range(25)]
+
+        start = time.perf_counter()
+        backend.increment_session_counts(entry_ids, namespace="default")
+        elapsed = time.perf_counter() - start
+
+        assert_budget("increment_session_counts_25_rows", elapsed, 0.05, "s")

@@ -1,8 +1,8 @@
 """PII detection pipeline using regex patterns and Shannon entropy analysis.
 
 Detects common PII types (email, phone, SSN, credit card, API keys) and
-high-entropy strings that may contain secrets.  Supports three actions:
-block (reject the entry), redact (mask and allow), and warn (log but allow).
+high-entropy strings that may contain secrets. ``detect_pii`` finds matches;
+``redact_text`` masks them.
 
 Also provides pure anonymization helpers (strip_pii, redact_paths,
 anonymize_installation_id) for telemetry data that must not contain PII.
@@ -17,8 +17,7 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from trw_memory.exceptions import ConfigError, MemoryError
-from trw_memory.models.memory import MemoryEntry
+from trw_memory.exceptions import ConfigError
 
 
 class PIIType(str, Enum):
@@ -572,58 +571,6 @@ def redact_text(text: str, matches: list[PIIMatch]) -> str:
         marker = f"[REDACTED:{match.pii_type}]"
         result = result[: match.start] + marker + result[match.end :]
     return result
-
-
-def check_entry_pii(
-    entry: MemoryEntry,
-    action: PIIAction = PIIAction.WARN,
-    entropy_threshold: float = _DEFAULT_ENTROPY_THRESHOLD,
-) -> tuple[MemoryEntry, list[PIIMatch]]:
-    """Check ``content``, ``detail`` and ``tags`` fields for PII and apply *action*.
-
-    Args:
-        entry: The memory entry to check.
-        action: What to do when PII is found: block, redact, or warn.
-        entropy_threshold: Minimum Shannon entropy for high-entropy detection.
-
-    Returns:
-        A tuple of ``(possibly_modified_entry, all_matches)``.
-
-    Raises:
-        MemoryError: If *action* is ``BLOCK`` and PII is detected.
-    """
-    # Scan content, detail AND tags. Security audit 2026-06-09 (v0.9.2): the
-    # internal runtime path (apply_runtime_pii_policy) scanned tags in v0.9.1, but
-    # this PUBLIC API still ignored them — so a credential or PII hidden in a tag
-    # returned a false-clean result to direct callers and was surfaced verbatim at
-    # recall time. Scan tags here for parity with the runtime path.
-    content_matches = detect_pii(entry.content, entropy_threshold)
-    detail_matches = detect_pii(entry.detail, entropy_threshold)
-    tag_matches_by_index: list[list[PIIMatch]] = [detect_pii(tag, entropy_threshold) for tag in entry.tags]
-    tag_matches = [match for matches in tag_matches_by_index for match in matches]
-
-    all_matches = content_matches + detail_matches + tag_matches
-
-    if not all_matches:
-        return (entry, [])
-
-    if action == PIIAction.BLOCK:
-        pii_types = {m.pii_type for m in all_matches}
-        raise MemoryError(
-            f"PII detected in entry {entry.id!r}: types={sorted(pii_types)}. Entry blocked by PII policy."
-        )
-
-    if action == PIIAction.REDACT:
-        new_content = redact_text(entry.content, content_matches)
-        new_detail = redact_text(entry.detail, detail_matches)
-        new_tags = [redact_text(tag, matches) for tag, matches in zip(entry.tags, tag_matches_by_index, strict=True)]
-        updated = entry.model_copy(
-            update={"content": new_content, "detail": new_detail, "tags": new_tags},
-        )
-        return (updated, all_matches)
-
-    # PIIAction.WARN — return entry unchanged with matches for logging
-    return (entry, all_matches)
 
 
 # ---------------------------------------------------------------------------

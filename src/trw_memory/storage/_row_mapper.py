@@ -99,8 +99,6 @@ def row_to_entry(row: tuple[object, ...], *, reference_time: datetime | None = N
         invalidated_by_raw,
         access_count,
         session_count,
-        q_value,
-        q_obs,
         source,
         source_identity,
         client_profile,
@@ -132,8 +130,6 @@ def row_to_entry(row: tuple[object, ...], *, reference_time: datetime | None = N
         sync_seq_raw,
         last_synced_at_raw,
         recall_count_raw,
-        helpful_count_raw,
-        unhelpful_count_raw,
         verification_status_raw,
         verification_checked_at_raw,
     ) = row
@@ -187,8 +183,6 @@ def row_to_entry(row: tuple[object, ...], *, reference_time: datetime | None = N
         invalidated_by=str(invalidated_by_raw) if invalidated_by_raw else None,
         access_count=int(str(access_count)),
         session_count=int(str(session_count)) if session_count else 0,
-        q_value=float(str(q_value)),
-        q_observations=int(str(q_obs)),
         source=cast("_SourceType", str(source)),
         source_identity=str(source_identity) if source_identity else "",
         client_profile=str(client_profile) if client_profile else "",
@@ -222,8 +216,6 @@ def row_to_entry(row: tuple[object, ...], *, reference_time: datetime | None = N
         sync_seq=int(str(sync_seq_raw)) if sync_seq_raw else 0,
         last_synced_at=parse_dt_safe(last_synced_at_raw, default=None) if last_synced_at_raw else None,
         recall_count=int(str(recall_count_raw)) if recall_count_raw else 0,
-        helpful_count=int(str(helpful_count_raw)) if helpful_count_raw else 0,
-        unhelpful_count=int(str(unhelpful_count_raw)) if unhelpful_count_raw else 0,
         # PRD-CORE-231-FR02: an unrecognised persisted literal degrades to None
         # (no adverse verdict) rather than raising and quarantining the row.
         verification_status=parse_verification_status(verification_status_raw),
@@ -253,8 +245,6 @@ def entry_to_row(entry: MemoryEntry) -> tuple[object, ...]:
         entry.invalidated_by,
         entry.access_count,
         entry.session_count,
-        entry.q_value,
-        entry.q_observations,
         entry.source,
         entry.source_identity,
         entry.client_profile,
@@ -289,8 +279,6 @@ def entry_to_row(entry: MemoryEntry) -> tuple[object, ...]:
         entry.sync_seq,
         entry.last_synced_at.isoformat() if entry.last_synced_at else None,
         entry.recall_count,
-        entry.helpful_count,
-        entry.unhelpful_count,
         entry.verification_status,
         entry.verification_checked_at or "",
     )

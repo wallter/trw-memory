@@ -40,8 +40,6 @@ def _make_full_entry(entry_id: str = "M-FULL") -> MemoryEntry:
         updated_at=now,
         last_accessed_at=now,
         access_count=7,
-        q_value=0.72,
-        q_observations=15,
         source="agent",
         source_identity="claude-opus",
         client_profile="claude-code",
@@ -109,8 +107,6 @@ class TestFullColumnRoundTrip:
         assert retrieved.recurrence == entry.recurrence
         assert retrieved.namespace == entry.namespace
         assert retrieved.access_count == entry.access_count
-        assert retrieved.q_value == pytest.approx(entry.q_value)
-        assert retrieved.q_observations == entry.q_observations
 
         # Provenance
         assert retrieved.source == entry.source

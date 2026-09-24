@@ -166,8 +166,11 @@ class TestRegisterReviewTool:
                 "trw_memory.integrations._backend.create_backend_from_config",
                 new=_ctx_factory(mock_backend),
             ),
-            patch("trw_memory.tools.review.review_quarantined_entry", return_value=expected),
+            patch("trw_memory.tools.review.review_quarantined_entry", return_value=expected) as review,
+            patch("trw_memory.tools.review.authenticated_principal", return_value="os:rev-3"),
         ):
-            result = await registered["fn"]("L-006", "approve", "rev-3")
+            result = await registered["fn"]("L-006", "approve")
 
         assert result == expected
+        # FR07(c): the reviewer is the server-established principal, never a caller argument.
+        assert review.call_args.kwargs["reviewer_id"] == "os:rev-3"

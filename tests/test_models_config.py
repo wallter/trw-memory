@@ -34,8 +34,6 @@ def test_memory_config_defaults() -> None:
     assert cfg.q_learning_rate == 0.15
     assert cfg.consolidation_enabled is True
     assert cfg.consolidation_max_per_cycle == 50
-    assert cfg.consolidation_interval_days == 7
-    assert cfg.key_rotation_backup is True
     assert cfg.local_only is False
     assert cfg.rbac_mode == "local"
 
@@ -173,7 +171,6 @@ def test_memory_config_reads_security_fields_from_trw_config_yaml(
             "memory_rbac_mode: remote",
             "memory_namespace_roles:",
             "  project:default: reader",
-            "memory_key_rotation_backup: false",
             "memory_local_only: false",
         ],
     )
@@ -186,7 +183,6 @@ def test_memory_config_reads_security_fields_from_trw_config_yaml(
     assert cfg.rbac_enabled is True
     assert cfg.rbac_mode == "remote"
     assert cfg.namespace_roles == {"project:default": "reader"}
-    assert cfg.key_rotation_backup is False
 
 
 def test_memory_config_accepts_memory_prefixed_init_fields() -> None:
@@ -197,7 +193,6 @@ def test_memory_config_accepts_memory_prefixed_init_fields() -> None:
         memory_rbac_enabled=True,
         memory_rbac_mode="remote",
         memory_namespace_roles={"project:default": "reader"},
-        memory_key_rotation_backup=False,
     )
 
     assert cfg.encryption_enabled is True
@@ -206,7 +201,6 @@ def test_memory_config_accepts_memory_prefixed_init_fields() -> None:
     assert cfg.rbac_enabled is True
     assert cfg.rbac_mode == "local"
     assert cfg.namespace_roles == {"project:default": "reader"}
-    assert cfg.key_rotation_backup is False
 
 
 def test_memory_config_env_overrides_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -294,8 +288,8 @@ _RETIRED_RERANK = {
 def fresh_rerank_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
     from trw_memory.models import _config_sources
 
-    monkeypatch.setattr(_config_sources, "_warned_rerank_settings", set())
-    for name in _RETIRED_RERANK:
+    monkeypatch.setattr(_config_sources, "_warned_retired_settings", set())
+    for name in (*_RETIRED_RERANK, "lifecycle_use_fsrs", "key_rotation_backup"):
         for spelling in (name, f"memory_{name}"):
             monkeypatch.delenv(spelling.upper(), raising=False)
             monkeypatch.delenv(spelling, raising=False)
@@ -342,6 +336,61 @@ def test_recall_rerank_fields_are_retired(
         assert field not in MemoryConfig.model_fields
         assert not hasattr(cfg, field)
     assert "recall_rerank_model" in MemoryConfig.model_fields  # model/candidates knobs stay
+
+
+@pytest.mark.usefixtures("fresh_rerank_warnings")
+@pytest.mark.parametrize("source", ["constructor", "environment", "dotenv", "yaml"])
+def test_lifecycle_use_fsrs_is_retired_with_a_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    """PRD-CORE-293 removed the FSRS path; a leftover value must say so, not vanish."""
+    from structlog.testing import capture_logs
+
+    monkeypatch.chdir(tmp_path)
+    kwargs: dict[str, object] = {}
+    if source == "constructor":
+        kwargs["lifecycle_use_fsrs"] = "true"
+    elif source == "environment":
+        monkeypatch.setenv("MEMORY_LIFECYCLE_USE_FSRS", "true")
+    elif source == "dotenv":
+        env_file = tmp_path / "legacy.env"
+        env_file.write_text("MEMORY_LIFECYCLE_USE_FSRS=true\n", encoding="utf-8")
+        kwargs["_env_file"] = env_file
+    else:
+        _write_trw_config(tmp_path, ["lifecycle_use_fsrs: true"])
+    with capture_logs() as logs:
+        cfg = MemoryConfig(**kwargs)
+    warned = _rerank_warnings(logs)
+    assert len(warned) == 1, warned
+    assert str(warned[0]["setting"]).lower().removeprefix("memory_") == "lifecycle_use_fsrs"
+    assert warned[0]["prd"] == "PRD-CORE-293"
+    assert "lifecycle_use_fsrs" not in MemoryConfig.model_fields
+    assert not hasattr(cfg, "lifecycle_use_fsrs")
+
+
+@pytest.mark.usefixtures("fresh_rerank_warnings")
+@pytest.mark.parametrize("source", ["yaml", "environment"])
+def test_key_rotation_backup_is_retired_with_a_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    """PRD-CORE-293 retired the whole key-rotation surface; a leftover value must say so, not vanish."""
+    from structlog.testing import capture_logs
+
+    monkeypatch.chdir(tmp_path)
+    kwargs: dict[str, object] = {}
+    if source == "environment":
+        monkeypatch.setenv("MEMORY_KEY_ROTATION_BACKUP", "false")
+    else:
+        _write_trw_config(tmp_path, ["key_rotation_backup: false"])
+    with capture_logs() as logs:
+        cfg = MemoryConfig(**kwargs)
+    warned = _rerank_warnings(logs)
+    assert len(warned) == 1, warned
+    assert warned[0]["log_level"] == "warning"
+    assert str(warned[0]["setting"]).lower().removeprefix("memory_") == "key_rotation_backup"
+    assert warned[0]["prd"] == "PRD-CORE-293"
+    assert "key_rotation_backup" not in MemoryConfig.model_fields
+    assert not hasattr(cfg, "key_rotation_backup")
 
 
 @pytest.mark.usefixtures("fresh_rerank_warnings")

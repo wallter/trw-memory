@@ -4,10 +4,9 @@ Belongs to ``client.py`` recall pipeline. Re-exported via
 ``_client_recall.py``. Split out from the parent recall module so each
 file stays under the 350 effective-LOC gate (PRD-DIST-246 batch 105).
 
-7 helpers:
+helpers:
 
 - ``apply_budget`` — pure token-budget filtering.
-- ``merge_org_results`` — append cross-validated sibling memories.
 - ``tier_results`` — collect local tier-managed candidates.
 - ``remember_results_in_tiers`` / ``remember_selected_candidates`` — re-exported from
   ``_client_recall_mirror`` (tier mirroring after a recall).
@@ -63,22 +62,6 @@ def apply_budget(
     raw: list[dict[str, object]] = list(results)  # type: ignore[arg-type]
     filtered, _used, _truncated = apply_token_budget(raw, token_budget)
     return filtered  # type: ignore[return-value]
-
-
-async def merge_org_results(
-    client: MemoryClient,
-    query: str,
-    local_results: list[MemoryResultDict],
-    limit: int,
-    tags: list[str] | None,
-    min_score: float,
-) -> list[MemoryResultDict]:
-    candidates = await _org_candidates(
-        client, query, {(r["namespace"], r["memory_id"]) for r in local_results}, limit, tags, min_score
-    )
-    from trw_memory._client_distilled_tiering import candidate_to_result
-
-    return client._merge_shared_candidates(local_results, [candidate_to_result(c) for c in candidates])
 
 
 async def collect_org_candidates(
@@ -279,8 +262,6 @@ def tier_result_from_entry(entry: dict[str, object]) -> MemoryResultDict:
         "namespace": str(entry.get("namespace", "default")),
         "source": "local",
         "last_accessed_at": str(entry.get("last_accessed_at", "")),
-        "q_value": MemoryClient._coerce_float(entry.get("q_value", 0.0)),
-        "q_observations": int(str(entry.get("q_observations", 0))),
         "recurrence": int(str(entry.get("recurrence", 1))),
         "access_count": int(str(entry.get("access_count", 0))),
         "metadata": metadata,

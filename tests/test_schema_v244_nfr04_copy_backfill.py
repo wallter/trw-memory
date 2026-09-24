@@ -43,6 +43,7 @@ from pathlib import Path
 import pytest
 
 import trw_memory.storage._dbapi  # noqa: F401  — installs pysqlite3 as ``sqlite3``
+from tests._timing import assert_budget
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage._schema import SCHEMA_VERSION, ensure_schema
 from trw_memory.storage.sqlite_backend import SQLiteBackend
@@ -79,28 +80,29 @@ def _v4_live_store(path: Path, rows: int) -> None:
     conn.close()
 
 
-@pytest.mark.perf
-@pytest.mark.slow
-def test_schema5_rebuild_against_copy_within_budget_preserves_rows(tmp_path: Path) -> None:
-    """AC1: migrating a BYTE COPY completes in budget, row count invariant, original untouched."""
+def _make_byte_copy(tmp_path: Path) -> tuple[Path, Path]:
+    """Build a v4-stamped live store and a byte copy of it for migration."""
     live = tmp_path / "memory.db"
     _v4_live_store(live, _SYNTHETIC_ROW_COUNT)
-
     copy_path = tmp_path / "memory.db.copy-for-migration"
     shutil.copy2(live, copy_path)
+    return live, copy_path
+
+
+@pytest.mark.slow
+def test_schema5_rebuild_against_copy_within_budget_preserves_rows(tmp_path: Path) -> None:
+    """AC1: migrating a BYTE COPY preserves the row count; original is untouched."""
+    live, copy_path = _make_byte_copy(tmp_path)
 
     conn = sqlite3.connect(copy_path)
     before = int(conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0])
 
-    started = time.monotonic()
     ensure_schema(conn)
-    elapsed = time.monotonic() - started
 
     after = int(conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0])
     version = int(conn.execute("PRAGMA user_version").fetchone()[0])
     conn.close()
 
-    assert elapsed < _BUDGET_SECONDS, f"schema-5 rebuild took {elapsed:.2f}s, over the {_BUDGET_SECONDS}s NFR04 budget"
     assert before == _SYNTHETIC_ROW_COUNT
     assert after == before, "every pre-migration row count must be preserved"
     assert version == SCHEMA_VERSION
@@ -113,15 +115,25 @@ def test_schema5_rebuild_against_copy_within_budget_preserves_rows(tmp_path: Pat
     live_conn.close()
 
 
-@pytest.mark.perf
+@pytest.mark.slow
+@pytest.mark.requires_local_timing
+def test_schema5_rebuild_against_copy_within_budget_preserves_rows_budget(tmp_path: Path) -> None:
+    """AC1: migrating a BYTE COPY completes within the NFR04 budget."""
+    _live, copy_path = _make_byte_copy(tmp_path)
+
+    conn = sqlite3.connect(copy_path)
+    started = time.monotonic()
+    ensure_schema(conn)
+    elapsed = time.monotonic() - started
+    conn.close()
+
+    assert_budget("schema5_rebuild_elapsed", elapsed, _BUDGET_SECONDS, "s")
+
+
 @pytest.mark.slow
 def test_second_run_against_the_migrated_copy_is_a_measured_no_op(tmp_path: Path) -> None:
     """AC2: re-running the migration on the already-migrated copy changes zero rows."""
-    live = tmp_path / "memory.db"
-    _v4_live_store(live, _SYNTHETIC_ROW_COUNT)
-
-    copy_path = tmp_path / "memory.db.copy-for-migration"
-    shutil.copy2(live, copy_path)
+    _live, copy_path = _make_byte_copy(tmp_path)
 
     conn = sqlite3.connect(copy_path)
     ensure_schema(conn)
@@ -133,9 +145,7 @@ def test_second_run_against_the_migrated_copy_is_a_measured_no_op(tmp_path: Path
         for row in conn2.execute("SELECT id, namespace, content, anchor_validity, confidence FROM memories")
     }
 
-    started = time.monotonic()
     ensure_schema(conn2)  # SCHEMA_VERSION already stamped -> must take the fast path
-    elapsed = time.monotonic() - started
 
     row_hashes_after = {
         row[0]: row[1:]
@@ -144,6 +154,24 @@ def test_second_run_against_the_migrated_copy_is_a_measured_no_op(tmp_path: Path
     conn2.close()
 
     assert row_hashes_after == row_hashes_before, "a second run over an already-migrated copy must change zero rows"
+
+
+@pytest.mark.slow
+@pytest.mark.requires_local_timing
+def test_second_run_against_the_migrated_copy_is_a_measured_no_op_budget(tmp_path: Path) -> None:
+    """AC2: re-running the migration on the already-migrated copy takes the fast path."""
+    _live, copy_path = _make_byte_copy(tmp_path)
+
+    conn = sqlite3.connect(copy_path)
+    ensure_schema(conn)
+    conn.close()
+
+    conn2 = sqlite3.connect(copy_path)
+    started = time.monotonic()
+    ensure_schema(conn2)  # SCHEMA_VERSION already stamped -> must take the fast path
+    elapsed = time.monotonic() - started
+    conn2.close()
+
     # The fast-path fires (PRAGMA user_version == SCHEMA_VERSION -> immediate
     # return), so the second run costs microseconds, not another rebuild pass.
-    assert elapsed < 1.0, f"a no-op second run took {elapsed:.4f}s -- the version-gate fast path did not fire"
+    assert_budget("schema5_second_run_elapsed", elapsed, 1.0, "s")

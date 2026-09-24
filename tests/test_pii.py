@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from trw_memory.exceptions import MemoryError
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.pii import (
-    PIIAction,
     PIIType,
     anonymize_installation_id,
-    check_entry_pii,
     detect_pii,
     redact_paths,
     redact_text,
@@ -177,24 +174,19 @@ class TestDetectPII:
 
     def test_real_ip_still_redacted(self) -> None:
         """Closure re-audit #3: a real IP is still detected after octet-range tightening."""
-        from trw_memory.models.memory import MemoryEntry
-        from trw_memory.security.pii import PIIAction, check_entry_pii
-
-        entry = MemoryEntry(id="IP-1", content="connect to 192.168.1.1 please")
-        updated, matches = check_entry_pii(entry, action=PIIAction.REDACT)
+        content = "connect to 192.168.1.1 please"
+        matches = detect_pii(content)
         assert any(m.pii_type == PIIType.IP_ADDRESS for m in matches)
-        assert "192.168.1.1" not in updated.content
-        assert "[REDACTED:ip_address]" in updated.content
+        redacted = redact_text(content, matches)
+        assert "192.168.1.1" not in redacted
+        assert "[REDACTED:ip_address]" in redacted
 
     def test_version_string_not_redacted_as_ip(self) -> None:
         """Closure re-audit #3: a 4-segment version string must NOT match IP_ADDRESS."""
-        from trw_memory.models.memory import MemoryEntry
-        from trw_memory.security.pii import PIIAction, check_entry_pii
-
-        entry = MemoryEntry(id="V-1", content="upgraded to python 3.11.0.2 today")
-        updated, matches = check_entry_pii(entry, action=PIIAction.REDACT)
+        content = "upgraded to python 3.11.0.2 today"
+        matches = detect_pii(content)
         assert not any(m.pii_type == PIIType.IP_ADDRESS for m in matches)
-        assert "3.11.0.2" in updated.content
+        assert "3.11.0.2" in redact_text(content, matches)
 
     def test_out_of_range_octets_not_ip(self) -> None:
         """An octet > 255 is not a valid IPv4 address."""
@@ -369,98 +361,6 @@ class TestRedactText:
         result = redact_text(text, matches)
         assert result.startswith("START ")
         assert result.endswith(" END")
-
-
-# ---------------------------------------------------------------------------
-# check_entry_pii tests
-# ---------------------------------------------------------------------------
-
-
-class TestCheckEntryPII:
-    """Tests for the entry-level PII check with action handling."""
-
-    def test_clean_entry_returns_unchanged(self) -> None:
-        """Entry without PII is returned unchanged with empty matches."""
-        entry = _make_entry("This is safe content.")
-        result_entry, matches = check_entry_pii(entry)
-        assert result_entry.content == "This is safe content."
-        assert matches == []
-
-    def test_warn_action_returns_entry_unchanged(self) -> None:
-        """WARN action returns the entry as-is but reports matches."""
-        entry = _make_entry("Contact user@example.com")
-        result_entry, matches = check_entry_pii(entry, action=PIIAction.WARN)
-        assert result_entry.content == "Contact user@example.com"
-        assert len(matches) >= 1
-
-    def test_redact_action_masks_pii(self) -> None:
-        """REDACT action masks PII in content field."""
-        entry = _make_entry("Contact user@example.com")
-        result_entry, matches = check_entry_pii(entry, action=PIIAction.REDACT)
-        assert "[REDACTED:email]" in result_entry.content
-        assert "user@example.com" not in result_entry.content
-        assert len(matches) >= 1
-
-    def test_redact_action_masks_pii_in_detail(self) -> None:
-        """REDACT action also masks PII in the detail field."""
-        entry = _make_entry(
-            content="Safe content",
-            detail="Detail with user@example.com inside",
-        )
-        result_entry, matches = check_entry_pii(entry, action=PIIAction.REDACT)
-        assert "user@example.com" not in result_entry.detail
-        assert "[REDACTED:email]" in result_entry.detail
-
-    def test_block_action_raises_memory_error(self) -> None:
-        """BLOCK action raises MemoryError when PII is found."""
-        entry = _make_entry("Contact user@example.com")
-        with pytest.raises(MemoryError, match="PII detected"):
-            check_entry_pii(entry, action=PIIAction.BLOCK)
-
-    def test_block_action_with_clean_entry_succeeds(self) -> None:
-        """BLOCK action does not raise when entry has no PII."""
-        entry = _make_entry("Clean content, no PII here.")
-        result_entry, matches = check_entry_pii(entry, action=PIIAction.BLOCK)
-        assert matches == []
-        assert result_entry.content == "Clean content, no PII here."
-
-    def test_block_action_flags_api_key_in_tag(self) -> None:
-        """A credential hidden in a tag is detected by the public API (v0.9.2).
-
-        Regression for the incomplete v0.9.1 fix: check_entry_pii scanned only
-        content + detail, so a direct caller got a false-clean result for PII
-        carried in tags even though the internal runtime path was fixed.
-        """
-        entry = MemoryEntry(
-            id="M-tag-key",
-            content="Safe content, no PII in the body.",
-            tags=["auth:sk-abcdefghijklmnopqrstuvwxyz"],
-        )
-        with pytest.raises(MemoryError, match="PII detected"):
-            check_entry_pii(entry, action=PIIAction.BLOCK)
-
-    def test_redact_action_masks_pii_in_tag(self) -> None:
-        """REDACT masks PII carried in a tag (parity with the runtime path)."""
-        entry = MemoryEntry(
-            id="M-tag-email",
-            content="Safe content",
-            tags=["contact:user@example.com"],
-        )
-        result_entry, matches = check_entry_pii(entry, action=PIIAction.REDACT)
-        assert "user@example.com" not in result_entry.tags[0]
-        assert "[REDACTED:email]" in result_entry.tags[0]
-        assert len(matches) >= 1
-
-    def test_custom_entropy_threshold(self) -> None:
-        """Custom entropy threshold is respected."""
-        # Very low threshold should flag almost any diverse token
-        entry = _make_entry("Token: abcdefghijklmnopqrst")
-        _, matches_low = check_entry_pii(entry, action=PIIAction.WARN, entropy_threshold=2.0)
-        _, matches_high = check_entry_pii(entry, action=PIIAction.WARN, entropy_threshold=6.0)
-        # Lower threshold should produce more or equal matches
-        he_low = [m for m in matches_low if m.pii_type == PIIType.HIGH_ENTROPY]
-        he_high = [m for m in matches_high if m.pii_type == PIIType.HIGH_ENTROPY]
-        assert len(he_low) >= len(he_high)
 
 
 # ---------------------------------------------------------------------------

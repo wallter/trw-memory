@@ -80,8 +80,6 @@ def _insert_memory_row(conn: sqlite3.Connection, entry_id: str, **overrides: obj
         "updated_at": now,
         "last_accessed_at": None,
         "access_count": 0,
-        "q_value": 0.5,
-        "q_observations": 0,
         "source": "agent",
         "source_identity": "",
         "merged_from": "[]",
@@ -111,12 +109,14 @@ def _insert_edge(
     target_id: str,
     edge_type: str,
     weight: float,
+    namespace: str = "default",
 ) -> None:
     """Insert an edge directly for test setup."""
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
-        "INSERT INTO memory_graph_edges (source_id, target_id, edge_type, weight, created_at) VALUES (?, ?, ?, ?, ?)",
-        (source_id, target_id, edge_type, weight, now),
+        "INSERT INTO memory_graph_edges (namespace, source_id, target_id, edge_type, weight, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (namespace, source_id, target_id, edge_type, weight, now),
     )
     conn.commit()
 

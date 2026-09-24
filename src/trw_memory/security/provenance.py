@@ -43,7 +43,6 @@ except ImportError:  # pragma: no cover — PyNaCl is optional
     BadSignatureError = Exception  # type: ignore[misc,assignment]
 
 __all__ = [
-    "ProvenanceChain",
     "ProvenanceEntry",
     "append",
     "append_signed",
@@ -74,14 +73,6 @@ class ProvenanceEntry(BaseModel):
     source_identity: str
     ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     signature: str = ""
-
-
-class ProvenanceChain(BaseModel):
-    """In-memory view of a provenance chain."""
-
-    model_config = ConfigDict(strict=True)
-
-    entries: list[ProvenanceEntry] = Field(default_factory=list)
 
 
 def _canonical(entry: ProvenanceEntry) -> bytes:

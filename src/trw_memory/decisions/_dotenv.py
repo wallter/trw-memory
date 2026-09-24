@@ -74,22 +74,18 @@ def _read_small_regular_file(path: str | Path) -> str | None:
         os.close(fd)
 
 
-def parse_dotenv_subset(path: str | Path, *, allowed_keys: frozenset[str]) -> dict[str, str]:
-    """Parse ``KEY=value`` lines from ``path``, keeping only allowlisted keys.
+def _parse_dotenv_lines(text: str, *, allowed_keys: frozenset[str]) -> dict[str, str]:
+    """Parse ``KEY=value`` lines already read into ``text``, keeping only allowlisted keys.
 
-    Anything :func:`_read_small_regular_file` refuses yields an empty mapping
-    rather than raising — a dotenv is an optional convenience, never a required
-    input, and the file is repo-controlled so both its contents and its kind are
-    untrusted. Handles ``export KEY=value``, ``#`` comments, blank lines, and
-    one layer of matching quotes around the value; nothing more elaborate (no
-    multiline values, no variable interpolation) is needed for the one key shape
-    this reads.
+    Pure (no I/O) so a caller that needs its OWN existence/refusal classification around the read
+    -- e.g. :mod:`trw_memory.decisions._enablement`, which must distinguish a genuinely absent
+    file from one the hardened reader refused -- can supply ``text`` itself rather than going
+    through :func:`parse_dotenv_subset`'s "any refusal yields empty" contract. Handles
+    ``export KEY=value``, ``#`` comments, blank lines, and one layer of matching quotes around the
+    value; nothing more elaborate (no multiline values, no variable interpolation) is needed for
+    the one key shape this reads.
     """
     values: dict[str, str] = {}
-    text = _read_small_regular_file(path)
-    if text is None:
-        return values
-
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -105,6 +101,20 @@ def parse_dotenv_subset(path: str | Path, *, allowed_keys: frozenset[str]) -> di
             value = value[1:-1]
         values[key] = value
     return values
+
+
+def parse_dotenv_subset(path: str | Path, *, allowed_keys: frozenset[str]) -> dict[str, str]:
+    """Parse ``KEY=value`` lines from ``path``, keeping only allowlisted keys.
+
+    Anything :func:`_read_small_regular_file` refuses yields an empty mapping
+    rather than raising — a dotenv is an optional convenience, never a required
+    input, and the file is repo-controlled so both its contents and its kind are
+    untrusted. See :func:`_parse_dotenv_lines` for the line-parsing rules.
+    """
+    text = _read_small_regular_file(path)
+    if text is None:
+        return {}
+    return _parse_dotenv_lines(text, allowed_keys=allowed_keys)
 
 
 __all__ = ["parse_dotenv_subset"]

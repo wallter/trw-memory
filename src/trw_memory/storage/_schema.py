@@ -117,8 +117,6 @@ CREATE TABLE IF NOT EXISTS memories (
     invalidated_by    TEXT,
     access_count      INTEGER DEFAULT 0,
     session_count     INTEGER DEFAULT 0,
-    q_value           REAL DEFAULT 0.5,
-    q_observations    INTEGER DEFAULT 0,
     source            TEXT DEFAULT 'agent',
     source_identity   TEXT DEFAULT '',
     client_profile    TEXT DEFAULT '',
@@ -150,8 +148,6 @@ CREATE TABLE IF NOT EXISTS memories (
     sync_seq          INTEGER DEFAULT 0,
     last_synced_at    TEXT,
     recall_count      INTEGER DEFAULT 0,
-    helpful_count     INTEGER DEFAULT 0,
-    unhelpful_count   INTEGER DEFAULT 0,
     verification_status TEXT DEFAULT NULL,
     verification_checked_at TEXT DEFAULT '',
     PRIMARY KEY (namespace, id)
@@ -365,11 +361,10 @@ def _bootstrap_and_backfill(cursor: sqlite3.Cursor) -> None:
         ("sync_seq", "INTEGER DEFAULT 0"),
         ("last_synced_at", "TEXT"),
     ]
-    # Migration: add PRD-CORE-132 feedback lifecycle counters
+    # Migration: add PRD-CORE-132 recall counter. PRD-CORE-293 retired the
+    # helpful/unhelpful counters: fresh stores omit them, old stores keep them.
     _migrate_cols += [
         ("recall_count", "INTEGER DEFAULT 0"),
-        ("helpful_count", "INTEGER DEFAULT 0"),
-        ("unhelpful_count", "INTEGER DEFAULT 0"),
     ]
     # Migration: add PRD-CORE-194 bi-temporal validity fields. Additive-only,
     # nullable; absent valid_from = open validity (back-filled to created_at

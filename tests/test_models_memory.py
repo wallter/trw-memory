@@ -30,8 +30,6 @@ def test_memory_entry_minimal_construction() -> None:
     assert entry.recurrence == 1
     assert entry.namespace == "default"
     assert entry.access_count == 0
-    assert entry.q_value == 0.5
-    assert entry.q_observations == 0
     assert entry.source == "agent"
     assert entry.source_identity == ""
     assert entry.merged_from == []
@@ -60,8 +58,6 @@ def test_memory_entry_full_construction() -> None:
         updated_at=now,
         last_accessed_at=now,
         access_count=3,
-        q_value=0.8,
-        q_observations=10,
         source="human",
         source_identity="tyler",
         merged_from=["M-000"],
@@ -76,8 +72,6 @@ def test_memory_entry_full_construction() -> None:
     assert entry.recurrence == 5
     assert entry.namespace == "project"
     assert entry.access_count == 3
-    assert entry.q_value == 0.8
-    assert entry.q_observations == 10
     assert entry.source == "human"
     assert entry.source_identity == "tyler"
     assert entry.merged_from == ["M-000"]

@@ -274,8 +274,6 @@ class MemoryEntry(BaseModel):
     session_count: int = Field(ge=0, default=0)
 
     # Scoring
-    q_value: float = Field(ge=0.0, le=1.0, default=0.5)
-    q_observations: int = Field(ge=0, default=0)
 
     # Provenance
     source: Literal["human", "agent", "tool", "consolidated", "team_sync", "company_sync"] = Field(
@@ -418,6 +416,14 @@ class MemoryEntry(BaseModel):
             raise ValueError("phase_affinity may have at most 6 entries")
         return v
 
+    @field_validator("assertions", mode="before")
+    @classmethod
+    def _parse_assertions(cls, v: object) -> object:
+        """Read the entry's own JSON back: a strict ``Assertion`` rejects an ISO timestamp string."""
+        if isinstance(v, list):
+            return [Assertion.model_validate(a, strict=False) if isinstance(a, dict) else a for a in v]
+        return v
+
     # Sync fields (PRD-CORE-047)
     vector_clock: dict[str, int] = Field(default_factory=dict, description="node_id -> counter for conflict resolution")
     remote_id: str | None = None
@@ -491,8 +497,6 @@ class MemoryEntry(BaseModel):
 
     # PRD-CORE-132: Feedback lifecycle counters
     recall_count: int = Field(ge=0, default=0, description="Number of times this entry was returned by recall")
-    helpful_count: int = Field(ge=0, default=0, description="Number of times marked helpful by the user")
-    unhelpful_count: int = Field(ge=0, default=0, description="Number of times marked unhelpful by the user")
 
     def __repr__(self) -> str:
         """Concise repr showing key identifying fields."""

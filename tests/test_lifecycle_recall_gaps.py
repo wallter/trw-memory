@@ -74,14 +74,14 @@ class TestRecordRecallAccessEmptyIds:
         Recording the call is what actually inverts.
         """
         backend = SQLiteBackend(Path(":memory:"))
-        calls: list[tuple[list[str], object]] = []
+        calls: list[tuple[list[str], str]] = []
 
-        def _spy(entry_ids: list[str], *, accessed_at: object = None) -> None:
-            calls.append((list(entry_ids), accessed_at))
+        def _spy(entry_ids: list[str], *, namespace: str, accessed_at: object = None) -> None:
+            calls.append((list(entry_ids), namespace))
 
         try:
             backend.increment_recall_access = _spy  # type: ignore[method-assign, assignment]
-            record_recall_access(backend, [])
+            record_recall_access(backend, [], namespace="default")
             assert calls == [], "an empty id list still reached the backend"
         finally:
             backend.close()
@@ -90,15 +90,15 @@ class TestRecordRecallAccessEmptyIds:
         """Non-vacuity partner: the spy must be capable of recording a call, or
         the assertion above passes for the wrong reason."""
         backend = SQLiteBackend(Path(":memory:"))
-        calls: list[tuple[list[str], object]] = []
+        calls: list[tuple[list[str], str]] = []
 
-        def _spy(entry_ids: list[str], *, accessed_at: object = None) -> None:
-            calls.append((list(entry_ids), accessed_at))
+        def _spy(entry_ids: list[str], *, namespace: str, accessed_at: object = None) -> None:
+            calls.append((list(entry_ids), namespace))
 
         try:
             backend.increment_recall_access = _spy  # type: ignore[method-assign, assignment]
-            record_recall_access(backend, ["M-1"])
-            assert [ids for ids, _ in calls] == [["M-1"]]
+            record_recall_access(backend, ["M-1"], namespace="default")
+            assert calls == [(["M-1"], "default")]
         finally:
             backend.close()
 
@@ -108,7 +108,7 @@ class TestRecordRecallAccessEmptyIds:
         try:
             backend.store(MemoryEntry(id="R-001", content="test"))
             ts = datetime(2024, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
-            record_recall_access(backend, ["R-001"], accessed_at=ts)
+            record_recall_access(backend, ["R-001"], namespace="default", accessed_at=ts)
             loaded = backend.get("R-001", namespace="default")
             assert loaded is not None
             assert loaded.recall_count == 1

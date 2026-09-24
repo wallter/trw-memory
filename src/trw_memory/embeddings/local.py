@@ -342,6 +342,7 @@ class LocalEmbeddingProvider:
                     artifact_sha256=loaded_identity,
                     encoding=f"trw-loaded-encoder-v2:{manifest_digest}",
                     dimensions=self._dim,
+                    model_id=self._model_name,
                 )
             if self._embedding_space is None:
                 # No measured identity (accelerator-resident or non-BERT encoder):

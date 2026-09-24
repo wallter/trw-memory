@@ -36,7 +36,8 @@ from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.retrieval import hybrid_search_scored as hybrid_search_scored
 from trw_memory.retrieval.admission_policy import apply_admission_filter
 from trw_memory.retrieval.lexical import tokenize_query
-from trw_memory.retrieval.source_policy import apply_source_policy
+from trw_memory.retrieval.recall_policy import RECALL_PREFETCH_MULTIPLIER, acquire_candidates
+from trw_memory.retrieval.source_policy import SourcePolicy
 from trw_memory.security.namespace_scope import authorize_namespaces
 from trw_memory.security.rbac import Permission, require_namespace_permission
 from trw_memory.security.runtime import append_audit_event, initialize_canaries, probe_canaries, should_halt_recalls
@@ -103,16 +104,16 @@ def memory_recall_impl(
     token_budget: int | None = None,
     config: MemoryConfig | None = None,
     include_distilled: bool = True,
-    distilled_weight: float | None = None,
     include_source_kinds: list[str] | None = None,
     exclude_source_kinds: list[str] | None = None,
-    source_weights: dict[str, float] | None = None,
     exclude_expired: bool = True,
+    status: str | None = "active",
+    record_access: bool = True,
 ) -> dict[str, object]:
     """Core implementation of memory_recall (callable without MCP).
 
     Args:
-        query: Free-text search query. Empty string returns all active entries.
+        query: Free-text search query. Empty string returns every entry in *status*.
         namespace: Primary namespace to search (e.g., "project:default").
         backend: Storage backend instance.
         namespace_backend_factory: Optional factory for opening additional
@@ -130,6 +131,7 @@ def memory_recall_impl(
         token_budget: If provided, truncate results to fit within this token
             budget.  Must be a positive integer.  ``None`` disables budget
             fitting (all results returned up to *limit*).
+        status: Lifecycle status searched; ``None`` searches every status.
 
     Returns:
         {"memories": list[dict], "total_matches": int, "query": str,
@@ -150,7 +152,8 @@ def memory_recall_impl(
 
     try:
         validate_namespace(namespace)
-    except ConfigError as exc:
+        wanted_status = MemoryStatus(status) if status is not None else None
+    except (ConfigError, ValueError) as exc:
         return {"error": str(exc), "status": "invalid"}
     cfg = config or MemoryConfig()
     require_namespace_permission(cfg, namespace, Permission.READ, "recall")
@@ -184,6 +187,9 @@ def memory_recall_impl(
     # answer was computed over. The counts ride out on the response so the caller
     # reads a narrowed result as narrowed instead of as a complete one.
     expired_skipped = 0
+    # Rank to trw_recall's depth, then cap to ``limit`` last, so a row admission
+    # or the recall filter drops is refilled from the ranked tail.
+    depth = limit * RECALL_PREFETCH_MULTIPLIER
     # Namespace-scoped local backends can only see one store at a time, so
     # cross-namespace recall must reopen the requested namespaces explicitly.
     all_entries = []
@@ -208,22 +214,12 @@ def memory_recall_impl(
                 scope = scope.without(ns)
                 continue
 
-            # Push the tag predicate into SQL so the row LIMIT applies AFTER the
-            # tag filter (the in-memory tag filter must not run over a truncated
-            # set, which would silently drop older tagged entries beyond the cap).
-            # Honor the configured candidate-pool knob instead of a hardcoded
-            # 10_000 (trw-memory-14) and mirror the SDK recall path
-            # (_client_recall_hybrid) exactly: max(limit * 5,
-            # hybrid_search_candidate_pool_size) so the two recall surfaces
-            # converge and operators can bound recall memory/latency via
-            # MEMORY_HYBRID_SEARCH_CANDIDATE_POOL_SIZE.
-            candidate_pool_size = max(limit * 5, cfg.hybrid_search_candidate_pool_size)
-            ns_entries = ns_backend.list_entries(
-                status=MemoryStatus.ACTIVE,
-                namespace=ns,
-                limit=candidate_pool_size,
-                tags=tags or None,
-            )
+            # The acquisition every recall surface shares (PRD-CORE-298 FR05): the
+            # recency pool, with the tag predicate in SQL so the LIMIT applies
+            # after it, plus the rows full-text search finds past the pool.
+            ns_entries = acquire_candidates(
+                ns_backend, query, namespace=ns, limit=depth, config=cfg, status=wanted_status, tags=tags or None
+            ).entries
             all_entries.extend(ns_entries)
 
             if query and ns_entries:
@@ -251,13 +247,16 @@ def memory_recall_impl(
         scope=scope,
         embedder=embedder,
         stored_embeddings=stored_embeddings,
-        limit=limit,
+        limit=depth,
         tags=tags,
     )
 
-    # Re-rank by relevance, with utility as a tiebreak (PRD-CORE-278 FR02).
+    # A query keeps the pipeline's order, as trw_recall does (PRD-CORE-298 FR05):
+    # re-sorting by a normalised score would tie every non-positive reranker score
+    # and let utility reorder them. A wildcard has no retrieval order, so it is
+    # ordered by utility.
     query_tokens = tokenize_query(query) if query else []
-    ranked_dicts = rank_by_utility(entry_dicts, query_tokens, config=cfg)
+    ranked_dicts = entry_dicts if query else rank_by_utility(entry_dicts, query_tokens, config=cfg)
     tier_dicts: list[dict[str, object]] = []
     if supports_tier_runtime(backend):
         tier_dicts = tier_candidates(
@@ -310,6 +309,7 @@ def memory_recall_impl(
                     if "id" in result
                 },
                 limit=limit,
+                open_backend=backend,
             )
         )
     # PRD-CORE-278 FR03: a supplementary row — tier-only or org — was never
@@ -322,18 +322,17 @@ def memory_recall_impl(
     # on one scale explains the whole result and ``min_score`` filters the same
     # number the response reports.
     _rescale_supplementary_scores(result_dicts, retrieval_keys, namespace)
-    result_dicts = apply_source_policy(
-        result_dicts,
+    # Source admission only, as trw_recall applies it (PRD-CORE-298 FR05): the
+    # order stays the pipeline's, with supplements after it. Re-sorting by source
+    # weight here made mixed-source results diverge from trw_recall's order.
+    admission = SourcePolicy.resolve(
         include_distilled=include_distilled,
-        distilled_weight=distilled_weight,
         include_source_kinds=include_source_kinds,
         exclude_source_kinds=exclude_source_kinds,
-        source_weights=source_weights,
         exclude_expired=exclude_expired,
     )
-    # ``min_score`` is applied ONCE, here, after source weighting has produced
-    # the number the caller will read. Filtering before the weighting rejected a
-    # row whose reported score would have cleared the floor.
+    result_dicts = [row for row in result_dicts if admission.allows(row)]
+    # ``min_score`` is applied ONCE, here, on the score the response reports.
     if min_score > 0.0:
         result_dicts = [row for row in result_dicts if float(str(row.get("score", 0.0))) >= min_score]
 
@@ -364,7 +363,8 @@ def memory_recall_impl(
     # Apply limit cap AFTER token budget
     result_dicts = result_dicts[:limit]
     tokens_used = sum(estimate_entry_tokens(d) for d in result_dicts)
-    _record_access_by_namespace(result_dicts, backend, namespace, namespace_backend_factory)
+    if record_access:
+        _record_access_by_namespace(result_dicts, backend, namespace, namespace_backend_factory)
     append_audit_event(
         cfg,
         "access",
@@ -451,23 +451,24 @@ def register_recall_tool(mcp: McpServer) -> None:
         graph_depth: int = 0,
         token_budget: int | None = None,
         include_distilled: bool = True,
-        distilled_weight: float | None = None,
         include_source_kinds: list[str] | None = None,
         exclude_source_kinds: list[str] | None = None,
-        source_weights: dict[str, float] | None = None,
         exclude_expired: bool = True,
+        status: str | None = "active",
+        record_access: bool = True,
     ) -> dict[str, object]:
         """Search memory entries using hybrid BM25 + vector retrieval.
 
         Search population is BOUNDED, not exhaustive: the store scan loads at
-        most max(limit * 5, hybrid_search_candidate_pool_size) entries per
-        namespace (default 1000), selected as the most recently updated rows.
-        When the tier runtime is live (the default; off under encryption) its
+        most max(limit * 25, hybrid_search_candidate_pool_size) entries per
+        namespace (default 1000), selected as the most recently updated rows,
+        plus the active rows a full-text search for the query finds beyond them
+        (at most max(bm25_candidates * 2, 100)). When the tier runtime is live (the default; off under encryption) its
         hot/warm/cold index is searched as well, and it holds every entry
         written through it plus, for a store that predates it, the most
         recently updated max(hot_max_entries * 8, 200) rows seeded at first
-        warmup. An entry older than the store-scan bound and absent from the
-        tier index is not searched, so an empty result
+        warmup. An entry older than the store-scan bound, missed by full-text
+        search and absent from the tier index is not searched, so an empty result
         does not mean the fact is absent from the store. Raise
         MEMORY_HYBRID_SEARCH_CANDIDATE_POOL_SIZE to widen the scan; measured
         cost on a 6500-row namespace was 139.6 ms at 1000 versus 1045.8 ms at
@@ -488,11 +489,13 @@ def register_recall_tool(mcp: McpServer) -> None:
                 token budget. Must be a positive integer. Returns metadata
                 about token usage in the response.
             include_distilled: Include git-distilled records when True.
-            distilled_weight: Optional git-distilled score weight override.
             include_source_kinds: Optional allowlist of source families.
             exclude_source_kinds: Optional denylist of source families.
-            source_weights: Optional per-source score weights.
             exclude_expired: When True, expired transient results are removed.
+            status: Lifecycle status to search (default 'active'; null: any).
+            record_access: Count the returned rows as accessed. A caller that filters
+                the page before showing it passes False and reports what it showed
+                through ``memory_record_surfaced``.
 
         Returns:
             {"memories": [...], "total_matches": int, "query": str,
@@ -508,12 +511,15 @@ def register_recall_tool(mcp: McpServer) -> None:
             # search, backend close -- runs in ONE worker thread, so the SQLite
             # connection never crosses a thread boundary.
             cfg = MemoryConfig()
-            with create_backend_from_config(cfg, namespace) as backend:
+            # PRD-CORE-298 FR05: the recall path verifies each store once per process.
+            with create_backend_from_config(cfg, namespace, check_integrity_once=True) as backend:
                 return memory_recall_impl(
                     query,
                     namespace,
                     backend=backend,
-                    namespace_backend_factory=lambda extra_ns: create_backend_from_config(cfg, extra_ns),
+                    namespace_backend_factory=lambda extra_ns: create_backend_from_config(
+                        cfg, extra_ns, check_integrity_once=True
+                    ),
                     limit=limit,
                     min_score=min_score,
                     tags=tags,
@@ -523,11 +529,11 @@ def register_recall_tool(mcp: McpServer) -> None:
                     token_budget=token_budget,
                     config=cfg,
                     include_distilled=include_distilled,
-                    distilled_weight=distilled_weight,
                     include_source_kinds=include_source_kinds,
                     exclude_source_kinds=exclude_source_kinds,
-                    source_weights=source_weights,
                     exclude_expired=exclude_expired,
+                    status=status,
+                    record_access=record_access,
                 )
 
         return await run_offloaded(_run)

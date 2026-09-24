@@ -32,10 +32,6 @@ class TestRequireNamespacePermission:
             ("memory_search", Permission.READ, "writer", False),
             ("memory_search", Permission.READ, "reader", True),
             ("memory_search", Permission.READ, "none", False),
-            ("memory_rotate_key", Permission.ADMIN, "admin", True),
-            ("memory_rotate_key", Permission.ADMIN, "writer", False),
-            ("memory_rotate_key", Permission.ADMIN, "reader", False),
-            ("memory_rotate_key", Permission.ADMIN, "none", False),
         ],
     )
     def test_permission_matrix(
@@ -70,7 +66,7 @@ def test_rbac_check_overhead_p99() -> None:
     durations_ns: list[int] = []
     for _ in range(10_000):
         start = time.perf_counter_ns()
-        require_namespace_permission(config, "project:5", Permission.ADMIN, "memory_rotate_key")
+        require_namespace_permission(config, "project:5", Permission.ADMIN, "memory_forget")
         durations_ns.append(time.perf_counter_ns() - start)
 
     durations_ns.sort()
@@ -83,4 +79,4 @@ def test_namespace_permission_rejects_invalid_namespace(namespace: str) -> None:
     config = MemoryConfig(rbac_enabled=True, default_role="admin")
 
     with pytest.raises(ConfigError, match=r"namespace|Namespace"):
-        require_namespace_permission(config, namespace, Permission.ADMIN, "memory_rotate_key")
+        require_namespace_permission(config, namespace, Permission.ADMIN, "memory_forget")

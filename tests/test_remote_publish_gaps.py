@@ -5,7 +5,6 @@ Target lines: 52-53, 68-69, 90, 129-149, 158, 167-208, 212-218, 226, 241-245.
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -15,11 +14,8 @@ from trw_memory.exceptions import LocalOnlyViolationError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.sync._remote_publish import (
     _extract_remote_id,
-    _hash_snapshot_file,
     _publish_payload_result,
-    clear_retry_queue,
     drain_retry_queue,
-    publish_snapshot_hash,
     retire_remote_memory,
 )
 
@@ -142,140 +138,6 @@ class TestDrainRetryQueue:
 
 
 # ---------------------------------------------------------------------------
-# clear_retry_queue
-# ---------------------------------------------------------------------------
-
-
-class TestClearRetryQueue:
-    def test_delegates_to_queue_clear(self) -> None:
-        """clear_retry_queue calls queue.clear() (line 158)."""
-        q = MagicMock()
-        clear_retry_queue(q)
-        q.clear.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# publish_snapshot_hash
-# ---------------------------------------------------------------------------
-
-
-class TestPublishSnapshotHash:
-    def test_sync_disabled_returns_failure(self, tmp_path: Path) -> None:
-        """sync_enabled=False → return failure immediately (lines 170-171)."""
-        cfg = MemoryConfig()
-        cfg.sync_enabled = False
-        cfg.local_only = False
-        snap = tmp_path / "snap.db"
-        snap.write_bytes(b"data")
-        result = publish_snapshot_hash(snap, cfg)
-        assert result["success"] is False
-
-    def test_no_platform_url_returns_failure(self, tmp_path: Path) -> None:
-        """platform_url empty → return failure (lines 172-173)."""
-        cfg = MemoryConfig()
-        cfg.sync_enabled = True
-        cfg.memory_snapshot_publish_hash = True
-        cfg.platform_url = ""
-        cfg.local_only = False
-        snap = tmp_path / "snap.db"
-        snap.write_bytes(b"data")
-        result = publish_snapshot_hash(snap, cfg)
-        assert result["success"] is False
-
-    def test_invalid_platform_url_returns_failure(self, tmp_path: Path) -> None:
-        """Invalid URL → warning + return failure (lines 174-176)."""
-        cfg = MemoryConfig()
-        cfg.sync_enabled = True
-        cfg.memory_snapshot_publish_hash = True
-        cfg.platform_url = "not-a-url"
-        cfg.local_only = False
-        snap = tmp_path / "snap.db"
-        snap.write_bytes(b"data")
-        result = publish_snapshot_hash(snap, cfg)
-        assert result["success"] is False
-
-    def test_missing_snapshot_file_returns_failure(self, tmp_path: Path) -> None:
-        """snapshot_path doesn't exist → debug + return failure (lines 177-179)."""
-        cfg = _cfg_sync_enabled()
-        cfg.memory_snapshot_publish_hash = True
-        result = publish_snapshot_hash(tmp_path / "nonexistent.db", cfg)
-        assert result["success"] is False
-
-    def test_oserror_on_hash_returns_retryable(self, tmp_path: Path) -> None:
-        """OSError from _hash_snapshot_file → retryable failure (lines 183-185)."""
-        cfg = _cfg_sync_enabled()
-        cfg.memory_snapshot_publish_hash = True
-        snap = tmp_path / "snap.db"
-        snap.write_bytes(b"data")
-        with patch("trw_memory.sync._remote_publish._hash_snapshot_file", side_effect=OSError("io")):
-            result = publish_snapshot_hash(snap, cfg)
-        assert result["success"] is False
-        assert result["retryable"] is True
-
-    def test_successful_publish_returns_success(self, tmp_path: Path) -> None:
-        """Successful POST → return success (lines 187-203)."""
-        cfg = _cfg_sync_enabled()
-        cfg.memory_snapshot_publish_hash = True
-        snap = tmp_path / "snap.db"
-        snap.write_bytes(b"binary data here")
-        mock_resp = _mock_response(status=200)
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.return_value = mock_resp
-        with patch("trw_memory.sync._remote_publish.httpx.Client", return_value=mock_client):
-            result = publish_snapshot_hash(snap, cfg)
-        assert result["success"] is True
-
-    def test_non_2xx_returns_retryable(self, tmp_path: Path) -> None:
-        """Non-2xx status → retryable failure (lines 204-205)."""
-        cfg = _cfg_sync_enabled()
-        cfg.memory_snapshot_publish_hash = True
-        snap = tmp_path / "snap.db"
-        snap.write_bytes(b"data")
-        mock_resp = _mock_response(status=503)
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.return_value = mock_resp
-        with patch("trw_memory.sync._remote_publish.httpx.Client", return_value=mock_client):
-            result = publish_snapshot_hash(snap, cfg)
-        assert result["success"] is False
-        assert result["retryable"] is True
-
-    def test_httpx_error_returns_retryable(self, tmp_path: Path) -> None:
-        """httpx.HTTPError → retryable failure (lines 206-208)."""
-        cfg = _cfg_sync_enabled()
-        cfg.memory_snapshot_publish_hash = True
-        snap = tmp_path / "snap.db"
-        snap.write_bytes(b"data")
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.side_effect = httpx.ConnectError("timeout")
-        with patch("trw_memory.sync._remote_publish.httpx.Client", return_value=mock_client):
-            result = publish_snapshot_hash(snap, cfg)
-        assert result["success"] is False
-        assert result["retryable"] is True
-
-
-# ---------------------------------------------------------------------------
-# _hash_snapshot_file
-# ---------------------------------------------------------------------------
-
-
-class TestHashSnapshotFile:
-    def test_returns_sha256_digest_and_size(self, tmp_path: Path) -> None:
-        """_hash_snapshot_file hashes file content and returns (digest, size) (lines 212-218)."""
-        data = b"hello world" * 100
-        snap = tmp_path / "snap.db"
-        snap.write_bytes(data)
-        digest, size = _hash_snapshot_file(snap)
-        assert len(digest) == 64  # SHA-256 hex
-        assert size == len(data)
-
-
-# ---------------------------------------------------------------------------
 # retire_remote_memory
 # ---------------------------------------------------------------------------
 
@@ -326,15 +188,6 @@ class TestLocalOnlyGates:
         q = MagicMock()
         with pytest.raises(LocalOnlyViolationError):
             drain_retry_queue(q, cfg)
-
-    def test_publish_snapshot_hash_local_only_raises(self, tmp_path: Path) -> None:
-        """publish_snapshot_hash with local_only=True → LocalOnlyViolationError (lines 168-169)."""
-        cfg = MemoryConfig()
-        cfg.local_only = True
-        snap = tmp_path / "snap.db"
-        snap.write_bytes(b"data")
-        with pytest.raises(LocalOnlyViolationError):
-            publish_snapshot_hash(snap, cfg)
 
 
 # ---------------------------------------------------------------------------

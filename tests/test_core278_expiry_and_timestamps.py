@@ -143,7 +143,7 @@ class TestMaintenanceDoesNotStampContentTime:
             backend.store(MemoryEntry(id="a", content="first", namespace=NAMESPACE))
             before = backend.get("a", namespace=NAMESPACE)
             time.sleep(0.01)
-            backend.increment_recall_access(["a"])
+            backend.increment_recall_access(["a"], namespace=NAMESPACE)
             after = backend.get("a", namespace=NAMESPACE)
             assert after.updated_at == before.updated_at
             assert after.last_accessed_at != before.last_accessed_at
@@ -191,7 +191,7 @@ class TestMaintenanceDoesNotStampContentTime:
             for index in range(3):
                 backend.store(MemoryEntry(id=f"filler-{index}", content=f"filler {index}", namespace=NAMESPACE))
                 time.sleep(0.005)
-            backend.increment_recall_access(["kv-first"])
+            backend.increment_recall_access(["kv-first"], namespace=NAMESPACE)
             listed = [entry.id for entry in backend.list_entries(namespace=NAMESPACE, limit=10)]
             assert listed[0] != "kv-first"
             assert listed[-1] == "kv-first"

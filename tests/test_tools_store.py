@@ -5,7 +5,7 @@ from typing import cast
 
 import pytest
 
-from trw_memory.exceptions import AuthorizationError, PIIBlockError, SchemaValidationError
+from trw_memory.exceptions import AuthorizationError
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -238,29 +238,19 @@ class TestMemoryStoreImpl:
             ):
                 memory_consolidate_impl("project:default", backend=backend, config=cfg)
 
-    def test_store_impl_can_raise_typed_security_errors_for_public_tool_contract(self, tmp_path: Path) -> None:
+    def test_store_impl_reports_security_refusals_as_statuses_for_the_public_tool_contract(
+        self, tmp_path: Path
+    ) -> None:
+        """A PII or schema refusal is a status the caller can classify, never a raise (PRD-CORE-280 e3)."""
         cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
         backend = _mock_backend()
 
-        with pytest.raises(PIIBlockError):
-            memory_store_impl(
-                "sk-abcdefghijklmnopqrstuvwxyz",
-                "project:default",
-                backend=backend,
-                config=cfg,
-                raise_security_errors=True,
-            )
+        blocked = memory_store_impl("sk-abcdefghijklmnopqrstuvwxyz", "project:default", backend=backend, config=cfg)
+        invalid = memory_store_impl(  # type: ignore[arg-type]
+            "valid content", "project:default", backend=backend, config=cfg, metadata={"owner": 1}
+        )
 
-        with pytest.raises(SchemaValidationError):
-            memory_store_impl(  # type: ignore[arg-type]
-                "valid content",
-                "project:default",
-                backend=backend,
-                config=cfg,
-                metadata={"owner": 1},
-                raise_security_errors=True,
-            )
-
+        assert (blocked["status"], invalid["status"]) == ("blocked", "invalid")
         audit_records = AuditLog(Path(cfg.audit_log_path)).read_all()
         assert audit_records[-1].op == "store_rejected"
         assert audit_records[-1].data["reason"] == "schema_invalid"

@@ -22,6 +22,8 @@ from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage._schema import ensure_fts_table
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
+from ._timing import assert_budget
+
 
 def _now() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc)
@@ -290,23 +292,117 @@ class TestFtsSpecialChars:
         assert backend.search_fts("") == []
 
 
+class TestFtsQueryTerms:
+    """PRD-FIX-148: the MATCH is an OR of individually quoted terms, not one phrase."""
+
+    def test_fts_multiword_query_returns_candidates(self, backend: SQLiteBackend) -> None:
+        """FR01. Against the old whole-query phrase this returned [] (0.0% on the A/B probe)."""
+        e = _entry(content="When touching token refresh in src/auth/session.py, always drain in-flight work")
+        backend.store(e)
+        backend.store(_entry(content="unrelated note about database migrations"))
+        results = backend.search_fts("about to edit src/auth/session.py: token refresh")
+        assert any(r.id == e.id for r in results)
+
+    @pytest.mark.parametrize(
+        "query",
+        ["token AND", "OR refresh", "NOT token", "NEAR(token refresh)", "-token", "col:token", 'tok"en refresh', "a*"],
+    )
+    def test_fts_operator_words_are_literal(self, backend: SQLiteBackend, query: str) -> None:
+        """FR02. Operator words, a leading hyphen, a colon and an embedded quote never raise."""
+        e = _entry(content="token refresh AND NOT near col token a")
+        backend.store(e)
+        backend.store(_entry(content="unrelated"))
+        assert [r.id for r in backend.search_fts(query)] == [e.id]
+
+    def test_fts_operator_word_matches_as_a_term(self, backend: SQLiteBackend) -> None:
+        e = _entry(content="the NEAR operator is documented here")
+        backend.store(e)
+        backend.store(_entry(content="unrelated"))
+        assert [r.id for r in backend.search_fts("NEAR")] == [e.id]
+
+    def test_fts_caller_phrase_semantics_preserved(self, backend: SQLiteBackend) -> None:
+        """FR03. A query the caller wraps in double quotes is still a phrase match."""
+        exact = _entry(content="rotate the signing key before deploy")
+        scattered = _entry(content="the key thing: deploy after you rotate signing")
+        backend.store(exact)
+        backend.store(scattered)
+        phrase_ids = {r.id for r in backend.search_fts('"rotate the signing key"')}
+        assert phrase_ids == {exact.id}
+        term_ids = {r.id for r in backend.search_fts("rotate the signing key")}
+        assert term_ids == {exact.id, scattered.id}
+
+    @pytest.mark.parametrize("via_filter", [False, True])
+    def test_fts_returns_candidates_in_bm25_rank_order(self, backend: SQLiteBackend, via_filter: bool) -> None:
+        """Relevance, not importance, orders the candidates -- on the plain and the filtered path.
+
+        Recall always reaches search_fts with an entry_filter, which used to order the
+        matches by importance; over an OR of terms that surfaces loose matches first.
+        """
+        strong = _entry(content="token refresh drains session work before rotating", importance=0.1)
+        weak = _entry(content="token", importance=0.9)
+        backend.store(strong)
+        backend.store(weak)
+        kwargs = {"entry_filter": lambda entry: True} if via_filter else {}
+        results = backend.search_fts("token refresh drains session", top_k=1, **kwargs)
+        assert [r.id for r in results] == [strong.id]
+
+    def test_fts_same_id_in_another_namespace_is_not_returned(self, backend: SQLiteBackend) -> None:
+        """The table's key is (namespace, id): a match in one namespace must not pull a
+        same-id, non-matching row from another when no namespace filter is given."""
+        backend.store(_entry(entry_id="shared", content="token refresh", namespace="a"))
+        backend.store(_entry(entry_id="shared", content="unrelated words", namespace="b"))
+        results = backend.search_fts("token refresh")
+        assert [(r.id, r.namespace) for r in results] == [("shared", "a")]
+
+    def test_fts_empty_and_overlong_queries_guarded(self, backend: SQLiteBackend) -> None:
+        e = _entry(content="alpha")
+        backend.store(e)
+        assert backend.search_fts("   ") == []
+        assert backend.search_fts("?? -- :: ") == []  # punctuation only: no terms, no MATCH
+        assert backend.search_fts('""') == []
+        # The 1,000-character cap still applies: a term past it is not searched.
+        assert backend.search_fts("x " * 500 + "alpha") == []
+        assert [r.id for r in backend.search_fts("x " * 10 + "alpha")] == [e.id]
+
+
 # ---------------------------------------------------------------------------
 # Performance regression guard (scale sanity)
 # ---------------------------------------------------------------------------
 
 
+def _build_fts_scale_corpus(tmp_path: Path) -> tuple[SQLiteBackend, list[MemoryEntry]]:
+    """Shared setup for the FTS-vs-LIKE scale-guard tests: a 10K-entry corpus."""
+    import random
+
+    words = [f"word{i}" for i in range(500)]
+    db = SQLiteBackend(tmp_path / "scale.db")
+    entries = [_entry(content=" ".join(random.sample(words, 12)) + f" unique_rare_{i}") for i in range(10_000)]
+    for e in entries:
+        db.store(e)
+    return db, entries
+
+
 class TestFtsScaleGuard:
-    @pytest.mark.perf
     def test_fts_faster_than_like_at_10k(self, tmp_path: Path) -> None:
-        import random
+        """FTS5 finds the expected row at 10K scale.
+
+        The FTS-vs-LIKE throughput comparison is a host-resource measurement,
+        moved to ``test_fts_faster_than_like_at_10k_budget``
+        (``requires_local_timing``, skipped on CI). This test keeps the
+        deterministic correctness assertion gating.
+        """
+        db, entries = _build_fts_scale_corpus(tmp_path)
+
+        # A broken/disabled FTS path returning [] must not win by doing no work.
+        results = db.search_fts("unique_rare_42", top_k=25)
+        assert any(entry.id == entries[42].id for entry in results)
+
+    @pytest.mark.requires_local_timing
+    def test_fts_faster_than_like_at_10k_budget(self, tmp_path: Path) -> None:
+        """FTS5 should be measurably faster than LIKE at 10K entries for rare terms."""
         import time
 
-        words = [f"word{i}" for i in range(500)]
-        db = SQLiteBackend(tmp_path / "scale.db")
-
-        entries = [_entry(content=" ".join(random.sample(words, 12)) + f" unique_rare_{i}") for i in range(10_000)]
-        for e in entries:
-            db.store(e)
+        db, _entries = _build_fts_scale_corpus(tmp_path)
 
         runs = 20
         rare = "unique_rare_42"
@@ -321,12 +417,7 @@ class TestFtsScaleGuard:
             db.search(rare, top_k=25)
         like_ms = (time.perf_counter() - t0) / runs * 1000
 
-        # A broken/disabled FTS path returning [] must not win by doing no work.
-        results = db.search_fts(rare, top_k=25)
-        assert any(entry.id == entries[42].id for entry in results)
-
-        # FTS5 should be measurably faster than LIKE at 10K entries for rare terms
-        assert fts_ms < like_ms, f"FTS5 ({fts_ms:.2f}ms) should be faster than LIKE ({like_ms:.2f}ms) at 10K entries"
+        assert_budget("fts_vs_like_10k", fts_ms, like_ms, "ms")
 
 
 # ---------------------------------------------------------------------------

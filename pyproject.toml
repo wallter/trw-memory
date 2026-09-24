@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "trw-memory"
-version = "2.0.0"
+version = "3.0.0"
 description = "Persistent memory engine with hybrid retrieval, tiered storage, and semantic dedup for AI agents"
 readme = "README.md"
 license = "BUSL-1.1"
@@ -291,7 +291,7 @@ markers = [
   "integration: uses real filesystem / sqlite / network — slower, still isolated",
   "slow: individual-test runtime > 5 seconds — excluded from default runs",
   "network: requires external network access (embedding models, API calls)",
-  "perf: asserts a wall-clock or CPU budget; result depends on machine load",
+  "requires_local_timing: a host-resource budget (wall-clock, throughput, RSS); skipped on CI runners, measured by the non-gating timing job (PRD-QUAL-141)",
 ]
 
 [tool.mypy]

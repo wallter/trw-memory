@@ -4,25 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from tests.conftest import make_entry
 
 
 class TestSecurity:
     """Section 7 of E2E plan: PII detection, encryption, audit."""
-
-    def test_pii_detection_block_mode(self) -> None:
-        """7.4 — PII detector in block mode raises on email address."""
-        from trw_memory.exceptions import MemoryError as TrwMemoryError
-        from trw_memory.security.pii import PIIAction, check_entry_pii
-
-        entry = make_entry(
-            content="Contact john@example.com for details",
-            entry_id="pii-test-1",
-        )
-        with pytest.raises(TrwMemoryError, match="PII detected"):
-            check_entry_pii(entry, action=PIIAction.BLOCK)
 
     def test_field_encryption_roundtrip(self) -> None:
         """7.9 — Encrypt then decrypt entry fields preserves content."""
@@ -75,20 +61,3 @@ class TestSecurity:
 
         assert records[1].prev_hash == records[0].hash
         assert records[2].prev_hash == records[1].hash
-
-
-class TestPIIRedactMode:
-    """Additional PII scenarios from section 7.5."""
-
-    def test_pii_redact_mode_masks_content(self) -> None:
-        """7.5 — PII detector in redact mode masks email in content."""
-        from trw_memory.security.pii import PIIAction, check_entry_pii
-
-        entry = make_entry(
-            content="Contact john@example.com for support",
-            entry_id="pii-redact-1",
-        )
-        updated, matches = check_entry_pii(entry, action=PIIAction.REDACT)
-        assert len(matches) > 0
-        assert "john@example.com" not in updated.content
-        assert "[REDACTED:" in updated.content

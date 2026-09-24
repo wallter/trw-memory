@@ -33,7 +33,6 @@ from trw_memory.retrieval.recency import recency_rank, recency_score
 from trw_memory.retrieval.temporal_query import (
     classify_temporal,
     prepare_temporal_query,
-    resolve_temporal_arithmetic_offset,
     strip_temporal_arithmetic,
     strip_temporal_prefix,
 )
@@ -99,7 +98,6 @@ __all__ = [
     "prepare_temporal_query",
     "recency_rank",
     "recency_score",
-    "resolve_temporal_arithmetic_offset",
     "rrf_fuse",
     "strip_temporal_arithmetic",
     "strip_temporal_prefix",

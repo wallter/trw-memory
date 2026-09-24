@@ -133,6 +133,7 @@ def _org_memory_results(
     *,
     exclude_keys: set[tuple[str, str]],
     limit: int,
+    open_backend: StorageBackend | None = None,
 ) -> list[dict[str, object]]:
     """Build additive org-wide recall results from sibling project stores."""
     org_entries = list_org_shared_entries(
@@ -140,6 +141,7 @@ def _org_memory_results(
         namespace,
         exclude_keys=exclude_keys,
         limit=max(limit, 25),
+        open_backend=open_backend,
     )
     if not org_entries:
         return []
@@ -201,8 +203,15 @@ def _graph_related(
         logger.debug("graph_related_error", exc_info=True)
         return []
 
+    return hydrate_active(related_nodes, backend, namespace)
+
+
+def hydrate_active(
+    nodes: list[dict[str, str | int | float]], backend: StorageBackend, namespace: str
+) -> list[dict[str, object]]:
+    """Each graph node's ACTIVE row in *namespace*, merged with the node's edge fields."""
     hydrated: list[dict[str, object]] = []
-    for node in related_nodes:
+    for node in nodes:
         entry = backend.get(str(node["id"]), namespace=namespace)
         if entry is None:
             # Dangling edge -- the target row was deleted; skip without crashing.
@@ -242,4 +251,4 @@ def _record_access_by_namespace(
                 if namespace_backend_factory is None:
                     continue
                 target_backend = stack.enter_context(namespace_backend_factory(result_namespace))
-            record_recall_access(target_backend, ids)
+            record_recall_access(target_backend, ids, namespace=result_namespace)

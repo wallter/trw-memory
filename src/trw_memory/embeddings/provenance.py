@@ -13,7 +13,7 @@ import math
 import re
 import struct
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -47,6 +47,8 @@ class EmbeddingSpace:
     artifact_sha256: str
     encoding: str
     dimensions: int
+    #: The model name, for logs only: it is not part of the identity and is never persisted.
+    model_id: str | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         if not _digest(self.artifact_sha256):
@@ -127,7 +129,9 @@ class VectorProvenance:
         )
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+        record = asdict(self)
+        record["space"].pop("model_id")
+        return json.dumps(record, sort_keys=True, separators=(",", ":"))
 
     @classmethod
     def from_json(cls, raw: object) -> VectorProvenance | None:

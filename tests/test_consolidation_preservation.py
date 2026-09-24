@@ -30,9 +30,6 @@ def _sources() -> list[MemoryEntry]:
             id="M-first",
             namespace="project/preservation",
             content="Preserve critical constraints",
-            helpful_count=2,
-            unhelpful_count=3,
-            q_observations=4,
             access_count=5,
             recall_count=6,
             protection_tier=ProtectionTier.CRITICAL,
@@ -43,9 +40,6 @@ def _sources() -> list[MemoryEntry]:
             id="M-second",
             namespace="project/preservation",
             content="Preserve permanent constraints too",
-            helpful_count=7,
-            unhelpful_count=8,
-            q_observations=9,
             access_count=10,
             recall_count=11,
             protection_tier=ProtectionTier.PERMANENT,
@@ -87,9 +81,6 @@ def test_public_cycle_preserves_constraints_and_feedback(tmp_path: Path, monkeyp
         active = backend.list_entries(namespace="project/preservation", status=MemoryStatus.ACTIVE)
         assert len(active) == 1
         replacement = active[0]
-        assert replacement.helpful_count == 9
-        assert replacement.unhelpful_count == 11
-        assert replacement.q_observations == 13
         assert replacement.access_count == 15
         assert replacement.recall_count == 17
         assert replacement.protection_tier == ProtectionTier.PERMANENT
@@ -108,7 +99,6 @@ def test_public_cycle_preserves_constraints_and_feedback(tmp_path: Path, monkeyp
             assert archived.status == MemoryStatus.ARCHIVED
             assert archived.consolidated_into == replacement.id
             assert archived.invalidated_by == replacement.id
-            assert archived.unhelpful_count == source.unhelpful_count
             assert archived.assertions == source.assertions
 
 

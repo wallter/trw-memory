@@ -1,8 +1,8 @@
 """Integration tests for bandit and graph primitives working together.
 
-Exercises BanditSelector lifecycle, PageHinkleyDetector change detection,
-and KnowledgeGraph operations (co-anchored edges, cluster detection,
-impact propagation) with real SQLite state. No mocks.
+Exercises PageHinkleyDetector change detection and KnowledgeGraph operations
+(co-anchored edges, cluster detection, impact propagation) with real SQLite
+state. No mocks.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ from datetime import datetime, timezone
 import pytest
 
 from trw_memory.bandit.change_detection import PageHinkleyDetector
-from trw_memory.bandit.thompson import BanditSelector
 from trw_memory.graph import (
     create_co_anchored_edges,
     detect_clusters,
@@ -79,70 +78,6 @@ def _get_importance(conn: sqlite3.Connection, entry_id: str) -> float:
     row = conn.execute("SELECT importance FROM memories WHERE id = ?", (entry_id,)).fetchone()
     assert row is not None, f"Entry {entry_id} not found"
     return float(row[0])
-
-
-# ===========================================================================
-# Thompson Sampling Full Lifecycle
-# ===========================================================================
-
-
-@pytest.mark.unit
-class TestThompsonFullLifecycle:
-    """BanditSelector add_arm -> select/update cycles -> serialize -> restore."""
-
-    def test_full_lifecycle(self) -> None:
-        """20 cycles of select/update, serialize to JSON, restore, verify state."""
-        rng = random.Random(12345)
-        selector = BanditSelector(tau=25, cold_start_min=2, floor_exploration=0.10)
-        arm_ids = ["arm-a", "arm-b", "arm-c", "arm-d", "arm-e"]
-
-        # Run 20 cycles of select + update
-        for _ in range(20):
-            decision = selector.select(arm_ids)
-            reward = rng.random()
-            selector.update(decision.selected_id, reward)
-
-        # Serialize
-        json_str = selector.to_json()
-        parsed = json.loads(json_str)
-        assert "arms" in parsed
-        assert len(parsed["arms"]) == 5
-
-        # Restore
-        restored = BanditSelector.from_json(json_str)
-
-        # Verify arm count and all observations preserved
-        assert len(restored._arms) == 5
-        for arm_id in arm_ids:
-            assert arm_id in restored._arms
-            original = selector._arms[arm_id]
-            clone = restored._arms[arm_id]
-            assert clone.alpha == pytest.approx(original.alpha)
-            assert clone.beta == pytest.approx(original.beta)
-            assert clone.window == pytest.approx(original.window)
-            assert clone.exposure_count == original.exposure_count
-
-        # Verify hyperparameters preserved
-        assert restored._tau == selector._tau
-        assert restored._cold_start_min == selector._cold_start_min
-        assert restored._floor_exploration == pytest.approx(selector._floor_exploration)
-
-    def test_lifecycle_continues_after_restore(self) -> None:
-        """Restored selector continues to select and update normally."""
-        selector = BanditSelector(tau=10, cold_start_min=1)
-        arm_ids = ["x", "y", "z"]
-
-        for _ in range(10):
-            d = selector.select(arm_ids)
-            selector.update(d.selected_id, 0.5)
-
-        restored = BanditSelector.from_json(selector.to_json())
-
-        # Continue operating -- should not raise
-        for _ in range(10):
-            d = restored.select(arm_ids)
-            assert d.selected_id in arm_ids
-            restored.update(d.selected_id, 0.7)
 
 
 # ===========================================================================

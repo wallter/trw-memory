@@ -140,7 +140,6 @@ from trw_memory._client_models import (  # noqa: E402
 from trw_memory._client_distilled_tiering import (  # noqa: E402
     DEFAULT_DISTILLED_RECALL_WEIGHT as DEFAULT_DISTILLED_RECALL_WEIGHT,
     apply_distilled_tiering as apply_distilled_tiering,
-    entry_to_result as _entry_to_result,
     get_distilled_recall_weight as _get_distilled_recall_weight,
     is_distilled_result as _is_distilled_result,
 )
@@ -497,13 +496,6 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
 
         return _impl(results, token_budget)
 
-    async def _merge_org_results(
-        self, query: str, local_results: list[MemoryResultDict], limit: int, tags: list[str] | None, min_score: float
-    ) -> list[MemoryResultDict]:
-        from trw_memory._client_recall import merge_org_results as _impl
-
-        return await _impl(self, query, local_results, limit, tags, min_score)
-
     # Native implementations bind as methods; direct callers retain the same
     # compatibility projection while production passes the invocation object.
     _fallback_recall = _native_fallback_recall
@@ -546,12 +538,6 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
         from trw_memory._client_recall import merge_tier_results as _impl
 
         return _impl(local_results, tier_only_results, limit, query_tokens, config, query_embedding)
-
-    @staticmethod
-    def _tier_result_from_entry(entry: dict[str, object]) -> MemoryResultDict:
-        from trw_memory._client_recall import tier_result_from_entry as _impl
-
-        return _impl(entry)
 
     # ---- Remote publish aliases (PRD-DIST-246 batch 111) -------------------
 

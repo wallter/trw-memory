@@ -47,7 +47,11 @@ _CONSTRUCTION_ALLOWLIST = {
 
 
 async def test_every_writer_populates_the_vector_clock(tmp_path: Path) -> None:
-    """All three production writers yield a non-empty clock on round trip."""
+    """Both production writers yield a non-empty clock on round trip.
+
+    trw-mcp's ``store_learning`` has no writer of its own since PRD-CORE-280 e3: it
+    writes through the daemon's ``memory_store``, which is writer 2.
+    """
     from trw_memory.client import MemoryClient
 
     cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path), embeddings_enabled=False)
@@ -62,7 +66,7 @@ async def test_every_writer_populates_the_vector_clock(tmp_path: Path) -> None:
     finally:
         await client.close()
 
-    # Writer 2 — trw_memory.tools.store (what trw-memory-server writes through).
+    # Writer 2 — trw_memory.tools.store (what trw-memory-server, and so trw-mcp, writes through).
     backend = SQLiteBackend(tmp_path / "tool.db")
     try:
         result = memory_store_impl(
@@ -78,21 +82,6 @@ async def test_every_writer_populates_the_vector_clock(tmp_path: Path) -> None:
         assert tool_entry.vector_clock, "the tool store surface must stamp a vector clock"
     finally:
         backend.close()
-
-    # Writer 3 — trw-mcp's store_learning (the flagship consumer's write path).
-    #
-    # PRD-CORE-251 FR03 deleted the hand builder this used to call: that path now
-    # delegates to writer 2, which is the point. Asserting on the ROW it lands
-    # keeps the assertion honest either way -- it would still fail if the
-    # delegation were replaced by a bare constructor tomorrow.
-    adapter = pytest.importorskip("trw_mcp.state.memory_adapter")
-    trw_dir = tmp_path / ".trw"
-    (trw_dir / "memory").mkdir(parents=True)
-    result = adapter.store_learning(trw_dir, "L-mcp-clock", "clock through trw-mcp", "detail")
-    assert result["status"] == "recorded", result
-    mcp_entry = adapter.get_backend(trw_dir).get("L-mcp-clock", namespace="default")
-    assert mcp_entry is not None
-    assert mcp_entry.vector_clock, "the trw-mcp write path must stamp a vector clock"
 
 
 def test_a_newer_local_edit_survives_a_stale_remote_one() -> None:

@@ -3,169 +3,64 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from trw_memory.cli import main
+from trw_memory.exceptions import DaemonUnreachableError
 
-from ._test_cli_support import _CLI
+from ._test_cli_support import _DAEMON_CLIENT, _mock_client
 
 
 class TestConsolidateCommand:
-    @patch(f"{_CLI}.consolidate_cycle")
-    @patch(f"{_CLI}.get_local_embedder")
-    @patch(f"{_CLI}._create_local_backend")
-    @patch(f"{_CLI}.MemoryConfig")
-    def test_consolidate_success(
-        self,
-        mock_config_cls: MagicMock,
-        mock_backend_fn: MagicMock,
-        mock_get_local_embedder: MagicMock,
-        mock_cycle: MagicMock,
-        capsys: pytest.CaptureFixture[str],
+    def test_consolidate_runs_over_the_daemon(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        mock_config_cls.return_value = MagicMock()
-        mock_backend = MagicMock()
-        mock_backend_fn.return_value = mock_backend
-        mock_get_local_embedder.return_value = MagicMock()
-        mock_cycle.return_value = {"status": "no_clusters", "consolidated_count": 0}
+        client = _mock_client()
+        monkeypatch.setattr(_DAEMON_CLIENT, lambda: client)
 
-        ret = main(["consolidate"])
-        assert ret == 0
-        captured = capsys.readouterr()
-        assert "no_clusters" in captured.out
-        mock_backend.close.assert_called_once()
+        assert main(["consolidate", "--dry-run", "--namespace", "project:a-11111111"]) == 0
 
-    @patch(f"{_CLI}.consolidate_cycle")
-    @patch(f"{_CLI}.get_local_embedder")
-    @patch(f"{_CLI}._create_local_backend")
-    @patch(f"{_CLI}.MemoryConfig")
-    def test_consolidate_dry_run(
-        self,
-        mock_config_cls: MagicMock,
-        mock_backend_fn: MagicMock,
-        mock_get_local_embedder: MagicMock,
-        mock_cycle: MagicMock,
+        client.consolidate.assert_awaited_once_with("project:a-11111111", dry_run=True)
+        assert json.loads(capsys.readouterr().out)["entries_consolidated"] == 3
+
+    def test_a_refused_consolidate_exits_1(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        mock_config_cls.return_value = MagicMock()
-        mock_backend_fn.return_value = MagicMock()
-        mock_get_local_embedder.return_value = MagicMock()
-        mock_cycle.return_value = {"dry_run": True, "clusters": [], "consolidated_count": 0}
-        ret = main(["consolidate", "--dry-run"])
-        assert ret == 0
-        call_kwargs = mock_cycle.call_args
-        assert call_kwargs is not None
-        assert call_kwargs.kwargs.get("dry_run")
+        client = _mock_client()
+        client.consolidate = AsyncMock(return_value={"status": "invalid", "error": "Invalid namespace"})
+        monkeypatch.setattr(_DAEMON_CLIENT, lambda: client)
 
-    @patch(f"{_CLI}.consolidate_cycle")
-    @patch(f"{_CLI}.get_local_embedder")
-    @patch(f"{_CLI}._create_local_backend")
-    @patch(f"{_CLI}.MemoryConfig")
-    def test_consolidate_passes_resolved_embedder(
-        self,
-        mock_config_cls: MagicMock,
-        mock_backend_fn: MagicMock,
-        mock_get_local_embedder: MagicMock,
-        mock_cycle: MagicMock,
-    ) -> None:
-        fake_config = MagicMock()
-        fake_config.embedding_model = "test-model"
-        fake_config.embedding_dim = 123
-        mock_config_cls.return_value = fake_config
-        mock_backend_fn.return_value = MagicMock()
-        fake_embedder = MagicMock()
-        mock_get_local_embedder.return_value = fake_embedder
-        mock_cycle.return_value = {"status": "no_clusters", "consolidated_count": 0}
-
-        ret = main(["consolidate"])
-
-        assert ret == 0
-        mock_get_local_embedder.assert_called_once_with(model_name="test-model", dim=123)
-        kwargs = mock_cycle.call_args.kwargs
-        assert kwargs["embedder"] is fake_embedder
-
-    @patch(f"{_CLI}.MemoryConfig", side_effect=RuntimeError("config fail"))
-    def test_consolidate_error(
-        self,
-        mock_config_cls: MagicMock,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        ret = main(["consolidate"])
-        assert ret == 1
-        captured = capsys.readouterr()
-        assert "Error:" in captured.err
-
-    @patch(f"{_CLI}._create_local_backend")
-    @patch(f"{_CLI}.MemoryConfig")
-    def test_consolidate_rejects_invalid_namespace_before_backend_creation(
-        self,
-        mock_config_cls: MagicMock,
-        mock_backend_fn: MagicMock,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        mock_config_cls.return_value = MagicMock()
-
-        ret = main(["consolidate", "--namespace", "../../escape"])
-
-        assert ret == 1
-        captured = capsys.readouterr()
-        assert "Invalid namespace" in captured.err
-        mock_backend_fn.assert_not_called()
+        assert main(["consolidate", "--namespace", "../../escape"]) == 1
+        assert "Invalid namespace" in capsys.readouterr().err
 
 
 class TestStatusCommand:
-    @patch(f"{_CLI}._create_local_backend")
-    @patch(f"{_CLI}.MemoryConfig")
-    def test_status_table(
-        self,
-        mock_config_cls: MagicMock,
-        mock_backend_fn: MagicMock,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        config = MagicMock()
-        config.storage_backend = "sqlite"
-        config.storage_path = ".memory"
-        mock_config_cls.return_value = config
+    def _client(self, total: int) -> MagicMock:
+        client = _mock_client()
+        client.status = AsyncMock(return_value={"total_entries": total, "config": {"storage_backend": "sqlite"}})
+        return client
 
-        mock_backend = MagicMock()
-        mock_backend.count.return_value = 42
-        mock_backend_fn.return_value = mock_backend
-
-        ret = main(["status"])
+    def test_status_table(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with patch(_DAEMON_CLIENT, return_value=self._client(42)):
+            ret = main(["status", "--namespace", "default"])
         assert ret == 0
         captured = capsys.readouterr()
         assert "42" in captured.out
         assert "Memory System Status" in captured.out
 
-    @patch(f"{_CLI}._create_local_backend")
-    @patch(f"{_CLI}.MemoryConfig")
-    def test_status_json(
-        self,
-        mock_config_cls: MagicMock,
-        mock_backend_fn: MagicMock,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        config = MagicMock()
-        config.storage_backend = "sqlite"
-        config.storage_path = ".memory"
-        mock_config_cls.return_value = config
-
-        mock_backend = MagicMock()
-        mock_backend.count.return_value = 5
-        mock_backend_fn.return_value = mock_backend
-
-        ret = main(["status", "--format", "json"])
+    def test_status_json(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with patch(_DAEMON_CLIENT, return_value=self._client(5)):
+            ret = main(["status", "--namespace", "default", "--format", "json"])
         assert ret == 0
         parsed = json.loads(capsys.readouterr().out)
-        assert parsed["entry_count"] == 5
+        assert (parsed["entry_count"], parsed["storage_path"]) == (5, "/daemon/memory.db")
 
-    @patch(f"{_CLI}.MemoryConfig", side_effect=RuntimeError("fail"))
-    def test_status_error(
-        self,
-        mock_config_cls: MagicMock,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        ret = main(["status"])
+    def test_status_error(self, capsys: pytest.CaptureFixture[str]) -> None:
+        client = _mock_client()
+        client.status = AsyncMock(side_effect=DaemonUnreachableError("the daemon is gone"))
+        with patch(_DAEMON_CLIENT, return_value=client):
+            ret = main(["status", "--namespace", "default"])
         assert ret == 1
         assert "Error:" in capsys.readouterr().err

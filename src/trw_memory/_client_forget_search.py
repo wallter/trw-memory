@@ -21,8 +21,9 @@ Extracted as PRD-DIST-246 batch 106.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
+from trw_memory._client_backend import client_logger as _client_logger
 from trw_memory._client_distilled_tiering import entry_to_result as _entry_to_result
 from trw_memory.exceptions import MemoryNotFoundError
 from trw_memory.models.memory import MemoryStatus
@@ -34,13 +35,6 @@ from trw_memory.security.runtime import (
 
 if TYPE_CHECKING:
     from trw_memory.client import ForgetResultDict, MemoryClient, MemoryResultDict
-
-
-def _client_logger() -> Any:
-    """Parent-module logger lookup so test patches on ``trw_memory.client.logger`` propagate."""
-    from trw_memory import client as _c
-
-    return _c.logger
 
 
 async def forget_impl(

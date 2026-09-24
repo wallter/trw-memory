@@ -100,13 +100,13 @@ def test_shared_content_lands_in_a_real_namespace_not_a_carve_out() -> None:
     assert SHARED_NAMESPACE in scope
 
 
-def test_fetch_requires_a_backend_so_it_cannot_run_ungated() -> None:
-    """The gate needs a backend, so a fetch that cannot be gated does not happen."""
+def test_fetch_requires_a_gate_so_it_cannot_run_ungated() -> None:
+    """The gate is a required argument, so a fetch that cannot be gated does not happen."""
     import inspect
 
     from trw_memory.sync import fetch_shared_memories
 
-    parameter = inspect.signature(fetch_shared_memories).parameters["backend"]
+    parameter = inspect.signature(fetch_shared_memories).parameters["admit"]
     assert parameter.default is inspect.Parameter.empty
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
 

@@ -7,7 +7,8 @@ Covers two adversarially-verified bugs in storage/_vector_ops.py:
 - ``search_vectors`` ran an unscoped KNN, so ids whose canonical memory row
   lives in another namespace could surface (cross-namespace leak).
 
-``vec_index`` carries no namespace column, so scoping joins to ``memories``.
+Scoping filters on ``vec_index.namespace`` and joins the row in that same
+namespace, so an orphaned vector (no row) never surfaces.
 These are integration tests against a real sqlite-vec backend.
 """
 
@@ -95,6 +96,22 @@ class TestSearchVectorsNamespaceScope:
         results = backend.search_vectors(query, top_k=3, namespace="ns-a")
         ids = {eid for eid, _ in results}
         assert ids == {"A-1"}
+
+    def test_an_id_held_in_two_namespaces_returns_only_this_namespaces_vector(self, tmp_path: Path) -> None:
+        """One store serves every namespace, so an id can recur (a migration copy, a rollback).
+
+        The scope is the vector's own namespace, not whichever row shares its id:
+        ns-b's far vector must not come back as ns-a's (a doubled hit that also
+        voids a dense dedup verdict against the census).
+        """
+        backend = _backend(tmp_path)
+        _store(backend, "SAME", "ns-a", [1.0, 0.0, 0.0, 0.0])
+        _store(backend, "SAME", "ns-b", [0.0, 1.0, 0.0, 0.0])
+
+        assert backend.search_vectors([1.0, 0.0, 0.0, 0.0], top_k=5, namespace="ns-a") == [("SAME", 0.0)]
+        near_b = backend.search_vectors([1.0, 0.0, 0.0, 0.0], top_k=5, namespace="ns-b")
+        assert [eid for eid, _ in near_b] == ["SAME"]
+        assert near_b[0][1] > 1.0, "ns-b's hit is its own orthogonal vector, not ns-a's identical one"
 
     def test_unscoped_search_can_return_any_namespace(self, tmp_path: Path) -> None:
         backend = _backend(tmp_path)

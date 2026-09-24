@@ -8,11 +8,10 @@ its liveness gate when the record parsed. So an invalid record walked straight
 past the gate: a second daemon bound a fresh port and overwrote the record while
 the first was still serving, leaving two writers on one ``memory.db``.
 
-*Token* — ``read_secret_file`` returned ``None`` for a planted symlink, a
-permission failure or non-UTF-8 bytes, and ``ensure_token`` reads ``None`` as
-first run. It then ``os.replace``d the live daemon's token, so every subsequent
-client call was rejected: the automatic rotation FR08 clause 3 forbids, reached
-from the create path instead of the reject path.
+*Secrets* — ``read_secret_file`` returned ``None`` for a planted symlink, a
+permission failure or non-UTF-8 bytes, which reads as first run. Minting over
+it replaces what a live daemon authenticates against (then the Slice A token,
+now PRD-CORE-298 FR02's grants file): every client is rejected.
 
 Both are now three-valued, and the middle value refuses.
 """
@@ -31,14 +30,15 @@ from trw_memory.daemon import (
     DiscoveryAbsent,
     DiscoveryInvalid,
     claim_single_instance,
-    ensure_token,
-    read_discovery,
+    mint_grant,
     read_discovery_result,
 )
 from trw_memory.exceptions import (
     DaemonRecordInvalidError,
     TokenUnreadableError,
 )
+
+from ._test_daemon_support import read_discovery
 
 #: Corruptions an operator, a crash or a version skew can genuinely leave
 #: behind. Each proves NOTHING about whether a daemon is serving the store.
@@ -80,7 +80,6 @@ def test_absent_record_reads_as_absent(paths: DaemonPaths) -> None:
     info = DaemonInfo(
         pid=os.getpid(),
         url="http://127.0.0.1:1/mcp",
-        token="t",
         started_at="2026-09-03T00:00:00+00:00",
         version="test",
     )
@@ -95,7 +94,7 @@ def test_claim_refuses_on_an_untrusted_record_without_binding_or_overwriting(pat
     before = paths.discovery.read_bytes()
 
     with pytest.raises(DaemonRecordInvalidError) as refusal:
-        claim_single_instance(paths, port=0, token="a-token", version="test")
+        claim_single_instance(paths, port=0, version="test")
 
     message = str(refusal.value)
     assert str(paths.discovery) in message, "the refusal must name the file to inspect"
@@ -104,7 +103,7 @@ def test_claim_refuses_on_an_untrusted_record_without_binding_or_overwriting(pat
 
 def test_claim_still_succeeds_when_the_slot_is_genuinely_free(paths: DaemonPaths) -> None:
     """The refusal is conditional on evidence: a clean slot is still claimable."""
-    claim = claim_single_instance(paths, port=0, token="a-token", version="test")
+    claim = claim_single_instance(paths, port=0, version="test")
     try:
         assert claim.info.pid == os.getpid()
         assert read_discovery(paths) == claim.info
@@ -125,13 +124,13 @@ def test_client_refuses_to_auto_start_over_an_untrusted_record(
     spawns: list[DaemonPaths] = []
     monkeypatch.setattr(client_module, "start_daemon_detached", spawns.append)
 
-    daemon_client = client_module.DaemonClient(paths=paths)
+    daemon_client = client_module.DaemonClient("any-grant", paths=paths)
     with pytest.raises(DaemonRecordInvalidError):
         daemon_client._attach()
 
     assert spawns == [], "a second daemon was spawned over a record that may name a live one"
     assert paths.discovery.read_bytes() == before
-    assert not paths.token.exists(), "a refused attach minted a token"
+    assert not paths.grants.exists(), "a refused attach minted a grant"
 
 
 def test_the_diagnostic_probe_still_collapses_to_none(paths: DaemonPaths) -> None:
@@ -140,68 +139,57 @@ def test_the_diagnostic_probe_still_collapses_to_none(paths: DaemonPaths) -> Non
     assert read_discovery(paths) is None
 
 
-# ── W03: an unreadable token file ────────────────────────────────────────────
+# ── W03: an unreadable grants file ────────────────────────────────────────────
 
 
 def _plant_symlink(paths: DaemonPaths, tmp_path: Path) -> Path:
-    victim = tmp_path / "victim-token"
+    victim = tmp_path / "victim-grants"
     victim.write_text("a-secret-that-must-not-be-read-or-replaced", encoding="utf-8")
-    paths.token.symlink_to(victim)
+    paths.grants.symlink_to(victim)
     return victim
 
 
-def test_a_symlinked_token_raises_and_is_never_replaced(paths: DaemonPaths, tmp_path: Path) -> None:
-    """The O_NOFOLLOW refusal must reach the caller, not become a rotation."""
+def test_a_symlinked_grants_file_raises_and_is_never_replaced(paths: DaemonPaths, tmp_path: Path) -> None:
+    """The O_NOFOLLOW refusal must reach the caller, not become a revocation."""
     victim = _plant_symlink(paths, tmp_path)
     victim_before = victim.read_bytes()
 
     with pytest.raises(TokenUnreadableError) as refusal:
-        ensure_token(paths)
+        mint_grant(paths, ["user:local"])
 
     message = str(refusal.value)
-    assert str(paths.token) in message, "the refusal must name the file"
-    assert "NOT regenerated" in message
-    assert paths.token.is_symlink(), "the token path was replaced"
+    assert str(paths.grants) in message, "the refusal must name the file"
+    assert "NOT rewritten" in message
+    assert paths.grants.is_symlink(), "the grants path was replaced"
     assert victim.read_bytes() == victim_before, "the symlink target was overwritten"
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this asserts on")
-def test_an_unreadable_token_raises_and_is_never_replaced(paths: DaemonPaths) -> None:
-    """A permission change locks the operator out of a rotation, not into one."""
-    paths.token.write_text("the-live-daemons-token", encoding="utf-8")
-    paths.token.chmod(0o000)
-    before = paths.token.stat().st_ino
+def test_an_unreadable_grants_file_raises_and_is_never_replaced(paths: DaemonPaths) -> None:
+    """A permission change locks the operator out of a revocation, not into one."""
+    paths.grants.write_text('{"digest": ["user:local"]}', encoding="utf-8")
+    paths.grants.chmod(0o000)
+    before = paths.grants.stat().st_ino
     try:
-        with pytest.raises(TokenUnreadableError, match="NOT regenerated"):
-            ensure_token(paths)
-        assert paths.token.stat().st_ino == before, "the token file was replaced"
+        with pytest.raises(TokenUnreadableError, match="NOT rewritten"):
+            mint_grant(paths, ["user:local"])
+        assert paths.grants.stat().st_ino == before, "the grants file was replaced"
     finally:
-        paths.token.chmod(0o600)
-    assert paths.token.read_text(encoding="utf-8") == "the-live-daemons-token"
+        paths.grants.chmod(0o600)
+    assert paths.grants.read_text(encoding="utf-8") == '{"digest": ["user:local"]}'
 
 
 @pytest.mark.parametrize(
     ("content", "case"),
     [(b"\xff\xfe not utf-8 \x80", "invalid_utf8"), (b"   \n", "empty")],
 )
-def test_an_undecodable_or_empty_token_raises_and_is_never_replaced(
+def test_an_undecodable_or_empty_grants_file_raises_and_is_never_replaced(
     paths: DaemonPaths, content: bytes, case: str
 ) -> None:
     """``write_secret_file`` is atomic, so neither state is a partial write."""
-    paths.token.write_bytes(content)
+    paths.grants.write_bytes(content)
 
-    with pytest.raises(TokenUnreadableError, match="NOT regenerated"):
-        ensure_token(paths)
+    with pytest.raises(TokenUnreadableError, match="NOT rewritten"):
+        mint_grant(paths, ["user:local"])
 
-    assert paths.token.read_bytes() == content, f"the {case} token file was rewritten"
-
-
-def test_a_genuinely_absent_token_is_still_generated_at_0600(paths: DaemonPaths) -> None:
-    """First run is still first run: the refusal is conditional, not blanket."""
-    assert not paths.token.exists()
-
-    token = ensure_token(paths)
-
-    assert token and paths.token.read_text(encoding="utf-8") == token
-    assert paths.token.stat().st_mode & 0o777 == 0o600
-    assert ensure_token(paths) == token, "a second call minted a new token"
+    assert paths.grants.read_bytes() == content, f"the {case} grants file was rewritten"

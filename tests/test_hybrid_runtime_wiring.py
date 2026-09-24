@@ -205,6 +205,21 @@ def test_memory_store_impl_upserts_vector_when_embedder_available() -> None:
     backend.upsert_vector.assert_called_once()
 
 
+def test_memory_store_impl_embeds_the_content_and_its_detail() -> None:
+    """The stored vector encodes ``"<content> <detail>"``, the text learn-time dedup compares."""
+    embedded: list[str] = []
+
+    class _Recording(_StubEmbedder):
+        def embed(self, text: str) -> list[float] | None:
+            embedded.append(text)
+            return super().embed(text)
+
+    with patch("trw_memory.tools.store.get_local_embedder", return_value=_Recording()):
+        memory_store_impl("My Summary", "project:default", backend=MagicMock(), detail="My Detail")
+
+    assert embedded == ["My Summary My Detail"]
+
+
 def test_memory_store_impl_rolls_back_when_vector_upsert_fails() -> None:
     """Tool store reports a transaction rollback on vector failure.
 
@@ -295,7 +310,7 @@ def test_memory_recall_impl_uses_configured_embedder_settings() -> None:
 
 
 def test_memory_recall_impl_forwards_retrieval_config_to_hybrid_search() -> None:
-    """Tool recall must use the same retrieval knobs as client recall."""
+    """Tool recall uses the configured retrieval knobs through the shared ranking arguments."""
     entry = MemoryEntry(id="M-001", content="pydantic", namespace="project:default")
     backend = MagicMock()
     backend.list_entries.return_value = [entry]
@@ -321,7 +336,8 @@ def test_memory_recall_impl_forwards_retrieval_config_to_hybrid_search() -> None
 
     kwargs = hybrid_search_mock.call_args.kwargs
     assert kwargs["rrf_k"] == 22
-    assert kwargs["importance_alpha"] == 0.4
+    # trw_recall's ranking (PRD-CORE-298 FR05): importance_alpha is 1.0, not the configured blend.
+    assert kwargs["importance_alpha"] == 1.0
     assert kwargs["recency_weight"] == 0.6
     assert kwargs["recency_halflife_days"] == 9.0
     assert kwargs["fusion_mode"] == "combmax"

@@ -160,6 +160,8 @@ def _move_rows(
     skipped = 0
     cursor: EntryCursor | None = None
     with stores.source.transaction(), stores.destination_transaction():
+        # Edges first: deleting a moved row purges its edges from the source.
+        stores.destination.add_graph_edges(destination, stores.source.graph_edges(source))
         while True:
             batch = stores.source.list_entries(namespace=source, limit=_BATCH_LIMIT, after=cursor)
             if not batch:
@@ -334,13 +336,17 @@ def store_census(config: MemoryConfig) -> dict[str, int]:
     census functions with different blind spots is exactly how the diagnose tool
     and the session-start advisory would come to disagree, so the narrower one
     was removed rather than kept as a convenience.
+
+    Over the daemon it holds only the token's granted namespaces (PRD-CORE-298
+    FR02), so a moved-checkout sibling another checkout owns is not reported.
     """
     from trw_memory.integrations._backend import discover_namespace_backends
+    from trw_memory.security.rbac import within_grant
 
     census: dict[str, int] = {}
     with discover_namespace_backends(config) as stores:
         for namespaces, backend in stores:
-            for namespace in namespaces:
+            for namespace in filter(within_grant, namespaces):
                 census[namespace] = census.get(namespace, 0) + backend.count(namespace=namespace)
     return census
 

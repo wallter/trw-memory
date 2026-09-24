@@ -75,3 +75,19 @@ class TestMemoryEntryAssertions:
         }
         entry = MemoryEntry.model_validate(data, strict=False)
         assert entry.assertions == []
+
+
+def test_an_entry_with_a_verified_assertion_round_trips_through_its_own_json() -> None:
+    """A daemon answers with ``model_dump(mode="json")``; the strict ``Assertion`` must accept it back."""
+    import json
+    from datetime import datetime, timezone
+
+    from trw_memory.models.memory import Assertion, MemoryEntry
+
+    verified = datetime(2026, 9, 23, 18, 0, tzinfo=timezone.utc)
+    assertion = Assertion(type="glob_exists", pattern="", target="x.py", last_result=True, last_verified_at=verified)
+    entry = MemoryEntry(id="L-rt", content="c", assertions=[assertion])
+
+    again = MemoryEntry.model_validate_json(json.dumps(entry.model_dump(mode="json")))
+
+    assert again.assertions[0].last_verified_at == verified

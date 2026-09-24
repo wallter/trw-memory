@@ -9,7 +9,7 @@ an adapter or a JSON import file skipped the injection-pattern gate, the PII
 scan, the write rate limit, anomaly scoring and provenance signing entirely, and
 was replayed verbatim on every later recall. (Three of the five surfaces that had
 the defect — the LangChain, CrewAI and LlamaIndex adapters — were later removed
-as unused; the VSCode adapter and the import CLI remain.)
+as unused, as was the VSCode adapter in 3.0.0; the import CLI remains.)
 
 :func:`guarded_store` is the shared seam those surfaces now use. It is the ONLY
 supported way to persist a caller-supplied entry from outside ``security/``;
@@ -146,7 +146,7 @@ def guarded_store_or_raise(
 
     ``guarded_store`` reports a quarantine by returning ``stored=False`` rather
     than raising, which is right for a caller that can surface the distinction
-    (the VSCode adapter puts it in ``status``). A caller whose only return channel
+    (for example by putting it in a ``status`` field). A caller whose only return channel
     is ``None`` cannot, and silently dropping a held write there produces a
     "censored transcript indistinguishable from a complete one".
 

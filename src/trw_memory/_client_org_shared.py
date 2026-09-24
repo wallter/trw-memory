@@ -27,26 +27,20 @@ from __future__ import annotations
 
 import asyncio
 import functools
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
+from trw_memory._client_backend import client_logger as _client_logger
 from trw_memory.embeddings._query_prompts import embed_query
 from trw_memory.embeddings._similarity_calibration import calibrated_threshold
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.dense import cosine_similarity
-from trw_memory.sync._remote_admission import admit_remote_results
+from trw_memory.sync._remote_admission import admit_remote_results, store_gate
 from trw_memory.sync._remote_common import decode_learning_api_v1_result
 
 if TYPE_CHECKING:
     from trw_memory._client_models import RemoteResultDict
     from trw_memory.client import MemoryClient, MemoryResultDict
-
-
-def _client_logger() -> Any:
-    """Parent-module logger lookup so test patches on ``trw_memory.client.logger`` propagate."""
-    from trw_memory import client as _c
-
-    return _c.logger
 
 
 async def merge_shared_results(
@@ -100,7 +94,7 @@ async def merge_shared_results(
                 _fetch,
                 query,
                 client._config,
-                backend=client._get_backend(),
+                admit=store_gate(client._config, client._get_backend()),
                 embedding=query_embedding,
                 limit=limit,
                 local_entries=local_entries,

@@ -23,18 +23,10 @@ from __future__ import annotations
 import sqlite3
 import threading
 from datetime import datetime, timezone
-from typing import Any
 
 import structlog
 
 logger = structlog.get_logger(__name__)
-
-
-def _graph_module() -> Any:
-    """Return the parent graph module for indirection lookups."""
-    from trw_memory import graph as _graph
-
-    return _graph
 
 
 def create_co_anchored_edges(
@@ -54,7 +46,8 @@ def create_co_anchored_edges(
     the anchor-file join spans every namespace in the file and mints edges
     between rows that were never meant to see each other (PRD-CORE-245 FR02).
     """
-    g = _graph_module()
+    from trw_memory import graph as g
+
     now = datetime.now(timezone.utc).isoformat()
     created = 0
     unique_anchor_files = list(dict.fromkeys(anchor_files))
@@ -79,7 +72,7 @@ def create_co_anchored_edges(
                 (*unique_anchor_files, namespace, entry_id, min_shared_anchors, max_per_file),
             ).fetchall()
             for other_id, shared_csv in rows:
-                g._upsert_edge(
+                created += g._upsert_edge(
                     conn,
                     entry_id,
                     other_id,
@@ -89,7 +82,6 @@ def create_co_anchored_edges(
                     namespace=namespace,
                     metadata={"anchor_files": str(shared_csv)},
                 )
-                created += 1
         else:
             for anchor_file in unique_anchor_files:
                 rows = conn.execute(
@@ -102,10 +94,9 @@ def create_co_anchored_edges(
 
                 for (other_id,) in rows:
                     meta = {"anchor_file": anchor_file}
-                    g._upsert_edge(
+                    created += g._upsert_edge(
                         conn, entry_id, other_id, "co_anchored", 0.8, now, namespace=namespace, metadata=meta
                     )
-                    created += 1
 
         if created:
             conn.commit()

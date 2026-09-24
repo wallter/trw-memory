@@ -214,6 +214,7 @@ def test_surface_membership_is_not_empty() -> None:
     """Guard against a silently empty Protocol — an empty contract passes everything."""
     assert set(SURFACE_MEMBERS) == {
         "memory_store_impl",
+        "memory_update_impl",
         "memory_recall_impl",
         "memory_search_impl",
         "memory_forget_impl",

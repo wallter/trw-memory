@@ -31,7 +31,6 @@ parent ``runtime`` module to break the import cycle.
 
 from __future__ import annotations
 
-import hashlib
 import threading
 from typing import Any
 
@@ -39,7 +38,7 @@ from trw_memory.exceptions import CanaryTamperError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.validation import DEFAULT_NAMESPACE
-from trw_memory.security.canary import _CANARY_FIXTURES, PINNED_HASHES
+from trw_memory.security.canary import _CANARY_FIXTURES, PINNED_HASHES, _sha
 from trw_memory.security.startup import resolve_security_path
 from trw_memory.security.telemetry_emit import build_security_traceability, emit_security_event
 from trw_memory.storage.interface import StorageBackend
@@ -210,7 +209,7 @@ def _probe_canaries_locked(config: MemoryConfig, *, backend: StorageBackend) -> 
                 },
             )
             continue
-        current_hash = hashlib.sha256(entry.content.encode("utf-8")).hexdigest()
+        current_hash = _sha(entry.content)
         if current_hash != expected_hash:
             # PRD-FIX-102 (FR-2/FR-4): DRIFT is the genuine content-tamper signal. Always
             # quarantine + emit, but RAISE only when ``canary_fail_mode == 'halt'`` (the
@@ -250,7 +249,7 @@ def _has_canary_drift(config: MemoryConfig, *, backend: StorageBackend) -> bool:
         entry = backend.get(canary_id, namespace=CANARY_NAMESPACE)
         if entry is None:
             continue  # missing => recoverable, not a tamper
-        if hashlib.sha256(entry.content.encode("utf-8")).hexdigest() != expected_hash:
+        if _sha(entry.content) != expected_hash:
             return True
     return False
 

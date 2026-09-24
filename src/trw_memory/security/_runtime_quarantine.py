@@ -21,7 +21,6 @@ Belongs to ``security/runtime.py``. Re-exported there for back-compat.
   reviews table (creates table on first call).
 - ``quarantine_namespace_dir`` — per-namespace dir path under the
   config's quarantine root.
-- ``read_namespace_metadata`` — read ``namespace.txt`` if present.
 
 The runtime-path functions defer a lookup of
 ``ensure_security_maintenance`` via ``runtime`` to break the import
@@ -32,6 +31,7 @@ Extracted as PRD-DIST-245 Phase 3 batch 100.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -41,14 +41,13 @@ from trw_memory.exceptions import QuarantineUnreachableError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.validation import DEFAULT_NAMESPACE
+from trw_memory.security.rbac import transport_grant
 from trw_memory.security.startup import resolve_security_path
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.persistence import lock_for_rmw
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 logger = structlog.get_logger(__name__)
-
-NAMESPACE_METADATA_FILE = "namespace.txt"
 
 
 def _ensure_maintenance(config: MemoryConfig) -> None:
@@ -71,29 +70,6 @@ def open_quarantine_backend(config: MemoryConfig) -> SQLiteBackend:
 
 def quarantine_namespace_dir(config: MemoryConfig, namespace: str) -> Path:
     return Path(config.quarantine_path) / namespace.replace(":", "_")
-
-
-def read_namespace_metadata(namespace_dir: Path) -> str | None:
-    metadata_path = namespace_dir / NAMESPACE_METADATA_FILE
-    if not metadata_path.exists():
-        return None
-    # Fail open: a quarantine namespace whose ``namespace.txt`` is unreadable
-    # (OSError) or non-UTF-8 (UnicodeDecodeError from a torn/partial write)
-    # yields ``None`` ("metadata absent") rather than raising into the
-    # quarantine review/discovery path. Mirrors the storage-side seam in
-    # ``integrations/_backend._read_namespace_metadata``. Never log the decoded
-    # text or raw bytes — the namespace string can carry sensitive project
-    # identifiers; only the path + error class.
-    try:
-        namespace = metadata_path.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError) as exc:
-        logger.warning(
-            "namespace_metadata_read_failed",
-            path=str(metadata_path),
-            error=type(exc).__name__,
-        )
-        return None
-    return namespace or None
 
 
 def store_quarantined_entry(config: MemoryConfig, entry: MemoryEntry) -> None:
@@ -122,22 +98,38 @@ def list_quarantined_entries(
     namespace: str | None = None,
     actor: str | None = None,
     limit: int = 100,
+    admits: Callable[[str], bool] | None = None,
 ) -> list[MemoryEntry]:
-    """Return quarantined entries filtered by namespace and actor."""
+    """Return quarantined entries filtered by namespace and actor.
+
+    Only namespaces inside the daemon token's grant, and that *admits* accepts
+    when given, are ever read (PRD-CORE-298 FR02). Filtering fetched rows
+    instead would pull other tenants' content into this process and let their
+    newer rows starve ``limit``.
+    """
     _ensure_maintenance(config)
+    granted = transport_grant()
     entries: list[MemoryEntry] = []
     with open_quarantine_backend(config) as backend:
-        # Over-fetch with a large bound (matching the delete path) so the
-        # actor/quarantined Python-side filter cannot silently drop matching
-        # entries that sort beyond a small ``limit * 5`` window — an audit
-        # truncation hazard (closure re-audit #2). The final ``[:limit]``
-        # slice is applied AFTER the updated_at sort, so the newest matches win.
-        for entry in backend.list_entries(namespace=namespace, limit=10_000):
-            if entry.metadata.get("quarantined") != "true":
+        scope = (
+            [namespace]
+            if namespace is not None
+            else backend.list_namespaces(None if granted is None else sorted(granted))
+        )
+        for readable in scope:
+            if (granted is not None and readable not in granted) or (admits is not None and not admits(readable)):
                 continue
-            if actor is not None and entry.source_identity != actor:
-                continue
-            entries.append(entry)
+            # Over-fetch with a large bound (matching the delete path) so the
+            # actor/quarantined Python-side filter cannot silently drop matching
+            # entries that sort beyond a small ``limit * 5`` window — an audit
+            # truncation hazard (closure re-audit #2). The final ``[:limit]``
+            # slice is applied AFTER the updated_at sort, so the newest matches win.
+            for entry in backend.list_entries(namespace=readable, limit=10_000):
+                if entry.metadata.get("quarantined") != "true":
+                    continue
+                if actor is not None and entry.source_identity != actor:
+                    continue
+                entries.append(entry)
     entries.sort(key=lambda item: item.updated_at, reverse=True)
     return entries[:limit]
 

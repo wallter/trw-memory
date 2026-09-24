@@ -271,10 +271,6 @@ def restore_from_backup(db_path: Path, backup_path: Path) -> None:
         dest.close()
 
 
-def _user_version(conn: sqlite3.Connection) -> int:
-    return int(conn.execute("PRAGMA user_version").fetchone()[0])
-
-
 # ---------------------------------------------------------------------------
 # Full quiesced orchestrator
 # ---------------------------------------------------------------------------
@@ -319,7 +315,7 @@ def run_memory_model_v2_cutover(
     """
     # Lazily import to avoid an import cycle: _schema imports this module to
     # register _MIGRATIONS[2].
-    from trw_memory.storage._schema import SCHEMA_VERSION, ensure_schema
+    from trw_memory.storage._schema import SCHEMA_VERSION, _user_version, ensure_schema
 
     active_plan, active_report = _plan_yaml_rewrites(active_dir, kind="active_yaml")
     cold_plan, cold_report = _plan_yaml_rewrites(cold_dir, kind="cold_yaml")

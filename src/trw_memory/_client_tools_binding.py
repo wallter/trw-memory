@@ -23,8 +23,9 @@ from __future__ import annotations
 import functools
 import inspect
 from collections.abc import Callable, Coroutine
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
+from trw_memory._client_backend import client_logger as _client_logger
 from trw_memory.exceptions import (
     MemoryConnectionError,
     StorageError,
@@ -41,13 +42,6 @@ if TYPE_CHECKING:
         StoreResultDict,
         _ToolFn,
     )
-
-
-def _client_logger() -> Any:
-    """Parent-module logger lookup so test patches on ``trw_memory.client.logger`` propagate."""
-    from trw_memory import client as _c
-
-    return _c.logger
 
 
 def make_tool_functions(client: MemoryClient) -> dict[str, _ToolFn]:

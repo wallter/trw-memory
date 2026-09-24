@@ -20,7 +20,7 @@ class _FakeBackend:
         self.recover_called = False
         self.open_without_called = False
 
-    def _open_and_configure(self, _db_path: Path) -> Any:
+    def _open_and_configure(self, _db_path: Path, **_: object) -> Any:
         raise self.exc
 
     #: What the (also-locked) probe reports. ``None`` is UNKNOWN — see

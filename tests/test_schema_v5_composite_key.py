@@ -48,8 +48,6 @@ EXPECTED_MEMORIES_COLUMNS = [
     "invalidated_by",
     "access_count",
     "session_count",
-    "q_value",
-    "q_observations",
     "source",
     "source_identity",
     "client_profile",
@@ -81,8 +79,6 @@ EXPECTED_MEMORIES_COLUMNS = [
     "sync_seq",
     "last_synced_at",
     "recall_count",
-    "helpful_count",
-    "unhelpful_count",
     "verification_status",
     "verification_checked_at",
 ]

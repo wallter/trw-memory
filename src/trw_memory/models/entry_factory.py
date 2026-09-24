@@ -27,13 +27,13 @@ fields, so a future writer cannot omit one by building the model directly.
 
 from __future__ import annotations
 
-import hashlib
 import socket
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.security.pii import anonymize_installation_id
 from trw_memory.sync.conflict import increment_clock, init_clock
 
 if TYPE_CHECKING:
@@ -46,13 +46,11 @@ def local_node_id_for(storage_path: str | Path) -> str:
     """Return this installation's vector-clock node id for *storage_path*.
 
     Mirrors ``MemoryClient``'s own derivation (hostname plus the resolved
-    storage path, double-hashed) so a row written through the client and a row
+    storage path, through ``anonymize_installation_id``) so a row written through the client and a row
     written through the tool surface name the SAME node. Two node ids for one
     installation would make its own successive edits look concurrent.
     """
-    raw = f"{socket.gethostname()}:{Path(storage_path).resolve()}"
-    first = hashlib.sha256(raw.encode()).hexdigest()
-    return hashlib.sha256(first.encode()).hexdigest()[:16]
+    return anonymize_installation_id(f"{socket.gethostname()}:{Path(storage_path).resolve()}")
 
 
 def new_entry(

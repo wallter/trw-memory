@@ -33,7 +33,7 @@ import structlog
 from trw_memory._client_distilled_tiering import entry_to_result as _entry_to_result
 from trw_memory.embeddings._query_prompts import embed_query
 from trw_memory.embeddings._space_gate import active_embedding_space, admit_space_vectors
-from trw_memory.models.memory import MemoryStatus
+from trw_memory.retrieval.recall_policy import acquire_candidates, hybrid_policy, resolve_query
 from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocation
 from trw_memory.security.namespace_scope import NamespaceScopeError, authorize_namespaces
 from trw_memory.security.rbac import Permission
@@ -94,7 +94,6 @@ async def try_hybrid_recall(
     ``None`` preserves the legacy behaviour of embedding inside the dense step.
     """
     try:
-        from trw_memory.retrieval import _adaptive_floor
         from trw_memory.retrieval.pipeline import hybrid_search
     except ImportError:  # trw-fail-silent-allow: optional retrieval extras absent, caller falls back to keyword recall
         return None
@@ -103,77 +102,25 @@ async def try_hybrid_recall(
 
     async with client._lock:
         backend = client._get_backend()
-        # PRD-DIST-2047 c796: load up to hybrid_search_candidate_pool_size
-        # entries (default 1000) so BM25 + dense can rank the full namespace.
-        # Pre-c796 the pool was capped at limit*5 (=50 for default limit=10),
-        # which silently lost targets ranked past position 50 on namespaces > 50.
-        candidate_pool_size = max(limit * 5, client._config.hybrid_search_candidate_pool_size)
         list_entries_start = perf_counter()
-        # Exclude superseded entries at the SQL level when as_of is not set and
-        # include_superseded is False.  This prevents superseded candidates from
-        # consuming slots in the BM25/dense candidate pool; apply_validity_prior
-        # still handles the as_of case in post-fusion.
-        if invocation is not None:
-            all_entries = invocation.acquire(
-                lambda predicate, remaining: backend.list_entries(
-                    namespace=client._namespace,
-                    limit=remaining,
-                    exclude_superseded=not include_superseded and as_of is None,
-                    temporal_selection=invocation.temporal,
-                    entry_filter=predicate,
-                ),
-                limit=candidate_pool_size,
-            )
-        else:
-            all_entries = backend.list_entries(
-                namespace=client._namespace,
-                limit=candidate_pool_size,
-                exclude_superseded=not include_superseded and as_of is None,
-            )
+        # One acquisition for every recall surface (PRD-CORE-292, PRD-CORE-298 FR05):
+        # the recency pool, superseded rows excluded at the SQL level unless
+        # time-travelling, plus the rows full-text search finds past the pool
+        # window (PRD-FIX-148).
+        candidates = acquire_candidates(
+            backend,
+            query,
+            namespace=client._namespace,
+            limit=limit,
+            config=client._config,
+            exclude_superseded=not include_superseded and as_of is None,
+            temporal_selection=invocation.temporal if invocation is not None else None,
+            acquire=invocation.acquire if invocation is not None else None,
+        )
+        candidate_pool_size = candidates.pool_size
+        all_entries = candidates.entries
         list_entries_ms = (perf_counter() - list_entries_start) * 1000.0
-        scan_complete = len(all_entries) < candidate_pool_size
-
-        # FTS5 augmentation: inject text-matching entries that rank past the
-        # recency-ordered list_entries pool. At enterprise scale (100K+ entries),
-        # list_entries may miss old relevant entries within a policy partition.
-        # FTS partition filtering may scan matching rows; no fixed latency is
-        # guaranteed. The deduplicated union is bounded by the sum of base and
-        # FTS caps, not the base cap alone. Skip when unavailable or query empty.
-        if query and getattr(backend, "_fts_available", False):
-            fts_top_k = min(candidate_pool_size, max(client._config.bm25_candidates * 2, 100))
-            try:
-                if invocation is not None:
-                    fts_entries = invocation.acquire(
-                        lambda predicate, remaining: backend.search_fts(
-                            query,
-                            top_k=remaining,
-                            namespace=client._namespace,
-                            status=MemoryStatus.ACTIVE,
-                            temporal_selection=invocation.temporal,
-                            entry_filter=predicate,
-                        ),
-                        limit=fts_top_k,
-                    )
-                else:
-                    fts_entries = backend.search_fts(
-                        query, top_k=fts_top_k, namespace=client._namespace, status=MemoryStatus.ACTIVE
-                    )
-                if fts_entries:
-                    existing_ids = {e.id for e in all_entries}
-                    new_from_fts = [e for e in fts_entries if e.id not in existing_ids]
-                    if new_from_fts:
-                        all_entries = list(all_entries) + new_from_fts
-                        logger.debug(
-                            "fts5_pool_augmentation",
-                            query=query[:80],
-                            fts_candidates=len(fts_entries),
-                            new_entries=len(new_from_fts),
-                            total_pool=len(all_entries),
-                        )
-            except NamespaceScopeError:
-                raise
-            except Exception:
-                logger.debug("fts5_augmentation_failed", exc_info=True)
+        scan_complete = candidates.complete
 
         # Vectors are read with their provenance; which of them may be dense-
         # scored is decided below, once the active embedder's space is known.
@@ -236,35 +183,11 @@ async def try_hybrid_recall(
     # prefixes when the config hasn't explicitly enabled either.  Preserves
     # explicit config — if the operator set recall_recency_weight > 0 we use
     # that value; only the zero-default case gets the auto-detected weight.
-    if client._config.recall_auto_temporal:
-        from trw_memory.retrieval.temporal_query import prepare_temporal_query
-
-        rewrite = prepare_temporal_query(
-            query,
-            current_recency_weight=client._config.recall_recency_weight,
-            auto_temporal=True,
-            strip_prefix=client._config.recall_strip_temporal_prefix,
-        )
-        retrieval_query = rewrite.retrieval_query
-        effective_recency_weight = rewrite.recency_weight
-        tc = rewrite.classification
-        if tc is not None and tc.is_temporal:
-            logger.debug(
-                "temporal_query_detected",
-                query=query[:80],
-                retrieval_query=retrieval_query[:80],
-                confidence=tc.confidence,
-                recency_weight=effective_recency_weight,
-                patterns=tc.matched_patterns,
-                prefix_stripped=rewrite.prefix_stripped,
-            )
-    else:
-        effective_recency_weight = client._config.recall_recency_weight
-        retrieval_query = query
-        rewrite = None
+    resolved = resolve_query(query, client._config)
+    retrieval_query, effective_recency_weight = resolved.text, resolved.recency_weight
 
     effective_query_embedding = query_embedding
-    if rewrite is not None and rewrite.prefix_stripped and embedder is not None:
+    if resolved.prefix_stripped and embedder is not None:
         # The caller's precomputed vector represents the original query
         # ("latest guidance on X"). Once the retrieval query is stripped to
         # "X", dense search must use the stripped vector too; otherwise prefix
@@ -284,7 +207,6 @@ async def try_hybrid_recall(
     # so the scope is minted for exactly that one -- through the authorizer, not
     # by hand, so the RBAC check runs on this surface too.
     scope = authorize_namespaces(client._config, [client._namespace], Permission.READ, "recall")
-    floor = _adaptive_floor.adaptive_rerank_floor(limit)  # PRD-CORE-284: scales with the caller's limit
     hybrid_search_start = perf_counter()
     try:
         ranked = hybrid_search(
@@ -296,25 +218,12 @@ async def try_hybrid_recall(
             stored_embeddings=stored_embeddings or None,
             bm25_candidates=effective_bm25_candidates,
             vector_candidates=effective_vector_candidates,
-            rrf_k=client._config.rrf_k,
-            importance_alpha=client._config.rrf_importance_alpha,
             top_k=effective_top_k,
             as_of=as_of,
             include_superseded=include_superseded,
-            recency_weight=effective_recency_weight,
-            recency_halflife_days=client._config.recall_recency_halflife_days,
-            fusion_mode=client._config.recall_fusion_mode,
-            validity_age_decay=client._config.recall_validity_age_decay,
             validity_reference_time=invocation.temporal.reference_time if invocation else None,
-            rerank=True,  # unconditional; only a missing/uncached/offline model skips it
-            rerank_model=client._config.recall_rerank_model,
-            rerank_candidates=client._config.recall_rerank_candidates,
-            rerank_min_score=floor.min_score,
-            rerank_min_keep=floor.min_keep,
-            rerank_local_only=client._config.local_only,
-            # The entity-bridge second hop only runs when the cross-encoder
-            # scored the pool; MEMORY_RECALL_BRIDGE_HOP=false turns it off.
-            bridge_hop=client._config.recall_bridge_hop,
+            # PRD-CORE-284/292: the one resolved policy every recall surface ranks with.
+            **hybrid_policy(client._config, limit=limit, recency_weight=effective_recency_weight),
             # When prefix was stripped, the cross-encoder also uses the stripped
             # query — the original "latest guidance on X" confuses the ms-marco
             # reranker (entries lack "guidance" vocabulary): -4.5pp T-HR.

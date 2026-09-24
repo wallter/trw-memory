@@ -33,41 +33,20 @@ def _entry(entry_id: str, **kwargs: object) -> MemoryEntry:
 
 
 class TestMergeAccumulationFields:
-    def test_q_value_takes_max(self) -> None:
-        existing = _entry("e1", q_value=0.4)
-        new_entry = _entry("e2", q_value=0.9)
-        updated = merge_entries(existing, new_entry)
-        assert updated.q_value == 0.9
-
-    def test_q_value_existing_wins_when_higher(self) -> None:
-        existing = _entry("e1", q_value=0.9)
-        new_entry = _entry("e2", q_value=0.4)
-        updated = merge_entries(existing, new_entry)
-        assert updated.q_value == 0.9
-
     def test_counters_are_summed(self) -> None:
         existing = _entry(
             "e1",
-            q_observations=3,
             access_count=5,
             recall_count=7,
-            helpful_count=2,
-            unhelpful_count=3,
         )
         new_entry = _entry(
             "e2",
-            q_observations=2,
             access_count=1,
             recall_count=3,
-            helpful_count=6,
-            unhelpful_count=9,
         )
         updated = merge_entries(existing, new_entry)
-        assert updated.q_observations == 5
         assert updated.access_count == 6
         assert updated.recall_count == 10
-        assert updated.helpful_count == 8
-        assert updated.unhelpful_count == 12
         # sessions_surfaced was dropped by PRD-CORE-244-FR08 (schema 5): it had no
         # producer, so this arm only ever summed two zeros.
 

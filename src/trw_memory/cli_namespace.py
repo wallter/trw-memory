@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import Any
 
+from trw_memory.daemon._grants import read_checkout_grant
 from trw_memory.daemon.client import DaemonClient
 from trw_memory.exceptions import DaemonError
 
@@ -67,20 +69,19 @@ async def handle_namespace(args: argparse.Namespace, *, client: DaemonClient | N
 
     Args:
         args: Parsed arguments carrying ``namespace_action`` and its operands.
-        client: Daemon client. Defaults to one resolved from the user-space
-            paths; injected by tests that point at a throwaway daemon.
+        client: Daemon client. Defaults to one presenting the enclosing
+            checkout's grant; injected by tests that point at a throwaway daemon.
 
     Returns:
-        0 on success, 1 on any refusal or unreachable daemon.
+        0 on success, 1 on any refusal, missing grant or unreachable daemon.
     """
-    daemon = client or DaemonClient()
     action = args.namespace_action
     try:
+        daemon = client or DaemonClient(read_checkout_grant(Path.cwd()))
         if action == "doctor":
-            result = await daemon.call_tool("memory_namespace_diagnose", {"namespace": args.namespace})
+            result = await daemon.namespace_diagnose(args.namespace)
         else:
-            tool = "memory_namespace_merge" if action == "merge" else "memory_namespace_rename"
-            result = await daemon.call_tool(tool, {"source": args.source, "destination": args.destination})
+            result = await daemon.namespace_move(action, args.source, args.destination)
     except DaemonError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

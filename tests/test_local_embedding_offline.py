@@ -101,6 +101,47 @@ def test_online_load_discloses_egress(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert "embedding_model_download_disclosure" in events
 
 
+def test_the_daemon_discloses_before_its_network_capable_load(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The daemon's model load (``get_local_embedder``) logs the egress before the model is fetched.
+
+    The fake model records the log events already emitted when it is constructed,
+    so the assertion is on order, not only on the disclosure existing somewhere.
+    """
+    import sys
+    import types
+
+    from trw_memory.embeddings import get_local_embedder, reset_provider_cache
+
+    use_fixture_cache(monkeypatch, tmp_path)
+    (tmp_path / "hub").mkdir()
+    loads: list[tuple[bool, list[object]]] = []
+
+    with capture_logs() as logs:
+
+        class _RecordingST:
+            def __init__(
+                self, model_name: str, local_files_only: bool = False, trust_remote_code: bool = False
+            ) -> None:
+                loads.append((local_files_only, [entry.get("event") for entry in logs]))
+
+            def encode(self, *a: object, **k: object) -> list[float]:
+                return [0.0]
+
+        fake_mod = types.ModuleType("sentence_transformers")
+        fake_mod.SentenceTransformer = _RecordingST  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "sentence_transformers", fake_mod)
+        reset_provider_cache()
+        try:
+            get_local_embedder(model_name="all-MiniLM-L6-v2", dim=1)
+        finally:
+            reset_provider_cache()
+
+    assert len(loads) == 1
+    network_capable, emitted_before_load = loads[0]
+    assert network_capable is False  # local_files_only=False: the load may reach huggingface.co
+    assert "embedding_model_download_disclosure" in emitted_before_load
+
+
 def test_complete_cache_suppresses_the_disclosure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """PRD-SEC-014-FR01: no egress is possible on a warm cache, so none is disclosed."""
     use_fixture_cache(monkeypatch, tmp_path)

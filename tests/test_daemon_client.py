@@ -23,13 +23,14 @@ from trw_memory.daemon import (
     DaemonInfo,
     DaemonPaths,
     DiscoveryAbsent,
-    ensure_token,
-    read_discovery,
+    mint_grant,
     read_live_discovery,
 )
 from trw_memory.daemon.client import DAEMON_START_COMMAND, DaemonClient
 from trw_memory.exceptions import DaemonAuthError, DaemonUnreachableError
 from trw_memory.models.config import MemoryConfig
+
+from ._test_daemon_support import read_discovery
 
 pytest.importorskip("fastmcp")
 
@@ -72,7 +73,6 @@ def _record_an_unreachable_daemon(paths: DaemonPaths) -> None:
     info = DaemonInfo(
         pid=os.getpid(),
         url=f"http://127.0.0.1:{_closed_port()}/mcp",
-        token="recorded-token",
         started_at="2026-09-03T00:00:00+00:00",
         version="test",
     )
@@ -119,7 +119,7 @@ def running_daemon(paths: DaemonPaths, provisioned_embedding_cache: str) -> Iter
 async def test_daemon_unreachable_fails_closed_with_actionable_error(paths: DaemonPaths, config: MemoryConfig) -> None:
     """FR08: BOTH a read and a write fail; no store is created; the remedy is named."""
     _record_an_unreachable_daemon(paths)
-    client = DaemonClient(config=config, paths=paths)
+    client = DaemonClient("any-grant", config=config, paths=paths)
 
     with pytest.raises(DaemonUnreachableError) as write_failure:
         await client.store("a conclusion that must not be silently dropped", "project:closed-aaaaaaaa")
@@ -141,7 +141,7 @@ async def test_daemon_unreachable_fails_closed_with_actionable_error(paths: Daem
 async def test_a_failed_call_is_attempted_exactly_twice(paths: DaemonPaths, config: MemoryConfig) -> None:
     """FR08 clause 1: try once, retry exactly once, then fail. Never a third."""
     _record_an_unreachable_daemon(paths)
-    client = DaemonClient(config=config, paths=paths)
+    client = DaemonClient("any-grant", config=config, paths=paths)
 
     with structlog.testing.capture_logs() as logs:
         with pytest.raises(DaemonUnreachableError):
@@ -151,56 +151,44 @@ async def test_a_failed_call_is_attempted_exactly_twice(paths: DaemonPaths, conf
     assert attempts == [1, 2], f"expected exactly two attempts, saw {attempts}"
 
 
-async def test_a_rejected_token_fails_closed_without_regenerating(
-    paths: DaemonPaths, config: MemoryConfig, running_daemon: DaemonInfo
+@pytest.mark.parametrize(("bound_to", "dialled"), [("2026-09-03T00:00:00+00:00", [1, 2]), ("another start", [])])
+async def test_a_bound_client_dials_only_the_daemon_it_was_bound_to(
+    bound_to: str, dialled: list[int], paths: DaemonPaths, config: MemoryConfig
 ) -> None:
-    """FR08 clause 3: rejection is a distinct, non-retried, non-rotating failure.
-
-    Automatic rotation would let any local process force one by corrupting the
-    file, so a corrupted token must survive the failed call byte for byte.
-    """
-    wrong = "a-token-this-daemon-never-issued"
-    paths.token.write_text(wrong, encoding="utf-8")
-    client = DaemonClient(config=config, paths=paths)
+    """PRD-CORE-298 FR07: a daemon other than the checked one is refused before any request, retries included."""
+    _record_an_unreachable_daemon(paths)
+    client = DaemonClient("any-grant", config=config, paths=paths, instance=(os.getpid(), bound_to))
 
     with structlog.testing.capture_logs() as logs:
-        with pytest.raises(DaemonAuthError, match="NOT regenerated"):
-            await client.recall("anything", "project:auth-bbbbbbbb")
+        with pytest.raises(DaemonUnreachableError) as refused:
+            await client.recall("anything", "project:closed-aaaaaaaa")
 
-    assert paths.token.read_text(encoding="utf-8") == wrong, "the token was rotated on rejection"
-    assert [entry for entry in logs if entry.get("event") == "daemon_call_failed"] == [], "a rejection was retried"
-    assert wrong not in str(logs), "the token leaked into a log event"
+    assert [entry["attempt"] for entry in logs if entry.get("event") == "daemon_call_failed"] == dialled
+    assert ("replaced" in str(refused.value)) is not dialled
 
 
-async def test_a_missing_token_is_generated_at_0600_and_the_attach_succeeds(
+async def test_a_rejected_token_fails_closed_without_minting(
     paths: DaemonPaths, config: MemoryConfig, running_daemon: DaemonInfo
 ) -> None:
-    """FR08 clause 2: first run is not an error."""
-    token_before = paths.token.read_text(encoding="utf-8")
-    paths.token.unlink()
+    """FR08 clause 3: rejection is a distinct, non-retried failure that mints nothing."""
+    wrong = "a-token-this-daemon-never-granted"
+    client = DaemonClient(wrong, config=config, paths=paths)
 
-    client = DaemonClient(config=config, paths=paths)
-    ensure_token(paths)
+    with structlog.testing.capture_logs() as logs:
+        with pytest.raises(DaemonAuthError, match="nothing was re-minted"):
+            await client.recall("anything", "project:auth-bbbbbbbb")
 
-    assert paths.token.exists()
-    assert paths.token.stat().st_mode & 0o777 == 0o600
-    # A freshly minted token is not the running daemon's, so the attach fails
-    # closed on AUTH -- proving the generation happened and that the client did
-    # not paper over the mismatch.
-    with pytest.raises(DaemonAuthError):
-        await client.recall("anything", "project:fresh-cccccccc")
-
-    paths.token.write_text(token_before, encoding="utf-8")
-    result = await client.recall("anything", "project:fresh-cccccccc")
-    assert isinstance(result, dict)
+    assert not paths.grants.exists(), "a rejection minted a grant"
+    assert [entry for entry in logs if entry.get("event") == "daemon_call_failed"] == [], "a rejection was retried"
+    assert wrong not in str(logs), "the token leaked into a log event"
 
 
 async def test_a_live_daemon_serves_reads_and_writes_over_loopback(
     paths: DaemonPaths, config: MemoryConfig, running_daemon: DaemonInfo
 ) -> None:
     """The positive path: the same client that fails closed also works."""
-    client = DaemonClient(config=config, paths=paths)
     namespace = "project:roundtrip-dddddddd"
+    client = DaemonClient(mint_grant(paths, [namespace]), config=config, paths=paths)
 
     stored = await client.store("a learning written through the daemon client", namespace)
     assert stored["status"] == "stored"
@@ -223,3 +211,61 @@ def test_reading_the_record_reports_a_running_daemon(paths: DaemonPaths, running
     assert isinstance(probed, DaemonInfo)
     assert probed.pid == running_daemon.pid
     assert probed.url == running_daemon.url
+
+
+class _LoseFirstResponse:
+    """A ``Client`` whose first call reaches the daemon and commits, then loses the response."""
+
+    calls: list[str] = []
+
+    def __init__(self, transport: object) -> None:
+        from fastmcp import Client
+
+        self._inner = Client(transport)  # type: ignore[arg-type]
+
+    async def __aenter__(self) -> _LoseFirstResponse:
+        await self._inner.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self._inner.__aexit__(*exc)  # type: ignore[arg-type]
+
+    async def call_tool(self, name: str, arguments: dict[str, object]) -> object:
+        import httpx
+
+        result = await self._inner.call_tool(name, arguments)
+        _LoseFirstResponse.calls.append(name)
+        if len(_LoseFirstResponse.calls) == 1:
+            raise httpx.ReadError("the connection dropped after the daemon answered")
+        return result
+
+
+async def test_a_store_whose_response_is_lost_after_commit_writes_one_row(
+    paths: DaemonPaths, config: MemoryConfig, running_daemon: DaemonInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    namespace = "project:lost-eeeeeeee"
+    client = DaemonClient(mint_grant(paths, [namespace]), config=config, paths=paths)
+    _LoseFirstResponse.calls = []
+    monkeypatch.setattr("trw_memory.daemon.client.Client", _LoseFirstResponse)
+
+    await client.store("committed once, answered twice", namespace)
+    monkeypatch.undo()
+    listed = await client.search(namespace, limit=10)
+
+    assert _LoseFirstResponse.calls == ["memory_store", "memory_store"]
+    assert [row["content"] for row in listed["entries"]] == ["committed once, answered twice"]
+
+
+async def test_a_write_that_cannot_be_replayed_is_not_retried_once_sent(
+    paths: DaemonPaths, config: MemoryConfig, running_daemon: DaemonInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    namespace = "project:lost-ffffffff"
+    client = DaemonClient(mint_grant(paths, [namespace]), config=config, paths=paths)
+    stored = await client.store("forget me once", namespace)
+    _LoseFirstResponse.calls = []
+    monkeypatch.setattr("trw_memory.daemon.client.Client", _LoseFirstResponse)
+
+    with pytest.raises(DaemonUnreachableError, match="may have been applied"):
+        await client.forget(stored["memory_id"], namespace)
+
+    assert _LoseFirstResponse.calls == ["memory_forget"]

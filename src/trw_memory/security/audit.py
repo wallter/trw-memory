@@ -410,8 +410,3 @@ class AuditLog:
             raise
         finally:
             os.close(fd)
-
-
-def audit_verify(log_path: Path) -> dict[str, object]:
-    """Verify an audit log and return the PRD-aligned result shape."""
-    return AuditLog(log_path).verify_chain()

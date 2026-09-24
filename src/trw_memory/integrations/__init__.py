@@ -1,24 +1,14 @@
-"""Integration adapters for trw-memory.
+"""Shared sync backend bridge used by trw-memory internals.
 
-Provides the VSCode interface contract plus the adapter factory. Adapter
-imports are lazy — ``import trw_memory`` never pulls an adapter module in.
+The VSCode adapter (``vscode.py``), the adapter factory (``factory.py``),
+and their ``BackendOwnerMixin`` helper (``_mixin.py``) were removed as
+unused surface — no production caller anywhere in the monorepo. See
+CHANGELOG.md [Unreleased] Breaking.
 
-The LangChain, LlamaIndex and CrewAI adapters were removed as unused surface;
-see CHANGELOG.md [Unreleased] Removed.
-
-Usage::
-
-    from trw_memory.integrations import get_adapter, list_available
-
-    # Factory auto-detect
-    adapter_cls = get_adapter("vscode")
-
-    # Direct import
-    from trw_memory.integrations.vscode import LocalMemoryAdapter
+``_backend.py`` remains: it backs ``create_backend_from_config``,
+``discover_namespace_backends``, ``resolve_backend_location`` and friends,
+which are used throughout ``trw_memory`` proper (client, cli, tools/,
+lifecycle/tiers/, graph.py).
 """
 
 from __future__ import annotations
-
-from trw_memory.integrations.factory import get_adapter, list_available
-
-__all__ = ["get_adapter", "list_available"]

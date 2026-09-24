@@ -153,9 +153,10 @@ def record_recall_access(
     backend: StorageBackend,
     entry_ids: list[str],
     *,
+    namespace: str,
     accessed_at: datetime | None = None,
 ) -> None:
-    """Record recall-time access for the entries that were actually returned.
+    """Record recall-time access for *namespace*'s entries that were actually returned.
 
     Utility scoring already depends on ``access_count`` and
     ``last_accessed_at``. Updating only the final returned IDs keeps recall
@@ -172,7 +173,7 @@ def record_recall_access(
         return
 
     touch_time = accessed_at or datetime.now(timezone.utc)
-    backend.increment_recall_access(entry_ids, accessed_at=touch_time)
+    backend.increment_recall_access(entry_ids, namespace=namespace, accessed_at=touch_time)
 
 
 # ---------------------------------------------------------------------------

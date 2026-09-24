@@ -1,4 +1,4 @@
-"""Graph importance and cross-validation tests."""
+"""Graph importance tests."""
 
 from __future__ import annotations
 
@@ -11,12 +11,11 @@ from trw_memory.graph import (
     _merge_cross_validated_entry,
     apply_importance_boost,
     apply_importance_decay,
-    detect_cross_validation,
 )
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 
-from ._test_graph_support import _V1, _V3, _make_conn, _make_entry, _merge_cross_validation_in_subprocess
+from ._test_graph_support import _make_entry, _merge_cross_validation_in_subprocess
 
 
 class TestApplyImportanceBoost:
@@ -138,32 +137,3 @@ class TestApplyImportanceDecay:
         result = apply_importance_decay(entry, delta=0.1)
 
         assert result.importance == 0.0
-
-
-class TestDetectCrossValidation:
-    def test_true_above_threshold(self) -> None:
-        conn = _make_conn()
-        entry = _make_entry("e1")
-        remote = [("remote-1", "proj-b", _V1)]
-
-        assert detect_cross_validation(entry, conn, embedding=_V1, remote_entries=remote)
-
-    def test_false_below_threshold(self) -> None:
-        conn = _make_conn()
-        entry = _make_entry("e1")
-        remote = [("remote-1", "proj-b", _V3)]
-
-        assert not detect_cross_validation(entry, conn, embedding=_V1, remote_entries=remote)
-
-    def test_false_when_no_embedding(self) -> None:
-        conn = _make_conn()
-        entry = _make_entry("e1")
-        remote = [("remote-1", "proj-b", _V1)]
-
-        assert not detect_cross_validation(entry, conn, embedding=None, remote_entries=remote)
-
-    def test_false_when_no_remote_entries(self) -> None:
-        conn = _make_conn()
-        entry = _make_entry("e1")
-
-        assert not detect_cross_validation(entry, conn, embedding=_V1, remote_entries=None)

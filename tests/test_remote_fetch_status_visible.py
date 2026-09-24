@@ -20,7 +20,7 @@ import pytest
 
 from trw_memory.models.config import MemoryConfig
 from trw_memory.storage.sqlite_backend import SQLiteBackend
-from trw_memory.sync import fetch_shared_memories
+from trw_memory.sync import fetch_shared_memories, store_gate
 
 pytestmark = pytest.mark.integration
 
@@ -64,11 +64,13 @@ def test_every_item_refused_is_not_the_same_as_an_empty_corpus(tmp_path: Path) -
                 patch("trw_memory.security.runtime.prepare_entry_for_store", return_value=refusal),
                 patch("trw_memory.security.runtime.store_quarantined_entry"),
             ):
-                refused = fetch_shared_memories("query", _config(tmp_path), backend=backend)
+                refused = fetch_shared_memories(
+                    "query", _config(tmp_path), admit=store_gate(_config(tmp_path), backend)
+                )
 
         with patch("trw_memory.sync._remote_fetch.httpx.Client") as mock_cls:
             _transport(mock_cls, [])
-            empty = fetch_shared_memories("query", _config(tmp_path), backend=backend)
+            empty = fetch_shared_memories("query", _config(tmp_path), admit=store_gate(_config(tmp_path), backend))
     finally:
         backend.close()
 
@@ -88,7 +90,9 @@ def test_a_partial_refusal_is_reported_as_partial(tmp_path: Path) -> None:
                 patch("trw_memory.security.runtime.prepare_entry_for_store", side_effect=verdicts),
                 patch("trw_memory.security.runtime.store_quarantined_entry"),
             ):
-                fetched = fetch_shared_memories("query", _config(tmp_path), backend=backend)
+                fetched = fetch_shared_memories(
+                    "query", _config(tmp_path), admit=store_gate(_config(tmp_path), backend)
+                )
     finally:
         backend.close()
 

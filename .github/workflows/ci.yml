@@ -142,3 +142,36 @@ jobs:
       - name: INFRA-020 security coverage gate (88%, lines + branches)
         if: env.TRW_SUITE == 'full'
         run: coverage report --include='*/trw_memory/security/*' --fail-under=88
+
+  # PRD-QUAL-141: host-resource budgets (wall-clock, throughput, RSS) are skipped in the gating
+  # suite on a runner and measured HERE, with CI and GITHUB_ACTIONS unset. Non-gating three ways:
+  # continue-on-error, no job needs it, and the script exits 0 with the outcome as a status in the
+  # uploaded artifact. It is not part of what release.yml's publish waits on.
+  timing:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-3.12-${{ hashFiles('pyproject.toml') }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,vectors,bm25,mcp]"
+      - name: Measure host-resource budgets (non-gating)
+        run: python .github/scripts/timing_job.py --out timing-results.json
+      - name: Upload timing results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: timing-results
+          path: |
+            timing-results.json
+            timing-junit.xml
+          if-no-files-found: warn

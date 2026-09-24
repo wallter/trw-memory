@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 from structlog.testing import capture_logs
 
+from tests._timing import assert_budget
 from trw_memory.embeddings import _hf_cache
 from trw_memory.embeddings import local as local_mod
 from trw_memory.embeddings._hf_cache import CacheProbe, CacheState, probe_model_cache
@@ -89,13 +90,12 @@ def test_absent_cache_stays_network_capable_and_discloses_once(
     assert len(attempts) == 1
 
 
-@pytest.mark.perf
 def test_cache_probe_runs_once_per_instance(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     seam: NetworkSeam,
 ) -> None:
-    """NFR01: the probe is latched to one evaluation per provider, inside budget."""
+    """NFR01: the probe is latched to one evaluation per provider."""
     use_fixture_cache(monkeypatch, tmp_path)
     build_model_cache(tmp_path)
     install_fake_sentence_transformers(monkeypatch)
@@ -114,12 +114,24 @@ def test_cache_probe_runs_once_per_instance(
     provider.embed("hello")
     assert calls == ["all-MiniLM-L6-v2"]
 
+
+@pytest.mark.requires_local_timing
+def test_cache_probe_runs_once_per_instance_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    seam: NetworkSeam,
+) -> None:
+    """NFR01: a probe evaluation stays inside the added-latency budget."""
+    use_fixture_cache(monkeypatch, tmp_path)
+    build_model_cache(tmp_path)
+    install_fake_sentence_transformers(monkeypatch)
+
     elapsed = []
     for _ in range(5):
         start = time.perf_counter()
         probe_model_cache("all-MiniLM-L6-v2")
         elapsed.append(time.perf_counter() - start)
-    assert max(elapsed) < _PROBE_BUDGET_SECONDS
+    assert_budget("probe_max_elapsed", max(elapsed), _PROBE_BUDGET_SECONDS, "s")
 
 
 def test_probe_failure_degrades_to_prior_resolution(

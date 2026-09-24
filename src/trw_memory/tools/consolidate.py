@@ -24,19 +24,61 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
-from trw_memory.security.rbac import Permission, require_namespace_permission
+from trw_memory.security.rbac import Permission, require_namespace_permission, transport_grant, within_grant
 from trw_memory.security.runtime import append_audit_event
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools._types import McpServer
 
 logger = structlog.get_logger(__name__)
 TEAM_NAMESPACE_WILDCARD = "team:*"
-PROJECT_NAMESPACE = "project:default"
 
 
-def _require_team_promotion_permissions(cfg: MemoryConfig, namespace: str) -> None:
+def _promotion_target() -> str:
+    """The caller's pinned project namespace: the one ``project:`` namespace its grant holds.
+
+    PRD-CORE-298 FR06: promotion writes where the caller's own project lives,
+    never a hard-coded ``project:default``. No grant (the in-process SDK, one
+    store per checkout) keeps ``project:default``; a grant with none or several
+    ``project:`` namespaces is ambiguous and refused before any row moves.
+    """
+    grant = transport_grant()  # None = no transport (SDK); an empty grant is still a grant and holds no project
+    projects = sorted(ns for ns in ({"project:default"} if grant is None else grant) if ns.startswith("project:"))
+    if len(projects) != 1:
+        raise AuthorizationError(f"Promotion needs exactly one project namespace in this grant; found {projects}.")
+    return projects[0]
+
+
+def _promote_team_namespace(
+    cfg: MemoryConfig,
+    namespace: str,
+    source_backend: StorageBackend,
+    factory: Callable[[str], StorageBackend] | None,
+    target: str,
+    record: Callable[[dict[str, object]], None] | None = None,
+) -> dict[str, object]:
+    """Promote one team namespace into *target* (from ``_promotion_target``); skipped when already completed.
+
+    Source and target each need WRITE (the grant, then RBAC when enabled). *record*
+    sees the result before the target backend closes, so a close failure after the
+    rows landed still reports the promotion.
+    """
     require_namespace_permission(cfg, namespace, Permission.WRITE, "consolidate")
-    require_namespace_permission(cfg, PROJECT_NAMESPACE, Permission.WRITE, "promote")
+    require_namespace_permission(cfg, target, Permission.WRITE, "promote")
+    if NamespaceManager(source_backend).team_namespace_completed(namespace):
+        return {
+            "promoted_count": 0,
+            "discarded_count": 0,
+            "namespace_id": namespace,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "status": "skipped",
+            "skipped_reason": "already_completed",
+        }
+    with ExitStack() as stack:
+        dest = stack.enter_context(factory(target)) if factory else source_backend
+        result = _promote_team_memories(namespace, source_backend, target_backend=dest, target_namespace=target)
+        if record is not None:
+            record(result)
+    return result
 
 
 def _promote_team_memories(
@@ -44,12 +86,13 @@ def _promote_team_memories(
     source_backend: StorageBackend,
     *,
     target_backend: StorageBackend | None = None,
+    target_namespace: str = "project:default",
     promotion_threshold: float = 0.7,
 ) -> dict[str, object]:
     """Promote high-impact team memories to the project namespace.
 
     Entries with importance >= promotion_threshold are copied to
-    "project:default" with provenance tracking. Lower-importance
+    *target_namespace* with provenance tracking. Lower-importance
     entries are counted but not promoted.
 
     Args:
@@ -57,6 +100,7 @@ def _promote_team_memories(
         source_backend: Backend that owns the team namespace entries.
         target_backend: Backend that should receive promoted project entries.
             Defaults to ``source_backend`` for tests or shared-store backends.
+        target_namespace: The project namespace promoted entries are written to.
         promotion_threshold: Minimum importance to promote (default 0.7).
 
     Returns:
@@ -80,7 +124,7 @@ def _promote_team_memories(
             promoted = entry.model_copy(
                 update={
                     "id": f"promoted-{entry.id}",
-                    "namespace": "project:default",
+                    "namespace": target_namespace,
                     "source_identity": namespace,
                     "outcome_history": [*entry.outcome_history, outcome],
                     "updated_at": now,
@@ -113,7 +157,11 @@ def _promote_all_team_namespaces(
     *,
     namespace_backend_factory: Callable[[str], StorageBackend] | None = None,
 ) -> dict[str, object]:
-    """Promote all discovered team namespaces and aggregate their summaries."""
+    """Promote all discovered team namespaces and aggregate their summaries.
+
+    An ambiguous grant is the caller's error, not one team's: it raises before discovery.
+    """
+    target = _promotion_target()
     namespace_results: list[dict[str, object]] = []
     errors: list[dict[str, str]] = []
     seen_namespaces: set[str] = set()
@@ -121,27 +169,18 @@ def _promote_all_team_namespaces(
     with discover_namespace_backends(cfg) as stores:
         for namespaces, store_backend in stores:
             for namespace in namespaces:
-                if not namespace.startswith("team:") or namespace in seen_namespaces:
+                # An ungranted team is skipped unnamed: an error entry would
+                # disclose it to the token (PRD-CORE-298 FR02).
+                if not namespace.startswith("team:") or namespace in seen_namespaces or not within_grant(namespace):
                     continue
                 seen_namespaces.add(namespace)
 
                 try:
-                    _require_team_promotion_permissions(cfg, namespace)
-                    manager = NamespaceManager(store_backend)
-                    if manager.team_namespace_completed(namespace):
+                    result = _promote_team_namespace(
+                        cfg, namespace, store_backend, namespace_backend_factory, target, namespace_results.append
+                    )
+                    if result.get("status") == "skipped":
                         logger.debug("team_namespace_wildcard_skip_completed", namespace=namespace)
-                        continue
-
-                    with ExitStack() as stack:
-                        project_backend = store_backend
-                        if namespace_backend_factory is not None:
-                            project_backend = stack.enter_context(namespace_backend_factory(PROJECT_NAMESPACE))
-                        result = _promote_team_memories(
-                            namespace,
-                            store_backend,
-                            target_backend=project_backend,
-                        )
-                        namespace_results.append(result)
                 except (
                     AuthorizationError,
                     ConfigError,
@@ -218,27 +257,7 @@ def memory_consolidate_impl(
     cfg = config or MemoryConfig()
     # Team namespace promotion: copy high-impact entries to project namespace
     if namespace.startswith("team:"):
-        _require_team_promotion_permissions(cfg, namespace)
-        manager = NamespaceManager(backend)
-        if manager.team_namespace_completed(namespace):
-            return {
-                "promoted_count": 0,
-                "discarded_count": 0,
-                "namespace_id": namespace,
-                "completed_at": datetime.now(timezone.utc).isoformat(),
-                "status": "skipped",
-                "skipped_reason": "already_completed",
-            }
-        project_backend = namespace_backend_factory(PROJECT_NAMESPACE) if namespace_backend_factory else backend
-        try:
-            return _promote_team_memories(
-                namespace,
-                backend,
-                target_backend=project_backend,
-            )
-        finally:
-            if project_backend is not backend:
-                project_backend.close()
+        return _promote_team_namespace(cfg, namespace, backend, namespace_backend_factory, _promotion_target())
 
     require_namespace_permission(cfg, namespace, Permission.WRITE, "consolidate")
 

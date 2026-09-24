@@ -10,7 +10,7 @@ wiring imported the function the live path does not call.
 
 Collapsing them needs one thing the two did not share: a knob bundle. trw-mcp
 tunes through ``TRWConfig`` (``learning_decay_half_life_days``,
-``q_cold_start_threshold``, ...) and trw-memory through ``MemoryConfig``
+``access_count_utility_boost_cap``, ...) and trw-memory through ``MemoryConfig``
 (``decay_half_life_days``, ...), and ``MemoryConfig`` is a ``BaseSettings`` that
 reads ``.trw/config.yaml`` — far too expensive to construct inside a per-entry
 scan loop. :class:`UtilityParams` is the narrow, plain-model seam both bind to
@@ -54,11 +54,6 @@ class UtilityParams(BaseModel):
         le=1.0,
         description="Sub-linear recurrence exponent modulating the decay rate.",
     )
-    cold_start_threshold: int = Field(
-        default=3,
-        ge=1,
-        description="Q-observations required before q_value is trusted over base importance.",
-    )
     access_count_boost_cap: float = Field(
         default=0.15,
         ge=0.0,
@@ -97,15 +92,11 @@ class UtilityParams(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Floor on the feedback-decay factor. helpful_count is 0 on 100% of the corpus, so "
-            "the term degenerates to 0.95**recall_count — a pure recall-FREQUENCY penalty, "
+            "Floor on the feedback-decay factor. The term is "
+            "effectively 0.95**recall_count — a pure recall-FREQUENCY penalty, "
             "unbounded below, on a counter that PRD-QUAL-032/D1 established is not evidence of "
             "use. 0.0 restores the pre-floor behaviour."
         ),
-    )
-    use_fsrs: bool = Field(
-        default=False,
-        description="Use FSRS-4.5 power-law retention instead of the Ebbinghaus exponential.",
     )
 
     def half_life_for(self, entry_type: str, confidence: str) -> float:
