@@ -886,3 +886,37 @@ def test_a_namespace_keeps_only_its_newest_unfinished_sweeps(backend, tmp_path, 
     sweeps = json.loads((tmp_path / MAINTENANCE_STATE_FILE).read_text())["project:default"]["verify_sweeps"]
     kept = sorted(json.loads(key)[1]["assertion_stale_threshold_days"] for key in sweeps)
     assert kept == [each["assertion_stale_threshold_days"] for each in settings][-VERIFY_SWEEPS_KEPT:]
+
+
+def test_a_verify_whose_sweep_failed_answers_error_with_its_counts(backend, tmp_path, monkeypatch):
+    """B71-109: a sweep with an entry that could not be checked was answered ``status: ok``; it now says
+    ``error`` with the reason, and keeps its counts."""
+    import asyncio
+
+    from trw_memory.lifecycle import verification_pass
+
+    root = str(_anchored_rows(tmp_path, backend, 3, monkeypatch))
+    check = verification_pass.run_verification_pass
+
+    def failing_first_row(entry_id, *args, **kwargs):
+        if entry_id == "row-0":
+            raise RuntimeError("this row cannot be checked")
+        return check(entry_id, *args, **kwargs)
+
+    monkeypatch.setattr(verification_pass, "run_verification_pass", failing_first_row)
+
+    reply = asyncio.run(_registered_verify(backend, monkeypatch)(namespace="project:default", project_root=root))
+
+    assert (reply["status"], reply["error"]) == ("error", "entry_failures"), reply
+    assert (reply["summary"]["entry_failures"], reply["summary"]["entries_processed"]) == (1, 2)
+
+
+def test_a_verify_without_a_project_root_answers_skipped(backend, monkeypatch):
+    """B71-109 fix-delta: with no root nothing is checked, so the reply says ``skipped`` with its reason,
+    not ``ok``."""
+    import asyncio
+
+    reply = asyncio.run(_registered_verify(backend, monkeypatch)(namespace="project:default"))
+
+    assert (reply["status"], reply["reason"]) == ("skipped", "no project_root"), reply
+    assert "summary" in reply

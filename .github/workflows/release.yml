@@ -80,7 +80,10 @@ jobs:
       suite: full
 
   publish:
-    needs: [build, smoke-test, full-suite]
+    # PRD-INFRA-188 Amendment 02 (2026-09-26): publish gates on build + smoke-test.
+    # The Linux full-suite proof is the local release-check receipt `cut` enforces for
+    # this exact tree; full-suite below still runs on every release, in parallel.
+    needs: [build, smoke-test]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

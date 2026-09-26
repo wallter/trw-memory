@@ -109,10 +109,23 @@ jobs:
       # branch coverage the old ``--cov=trw_memory.security --cov-branch`` run
       # measured; measuring the whole package from startup also removes the
       # mid-collection numpy import that run needed a warm-up plugin for.
+      # -n 4, not auto: the test conftest caps xdist at 4 workers (auto would be 18 on the
+      # release host); 4 equals auto on GitHub's 4-vCPU runners. (PRD-INFRA-196 speed follow-up, 2026-09-26): the full suite ran fully
+      # serial here (unlike trw-mcp's ci.yml, which already passes -n auto) and was
+      # the dominant cost in the release.yml full-suite gate (~19 min of ~23 min
+      # release wall-clock on GH's 4-vCPU standard runner). pytest-cov combines
+      # per-worker coverage data automatically under xdist, so --cov-branch below
+      # still produces one coverage.xml. trw-memory has no xdist_group markers (unlike
+      # trw-mcp), so the default `load` distribution needs no --dist override.
+      # Residual risk: this suite has never run under process-level parallelism
+      # before, so a test relying on shared global/file-scoped state it never needed
+      # to guard could surface only here. A parallel Linux-Docker measurement pass
+      # is verifying this before it gates a real release; hold/revert this if that
+      # measurement reports parallel-only failures.
       - name: Test with coverage
         if: env.TRW_SUITE == 'full'
         run: >-
-          pytest tests/ -q
+          pytest tests/ -q -n 4
           --cov=trw_memory
           --cov-branch
           --cov-report=xml:coverage.xml

@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "trw-memory"
-version = "4.0.0"
+version = "4.0.1"
 description = "Persistent memory engine with hybrid retrieval, tiered storage, and semantic dedup for AI agents"
 readme = "README.md"
 license = "BUSL-1.1"
@@ -122,6 +122,7 @@ dev = [
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",
     "pytest-asyncio>=0.24.0",
+    "pytest-xdist>=3.5.0",  # speed/gh-release-workflow: full-suite CI parallelism (parity with trw-mcp)
     "mypy>=1.11.0,<2.0",  # pin to the 1.x line: mypy 2.x is a major release with behavior changes that a raw `pip install .[dev]` would resolve (2.3.0), diverging from the verified uv.lock (1.20.2). Migrate to 2.x deliberately, not via CI drift.
     "ruff>=0.15.0,<0.16",  # CI installs .[dev]; a newer minor adds rules the repo has not adopted yet
     "tomli>=2.0.1; python_version < '3.11'",

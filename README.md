@@ -131,15 +131,15 @@ results = backend.search("query", top_k=10, namespace="default")
 
 ## What's new in 4.x
 
-<!-- whats-new: 4.0.0 -->
+<!-- whats-new: 4.0.1 -->
 
+- **4.0.1: results you can trust at a glance.** `memory_verify` reports `error` or `skipped` when a sweep could not finish cleanly, and `trw-memory import` leaves an export's system canary rows out.
 - **No corrupted or lost writes.** A store shared by two processes keeps its SQLite locks, and a new store's first writes are kept. Both affected 2.x and 3.x.
 - **Recall works on a default install.** rank-bm25 is a base dependency, so the entity-bridge hop no longer crashes and default installs get the BM25 lane.
 - **A crashed daemon no longer strands clients.** A zombie daemon reads as dead, its starter reaps it, and models run on CPU on macOS, avoiding a Metal crash.
 - **Text in, never vectors.** The daemon embeds and dedups itself, and no vector leaves your machine.
 - **One download path.** `fetch_models()` gets the models, the embedding model at a pinned revision, and runtime loads are cache-only. `local_only` is retired.
-- **Re-embed in place, and clear version errors.** `memory_reembed` re-encodes vectors outside the active space; a 4.x daemon refuses a 3.x client by name.
-- **Faster daemon calls.** The daemon serves stateless JSON, and `DaemonClient(keep_session=True)` makes each call one HTTP request instead of six.
+- **Re-embed in place, faster calls.** `memory_reembed` re-encodes stale vectors, a 4.x daemon refuses a 3.x client by name, and `keep_session=True` makes each call one HTTP request.
 
 4.0.0 is a breaking release: read the [CHANGELOG](https://github.com/wallter/trw-memory/blob/main/CHANGELOG.md) before upgrading, and upgrade trw-mcp to 7.0.0 with it.
 

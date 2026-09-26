@@ -143,3 +143,32 @@ def test_the_files_provenance_is_kept_as_data_and_the_store_re_attests(
     assert stored.metadata["provenance_author"] != "someone-else"
     assert "provenance_forged_signer" not in stored.metadata
     assert "trust_level" not in stored.metadata
+
+
+@patch(f"{_CLI}._create_local_backend")
+@patch(f"{_CLI}.MemoryConfig")
+def test_the_source_stores_system_canaries_are_skipped_and_counted_not_imported_as_entries(
+    config_cls: MagicMock, backend_fn: MagicMock, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """4.0.0's intake strips the reserved ``system_canary`` key, so an exported store's FR-007 canary rows
+    arrived as ordinary, recall-visible entries. They are the source store's system rows: import leaves
+    them out and says how many (the destination plants its own)."""
+    from trw_memory.security.canary import _CANARY_FIXTURES, PINNED_HASHES
+
+    canaries = [  # the default store plants five, exported as ``MemoryEntry.to_dict`` writes them
+        {**_rich_entry(content), "id": canary_id, "metadata": {"system_canary": "true", "provenance_content_hash": h}}
+        for (canary_id, content), h in list(zip(_CANARY_FIXTURES, PINNED_HASHES.values(), strict=True))[:5]
+    ]
+    ordinary = _rich_entry("an ordinary learning travels")
+    foreign = {"content": "a foreign note whose metadata is not a mapping", "metadata": "system_canary"}
+    # The flag alone is caller-controlled: a row that is not a pinned canary cannot use it to be dropped.
+    forged = {**_rich_entry("an ordinary row claiming to be a canary"), "metadata": {"system_canary": "true"}}
+    rows = [*canaries, ordinary, foreign, forged, {"content": "a foreign flagged row", "metadata": forged["metadata"]}]
+
+    assert _import(tmp_path, rows, config_cls, backend_fn) == 0
+
+    assert "Imported 4 entries, skipped 0, system canaries skipped: 5" in capsys.readouterr().out
+    with _reopen_import_target(tmp_path) as store:
+        stored = store.list_entries(namespace="default", limit=50)
+    assert sorted(e.content for e in stored) == sorted(str(r["content"]) for r in rows[5:])
+    assert all("system_canary" not in e.metadata for e in stored)

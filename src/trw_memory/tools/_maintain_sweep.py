@@ -312,4 +312,9 @@ async def serve_verify(
     if not isinstance(done, dict) or "complete" not in done:  # the sweep raised; it starts over next time
         return {"status": "error", "error": str(done.get("reason") if isinstance(done, dict) else "no result")}
     summary = {key: done.get(key, 0) for key in MaintainVerifySummary().as_dict()}
-    return {"status": "ok", "summary": summary, **({"next": list(run.after)} if run.after else {})}
+    reply: dict[str, object] = {"status": "ok", "summary": summary, **({"next": list(run.after)} if run.after else {})}
+    # A sweep that ended in error (entry or persist failures, an unusable root, a failure carried from an
+    # earlier call of it), or that checked nothing (no project root), says so with its counts (B71-109).
+    if (status := done.get("status")) in (maintain._ERROR, maintain._SKIPPED):
+        reply["status"], reply["error" if status == maintain._ERROR else "reason"] = status, str(done.get("reason"))
+    return reply

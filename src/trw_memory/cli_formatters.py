@@ -122,11 +122,10 @@ def format_export_summary(count: int, path: str | None) -> str:
     Returns:
         Human-readable summary.
     """
-    dest = path or "stdout"
-    return f"Exported {count} entries to {dest}"
+    return f"Exported {count} entries to {path or 'stdout'}"
 
 
-def format_import_summary(imported: int, skipped: int, rejected: int = 0) -> str:
+def format_import_summary(imported: int, skipped: int, rejected: int = 0, canaries: int = 0) -> str:
     """Format import summary.
 
     Args:
@@ -135,14 +134,15 @@ def format_import_summary(imported: int, skipped: int, rejected: int = 0) -> str
         rejected: Number of entries blocked by the store gate. Reported on its
             own clause rather than folded into *skipped* so a blocked injection
             payload is never mistaken for a benign duplicate.
+        canaries: Number of the source store's system canary rows left out; the
+            destination store plants its own.
 
     Returns:
         Human-readable summary.
     """
     base = f"Imported {imported} entries, skipped {skipped}"
-    if rejected:
-        return f"{base}, rejected {rejected} (blocked by store gate; see stderr)"
-    return base
+    base += f", system canaries skipped: {canaries}" if canaries else ""
+    return base + (f", rejected {rejected} (blocked by store gate; see stderr)" if rejected else "")
 
 
 def entry_to_export_dict(entry: MemoryEntry) -> dict[str, object]:

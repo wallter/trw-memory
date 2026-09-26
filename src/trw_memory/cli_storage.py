@@ -24,20 +24,16 @@ def open_validated_backend(
     *,
     backend_factory: Callable[[MemoryConfig, str], StorageBackend],
 ) -> tuple[str, StorageBackend]:
-    validated_namespace = validate_namespace(namespace)
-    return validated_namespace, backend_factory(config, validated_namespace)
+    return (validated := validate_namespace(namespace)), backend_factory(config, validated)
 
 
 def resolve_base_and_db(args: argparse.Namespace, *, config_cls: type[MemoryConfig]) -> tuple[Path, Path]:
     config = config_cls()
     namespace = validate_namespace(args.namespace)
     if getattr(args, "db", None):
-        db_path = Path(args.db).resolve()
-        base_dir = db_path.parent
-    else:
-        base_dir = (Path(config.storage_path) / namespace.replace(":", "_")).resolve()
-        db_path = base_dir / config.sqlite_db_name
-    return base_dir, db_path
+        return (db_path := Path(args.db).resolve()).parent, db_path
+    base_dir = (Path(config.storage_path) / namespace.replace(":", "_")).resolve()
+    return base_dir, base_dir / config.sqlite_db_name
 
 
 def write_export(args: argparse.Namespace, data: list[dict[str, Any]], export_summary: Callable[..., str]) -> None:
@@ -87,6 +83,15 @@ _FOREIGN_KEPT = frozenset({"content", "detail", "tags", "importance"})
 def _is_own_export(row: dict[str, Any]) -> bool:
     """A row written by ``trw-memory export`` (``MemoryEntry.to_dict``) rather than a foreign format."""
     return isinstance(row.get("id"), str) and "created_at" in row and "vector_clock" in row
+
+
+def _is_system_canary(row: dict[str, Any]) -> bool:
+    """The source store's own FR-007 canary row: an own-export row flagged ``system_canary`` whose id and
+    content are a pinned canary's. Any other row carrying the flag is imported (the gate strips the flag)."""
+    from trw_memory.security.canary import PINNED_HASHES, _sha
+
+    flagged = isinstance(meta := row.get("metadata"), dict) and meta.get("system_canary") == "true"
+    return flagged and _is_own_export(row) and PINNED_HASHES.get(row["id"]) == _sha(str(row.get("content", "")))
 
 
 def _rebuild_own_export(row: dict[str, Any], namespace: str) -> MemoryEntry:
@@ -162,12 +167,15 @@ def handle_import(
     config = config_cls()
     namespace, backend = open_validated_backend(config, args.namespace, backend_factory=backend_factory)
     imported = 0
-    skipped = 0
+    skipped = canaries = 0
     foreign_dropped: set[str] = set()
     rejected_rows: list[dict[str, Any]] = []
     try:
         for index, entry_data in enumerate(data):
             if not isinstance(entry_data, dict):
+                continue
+            if _is_system_canary(entry_data):
+                canaries += 1  # the source store's FR-007 canary row: the destination plants its own
                 continue
 
             if args.merge:
@@ -222,7 +230,7 @@ def handle_import(
         if foreign_dropped:
             # Not trw-memory's own export: only content/detail/tags/importance survive, and a new id.
             print(f"Foreign format: fields dropped: {', '.join(sorted(foreign_dropped))}", file=sys.stderr)
-        print(import_summary(imported, skipped, rejected=len(rejected_rows)))
+        print(import_summary(imported, skipped, rejected=len(rejected_rows), canaries=canaries))
         return 1 if rejected_rows else 0
     finally:
         backend.close()
