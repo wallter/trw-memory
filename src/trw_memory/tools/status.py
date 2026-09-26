@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import structlog
 
+from trw_memory.daemon._offload import run_serialized
 from trw_memory.exceptions import AuthorizationError, ConfigError
 from trw_memory.integrations._backend import discover_namespace_backends
 from trw_memory.models.config import MemoryConfig, daemon_wide_security
@@ -18,6 +19,7 @@ from trw_memory.security.runtime import list_quarantined_entries, security_maint
 from trw_memory.storage._namespace_health import namespace_health
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.storage.sqlite_backend import SQLiteBackend
+from trw_memory.tools._embedder import coverage_status, embedder_status
 from trw_memory.tools._types import McpServer
 
 logger = structlog.get_logger(__name__)
@@ -219,6 +221,10 @@ def memory_status_impl(
         result["security_posture"] = security_posture
     if health is not None:
         result["health"] = health
+    # PRD-CORE-302 C3: trw-mcp reads embedder state and vector coverage here instead of loading a model.
+    result["embedder"] = embedder_status(cfg)
+    if namespace is not None:
+        result["coverage"] = coverage_status(backend, namespace, cfg)
     return result
 
 
@@ -249,15 +255,14 @@ def register_status_tool(mcp: McpServer) -> None:
             {"total_entries": int, "namespaces": dict, "config": dict}, plus ``health``
         (``storage._namespace_health.namespace_health``) for one namespace of a SQLite store
         """
-        cfg = MemoryConfig()
-        if security_settings_only:
-            from trw_memory.daemon._discovery import this_daemon
 
-            return {"security_settings": daemon_wide_security(cfg), "daemon": this_daemon()}
-        backend_namespace = namespace or "default"
-        with create_backend_from_config(cfg, backend_namespace) as backend:
-            return memory_status_impl(
-                namespace,
-                backend=backend,
-                config=cfg,
-            )
+        def status() -> dict[str, object]:  # config and store reads, off the loop (C12 rc4)
+            cfg = MemoryConfig()
+            if security_settings_only:
+                from trw_memory.daemon._discovery import this_daemon
+
+                return {"security_settings": daemon_wide_security(cfg), "daemon": this_daemon()}
+            with create_backend_from_config(cfg, namespace or "default") as backend:
+                return memory_status_impl(namespace, backend=backend, config=cfg)
+
+        return await run_serialized(status)

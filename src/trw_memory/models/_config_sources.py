@@ -58,6 +58,36 @@ def _check_retired_hype_environment(dotenv_source: PydanticBaseSettingsSource) -
         _check_retired_hype_settings(_dotenv_raw(dotenv_source, path), source=f"dotenv {path}", textual=True)
 
 
+# F5 (2026-09-24, trw-memory 4.0.0 security fix): 'local_only' used to be
+# routed through the warn-only _RETIRED_SETTINGS/_warn_retired_settings path
+# below. That was a privacy flip: `local_only: true` in 3.1.0 and earlier
+# forced sync_enabled=False (clearing platform_url/platform_api_key/
+# sync_namespace); 4.0.0 dropped that override entirely, so a config that
+# ALSO set sync_enabled/learning_sharing_enabled started syncing after the
+# upgrade with only a log line as evidence. Unlike the other retired settings,
+# 'local_only' fails closed -- any value, any source -- so an upgrader relying
+# on it to keep sync off gets a refusal instead of a silent behavior change.
+def _check_retired_local_only_settings(raw: dict[str, object], *, source: str) -> None:
+    """Refuse a source that still sets 'local_only'. Checked before precedence/filtering can hide it."""
+    for key in raw:
+        if not isinstance(key, str):
+            continue
+        if key.lower().removeprefix("memory_") != "local_only":
+            continue
+        raise ConfigError(
+            f"{key} in {source}: 'local_only' was removed in trw-memory 4.0.0 (trw-mcp 7.0.0); "
+            "remove it. To keep sync off, set sync_enabled: false "
+            "(and learning_sharing_enabled: false) explicitly."
+        )
+
+
+def _check_retired_local_only_environment(dotenv_source: PydanticBaseSettingsSource) -> None:
+    """Validate raw env/dotenv sources before ignore-empty/precedence discards evidence."""
+    _check_retired_local_only_settings(dict(os.environ), source="environment")
+    for path in _dotenv_files(dotenv_source):
+        _check_retired_local_only_settings(_dotenv_raw(dotenv_source, path), source=f"dotenv {path}")
+
+
 # Removed settings, mapped to (PRD, what replaced them). Unlike HyPE's retirement
 # this never raises (operator decision): any legacy value, neutral or not, logs
 # one structured warning per (setting, source) per process, because
@@ -78,7 +108,15 @@ _RETIRED_SETTINGS: dict[str, tuple[str, str]] = {
         "PRD-CORE-293",
         "none; the whole SQLCipher key-rotation surface (rotate_key and its "
         "backup/checkpoint/rekey helpers) was retired — the operator does not use key "
-        "rotation. At-rest encryption itself (encryption_enabled) is unaffected.",
+        "rotation. Encryption at rest itself was removed later (trw-memory 4.1).",
+    ),
+    **dict.fromkeys(
+        ("encryption_algorithm", "key_source", "key_file_path", "auto_generate_key", "master_key"),
+        (
+            "B71-50",
+            "none; encryption at rest and its master key were removed in trw-memory 4.1 — "
+            "use full-disk encryption (FileVault, BitLocker or LUKS)",
+        ),
     ),
     "q_learning_rate": (
         "PRD-CORE-293",
@@ -130,8 +168,18 @@ def _warn_retired_environment(dotenv_source: PydanticBaseSettingsSource) -> None
 
 
 def _read_trw_config_yaml() -> dict[str, object]:
-    """Best-effort read of the current project's `.trw/config.yaml`."""
-    config_path = Path.cwd() / ".trw" / "config.yaml"
+    """The current project's `.trw/config.yaml`, over the machine file's platform contact switch.
+
+    trw-mcp resolves ``platform_contact_enabled`` from ``~/.trw/config.yaml`` and then the project file
+    (``TRW_PLATFORM_CONTACT_ENABLED`` above both), so the machine-wide switch stops sync here too (rc11).
+    """
+    machine = _read_yaml_file(Path.home() / ".trw" / "config.yaml")
+    key = "platform_contact_enabled"
+    return {**({key: machine[key]} if key in machine else {}), **_read_yaml_file(Path.cwd() / ".trw" / "config.yaml")}
+
+
+def _read_yaml_file(config_path: Path) -> dict[str, object]:
+    """Best-effort read of one TRW `config.yaml`: ``{}`` when absent or unreadable."""
     if not config_path.exists():
         return {}
 
@@ -139,7 +187,7 @@ def _read_trw_config_yaml() -> dict[str, object]:
     try:
         with config_path.open(encoding="utf-8") as handle:
             loaded = yaml.load(handle)
-    except (OSError, YAMLError):
+    except (OSError, YAMLError):  # trw-fail-silent-allow: an unreadable config file sets nothing (best-effort)
         return {}
     return loaded if isinstance(loaded, dict) else {}
 
@@ -159,6 +207,7 @@ def _first_truthy_item(values: object) -> object | None:
 
 def _map_trw_config_yaml_to_memory_settings(raw: dict[str, object]) -> dict[str, Any]:
     _check_retired_hype_settings(raw, source=".trw/config.yaml")
+    _check_retired_local_only_settings(raw, source=".trw/config.yaml")
     _warn_retired_settings(raw, source=".trw/config.yaml")
     mapped: dict[str, Any] = {}
 
@@ -172,8 +221,8 @@ def _map_trw_config_yaml_to_memory_settings(raw: dict[str, object]) -> dict[str,
     for target, aliases in (
         ("sync_min_importance", ("sync_min_importance",)),
         ("sync_namespace", ("sync_namespace",)),
+        ("platform_contact_enabled", ("platform_contact_enabled",)),
         ("platform_api_key", ("platform_api_key",)),
-        ("local_only", ("local_only", "memory_local_only")),
         (
             "embedding_trust_remote_code",
             ("embedding_trust_remote_code", "memory_embedding_trust_remote_code"),
@@ -188,7 +237,6 @@ def _map_trw_config_yaml_to_memory_settings(raw: dict[str, object]) -> dict[str,
         ("warm_archive_max_score", ("warm_archive_max_score",)),
         ("cold_purge_max_score", ("cold_purge_max_score",)),
         ("encryption_enabled", ("encryption_enabled", "memory_encryption_enabled")),
-        ("auto_generate_key", ("auto_generate_key", "memory_auto_generate_key")),
         ("rbac_enabled", ("rbac_enabled", "memory_rbac_enabled")),
         ("rbac_mode", ("rbac_mode", "memory_rbac_mode")),
         ("namespace_roles", ("namespace_roles", "memory_namespace_roles")),

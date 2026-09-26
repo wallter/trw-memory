@@ -8,11 +8,13 @@ which a fail-open client would quietly return an empty recall.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 import subprocess
 import sys
 import time
+import types
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -269,3 +271,220 @@ async def test_a_write_that_cannot_be_replayed_is_not_retried_once_sent(
         await client.forget(stored["memory_id"], namespace)
 
     assert _LoseFirstResponse.calls == ["memory_forget"]
+
+
+async def test_a_held_session_serves_many_calls_on_one_initialize(
+    paths: DaemonPaths, config: MemoryConfig, running_daemon: DaemonInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W27: one session for many calls, and the stateless daemon never holds an SSE GET open."""
+    import collections
+
+    import httpx
+
+    sent: collections.Counter[str] = collections.Counter()
+    real_send = httpx.AsyncClient.send
+
+    async def counting(self: httpx.AsyncClient, request: httpx.Request, **kwargs: object) -> httpx.Response:
+        body = request.content.decode(errors="replace") if request.method == "POST" else ""
+        marker = '"method":"'
+        method = body.split(marker)[1].split('"')[0] if marker in body else ""
+        sent[f"{request.method} {method}"] += 1
+        return await real_send(self, request, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", counting)
+    namespace = "project:held-11111111"
+    client = DaemonClient(mint_grant(paths, [namespace]), config=config, paths=paths, keep_session=True)
+
+    stored = await client.store("held session row", namespace)
+    for _ in range(3):
+        assert (await client.get(stored["memory_id"], namespace))["entry"]["id"] == stored["memory_id"]
+    await client._sessions.drop()
+
+    assert sent["POST initialize"] == 1
+    assert sent["POST tools/call"] == 4
+    assert sent["POST tools/list"] <= 1
+    assert not [key for key in sent if key.startswith(("GET", "DELETE"))], sent
+
+
+async def test_a_held_session_is_replaced_after_a_lost_response(
+    paths: DaemonPaths, config: MemoryConfig, running_daemon: DaemonInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W27: a transport failure drops the held session; the replayable retry opens a fresh one."""
+    namespace = "project:held-22222222"
+    client = DaemonClient(mint_grant(paths, [namespace]), config=config, paths=paths, keep_session=True)
+    _LoseFirstResponse.calls = []
+    monkeypatch.setattr("trw_memory.daemon.client.Client", _LoseFirstResponse)
+
+    await client.store("committed once on a held session", namespace)
+    held = client._sessions.held
+    assert _LoseFirstResponse.calls == ["memory_store", "memory_store"]
+    listed = await client.search(namespace, limit=10)
+
+    assert held is not None and isinstance(held.client, _LoseFirstResponse), "the retry did not open a new session"
+    assert [row["content"] for row in listed["entries"]] == ["committed once on a held session"]
+
+
+@pytest.mark.parametrize("header", [None, "0.9.0"])
+async def test_a_client_of_another_major_is_refused_by_name(
+    paths: DaemonPaths, config: MemoryConfig, running_daemon: DaemonInfo, header: str | None
+) -> None:
+    """W45: a 3.1.0-shaped call (no version header, the old signature) gets the upgrade, not a contract error."""
+    from fastmcp import Client
+    from fastmcp.client.transports import StreamableHttpTransport
+    from fastmcp.exceptions import ToolError
+
+    from trw_memory.daemon._version_gate import VERSION_HEADER
+
+    namespace = "project:oldclient-33333333"
+    token = mint_grant(paths, [namespace])
+    transport = StreamableHttpTransport(
+        url=running_daemon.url, auth=token, headers={VERSION_HEADER: header} if header else None
+    )
+    async with Client(transport) as old_client:
+        with pytest.raises(ToolError, match="daemon_version_mismatch") as refused:
+            await old_client.call_tool("memory_recall", {"query": "anything", "namespace": namespace, "limit": 5})
+
+    message = str(refused.value)
+    assert f"pid {running_daemon.pid}" in message
+    assert "pip install -U trw-mcp trw-memory" in message
+    assert ("3.x or older" in message) if header is None else (f"is trw-memory {header}" in message)
+    # A current client on the same daemon is unaffected.
+    current = DaemonClient(token, config=config, paths=paths)
+    assert (await current.store("the current client still writes", namespace))["status"] == "stored"
+
+
+@pytest.mark.parametrize(("theirs", "refused"), [("3.1.0", True), ("4.2.1", False), ("test", False)])
+def test_attach_refuses_a_daemon_of_another_major(
+    paths: DaemonPaths, config: MemoryConfig, monkeypatch: pytest.MonkeyPatch, theirs: str, refused: bool
+) -> None:
+    """PRD-CORE-302 C7: the package floor cannot cover a daemon already running from another install."""
+    from trw_memory.daemon import client as client_module
+    from trw_memory.exceptions import DaemonVersionMismatchError
+
+    monkeypatch.setattr(client_module, "_package_version", lambda: "4.0.0")
+    paths.user_memory_dir.mkdir(parents=True, exist_ok=True)
+    info = DaemonInfo(
+        pid=os.getpid(), url="http://127.0.0.1:1/mcp", started_at="2026-09-24T00:00:00+00:00", version=theirs
+    )
+    paths.discovery.write_text(info.model_dump_json(), encoding="utf-8")
+    client = DaemonClient("any-grant", config=config, paths=paths)
+
+    if refused:
+        with pytest.raises(DaemonVersionMismatchError, match=r"daemon_version_mismatch.*serves 3\.1\.0.*is 4\.0\.0"):
+            client._attach()
+    else:
+        assert client._attach().version == theirs
+
+
+class _GatedSession:
+    """A ``Client`` that records its sessions and holds ``call_tool`` until the gate opens."""
+
+    opened: list[_GatedSession] = []
+    gate: asyncio.Event
+    entered: asyncio.Event
+    open_gate: asyncio.Event
+
+    def __init__(self, _transport: object) -> None:
+        self.closed = 0
+        _GatedSession.opened.append(self)
+
+    async def __aenter__(self) -> _GatedSession:
+        await _GatedSession.open_gate.wait()
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        self.closed += 1
+
+    async def call_tool(self, name: str, arguments: dict[str, object]) -> object:
+        if name == "memory_fail_in_transport":
+            import httpx
+
+            raise httpx.ReadError("the connection dropped")
+        _GatedSession.entered.set()
+        await _GatedSession.gate.wait()
+        return types.SimpleNamespace(data={"status": "ok", "tool": name})
+
+
+@pytest.fixture
+def gated_sessions(monkeypatch: pytest.MonkeyPatch) -> type[_GatedSession]:
+    _GatedSession.opened = []
+    _GatedSession.gate = asyncio.Event()
+    _GatedSession.entered = asyncio.Event()
+    _GatedSession.open_gate = asyncio.Event()
+    _GatedSession.open_gate.set()
+    monkeypatch.setattr("trw_memory.daemon.client.Client", _GatedSession)
+    return _GatedSession
+
+
+async def test_retiring_a_client_mid_call_closes_its_session_only_after_the_call_returns(
+    paths: DaemonPaths, config: MemoryConfig, running_daemon: DaemonInfo, gated_sessions: type[_GatedSession]
+) -> None:
+    """Release-verify RES-01: a replaced client's held session is closed, but never under an in-flight call."""
+    client = DaemonClient("grant", config=config, paths=paths, keep_session=True)
+    in_flight = asyncio.create_task(client.call_tool("memory_status", {"namespace": "project:x"}))
+    await gated_sessions.entered.wait()
+
+    await client.retire()
+    held = gated_sessions.opened[0]
+    assert held.closed == 0, "the in-flight call's session was closed under it"
+
+    gated_sessions.gate.set()
+    assert (await in_flight)["status"] == "ok"
+    assert held.closed == 1
+
+    await client.call_tool("memory_status", {"namespace": "project:x"})
+    assert len(gated_sessions.opened) == 2, "a retired client opens a session per call"
+    assert gated_sessions.opened[1].closed == 1, "and closes it when the call returns"
+    assert held.closed == 1
+
+
+async def test_retiring_an_idle_client_closes_its_session_at_once(
+    paths: DaemonPaths, config: MemoryConfig, running_daemon: DaemonInfo, gated_sessions: type[_GatedSession]
+) -> None:
+    gated_sessions.gate.set()
+    client = DaemonClient("grant", config=config, paths=paths, keep_session=True)
+    await client.call_tool("memory_status", {"namespace": "project:x"})
+    assert gated_sessions.opened[0].closed == 0, "the session is held between calls"
+
+    await client.retire()
+
+    assert gated_sessions.opened[0].closed == 1
+
+
+async def test_a_transport_failure_never_closes_the_session_under_another_in_flight_call(
+    paths: DaemonPaths, config: MemoryConfig, running_daemon: DaemonInfo, gated_sessions: type[_GatedSession]
+) -> None:
+    """Sol round 2: the failing call releases the shared session; the call still using it closes it on return."""
+    client = DaemonClient("grant", config=config, paths=paths, keep_session=True)
+    in_flight = asyncio.create_task(client.call_tool("memory_status", {"namespace": "project:x"}))
+    await gated_sessions.entered.wait()
+    shared = gated_sessions.opened[0]
+
+    with pytest.raises(DaemonUnreachableError):
+        await client.call_tool("memory_fail_in_transport", {})
+    assert shared.closed == 0, "the failing call closed a session another call was using"
+
+    gated_sessions.gate.set()
+    assert (await in_flight)["status"] == "ok"
+    assert shared.closed == 1
+    await client.call_tool("memory_status", {"namespace": "project:x"})
+    assert gated_sessions.opened[-1] is not shared, "the released session was handed out again"
+
+
+async def test_a_session_still_opening_when_the_client_is_retired_is_closed_after_its_call(
+    paths: DaemonPaths, config: MemoryConfig, running_daemon: DaemonInfo, gated_sessions: type[_GatedSession]
+) -> None:
+    """Sol round 3: retire() landing while a session opens must not leave that session held forever."""
+    gated_sessions.open_gate.clear()
+    gated_sessions.gate.set()
+    client = DaemonClient("grant", config=config, paths=paths, keep_session=True)
+    opening_call = asyncio.create_task(client.call_tool("memory_status", {"namespace": "project:x"}))
+    while not gated_sessions.opened:  # noqa: ASYNC110 -- waits for the Client constructor, which has no event
+        await asyncio.sleep(0)
+
+    await client.retire()
+    gated_sessions.open_gate.set()
+    assert (await opening_call)["status"] == "ok"
+
+    assert gated_sessions.opened[0].closed == 1
+    assert client._sessions.held is None

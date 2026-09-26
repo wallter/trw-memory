@@ -12,7 +12,6 @@ import structlog.testing
 from trw_memory.storage._connection import (
     apply_open_pragmas,
     check_integrity,
-    connect,
     db_has_data,
     open_and_configure,
     open_without_integrity_check,
@@ -298,67 +297,3 @@ class TestDbHasData:
             side_effect=sqlite3.DatabaseError("file is not a database"),
         ):
             assert db_has_data(db_path) is False
-
-
-# ---------------------------------------------------------------------------
-# sqlcipher paths — key validation (lines 96-100) and pragma (lines 66-68)
-# ---------------------------------------------------------------------------
-
-
-class TestSqlcipherPaths:
-    def test_invalid_sqlcipher_key_too_short_raises_value_error(self, tmp_path: Path) -> None:
-        """sqlcipher_key_hex with < 64 chars → raises ValueError."""
-        with pytest.raises(ValueError, match="64-character"):
-            connect(
-                tmp_path / "test.db",
-                dbapi=sqlite3,
-                timeout=5.0,
-                check_same_thread=True,
-                sqlcipher_key_hex="abc123",  # too short
-            )
-
-    def test_invalid_sqlcipher_key_uppercase_raises_value_error(self, tmp_path: Path) -> None:
-        """sqlcipher_key_hex with uppercase chars → raises ValueError."""
-        bad_key = "A" * 64  # uppercase, not valid lowercase hex
-        with pytest.raises(ValueError, match="lowercase hex"):
-            connect(
-                tmp_path / "test.db",
-                dbapi=sqlite3,
-                timeout=5.0,
-                check_same_thread=True,
-                sqlcipher_key_hex=bad_key,
-            )
-
-    def test_apply_sqlcipher_pragmas_safe_delegates_to_parent(self) -> None:
-        """_apply_sqlcipher_pragmas_safe calls the parent module's function."""
-        from trw_memory.storage._connection import _apply_sqlcipher_pragmas_safe
-
-        mock_conn = MagicMock()
-        with patch("trw_memory.storage.sqlite_backend._apply_sqlcipher_pragmas") as mock_parent:
-            _apply_sqlcipher_pragmas_safe(mock_conn)
-        mock_parent.assert_called_once_with(mock_conn)
-
-    def test_valid_sqlcipher_key_applies_key_pragma(self, tmp_path: Path) -> None:
-        """Valid 64-char hex key → PRAGMA key executed (lines 98-100)."""
-        valid_key = "a" * 64  # valid 64-char lowercase hex
-        mock_conn = MagicMock()
-        mock_conn.row_factory = None
-
-        with (
-            patch("trw_memory.storage._connection.sqlite3.connect", return_value=mock_conn),
-            patch("trw_memory.storage._connection._apply_sqlcipher_pragmas_safe"),
-        ):
-            try:
-                connect(
-                    tmp_path / "test.db",
-                    dbapi=sqlite3,
-                    timeout=5.0,
-                    check_same_thread=True,
-                    sqlcipher_key_hex=valid_key,
-                )
-            except Exception:
-                pass  # connection may fail due to missing sqlcipher
-
-        # Verify the key PRAGMA was attempted
-        calls = [str(c) for c in mock_conn.execute.call_args_list]
-        assert any("PRAGMA key" in c for c in calls)

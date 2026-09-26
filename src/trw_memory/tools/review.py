@@ -10,6 +10,7 @@ from __future__ import annotations
 import getpass
 from typing import Literal
 
+from trw_memory.daemon._offload import run_serialized
 from trw_memory.exceptions import AuthorizationError, ConfigError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -20,6 +21,15 @@ from trw_memory.tools._types import McpServer
 #: Default page size for the quarantine list. Matches the review queue a human
 #: works in one sitting; a maintainer wanting more passes ``limit`` explicitly.
 QUARANTINE_LIST_DEFAULT_LIMIT = 100
+
+#: Same ceiling as ``tools/listing.py``'s ``LIST_PAGE_MAX`` and the reembed
+#: batch cap: a shared daemon serves every tenant from one process, and this
+#: list reads every permitted namespace's quarantine backend and materializes
+#: each row (``_quarantine_row``) before returning, so an unbounded ``limit``
+#: is a single-caller resource exhaustion of the whole daemon. No caller in
+#: this tree pages above the default (100), so 1000 leaves headroom without
+#: reopening the DoS.
+QUARANTINE_LIST_MAX_LIMIT = 1000
 
 
 def memory_review_impl(
@@ -71,7 +81,8 @@ def register_review_tool(mcp: McpServer) -> None:
         The review is recorded under the caller's authenticated identity.
         """
 
-        return memory_review_impl(
+        return await run_serialized(
+            memory_review_impl,
             learning_id,
             decision=decision,
             reviewer_id=authenticated_principal(),
@@ -107,6 +118,8 @@ def memory_quarantine_list_impl(
         named a namespace it may not read. An empty quarantine returns an empty
         list, not an error.
     """
+    if limit < 1 or limit > QUARANTINE_LIST_MAX_LIMIT:
+        return {"error": f"limit must be in [1, {QUARANTINE_LIST_MAX_LIMIT}]", "status": "invalid"}
     cfg = config or MemoryConfig()
     if namespace:
         # Same shape as ``namespace_admin._curate_impl``: a tool returns a typed
@@ -163,4 +176,4 @@ def register_quarantine_list_tool(mcp: McpServer) -> None:
     ) -> dict[str, object]:
         """List quarantined rows awaiting review, scoped to permitted namespaces."""
 
-        return memory_quarantine_list_impl(namespace, limit=limit)
+        return await run_serialized(memory_quarantine_list_impl, namespace, limit=limit)

@@ -16,6 +16,19 @@ from trw_memory.models.memory import MemoryEntry
 from ._test_tiers_support import _make_entry, cfg, mem_dir, mgr  # noqa: F401
 
 
+def _hot_get(mgr: TierManager, entry_id: str) -> MemoryEntry | None:
+    """Test seam mirroring the removed ``TierManager.hot_get`` body exactly
+    (MRU move + ``last_accessed_at`` refresh included), for tests that use it
+    only to observe hot-cache state after some other operation under test."""
+    with mgr._hot_lock:
+        if entry_id not in mgr._hot:
+            return None
+        mgr._hot.move_to_end(entry_id)
+        entry = mgr._hot[entry_id]
+        entry.last_accessed_at = datetime.now(timezone.utc)
+        return entry
+
+
 class TestSweep:
     def test_sweep_returns_tier_sweep_result(self, mgr: TierManager) -> None:
         assert isinstance(mgr.sweep(), TierSweepResult)
@@ -31,13 +44,13 @@ class TestSweep:
         mgr.hot_put("stale", _make_entry("stale", days_old=cfg.hot_ttl_days + 5))
         assert mgr.hot_size == 1
         result = mgr.sweep()
-        assert mgr.hot_get("stale") is None
+        assert _hot_get(mgr, "stale") is None
         assert result.demoted >= 1
 
     def test_sweep_keeps_fresh_hot_entry(self, mgr: TierManager) -> None:
         mgr.hot_put("fresh", _make_entry("fresh", days_old=1))
         result = mgr.sweep()
-        assert mgr.hot_get("fresh") is not None
+        assert _hot_get(mgr, "fresh") is not None
         assert result.demoted == 0
 
     def test_sweep_hot_to_warm_failure_keeps_entry_in_hot(self, mgr: TierManager, cfg: MemoryConfig) -> None:
@@ -55,7 +68,7 @@ class TestSweep:
             mgr.warm_add = original_warm_add  # type: ignore[method-assign]
 
         assert result.errors == 1
-        assert mgr.hot_get("stale-hot") is not None
+        assert _hot_get(mgr, "stale-hot") is not None
 
     def test_sweep_demotes_warm_to_cold(self, mgr: TierManager, mem_dir: Path, cfg: MemoryConfig) -> None:
         from trw_memory.storage.persistence import write_yaml
@@ -251,7 +264,7 @@ class TestSweep:
         result = mgr.sweep(config=MemoryConfig())
 
         assert result.demoted >= 1
-        assert mgr.hot_get("env-hot") is None
+        assert _hot_get(mgr, "env-hot") is None
 
     def test_sweep_reads_retention_days_from_environment(
         self,

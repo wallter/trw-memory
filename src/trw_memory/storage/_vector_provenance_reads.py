@@ -39,7 +39,10 @@ def vector_space_census(
     vec_available: bool,
     namespace: str,
 ) -> dict[EmbeddingSpace | None, int] | None:
-    """Count *namespace*'s stored vectors by the embedding space their provenance claims.
+    """Count *namespace*'s rows that have a stored vector, by the embedding space its provenance claims.
+
+    Only vectors of existing ``memories`` rows count, and each row once per space (C12 rc4): an orphan
+    vector, or a second vector of one row, must not stand in for a row that has none.
 
     Reads only ``vec_index.provenance_json`` -- no vector blob is loaded -- and
     classifies each row with :meth:`VectorProvenance.from_json`, so a NULL,
@@ -59,20 +62,20 @@ def vector_space_census(
     try:
         with lock:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(vec_index)").fetchall()}
-            proof_column = "provenance_json" if "provenance_json" in columns else "NULL"
+            proof_column = "v.provenance_json" if "provenance_json" in columns else "NULL"
             rows = conn.execute(
-                f"SELECT {proof_column} FROM vec_index WHERE namespace = ?",  # noqa: S608 -- fixed local SQL fragment only
+                f"SELECT v.entry_id, {proof_column} FROM vec_index v "  # noqa: S608 -- fixed local SQL fragment only
+                "JOIN memories m ON m.namespace = v.namespace AND m.id = v.entry_id WHERE v.namespace = ?",
                 (namespace,),
             ).fetchall()
     except sqlite3.Error:  # trw-fail-silent-allow: None is the typed "no census" signal; logged at warning
         logger.warning("vector_space_census_error", exc_info=True)
         return None
-    census: dict[EmbeddingSpace | None, int] = {}
-    for (raw,) in rows:
+    census: dict[EmbeddingSpace | None, set[str]] = {}
+    for entry_id, raw in rows:
         proof = VectorProvenance.from_json(raw)
-        space = proof.space if proof is not None else None
-        census[space] = census.get(space, 0) + 1
-    return census
+        census.setdefault(proof.space if proof is not None else None, set()).add(entry_id)
+    return {space: len(ids) for space, ids in census.items()}
 
 
 def get_vector_records(

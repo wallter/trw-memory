@@ -14,7 +14,6 @@ from trw_memory.models.memory import MemoryEntry
 async def test_public_hybrid_pool_does_not_starve_historical_candidate(
     client: MemoryClient, monkeypatch: pytest.MonkeyPatch, include_superseded: bool, fts_enabled: bool
 ) -> None:
-    pytest.importorskip("rank_bm25")
     backend = client._get_backend()
     if fts_enabled and not backend.fts_available:
         pytest.skip("SQLite has no FTS5")

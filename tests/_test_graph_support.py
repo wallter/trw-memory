@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
-from trw_memory.graph import _merge_cross_validated_entry
+from trw_memory._graph_cross_project import merge_cross_validated_entry as _merge_cross_validated_entry
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry

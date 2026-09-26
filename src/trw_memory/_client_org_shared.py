@@ -30,7 +30,6 @@ import functools
 from typing import TYPE_CHECKING, Literal, cast
 
 from trw_memory._client_backend import client_logger as _client_logger
-from trw_memory.embeddings._query_prompts import embed_query
 from trw_memory.embeddings._similarity_calibration import calibrated_threshold
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.models.memory import MemoryEntry
@@ -80,9 +79,6 @@ async def merge_shared_results(
             local_entries=local_entries,
             embedder=embedder,
         )
-        query_embedding: list[float] | None = None
-        if embedder is not None and query.strip():
-            query_embedding = await asyncio.to_thread(embed_query, embedder, query)
 
         # Look up `fetch_shared_memories` via parent module so test patches
         # on `trw_memory.client.fetch_shared_memories` propagate.
@@ -95,7 +91,6 @@ async def merge_shared_results(
                 query,
                 client._config,
                 admit=store_gate(client._config, client._get_backend()),
-                embedding=query_embedding,
                 limit=limit,
                 local_entries=local_entries,
                 embedder=embedder,

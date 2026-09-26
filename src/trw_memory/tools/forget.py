@@ -6,17 +6,21 @@ by ID or performs a bulk search-and-delete.
 
 from __future__ import annotations
 
+import contextlib
+
 import structlog
 
-from trw_memory.exceptions import AuthorizationError, ConfigError, StorageError
+from trw_memory.daemon._offload import run_serialized
+from trw_memory.exceptions import AuthorizationError, StorageError
 from trw_memory.lifecycle.tiers._runtime import remove_entry_from_tiers, supports_tier_runtime
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
-from trw_memory.namespaces.validation import validate_namespace
-from trw_memory.security.rbac import Permission, require_namespace_permission
+from trw_memory.security.rbac import Permission
 from trw_memory.security.runtime import append_audit_event, delete_quarantined_entries
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools._types import McpServer
+from trw_memory.tools.entry import refused_namespace
+from trw_memory.tools.search import _SCAN_ROWS
 
 logger = structlog.get_logger(__name__)
 
@@ -56,12 +60,9 @@ def memory_forget_impl(
             "status": "invalid",
         }
 
-    try:
-        validate_namespace(namespace)
-    except ConfigError as exc:
-        return {"error": str(exc), "status": "invalid"}
     cfg = config or MemoryConfig()
-    require_namespace_permission(cfg, namespace, Permission.DELETE, "forget")
+    if refused := refused_namespace(namespace, Permission.DELETE, "forget", cfg):
+        return refused
 
     if actor:
         # Closure re-audit #5: count + scan + delete must be atomic. A concurrent
@@ -69,28 +70,16 @@ def memory_forget_impl(
         # wrong fetch bound / partial delete (TOCTOU). Cover them with one
         # BEGIN IMMEDIATE snapshot when the backend supports transaction().
         deleted_count = 0
-        txn_ctx = backend.transaction() if hasattr(backend, "transaction") else None
-        if txn_ctx is not None:
-            with txn_ctx:
-                entries = backend.list_entries(
-                    namespace=namespace, limit=max(10_000, backend.count(namespace=namespace))
-                )
-                for candidate in entries:
-                    if candidate.source_identity != actor:
-                        continue
-                    if backend.delete(candidate.id, namespace=candidate.namespace):
-                        deleted_count += 1
-                        if supports_tier_runtime(backend):
-                            remove_entry_from_tiers(cfg, namespace, candidate.id)
-        else:
-            entries = backend.list_entries(namespace=namespace, limit=max(10_000, backend.count(namespace=namespace)))
-            for candidate in entries:
-                if candidate.source_identity != actor:
-                    continue
-                if backend.delete(candidate.id, namespace=candidate.namespace):
+        # At most _SCAN_ROWS of the actor's rows per call, selected in storage (+1 says more remain), so
+        # the serialized lane never materializes the namespace (rc9); a repeat call deletes the rest.
+        with backend.transaction() if hasattr(backend, "transaction") else contextlib.nullcontext():
+            ids = backend.ids_by_source(namespace, actor, _SCAN_ROWS + 1)
+            truncated = len(ids) > _SCAN_ROWS
+            for entry_id in ids[:_SCAN_ROWS]:
+                if backend.delete(entry_id, namespace=namespace):
                     deleted_count += 1
                     if supports_tier_runtime(backend):
-                        remove_entry_from_tiers(cfg, namespace, candidate.id)
+                        remove_entry_from_tiers(cfg, namespace, entry_id)
         deleted_count += delete_quarantined_entries(cfg, namespace=namespace, actor=actor)
         append_audit_event(
             cfg,
@@ -99,7 +88,8 @@ def memory_forget_impl(
             namespace=namespace,
             data={"entries_deleted": deleted_count, "selector": "actor"},
         )
-        return {"deleted": deleted_count, "entries_deleted": deleted_count, "status": "ok"}
+        truncated_reply = {"truncated": True} if truncated else {}
+        return {"deleted": deleted_count, "entries_deleted": deleted_count, "status": "ok", **truncated_reply}
 
     # --- Delete by ID (with namespace isolation) ---
     if memory_id:
@@ -233,15 +223,11 @@ def register_forget_tool(mcp: McpServer) -> None:
         Returns:
             {"deleted": int, "status": "ok"}
         """
-        cfg = MemoryConfig()
-        with create_backend_from_config(cfg, namespace) as backend:
-            return memory_forget_impl(
-                memory_id,
-                query,
-                namespace,
-                backend=backend,
-                config=cfg,
-                actor=actor,
-            )
+
+        def forget() -> dict[str, object]:
+            with create_backend_from_config(cfg := MemoryConfig(), namespace) as backend:
+                return memory_forget_impl(memory_id, query, namespace, backend=backend, config=cfg, actor=actor)
+
+        return await run_serialized(forget)
 
     mcp.tool()(memory_forget)

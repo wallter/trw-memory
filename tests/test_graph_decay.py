@@ -195,7 +195,8 @@ class TestMemoryDecayPassBatch:
             tracemalloc.stop()
 
         assert result["processed"] == 1000
-        assert result["remaining"] == 49_000
+        # rc9: counted only up to DECAY_COUNT_MAX, so 49,000 left reads as a lower bound, flagged.
+        assert (result["remaining"], result["remaining_capped"]) == (9_000, True)
         assert result["total_decayed"] == 1000
         assert peak < 512 * 1024 * 1024
 

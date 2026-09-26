@@ -9,6 +9,8 @@ checks on every namespaced call.
 
 from __future__ import annotations
 
+import asyncio
+
 import structlog
 from fastmcp.server.auth import AccessToken, TokenVerifier
 
@@ -38,7 +40,7 @@ class LoopbackTokenVerifier(TokenVerifier):
         The token is never logged, on either branch.
         """
         try:
-            grant = read_grant(self._paths, token) if token else None
+            grant = await asyncio.to_thread(read_grant, self._paths, token) if token else None  # file I/O, off the loop
         except TokenUnreadableError:  # trw-fail-silent-allow: None is fastmcp's logged 401
             logger.warning("daemon_grants_unreadable", path=str(self._paths.grants))
             return None

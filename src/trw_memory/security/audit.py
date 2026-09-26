@@ -24,8 +24,10 @@ _COMPACT_MANIFEST_NAME = "audit_compact_manifest.jsonl"
 # lock. append() used to re-parse the whole log for the head on EVERY record, a
 # cost that grew with the log (one per store). It now re-reads, and re-validates,
 # only when the file changed under another writer; the one change that goes
-# unseen is a same-size in-place rewrite within one mtime tick on the same
-# inode, which verify_chain() still reports.
+# unseen is a same-size rewrite within one mtime tick on the same inode number --
+# in place, or (on Linux, which hands a freed inode number straight to the next
+# file) by replacing the file -- and verify_chain() still reports the broken link
+# that an append after it leaves.
 _HEAD_CACHE: dict[str, tuple[tuple[int, int, int, int], str]] = {}
 _HEAD_CACHE_LOCK = threading.Lock()
 _HEAD_CACHE_MAX = 256

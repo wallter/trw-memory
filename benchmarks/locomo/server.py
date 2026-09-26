@@ -139,6 +139,10 @@ class Mem0Backend:
     """Drives ``mem0.Memory`` in-process; calls are serialised through a pool."""
 
     def __init__(self) -> None:
+        # mem0 keeps a global dir (default ~/.mem0) holding a local-Qdrant migrations store, which
+        # file-locks on open: a second shim on the same machine would die with "already accessed by
+        # another instance". Give each store its own, so conversations can ingest in parallel.
+        os.environ["MEM0_DIR"] = str(DATA_DIR / ".mem0")
         from mem0 import Memory
 
         DATA_DIR.mkdir(parents=True, exist_ok=True)

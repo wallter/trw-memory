@@ -47,7 +47,12 @@ def recorded_targets(monkeypatch: pytest.MonkeyPatch) -> list[_RecordingConnecti
     def _connect(database: object, *args: object, **kwargs: object) -> object:
         is_snapshot = BACKUP_DIR_NAME in Path(str(database)).parts
         if is_snapshot:
-            kwargs.setdefault("factory", _RecordingConnection)
+            # Layer the recorder over whatever factory the caller passes (connect_registered
+            # passes its own close-tracking subclass, C15), so both close() hooks run.
+            base = kwargs.get("factory", sqlite3.Connection)
+            kwargs["factory"] = (
+                base if issubclass(base, _RecordingConnection) else type("Recording", (_RecordingConnection, base), {})
+            )
         conn = real_connect(database, *args, **kwargs)
         if is_snapshot and isinstance(conn, _RecordingConnection):
             opened.append(conn)

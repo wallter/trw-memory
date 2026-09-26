@@ -6,12 +6,8 @@ import multiprocessing
 import threading
 from pathlib import Path
 
-from trw_memory.graph import (
-    IMPORTANCE_BOOST,
-    _merge_cross_validated_entry,
-    apply_importance_boost,
-    apply_importance_decay,
-)
+from trw_memory._graph_cross_project import merge_cross_validated_entry as _merge_cross_validated_entry
+from trw_memory.graph import IMPORTANCE_BOOST, apply_importance_boost, apply_importance_decay
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 

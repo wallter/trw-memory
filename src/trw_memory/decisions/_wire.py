@@ -21,10 +21,10 @@ from trw_memory.decisions._models import (
     DecisionResult,
     NoulQuestion,
     ScoreQuestion,
+    parse_question,
 )
 
 _ANSWER_ADAPTER: TypeAdapter[DecisionAnswer] = TypeAdapter(DecisionAnswer)
-_QUESTION_ADAPTER: TypeAdapter[DecisionQuestion] = TypeAdapter(DecisionQuestion)
 
 
 def _stringify(value: JsonValue) -> str:
@@ -86,7 +86,7 @@ def build_payload(
     validated into the typed models here, so they are not silently rejected.
     """
     typed: dict[str, DecisionQuestion] = {
-        qid: _QUESTION_ADAPTER.validate_python(q) if isinstance(q, Mapping) else q for qid, q in questions.items()
+        qid: parse_question(qid, q) if isinstance(q, Mapping) else q for qid, q in questions.items()
     }
     payload: dict[str, Any] = {
         "model": model,

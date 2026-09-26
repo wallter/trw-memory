@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
@@ -59,7 +60,7 @@ def embedding_has_consumer(config: MemoryConfig, backend: StorageBackend) -> boo
     """Return whether a freshly computed dense embedding has any live sink.
 
     Store paths compute an embedding purely to persist/search it. A dense
-    vector has exactly four potential sinks on the write path:
+    vector has exactly three potential sinks on the write path:
 
     1. the primary backend's vector store (``backend.upsert_vector``);
     2. the warm tier's own ``sqlite-vec`` sidecar, which is an independent
@@ -67,8 +68,9 @@ def embedding_has_consumer(config: MemoryConfig, backend: StorageBackend) -> boo
        cannot persist vectors (e.g. a YAML primary with ``sqlite-vec``
        installed) — gated by :func:`tier_runtime_enabled`;
     3. graph similarity edges, which read candidate vectors back from the
-       primary backend and so are already covered by ``supports_vectors``;
-    4. remote publish, which ships the vector to the platform.
+       primary backend and so are already covered by ``supports_vectors``.
+
+    Remote publish is not one: no vector leaves the machine (PRD-CORE-302 FR04).
 
     When none of these are live, computing the embedding is pure waste —
     every downstream ``upsert_vector`` would no-op. Returning ``True`` is the
@@ -76,7 +78,7 @@ def embedding_has_consumer(config: MemoryConfig, backend: StorageBackend) -> boo
     it already does today, so this never regresses existing behaviour.
 
     Args:
-        config: Active memory configuration (tier + sync settings).
+        config: Active memory configuration (tier settings).
         backend: The primary storage backend for this write.
 
     Returns:
@@ -84,9 +86,7 @@ def embedding_has_consumer(config: MemoryConfig, backend: StorageBackend) -> boo
     """
     if backend.supports_vectors():
         return True
-    if tier_runtime_enabled(config):
-        return True
-    return not config.local_only and config.sync_enabled and bool(config.platform_url)
+    return tier_runtime_enabled(config)
 
 
 def get_tier_manager(config: MemoryConfig, namespace: str) -> TierManager:
@@ -130,6 +130,13 @@ def reset_tier_manager_cache() -> None:
             manager.close()
         except Exception:  # justified: a best-effort teardown must not mask the caller's failure
             logger.warning("tier_manager_cache_reset_close_failed", cache_key=cache_key, exc_info=True)
+
+
+# A cached manager holds its warm.db connection for the life of the process; nothing
+# else closes it. Close them at exit, as the graph worker pool does its backends, so
+# SQLite checkpoints and removes warm.db-wal instead of leaving it for the next open
+# (W37: a 7.5 MB warm.db-wal survived every benchmark process).
+atexit.register(reset_tier_manager_cache)
 
 
 def warmup_tier_manager(
@@ -183,25 +190,13 @@ def remember_entry_in_tiers(
             logger.warning("tier_warm_mirror_failed", namespace=namespace, entry_id=entry.id, exc_info=True)
 
 
-def remember_entry_data_in_tiers(config: MemoryConfig, entry_data: dict[str, object]) -> None:
-    """Mirror a serialized entry payload into the runtime tier system."""
-    if not tier_runtime_enabled(config):
-        return
-    try:
-        entry = MemoryEntry.model_validate(entry_data)
-    except Exception:
-        logger.warning("tier_entry_validation_failed", namespace=entry_data.get("namespace", ""), exc_info=True)
-        return
-    remember_entry_in_tiers(config, entry.namespace, entry)
-
-
 def remember_entries_data_in_tiers(config: MemoryConfig, payloads: list[dict[str, object]]) -> None:
     """Mirror several serialized entry payloads into the tiers, one warm write per namespace.
 
     Recall calls this with every returned row so the warm sidecar sees a
     fresh ``last_accessed_at``; doing it per entry made recall latency scale
-    with ``limit * sidecar_rows``. Hot-tier order is the same as sequential
-    :func:`remember_entry_data_in_tiers`; the warm sidecar ends up identical.
+    with ``limit * sidecar_rows``. Hot-tier order is the same as one
+    :func:`remember_entry_in_tiers` per entry; the warm sidecar ends up identical.
     """
     if not tier_runtime_enabled(config) or not payloads:
         return

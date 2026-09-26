@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trw_memory.exceptions import CorruptDatabaseUnsalvageableError
-from trw_memory.storage._connection import is_io_error, is_lock_contention_error
+from trw_memory.storage._connection import classify_open_error
 from trw_memory.storage._recovery import classify_recovery_preflight, write_recovery_state
 from trw_memory.storage._schema import ensure_schema, ensure_vec_table
 
@@ -44,31 +44,34 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
-#: Re-exported from ``_connection`` so this module and ``db_has_data`` cannot
-#: drift on what counts as transient: they make the same destructive decision
-#: together, and the whole defect was the two halves disagreeing.
-_is_lock_contention_error = is_lock_contention_error
-
-#: Opens tried when the checked open fails with an I/O error, and the wait before each retry (x attempt).
+#: Opens tried when the checked open fails with an I/O error or lock/busy, and the
+#: wait before each retry (x attempt). Lock/busy waits are short: the case they
+#: exist for is two first opens of a NEW store both switching it to WAL, where
+#: SQLite answers "database is locked" at once instead of calling the busy
+#: handler (it would deadlock), and the other opener is done within milliseconds.
 _IO_ERROR_ATTEMPTS = 3
 _IO_ERROR_BACKOFF_SECONDS = 0.5
+_LOCK_BACKOFF_SECONDS = 0.05
 
 
-def _open_checked(backend: SQLiteBackend, db_path: Path, *, dbapi: Any, sqlcipher_key_hex: str | None) -> Any:
-    """The integrity-checked open, retried while it fails with an I/O error."""
+def _open_checked(backend: SQLiteBackend, db_path: Path) -> Any:
+    """The integrity-checked open, retried while it fails with an I/O error or lock/busy."""
     once = getattr(backend, "_check_integrity_once", False)
     for attempt in range(1, _IO_ERROR_ATTEMPTS + 1):
         try:
-            if sqlcipher_key_hex is None:
-                return backend._open_and_configure(db_path, check_once=once)
-            return backend._open_and_configure(
-                db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex, check_once=once
-            )
+            return backend._open_and_configure(db_path, check_once=once)
         except sqlite3.DatabaseError as exc:
-            if not is_io_error(exc) or attempt == _IO_ERROR_ATTEMPTS:
+            kind = classify_open_error(exc)
+            if kind not in ("io", "lock") or attempt == _IO_ERROR_ATTEMPTS:
                 raise
-            logger.warning("db_open_io_error_retry", db=str(db_path), attempt=attempt, error=str(exc))
-            time.sleep(_IO_ERROR_BACKOFF_SECONDS * attempt)
+            locked = kind == "lock"
+            logger.warning(
+                "db_open_lock_retry" if locked else "db_open_io_error_retry",
+                db=str(db_path),
+                attempt=attempt,
+                error=str(exc),
+            )
+            time.sleep((_LOCK_BACKOFF_SECONDS if locked else _IO_ERROR_BACKOFF_SECONDS) * attempt)
     raise AssertionError("unreachable: the last attempt returns or raises")  # pragma: no cover
 
 
@@ -77,7 +80,6 @@ def open_connection_with_recovery(
     db_path: Path,
     *,
     dbapi: Any,
-    sqlcipher_key_hex: str | None,
     recovery_policy: str,
     corrupt_backup_keep: int,
     rebuild_from_cold: bool,
@@ -102,54 +104,43 @@ def open_connection_with_recovery(
             backup_path=preflight.state_path,
         )
     try:
-        conn = _open_checked(backend, db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
+        conn = _open_checked(backend, db_path)
     except sqlite3.DatabaseError as exc:
-        if is_io_error(exc):
-            # Never the recovery branch, whatever the probe says: renaming a store
-            # because a read failed is how a healthy one was lost (L-8QV8).
+        kind = classify_open_error(exc)
+        # An I/O error is never the recovery branch, whatever the probe says:
+        # renaming a store because a read failed is how a healthy one was lost
+        # (L-8QV8). Nor is lock/busy, whatever the store holds. It used to
+        # recover when the data probe said "no rows" -- and a NEW store has no
+        # rows while other connections are creating it. Recovery then renamed
+        # the file to ``.corrupt.bak`` and unlinked its WAL under those
+        # connections, whose next commits returned success into files no reader
+        # would open again: the daemon's silent write loss. A store that really
+        # is damaged fails its next open with a corruption error and is
+        # recovered then. Both open unchecked, the file untouched.
+        if kind in ("io", "lock"):
             logger.warning(
-                "db_integrity_check_io_error",
+                "db_integrity_check_deferred",
                 db=str(db_path),
+                cause=kind,
                 action="open_anyway",
                 error=str(exc),
-                hint="quick_check hit an I/O error on every attempt; opening without it, the file untouched",
             )
             write_recovery_state(
                 db_path,
                 status="degraded_open_with_background_recovery",
-                reason="sqlite_io_error",
+                reason="sqlite_io_error" if kind == "io" else "sqlite_lock_or_busy",
                 db_size_bytes=preflight.db_size_bytes,
             )
-            conn = backend._open_without_integrity_check(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
-            ensure_schema(conn)
-            return conn, True, False
-        # `is not False`, deliberately, not a truth test. Under contention the
-        # PROBE is locked too and returns None (UNKNOWN), and the safe reading of
-        # "I could not check" is "assume there is something to lose" — the
-        # degraded open below is non-destructive, while the `else` branch renames
-        # the live database and initialises a blank schema. A plain truth test
-        # sent UNKNOWN down the destructive path, so a populated store was wiped
-        # precisely when the machine was busy.
-        if (
-            _is_lock_contention_error(exc)
-            and backend._db_has_data(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex) is not False
-        ):
-            logger.warning(
-                "db_integrity_check_deferred_due_to_lock",
-                db=str(db_path),
-                action="open_anyway",
-                hint=("quick_check could not complete because SQLite reported lock/busy; opening without probe"),
-            )
-            write_recovery_state(
-                db_path,
-                status="degraded_open_with_background_recovery",
-                reason="sqlite_lock_or_busy",
-                db_size_bytes=preflight.db_size_bytes,
-            )
-            conn = backend._open_without_integrity_check(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
+            conn = backend._open_without_integrity_check(db_path, dbapi=dbapi)
             integrity_warning = True
+        elif kind == "other":
+            # Out of descriptors, disk full, read-only, ``locking protocol``: the
+            # machine or another connection failed, not the file. Quarantining on
+            # those moved healthy stores aside the same way. Surface it; the file stays.
+            logger.warning("db_open_failed_not_corruption", db=str(db_path), error=str(exc))
+            raise
         else:
-            has_data = backend._db_has_data(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
+            has_data = backend._db_has_data(db_path, dbapi=dbapi)
             logger.exception(
                 "db_corrupt_detected",
                 db=str(db_path),
@@ -178,7 +169,6 @@ def open_connection_with_recovery(
                 conn = backend.recover_db(
                     db_path,
                     dbapi=dbapi,
-                    sqlcipher_key_hex=sqlcipher_key_hex,
                     recovery_policy=recovery_policy,  # type: ignore[arg-type]
                     corrupt_backup_keep=corrupt_backup_keep,
                     rebuild_from_cold=rebuild_from_cold,

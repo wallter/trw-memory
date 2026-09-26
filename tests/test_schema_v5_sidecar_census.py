@@ -19,7 +19,7 @@ import pytest
 import trw_memory.storage._dbapi  # noqa: F401  — installs pysqlite3 as ``sqlite3``
 import trw_memory.storage._schema_v5 as schema_v5_module
 from trw_memory.models.memory import MemoryEntry
-from trw_memory.storage._schema import CREATE_VEC_INDEX, ensure_schema
+from trw_memory.storage._schema import CREATE_VEC_INDEX, CREATE_WIKI_REFS, SCHEMA_VERSION, ensure_schema
 from trw_memory.storage._schema_v5 import MigrationCensusMismatchError
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
@@ -53,6 +53,10 @@ def _v4_fixture_with_sidecars(path: Path) -> None:
     conn.execute(_EDGE_INSERT, ("project:y", "M-b", "M-a", "tag_cooccurrence"))
     conn.execute("INSERT INTO vec_index (entry_id, namespace) VALUES ('M-a', 'project:x')")
     conn.execute("INSERT INTO vec_index (entry_id, namespace) VALUES ('M-b', 'project:y')")
+    # wiki_refs is no longer created by the bootstrap (retired at schema 7,
+    # W10) — this fixture simulates a real legacy database that still has
+    # the table on disk, so it creates it explicitly before seeding a row.
+    conn.execute(CREATE_WIKI_REFS)
     conn.execute(
         "INSERT INTO wiki_refs (source_entry_id, source_slug, target_slug, ref_type, namespace, updated_at) "
         "VALUES ('M-a', 'slug-a', 'slug-b', 'related', 'project:x', '2026-01-01T00:00:00+00:00')"
@@ -69,9 +73,12 @@ def test_sidecar_rows_survive_migration_and_tag_cooccurrence_is_dropped(tmp_path
 
     conn = sqlite3.connect(db)
     ensure_schema(conn)
-    # ensure_schema runs v5's destructive census and then additive v6;
-    # the sidecar outcomes below still specifically discriminate the v5 delta.
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+    # ensure_schema runs v5's destructive census, additive v6, v7's wiki_refs
+    # retirement (W10), then v8's quarantine_reviews namespace column (Q3,
+    # additive, no-op here since this fixture has no quarantine_reviews
+    # table); the sidecar outcomes below still specifically discriminate the
+    # v5 delta on the tables it still owns.
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
     assert conn.execute("SELECT COUNT(*) FROM memory_graph_edges").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM memory_graph_edges WHERE edge_type = 'related'").fetchone()[0] == 1
@@ -79,7 +86,13 @@ def test_sidecar_rows_survive_migration_and_tag_cooccurrence_is_dropped(tmp_path
         conn.execute("SELECT COUNT(*) FROM memory_graph_edges WHERE edge_type = 'tag_cooccurrence'").fetchone()[0] == 0
     )
     assert conn.execute("SELECT COUNT(*) FROM vec_index").fetchone()[0] == 2
-    assert conn.execute("SELECT COUNT(*) FROM wiki_refs").fetchone()[0] == 1
+    # wiki_refs held one real row through the v5 rebuild (proven by the
+    # census-mismatch test below, which fails BEFORE v7 ever runs if that row
+    # is dropped) but v7 retires the table outright once the full chain
+    # completes — the store still opens and every entry is still readable.
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        conn.execute("SELECT COUNT(*) FROM wiki_refs")
+    assert conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 2
     conn.close()
 
 

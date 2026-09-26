@@ -4,38 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.conftest import make_entry
-
 
 class TestSecurity:
-    """Section 7 of E2E plan: PII detection, encryption, audit."""
-
-    def test_field_encryption_roundtrip(self) -> None:
-        """7.9 — Encrypt then decrypt entry fields preserves content."""
-        from trw_memory.security.encryption import (
-            decrypt_entry_fields,
-            derive_namespace_key,
-            derive_namespace_key_bytes,
-            encrypt_entry_fields,
-            generate_master_key,
-        )
-
-        master_key = generate_master_key()
-        assert len(derive_namespace_key(master_key, "test-ns")) == 64
-        namespace_key = derive_namespace_key_bytes(master_key, "test-ns")
-
-        entry = make_entry(
-            entry_id="enc-test-1",
-            content="sensitive data",
-            detail="very secret details",
-        )
-        encrypted = encrypt_entry_fields(entry, namespace_key)
-        assert encrypted.content != "sensitive data"
-        assert encrypted.detail != "very secret details"
-
-        decrypted = decrypt_entry_fields(encrypted, namespace_key)
-        assert decrypted.content == "sensitive data"
-        assert decrypted.detail == "very secret details"
+    """Section 7 of E2E plan: PII detection and audit."""
 
     def test_audit_logging_records_operations(self, tmp_path: Path) -> None:
         """7.11 — Audit log records store/recall/delete events with hash chain."""

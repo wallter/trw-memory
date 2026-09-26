@@ -19,7 +19,6 @@ from trw_memory.sync._remote_common import (
     AnonymizedEntry,
     PublishResult,
     RetryDrainResult,
-    _raise_local_only_violation,
     build_platform_headers,
     encode_learning_api_v1,
     is_valid_platform_url,
@@ -43,7 +42,6 @@ def _anonymize_entry(entry: MemoryEntry, project_root: str = "") -> AnonymizedEn
         detail=detail[:MAX_DETAIL_LENGTH] if detail else None,
         tags=tags,
         importance=entry.importance,
-        embedding=None,
         source_project=anonymize_installation_id(entry.metadata.get("installation_id", "")),
         source_learning_id=entry.id,
     )
@@ -72,11 +70,12 @@ def _publish_payload_result(
         return {"success": False, "remote_id": None, "retryable": False}
 
     try:
+        publish_url = f"{cfg.platform_url.rstrip('/')}/v1/learnings"
         with httpx.Client(timeout=PUBLISH_TIMEOUT) as client:
             resp = client.post(
-                f"{cfg.platform_url.rstrip('/')}/v1/learnings",
+                publish_url,
                 json=payload,
-                headers=build_platform_headers(cfg.platform_api_key),
+                headers=build_platform_headers(cfg.platform_api_key, publish_url),
             )
             if 200 <= resp.status_code < 300:
                 remote_id = _extract_remote_id(resp)
@@ -93,12 +92,8 @@ def publish_memory_result(
     entry: MemoryEntry,
     cfg: MemoryConfig,
     *,
-    embedding: list[float] | None = None,
     project_root: str = "",
 ) -> PublishResult:
-    if cfg.local_only:
-        logger.warning("memory_publish_blocked_local_only", entry_id=entry.id)
-        _raise_local_only_violation()
     if not cfg.sync_enabled or not cfg.platform_url:
         return {"success": False, "remote_id": None, "retryable": False}
     if not is_valid_platform_url(cfg.platform_url):
@@ -108,8 +103,6 @@ def publish_memory_result(
         return {"success": False, "remote_id": None, "retryable": False}
 
     payload = _anonymize_entry(entry, project_root)
-    if embedding:
-        payload["embedding"] = embedding
     return _publish_payload_result(cast("dict[str, object]", payload), cfg, entry_id=entry.id)
 
 
@@ -122,9 +115,6 @@ def _drain_retry_queue_with_ids(
     queue: RetryQueue,
     cfg: MemoryConfig,
 ) -> tuple[RetryDrainResult, list[str]]:
-    if cfg.local_only:
-        logger.warning("memory_retry_drain_blocked_local_only")
-        _raise_local_only_violation()
     if not cfg.sync_enabled or not cfg.platform_url:
         return {
             "drained": 0,
@@ -144,6 +134,8 @@ def _drain_retry_queue_with_ids(
     published_remote_ids: list[str | None] = []
 
     def publish_payload(payload: dict[str, object]) -> bool:
+        # A payload queued before vectors left the wire (PRD-CORE-302 FR04) may still carry one.
+        payload.pop("embedding", None)
         source_learning_id = payload.get("source_learning_id")
         entry_id = str(source_learning_id) if isinstance(source_learning_id, str) else ""
         result = _publish_payload_result(payload, cfg, entry_id=entry_id)
@@ -166,9 +158,6 @@ def _drain_retry_queue_with_ids(
 
 
 def retire_remote_memory(remote_id: str, cfg: MemoryConfig) -> bool:
-    if cfg.local_only:
-        logger.warning("memory_retire_blocked_local_only", remote_id=remote_id)
-        _raise_local_only_violation()
     if not cfg.sync_enabled or not cfg.platform_url or not remote_id:
         return True
     if not is_valid_platform_url(cfg.platform_url):
@@ -176,17 +165,22 @@ def retire_remote_memory(remote_id: str, cfg: MemoryConfig) -> bool:
         return True
 
     try:
+        retire_url = f"{cfg.platform_url.rstrip('/')}/v1/learnings/{remote_id}/status"
         with httpx.Client(timeout=PUBLISH_TIMEOUT) as client:
             resp = client.patch(
-                f"{cfg.platform_url.rstrip('/')}/v1/learnings/{remote_id}/status",
+                retire_url,
                 json={"status": "obsolete"},
-                headers=build_platform_headers(cfg.platform_api_key),
+                headers=build_platform_headers(cfg.platform_api_key, retire_url),
             )
             if 200 <= resp.status_code < 300:
                 logger.debug("memory_retired_remote", remote_id=remote_id)
                 return True
             logger.warning("memory_retire_failed", remote_id=remote_id, status=resp.status_code)
             return False
-    except (httpx.HTTPError, OSError, ConnectionError):
+    except (
+        httpx.HTTPError,
+        OSError,
+        ConnectionError,
+    ):  # trw-fail-silent-allow: pre-existing; logs at debug and fail-open is documented sync behavior
         logger.debug("memory_retire_error", remote_id=remote_id, exc_info=True)
         return False

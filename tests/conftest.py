@@ -20,14 +20,15 @@ To classify a test file:
 from __future__ import annotations
 
 import os
+import shutil
+import sys
+import tempfile
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
-import shutil
-import tempfile
 
 # MUST be the very first runtime import: ``trw_memory.__init__`` runs the
 # pysqlite3 shim which swaps ``sys.modules["sqlite3"]`` to pysqlite3. If
@@ -37,15 +38,16 @@ import tempfile
 # silently miss them. Pulling trw_memory in here at the top of conftest
 # guarantees the swap is in place before any test module is loaded.
 import trw_memory as _trw_memory_shim_trigger  # noqa: F401
-from tests._timing import apply_timing_policy, pytest_runtest_logreport, pytest_sessionfinish  # noqa: F401
+from tests._daemon_reaper import reap_daemons_under
+from tests._timing import apply_timing_policy
+from tests._timing import pytest_sessionfinish as _timing_sessionfinish
 from tests._trw_home import isolated_trw_home  # noqa: F401  (canonical copy; see that module's docstring)
 from trw_memory.client import MemoryClient
 from trw_memory.embeddings import reset_provider_cache
 from trw_memory.graph import wait_for_graph_updates
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
-from trw_memory.security.keys import clear_key_cache
-from trw_memory.storage._resilient_fetch import reset_bytes_fallback_failures, reset_schema_row_quarantines
+from trw_memory.storage import _resilient_fetch
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 # --------------------------------------------------------------------------
@@ -121,7 +123,15 @@ def _refuse_on_low_disk(config: pytest.Config) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Refuse a wide xdist fan-out before it OOMs the workstation again, and a near-full disk."""
+    """Refuse a wide xdist fan-out before it OOMs the workstation again, and a near-full disk.
+
+    Also pins the umask to 0022: tests lay out home and checkout directories with a
+    plain ``mkdir``, which a 0002 login umask (stock Ubuntu/Debian user-private
+    groups) turns group-writable, and the ancestor trust check then refuses the
+    test's own layout. Behaviour under 0002 is tested explicitly
+    (test_dir_trust: the ``umask_0002`` tests).
+    """
+    os.umask(0o022)
     _refuse_on_low_disk(config)
     allow_wide = os.environ.get(_ALLOW_WIDE_XDIST_ENV) == "1"
     violation = _xdist_fanout_violation(getattr(config.option, "numprocesses", None), allow_wide)
@@ -132,6 +142,30 @@ def pytest_configure(config: pytest.Config) -> None:
             "TRW_PYTEST_ALLOW_WIDE_XDIST=1",
             returncode=3,
         )
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Stop every memory daemon still published or placed under this run's basetemp.
+
+    PRD-INFRA-196-FR07: trw-memory lacked this sweep entirely (unlike trw-mcp's
+    and the root suite's own copies); reaping still runs first (a daemon its own
+    test already stopped is not a leak), but any pid the sweep still had to
+    signal now fails the session too.
+    """
+    try:
+        _timing_sessionfinish(session, exitstatus)
+    finally:
+        factory = getattr(session.config, "_tmp_path_factory", None)
+        if factory is not None:
+            leaked = reap_daemons_under(factory.getbasetemp(), wait=True, by_process=True)
+            if leaked:
+                print(
+                    f"\nFAIL: {len(leaked)} leaked memory daemon(s) stopped at session end under "
+                    f"{factory.getbasetemp()}: pids {leaked}",
+                    file=sys.stderr,
+                )
+                if session.exitstatus == 0:
+                    session.exitstatus = 1
 
 
 @pytest.fixture(autouse=True)
@@ -145,8 +179,8 @@ def reset_bytes_fallback_counter() -> Iterator[None]:
     tests, making counter assertions order-dependent. Resetting *before* each
     test guarantees a known baseline regardless of collection order.
     """
-    reset_bytes_fallback_failures()
-    reset_schema_row_quarantines()
+    _resilient_fetch._fallback_metrics.bytes_fallback_failures = 0
+    _resilient_fetch._fallback_metrics.schema_row_quarantines = 0
     yield
 
 
@@ -232,13 +266,6 @@ def _clear_runtime_caches() -> None:
 
 
 @pytest.fixture(autouse=True)
-def clear_master_key_cache_fixture() -> Iterator[None]:
-    clear_key_cache()
-    yield
-    clear_key_cache()
-
-
-@pytest.fixture(autouse=True)
 def restore_logging_state() -> Iterator[None]:
     """Save+restore global structlog and stdlib-logging config around each test.
 
@@ -269,65 +296,6 @@ def restore_logging_state() -> Iterator[None]:
         structlog.configure(**saved_structlog)
         root.handlers[:] = saved_handlers
         root.setLevel(saved_level)
-
-
-@pytest.fixture(autouse=True)
-def _hermetic_keyring_backend() -> Iterator[None]:
-    """Install an in-memory keyring backend for the duration of each test.
-
-    The public-mirror CI installs the ``keyring`` package but the headless
-    GitHub runner has NO OS keyring backend available (no SecretStorage /
-    kwallet / macOS Keychain), so any code path that stores or reads a master
-    key via ``keyring.set_password`` raises
-    ``keyring.errors.NoKeyringError: No recommended backend was available``.
-    In the monorepo dev box a real backend (or none) is present and masks this.
-
-    Pinning a process-local in-memory backend makes the keyring path hermetic
-    and deterministic: tests that expect a DIFFERENT raise downstream (e.g.
-    ``test_local_mode_raises_when_sqlite_encryption_requested`` asserting the
-    SQLCipher-driver ``EncryptionUnavailableError``) reach their intended
-    assertion instead of being pre-empted by the keyring-store failure.
-
-    This is a test-only fixture — it does NOT add ``keyrings.alt`` (or any
-    other backend) to the runtime dependency set.
-    """
-    try:  # keyring is a test/CI dep, not a hard runtime dep — fail open if absent.
-        import keyring
-        import keyring.backend
-        from keyring.errors import PasswordDeleteError
-    except (
-        Exception
-    ):  # pragma: no cover  # trw-fail-silent-allow: keyring is an optional test dep; fixture is a no-op without it
-        yield
-        return
-
-    class _InMemoryKeyring(keyring.backend.KeyringBackend):  # type: ignore[misc]
-        """A minimal RAM-only keyring backend for hermetic tests."""
-
-        priority = 1.0  # type: ignore[assignment]
-
-        def __init__(self) -> None:
-            super().__init__()
-            self._store: dict[tuple[str, str], str] = {}
-
-        def get_password(self, service: str, username: str) -> str | None:
-            return self._store.get((service, username))
-
-        def set_password(self, service: str, username: str, password: str) -> None:
-            self._store[(service, username)] = password
-
-        def delete_password(self, service: str, username: str) -> None:
-            try:
-                del self._store[(service, username)]
-            except KeyError as exc:
-                raise PasswordDeleteError("not found") from exc
-
-    previous = keyring.get_keyring()
-    keyring.set_keyring(_InMemoryKeyring())
-    try:
-        yield
-    finally:
-        keyring.set_keyring(previous)
 
 
 @pytest.fixture(autouse=True)

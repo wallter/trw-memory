@@ -66,8 +66,8 @@ def test_invariant_fails_for_a_default_that_declares_custom_modules(
     assert probe.declares_remote_code is True
 
 
-def test_trw_mcp_default_matches_the_engine_default() -> None:
-    """The two shipped defaults must not diverge (FR03 names both surfaces)."""
-    config_module = pytest.importorskip("trw_mcp.models.config")
-    default = config_module.TRWConfig.model_fields["retrieval_embedding_model"].default
-    assert default == local_mod._DEFAULT_MODEL
+def test_the_config_default_matches_the_loader_default() -> None:
+    """The model the daemon configures by default is the one the loader guards (FR03)."""
+    from trw_memory.models.config import MemoryConfig
+
+    assert MemoryConfig.model_fields["embedding_model"].default == local_mod._DEFAULT_MODEL

@@ -45,8 +45,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient:
 
 def _prepare_common_recall_mocks(client: MemoryClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(client, "_get_embedder", lambda: None)
-    monkeypatch.setattr(client, "_merge_tier_results", lambda results, *_args: results)
-    monkeypatch.setattr(client, "_remember_results_in_tiers", lambda _results: None)
+    monkeypatch.setattr("trw_memory._client_recall.remember_results_in_tiers", lambda _client, _results: None)
     monkeypatch.setattr(client, "_record_recall_access", AsyncMock(return_value=None))
     monkeypatch.setattr(client, "_apply_pending_remote_retirements", AsyncMock(return_value=None))
 

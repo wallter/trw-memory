@@ -326,24 +326,28 @@ def test_restore_copies_snapshot_over_db(tmp_path: Path) -> None:
     assert _row_count(src) == 5
 
 
-def test_restore_clears_stale_wal_shm_sidecars(tmp_path: Path) -> None:
-    """Restore must delete stale -wal/-shm so old WAL frames can't corrupt the base."""
+@pytest.mark.parametrize("name", ["memory.db", "store.sqlite", "a.db.db"])
+def test_restore_clears_stale_wal_shm_sidecars(tmp_path: Path, name: str) -> None:
+    """Restore must delete stale -wal/-shm so old WAL frames can't corrupt the base.
+
+    rc4: the sidecars were derived by replacing ".db", so a "store.sqlite" restore unlinked the store it
+    had just restored, and "a.db.db" missed its real sidecars.
+    """
     base = tmp_path
-    src = tmp_path / "memory.db"
+    src = tmp_path / name
     _make_db(src, rows=5)
     snap = take_daily_snapshot(base, src, keep_daily=7, now=datetime(2026, 4, 13, tzinfo=timezone.utc))
     # Stale sidecars left from a prior live DB session at this path.
-    wal = tmp_path / "memory.db-wal"
-    shm = tmp_path / "memory.db-shm"
+    wal = tmp_path / f"{name}-wal"
+    shm = tmp_path / f"{name}-shm"
     wal.write_bytes(b"stale wal frames")
     shm.write_bytes(b"stale shm")
 
     restore_from_snapshot(base, snap, src)
 
-    assert src.exists()
+    # checked before anything opens the store: SQLite itself discards an invalid WAL on open
+    assert (src.exists(), wal.exists(), shm.exists()) == (True, False, False)
     assert _row_count(src) == 5
-    assert not wal.exists()  # stale WAL removed so it cannot replay onto the base
-    assert not shm.exists()
 
 
 def test_restore_rejects_path_traversal(tmp_path: Path) -> None:

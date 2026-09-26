@@ -18,10 +18,53 @@ from unittest.mock import patch
 
 import pytest
 
-from trw_memory.exceptions import StorageError
+from trw_memory.exceptions import StorageError, UntrustedDirectoryError
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 _POSIX_ONLY = pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX mode bits")
+
+
+@_POSIX_ONLY
+def test_an_ancestor_another_principal_can_rewrite_refuses_the_store(tmp_path: Path) -> None:
+    """PRD-SEC-016 FR04: an ancestor of the store directory -- not just its
+    immediate parent -- that is group/world-writable without the sticky bit
+    refuses the daemon's ancestor-chain gate before anything is opened, even
+    though the store directory itself is private and self-owned."""
+    import trw_memory._dir_trust as dir_trust
+
+    shared_ancestor = tmp_path / "shared-home"
+    shared_ancestor.mkdir(mode=0o777)
+    os.chmod(shared_ancestor, 0o777)
+    store_dir = shared_ancestor / "user" / "memory"
+    store_dir.mkdir(parents=True, mode=0o700)
+
+    with pytest.raises(UntrustedDirectoryError, match="group/world-writable"):
+        dir_trust.verify_ancestor_chain_trusted(store_dir)
+
+
+@_POSIX_ONLY
+def test_a_sticky_world_writable_ancestor_serves(tmp_path: Path) -> None:
+    """FR04: a sticky ancestor (``/tmp``-style) is trusted regardless of writability."""
+    import trw_memory._dir_trust as dir_trust
+
+    sticky_ancestor = tmp_path / "sticky-home"
+    sticky_ancestor.mkdir(mode=0o1777)
+    os.chmod(sticky_ancestor, 0o1777)
+    store_dir = sticky_ancestor / "user" / "memory"
+    store_dir.mkdir(parents=True, mode=0o700)
+
+    dir_trust.verify_ancestor_chain_trusted(store_dir)  # must not raise
+
+
+@_POSIX_ONLY
+def test_default_own_private_layout_serves(tmp_path: Path) -> None:
+    """FR04: the default private (0700, self-owned) ~/.trw layout adds no failure."""
+    import trw_memory._dir_trust as dir_trust
+
+    store_dir = tmp_path / "own-home" / "user" / "memory"
+    store_dir.mkdir(parents=True, mode=0o700)
+
+    dir_trust.verify_ancestor_chain_trusted(store_dir)  # must not raise
 
 
 @_POSIX_ONLY
@@ -73,7 +116,7 @@ def test_unowned_unsafe_parent_remains_fail_closed(tmp_path: Path, monkeypatch: 
     os.chmod(parent, 0o775)
     monkeypatch.setattr(permissions.os, "geteuid", lambda: parent.stat().st_uid + 1)
 
-    with pytest.raises(StorageError, match="must not be group/world writable"):
+    with pytest.raises(StorageError, match="group/world-writable"):
         SQLiteBackend(parent / "memory.db")
     assert stat.S_IMODE(parent.stat().st_mode) == 0o775
 
@@ -91,7 +134,7 @@ def test_parent_fchmod_failure_remains_fail_closed(tmp_path: Path, monkeypatch: 
 
     monkeypatch.setattr(permissions.os, "fchmod", fail_fchmod)
 
-    with pytest.raises(StorageError, match="Cannot harden SQLite parent permissions"):
+    with pytest.raises(StorageError, match=r"Cannot harden .* permissions"):
         SQLiteBackend(parent / "memory.db")
 
 
@@ -129,7 +172,7 @@ def test_parent_symlink_is_rejected_without_chmodding_target(tmp_path: Path) -> 
     linked_parent = tmp_path / "linked-parent"
     linked_parent.symlink_to(target, target_is_directory=True)
 
-    with pytest.raises(StorageError, match="Cannot securely open SQLite parent"):
+    with pytest.raises(StorageError, match="Cannot securely open directory"):
         SQLiteBackend(linked_parent / "memory.db")
     assert stat.S_IMODE(target.stat().st_mode) == 0o775
 
@@ -206,9 +249,15 @@ def test_nofollow_race_failure_blocks_connection_open(tmp_path: Path, monkeypatc
     db_path = tmp_path / "memory.db"
     real_open = os.open
 
-    def fail_open(path: object, flags: int, mode: int = 0o777) -> int:
-        if Path(str(path)) == db_path:
+    def fail_open(path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        # The DB file is now opened dir_fd-relative to the verified parent,
+        # so the call this test targets passes the bare filename, not the
+        # full path -- ``dir_fd`` is what proves it is anchored to the
+        # already-open, already-verified parent descriptor.
+        if dir_fd is not None and str(path) == db_path.name:
             raise OSError(errno.ELOOP, "loop")
+        if dir_fd is not None:
+            return real_open(path, flags, mode, dir_fd=dir_fd)  # type: ignore[arg-type]
         return real_open(path, flags, mode)  # type: ignore[arg-type]
 
     monkeypatch.setattr(permissions.os, "open", fail_open)
@@ -228,7 +277,7 @@ def test_recovery_open_secures_db_and_sidecars(tmp_path: Path) -> None:
     db_path = tmp_path / "recovered.db"
     previous_umask = os.umask(0o022)
     try:
-        connection = _open_recovered_conn(db_path, dbapi=sqlite3, sqlcipher_key_hex=None)
+        connection = _open_recovered_conn(db_path, dbapi=sqlite3)
         try:
             paths = [db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")]
             assert all(path.exists() for path in paths)

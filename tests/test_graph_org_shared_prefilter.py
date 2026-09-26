@@ -137,3 +137,32 @@ def test_list_org_shared_omits_sibling_without_read_permission(monkeypatch: Any)
 
     assert graph.list_org_shared_entries(config, "project:current") == []
     assert spy.list_entries_calls == []
+
+
+def test_a_sibling_outside_the_transport_grant_is_skipped_unread_and_unlogged(monkeypatch: Any) -> None:
+    """W27: org recall visits every namespace, so an ungranted one is a routine skip, not a warning."""
+    from structlog.testing import capture_logs
+
+    from trw_memory import graph
+
+    granted, other = "project:granted", "project:other"
+    spy = _SpyBackend(
+        [
+            _xv(make_entry(entry_id="M-g", content="granted row", namespace=granted, importance=0.9)),
+            _xv(make_entry(entry_id="M-o", content="other tenant row", namespace=other, importance=0.9)),
+        ]
+    )
+
+    @contextmanager
+    def _fake_discover(_config: MemoryConfig, **_: object) -> Any:
+        yield [([granted, other], spy)]
+
+    monkeypatch.setattr("trw_memory.integrations._backend.discover_namespace_backends", _fake_discover)
+    monkeypatch.setattr("trw_memory.security.rbac.transport_grant", lambda: frozenset({"project:current", granted}))
+
+    with capture_logs() as logs:
+        result = graph.list_org_shared_entries(MemoryConfig(), "project:current")
+
+    assert [entry.content for entry in result] == ["granted row"]
+    assert [call["namespace"] for call in spy.list_entries_calls] == [granted], "an ungranted sibling was read"
+    assert not [log for log in logs if log.get("event") == "authorization_denied"]

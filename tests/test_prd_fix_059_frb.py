@@ -15,12 +15,12 @@ from unittest.mock import patch
 import pytest
 import structlog
 
-from trw_memory.client import (
+from trw_memory._client_recall import (
     _FALLBACK_IMPORTANCE_WEIGHT,
     _FALLBACK_TF_SCALE,
     _FALLBACK_TF_WEIGHT,
-    MemoryClient,
 )
+from trw_memory.client import MemoryClient
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -390,14 +390,6 @@ class TestScoringConstants:
     def test_weights_sum_to_one(self) -> None:
         """TF weight + importance weight should sum to 1.0."""
         assert abs(_FALLBACK_TF_WEIGHT + _FALLBACK_IMPORTANCE_WEIGHT - 1.0) < 0.01
-
-    def test_backward_compat_aliases_exist(self) -> None:
-        """Old constant names still exist for backward compatibility."""
-        from trw_memory.client import _IMPORTANCE_WEIGHT, _TF_SCALE, _TF_WEIGHT
-
-        assert _TF_WEIGHT == _FALLBACK_TF_WEIGHT
-        assert _IMPORTANCE_WEIGHT == _FALLBACK_IMPORTANCE_WEIGHT
-        assert _TF_SCALE == _FALLBACK_TF_SCALE
 
 
 # ---------------------------------------------------------------------------

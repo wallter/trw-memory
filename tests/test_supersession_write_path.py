@@ -49,7 +49,6 @@ def test_consolidation_closes_window_not_delete(tmp_path: Path) -> None:
     # Existing flags preserved (complementary, not replaced).
     assert a.consolidated_into == consolidated.id
     assert a.status == MemoryStatus.ARCHIVED
-    assert a.validity_state() == "superseded"
 
     # Retained, not deleted: row count is non-decreasing across the operation
     # (2 originals + 1 consolidated = 3).

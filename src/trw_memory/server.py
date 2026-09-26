@@ -31,6 +31,8 @@ import sys
 
 from fastmcp import FastMCP
 
+from trw_memory.daemon._arg_bounds import ArgumentBounds
+
 mcp = FastMCP("trw-memory")
 
 #: The two live transports. ``stdio`` stays the default so a client that spawns
@@ -44,9 +46,6 @@ SERVE_MODES = ("stdio", "http")
 REGISTERED_TOOL_NAMES: tuple[str, ...] = (
     "memory_assertion_health",
     "memory_audit",
-    "memory_code_index",
-    "memory_code_search",
-    "memory_code_symbol",
     "memory_consolidate",
     "memory_list_page",
     "memory_find_duplicate",
@@ -60,6 +59,7 @@ REGISTERED_TOOL_NAMES: tuple[str, ...] = (
     "memory_namespace_rename",
     "memory_quarantine_list",
     "memory_recall",
+    "memory_reembed",
     "memory_record_surfaced",
     "memory_review",
     "memory_search",
@@ -75,14 +75,12 @@ REGISTERED_TOOL_NAMES: tuple[str, ...] = (
     "memory_similar",
     "memory_verify",
     "memory_import_checkout",
-    "memory_wiki_lint",
 )
 
 
 def _register_tools() -> None:
     from trw_memory.tools.audit import register_audit_tool
     from trw_memory.tools.checkout_import import register_checkout_import_tools
-    from trw_memory.tools.code_index import register_code_index_tools
     from trw_memory.tools.consolidate import register_consolidate_tool
     from trw_memory.tools.entry import register_entry_tools
     from trw_memory.tools.forget import register_forget_tool
@@ -91,6 +89,7 @@ def _register_tools() -> None:
     from trw_memory.tools.namespace_admin import register_namespace_admin_tools
     from trw_memory.tools.recall import register_recall_tool
     from trw_memory.tools.recall_support import register_recall_support_tools
+    from trw_memory.tools.reembed import register_reembed_tool
     from trw_memory.tools.review import register_quarantine_list_tool, register_review_tool
     from trw_memory.tools.search import register_search_tool
     from trw_memory.tools.similar import register_similar_tool
@@ -99,7 +98,6 @@ def _register_tools() -> None:
     from trw_memory.tools.sync import register_sync_tools
     from trw_memory.tools.update import register_update_tool
     from trw_memory.tools.verify import register_verify_tool
-    from trw_memory.tools.wiki_lint import register_wiki_lint_tool
 
     register_store_tool(mcp)
     register_recall_tool(mcp)
@@ -118,27 +116,20 @@ def _register_tools() -> None:
     register_update_tool(mcp)
     register_consolidate_tool(mcp)
     register_maintain_tool(mcp)
+    register_reembed_tool(mcp)
     register_search_tool(mcp)
     register_status_tool(mcp)
-    register_wiki_lint_tool(mcp)
-    register_code_index_tools(mcp)
 
 
 _register_tools()
+mcp.add_middleware(ArgumentBounds())
 
 
 def _preflight(config: object) -> None:
-    """Fail before serving when a required runtime dependency is missing."""
-    from trw_memory.embeddings import get_local_embedder
-    from trw_memory.storage.sqlite_backend import _import_sqlcipher_driver
+    """Fail before serving when the config asks for something 4.0 cannot do."""
+    from trw_memory.exceptions import refuse_encryption_at_rest
 
-    if getattr(config, "encryption_enabled", False):
-        _import_sqlcipher_driver()
-    if getattr(config, "local_only", False):
-        get_local_embedder(
-            model_name=getattr(config, "embedding_model", ""),
-            dim=getattr(config, "embedding_dim", 0),
-        )
+    refuse_encryption_at_rest(config)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -174,25 +165,11 @@ def _build_parser() -> argparse.ArgumentParser:
 def _serve_http(port: int | None, idle_shutdown_seconds: float | None) -> None:
     """Run the loopback daemon, exiting quietly if one is already running."""
     from trw_memory.daemon._serve import DaemonServeOptions, serve_loopback
-    from trw_memory.exceptions import ConfigError, DaemonAlreadyRunningError
+    from trw_memory.exceptions import DaemonAlreadyRunningError
     from trw_memory.models.config import MemoryConfig
 
     config = MemoryConfig()
     _preflight(config)
-    if config.encryption_enabled:
-        # The daemon pins memory_single_store_path, and that combination is
-        # refused (PRD-CORE-253 FR09): SQLCipher keys a file while this package
-        # derives a per-namespace key, so every namespace after the first could
-        # not decrypt the shared store. Refusing HERE, before the pin, turns a
-        # confusing second-namespace decrypt failure inside a served tool call
-        # into one startup error that names the reason.
-        raise ConfigError(
-            "refusing to start the loopback daemon with encryption_enabled: the daemon serves every "
-            "namespace from one file, and this package derives a per-namespace SQLCipher key, so only "
-            "the first namespace could decrypt it. Single-file encryption keys are PRD-CORE-253 FR09. "
-            "Run `trw-memory-server serve stdio` for an encrypted per-namespace store, or disable "
-            "encryption for the daemon."
-        )
     options = DaemonServeOptions.from_config(config, port=port, idle_shutdown_seconds=idle_shutdown_seconds)
     try:
         asyncio.run(serve_loopback(options))
@@ -205,7 +182,9 @@ def _serve_http(port: int | None, idle_shutdown_seconds: float | None) -> None:
 def main(argv: list[str] | None = None) -> None:
     """Console-script entry point for ``trw-memory-server``."""
     from trw_memory.models.config import MemoryConfig
+    from trw_memory.user_paths import require_supported_platform
 
+    require_supported_platform()
     args = _build_parser().parse_args(argv)
     if getattr(args, "mode", "stdio") == "http":
         _serve_http(args.port, args.idle_shutdown_seconds)

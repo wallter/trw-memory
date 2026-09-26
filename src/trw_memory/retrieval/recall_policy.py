@@ -170,8 +170,8 @@ def resolve_query(query: str, config: MemoryConfig) -> RetrievalQuery:
 def hybrid_policy(config: MemoryConfig, *, limit: int, recency_weight: float) -> dict[str, Any]:
     """The ``hybrid_search`` keyword arguments every recall surface ranks with.
 
-    Rerank is unconditional (PRD-CORE-284): only a missing, uncached or -- under
-    ``local_only`` -- undownloadable model skips it. The floor scales with ``limit``.
+    Rerank is unconditional (PRD-CORE-284): only a missing or uncached model
+    skips it. The floor scales with ``limit``.
     """
     from trw_memory.retrieval import _adaptive_floor
 
@@ -188,7 +188,6 @@ def hybrid_policy(config: MemoryConfig, *, limit: int, recency_weight: float) ->
         "rerank_candidates": config.recall_rerank_candidates,
         "rerank_min_score": floor.min_score,
         "rerank_min_keep": floor.min_keep,
-        "rerank_local_only": config.local_only,
         # The entity-bridge second hop only runs when the cross-encoder scored the
         # pool; MEMORY_RECALL_BRIDGE_HOP=false turns it off.
         "bridge_hop": config.recall_bridge_hop,
@@ -199,6 +198,9 @@ def hybrid_policy(config: MemoryConfig, *, limit: int, recency_weight: float) ->
 #: admission, the recall filter or the token budget drop are refilled from ranked
 #: rows rather than lost (trw-mcp F-001). Both tool surfaces rank to this depth.
 RECALL_PREFETCH_MULTIPLIER = 5
+#: The largest ``limit`` either recall surface accepts: the 10,000-row ceiling the store tools already
+#: scan to, and trw-mcp's deepest daemon page (C12 rc7).
+MAX_RECALL_LIMIT = 10_000
 
 
 def ranking_arguments(

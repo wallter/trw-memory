@@ -23,7 +23,7 @@ from ._optional_extras import requires_sqlite_vec
 
 class TestDbapiGraphCompatibility:
     def test_graph_update_accepts_dbapi_compatible_connection_proxy(self, tmp_path: Path) -> None:
-        """Graph enrichment supports SQLCipher-like non-stdlib connection types."""
+        """Graph enrichment supports non-stdlib (pysqlite3-style) connection types."""
 
         class ConnectionProxy:
             def __init__(self, delegate: sqlite3.Connection) -> None:
@@ -257,7 +257,6 @@ class TestRbacEnforcement:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
         monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
         monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
-        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
         monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
         monkeypatch.setenv("MEMORY_PLATFORM_API_KEY", "test-key")
         client = MemoryClient(namespace="default", mode="local")
@@ -274,7 +273,39 @@ class TestRbacEnforcement:
         assert entry is not None
         assert entry.published_to_platform is True
         assert entry.remote_id == "42"
+        assert entry.last_synced_at is not None
         assert entry.vector_clock
+        await reopened.close()
+
+    async def test_an_edit_made_while_the_publish_ran_stays_dirty(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """C12 rc7: the publish ran on a snapshot outside the client lock, then stamped last_synced_at
+        unconditionally, so an edit landing meanwhile was recorded as pushed and never sent."""
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
+        monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
+        monkeypatch.setenv("MEMORY_PLATFORM_API_KEY", "test-key")
+        client = MemoryClient(namespace="default", mode="local")
+        db_path = client._get_backend()._db_path  # type: ignore[attr-defined]
+
+        def _publish_while_edited(entry: MemoryEntry, *_args: object, **_kwargs: object) -> dict[str, object]:
+            with SQLiteBackend(db_path) as other:
+                other.update(entry.id, namespace=entry.namespace, detail="edited during the publish")
+            return {"success": True, "remote_id": "42", "retryable": False}
+
+        with patch("trw_memory.client.publish_memory_result", side_effect=_publish_while_edited):
+            stored = await client.store("publish this entry", importance=0.9)
+            await client.close()
+
+        reopened = MemoryClient(namespace="default", mode="local")
+        entry = reopened._get_backend().get(stored["memory_id"], namespace="default")
+        assert entry is not None and entry.detail == "edited during the publish"
+        assert entry.published_to_platform is True and entry.remote_id == "42"
+        assert entry.last_synced_at is None, "an edit the platform never received was marked synced"
         await reopened.close()
 
     async def test_store_sync_failure_enqueues_retry_payload(
@@ -285,7 +316,6 @@ class TestRbacEnforcement:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
         monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
         monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
-        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
         monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
         monkeypatch.setenv("MEMORY_PLATFORM_API_KEY", "test-key")
         client = MemoryClient(namespace="default", mode="local")

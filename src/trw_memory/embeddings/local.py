@@ -16,13 +16,13 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
-import os
 import sys
 import threading
 from collections.abc import Iterator
 
 import structlog
 
+from trw_memory._model_pin import DEFAULT_EMBEDDING_MODEL, model_revision
 from trw_memory.embeddings._declared_space import declared_embedding_space, snapshot_revision
 from trw_memory.embeddings._hf_cache import CacheProbe, CacheState, probe_model_cache
 from trw_memory.embeddings._loaded_state import dependency_versions, loaded_state_digest
@@ -30,16 +30,15 @@ from trw_memory.embeddings._query_prompts import query_prefix
 from trw_memory.embeddings._runtime_identity import capture_runtime_identity, runtime_identity_matches
 from trw_memory.embeddings._similarity_calibration import register_space_model
 from trw_memory.embeddings.provenance import EmbeddingSpace
-from trw_memory.exceptions import LocalOnlyViolationError, RemoteCodeNotPermittedError
+from trw_memory.exceptions import ModelNotCachedError, RemoteCodeNotPermittedError
 from trw_memory.models.config import MemoryConfig
 
 logger = structlog.get_logger(__name__)
 
-_DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
+_DEFAULT_MODEL = DEFAULT_EMBEDDING_MODEL
 _DEFAULT_DIM = 384
 _TORCHCODEC_MODULE_PREFIX = "torchcodec"
 _MISSING = object()
-_HF_HOST = "huggingface.co"
 
 # PRD-SEC-014-FR02: the single named consent for executing repo-supplied code.
 _REMOTE_CODE_FIELD = "embedding_trust_remote_code"
@@ -52,31 +51,15 @@ _REMOTE_CODE_FIELD = "embedding_trust_remote_code"
 # security refusal.
 _REMOTE_CODE_ERROR_MARKERS = ("trust_remote_code=true", "requires you to execute")
 
-# PRD-QUAL-110-FR04: offline switches that block the huggingface.co model
-# download. ``TRW_OFFLINE`` is the TRW master switch; ``HF_HUB_OFFLINE`` is the
-# upstream huggingface_hub convention. Any truthy value forces
-# ``local_files_only=True`` even when the ``local_only`` config field is False.
-_OFFLINE_ENV_VARS = ("TRW_OFFLINE", "HF_HUB_OFFLINE")
-_TRUTHY = ("1", "true", "yes", "on")
+#: What a missing model's error names as the fix (runtime loads never download, PLAN W40).
+#: Both routes: an SDK-only install has no ``trw-mcp`` command.
+FETCH_COMMAND = "trw-mcp models fetch (SDK: trw_memory.embeddings.fetch_models())"
 
-
-def _offline_download_blocked() -> bool:
-    """Return True when an env offline switch blocks the model download (FR04)."""
-    return any(os.environ.get(name, "").strip().lower() in _TRUTHY for name in _OFFLINE_ENV_VARS)
-
-
-def _blocked_by(config: MemoryConfig, offline: bool) -> str:
-    """Name what prevented the download in a ``local_files_only`` failure.
-
-    Since PRD-SEC-014-FR01 a cache probe can force ``local_files_only`` on its
-    own, so the message must be able to say so (RISK-001): reporting an offline
-    switch that is not set would send the operator to unset nothing.
-    """
-    if config.local_only:
-        return "memory_local_only=True"
-    if offline:
-        return "TRW_OFFLINE/HF_HUB_OFFLINE"
-    return "the local cache reported a complete snapshot, so no download was attempted"
+#: Every input is cut to this many characters before it reaches the model, so no caller (store,
+#: correction, similar, reembed, consolidation) can hand the shared encode lock an unbounded text.
+#: The model truncates to its token window anyway (512 tokens for the default), so the cut changes
+#: no vector of ordinary text (rc9 sweep round 3).
+MAX_EMBED_INPUT_CHARS = 8_000
 
 
 def _is_remote_code_error(exc: BaseException) -> bool:
@@ -161,8 +144,32 @@ def _hide_broken_torchcodec_for_sentence_transformers() -> Iterator[None]:
 
 #: Device name handed to sentence-transformers when the CUDA load fails.
 _CPU_DEVICE = "cpu"
+
+#: The device every model in this process runs on; ``None`` lets torch choose.
+#: macOS runs on CPU: two threads encoding on the Metal (MPS) device at once
+#: aborted the daemon (``IOGPUMetalCommandBuffer setCurrentCommandEncoder``
+#: assertion, 2026-09-25), and a process abort takes every client's memory down.
+#: A lock would have to cover every torch call that touches the device, now and
+#: later, and a gap is another abort. Measured on an M5 Pro: a query embed is
+#: faster on CPU (5-8 vs 10-13 ms); a 50-pair re-rank costs ~20 ms more.
+INFERENCE_DEVICE: str | None = _CPU_DEVICE if sys.platform == "darwin" else None
 #: How much of the CUDA error text the fallback warning carries.
 _CUDA_ERROR_DETAIL_CHARS = 160
+
+
+#: OSErrors that name the machine, not the cache: never reported as a cache miss.
+_NOT_A_CACHE_MISS = (PermissionError, IsADirectoryError, NotADirectoryError, InterruptedError)
+
+
+def _is_cache_miss(exc: OSError, state: CacheState) -> bool:
+    """Whether a local-files-only load failed because the model is not cached.
+
+    A ``COMPLETE`` probe saw every declared file on disk, so a load error there is
+    something else. Otherwise the loader's own miss (a plain ``OSError`` from
+    transformers, or ``FileNotFoundError``) is a miss, unless the error names the
+    machine: permissions, a path of the wrong kind, an interrupted read.
+    """
+    return state is not CacheState.COMPLETE and not isinstance(exc, _NOT_A_CACHE_MISS)
 
 
 def _is_cuda_error(exc: BaseException) -> bool:
@@ -254,44 +261,18 @@ class LocalEmbeddingProvider:
 
         self._load_attempted = True
         config = MemoryConfig()
-        # PRD-QUAL-110-FR04: an env offline switch forces local-files-only even
-        # when the config field is False, so an air-gapped deployer can prove
-        # zero huggingface.co egress without editing config.
-        offline = _offline_download_blocked()
-        switch_forced = bool(config.local_only) or offline
-        # PRD-SEC-014-FR01: the cache decides first. A complete local snapshot
-        # needs no Hub round-trip at all, so the config/env expression is now the
-        # FALLBACK for a cache we could not confirm, not the primary resolution.
+        # PLAN W40: a runtime load never downloads. A complete snapshot is handed
+        # over as its DIRECTORY: ``local_files_only=True`` alone is not enough,
+        # because transformers' AutoProcessor rebuilds its hub kwargs from
+        # ``inspect.signature(cached_file)`` and drops it, so the processor probes
+        # would still reach huggingface.co. The local-directory branch cannot.
         probe = self._probe_cache()
         cache_first = probe.state is CacheState.COMPLETE and bool(probe.snapshot_path)
-        local_files_only = switch_forced or probe.state is CacheState.COMPLETE
-        # ``local_files_only=True`` is NOT sufficient on its own: transformers'
-        # AutoProcessor rebuilds its hub kwargs with
-        # ``inspect.signature(cached_file).parameters``, and ``cached_file``'s
-        # signature is ``(path_or_repo_id, filename, **kwargs)`` — so every hub
-        # kwarg, local_files_only included, is dropped and the processor/feature
-        # -extractor probes still reach huggingface.co. That is the source of the
-        # two unauthenticated-request warnings reported against a warm cache.
-        # Handing sentence-transformers the resolved snapshot DIRECTORY takes the
-        # local-directory branch instead, which cannot make a request at all.
         model_ref = probe.snapshot_path if cache_first else self._model_name
         # PRD-SEC-014-FR02: one typed field, and nothing else, decides this.
         trust_remote_code = bool(config.embedding_trust_remote_code)
         if probe.declares_remote_code and not trust_remote_code:
             raise self._remote_code_error("its cached snapshot ships Python modules")
-        if not local_files_only:
-            # A network-capable load may fetch the model from huggingface.co —
-            # disclose the potential egress before it happens (FR04).
-            logger.info(
-                "embedding_model_download_disclosure",
-                model=self._model_name,
-                source=_HF_HOST,
-                cache_state=probe.state.value,
-                detail=(
-                    "Embedding model may be downloaded from huggingface.co on "
-                    "first use. Set TRW_OFFLINE=1 (or HF_HUB_OFFLINE=1) to block."
-                ),
-            )
         try:
             with _hide_broken_torchcodec_for_sentence_transformers():
                 from sentence_transformers import SentenceTransformer
@@ -299,8 +280,10 @@ class LocalEmbeddingProvider:
             try:
                 self._model = SentenceTransformer(
                     model_ref,
-                    local_files_only=local_files_only,
+                    revision=model_revision(self._model_name),
+                    local_files_only=True,
                     trust_remote_code=trust_remote_code,
+                    device=INFERENCE_DEVICE,
                 )
             except RuntimeError as exc:
                 # A busy or full GPU (another process holding CUDA memory) makes
@@ -316,7 +299,8 @@ class LocalEmbeddingProvider:
                 )
                 self._model = SentenceTransformer(
                     model_ref,
-                    local_files_only=local_files_only,
+                    revision=model_revision(self._model_name),
+                    local_files_only=True,
                     trust_remote_code=trust_remote_code,
                     device=_CPU_DEVICE,
                 )
@@ -347,10 +331,8 @@ class LocalEmbeddingProvider:
             if self._embedding_space is None:
                 # No measured identity (accelerator-resident or non-BERT encoder):
                 # record the declared one so vectors are never written unqualified.
-                # A load that just downloaded the snapshot re-probes once to learn
-                # its revision; an uninspectable cache stays revision-less.
-                cold = probe.state in (CacheState.ABSENT, CacheState.INCOMPLETE)
-                revision = probe.snapshot_path if cache_first else (self._probe_cache().snapshot_path if cold else "")
+                # An uninspectable cache stays revision-less.
+                revision = probe.snapshot_path if cache_first else ""
                 self._declared_space = declared_embedding_space(
                     self._model_name, snapshot_revision(revision), self._dim
                 )
@@ -372,18 +354,17 @@ class LocalEmbeddingProvider:
         except OSError as exc:
             if not trust_remote_code and _is_remote_code_error(exc):
                 raise self._remote_code_error("the loader refused to load it without that consent") from exc
-            if local_files_only:
-                raise LocalOnlyViolationError(
-                    f"Model '{self._model_name}' not found in local cache. Download is blocked "
-                    f"({_blocked_by(config, offline)}). Pre-download the model: "
-                    f"python -m sentence_transformers download {self._model_name}"
-                ) from exc
-            self._last_load_error = f"sentence-transformers installed but model load failed: {exc}"
-            logger.warning(
-                "embedding_model_load_failed",
-                model=self._model_name,
-                exc_info=True,
-            )
+            if not _is_cache_miss(exc, probe.state):
+                # A permission, disk or corrupt-file error on a model that IS cached:
+                # reporting it as "not in the local cache" sent operators to re-fetch
+                # a model they already had (W07c). Surface it as itself.
+                self._last_load_error = f"model load failed: {type(exc).__name__}: {exc}"
+                logger.warning("embedding_model_load_failed", model=self._model_name, exc_info=True)
+                return self._model
+            raise ModelNotCachedError(
+                f"Model '{self._model_name}' is not in the local cache, and runtime loads never "
+                f"download. Fetch it: {FETCH_COMMAND}"
+            ) from exc
         except (RuntimeError, TypeError, ValueError) as exc:
             if not trust_remote_code and _is_remote_code_error(exc):
                 raise self._remote_code_error("the loader refused to load it without that consent") from exc
@@ -430,6 +411,7 @@ class LocalEmbeddingProvider:
         """
         if not text.strip():
             return None
+        text = text[:MAX_EMBED_INPUT_CHARS]
 
         model = self._load_model()
         if model is None:
@@ -475,7 +457,7 @@ class LocalEmbeddingProvider:
             return [None] * len(texts)
 
         results: list[list[float] | None] = []
-        non_blank = [t for t in texts if t.strip()]
+        non_blank = [t[:MAX_EMBED_INPUT_CHARS] for t in texts if t.strip()]
         if not non_blank:
             return [None] * len(texts)
 

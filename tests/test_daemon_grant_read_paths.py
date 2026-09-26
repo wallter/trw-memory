@@ -8,6 +8,7 @@ the grant itself. With no access token (the in-process SDK) nothing changes.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -194,3 +195,196 @@ def test_status_under_a_grant_is_blind_to_the_process_wide_maintenance_queue(
 
     assert busy == idle
     assert "maintenance" not in busy.get("security_posture", {})  # type: ignore[operator]
+
+
+def test_path_refusals_leak_no_file_content(tmp_path: Path) -> None:
+    """PRD-SEC-016 NFR04 -- the evidence artifact this AC names.
+
+    "A refusal reply and its log line name the path and the reason. They
+    contain no bytes read from the refused file." Exercises the ONE
+    checkout-bound opener (``open_checkout_file_fd``, PRD-SEC-016 FR02/FR03/
+    FR05) against two distinct refusal causes -- a symlink escape and a
+    ``..`` traversal attempt -- each targeting a file that holds a
+    distinctive secret marker string. The walk refuses BEFORE it ever reads
+    a byte of that file (the component-by-component ``O_NOFOLLOW`` open in
+    ``_dir_trust.open_component_fd`` fails on the symlink/traversal itself,
+    never opening the target for read), so this test proves the secret
+    cannot appear anywhere a caller or an operator can see it: the returned
+    refusal dict (including its ``"error"`` string), and every structlog
+    event captured during the call.
+    """
+    import structlog
+
+    from trw_memory.tools.entry import open_checkout_file_fd
+
+    secret = "TOP-SECRET-9f3a1c-do-not-leak-this-content"  # a marker string, not a real credential
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_file = outside / "private.db"
+    outside_file.write_text(secret, encoding="utf-8")
+
+    root = tmp_path / "checkout"
+    root.mkdir()
+    escape_link = root / "escape.db"
+    escape_link.symlink_to(outside_file)
+
+    with structlog.testing.capture_logs() as symlink_logs:
+        symlink_result = open_checkout_file_fd(str(root), str(root / "escape.db"), "test_read")
+    with structlog.testing.capture_logs() as traversal_logs:
+        traversal_result = open_checkout_file_fd(str(root), str(root / ".." / "outside" / "private.db"), "test_read")
+
+    for result, logs, expected_path_fragment in (
+        (symlink_result, symlink_logs, "escape.db"),
+        (traversal_result, traversal_logs, ".."),
+    ):
+        assert isinstance(result, dict), result
+        assert result["status"] == "refused", result
+        error_message = str(result["error"])
+        assert secret not in error_message, error_message
+        assert secret not in str(result), result
+        log_text = "\n".join(f"{event.get('event', '')} {event}" for event in logs)
+        assert secret not in log_text, log_text
+        # The refusal still names the path and a reason -- NFR04 is about
+        # content leakage, not silence -- so the reply must not degenerate
+        # into an empty acknowledgement.
+        assert "error" in result and error_message
+        assert result["status"] == "refused"
+        # PRD-SEC-016 round-8 finding 3: NFR04's own text is "A refusal
+        # reply AND ITS LOG LINE name the path and the reason" -- assert the
+        # LOG's fields directly, not just the reply's. Before this fix, the
+        # `".."`-traversal refusal produced NO log event at all (only the
+        # symlink-escape path, indirectly, via `_dir_trust`'s own
+        # `dir_open_refused`), so a string-absence check alone could not
+        # have caught a silent refusal.
+        refusal_events = [event for event in logs if event.get("event") == "checkout_boundary_refused"]
+        assert refusal_events, logs
+        assert any(expected_path_fragment in str(event.get("path", "")) for event in refusal_events), logs
+        assert all(event.get("reason") for event in refusal_events), logs
+
+
+def test_a_served_verify_refusal_never_opens_the_refused_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRD-SEC-016 round-7 item 4 -- an open/read spy, at a SERVED tool's own reply and log output.
+
+    The prior NFR04 test above exercises the internal opener directly and
+    proves no BYTES leak. This goes further, at the boundary the coordinator
+    named: the REAL served ``memory_verify`` tool, a REAL SQLite-backed entry
+    carrying a ``grep_present`` assertion whose target is a symlink escaping
+    the checkout, and a spy on ``os.open`` proving the escape target is
+    never opened AT ALL (not "opened but the read is discarded") -- the
+    dir_fd walk (``verification.py::_walk_checkout``) refuses a pattern-
+    matching candidate the instant ``os.DirEntry``/a fresh no-follow stat
+    says it is a symlink, before any enumeration through it or any attempt
+    to read it, so no ``os.open`` call for the outside path is ever made.
+
+    PRD-SEC-016 round-8 review, item 3: the spy used to record ``os.open``'s
+    raw ``path`` ARGUMENT and compare that string against the outside file's
+    fully-RESOLVED path -- blind to a hypothetical future bug that reached
+    the same inode through a bare, ``dir_fd``-relative name (which never
+    equals an absolute string no matter what it points to). This spy instead
+    ``fstat``s every fd ``os.open`` actually returns and records its
+    ``(st_dev, st_ino)`` IDENTITY, then asserts the outside file's identity
+    never appears among them -- a check that holds regardless of what
+    string, relative or absolute, any future open call used to get there.
+    """
+    import asyncio
+
+    import structlog
+
+    from trw_memory.models.memory import Assertion, AssertionType, MemoryEntry, MemoryStatus
+    from trw_memory.tools.verify import register_verify_tool
+
+    secret = "TOP-SECRET-r7-item4-never-opened"  # a marker string, not a real credential
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_file = outside / "leak.txt"
+    outside_file.write_text(secret, encoding="utf-8")
+
+    root = tmp_path / "checkout"
+    root.mkdir()
+    (root / "escape.txt").symlink_to(outside_file)
+
+    monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "verify-storage"))
+    monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+
+    config = MemoryConfig()
+    with create_backend_from_config(config, _ALPHA) as backend:
+        backend.store(
+            MemoryEntry(
+                id="L-escape",
+                content="a claim checked against escape.txt",
+                namespace=_ALPHA,
+                status=MemoryStatus.ACTIVE,
+                assertions=[Assertion(type=AssertionType.GREP_PRESENT, pattern="anything", target="escape.txt")],
+            )
+        )
+
+    outside_identity = (os.stat(outside_file).st_dev, os.stat(outside_file).st_ino)
+    opened_names: list[str] = []
+    opened_identities: list[tuple[int, int]] = []
+    real_open = os.open
+
+    def spying_open(path: object, *args: object, **kwargs: object) -> int:
+        opened_names.append(path if isinstance(path, str) else os.fsdecode(path))  # type: ignore[arg-type]
+        fd = real_open(path, *args, **kwargs)  # type: ignore[arg-type]
+        try:
+            st = os.fstat(fd)
+        except OSError as exc:
+            # Round-10 review, item 3: a swallowed fstat failure here was
+            # indistinguishable from "this fd's identity was checked and is
+            # not the outside one" -- but a spy that cannot observe every
+            # fd `os.open` returns is not proving the property this test
+            # claims. Fail loudly instead of silently narrowing the sample.
+            raise AssertionError(f"identity spy could not fstat an fd opened for {path!r}: {exc}") from exc
+        opened_identities.append((st.st_dev, st.st_ino))
+        return fd
+
+    monkeypatch.setattr(os, "open", spying_open)
+
+    class _Captured:
+        def __init__(self) -> None:
+            self.tools: dict[str, object] = {}
+
+        def tool(self) -> object:
+            return lambda fn: self.tools.setdefault(fn.__name__, fn)
+
+    server = _Captured()
+    register_verify_tool(server)  # type: ignore[arg-type]
+    token = AccessToken(token="t", client_id="c", scopes=[f"ns:{_ALPHA}"], claims={"root": str(root)})
+    reset = auth_context_var.set(AuthenticatedUser(token))
+    try:
+        with structlog.testing.capture_logs() as logs:
+            answer = asyncio.run(
+                server.tools["memory_verify"](namespace=_ALPHA, project_root=None, settings=None)  # type: ignore[operator]
+            )
+    finally:
+        auth_context_var.reset(reset)
+
+    assert answer.get("status") == "ok", answer
+    real_outside_path = str(outside_file.resolve())
+    assert real_outside_path not in opened_names, opened_names
+    assert not any(secret in name for name in opened_names), opened_names
+    # The identity check, not the path-string check above, is the one that
+    # cannot be fooled by a relative, dir_fd-anchored open reaching the same
+    # inode under a name that never matches `real_outside_path`.
+    assert outside_identity not in opened_identities, (outside_identity, opened_identities)
+    assert secret not in str(answer), answer
+    log_text = "\n".join(f"{event.get('event', '')} {event}" for event in logs)
+    assert secret not in log_text, log_text
+
+
+def test_the_identity_spy_actually_fires_on_a_matching_identity() -> None:
+    """Non-vacuity partner: the identity assertion above is not vacuously true.
+
+    A bare `assert X not in []` always passes; this proves the check has
+    teeth by fabricating an `opened_identities` list that DOES contain the
+    outside file's identity (as a hypothetical dir_fd-relative-open
+    regression would produce) and confirming the assertion actually fires.
+    """
+    outside_identity = (7, 42)
+    opened_identities = [(1, 1), outside_identity, (2, 2)]
+
+    assert outside_identity in opened_identities  # the fixture itself is sane
+    with pytest.raises(AssertionError):
+        assert outside_identity not in opened_identities, (outside_identity, opened_identities)

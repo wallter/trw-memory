@@ -50,7 +50,7 @@ def _archive_originals(
        the findings-ledger retained-for-audit discipline.
     4. Updates via storage.update().
 
-    On failure, logs ERROR and raises the exception (caller handles rollback).
+    On failure, raises; the caller logs the cluster's failure and rolls back.
 
     S4 fix: all per-entry archival updates run inside ONE ``storage.transaction()``
     so a crash mid-loop can never leave a cluster partially archived — either every
@@ -68,47 +68,27 @@ def _archive_originals(
             half-open boundary: the superseding record opens exactly when the
             prior window closes).
     """
-    archived_count = 0
     # The window-close instant. One shared instant for the whole cluster so all
     # originals close at the same moment the consolidated entry opens (gap-free).
     close_at = invalid_from if invalid_from is not None else datetime.now(timezone.utc)
 
     with storage.transaction():
         for entry in cluster:
-            try:
-                # FR04: close the prior window without ever clobbering a window
-                # already closed by an earlier supersession (idempotent guard) —
-                # an original that was already superseded keeps its first closer.
-                close_fields: dict[str, object] = {
-                    "consolidated_into": consolidated_id,
-                    "status": MemoryStatus.ARCHIVED,
-                    "updated_at": datetime.now(timezone.utc),
-                }
-                if entry.invalid_from is None:
-                    close_fields["invalid_from"] = close_at
-                    close_fields["invalidated_by"] = consolidated_id
-                updated = storage.update(entry.id, namespace=entry.namespace, **close_fields)
-                if updated is None:
-                    raise StorageError(f"failed to archive original entry {entry.id!r}")
-                archived_count += 1
-            except (
-                StorageError,
-                ValueError,
-                RuntimeError,
-            ) as exc:  # per-item error handling: re-raise but log each failure individually
-                logger.exception(
-                    "consolidation_archive_failed",
-                    entry_id=entry.id,
-                    consolidated_id=consolidated_id,
-                    error=str(exc),
-                )
-                raise
+            # FR04: close the prior window without ever clobbering a window
+            # already closed by an earlier supersession (idempotent guard) —
+            # an original that was already superseded keeps its first closer.
+            close_fields: dict[str, object] = {
+                "consolidated_into": consolidated_id,
+                "status": MemoryStatus.ARCHIVED,
+                "updated_at": datetime.now(timezone.utc),
+            }
+            if entry.invalid_from is None:
+                close_fields["invalid_from"] = close_at
+                close_fields["invalidated_by"] = consolidated_id
+            if storage.update(entry.id, namespace=entry.namespace, **close_fields) is None:
+                raise StorageError(f"failed to archive original entry {entry.id!r}")
 
-    logger.info(
-        "consolidation_archive_complete",
-        consolidated_id=consolidated_id,
-        archived_count=archived_count,
-    )
+    logger.info("consolidation_archive_complete", consolidated_id=consolidated_id, archived_count=len(cluster))
 
 
 # ---------------------------------------------------------------------------
@@ -116,13 +96,21 @@ def _archive_originals(
 # ---------------------------------------------------------------------------
 
 
-def _restore_originals(
-    cluster: list[MemoryEntry],
-    storage: StorageBackend,
-) -> None:
-    """Restore original entries after a failed consolidation attempt."""
-    for entry in cluster:
-        storage.store(entry)
+def _restore_originals(cluster: list[MemoryEntry], storage: StorageBackend, consolidated_id: str) -> None:
+    """Undo this cycle's archival and only that (C12 rc7): a row deleted since the cluster was read stays
+    deleted, and a field is put back only while it still holds what archival wrote into it."""
+    written = {"consolidated_into": consolidated_id, "status": MemoryStatus.ARCHIVED, "invalidated_by": consolidated_id}
+    with storage.transaction():
+        for entry in cluster:
+            if (current := storage.get(entry.id, namespace=entry.namespace)) is None:
+                continue
+            undo = {f: getattr(entry, f) for f, value in written.items() if getattr(current, f) == value}
+            if "invalidated_by" in undo:
+                undo["invalid_from"] = entry.invalid_from
+            if "status" in undo:  # no writer retired it since, so archival's timestamp is the last one
+                undo["updated_at"] = entry.updated_at
+            if "consolidated_into" in undo:
+                storage.update(entry.id, namespace=entry.namespace, **undo)
 
 
 def _rollback_consolidation(
@@ -137,16 +125,19 @@ def _rollback_consolidation(
     sides in place would duplicate knowledge and silently mark only part of the
     cluster as archived. Roll back to the pre-cycle state instead.
 
+    Only an original still archived INTO this cycle's entry is touched: re-storing the snapshots
+    whole resurrected a row forget deleted while the cycle ran and reverted concurrent corrections.
+
     Restoring the originals to ACTIVE is the safety-critical half and must run
     even if deleting the new consolidated entry fails: on a YAML backend
     ``_archive_originals``' ``transaction()`` is a no-op, so a mid-loop failure
     can leave some originals already ``status=archived`` + ``consolidated_into``
     set while the consolidated entry survives. Restore the originals FIRST
-    (idempotent ``store`` of their pre-cycle snapshots), then surface any
+    (their archival fields, from the pre-cycle snapshots), then surface any
     new-entry delete failure. This guarantees a partial consolidation never
     leaves originals archived alongside a surviving consolidated entry.
     """
-    _restore_originals(cluster, storage)
+    _restore_originals(cluster, storage, new_entry.id)
     deleted = storage.delete(new_entry.id, namespace=new_entry.namespace)
     if not deleted:
         raise StorageError(f"failed to delete partially consolidated entry {new_entry.id!r}")

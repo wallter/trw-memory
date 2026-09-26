@@ -517,17 +517,6 @@ class MemoryEntry(BaseModel):
 
         return memory_entry_to_dict(self, fields=fields)
 
-    def validity_state(self) -> Literal["open", "superseded"]:
-        """PRD-CORE-194 FR02: derived validity state from the truth signal.
-
-        ``"superseded"`` iff the window is closed (``invalid_from`` set) — a
-        truth statement. ``"open"`` otherwise. This is ORTHOGONAL to the
-        confidence/decay-driven ``unverified-stale`` signal: TTL/decay downgrades
-        ``confidence`` and never sets ``invalid_from``, so the two states are
-        produced by different causes and surfaced distinctly (FR03).
-        """
-        return "superseded" if self.invalid_from is not None else "open"
-
 
 class MemoryIndex(BaseModel):
     """Index tracking all memory entries."""

@@ -14,7 +14,7 @@ from uuid import uuid4
 import structlog
 from pydantic import BaseModel, ConfigDict
 
-from trw_memory._client_store import _existing_entry_for_namespace
+from trw_memory._client_store import _existing_entry_for_namespace, _revision
 from trw_memory.daemon._offload import run_offloaded
 from trw_memory.embeddings import get_local_embedder, keyword_only_on_refusal
 from trw_memory.embeddings.provenance import generation_provenance_kwargs
@@ -111,7 +111,8 @@ def memory_store_impl(
     Returns:
         {"memory_id": str, "status": "stored", "namespace": str}; a refusal is a
         status, never a raise: "invalid" (schema), "blocked" (PII, poisoning),
-        "rate_limited" (retry after ``retry_after`` seconds), "error" (storage).
+        "rate_limited" (retry after ``retry_after`` seconds), "conflict" (the row changed
+        while the store was prepared; retry), "error" (storage).
         Only an authorization refusal raises.
 
     The status vocabulary this returns is mapped -- explicitly and under test --
@@ -144,7 +145,9 @@ def memory_store_impl(
         )
         raise
     try:
-        validate_store_inputs(content=content, detail=detail, tags=tags, metadata=metadata, importance=importance)
+        validate_store_inputs(
+            content=content, detail=detail, tags=tags, metadata=metadata, importance=importance, assertions=assertions
+        )
     except SchemaValidationError as exc:
         append_audit_event(
             cfg,
@@ -293,8 +296,13 @@ def memory_store_impl(
         # vector failure rolls the row back automatically. This matches
         # MemoryClient.store() (_client_store.py) instead of the older
         # compensating-delete path, giving both store seams one atomicity model.
+        # The row was read before the embedding, off the serialized lane, so a forget, update or
+        # other store may have landed since: write only over the row this revision was built from.
         try:
             with backend.transaction():
+                if _revision(_existing_entry_for_namespace(backend, entry_id, namespace)) != _revision(existing):
+                    msg = f"{entry_id!r} changed while this store was prepared; nothing was written, retry"
+                    return {"error": msg, "status": "conflict", "namespace": namespace}
                 backend.store(entry)
                 if embedding is not None:
                     backend.upsert_vector(entry.id, embedding, namespace=entry.namespace, **proof)

@@ -57,6 +57,10 @@ class _TxnSpyBackend:
         self.list_in_txn.append(self._txn_depth > 0)
         return self._inner.list_entries(*a, **k)
 
+    def ids_by_source(self, *a, **k):  # type: ignore[no-untyped-def]
+        self.list_in_txn.append(self._txn_depth > 0)
+        return self._inner.ids_by_source(*a, **k)
+
 
 def _entry(entry_id: str, actor: str, namespace: str = "project:a") -> MemoryEntry:
     return MemoryEntry(
@@ -94,6 +98,32 @@ class TestToolForgetActorAtomicity:
             # bob's entry survives.
             assert inner.get("B-1", namespace="project:a") is not None
             assert inner.get("A-1", namespace="project:a") is None
+        finally:
+            inner.close()
+
+
+class TestToolForgetActorWindow:
+    def test_actor_forget_reaches_a_fixed_window_and_says_what_it_did_not_reach(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """rc9: an actor forget read the whole namespace inside its transaction on the serialized lane. It
+        now deletes at most _SCAN_ROWS of the actor's rows, selected in storage (so newer rows of other
+        actors cannot hide them), reports ``truncated`` when more remain, and a repeat call deletes the rest."""
+        from trw_memory.tools import forget
+
+        monkeypatch.setattr(forget, "_SCAN_ROWS", 2)
+        cfg = MemoryConfig(storage_path=str(tmp_path / "mem"))
+        inner = SQLiteBackend(tmp_path / "mem.db", dim=cfg.embedding_dim)
+        try:
+            for index, who in enumerate(["alice", "alice", "alice", "bob", "bob", "bob", "bob", "bob"]):
+                inner.store(_entry(f"E-{index}", who))  # the actor's rows are the OLDEST
+
+            first = memory_forget_impl(None, None, "project:a", backend=inner, config=cfg, actor="alice")
+            second = memory_forget_impl(None, None, "project:a", backend=inner, config=cfg, actor="alice")
+
+            assert (first["deleted"], first.get("truncated")) == (2, True)
+            assert (second["deleted"], "truncated" in second) == (1, False)
+            assert all(entry.source_identity == "bob" for entry in inner.list_entries(namespace="project:a"))
         finally:
             inner.close()
 

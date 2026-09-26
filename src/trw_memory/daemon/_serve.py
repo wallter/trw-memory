@@ -24,20 +24,22 @@ import os
 import signal
 import time
 from collections.abc import Iterator
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as package_version
 
 import structlog
 import uvicorn
 from pydantic import BaseModel, Field
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from trw_memory._dir_trust import verify_ancestor_chain_trusted
+from trw_memory.daemon._arg_bounds import call_with_body_cap
 from trw_memory.daemon._instance import claim_single_instance, release_single_instance
 from trw_memory.daemon._offload import shutdown_offload_pool
 from trw_memory.daemon._paths import DaemonPaths
 from trw_memory.daemon._verifier import LoopbackTokenVerifier
-from trw_memory.exceptions import ConfigError
+from trw_memory.daemon.client import _package_version
+from trw_memory.exceptions import ConfigError, UntrustedDirectoryError
 from trw_memory.models.config import MemoryConfig
+from trw_memory.user_paths import require_supported_platform
 
 __all__ = ["DaemonServeOptions", "serve_loopback"]
 
@@ -128,7 +130,7 @@ class _IdleTracker:
         self.in_flight += 1
         self.last_request_at = time.monotonic()
         try:
-            await self._app(scope, receive, send)
+            await call_with_body_cap(self._app, scope, receive, send)
         finally:
             self.in_flight -= 1
             self.last_request_at = time.monotonic()
@@ -136,13 +138,6 @@ class _IdleTracker:
     def idle_for(self, idle_shutdown_seconds: float) -> bool:
         """True when nothing is in flight and the last activity is a window old."""
         return self.in_flight == 0 and time.monotonic() - self.last_request_at >= idle_shutdown_seconds
-
-
-def _package_version() -> str:
-    try:
-        return package_version("trw-memory")
-    except PackageNotFoundError:  # pragma: no cover - only in a source tree without metadata
-        return "unknown"
 
 
 def _idle_poll_seconds(idle_shutdown_seconds: float) -> float:
@@ -161,11 +156,19 @@ async def _watch_idle(tracker: _IdleTracker, server: uvicorn.Server, idle_shutdo
 
 
 def _build_app(paths: DaemonPaths) -> ASGIApp:
-    """Return the streamable-HTTP app with the grant verifier attached."""
+    """Return the streamable-HTTP app with the grant verifier attached.
+
+    Stateless with plain JSON responses (W27): no daemon tool uses MCP session
+    state, and a session-holding server made every client open a standing SSE
+    GET, which the idle tracker counts as in flight, plus a DELETE on close.
+    """
+    from trw_memory.daemon._version_gate import VersionGate
     from trw_memory.server import mcp
 
     mcp.auth = LoopbackTokenVerifier(paths)
-    return mcp.http_app(transport="streamable-http")
+    if not any(isinstance(layer, VersionGate) for layer in mcp.middleware):
+        mcp.add_middleware(VersionGate(_package_version()))
+    return mcp.http_app(transport="streamable-http", stateless_http=True, json_response=True)
 
 
 @contextlib.contextmanager
@@ -234,9 +237,23 @@ async def serve_loopback(options: DaemonServeOptions, *, paths: DaemonPaths | No
         DaemonAlreadyRunningError: A live daemon already holds the claim; this
             process exits without binding and without touching its files.
     """
+    require_supported_platform()  # before anything is opened, even with explicit paths
     resolved = paths or DaemonPaths.resolve()
+    # PRD-SEC-016 FR04: refuse to serve a store whose directory chain another
+    # principal can rewrite, BEFORE anything is opened or the socket is
+    # bound. UntrustedDirectoryError is re-raised as ConfigError so it joins
+    # the same "refuses to start" surface as the retired-token check below
+    # (both name the reason in the exception message that the caller logs
+    # and exits non-zero on).
+    try:
+        verify_ancestor_chain_trusted(resolved.user_memory_dir)
+    except UntrustedDirectoryError as exc:
+        raise ConfigError(str(exc)) from exc
     os.environ.setdefault(_STORAGE_PATH_ENV, str(resolved.user_memory_dir))
     os.environ.setdefault(_SINGLE_STORE_ENV, str(resolved.store))
+    # Every tool body runs on one serialized lane, bounded on the single SQLite store only (rc9).
+    if (backend := MemoryConfig().storage_backend) != "sqlite":
+        raise ConfigError(f"refusing to start: the daemon serves one SQLite store, not storage_backend={backend!r}")
     if resolved.token.exists() or resolved.token.is_symlink():
         raise ConfigError(
             f"refusing to start: {resolved.token} is a retired all-namespace bearer (PRD-CORE-298 FR02). "

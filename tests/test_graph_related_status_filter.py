@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools._recall_helpers import _graph_related
@@ -37,7 +39,7 @@ class TestGraphRelatedStatusFilter:
         backend.store(make_entry(entry_id="ghost", content="obsolete neighbour", status=MemoryStatus.OBSOLETE))
         _link(backend, "seed", "ghost")
 
-        related = _graph_related([{"id": "seed"}], depth=2, backend=backend, conn=backend._conn, namespace="default")
+        related, _ = _graph_related([{"id": "seed"}], depth=2, backend=backend, conn=backend._conn, namespace="default")
 
         ids = {str(item["id"]) for item in related}
         assert "ghost" not in ids, "obsolete neighbour leaked into graph related results"
@@ -48,7 +50,7 @@ class TestGraphRelatedStatusFilter:
         backend.store(make_entry(entry_id="kin", content="active neighbour", status=MemoryStatus.ACTIVE))
         _link(backend, "seed", "kin")
 
-        related = _graph_related([{"id": "seed"}], depth=2, backend=backend, conn=backend._conn, namespace="default")
+        related, _ = _graph_related([{"id": "seed"}], depth=2, backend=backend, conn=backend._conn, namespace="default")
 
         ids = {str(item["id"]) for item in related}
         assert "kin" in ids, "active neighbour should be surfaced via graph traversal"
@@ -63,7 +65,28 @@ class TestGraphRelatedStatusFilter:
         _link(backend, "seed", "poison")
         _link(backend, "seed", "kin")
 
-        related = _graph_related([{"id": "seed"}], depth=2, backend=backend, conn=backend._conn, namespace="default")
+        related, _ = _graph_related([{"id": "seed"}], depth=2, backend=backend, conn=backend._conn, namespace="default")
 
         ids = {str(item["id"]) for item in related}
         assert ids == {"kin"}
+
+    def test_obsolete_neighbours_do_not_fill_the_node_bound(
+        self, sqlite_memory_backend: SQLiteBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The breadth bound counts only ACTIVE neighbours: obsolete ones cannot crowd a visible one out."""
+        from trw_memory.tools import _recall_helpers
+
+        monkeypatch.setattr(_recall_helpers, "GRAPH_RELATED_MAX", 2)
+        backend = sqlite_memory_backend
+        backend.store(make_entry(entry_id="seed", content="active seed", status=MemoryStatus.ACTIVE))
+        for ghost in ("ghost-1", "ghost-2", "ghost-3"):
+            backend.store(make_entry(entry_id=ghost, content=ghost, status=MemoryStatus.OBSOLETE))
+            _link(backend, "seed", ghost)
+        backend.store(make_entry(entry_id="kin", content="active neighbour", status=MemoryStatus.ACTIVE))
+        _link(backend, "seed", "kin")
+
+        related, truncated = _graph_related(
+            [{"id": "seed"}], depth=1, backend=backend, conn=backend._conn, namespace="default"
+        )
+
+        assert ([str(item["id"]) for item in related], truncated) == (["kin"], False)

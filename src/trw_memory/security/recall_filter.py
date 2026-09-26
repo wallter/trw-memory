@@ -29,7 +29,7 @@ from trw_memory.security.poisoning import _INJECTION_PATTERNS, scannable_text
 from trw_memory.security.provenance import entry_content_hash
 from trw_memory.storage.persistence import lock_for_rmw
 
-__all__ = ["RecallDecision", "RecallFilterResult", "filter_recall_window"]
+__all__ = ["RecallDecision", "RecallFilterResult", "filter_recall_window", "redacted_scan_fields"]
 
 _LOG = structlog.get_logger(__name__)
 _LATENCY_BUDGET_MS = 20.0
@@ -115,6 +115,27 @@ def _redact_entry(entry: MemoryEntry) -> MemoryEntry:
             ],
         }
     )
+
+
+def redacted_scan_fields(entry: MemoryEntry) -> dict[str, object]:
+    """Return every ``SCANNED_ENTRY_FIELDS`` value off *entry*, JSON-safe.
+
+    ``filter_recall_window`` redacts ``content``, ``detail``, ``nudge_line``,
+    ``tags``, ``evidence`` and each assertion's ``last_evidence`` (see
+    ``_redact_entry``), but a redacted entry is only useful to a caller that
+    actually copies all six back onto its own result shape. Both recall
+    surfaces used to hand-pick a subset (content/detail/metadata only), so a
+    redacted tag, evidence item, nudge_line or assertion went back verbatim —
+    this is the one place both now read from, so they cannot diverge again.
+    """
+    return {
+        "content": entry.content,
+        "detail": entry.detail,
+        "nudge_line": entry.nudge_line,
+        "tags": list(entry.tags),
+        "evidence": list(entry.evidence),
+        "assertions": [assertion.model_dump(mode="json") for assertion in entry.assertions],
+    }
 
 
 def _decide(entry: MemoryEntry, *, mode: Literal["strict", "redact", "observe"]) -> RecallDecision:

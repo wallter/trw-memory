@@ -50,10 +50,6 @@ JUSTIFIED_INTERNAL_STORES: dict[tuple[str, str], str] = {
         "backend_internal: the default bulk-write fallback fans out to this "
         "backend's own store(); gating here would double-gate every caller."
     ),
-    ("lifecycle/_consolidation_rollback.py", "_restore_originals"): (
-        "rewrite_of_persisted_entry: rolls a failed consolidation back by "
-        "re-writing the exact entries it had just read out of the store."
-    ),
     ("lifecycle/tiers/_runtime.py", "_restoration_callbacks._restore_entry"): (
         "rewrite_of_persisted_entry: restores an archived cold-tier row read by "
         "ColdTierStore.cold_promote into its namespace-checked backend; the "

@@ -57,6 +57,13 @@ start_job() {  # start_job <phase> <name> <log> <cmd...>
   echo "$pid" >> "$ROOT/$phase.pids"
   PIDS+=("$pid"); NAMES+=("$name")
   echo "started $name pid $pid (log $log)"
+  # A job that dies at startup would otherwise free its slot instantly and let the loop race through
+  # every remaining job, turning one failure into a silent run of empty arms.
+  sleep 20
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "FAILED $name died during startup; last lines of $log:"; tail -5 "$log"
+    return 1
+  fi
 }
 # ${A[@]+"${A[@]}"}: bash 3.2 (macOS /bin/bash) treats an empty array as unbound under set -u.
 running() { local n=0 p; for p in ${PIDS[@]+"${PIDS[@]}"}; do kill -0 "$p" 2>/dev/null && n=$((n + 1)); done; echo "$n"; }

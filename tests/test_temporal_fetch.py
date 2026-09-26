@@ -73,7 +73,7 @@ def test_secondary_failure_is_not_successful_empty_result(tmp_path: Path, monkey
 
     class Unavailable:
         @staticmethod
-        def connect(path):
+        def connect(path, **kwargs):
             raise sqlite3.OperationalError("secondary unavailable")
 
     monkeypatch.setattr(_temporal_fetch, "_select_stream", corrupt_stream)

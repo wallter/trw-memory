@@ -27,10 +27,10 @@ class _FakeBackend:
     #: ``test_lock_contention_with_an_UNKNOWN_probe_is_not_a_wipe``.
     has_data: bool | None = True
 
-    def _db_has_data(self, _db_path: Path, *, dbapi: Any, sqlcipher_key_hex: str | None) -> bool | None:
+    def _db_has_data(self, _db_path: Path, *, dbapi: Any) -> bool | None:
         return self.has_data
 
-    def _open_without_integrity_check(self, _db_path: Path, *, dbapi: Any, sqlcipher_key_hex: str | None) -> Any:
+    def _open_without_integrity_check(self, _db_path: Path, *, dbapi: Any) -> Any:
         self.open_without_called = True
         return sqlite3.connect(":memory:")
 
@@ -39,7 +39,6 @@ class _FakeBackend:
         _db_path: Path,
         *,
         dbapi: Any,
-        sqlcipher_key_hex: str | None,
         recovery_policy: str,
         corrupt_backup_keep: int,
         rebuild_from_cold: bool,
@@ -56,7 +55,6 @@ def test_quick_check_failure_with_rows_recovers_instead_of_opening_corrupt_db(tm
         backend,  # type: ignore[arg-type]
         tmp_path / "memory.db",
         dbapi=sqlite3,
-        sqlcipher_key_hex=None,
         recovery_policy="strict",
         corrupt_backup_keep=5,
         rebuild_from_cold=True,
@@ -77,7 +75,6 @@ def test_lock_contention_with_rows_keeps_non_destructive_open_without_probe(tmp_
         backend,  # type: ignore[arg-type]
         tmp_path / "memory.db",
         dbapi=sqlite3,
-        sqlcipher_key_hex=None,
         recovery_policy="strict",
         corrupt_backup_keep=5,
         rebuild_from_cold=True,
@@ -112,7 +109,6 @@ def test_lock_contention_with_an_UNKNOWN_probe_is_not_a_wipe(tmp_path: Path) -> 
         backend,  # type: ignore[arg-type]
         tmp_path / "memory.db",
         dbapi=sqlite3,
-        sqlcipher_key_hex=None,
         recovery_policy="strict",
         corrupt_backup_keep=5,
         rebuild_from_cold=True,
@@ -125,24 +121,31 @@ def test_lock_contention_with_an_UNKNOWN_probe_is_not_a_wipe(tmp_path: Path) -> 
     assert recovered is False
 
 
-def test_a_genuinely_empty_store_still_recovers(tmp_path: Path) -> None:
-    """Non-vacuity partner. ``False`` must still reach the recovery path, or the
-    fix would have disabled recovery for every store it is meant to repair."""
+def test_lock_contention_on_an_empty_store_is_not_a_wipe(tmp_path: Path) -> None:
+    """A NEW store has no rows while other connections are creating it.
+
+    This arm used to recover ("nothing to lose"), renaming the file and
+    unlinking its WAL under the connections still creating it: their commits
+    then returned success into files nothing reads again. Lock/busy says
+    nothing about corruption; ``test_a_malformed_image_is_still_recovered_not_retried``
+    is the partner that proves recovery still runs for a malformed image.
+    """
     backend = _FakeBackend(sqlite3.DatabaseError("database is locked"))
     backend.has_data = False
 
-    open_connection_with_recovery(
+    conn, integrity_warning, recovered = open_connection_with_recovery(
         backend,  # type: ignore[arg-type]
         tmp_path / "memory.db",
         dbapi=sqlite3,
-        sqlcipher_key_hex=None,
         recovery_policy="strict",
         corrupt_backup_keep=5,
         rebuild_from_cold=True,
     )
 
-    assert backend.recover_called is True
-    assert backend.open_without_called is False
+    conn.close()
+    assert backend.recover_called is False, "lock contention on an empty store triggered destructive recovery"
+    assert backend.open_without_called is True
+    assert (integrity_warning, recovered) == (True, False)
 
 
 def test_preflight_classifies_large_db_as_degraded_open(tmp_path: Path) -> None:
@@ -166,7 +169,6 @@ def test_degraded_preflight_blocks_inline_recovery_and_persists_state(tmp_path: 
             backend,  # type: ignore[arg-type]
             db_path,
             dbapi=sqlite3,
-            sqlcipher_key_hex=None,
             recovery_policy="strict",
             corrupt_backup_keep=5,
             rebuild_from_cold=True,
@@ -316,7 +318,6 @@ def _open(backend: object, db_path: Path) -> tuple[Any, bool, bool]:
         backend,  # type: ignore[arg-type]
         db_path,
         dbapi=sqlite3,
-        sqlcipher_key_hex=None,
         recovery_policy="strict",
         corrupt_backup_keep=5,
         rebuild_from_cold=True,
@@ -393,4 +394,69 @@ def test_a_real_store_that_hits_io_errors_keeps_its_file_and_rows(
     assert reopened.count() == 3
     reopened.close()
     assert db_path.stat().st_ino == inode, "the live store was replaced"
+    assert list(tmp_path.glob("memory.db.corrupt*")) == []
+
+
+# --- lock/busy on a new store's first opens (7.0.0 daemon P0) ----------------------
+
+
+def test_a_transient_lock_is_retried_into_a_checked_open(tmp_path: Path, no_backoff: list[float]) -> None:
+    """Two first opens of a new store both switch it to WAL; SQLite answers one "locked" at once."""
+    backend = _FlakyBackend(sqlite3.OperationalError("database is locked"), failures=2)
+
+    conn, integrity_warning, recovered = _open(backend, tmp_path / "memory.db")
+
+    conn.close()
+    assert backend.opens == 3
+    assert len(no_backoff) == 2 and max(no_backoff) < 0.5, "lock waits are short, not the I/O backoff"
+    assert (integrity_warning, recovered, backend.recover_called, backend.open_without_called) == (
+        False,
+        False,
+        False,
+        False,
+    )
+    assert not recovery_state_path(tmp_path / "memory.db").exists()
+
+
+def test_a_write_through_an_open_connection_survives_a_locked_first_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_backoff: list[float]
+) -> None:
+    """End to end on a real file, with the daemon's interleaving forced by a hook.
+
+    Writer A holds a connection to a new, empty store and has just passed its
+    stale-handle check. Writer B's checked open then fails "database is
+    locked" on every attempt. B used to recover the "empty" store -- rename it
+    to ``.corrupt.bak`` and unlink its WAL under A -- so A's write, already
+    past the check that would have reconnected it, returned success into a
+    file nothing reads again (the daemon test counted 199 of 200 rows).
+    """
+    from trw_memory.models.memory import MemoryEntry
+    from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+    db_path = tmp_path / "memory.db"
+    writer_a = SQLiteBackend(db_path)
+    real_open = SQLiteBackend.__dict__["_open_and_configure"]  # the staticmethod itself, not the unwrapped function
+    real_is_stale = writer_a._stale_detector.is_stale
+    opened_b: list[SQLiteBackend] = []
+
+    def locked(*_a: object, **_k: object) -> Any:
+        raise sqlite3.OperationalError("database is locked")
+
+    def check_then_let_b_open() -> bool:
+        stale = real_is_stale()
+        monkeypatch.setattr(SQLiteBackend, "_open_and_configure", staticmethod(locked))
+        opened_b.append(SQLiteBackend(db_path))
+        monkeypatch.setattr(SQLiteBackend, "_open_and_configure", real_open)
+        return stale
+
+    monkeypatch.setattr(writer_a._stale_detector, "is_stale", check_then_let_b_open)
+    writer_a.store(MemoryEntry(id="L-a", content="written through the first connection"))
+    monkeypatch.setattr(writer_a._stale_detector, "is_stale", real_is_stale)
+    (writer_b,) = opened_b
+    writer_b.store(MemoryEntry(id="L-b", content="written through the degraded open"))
+    writer_a.close()
+    writer_b.close()
+
+    with SQLiteBackend(db_path) as reader:
+        assert reader.count() == 2, "a write that returned success is missing from the live store"
     assert list(tmp_path.glob("memory.db.corrupt*")) == []

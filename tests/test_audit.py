@@ -69,9 +69,6 @@ class TestSecurityMaintenanceQueue:
         assert status["bounded"] is True
         assert status["queued"] == 1
 
-        drained = security_runtime.drain_security_maintenance_queue(cfg)
-        assert drained == {"drained": 1, "queued": 0}
-
     def test_security_maintenance_preserves_other_config_queue_items(self, tmp_path: Path) -> None:
         security_runtime._AUDIT_MAINTENANCE_CACHE.clear()
         security_runtime._AUDIT_MAINTENANCE_QUEUE.clear()
@@ -86,10 +83,8 @@ class TestSecurityMaintenanceQueue:
 
         security_runtime.ensure_security_maintenance(first)
         security_runtime.ensure_security_maintenance(second)
-        drained = security_runtime.drain_security_maintenance_queue(first)
 
-        assert drained == {"drained": 1, "queued": 1}
-        assert security_runtime.drain_security_maintenance_queue(second) == {"drained": 1, "queued": 0}
+        assert security_runtime.security_maintenance_status()["queued"] == 2
 
     def test_security_maintenance_enqueue_is_thread_safe_and_deduplicated(self, tmp_path: Path) -> None:
         security_runtime._AUDIT_MAINTENANCE_CACHE.clear()
@@ -111,7 +106,6 @@ class TestSecurityMaintenanceQueue:
             thread.join()
 
         assert security_runtime.security_maintenance_status()["queued"] == 1
-        assert security_runtime.drain_security_maintenance_queue(cfg) == {"drained": 1, "queued": 0}
 
     def test_processed_cache_stays_bounded_across_many_distinct_keys(self, tmp_path: Path) -> None:
         # Reproduces the unbounded-growth bug: each distinct

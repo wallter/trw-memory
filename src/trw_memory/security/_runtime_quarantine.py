@@ -19,8 +19,6 @@ Belongs to ``security/runtime.py``. Re-exported there for back-compat.
   with the SEC-001 recovery policy.
 - ``append_review_log`` — INSERT a review row into the quarantine
   reviews table (creates table on first call).
-- ``quarantine_namespace_dir`` — per-namespace dir path under the
-  config's quarantine root.
 
 The runtime-path functions defer a lookup of
 ``ensure_security_maintenance`` via ``runtime`` to break the import
@@ -33,14 +31,20 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timezone
-from pathlib import Path
 
 import structlog
 
-from trw_memory.exceptions import QuarantineUnreachableError
+from trw_memory.exceptions import (
+    PIIBlockError,
+    QuarantineUnreachableError,
+    SchemaValidationError,
+    refuse_encryption_at_rest,
+)
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.validation import DEFAULT_NAMESPACE
+from trw_memory.security._runtime_pii import apply_runtime_pii_policy
+from trw_memory.security.poisoning import validate_entry_payload
 from trw_memory.security.rbac import transport_grant
 from trw_memory.security.startup import resolve_security_path
 from trw_memory.storage.interface import StorageBackend
@@ -57,6 +61,7 @@ def _ensure_maintenance(config: MemoryConfig) -> None:
 
 
 def open_quarantine_backend(config: MemoryConfig) -> SQLiteBackend:
+    refuse_encryption_at_rest(config)
     path = resolve_security_path(config, "quarantine_db_path", create_parent=True)
     return SQLiteBackend(
         db_path=path,
@@ -66,10 +71,6 @@ def open_quarantine_backend(config: MemoryConfig) -> SQLiteBackend:
         rebuild_from_cold=config.memory_recovery_rebuild_from_cold,
         recovery_inline_max_bytes=config.memory_recovery_inline_max_bytes,
     )
-
-
-def quarantine_namespace_dir(config: MemoryConfig, namespace: str) -> Path:
-    return Path(config.quarantine_path) / namespace.replace(":", "_")
 
 
 def store_quarantined_entry(config: MemoryConfig, entry: MemoryEntry) -> None:
@@ -87,7 +88,7 @@ def store_quarantined_entry(config: MemoryConfig, entry: MemoryEntry) -> None:
                     }
                 )
             )
-            append_review_log(config, entry.id, "quarantined", reviewer_id="system")
+            append_review_log(config, entry.id, "quarantined", reviewer_id="system", namespace=entry.namespace)
     except OSError as exc:
         raise QuarantineUnreachableError(f"quarantine DB unavailable: {exc}") from exc
 
@@ -170,54 +171,56 @@ def delete_quarantined_entries(
     return deleted
 
 
+#: DDL for the review-log table. ``namespace`` was added at schema 8 (Q3):
+#: ``learning_id`` is caller-choosable and can collide across namespaces
+#: (PRD-CORE-294), so a review keyed on ``learning_id`` alone let namespace A's
+#: terminal decision block namespace B's own row with the same id, and leaked
+#: A's reviewer identity to a caller asking about B's. See
+#: ``trw_memory.storage._schema._migrate_v8_quarantine_review_namespace`` for
+#: the forward migration that adds this column to a pre-existing table.
+_CREATE_QUARANTINE_REVIEWS = """
+CREATE TABLE IF NOT EXISTS quarantine_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    learning_id TEXT NOT NULL,
+    namespace TEXT NOT NULL DEFAULT '',
+    decision TEXT NOT NULL,
+    reviewer_id TEXT NOT NULL,
+    reviewed_at TEXT NOT NULL
+)
+"""
+
+
 def append_review_log(
     config: MemoryConfig,
     learning_id: str,
     decision: str,
     *,
     reviewer_id: str,
+    namespace: str,
 ) -> None:
     with open_quarantine_backend(config) as backend:
         conn = getattr(backend, "_conn", None)
         if conn is None:
             raise QuarantineUnreachableError("quarantine DB connection unavailable")
+        conn.execute(_CREATE_QUARANTINE_REVIEWS)
         conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS quarantine_reviews (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                learning_id TEXT NOT NULL,
-                decision TEXT NOT NULL,
-                reviewer_id TEXT NOT NULL,
-                reviewed_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            "INSERT INTO quarantine_reviews (learning_id, decision, reviewer_id, reviewed_at) VALUES (?, ?, ?, ?)",
-            (learning_id, decision, reviewer_id, datetime.now(timezone.utc).isoformat()),
+            "INSERT INTO quarantine_reviews (learning_id, namespace, decision, reviewer_id, reviewed_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (learning_id, namespace, decision, reviewer_id, datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
 
 
-def get_status_history(config: MemoryConfig, learning_id: str) -> list[dict[str, str]]:
+def get_status_history(config: MemoryConfig, learning_id: str, *, namespace: str) -> list[dict[str, str]]:
     with open_quarantine_backend(config) as backend:
         conn = getattr(backend, "_conn", None)
         if conn is None:
             return []
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS quarantine_reviews (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                learning_id TEXT NOT NULL,
-                decision TEXT NOT NULL,
-                reviewer_id TEXT NOT NULL,
-                reviewed_at TEXT NOT NULL
-            )
-            """
-        )
+        conn.execute(_CREATE_QUARANTINE_REVIEWS)
         rows = conn.execute(
-            "SELECT decision, reviewer_id, reviewed_at FROM quarantine_reviews WHERE learning_id = ? ORDER BY id ASC",
-            (learning_id,),
+            "SELECT decision, reviewer_id, reviewed_at FROM quarantine_reviews "
+            "WHERE learning_id = ? AND namespace = ? ORDER BY id ASC",
+            (learning_id, namespace),
         ).fetchall()
     return [
         {"status": str(decision), "reviewer_id": str(reviewer_id), "ts": str(reviewed_at)}
@@ -267,7 +270,7 @@ def _review_quarantined_entry_locked(
     effective_namespace = namespace if namespace is not None else DEFAULT_NAMESPACE
     with open_quarantine_backend(config) as quarantine_backend:
         entry = quarantine_backend.get(learning_id, namespace=effective_namespace)
-        existing_history = get_status_history(config, learning_id)
+        existing_history = get_status_history(config, learning_id, namespace=effective_namespace)
         resolved_status = next(
             (item["status"] for item in existing_history if item.get("status") in {"active", "obsolete_poisoned"}),
             "",
@@ -277,19 +280,58 @@ def _review_quarantined_entry_locked(
         if entry is None:
             return {"learning_id": learning_id, "status": "not_found"}
         if decision == "approve":
-            approved = entry.model_copy(
+            # Q1: a quarantined row that reached this queue via a caller-forged
+            # ``metadata.quarantined`` flag (rather than a genuine trust-score
+            # or anomaly hold) was never subjected to schema/PII checks. Re-run
+            # both here so a reviewer's approval cannot promote unscanned
+            # content — rate-limit and anomaly scoring are skipped: they need
+            # server-side session context this delayed, out-of-band review does not
+            # have, and re-running them against "now" would judge the entry by
+            # a window it was never actually written in.
+            try:
+                validate_entry_payload(
+                    entry,
+                    max_chars=config.max_entry_chars,
+                    min_evidence_items_for_verified=config.min_evidence_items_for_verified,
+                )
+                revalidated, _pii_matches = apply_runtime_pii_policy(entry, config)
+            except (SchemaValidationError, PIIBlockError) as exc:
+                append_review_log(
+                    config, learning_id, "approve_blocked", reviewer_id=reviewer_id, namespace=effective_namespace
+                )
+                return {"learning_id": learning_id, "status": "blocked", "reason": str(exc)}
+            # Adversarial audit 2026-09-24: a plain ``active_backend.store``
+            # here would silently overwrite whatever now lives at
+            # (namespace, id) — a legitimate write made to that id while this
+            # row sat in the review queue, or a caller who chose a colliding
+            # id specifically to land on approve. Refuse rather than clobber;
+            # the reviewer can re-run under a different id once the conflict
+            # is resolved. The check and the store share one write transaction
+            # (BEGIN IMMEDIATE on SQLite), so no writer can land between them (C12).
+            approved = revalidated.model_copy(
                 update={
                     "metadata": {
-                        **entry.metadata,
+                        **revalidated.metadata,
                         "quarantined": "false",
                         "reviewed_by": reviewer_id,
                         "review_decision": "approve",
                     }
                 }
             )
-            active_backend.store(approved)
+            if getattr(type(active_backend), "transaction", None) is StorageBackend.transaction:
+                # No atomic check-and-insert here (YAML): an approval could overwrite a racing write.
+                return {"learning_id": learning_id, "status": "unsupported_backend"}
+            with active_backend.transaction() as txn:
+                conflict = txn.get(learning_id, namespace=effective_namespace) is not None
+                if not conflict:
+                    txn.store(approved)
+            if conflict:
+                append_review_log(
+                    config, learning_id, "approve_conflict", reviewer_id=reviewer_id, namespace=effective_namespace
+                )
+                return {"learning_id": learning_id, "status": "conflict"}
             quarantine_backend.delete(learning_id, namespace=effective_namespace)
-            append_review_log(config, learning_id, "active", reviewer_id=reviewer_id)
+            append_review_log(config, learning_id, "active", reviewer_id=reviewer_id, namespace=effective_namespace)
             return {"learning_id": learning_id, "status": "approved"}
         rejected = entry.model_copy(
             update={
@@ -302,5 +344,7 @@ def _review_quarantined_entry_locked(
             }
         )
         quarantine_backend.store(rejected)
-        append_review_log(config, learning_id, "obsolete_poisoned", reviewer_id=reviewer_id)
+        append_review_log(
+            config, learning_id, "obsolete_poisoned", reviewer_id=reviewer_id, namespace=effective_namespace
+        )
         return {"learning_id": learning_id, "status": "rejected"}

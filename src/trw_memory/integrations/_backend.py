@@ -17,12 +17,10 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from trw_memory.exceptions import ConfigError
+from trw_memory.exceptions import refuse_encryption_at_rest
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.entry_factory import local_node_id_for, new_entry
 from trw_memory.models.memory import MemoryEntry
-from trw_memory.security.encryption import derive_namespace_key
-from trw_memory.security.keys import get_master_key
 
 if TYPE_CHECKING:
     from trw_memory.storage.interface import StorageBackend
@@ -58,43 +56,20 @@ def _write_namespace_metadata(namespace_dir: Path, namespace: str) -> None:
     (namespace_dir / _NAMESPACE_METADATA_FILE).write_text(namespace, encoding="utf-8")
 
 
-def _read_namespace_metadata(namespace_dir: Path) -> str | None:
-    metadata_path = namespace_dir / _NAMESPACE_METADATA_FILE
-    if not metadata_path.exists():
-        return None
-    # Fail open: a single namespace whose ``namespace.txt`` is unreadable
-    # (OSError) or non-UTF-8 (UnicodeDecodeError from a torn/partial write)
-    # must not abort ``discover_namespace_backends`` for every OTHER namespace.
-    # The caller treats ``None`` as "skip this namespace" with a content-free
-    # warning, isolating one corrupt sidecar like any other discovery miss.
-    # Never log the decoded text or raw bytes — the stored namespace string can
-    # carry sensitive project identifiers; only the path + error class.
-    try:
-        namespace = metadata_path.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError) as exc:
-        logger.warning(
-            "namespace_metadata_read_failed",
-            path=str(metadata_path),
-            error=type(exc).__name__,
-        )
-        return None
-    return namespace or None
-
-
 def _create_sqlite_backend(
     config: MemoryConfig,
     db_path: Path,
     *,
-    sqlcipher_key_hex: str | None,
     check_integrity_once: bool = False,
 ) -> StorageBackend:
     """Create SQLite storage with the canonical recovery and dimension settings."""
     from trw_memory.storage.sqlite_backend import SQLiteBackend
 
+    refuse_encryption_at_rest(config)
+
     return SQLiteBackend(
         db_path=db_path,
         dim=config.embedding_dim,
-        sqlcipher_key_hex=sqlcipher_key_hex,
         recovery_policy=config.memory_recovery_policy,
         corrupt_backup_keep=config.memory_corrupt_backup_keep,
         rebuild_from_cold=config.memory_recovery_rebuild_from_cold,
@@ -133,24 +108,6 @@ def resolve_backend_db_path(config: MemoryConfig, namespace: str) -> Path:
     if config.memory_single_store_path:
         return Path(config.memory_single_store_path)
     return Path(config.storage_path) / namespace.replace(":", "_") / config.sqlite_db_name
-
-
-def _refuse_encrypted_single_store(config: MemoryConfig) -> None:
-    """Re-assert the config-level refusal at the point of use.
-
-    :class:`~trw_memory.models.config.MemoryConfig` already rejects
-    ``encryption_enabled`` together with ``memory_single_store_path``, but a
-    caller can mutate a validated model afterwards (pydantic does not validate
-    on assignment here), and this module is where the wrong key would actually
-    be handed to SQLCipher. The cost is one boolean; the failure it prevents is
-    an unopenable store.
-    """
-    if config.encryption_enabled and config.memory_single_store_path:
-        raise ConfigError(
-            "refusing to open a single shared store with per-namespace encryption: "
-            "encryption_enabled and memory_single_store_path are mutually exclusive until "
-            "PRD-CORE-253 FR09 ships a per-file key."
-        )
 
 
 def resolve_backend_location(config: MemoryConfig, namespace: str) -> Path:
@@ -210,6 +167,7 @@ def create_backend_from_config(
     column and the sidecar ``namespace.txt`` metadata, so callers can decouple
     the on-disk directory layout from the queried namespace.
     """
+    refuse_encryption_at_rest(config)  # before anything touches disk (C12)
     base = Path(config.storage_path)
     ns_dir = namespace.replace(":", "_")
 
@@ -226,17 +184,7 @@ def create_backend_from_config(
             db_path.parent.mkdir(parents=True, exist_ok=True)
         else:
             _write_namespace_metadata(db_path.parent, namespace)
-        sqlcipher_key_hex: str | None = None
-        if config.encryption_enabled:
-            # A per-NAMESPACE key against a shared FILE is unopenable for every
-            # namespace after the first, so the combination is refused rather
-            # than written (PRD-CORE-253 FR09 owns the redesign).
-            _refuse_encrypted_single_store(config)
-            master_key = get_master_key(config)
-            sqlcipher_key_hex = derive_namespace_key(master_key, namespace)
-        return _create_sqlite_backend(
-            config, db_path, sqlcipher_key_hex=sqlcipher_key_hex, check_integrity_once=check_integrity_once
-        )
+        return _create_sqlite_backend(config, db_path, check_integrity_once=check_integrity_once)
 
     from trw_memory.storage.yaml_backend import YAMLBackend
 
@@ -248,10 +196,9 @@ def create_backend_from_config(
 
 @dataclass(frozen=True)
 class NamespaceStoreLocation:
-    """One on-disk SQLite namespace store: its file and the key that opens it."""
+    """One on-disk SQLite namespace store."""
 
     db_path: Path
-    sqlcipher_key_hex: str | None = None
 
 
 def namespace_store_locations(config: MemoryConfig) -> list[NamespaceStoreLocation]:
@@ -263,37 +210,26 @@ def namespace_store_locations(config: MemoryConfig) -> list[NamespaceStoreLocati
     (:func:`open_namespace_store` + ``list_namespaces``); a folder name is a
     lossy encoding of them. Non-SQLite backends have no vector stores to find.
     """
+    refuse_encryption_at_rest(config)  # every store here is opened keyless (C12)
     if config.memory_single_store_path:
         # One file holds every namespace; directory scanning would find nothing
-        # (the store is a FILE in ``base``). Keyless is only correct because the
-        # guard proves the store is not encrypted -- a keyless open of an
-        # ENCRYPTED store would fail rather than read plaintext.
-        _refuse_encrypted_single_store(config)
+        # (the store is a FILE in ``base``).
         single = Path(config.memory_single_store_path)
         return [NamespaceStoreLocation(single)] if single.exists() else []
     base = Path(config.storage_path)
     if config.storage_backend != "sqlite" or not base.exists():
         return []
-    master_key: bytes | None = get_master_key(config) if config.encryption_enabled else None
     locations: list[NamespaceStoreLocation] = []
     for candidate in sorted(base.iterdir()):
         db_path = candidate / config.sqlite_db_name
-        if not candidate.is_dir() or not db_path.exists():
-            continue
-        sqlcipher_key_hex: str | None = None
-        if master_key is not None:
-            namespace = _read_namespace_metadata(candidate)
-            if namespace is None:
-                logger.warning("encrypted_namespace_discovery_skipped", path=str(candidate))
-                continue
-            sqlcipher_key_hex = derive_namespace_key(master_key, namespace)
-        locations.append(NamespaceStoreLocation(db_path, sqlcipher_key_hex))
+        if candidate.is_dir() and db_path.exists():
+            locations.append(NamespaceStoreLocation(db_path))
     return locations
 
 
 def open_namespace_store(config: MemoryConfig, location: NamespaceStoreLocation) -> StorageBackend:
     """Open the store at *location* (a context manager, like every backend)."""
-    return _create_sqlite_backend(config, location.db_path, sqlcipher_key_hex=location.sqlcipher_key_hex)
+    return _create_sqlite_backend(config, location.db_path)
 
 
 @contextmanager
@@ -315,6 +251,7 @@ def discover_namespace_backends(
     """
     from contextlib import ExitStack
 
+    refuse_encryption_at_rest(config)
     reuse_path = getattr(reuse, "db_path", None)
     reuse_file = os.path.realpath(reuse_path) if reuse_path is not None else None
     if config.memory_single_store_path or config.storage_backend == "sqlite":

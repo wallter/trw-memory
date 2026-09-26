@@ -33,15 +33,20 @@ hit@k/recall@k family can say so.
 
 ## Why `forbidden@k` matters, in one measurement
 
-At 1,000 rows, identical corpus, identical queries:
+At 1,000 rows, identical corpus, the synthetic suite's **16 queries** (so every rate below is out of
+16, with Wilson 95% intervals that are wide):
 
 | arm | hit@10 | **forbidden@10** |
 |---|---|---|
-| hybrid retrieval with lifecycle filtering | 100.0% | **0.0%** |
-| substring scan ("grep") | 25.0% | **50.0%** |
+| `MemoryClient.recall` (hybrid + rerank, lifecycle-filtered) | 100% (16/16) | **0%** |
+| hybrid without rerank (trw-mcp's `trw_recall` before PRD-CORE-292 added the rerank) | 56% (9/16) | **0%** |
+| substring scan ("grep") | 25% (4/16) | **50%** (8/16) |
 
-Grep finds a quarter of the answers, and a retired convention appears in its ranked list on half of
-all queries.
+Grep finds 4 of 16 answers, and a retired record appears in its ranked list on 8 of 16 queries. Both
+trw-memory paths return none. Note the second row: without the reranker, hybrid retrieval does no
+better than BM25 alone on this suite, and the 9/16 vs 4/16 comparison with grep has overlapping
+intervals. The fix that motivated this suite was developed on the same 16 queries; hold out a second
+seed before trusting a new arm.
 
 Read that narrowly. EngMem scores ranked **identifiers** -- no model reads the results -- so this
 measures that stale records are *retrieved*, not that they produced a wrong answer. It is staleness,
@@ -54,9 +59,9 @@ replaced another. You can filter an explicit marker, but maintaining that marker
 memory-system function -- the difference is whether the store enforces it or a human does, forever.
 
 This is not a tuning gap that a better embedding model closes. Independent work
-([MemStrata, arXiv:2606.26511](https://arxiv.org/pdf/2606.26511)) measures that cosine similarity
+([MemStrata, arXiv:2606.26511](https://arxiv.org/abs/2606.26511)) measures that cosine similarity
 separates a *contradicted* fact from a mere *duplicate* at **AUROC 0.59 — near chance** — because a
-superseding fact is usually *more* embedding-similar to what it replaces than a paraphrase is.
+superseding fact is often *more* embedding-similar to what it replaces than a paraphrase is.
 Supersession has to be a deterministic property of the data model. It cannot be delegated to a
 similarity score.
 

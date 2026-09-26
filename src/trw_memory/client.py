@@ -93,16 +93,6 @@ from trw_memory._client_bulk_store import (
     store_many_impl as _store_many_impl,
 )
 from trw_memory._client_conversation import ConversationMessage as ConversationMessage
-from trw_memory._client_recall import (
-    _FALLBACK_IMPORTANCE_WEIGHT as _FALLBACK_IMPORTANCE_WEIGHT,
-    _FALLBACK_TF_SCALE as _FALLBACK_TF_SCALE,
-    _FALLBACK_TF_WEIGHT as _FALLBACK_TF_WEIGHT,
-)
-
-# Re-export old names for backward compatibility (internal only).
-_TF_WEIGHT = _FALLBACK_TF_WEIGHT
-_IMPORTANCE_WEIGHT = _FALLBACK_IMPORTANCE_WEIGHT
-_TF_SCALE = _FALLBACK_TF_SCALE
 
 
 def _make_id() -> str:
@@ -132,16 +122,15 @@ from trw_memory._client_models import (  # noqa: E402
 
 
 # Distilled-tiering helpers + entry-to-result extracted to
-# _client_distilled_tiering.py (PRD-DIST-246 batch 109). Re-exports
-# preserve the public API surface (`apply_distilled_tiering` is part of
-# the documented client.py exports) and the internal lookup paths used
-# by `_client_recall.py` / `_client_recall_helpers.py` /
-# `_client_org_shared.py`.
+# _client_distilled_tiering.py (PRD-DIST-246 batch 109). Re-export
+# preserves the public API surface (`apply_distilled_tiering` is part of
+# the documented client.py exports). ``get_distilled_recall_weight`` and
+# ``is_distilled_result`` have no consumer through this facade (nothing in
+# src imports them from here) -- import them from `_client_distilled_tiering`
+# directly if a new one needs them.
 from trw_memory._client_distilled_tiering import (  # noqa: E402
     DEFAULT_DISTILLED_RECALL_WEIGHT as DEFAULT_DISTILLED_RECALL_WEIGHT,
     apply_distilled_tiering as apply_distilled_tiering,
-    get_distilled_recall_weight as _get_distilled_recall_weight,
-    is_distilled_result as _is_distilled_result,
 )
 
 
@@ -208,6 +197,8 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
     _tier_manager: object | None
     _embedder: EmbeddingProvider | None
     _embedder_initialized: bool
+    #: Why the embedder was refused (an uncached model), or ``""``.
+    _embedder_refusal: str
 
     def __init__(
         self,
@@ -462,18 +453,23 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
         """Return this client's cached local embedding provider, if available.
 
         This is a best-effort helper: when sentence-transformers is not
-        installed or the provider reports itself as unavailable, dense
-        retrieval is silently skipped and the hybrid pipeline degrades
-        to BM25-only mode. Both success and unavailability are cached for the
-        client lifetime so repeated operations do not reload the model or
-        repeat a failed optional-dependency probe.
+        installed, the provider reports itself as unavailable, or the model is
+        not in the local cache (runtime loads never download; the logged
+        reason names ``trw_memory.embeddings.fetch_models()``), dense retrieval
+        is skipped and the hybrid pipeline degrades to BM25-only mode. Both
+        success and unavailability are cached for the client lifetime so
+        repeated operations do not reload the model or repeat a failed probe.
+        A model that needs remote code still raises.
         """
-        from trw_memory.embeddings import get_local_embedder
+        from trw_memory.embeddings import get_local_embedder, keyword_only_on_refusal
 
         if not self._embedder_initialized:
-            self._embedder = get_local_embedder(
-                model_name=self._config.embedding_model,
-                dim=self._config.embedding_dim,
+            self._embedder, self._embedder_refusal = keyword_only_on_refusal(
+                lambda: get_local_embedder(
+                    model_name=self._config.embedding_model,
+                    dim=self._config.embedding_dim,
+                ),
+                surface="sdk",
             )
             self._embedder_initialized = True
         return self._embedder
@@ -481,20 +477,12 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
     # ---- Recall helper aliases (PRD-DIST-246 batch 105) -------------------
     # Re-export thin wrappers so existing test patches on
     # `trw_memory.client.MemoryClient._<helper>` keep working after the
-    # implementation moved to ``_client_recall.py``. Tests monkeypatch via
-    # ``setattr(client, "_merge_tier_results", ...)`` and direct
-    # ``MemoryClient._<helper>(...)`` calls.
+    # implementation moved to ``_client_recall.py``.
 
     def _apply_recall_security(self, results: list[MemoryResultDict]) -> list[MemoryResultDict]:
         from trw_memory._client_recall import apply_recall_security as _impl
 
         return _impl(self, results)
-
-    @staticmethod
-    def _apply_budget(results: list[MemoryResultDict], token_budget: int | None) -> list[MemoryResultDict]:
-        from trw_memory._client_recall import apply_budget as _impl
-
-        return _impl(results, token_budget)
 
     # Native implementations bind as methods; direct callers retain the same
     # compatibility projection while production passes the invocation object.
@@ -505,39 +493,6 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
         from trw_memory._client_recall import record_recall_access_impl as _impl
 
         await _impl(self, results)
-
-    def _tier_results(
-        self,
-        backend: StorageBackend,
-        query: str,
-        tags: list[str] | None,
-        limit: int,
-        query_embedding: list[float] | None = None,
-        *,
-        invocation: RecallInvocation | None = None,
-        covered_ids: frozenset[str] = frozenset(),
-    ) -> list[MemoryResultDict] | list[LocalCandidate]:
-        from trw_memory._client_recall import tier_results as _impl
-
-        return _impl(self, backend, query, tags, limit, query_embedding, invocation=invocation, covered_ids=covered_ids)
-
-    def _remember_results_in_tiers(self, results: list[MemoryResultDict]) -> None:
-        from trw_memory._client_recall import remember_results_in_tiers as _impl
-
-        _impl(self, results)
-
-    @staticmethod
-    def _merge_tier_results(
-        local_results: list[MemoryResultDict],
-        tier_only_results: list[MemoryResultDict],
-        limit: int,
-        query_tokens: list[str],
-        config: MemoryConfig,
-        query_embedding: list[float] | None = None,
-    ) -> list[MemoryResultDict]:
-        from trw_memory._client_recall import merge_tier_results as _impl
-
-        return _impl(local_results, tier_only_results, limit, query_tokens, config, query_embedding)
 
     # ---- Remote publish aliases (PRD-DIST-246 batch 111) -------------------
 
@@ -551,10 +506,10 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
 
         _impl(self, coro)
 
-    async def _publish_entry(self, entry: MemoryEntry, embedding: list[float] | None) -> None:
+    async def _publish_entry(self, entry: MemoryEntry) -> None:
         from trw_memory._client_lifecycle import publish_entry as _impl
 
-        await _impl(self, entry, embedding)
+        await _impl(self, entry)
 
     # Org-shared helper aliases (PRD-DIST-246 batch 107) moved to the
     # ``OrgSharedAliasMixin`` base (`_client_org_shared_aliases.py`).
@@ -567,11 +522,6 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
 
     # ---- Tools-binding aliases (PRD-DIST-246 batch 108) -------------------
     # Implementations live in `_client_tools_binding.py`.
-
-    def _make_tool_functions(self) -> dict[str, _ToolFn]:
-        from trw_memory._client_tools_binding import make_tool_functions as _impl
-
-        return _impl(self)
 
     def register_tools(self, agent: AgentWithRegisterTool | AgentWithToolDecorator) -> None:
         from trw_memory._client_tools_binding import register_tools as _impl

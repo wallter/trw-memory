@@ -30,17 +30,8 @@ from trw_memory.storage._shared import (
     IMMUTABLE_FIELDS,
 )
 
-# SQLCipher driver/pragma + cold-rebuild base extracted to _sqlcipher_setup.py
-# (PRD-DIST-245 batch 90). Re-exports preserve back-compat names.
-from trw_memory.storage._sqlcipher_setup import (
-    SQLCIPHER_CIPHER as SQLCIPHER_CIPHER,
-    SQLCIPHER_CIPHER_PAGE_SIZE as SQLCIPHER_CIPHER_PAGE_SIZE,
-    SQLCIPHER_KDF_ITER as SQLCIPHER_KDF_ITER,
-    SQLCIPHER_REQUIRED_MESSAGE as SQLCIPHER_REQUIRED_MESSAGE,
-    apply_sqlcipher_pragmas as _apply_sqlcipher_pragmas,
-    import_sqlcipher_driver as _import_sqlcipher_driver,
-    resolve_cold_rebuild_base as _resolve_cold_rebuild_base,
-)
+# Cold-rebuild base extracted to _cold_rebuild_base.py (PRD-DIST-245 batch 90).
+from trw_memory.storage._cold_rebuild_base import resolve_cold_rebuild_base as _resolve_cold_rebuild_base
 from trw_memory.storage._stale_handle_detector import StaleHandleDetector
 from trw_memory.storage._wal_checkpoint import (
     WAL_RESET_UNSAFE_REMEDY as WAL_RESET_UNSAFE_REMEDY,
@@ -56,7 +47,6 @@ from trw_memory.storage._permissions import prepare_db_file_mode as _prepare_db_
 
 if TYPE_CHECKING:
     from trw_memory.retrieval.temporal_selection import TemporalSelection
-    from trw_memory.wiki.storage import StoredWikiReference
 
 logger = structlog.get_logger(__name__)
 
@@ -64,8 +54,6 @@ __all__ = [
     "CheckpointMode",
     "CheckpointResult",
     "SQLiteBackend",
-    "_apply_sqlcipher_pragmas",
-    "_import_sqlcipher_driver",
     "_resolve_cold_rebuild_base",
     "lock_for_rmw",
     "run_checkpoint",
@@ -156,7 +144,6 @@ from trw_memory.storage._stale_handle import (
     fresh_connection as _stale_handle_fresh_connection,
     handle_integrity_regression as _stale_handle_integrity_regression,
     reconnect as _stale_handle_reconnect,
-    run_integrity_check as _stale_handle_run_integrity_check,
 )
 from trw_memory.storage._transaction import transaction as _transaction_impl
 
@@ -181,7 +168,6 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         db_path: Path,
         dim: int = 384,
         *,
-        sqlcipher_key_hex: str | None = None,
         recovery_policy: Literal["strict", "empty_ok"] = "strict",
         corrupt_backup_keep: int = 5,
         rebuild_from_cold: bool = True,
@@ -202,8 +188,7 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         # per-row commit when >0 so caller-controlled outer transaction
         # batches N writes into one BEGIN IMMEDIATE / COMMIT.
         self._skip_commit_depth: int = 0
-        self._dbapi: Any = _import_sqlcipher_driver() if sqlcipher_key_hex is not None else sqlite3
-        self._sqlcipher_key_hex = sqlcipher_key_hex
+        self._dbapi: Any = sqlite3
         self._recovery_policy = recovery_policy
         self._corrupt_backup_keep = corrupt_backup_keep
         self._rebuild_from_cold = rebuild_from_cold
@@ -222,7 +207,6 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
             self,
             db_path,
             dbapi=self._dbapi,
-            sqlcipher_key_hex=sqlcipher_key_hex,
             recovery_policy=self._recovery_policy,
             corrupt_backup_keep=self._corrupt_backup_keep,
             rebuild_from_cold=self._rebuild_from_cold,
@@ -241,12 +225,8 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         # backport 3.44.6 / 3.50.7). When unsafe, resetting checkpoint modes are
         # coerced to PASSIVE (see checkpoint_wal) so the race cannot be triggered.
         #
-        # The version read is THIS BACKEND'S driver, not the process-wide one.
-        # An encrypted store opens sqlcipher3 (``self._dbapi`` above), whose
-        # bundled SQLite is unrelated to the stdlib/pysqlite3 selection in
-        # ``_dbapi``; deriving the gate from the process driver would let a
-        # capable stdlib authorise a resetting checkpoint on an unsafe SQLCipher
-        # build, and would log a version the store is not running on
+        # The version read is this backend's driver (``self._dbapi``), so the
+        # gate and its log name the SQLite the store actually runs on
         # (PRD-INFRA-185 FR07).
         from trw_memory.storage import _dbapi as _driver
 
@@ -303,11 +283,6 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
     _prune_corrupt_backups = staticmethod(_prune_corrupt_backups_impl)
     recover_db = staticmethod(_recovery_recover_db)
 
-    def _run_integrity_check(self) -> bool:
-        """Delegate to ``_stale_handle.run_integrity_check``."""
-        with self._fresh_connection():
-            return _stale_handle_run_integrity_check(self)
-
     # Public integrity probe delegated to ``_connection.check_integrity``;
     # kept as a staticmethod alias so ``SQLiteBackend.check_integrity`` callers
     # and test patches resolve unchanged.
@@ -360,10 +335,6 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
             params=tuple(params),
             order_by=order_by,
             limit=limit,
-            # Thread the namespace's SQLCipher key so the bytes-mode fallback can
-            # key its secondary connection — otherwise an encrypted store returns
-            # zero rows from the fallback instead of quarantining only bad rows.
-            sqlcipher_key_hex=self._sqlcipher_key_hex,
         )
 
     def _fetch_rows_resilient(
@@ -449,21 +420,17 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
 
     def store(self, entry: MemoryEntry) -> None:
         """INSERT OR REPLACE the entry into the memories table."""
-        from trw_memory.wiki.storage import replace_wiki_refs_for_entry
-
         try:
             with self.transaction():
                 _crud_ops_store(self, _INSERT_COLUMNS_SQL, _COLUMNS, entry)
-                replace_wiki_refs_for_entry(self, entry)
         except self._dbapi.Error as exc:
             raise StorageError(f"Failed to store entry {entry.id}: {exc}", path=str(self._db_path)) from exc
 
     def store_many(self, entries: list[MemoryEntry]) -> int:
         """Bulk-insert entries in a single transaction using executemany.
 
-        Does not update wiki_refs or schedule graph updates; use it for imports
-        where those side effects are acceptable to defer. Returns the number
-        of entries stored.
+        Does not schedule graph updates; use it for imports where that side
+        effect is acceptable to defer. Returns the number of entries stored.
         """
         with self._fresh_connection():
             return _crud_ops_store_many(self, _INSERT_COLUMNS_SQL, _COLUMNS, entries)
@@ -475,15 +442,11 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
 
     def update(self, entry_id: str, *, namespace: str, **fields: object) -> MemoryEntry | None:
         """Apply a partial update to the ``(namespace, entry_id)``-identified entry."""
-        from trw_memory.wiki.storage import replace_wiki_refs_for_entry
-
         try:
             with self.transaction():
                 updated = _crud_ops_update(
                     self, _SELECT_COLUMNS_SQL, _VALID_UPDATE_COLUMNS, entry_id, namespace, **fields
                 )
-                if updated is not None and "metadata" in fields:
-                    replace_wiki_refs_for_entry(self, updated)
         except self._dbapi.Error as exc:
             raise StorageError(f"Failed to update entry {entry_id}: {exc}", path=str(self._db_path)) from exc
         return updated
@@ -503,13 +466,9 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
 
     def delete(self, entry_id: str, *, namespace: str) -> bool:
         """Remove the ``(namespace, entry_id)`` entry and every sidecar row it owns."""
-        from trw_memory.wiki.storage import purge_wiki_refs_for_entry
-
         try:
             with self.transaction():
                 deleted = _crud_ops_delete(self, entry_id, namespace)
-                if deleted:
-                    purge_wiki_refs_for_entry(self, entry_id)
         except self._dbapi.Error as exc:
             raise StorageError(f"Failed to delete entry {entry_id}: {exc}", path=str(self._db_path)) from exc
         return deleted
@@ -678,20 +637,6 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
     def delete_by_namespace(self, namespace: str) -> int:
         """Delete every entry in a namespace atomically (see :mod:`_namespace_purge`)."""
         return _namespace_purge_delete(self, namespace)
-
-    def query_wiki_outbound_refs(self, source_slug: str, *, namespace: str | None = None) -> list[StoredWikiReference]:
-        """Return deterministic persisted outbound wiki refs for ``source_slug``."""
-        from trw_memory.wiki.storage import query_wiki_outbound_refs
-
-        with self._fresh_connection():
-            return list(query_wiki_outbound_refs(self, source_slug, namespace=namespace))
-
-    def query_wiki_inbound_refs(self, target_slug: str, *, namespace: str | None = None) -> list[StoredWikiReference]:
-        """Return deterministic persisted inbound wiki refs for ``target_slug``."""
-        from trw_memory.wiki.storage import query_wiki_inbound_refs
-
-        with self._fresh_connection():
-            return list(query_wiki_inbound_refs(self, target_slug, namespace=namespace))
 
     def close(self) -> None:
         """Stop integrity scheduler, then close connection."""

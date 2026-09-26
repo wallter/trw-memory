@@ -17,8 +17,18 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.storage import _stale_handle
 from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+
+def _run_integrity_check(backend: SQLiteBackend) -> bool:
+    """Mirror the removed ``SQLiteBackend._run_integrity_check``: a fresh-connection-wrapped quick_check."""
+    with backend._fresh_connection():
+        return _stale_handle.run_integrity_check(backend)
+
 
 # PRD-CORE-139: timestamped backup filename pattern.
 _TIMESTAMPED_BACKUP_RE = re.compile(r"^memory\.db\.corrupt\.(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)(?:-\d+)?\.bak$")
@@ -57,7 +67,7 @@ class TestIntegrityCheck:
     def test_healthy_db(self, tmp_path: Path) -> None:
         db_path = tmp_path / "ok.db"
         backend = SQLiteBackend(db_path)
-        assert backend._run_integrity_check() is True
+        assert _run_integrity_check(backend) is True
         backend.close()
 
     def test_corrupt_db(self, tmp_path: Path) -> None:
@@ -131,6 +141,46 @@ class TestRecoverDb:
         # The new database should be valid
         result = SQLiteBackend.check_integrity(db_path)
         assert result["ok"] is True
+
+    @pytest.mark.parametrize("name", ["memory.db", "store.sqlite", "a.db.db"])
+    def test_stale_sidecars_are_gone_before_the_recovered_store_is_written(
+        self, tmp_path: Path, name: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """rc4: a ".db"-replacing derivation left "store.sqlite-wal" for the recovered store to replay.
+
+        Observed where recovery starts writing, before SQLite's own open could discard an invalid WAL.
+        """
+        from trw_memory.storage import _recovery
+
+        db_path = tmp_path / name
+        backend = SQLiteBackend(db_path)
+        backend.store(_make_entry())
+        backend.close()
+        wal, shm = tmp_path / f"{name}-wal", tmp_path / f"{name}-shm"
+        wal.write_bytes(b"wal data")
+        shm.write_bytes(b"shm data")
+        _corrupt_db(db_path)
+        seen: list[bool] = []
+        real_sentinel = _recovery.write_sentinel
+        monkeypatch.setattr(
+            _recovery, "write_sentinel", lambda *a: (seen.append(wal.exists() or shm.exists()), real_sentinel(*a))[1]
+        )
+
+        SQLiteBackend.recover_db(db_path, recovery_policy="empty_ok").close()
+
+        assert seen == [False]
+
+    @pytest.mark.parametrize("name", ["memory.db", "store.sqlite", "a.db.db"])
+    def test_strict_refuse_cleanup_removes_the_fresh_stores_sidecars(self, tmp_path: Path, name: str) -> None:
+        from trw_memory.storage._recovery import _cleanup_strict_refuse
+
+        paths = [tmp_path / f"{name}{suffix}" for suffix in ("", "-wal", "-shm")]
+        for path in paths:
+            path.write_bytes(b"x")
+
+        _cleanup_strict_refuse(sqlite3.connect(":memory:"), paths[0])
+
+        assert [path.exists() for path in paths] == [False, False, False]
 
     def test_cleans_wal_shm_files(self, tmp_path: Path) -> None:
         db_path = tmp_path / "memory.db"
@@ -208,7 +258,7 @@ class TestInitAutoRecovery:
         # (PRD-CORE-138: default strict raises on non-empty backup with 0 rows).
         backend2 = SQLiteBackend(db_path, recovery_policy="empty_ok")
         # Database should be healthy after recovery
-        assert backend2._run_integrity_check() is True
+        assert _run_integrity_check(backend2) is True
         assert backend2.recovered is True
         assert backend2.integrity_warning is False
         backend2.close()

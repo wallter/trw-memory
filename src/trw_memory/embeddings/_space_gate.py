@@ -156,7 +156,8 @@ def comparable_neighbours(
     records = backend.get_vector_records([entry_id for entry_id, _ in hits], namespace=namespace)
     admitted = admit_space_vectors(records, space, namespace=namespace, surface=surface)
     census = backend.vector_space_census(namespace=namespace)
-    if len(admitted) < len(hits) or not _census_proves(census, space, rows=len(hits)):
+    # the census must cover every row _exhaustive would examine: a vectorless row may be the duplicate (C12 rc4)
+    if len(admitted) < len(hits) or not _census_proves(census, space, rows=backend.count(namespace=namespace)):
         logger.debug("dense_window_incomplete", surface=surface, window=len(hits), admitted=len(admitted))
         return None
     return [(entry_id, distance) for entry_id, distance in hits if entry_id in admitted]
@@ -164,7 +165,7 @@ def comparable_neighbours(
 
 def _census_proves(census: object, space: EmbeddingSpace, *, rows: int) -> bool:
     """A census proves one space only if it is a mapping of positive int counts, all
-    keyed by *space*, that accounts for at least the *rows* the window returned. An
+    keyed by *space*, that accounts for at least the namespace's *rows* (not just the window). An
     empty census beside a nonempty window, or any invalid count, proves nothing."""
     if not isinstance(census, dict) or not census:
         return False

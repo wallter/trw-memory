@@ -102,7 +102,12 @@ class TestAbsenceIsNotProvenByNotLooking:
         from unittest.mock import patch
 
         assertions = [Assertion(type=AssertionType.GREP_ABSENT, pattern="danger", target="*.py")]
-        with patch.object(Path, "glob", side_effect=OSError("permission denied")):
+        # PRD-SEC-016 round-8 finding 1: enumeration is now a no-follow
+        # dir_fd walk (``os.scandir``), not ``Path.glob`` -- the fault is
+        # planted at the TOP of the walk (the checkout root itself), which
+        # is the one failure this walk must never silently swallow as "zero
+        # matches."
+        with patch.object(os, "scandir", side_effect=OSError("permission denied")):
             results = verify_assertions(assertions, tmp_path)
         assert results[0].passed is None
         # Asserting the EVIDENCE, not just the verdict. verify_assertions wraps
@@ -118,7 +123,7 @@ class TestAbsenceIsNotProvenByNotLooking:
         from unittest.mock import patch
 
         assertions = [Assertion(type=AssertionType.GLOB_ABSENT, pattern="", target="*.secret")]
-        with patch.object(Path, "glob", side_effect=OSError("permission denied")):
+        with patch.object(os, "scandir", side_effect=OSError("permission denied")):
             results = verify_assertions(assertions, tmp_path)
         assert results[0].passed is None
         # The evidence, not just the verdict — see the note on the grep case above.

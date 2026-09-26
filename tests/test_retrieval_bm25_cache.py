@@ -20,12 +20,18 @@ from trw_memory.retrieval.bm25 import bm25_search
 from ._test_retrieval_support import make_entry
 
 
+def _clear_bm25_cache() -> None:
+    """Test seam mirroring the removed ``bm25.clear_bm25_cache``."""
+    with bm25_mod._bm25_cache_lock:
+        bm25_mod._bm25_cache.clear()
+
+
 @pytest.fixture(autouse=True)
 def _reset_bm25_cache() -> Iterator[None]:
     """Reset the module-level cache before and after each test for isolation."""
-    bm25_mod.clear_bm25_cache()
+    _clear_bm25_cache()
     yield
-    bm25_mod.clear_bm25_cache()
+    _clear_bm25_cache()
 
 
 class _CountingBM25:
@@ -50,7 +56,6 @@ class _CountingBM25:
 @pytest.fixture
 def counting_bm25(monkeypatch: pytest.MonkeyPatch) -> type[_CountingBM25]:
     """Patch the BM25Okapi symbol used inside bm25.py with a counting double."""
-    pytest.importorskip("rank_bm25")
     _CountingBM25.construction_count = 0
     monkeypatch.setattr(bm25_mod, "BM25Okapi", _CountingBM25)
     return _CountingBM25
@@ -142,7 +147,7 @@ class TestBm25Cache:
         cached_results = bm25_search("neural gradient", entries)
 
         # Force a fresh build by clearing the cache, then compare.
-        bm25_mod.clear_bm25_cache()
+        _clear_bm25_cache()
         fresh_results = bm25_search("neural gradient", entries)
 
         assert cached_results == fresh_results

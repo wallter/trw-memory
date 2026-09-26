@@ -77,7 +77,6 @@ async def test_public_client_source_expiry_uses_query_time(
     backend.store(entry)
     monkeypatch.setattr(client, "_get_embedder", lambda: None)
     if route == "bm25-hybrid":
-        pytest.importorskip("rank_bm25")
         # Exercise the real hybrid acquisition/ranking path, with no model.
         # A fallback cannot rescue an empty/failed hybrid result into a pass.
         if as_of_year <= 2024:

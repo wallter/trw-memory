@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 import structlog
 
+from trw_memory.daemon._offload import run_serialized
 from trw_memory.embeddings import get_local_embedder, keyword_only_on_refusal
 from trw_memory.exceptions import AuthorizationError, ConfigError, StorageError
 from trw_memory.integrations._backend import discover_namespace_backends
@@ -339,18 +340,18 @@ def register_consolidate_tool(mcp: McpServer) -> None:
         Returns:
             {"clusters_found": int, "entries_consolidated": int, "dry_run": bool}
         """
-        cfg = MemoryConfig()
 
-        def backend_factory(extra_ns: str) -> StorageBackend:
-            return create_backend_from_config(cfg, extra_ns)
+        def consolidate() -> dict[str, object]:  # clusters by embedding: never on the event loop (C12 rc4)
+            cfg = MemoryConfig()
 
-        if namespace == TEAM_NAMESPACE_WILDCARD:
-            return _promote_all_team_namespaces(cfg, namespace_backend_factory=backend_factory)
-        with create_backend_from_config(cfg, namespace) as backend:
-            return memory_consolidate_impl(
-                namespace,
-                backend=backend,
-                dry_run=dry_run,
-                config=cfg,
-                namespace_backend_factory=backend_factory,
-            )
+            def backend_factory(extra_ns: str) -> StorageBackend:
+                return create_backend_from_config(cfg, extra_ns)
+
+            if namespace == TEAM_NAMESPACE_WILDCARD:
+                return _promote_all_team_namespaces(cfg, namespace_backend_factory=backend_factory)
+            with create_backend_from_config(cfg, namespace) as backend:
+                return memory_consolidate_impl(
+                    namespace, backend=backend, dry_run=dry_run, config=cfg, namespace_backend_factory=backend_factory
+                )
+
+        return await run_serialized(consolidate)

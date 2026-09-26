@@ -17,7 +17,7 @@ import pytest
 
 import trw_memory.storage._dbapi  # noqa: F401  — installs pysqlite3 as ``sqlite3``
 from trw_memory.models.memory import MemoryEntry
-from trw_memory.storage._schema import ensure_schema
+from trw_memory.storage._schema import SCHEMA_VERSION, ensure_schema
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 pytestmark = pytest.mark.unit
@@ -71,7 +71,7 @@ def test_reader_survives_migration(tmp_path: Path) -> None:
         writer = sqlite3.connect(db, timeout=30)
         writer.execute("PRAGMA journal_mode=WAL")
         ensure_schema(writer)
-        assert writer.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert writer.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         writer.close()
     finally:
         stop.set()
@@ -118,7 +118,7 @@ def test_the_migration_takes_a_snapshot_first(tmp_path: Path) -> None:
     ensure_schema(conn)
     conn.close()
 
-    snapshots = sorted((tmp_path / BACKUP_DIR_NAME).glob("snapshot.db.pre-schema-6.*"))
+    snapshots = sorted((tmp_path / BACKUP_DIR_NAME).glob(f"snapshot.db.pre-schema-{SCHEMA_VERSION}.*"))
     assert len(snapshots) == 1, "a destructive delta must leave exactly one recoverable snapshot"
 
     restored = sqlite3.connect(f"file:{snapshots[0]}?mode=ro", uri=True)

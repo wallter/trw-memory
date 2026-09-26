@@ -93,14 +93,17 @@ def test_an_empty_quarantine_returns_an_empty_result_not_an_error(tmp_path: Path
 
 
 def test_a_resolved_row_leaves_the_next_list(tmp_path: Path) -> None:
-    """The discovery half and the resolution half compose: list, review, re-list."""
-    from trw_memory.integrations._backend import create_backend_from_config
+    """The discovery half and the resolution half compose: list, review, re-list.
+
+    No pre-existing active row at this id — a quarantined entry approved onto
+    an id that is ALREADY active in the store is the Q1 conflict case covered
+    by ``test_runtime_quarantine_isolation.py``'s approve-conflict tests, not
+    this one.
+    """
     from trw_memory.tools.review import memory_review_impl
 
     config = _config(tmp_path)
     _quarantine(config, MINE, "M-pending")
-    with create_backend_from_config(config, MINE) as backend:
-        backend.store(make_entry(entry_id="M-pending", namespace=MINE, content="suspicious M-pending"))
 
     before = memory_quarantine_list_impl(config=config)
     assert [row["id"] for row in before["entries"]] == ["M-pending"]
@@ -122,6 +125,20 @@ def test_listed_rows_carry_what_a_reviewer_decides_on(tmp_path: Path) -> None:
     assert row["namespace"] == MINE
     assert row["content"] == "suspicious M-1"
     assert row["quarantined_at"], "the queue must show when the row arrived"
+
+
+def test_limit_above_max_is_refused(tmp_path: Path) -> None:
+    """A shared daemon serving every tenant from one process must not read and
+    materialize an unbounded number of quarantined rows for a single caller
+    (same class of finding as the reembed batch_size DoS)."""
+    from trw_memory.tools.review import QUARANTINE_LIST_MAX_LIMIT
+
+    config = _config(tmp_path)
+
+    answer = memory_quarantine_list_impl(config=config, limit=QUARANTINE_LIST_MAX_LIMIT + 1)
+
+    assert answer["status"] == "invalid"
+    assert str(QUARANTINE_LIST_MAX_LIMIT) in str(answer["error"])
 
 
 def test_the_list_verb_is_registered_on_the_published_surface() -> None:

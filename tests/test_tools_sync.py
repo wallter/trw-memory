@@ -61,6 +61,18 @@ def test_dirty_rows_are_paged_within_one_namespace(backend: SQLiteBackend) -> No
     assert [e.id for e in DeltaTracker.get_dirty_entries(backend, namespace=_ALPHA, limit=2)] == ["A-0", "A-1"]
 
 
+def test_dirty_page_above_max_is_refused(backend: SQLiteBackend, config: MemoryConfig) -> None:
+    """A shared daemon serving every tenant from one process must not hydrate an
+    unbounded page of rows for a single caller (same class of finding as the
+    reembed batch_size DoS)."""
+    from trw_memory.tools.sync import MAX_SYNC_DIRTY_PAGE
+
+    answer = memory_sync_dirty_page_impl(_ALPHA, MAX_SYNC_DIRTY_PAGE + 1, backend=backend, config=config)
+
+    assert answer["status"] == "invalid"
+    assert str(MAX_SYNC_DIRTY_PAGE) in str(answer["error"])
+
+
 def test_a_marked_row_leaves_the_page_and_the_other_namespace_is_untouched(
     backend: SQLiteBackend, config: MemoryConfig
 ) -> None:
@@ -169,9 +181,9 @@ def test_a_refused_namespace_opens_no_backend(monkeypatch: pytest.MonkeyPatch, a
     import asyncio
 
     from trw_memory.tools.checkout_import import register_checkout_import_tools
-    from trw_memory.tools.maintain import register_maintain_tool
     from trw_memory.tools.entry import register_entry_tools
     from trw_memory.tools.listing import register_list_page_tool
+    from trw_memory.tools.maintain import register_maintain_tool
     from trw_memory.tools.similar import register_similar_tool
     from trw_memory.tools.sync import register_sync_tools
     from trw_memory.tools.update import register_update_tool
@@ -197,7 +209,7 @@ def test_a_refused_namespace_opens_no_backend(monkeypatch: pytest.MonkeyPatch, a
     calls = {
         "memory_get": {"memory_id": "M-1"},
         "memory_find_duplicate": {"content": "c", "detail": "d"},
-        "memory_similar": {"vector": [1.0, 0.0, 0.0], "space": None},
+        "memory_similar": {"text": "t", "skip_threshold": 0.95, "merge_threshold": 0.85},
         "memory_verify": {"project_root": None},
         "memory_import_checkout": {"source_path": "/tmp/x/memory.db", "ids": ["M-1"]},
         "memory_maintain": {},
@@ -227,3 +239,56 @@ def test_a_conditional_ack_needs_a_transactional_backend(tmp_path: Path) -> None
     with pytest.raises(TypeError, match="transaction"):
         DeltaTracker.mark_synced(["Y-1"], store, namespace=_ALPHA, expected_seq={"Y-1": 1})
     assert DeltaTracker.mark_synced(["Y-1"], store, namespace=_ALPHA) == 1
+
+
+def test_an_edit_landing_between_the_write_and_its_ack_stays_dirty(
+    backend: SQLiteBackend, config: MemoryConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C12 rc7: apply committed the pulled row, then marked it synced in a second commit, so an edit from
+    another connection landing between the two was acknowledged as pushed and never sent."""
+    import threading
+
+    def _edit() -> None:
+        with SQLiteBackend(tmp_path / "memory.db") as other:
+            other.update("T-1", namespace=_ALPHA, detail="edited meanwhile")
+
+    store, edit = backend.store, threading.Thread(target=_edit)
+
+    def _store_then_edit(entry: MemoryEntry) -> None:
+        store(entry)
+        edit.start()
+        edit.join(timeout=0.5)  # lands now without the fix; waits for the ack's commit with it
+
+    monkeypatch.setattr(backend, "store", _store_then_edit)
+    pulled = MemoryEntry(id="T-1", content="shared tip", namespace=_ALPHA, remote_id="R-1", source="team_sync")
+
+    assert apply_synced_entry(backend, config, pulled) == ("stored", "")
+    edit.join(timeout=10)
+    row = backend.get("T-1", namespace=_ALPHA)
+    assert row is not None and row.detail == "edited meanwhile"
+    assert row.last_synced_at is None, "an edit the peer never received was marked synced"
+
+
+def test_a_publish_is_not_acknowledged_over_different_content_at_the_same_revision(backend: SQLiteBackend) -> None:
+    """sol rc7 r4: store() numbers a revision from the writer's copy, so a stale copy stored meanwhile can
+    reach the published sync_seq with other content; the ack compares the content hash too."""
+    from trw_memory.sync.delta import ack_publish
+
+    published = MemoryEntry(id="P-1", content="as published", namespace=_ALPHA)
+    backend.store(published)  # stamps the published snapshot's sync_seq and sync_hash in place
+    backend.store(MemoryEntry(id="P-1", content="written from a stale copy", namespace=_ALPHA))
+
+    assert ack_publish(backend, published, published_to_platform=True) is False
+    row = backend.get("P-1", namespace=_ALPHA)
+    assert row is not None and row.published_to_platform is True and row.last_synced_at is None
+
+
+def test_a_publish_of_the_current_revision_is_acknowledged(backend: SQLiteBackend) -> None:
+    from trw_memory.sync.delta import ack_publish
+
+    published = MemoryEntry(id="P-2", content="as published", namespace=_ALPHA)
+    backend.store(published)
+
+    assert ack_publish(backend, published, published_to_platform=True) is True
+    row = backend.get("P-2", namespace=_ALPHA)
+    assert row is not None and row.last_synced_at is not None

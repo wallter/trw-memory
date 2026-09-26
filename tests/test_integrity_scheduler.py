@@ -14,6 +14,26 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
+# Test-only mirrors of the removed public ``is_running``/``run_once`` seams.
+# ---------------------------------------------------------------------------
+
+
+def _is_running(sched: IntegrityScheduler) -> bool:
+    with sched._lock:
+        t = sched._thread
+    return t is not None and t.is_alive()
+
+
+def _run_once(sched: IntegrityScheduler) -> bool:
+    ok, detail = sched._probe()
+    sched.last_check_at = time.time()
+    sched.last_check_ok = ok
+    sched._write_sentinel()
+    sched._report(ok, detail)
+    return ok
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -50,7 +70,7 @@ def test_scheduler_disabled_when_interval_zero(tmp_path: Path) -> None:
     _make_healthy_db(db)
     sched = IntegrityScheduler(db, interval_minutes=0)
     sched.start()
-    assert sched.is_running is False, "interval=0 must be a hard disable"
+    assert _is_running(sched) is False, "interval=0 must be a hard disable"
     sched.stop()
 
 
@@ -59,9 +79,9 @@ def test_scheduler_starts_when_interval_positive(tmp_path: Path) -> None:
     _make_healthy_db(db)
     sched = IntegrityScheduler(db, interval_minutes=1)
     sched.start()
-    assert sched.is_running is True
+    assert _is_running(sched) is True
     sched.stop(timeout=1.0)
-    assert sched.is_running is False
+    assert _is_running(sched) is False
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +93,7 @@ def test_run_once_ok_on_healthy_db(tmp_path: Path) -> None:
     db = tmp_path / "memory.db"
     _make_healthy_db(db)
     sched = IntegrityScheduler(db, interval_minutes=0)
-    assert sched.run_once() is True
+    assert _run_once(sched) is True
     assert sched.last_check_ok is True
     assert sched.last_check_at is not None
     assert sched.last_check_at > 0
@@ -85,14 +105,14 @@ def test_run_once_failure_on_corrupt_db(tmp_path: Path) -> None:
     _corrupt_db(db)
     sched = IntegrityScheduler(db, interval_minutes=0)
     # Corrupted DB → quick_check returns non-ok OR raises; either path sets False.
-    assert sched.run_once() is False
+    assert _run_once(sched) is False
     assert sched.last_check_ok is False
 
 
 def test_run_once_failure_on_missing_db(tmp_path: Path) -> None:
     missing = tmp_path / "never_created.db"
     sched = IntegrityScheduler(missing, interval_minutes=0)
-    assert sched.run_once() is False
+    assert _run_once(sched) is False
     assert sched.last_check_ok is False
 
 
@@ -112,7 +132,7 @@ def test_on_regression_fires_when_corrupt(tmp_path: Path) -> None:
         captured.append((p, detail))
 
     sched = IntegrityScheduler(db, interval_minutes=0, on_regression=_capture)
-    result = sched.run_once()
+    result = _run_once(sched)
     assert result is False
     assert len(captured) == 1
     assert captured[0][0] == db
@@ -126,7 +146,7 @@ def test_on_regression_does_not_fire_when_healthy(tmp_path: Path) -> None:
 
     captured: list[tuple[Path, str]] = []
     sched = IntegrityScheduler(db, interval_minutes=0, on_regression=lambda p, d: captured.append((p, d)))
-    sched.run_once()
+    _run_once(sched)
     assert captured == []
 
 
@@ -142,7 +162,7 @@ def test_on_regression_callback_exception_swallowed(tmp_path: Path) -> None:
     sched = IntegrityScheduler(db, interval_minutes=0, on_regression=_raiser)
     escaped: list[str] = []
     try:
-        sched.run_once()
+        _run_once(sched)
     except Exception as exc:
         escaped.append(repr(exc))
     assert escaped == [], f"a buggy on_regression callback escaped run_once: {escaped}"
@@ -159,7 +179,7 @@ def test_start_is_idempotent(tmp_path: Path) -> None:
     sched = IntegrityScheduler(db, interval_minutes=60)
     sched.start()
     sched.start()  # second start is a no-op
-    assert sched.is_running is True
+    assert _is_running(sched) is True
     sched.stop(timeout=1.0)
 
 
@@ -231,7 +251,7 @@ def test_loop_uses_dedicated_readonly_connection(tmp_path: Path, monkeypatch: Mo
     monkeypatch.setattr(sqlite3, "connect", _recording_connect)
 
     sched = IntegrityScheduler(db, interval_minutes=0)
-    sched.run_once()
+    _run_once(sched)
 
     assert len(calls) == 1, "expected exactly one connect() in run_once()"
     first_args, first_kwargs = calls[0]
@@ -259,6 +279,42 @@ def test_last_check_at_updates_on_run_once(tmp_path: Path) -> None:
     _make_healthy_db(db)
     sched = IntegrityScheduler(db, interval_minutes=0)
     t0 = time.time()
-    sched.run_once()
+    _run_once(sched)
     assert sched.last_check_at is not None
     assert sched.last_check_at >= t0 - 0.5
+
+
+# ---------------------------------------------------------------------------
+# PRD-SEC-016 round-5: identity check around the read-only probe connect
+# ---------------------------------------------------------------------------
+
+
+def test_a_db_identity_change_between_stat_and_connect_is_reported_as_a_regression(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """A store swapped during the probe's read-only connect (connect_registered refuses it) surfaces
+    as a regression, never as a check of whatever now occupies db_path."""
+    db = tmp_path / "memory.db"
+    _make_healthy_db(db)
+    sched = IntegrityScheduler(db, interval_minutes=0)
+
+    from tests._swap_after_pin import swap_after_pin
+
+    swap_after_pin(monkeypatch, db)
+
+    ok = _run_once(sched)
+
+    assert ok is False
+    assert sched.last_check_ok is False
+
+
+def test_an_unchanged_db_through_the_probe_still_reports_healthy(tmp_path: Path) -> None:
+    """Regression control: the identity check must not false-positive on the ordinary, unraced probe."""
+    db = tmp_path / "memory.db"
+    _make_healthy_db(db)
+    sched = IntegrityScheduler(db, interval_minutes=0)
+
+    ok = _run_once(sched)
+
+    assert ok is True
+    assert sched.last_check_ok is True

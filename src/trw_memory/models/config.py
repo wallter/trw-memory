@@ -14,7 +14,7 @@ from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import PydanticBaseSettingsSource
 
-from trw_memory.exceptions import ConfigError
+from trw_memory.exceptions import refuse_encryption_at_rest
 from trw_memory.models._config_daemon import _DaemonConfigMixin
 from trw_memory.models._config_lifecycle import _LifecycleConfigMixin
 from trw_memory.models._config_retrieval import _RetrievalConfigMixin
@@ -22,6 +22,8 @@ from trw_memory.models._config_security import _SecurityConfigMixin
 from trw_memory.models._config_sources import (
     _check_retired_hype_environment,
     _check_retired_hype_settings,
+    _check_retired_local_only_environment,
+    _check_retired_local_only_settings,
     _TRWConfigYamlSource,
     _warn_retired_environment,
     _warn_retired_settings,
@@ -69,41 +71,11 @@ class MemoryConfig(
         return self
 
     @model_validator(mode="after")
-    def _apply_local_only(self) -> MemoryConfig:
-        """Disable every remote-capable setting when local-only mode is active."""
-        if self.local_only:
-            self.rbac_mode = "local"
-            self.sync_enabled = False
-            self.sync_namespace = ""
-            self.platform_url = ""
-            self.platform_api_key = ""
-        return self
-
-    @model_validator(mode="after")
-    def _refuse_encrypted_single_store(self) -> MemoryConfig:
-        """Reject encryption + a single store, because the key model is per-namespace.
-
-        SQLCipher keys a whole FILE, but
-        ``security.encryption.derive_namespace_key`` derives a DIFFERENT key per
-        namespace. Under ``memory_single_store_path`` those two facts collide:
-        the first namespace to open the shared file sets ``PRAGMA key`` to its
-        own derived key, and every other namespace then cannot decrypt the file
-        it is supposed to share. Silent-at-config, fatal-at-second-namespace.
-
-        Refusing the combination outright is the honest position while the
-        per-file key redesign is unwritten (PRD-CORE-253 FR09, Slice B). The
-        alternative -- deriving one key for the file -- changes the key
-        derivation for every existing encrypted store and needs its own
-        migration, which is exactly why it is not a line of code here.
-        """
-        if self.encryption_enabled and self.memory_single_store_path:
-            raise ConfigError(
-                "encryption_enabled and memory_single_store_path cannot both be set: SQLCipher keys a "
-                "whole file, but this package derives a per-NAMESPACE key, so only the first namespace "
-                "to open the shared store could decrypt it. Single-file encryption keys are PRD-CORE-253 "
-                "FR09 (Slice B). Until then, use one encrypted store per namespace (leave "
-                "memory_single_store_path empty) or run the daemon unencrypted."
-            )
+    def _apply_security_switches(self) -> MemoryConfig:
+        """4.0 refuses ``encryption_enabled`` at config load, as backend creation does too (C12), and
+        ``platform_contact_enabled: false`` turns sync off here, so every publish and subscribe path inherits it (rc11)."""
+        refuse_encryption_at_rest(self)
+        self.sync_enabled = self.sync_enabled and self.platform_contact_enabled
         return self
 
     @model_validator(mode="after")
@@ -144,8 +116,10 @@ class MemoryConfig(
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """Load ``.trw/config.yaml`` after environment variables."""
         _check_retired_hype_settings(init_settings(), source="constructor")
+        _check_retired_local_only_settings(init_settings(), source="constructor")
         # Inspect source data before Pydantic drops aliases of removed fields.
         _check_retired_hype_environment(dotenv_settings)
+        _check_retired_local_only_environment(dotenv_settings)
         _warn_retired_settings(init_settings(), source="constructor")
         _warn_retired_environment(dotenv_settings)
         return (

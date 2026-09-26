@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from trw_memory.daemon._offload import run_serialized
 from trw_memory.models.config import MemoryConfig
 from trw_memory.security.rbac import Permission, require_namespace_permission
 from trw_memory.security.runtime import audit_entry
@@ -27,4 +28,4 @@ def register_audit_tool(mcp: McpServer) -> None:
     async def memory_audit(learning_id: str, namespace: str = "default") -> dict[str, object]:
         """Return provenance + lifecycle audit data for one memory row."""
 
-        return memory_audit_impl(learning_id, namespace=namespace)
+        return await run_serialized(memory_audit_impl, learning_id, namespace=namespace)

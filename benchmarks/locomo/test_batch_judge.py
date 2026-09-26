@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -362,6 +363,59 @@ def test_a_reasked_answer_is_judged_afresh(offline: Path, monkeypatch: pytest.Mo
     assert len(judged) == 2 and "second" in judged[1]  # the new answer got its own verdict
     out = json.loads((bench / f"results/locomo/predicted_fake__t/{qids[0]}.json").read_text())
     assert out["cutoff_results"]["top_10"]["generated_answer"] == "second"
+
+
+@pytest.mark.parametrize(
+    ("info", "want"),
+    [
+        (
+            {"limit": 50, "limit_remaining": 49.99, "include_byok_in_limit": True, "usage": 0.004, "byok_usage": 0.006},
+            0.01,
+        ),
+        (
+            {
+                "limit": 50,
+                "limit_remaining": 49.99,
+                "include_byok_in_limit": False,
+                "usage": 0.004,
+                "byok_usage": 0.006,
+            },
+            0.01,
+        ),
+        ({"usage": 0.004, "byok_usage": 0.006}, 0.01),  # no limit configured
+        ({"usage": 0.004}, 0.004),  # no BYOK on this account
+        ({}, None),
+        (None, None),
+    ],
+)
+def test_key_spend_counts_byok(info: dict[str, Any] | None, want: float | None) -> None:
+    got = bj.key_spend(info)
+    assert got is None if want is None else got == pytest.approx(want)
+
+
+def test_request_bodies_ask_for_usage_accounting() -> None:
+    assert bj.chat_body("m", "", "u", json_mode=False, reasoning=None)["usage"] == {"include": True}
+
+
+def test_a_fresh_batch_may_404_briefly_but_not_forever(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bj, "LEDGER", tmp_path / "ledger.jsonl")
+    st = bj.State(tmp_path / "s")
+    st.save_batches([{"id": "b1", "role": "answer", "n": 1, "status": "in_progress", "submitted": time.time()}])
+    calls = iter([SystemExit("GET /batches/b1 -> HTTP 404: b'not found'"), {"status": "completed", "results": []}])
+
+    def fetch(_bid: str) -> dict[str, Any]:
+        nxt = next(calls)
+        if isinstance(nxt, SystemExit):
+            raise nxt
+        return nxt
+
+    bj.poll_batches(st, "answer", "t", 0, fetch)  # the early 404 is tolerated
+    assert st.batches()[0]["status"] == "completed"
+
+    st.save_batches([{"id": "b2", "role": "answer", "n": 1, "status": "in_progress",
+                      "submitted": time.time() - bj.NEW_BATCH_GRACE - 1}])  # fmt: skip
+    with pytest.raises(SystemExit, match="404"):
+        bj.poll_batches(st, "answer", "t", 0, lambda _b: (_ for _ in ()).throw(SystemExit("HTTP 404: gone")))
 
 
 def test_torn_results_line_is_ended_before_appending(tmp_path: Path) -> None:

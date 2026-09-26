@@ -17,11 +17,6 @@ from ._test_tiers_support import _make_entry, cfg, mem_dir, mgr  # noqa: F401
 from ._timing import assert_budget
 
 
-def _seed_hot_tier(mgr: TierManager) -> None:
-    for index in range(3):
-        mgr.hot_put(f"hot-{index}", _make_entry(f"hot-{index}"))
-
-
 def _seed_warm_tier(mgr: TierManager) -> None:
     for index in range(500):
         mgr.warm_add(
@@ -92,23 +87,6 @@ def _seed_sweep_entries(mgr: TierManager, mem_dir: Path, cfg: MemoryConfig) -> N
 
 
 class TestTierPerformanceContracts:
-    def test_hot_tier_latency_p95_under_1ms(self, mgr: TierManager) -> None:
-        _seed_hot_tier(mgr)
-        assert mgr.hot_get("hot-1") is not None
-
-    @pytest.mark.requires_local_timing
-    def test_hot_tier_latency_p95_under_1ms_budget(self, mgr: TierManager) -> None:
-        _seed_hot_tier(mgr)
-
-        durations: list[float] = []
-        for _ in range(2_000):
-            started = time.perf_counter()
-            mgr.hot_get("hot-1")
-            durations.append(time.perf_counter() - started)
-
-        durations.sort()
-        assert_budget("hot_tier_get_p95", durations[int(len(durations) * 0.95)], 0.001, "s")
-
     def test_warm_tier_search_p95_under_50ms(self, mgr: TierManager) -> None:
         _seed_warm_tier(mgr)
         assert mgr.warm_search(["python"], None, top_k=25)

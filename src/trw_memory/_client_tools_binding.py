@@ -113,7 +113,7 @@ def register_tools(
     if client._tools_registered:
         raise ToolAlreadyRegisteredError("register_tools() has already been called on this client")
 
-    tools = client._make_tool_functions()
+    tools = make_tool_functions(client)
 
     register_fn = getattr(agent, "register_tool", None)
     tool_decorator = getattr(agent, "tool", None)

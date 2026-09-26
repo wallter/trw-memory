@@ -382,3 +382,46 @@ def test_empty_namespace_states_have_a_count_bound_and_lru_eviction() -> None:
     assert ("store", "0") in cache._states
     assert ("store", "1") not in cache._states
     assert cache.nbytes == 0
+
+
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_a_store_collected_inside_the_cache_guard_does_not_deadlock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The finalizer that forgets an in-memory store's index runs on the thread whose allocation
+    triggered the collection; the cache's guard does not re-enter, so it must not take it (rc8)."""
+    import gc
+    import threading
+
+    from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+    cache = nsindex.NamespaceIndexCache()
+    backend = SQLiteBackend(Path(":memory:"), dim=DIM)
+    if not backend.supports_vectors():
+        pytest.skip("sqlite-vec did not load for the in-memory store")
+    _put(backend, "M-a", E0)
+    indexed = nsindex.namespace_candidates(backend, NS, cache=cache)
+    assert indexed is not None
+    del indexed
+    assert len(cache) == 1
+    backend.close()
+
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        cycle: list[object] = [backend]
+        cycle.append(cycle)  # only the cycle collector can free it now
+        del backend, cycle
+        new_state = nsindex._IndexState
+
+        def collect_then_build(file_id: tuple[int, int] | None) -> object:
+            gc.collect()  # runs while state() holds the guard
+            return new_state(file_id)
+
+        monkeypatch.setattr(nsindex, "_IndexState", collect_then_build)
+        worker = threading.Thread(target=cache.state, args=(("other", NS), None), daemon=True)
+        worker.start()
+        worker.join(timeout=30)
+        assert not worker.is_alive(), "the finalizer blocked on the guard its own thread holds"
+    finally:
+        if was_enabled:
+            gc.enable()
+    assert len(cache) == 1  # only ("other", NS): the collected store's index is gone

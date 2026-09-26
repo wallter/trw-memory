@@ -39,7 +39,6 @@ def make_sync_config(
     platform_url: str = "https://api.example.com",
     platform_api_key: str = "test-key-123",
     sync_min_importance: float = 0.7,
-    local_only: bool = False,
 ) -> MemoryConfig:
     """Create a MemoryConfig for sync tests."""
     return MemoryConfig(
@@ -47,7 +46,6 @@ def make_sync_config(
         platform_url=platform_url,
         platform_api_key=platform_api_key,
         sync_min_importance=sync_min_importance,
-        local_only=local_only,
     )
 
 

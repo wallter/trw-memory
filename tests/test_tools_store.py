@@ -193,9 +193,10 @@ class TestMemoryStoreImpl:
         backend = _mock_backend(entries)
         deleted_ids: set[str] = set()
 
-        backend.list_entries.side_effect = lambda **kwargs: [entry for entry in entries if entry.id not in deleted_ids][
-            : int(kwargs["limit"])
-        ]
+        # Storage selects the actor's rows (rc9): 10,050 newer rows of other actors do not hide them.
+        backend.ids_by_source.side_effect = lambda _ns, actor, limit: [
+            entry.id for entry in entries if entry.source_identity == actor and entry.id not in deleted_ids
+        ][:limit]
         backend.delete.side_effect = lambda entry_id, **_kwargs: deleted_ids.add(entry_id) is None
 
         result = memory_forget_impl(None, None, "project:default", backend=backend, config=cfg, actor="alice")

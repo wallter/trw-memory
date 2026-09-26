@@ -26,7 +26,7 @@ weights, so a provider that fails to load is a *transient* answer: the library
 may be installed a minute later, or the model pulled into the cache. Caching
 ``None`` would make the first failure permanent for the life of the process.
 
-**Policy decides identity, not just the model name.** ``local_only``,
+**Policy decides identity, not just the model name.**
 ``embedding_trust_remote_code`` and the offline switches (PRD-SEC-014,
 PRD-QUAL-110) select *what may be loaded and from where*; the HuggingFace cache
 roots select *which snapshot*. All of them are part of the fingerprint, and a
@@ -55,15 +55,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = structlog.get_logger(__name__)
 
-__all__ = ["BUILD_WAIT_TIMEOUT_SECONDS", "cached_local_embedder", "reset_provider_cache"]
+__all__ = ["BUILD_WAIT_TIMEOUT_SECONDS", "cached_local_embedder", "loaded_local_embedder", "reset_provider_cache"]
 
 #: Environment variables that select what may be loaded and from where. The
 #: offline pair is PRD-QUAL-110-FR04; the cache roots are what
 #: ``embeddings/_hf_cache.py`` resolves dynamically, so a caller that repoints
 #: HF_HOME is asking for a different snapshot, not the cached one.
 _POLICY_ENV_VARS = (
-    "TRW_OFFLINE",
-    "HF_HUB_OFFLINE",
     "HF_HOME",
     "HF_HUB_CACHE",
     "HUGGINGFACE_HUB_CACHE",
@@ -135,10 +133,16 @@ def _policy_fingerprint() -> tuple[object, ...]:
     config = MemoryConfig()
     return (
         os.getpid(),
-        bool(config.local_only),
         bool(config.embedding_trust_remote_code),
         tuple(os.environ.get(name, "") for name in _POLICY_ENV_VARS),
     )
+
+
+def loaded_local_embedder(key: tuple[str, int]) -> EmbeddingProvider | None:
+    """The provider already cached for *key* under the current policy, never building one (a status read)."""
+    fingerprint = _policy_fingerprint()
+    with _CACHE_LOCK:
+        return _PROVIDER_CACHE.get(key) if fingerprint == _CACHE_FINGERPRINT else None
 
 
 def reset_provider_cache() -> None:

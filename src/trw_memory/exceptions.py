@@ -20,8 +20,40 @@ class StorageError(MemoryError):
     """Raised when a storage operation fails (read, write, lock)."""
 
 
+class UntrustedDirectoryError(StorageError):
+    """A directory is a symlink, or group/world-writable and owned by someone
+    else -- refused before a secret-bearing read or write touches it
+    (PRD-SEC-016)."""
+
+
 class ConfigError(MemoryError):
     """Raised when configuration is invalid or cannot be loaded."""
+
+
+#: The refusal ``encryption_enabled=true`` gets (C12, 7.0 freeze). The SQLCipher path it once
+#: selected never worked with a real driver and was removed in 4.1; disk encryption covers the store.
+ENCRYPTION_AT_REST_UNSUPPORTED = (
+    "trw-memory does not encrypt its store; remove encryption_enabled and use full-disk encryption "
+    "(FileVault, BitLocker or LUKS) to protect data at rest"
+)
+
+
+class EncryptionAtRestUnsupportedError(ConfigError):
+    """``encryption_enabled`` was set; see :data:`ENCRYPTION_AT_REST_UNSUPPORTED`."""
+
+
+def refuse_encryption_at_rest(config: object) -> None:
+    """Raise :class:`EncryptionAtRestUnsupportedError` if *config* asks for encryption at rest.
+
+    Config load refuses it; every store open re-checks, because a validated model can still be
+    mutated (``model_copy(update=...)``, attribute assignment).
+    """
+    if getattr(config, "encryption_enabled", False):
+        raise EncryptionAtRestUnsupportedError(ENCRYPTION_AT_REST_UNSUPPORTED)
+
+
+class UnsupportedPlatformError(ConfigError):
+    """This platform cannot run trw-memory's directory and secret-file protections (native Windows)."""
 
 
 class MemoryConnectionError(MemoryError):
@@ -44,8 +76,12 @@ class DimensionMismatchError(MemoryError):
     """Raised when vectors have incompatible dimensions."""
 
 
-class LocalOnlyViolationError(MemoryError):
-    """Raised when a network-capable operation is attempted in local-only mode."""
+class ModelNotCachedError(MemoryError):
+    """Raised when a runtime model load finds the model missing from the local cache.
+
+    Runtime loads never download (PLAN W40): models are fetched at install time or
+    by ``trw-mcp models fetch`` (``trw_memory.embeddings.fetch_models``).
+    """
 
 
 class EmbeddingUnavailableError(MemoryError):
@@ -62,25 +98,6 @@ class RemoteCodeNotPermittedError(MemoryError):
     arbitrary code execution. The message names the field so the fail-closed path
     is actionable rather than merely refusing.
     """
-
-
-class MasterKeyNotFoundError(MemoryError):
-    """Raised when no usable master key exists in any configured source."""
-
-
-class MasterKeyUnreadableError(MemoryError):
-    """Raised when a configured key source EXISTS but could not be read.
-
-    Deliberately distinct from :class:`MasterKeyNotFoundError`. "Absent" may be
-    auto-generated over; "unreadable" may never be, because auto-generation
-    overwrites the stored key and every memory encrypted under the old one
-    becomes permanently undecryptable. A locked keyring, a keyring backend that
-    raises, and a corrupt hex payload are all this error, not absence.
-    """
-
-
-class EncryptionUnavailableError(MemoryError):
-    """Raised when an encryption-required runtime dependency is unavailable."""
 
 
 class SchemaValidationError(MemoryError):
@@ -253,6 +270,15 @@ class DaemonUnreachableError(DaemonError):
     conclusion derived from it is split-brain with extra steps. The message
     carries the discovery-file path and the start command so the failure names
     its own remedy.
+    """
+
+
+class DaemonVersionMismatchError(DaemonUnreachableError):
+    """Raised on attach when the serving daemon's major version is not the client's (PRD-CORE-302 C7).
+
+    The package floor governs what is installed, not a daemon already running or
+    started from another environment; a tool signature changes across majors, so
+    the pairing is refused before any call rather than at the first mismatched one.
     """
 
 

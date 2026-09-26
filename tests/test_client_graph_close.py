@@ -25,6 +25,27 @@ from trw_memory.storage.sqlite_backend import SQLiteBackend
 from .conftest import make_entry
 
 
+def _reset_pool(timeout: float = 5.0) -> None:
+    """Test-only: stop every worker thread, mirroring the removed ``_reset_graph_worker_pool_for_tests``."""
+    survivors = pool._POOL.stop_all(timeout)
+    assert not survivors, f"{len(survivors)} graph worker(s) still running after {timeout}s"
+
+
+def _live(p: "pool._GraphWorkerPool") -> int:
+    with p._lock:
+        return sum(1 for worker in p._live if worker.thread.is_alive())
+
+
+def _open_backends(p: "pool._GraphWorkerPool") -> int:
+    with p._lock:
+        return sum(1 for worker in p._live if worker.backend is not None)
+
+
+def _worker_for(p: "pool._GraphWorkerPool", config: MemoryConfig, namespace: str) -> object:
+    with p._lock:
+        return p._workers.get(pool._worker_key(config, namespace))
+
+
 def test_registered_but_unstarted_worker_is_not_reported_finished() -> None:
     registry = _GraphThreadRegistry()
     owner = object()
@@ -180,10 +201,10 @@ async def test_backend_close_failure_keeps_retry_handle(client: MemoryClient, mo
 
 @pytest.fixture
 def fresh_pool() -> Iterator[None]:
-    pool._reset_graph_worker_pool_for_tests()
+    _reset_pool()
     yield
     graph.wait_for_graph_updates(timeout=5.0)
-    pool._reset_graph_worker_pool_for_tests()
+    _reset_pool()
 
 
 @pytest.fixture
@@ -240,7 +261,7 @@ def test_schedule_graph_update_reuses_one_worker_backend_across_rows(
     # 25 single-row jobs plus one batch job for the same file: ONE open, on the worker thread.
     assert [path for path, _thread in backend_opens] == [_db_path(config)]
     assert backend_opens[0][1].startswith("trw-memory-graph-worker-")
-    assert pool._POOL.live_worker_count() == 1
+    assert _live(pool._POOL) == 1
 
 
 @pytest.mark.usefixtures("fresh_pool")
@@ -255,28 +276,28 @@ def test_idle_worker_self_evicts_and_next_job_reopens(
         backend_opens.clear()
         assert graph.schedule_graph_update(make_entry(entry_id="M-idle-1"), owner, config=config)
         graph.wait_for_graph_updates(timeout=5.0, owner=owner)
-        worker = pool._POOL.worker_for(config, "default")
+        worker = _worker_for(pool._POOL, config, "default")
         assert worker is not None
-        assert pool._POOL.open_backend_count() == 1
+        assert _open_backends(pool._POOL) == 1
 
         # Idle for just under the window: many polls later it is still registered.
         now[0] += pool._GRAPH_WORKER_IDLE_EVICT_SECONDS - 0.5
         time.sleep(0.1)
-        assert pool._POOL.worker_for(config, "default") is worker
+        assert _worker_for(pool._POOL, config, "default") is worker
         assert worker.thread.is_alive()
 
         # Past the window it closes its backend and leaves the registry by itself.
         now[0] += 1.0
         assert _wait_until(lambda: not worker.thread.is_alive())
-        assert pool._POOL.worker_for(config, "default") is None
-        assert pool._POOL.live_worker_count() == 0
-        assert pool._POOL.open_backend_count() == 0
+        assert _worker_for(pool._POOL, config, "default") is None
+        assert _live(pool._POOL) == 0
+        assert _open_backends(pool._POOL) == 0
         assert len(backend_opens) == 1
 
         # The next job gets a new worker and a real, fresh open (and quick_check).
         assert graph.schedule_graph_update(make_entry(entry_id="M-idle-2"), owner, config=config)
         graph.wait_for_graph_updates(timeout=5.0, owner=owner)
-        replacement = pool._POOL.worker_for(config, "default")
+        replacement = _worker_for(pool._POOL, config, "default")
         assert replacement is not None
         assert replacement is not worker
         assert [path for path, _thread in backend_opens] == [_db_path(config)] * 2
@@ -304,7 +325,7 @@ def test_worker_cap_evicts_only_idle_workers_and_never_drops_a_job(
         assert graph.schedule_graph_update(make_entry(entry_id=name), owner, config=configs[name])
 
     def worker_of(name: str) -> pool._GraphWorker | None:
-        return pool._POOL.worker_for(configs[name], "default")
+        return _worker_for(pool._POOL, configs[name], "default")
 
     schedule("a")  # stays busy
     assert started["a"].wait(5)
@@ -339,15 +360,15 @@ def test_worker_registry_reset_hook_closes_all_workers(tmp_path: Path) -> None:
         owners.append(owner)
         assert graph.schedule_graph_update(make_entry(entry_id=f"M-{name}"), owner, config=config)
     graph.wait_for_graph_updates(timeout=10.0)
-    assert pool._POOL.live_worker_count() == 3
-    assert pool._POOL.open_backend_count() == 3
+    assert _live(pool._POOL) == 3
+    assert _open_backends(pool._POOL) == 3
     worker_threads = [t for t in threading.enumerate() if t.name.startswith("trw-memory-graph-worker-")]
     assert len(worker_threads) == 3
 
-    pool._reset_graph_worker_pool_for_tests()
+    _reset_pool()
 
-    assert pool._POOL.live_worker_count() == 0
-    assert pool._POOL.open_backend_count() == 0
+    assert _live(pool._POOL) == 0
+    assert _open_backends(pool._POOL) == 0
     assert not any(thread.is_alive() for thread in worker_threads)
     for owner in owners:
         owner.close()
@@ -372,4 +393,4 @@ def test_concurrent_producers_create_exactly_one_worker_per_path(
         graph.wait_for_graph_updates(timeout=10.0, owner=owner)
 
     assert [path for path, _thread in backend_opens] == [_db_path(config)]
-    assert pool._POOL.live_worker_count() == 1
+    assert _live(pool._POOL) == 1

@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.lifecycle._recall import FUSED_SCORE_KEY, rank_by_utility
 from trw_memory.models.config import MemoryConfig
@@ -324,7 +326,7 @@ class TestToolRecallPreservesScoreOrder:
         }
 
 
-class TestDegradedLexicalFallback:
+class TestKeywordOnlyRecall:
     def test_identifier_words_are_indexed_separately(self) -> None:
         tokens = _tokenize_entry(MemoryEntry(id="x", content="favourite_language: Go", namespace=NAMESPACE))
         assert {"favourite", "language", "favourite_language"} <= set(tokens)
@@ -333,19 +335,30 @@ class TestDegradedLexicalFallback:
         assert _split_identifiers(["manager_name"]) == ["manager_name", "manager", "name"]
         assert _normalize_text("HybridSearch") == "hybrid search"
 
-    def test_no_retrieval_source_still_answers_a_lexical_query(self) -> None:
+    def test_keyword_only_recall_answers_an_identifier_query(self) -> None:
+        """No dense source: BM25 alone finds the identifier from its words (the FR04 case)."""
         entries = _entries("favourite_language: Go", "note_1: unrelated filler entry 1")
-        with patch("trw_memory.retrieval.bm25._BM25_AVAILABLE", False):
-            candidates = hybrid_search_scored("favourite language", entries, scope=_scope())
+        candidates = hybrid_search_scored("favourite language", entries, scope=_scope())
         assert [candidate.entry.content for candidate in candidates] == ["favourite_language: Go"]
+
+    def test_the_lexical_fallback_finds_a_hyphenated_content_word_from_its_parts(self) -> None:
+        """BM25 keeps "trw-memory" whole, so only the FR04 lexical source finds it from "trw memory"."""
+        entries = _entries("the trw-memory daemon owns embedding", "note_1: unrelated filler entry 1")
+        candidates = hybrid_search_scored("trw memory", entries, scope=_scope())
+        assert [candidate.entry.content for candidate in candidates] == ["the trw-memory daemon owns embedding"]
 
     def test_no_lexical_match_returns_nothing_rather_than_filler(self) -> None:
         entries = _entries("note_1: unrelated filler entry 1", "note_2: unrelated filler entry 2")
-        with patch("trw_memory.retrieval.bm25._BM25_AVAILABLE", False):
-            assert hybrid_search_scored("kubernetes cluster", entries, scope=_scope()) == []
+        assert hybrid_search_scored("kubernetes cluster", entries, scope=_scope()) == []
 
-    def test_fallback_still_honours_the_validity_prior(self) -> None:
-        """The fallback lives INSIDE the pipeline so exclusions still apply."""
+    @pytest.mark.parametrize("query", ["!!!", "-", "???", "日本語"])
+    def test_a_query_with_no_searchable_token_returns_nothing(self, query: str) -> None:
+        """The FR04 lexical source scored every row 1.0 for these, returning the whole store as filler."""
+        entries = _entries("not bar", "note_1: unrelated filler entry 1")
+        assert hybrid_search_scored(query, entries, scope=_scope()) == []
+
+    def test_the_lexical_fallback_still_honours_the_validity_prior(self) -> None:
+        """With BM25 empty the FR04 source answers, inside the pipeline, so exclusions still apply."""
         now = datetime.now(timezone.utc)
         open_entry = MemoryEntry(id="open", content="pydantic validation", namespace=NAMESPACE, valid_from=now)
         superseded = MemoryEntry(
@@ -356,8 +369,23 @@ class TestDegradedLexicalFallback:
             invalid_from=now,
             invalidated_by="open",
         )
-        with patch("trw_memory.retrieval.bm25._BM25_AVAILABLE", False):
+        with patch("trw_memory.retrieval.pipeline.bm25_search", return_value=[]):
             candidates = hybrid_search_scored("pydantic validation", [superseded, open_entry], scope=_scope())
+        assert [candidate.entry.id for candidate in candidates] == ["open"]
+
+    def test_keyword_only_recall_still_honours_the_validity_prior(self) -> None:
+        """Exclusions live in the pipeline's prior, so they apply to BM25 hits too."""
+        now = datetime.now(timezone.utc)
+        open_entry = MemoryEntry(id="open", content="pydantic validation", namespace=NAMESPACE, valid_from=now)
+        superseded = MemoryEntry(
+            id="old",
+            content="pydantic validation",
+            namespace=NAMESPACE,
+            valid_from=now - timedelta(days=2),
+            invalid_from=now,
+            invalidated_by="open",
+        )
+        candidates = hybrid_search_scored("pydantic validation", [superseded, open_entry], scope=_scope())
         assert [candidate.entry.id for candidate in candidates] == ["open"]
 
 

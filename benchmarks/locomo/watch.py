@@ -7,7 +7,8 @@ so every line is worth reading::
 
 Checks every ``--interval`` seconds:
 
-* spend since the watcher started, from ``GET /api/v1/key``: warn at 75% of --budget, stop at
+* spend since the watcher started, from ``GET /api/v1/key`` (limit accounting, or usage +
+  byok_usage): warn at 75% of --budget, stop at
   100%; stop if usage has been unreadable for ``--usage-outage`` seconds (fail closed)
 * progress: new predictions OR new mem0 writes OR checkpoint updates; warn after 10 min idle,
   stop after 30 (ingest writes no prediction until a conversation is fully stored)
@@ -19,7 +20,7 @@ Checks every ``--interval`` seconds:
   (warn > 25%, stop > 60%; small talk legitimately yields nothing)
 * shim/run logs: Tracebacks and HTTP 429/5xx lines (warn on any, stop above 50 per check)
 * ledger rows for this phase: batch not ``completed``, fewer results than requests, > 1% errors
-  or truncations, BYOK billing, uncertain submissions, failed answer gates, summaries with
+  or truncations, uncertain submissions, failed answer gates, summaries with
   judge errors or truncations > 1% (missing questions only warn: rerun to retry them)
 * load average (warn > 8; stop above ``--max-load`` when given, for local phases)
 
@@ -281,7 +282,10 @@ def main(argv: list[str] | None = None) -> int:
                 bad_batch = (r.get("status") != "completed" or int(r.get("returned", 0)) < int(r.get("n", 0))
                              or (bad_n >= 3 and bad_n / n > 0.01))  # fmt: skip
                 if r.get("is_byok"):
-                    stops.append(f"BYOK billing on batch {r.get('batch_id')}: usage.cost excludes provider charges")
+                    # Provider-billed: usage.cost is not the real charge. Spend is tracked from the key's
+                    # own accounting (usage + byok_usage) instead, so this is a note, not a stop.
+                    report(f"byok.{r.get('batch_id')}", "WARN", f"batch {r.get('batch_id')} billed via BYOK; "
+                           f"cost comes from the key's spend, not usage.cost")  # fmt: skip
                 if bad_batch:
                     stops.append(msg)
                 else:

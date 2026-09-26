@@ -9,12 +9,24 @@ import pytest
 
 from trw_memory.embeddings.provenance import EmbeddingSpace, StoredVector, VectorProvenance
 from trw_memory.lifecycle.tiers import TierManager
-from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 
 from ._test_tiers_support import cfg as _cfg_fixture  # noqa: F401
 from ._test_tiers_support import mem_dir as _mem_dir_fixture  # noqa: F401
 from ._test_tiers_support import mgr as _mgr_fixture  # noqa: F401
+
+
+def _hot_get(mgr: TierManager, entry_id: str) -> MemoryEntry | None:
+    """Test seam mirroring the removed ``TierManager.hot_get`` body exactly
+    (MRU move + ``last_accessed_at`` refresh included), for tests that use it
+    only to observe hot-cache state after some other operation under test."""
+    with mgr._hot_lock:
+        if entry_id not in mgr._hot:
+            return None
+        mgr._hot.move_to_end(entry_id)
+        entry = mgr._hot[entry_id]
+        entry.last_accessed_at = datetime.now(timezone.utc)
+        return entry
 
 
 def _make_entry(
@@ -40,24 +52,12 @@ def _make_entry(
 
 
 class TestHotTier:
-    def test_hot_get_miss_returns_none(self, mgr: TierManager) -> None:
-        assert mgr.hot_get("nonexistent") is None
-
     def test_hot_put_and_get(self, mgr: TierManager) -> None:
         entry = _make_entry("e1")
         mgr.hot_put("e1", entry)
-        result = mgr.hot_get("e1")
+        result = _hot_get(mgr, "e1")
         assert result is not None
         assert result.id == "e1"
-
-    def test_hot_get_moves_to_mru(self, mgr: TierManager) -> None:
-        mgr.hot_put("e1", _make_entry("e1"))
-        mgr.hot_put("e2", _make_entry("e2"))
-        mgr.hot_put("e3", _make_entry("e3"))
-        mgr.hot_get("e1")
-        mgr.hot_put("e4", _make_entry("e4"))
-        assert mgr.hot_get("e1") is not None
-        assert mgr.hot_get("e2") is None
 
     def test_hot_put_evicts_lru_when_over_capacity(self, mgr: TierManager) -> None:
         mgr.hot_put("e1", _make_entry("e1"))
@@ -66,7 +66,7 @@ class TestHotTier:
         assert mgr.hot_size == 3
         mgr.hot_put("e4", _make_entry("e4"))
         assert mgr.hot_size == 3
-        assert mgr.hot_get("e1") is None
+        assert _hot_get(mgr, "e1") is None
 
     def test_hot_capacity_eviction_demotes_entry_to_warm_tier(self, mgr: TierManager) -> None:
         mgr.hot_put("e1", _make_entry("e1"))
@@ -99,22 +99,15 @@ class TestHotTier:
         # trw-memory-2: warm_add failure drops the LRU evictee (e1) and preserves
         # the freshly written entry (e4) — previously the new write was lost
         # (see TierManager.hot_put + test_tier_thread_safety.py).
-        assert mgr.hot_get("e1") is None
-        assert mgr.hot_get("e4") is not None
+        assert _hot_get(mgr, "e1") is None
+        assert _hot_get(mgr, "e4") is not None
 
     def test_hot_put_refresh_existing(self, mgr: TierManager) -> None:
         mgr.hot_put("e1", _make_entry("e1"))
         mgr.hot_put("e1", _make_entry("e1", importance=0.9))
-        result = mgr.hot_get("e1")
+        result = _hot_get(mgr, "e1")
         assert result is not None
         assert result.importance == pytest.approx(0.9)
-
-    def test_hot_clear(self, mgr: TierManager) -> None:
-        mgr.hot_put("e1", _make_entry("e1"))
-        mgr.hot_put("e2", _make_entry("e2"))
-        mgr.hot_clear()
-        assert mgr.hot_size == 0
-        assert mgr.hot_get("e1") is None
 
     def test_hot_size_property(self, mgr: TierManager) -> None:
         assert mgr.hot_size == 0
@@ -126,18 +119,7 @@ class TestHotTier:
         mgr.hot_put("e2", _make_entry("e2"))
         mgr.hot_put("e3", _make_entry("e3"))
         mgr.hot_put("e4", _make_entry("e4"))
-        assert mgr.hot_get("e1") is None
-
-    def test_hot_get_refreshes_ttl_eligibility(self, mgr: TierManager, cfg: MemoryConfig) -> None:
-        mgr.hot_put("e1", _make_entry("e1", days_old=30))
-
-        refreshed = mgr.hot_get("e1")
-        assert refreshed is not None
-
-        result = mgr.sweep(config=cfg)
-
-        assert result.demoted == 0
-        assert mgr.hot_get("e1") is not None
+        assert _hot_get(mgr, "e1") is None
 
     def test_warmup_hot_from_warm_ranks_full_sidecar_before_truncating(self, mgr: TierManager) -> None:
         for idx in range(10):
@@ -154,7 +136,7 @@ class TestHotTier:
 
         loaded = mgr.warmup_hot_from_warm(max_entries=1)
         assert loaded == 1
-        assert mgr.hot_get("best") is not None
+        assert _hot_get(mgr, "best") is not None
 
     def test_search_merges_hot_warm_and_cold_results(self, mgr: TierManager) -> None:
         from trw_memory.storage.persistence import write_yaml

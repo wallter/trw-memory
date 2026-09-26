@@ -103,3 +103,30 @@ def test_a_stub_that_spawned_nothing_still_fails_closed(paths: DaemonPaths, monk
 
 def test_the_daemon_argv_is_the_module_entry_point() -> None:
     assert (sys.executable, *client_module._DAEMON_ARGV) == (sys.executable, "-m", "trw_memory.server", "serve", "http")
+
+
+def test_the_daemon_never_gets_a_pipe_nobody_drains(paths: DaemonPaths, monkeypatch: pytest.MonkeyPatch) -> None:
+    """7.0 freeze: the daemon logs from its event loop, so a full undrained pipe would stall every request.
+
+    Measured on Linux (SQLite 3.46): 60 KB of per-open warnings before the first
+    refused call's traceback, past a 64 KiB pipe buffer.
+    """
+    import subprocess
+
+    seen: dict[str, object] = {}
+
+    class _Recorded:
+        pid = 0
+
+        def __init__(self, _argv: list[str], **kwargs: object) -> None:
+            seen.update(kwargs)
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(client_module.subprocess, "Popen", _Recorded)
+
+    client_module.start_daemon_detached(paths)
+
+    assert subprocess.PIPE not in (seen["stdin"], seen["stdout"], seen["stderr"])
+    assert seen["stdout"] == subprocess.DEVNULL

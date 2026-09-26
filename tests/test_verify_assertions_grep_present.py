@@ -5,9 +5,14 @@ PRD-CORE-086 FR04: verify_assertions() for grep_present type.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from types import TracebackType
+from typing import IO, Any
 
-from trw_memory.lifecycle.verification import verify_assertions
+import pytest
+
+from trw_memory.lifecycle.verification import MAX_FILE_SIZE_BYTES, verify_assertions
 from trw_memory.models.memory import Assertion, AssertionType
 
 
@@ -76,6 +81,61 @@ class TestGrepPresentEdgeCases:
         results = verify_assertions(assertions, tmp_path)
         assert results[0].passed is False  # Oversized file skipped
         assert "file exceeds 1MB limit" in results[0].evidence
+
+    def test_oversized_file_is_never_read_in_full(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Round-10 (gpt-6-sol) review: an oversized match must not be fully materialized before the size check runs.
+
+        The prior test above only proves the CLASSIFICATION is correct; this
+        proves the classification is reached without reading the whole file
+        into memory first -- a file whose bytes never left the OS page cache
+        for this process still classifies as oversized.
+        """
+        large_content = "hello_world\n" * 200_000  # ~2.4MB, comfortably over the 1MB cap
+        (tmp_path / "large.py").write_text(large_content)
+
+        real_fdopen = os.fdopen
+        max_read_size_seen: list[int] = []
+
+        class _SpyingReader:
+            """Delegates everything to the real ``BufferedReader`` except ``read``, which it records."""
+
+            def __init__(self, wrapped: IO[bytes]) -> None:
+                self._wrapped = wrapped
+
+            def read(self, size: int = -1) -> bytes:
+                max_read_size_seen.append(size)
+                return self._wrapped.read(size)
+
+            def __enter__(self) -> _SpyingReader:
+                self._wrapped.__enter__()
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_val: BaseException | None,
+                exc_tb: TracebackType | None,
+            ) -> None:
+                self._wrapped.__exit__(exc_type, exc_val, exc_tb)
+
+        def spying_fdopen(fd: int, mode: str = "r", **kwargs: Any) -> _SpyingReader:
+            return _SpyingReader(real_fdopen(fd, mode, **kwargs))
+
+        monkeypatch.setattr(os, "fdopen", spying_fdopen)
+
+        assertions = [
+            Assertion(type=AssertionType.GREP_PRESENT, pattern="hello_world", target="*.py"),
+        ]
+        results = verify_assertions(assertions, tmp_path)
+
+        assert results[0].passed is False
+        assert "file exceeds 1MB limit" in results[0].evidence
+        # A bounded read passes an explicit, finite, positive size to
+        # `handle.read` -- never `-1`/no-argument, which would read the
+        # whole 2.4MB file.
+        assert max_read_size_seen, "the spy never observed a read call"
+        for size in max_read_size_seen:
+            assert 0 < size <= MAX_FILE_SIZE_BYTES + 1, max_read_size_seen
 
     def test_default_excludes_applied(self, tmp_path: Path) -> None:
         # Create file in __pycache__ which is in DEFAULT_EXCLUDES

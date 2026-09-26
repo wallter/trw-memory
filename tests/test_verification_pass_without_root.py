@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from trw_memory.lifecycle.verification_pass import run_maintain_verify
+from trw_memory.lifecycle.verification_pass import MaintainVerifySummary, run_maintain_verify
 from trw_memory.models.memory import Assertion, AssertionType, MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
@@ -31,8 +31,8 @@ def backend(tmp_path: Path) -> Iterator[SQLiteBackend]:
     store.close()
 
 
-def _refresh(backend: SQLiteBackend, root: Path | None) -> None:
-    run_maintain_verify(
+def _refresh(backend: SQLiteBackend, root: Path | None) -> MaintainVerifySummary:
+    return run_maintain_verify(
         backend,
         assertion_failure_penalty=0.15,
         assertion_stale_threshold_days=7,
@@ -65,3 +65,37 @@ def test_a_refresh_without_a_root_keeps_a_dated_failure(backend: SQLiteBackend, 
     _refresh(backend, None)
 
     assert _assertions(backend) == failed
+
+
+def test_an_assertion_replaced_during_the_check_keeps_the_edit_and_gets_no_verdict(
+    backend: SQLiteBackend, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C12 rc7: the sweep wrote back the list it checked plus its verdict, so an update replacing assertion A
+    with B in between was reverted to A and the row stamped verified on evidence it no longer carried."""
+    from trw_memory.lifecycle import verification_pass
+
+    (tmp_path / "source.py").write_text("def my_func(): ...\n", encoding="utf-8")
+    replacement = Assertion(type=AssertionType.GREP_PRESENT, pattern="other_func", target="source.py")
+    check = verification_pass.run_verification_pass
+
+    def _check_then_edit(*args: object, **kwargs: object) -> verification_pass.VerificationOutcome:
+        outcome = check(*args, **kwargs)  # type: ignore[arg-type]
+        backend.update("L-test", namespace="default", assertions=[replacement])
+        return outcome
+
+    monkeypatch.setattr(verification_pass, "run_verification_pass", _check_then_edit)
+    summary = _refresh(backend, tmp_path)
+
+    entry = backend.get("L-test", namespace="default")
+    assert entry is not None and [a.pattern for a in entry.assertions] == ["other_func"], "a concurrent edit reverted"
+    assert entry.verification_status != "verified"
+    assert summary.persist_failures == 0, "a superseded verdict is dropped, not a failed maintenance pass"
+
+
+def test_an_unchanged_row_still_gets_its_verdict(backend: SQLiteBackend, tmp_path: Path) -> None:
+    (tmp_path / "source.py").write_text("def my_func(): ...\n", encoding="utf-8")
+
+    _refresh(backend, tmp_path)
+
+    entry = backend.get("L-test", namespace="default")
+    assert entry is not None and entry.verification_status == "verified"

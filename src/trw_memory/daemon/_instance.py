@@ -27,6 +27,7 @@ evidence: it carries the pid that liveness is checked against.
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 from dataclasses import dataclass
 
@@ -39,8 +40,9 @@ from trw_memory.daemon._discovery import (
     write_discovery,
 )
 from trw_memory.daemon._loopback import bind_loopback_socket, endpoint_url
-from trw_memory.daemon._paths import DaemonPaths
+from trw_memory.daemon._paths import IMPORT_TMP_SUBDIR, DaemonPaths
 from trw_memory.exceptions import DaemonAlreadyRunningError, DaemonRecordInvalidError
+from trw_memory.storage._pid_liveness import _pid_is_live
 from trw_memory.storage.persistence import lock_for_rmw
 
 __all__ = ["InstanceClaim", "claim_single_instance", "release_single_instance"]
@@ -97,6 +99,13 @@ def claim_single_instance(paths: DaemonPaths, *, port: int, version: str) -> Ins
                 )
             logger.info("daemon_stale_record_reaped", pid=existing.pid, path=str(paths.discovery))
             paths.discovery.unlink(missing_ok=True)
+        # A private import copy whose process is gone is an orphan (C12-R). A live owner's -- this
+        # daemon's, or a stdio server's beside it -- is still in use, so only the dead ones go.
+        import_tmp = paths.user_memory_dir / IMPORT_TMP_SUBDIR
+        for work in () if import_tmp.is_symlink() else import_tmp.glob("*"):  # never delete through a link
+            owner = work.name.split("-")[0]
+            if not (owner.isdecimal() and _pid_is_live(int(owner), work)):
+                shutil.rmtree(work, ignore_errors=True)
 
         sock = bind_loopback_socket(port)
         try:
@@ -134,11 +143,7 @@ def release_single_instance(paths: DaemonPaths, *, claimed: DaemonInfo | None = 
         if not isinstance(existing, DaemonInfo) or existing.pid != os.getpid():
             return
         if claimed is not None and existing.started_at != claimed.started_at:
-            logger.info(
-                "daemon_discovery_kept_for_newer_claim",
-                path=str(paths.discovery),
-                pid=existing.pid,
-            )
+            logger.info("daemon_discovery_kept_for_newer_claim", path=str(paths.discovery), pid=existing.pid)
             return
         paths.discovery.unlink(missing_ok=True)
         logger.info("daemon_discovery_removed", path=str(paths.discovery), pid=existing.pid)

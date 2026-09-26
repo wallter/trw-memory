@@ -419,6 +419,17 @@ class StorageBackend(ABC):
         """Every knowledge-graph edge filed under *namespace*; a backend without a graph holds none."""
         return []
 
+    def graph_edge_count(self, namespace: str) -> int:
+        """How many edges :meth:`graph_edges` would return, without reading them."""
+        return len(self.graph_edges(namespace))
+
+    def ids_by_source(self, namespace: str, source_identity: str, limit: int) -> list[str]:
+        """Up to *limit* ids of *namespace*'s rows written by *source_identity*, any status."""
+        found = self.list_entries(
+            namespace=namespace, limit=limit, entry_filter=lambda e: e.source_identity == source_identity
+        )
+        return [entry.id for entry in found]
+
     def add_graph_edges(self, namespace: str, edges: Sequence[GraphEdge]) -> None:
         """File *edges* under *namespace*, keeping any already there.
 

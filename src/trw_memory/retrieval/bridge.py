@@ -125,7 +125,8 @@ def extend_with_bridge(
     eligible = {entry.id: entry for entry in tail}
     # Look only a bounded distance into the second-hop ranking: its deep tail
     # matches a single bridge term and is noise the cross-encoder would pay for.
-    hits = bm25_search(f"{query} {' '.join(terms)}", entries, top_k=len(scored) + 3 * candidates)
+    # Terms first: the query bound keeps the leading chunks, and the bridge terms are the point.
+    hits = bm25_search(f"{' '.join(terms)} {query}", entries, top_k=len(scored) + 3 * candidates)
     # Only rows that hold a bridge term are new evidence; a row matching the
     # query words alone was already ranked by the first hop, so scoring it
     # again only costs cross-encoder time.

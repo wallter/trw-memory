@@ -7,8 +7,6 @@ from unittest.mock import patch
 
 import pytest
 
-pytest.importorskip("rank_bm25")
-
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.bridge import bridge_terms, extend_with_bridge
@@ -85,7 +83,7 @@ def test_extend_is_a_no_op_when_the_scorer_is_unavailable_or_tail_empty() -> Non
     assert out == (scored, [], False) and called == []
 
 
-def _table_scores(query, entries, *, model_name, local_only=False):
+def _table_scores(query, entries, *, model_name):
     table = {"seed": 5.0, "bridge": 3.0}
     return sorted(((e, table.get(e.id, -9.0)) for e in entries), key=lambda x: x[1], reverse=True)
 

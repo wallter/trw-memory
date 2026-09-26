@@ -17,7 +17,8 @@ from typing import TYPE_CHECKING
 import structlog
 
 from trw_memory.exceptions import PoisoningError, SchemaValidationError
-from trw_memory.models.memory import Confidence, MemoryEntry
+from trw_memory.models._assertion_cap import overlong
+from trw_memory.models.memory import Assertion, Confidence, MemoryEntry
 
 if TYPE_CHECKING:
     # trw_memory.decisions imports trw_memory.security (via _redaction ->
@@ -159,6 +160,28 @@ _INJECTION_PATTERNS = _ALWAYS_ENFORCED_PATTERNS + _CODE_EXEMPT_PATTERNS
 # Must NOT be caller-settable — see security audit 2026-04-18 H2.
 SYSTEM_CODE_FLAG_KEY = "_sys_code_flagged"
 
+# System-only quarantine/review/canary metadata keys. ``quarantined``/
+# ``quarantined_at`` gate the trust-quarantine short-circuit in
+# ``prepare_entry_for_store`` (Q1): a caller who sets
+# ``metadata={"quarantined": "true"}`` used to take that branch straight past
+# rate-limit / PII / anomaly scoring. ``reviewed_by`` / ``review_decision`` /
+# ``security_status`` are review-workflow state written only by
+# ``review_quarantined_entry`` after a human decision. ``system_canary`` marks
+# the FR-007 canary rows every recall surface hides from callers
+# (``apply_recall_security`` / ``_apply_sec001_recall_policy``); a caller who
+# forges it on their own entry would only hide that entry from their own
+# recall, but it is exactly as caller-illegitimate as the others. None of the
+# six is ever legitimately caller-supplied; stripped at intake by
+# ``_stage_strip_reserved_metadata`` before any quarantine decision is made.
+RESERVED_SYSTEM_METADATA_KEYS = (
+    "quarantined",
+    "quarantined_at",
+    "reviewed_by",
+    "review_decision",
+    "security_status",
+    "system_canary",
+)
+
 
 def quarantine_entry(entry: MemoryEntry) -> MemoryEntry:
     """Move *entry* to quarantine by setting metadata flags.
@@ -177,6 +200,21 @@ def quarantine_entry(entry: MemoryEntry) -> MemoryEntry:
     new_metadata["quarantined"] = "true"
     new_metadata["quarantined_at"] = now
     return entry.model_copy(update={"metadata": new_metadata})
+
+
+def strip_reserved_metadata(entry: MemoryEntry) -> MemoryEntry:
+    """Strip caller-set ``RESERVED_SYSTEM_METADATA_KEYS`` from *entry* (Q1).
+
+    Called by ``_runtime_pipeline._stage_strip_reserved_metadata``, the FIRST
+    pre-quarantine stage -- before ``prepare_entry_for_store``'s
+    ``metadata.get("quarantined")`` short-circuit check, which exists to
+    detect that trust-intake ITSELF just quarantined this entry, not to be a
+    caller-settable bypass.
+    """
+    if not any(key in entry.metadata for key in RESERVED_SYSTEM_METADATA_KEYS):
+        return entry
+    stripped = {k: v for k, v in entry.metadata.items() if k not in RESERVED_SYSTEM_METADATA_KEYS}
+    return entry.model_copy(update={"metadata": stripped})
 
 
 #: Free-form, caller-writable ``MemoryEntry`` fields every injection scan must
@@ -423,6 +461,7 @@ def validate_store_inputs(
     tags: object,
     metadata: object,
     importance: object,
+    assertions: list[Assertion] | None = None,
 ) -> None:
     """Strictly validate public store inputs before coercion or persistence."""
     failed_fields: list[str] = []
@@ -439,6 +478,8 @@ def validate_store_inputs(
         failed_fields.append("metadata")
     if not isinstance(importance, (int, float)) or not 0.0 <= float(importance) <= 1.0:
         failed_fields.append("importance")
+    if any(map(overlong, assertions or ())):
+        failed_fields.append("assertions")
 
     if failed_fields:
         raise SchemaValidationError(

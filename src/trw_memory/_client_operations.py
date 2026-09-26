@@ -116,8 +116,7 @@ class ClientOperationsMixin:
         after an ``embedding_model`` change (or for vectors written before
         provenance existed) rows are BM25-only until this runs. Idempotent and
         resumable: rows already in the active space are skipped, and every
-        ``batch_size`` page commits on its own. Honours ``TRW_OFFLINE`` /
-        ``HF_HUB_OFFLINE`` / ``local_only`` exactly as recall does.
+        ``batch_size`` page commits on its own. Like recall, it never downloads a model.
         """
         from trw_memory._client_reembed import reembed_namespace
 

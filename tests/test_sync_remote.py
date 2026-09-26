@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import json
-import socket
-import time
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+from _pytest.monkeypatch import MonkeyPatch
 
-from tests._timing import assert_budget
-from trw_memory.exceptions import LocalOnlyViolationError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.sync import store_gate
@@ -40,7 +37,6 @@ def publish_memory(
     entry: MemoryEntry,
     cfg: MemoryConfig,
     *,
-    embedding: list[float] | None = None,
     project_root: str = "",
 ) -> bool:
     """Test-local mirror of the removed ``sync.remote.publish_memory`` bool wrapper.
@@ -49,33 +45,8 @@ def publish_memory(
     keeps the pre-existing fail-open ("success or non-retryable") assertions
     in this file readable without re-deriving the tuple unpack in every test.
     """
-    result = publish_memory_result(entry, cfg, embedding=embedding, project_root=project_root)
+    result = publish_memory_result(entry, cfg, project_root=project_root)
     return result["success"] or not result["retryable"]
-
-
-def test_local_only_blocks_immediately() -> None:
-    cfg = _make_config(local_only=True)
-    entry = _make_entry()
-
-    with patch.object(socket, "socket") as mock_socket:
-        with pytest.raises(LocalOnlyViolationError, match="memory_local_only=True"):
-            publish_memory(entry, cfg)
-
-    mock_socket.assert_not_called()
-
-
-@pytest.mark.requires_local_timing
-def test_local_only_blocks_immediately_budget() -> None:
-    cfg = _make_config(local_only=True)
-    entry = _make_entry()
-
-    with patch.object(socket, "socket"):
-        start = time.perf_counter()
-        with pytest.raises(LocalOnlyViolationError, match="memory_local_only=True"):
-            publish_memory(entry, cfg)
-        elapsed = time.perf_counter() - start
-
-    assert_budget("local_only_block_elapsed", elapsed, 0.005, "s")
 
 
 class TestAnonymizeEntry:
@@ -134,11 +105,9 @@ class TestAnonymizeEntry:
         assert len(result["source_project"]) == 16
         assert all(c in "0123456789abcdef" for c in result["source_project"])
 
-    def test_embedding_defaults_to_none(self) -> None:
-        """Default embedding is None (populated by caller)."""
-        entry = _make_entry()
-        result = _anonymize_entry(entry)
-        assert result["embedding"] is None
+    def test_carries_no_embedding(self) -> None:
+        """Vectors never leave the machine (PRD-CORE-302 FR04)."""
+        assert "embedding" not in _anonymize_entry(_make_entry())
 
     def test_empty_detail_returns_none(self) -> None:
         """Empty detail field returns None in payload."""
@@ -155,13 +124,6 @@ class TestPublishMemory:
         cfg = _make_config(sync_enabled=False)
         entry = _make_entry(importance=0.9)
         assert publish_memory(entry, cfg) is True
-
-    def test_raises_when_local_only_enabled(self) -> None:
-        """Local-only mode blocks remote publish entrypoints explicitly."""
-        cfg = _make_config(local_only=True)
-        entry = _make_entry(importance=0.9)
-        with pytest.raises(LocalOnlyViolationError, match="memory_local_only=True"):
-            publish_memory(entry, cfg)
 
     def test_returns_false_when_platform_url_empty(self) -> None:
         """Empty remote config is treated as a non-retryable skip."""
@@ -209,8 +171,9 @@ class TestPublishMemory:
         assert publish_memory_result(entry, cfg) == {"success": False, "remote_id": None, "retryable": False}
 
     @patch("trw_memory.sync.remote.httpx.Client")
-    def test_calls_correct_url_with_auth(self, mock_client_cls: MagicMock) -> None:
-        """POST goes to {platform_url}/v1/learnings with Bearer token."""
+    def test_calls_correct_url_with_auth(self, mock_client_cls: MagicMock, monkeypatch: MonkeyPatch) -> None:
+        """POST goes to {platform_url}/v1/learnings with Bearer token when the host is trusted."""
+        monkeypatch.setenv("TRW_PLATFORM_TRUSTED_HOSTS", "api.test.com")
         mock_client = _mock_httpx_client(mock_client_cls, status_code=200)
 
         cfg = _make_config(platform_url="https://api.test.com")
@@ -221,6 +184,18 @@ class TestPublishMemory:
         assert call_args[0][0] == "https://api.test.com/v1/learnings"
         headers = call_args[1]["headers"]
         assert headers["Authorization"] == "Bearer test-key-123"
+
+    @patch("trw_memory.sync.remote.httpx.Client")
+    def test_untrusted_platform_url_never_gets_the_bearer(self, mock_client_cls: MagicMock) -> None:
+        """F5/P1-C: a project-configured host outside the trust allowlist gets no Authorization header."""
+        mock_client = _mock_httpx_client(mock_client_cls, status_code=200)
+
+        cfg = _make_config(platform_url="https://api.test.com")
+        entry = _make_entry(importance=0.9)
+        publish_memory(entry, cfg)
+
+        headers = mock_client.post.call_args[1]["headers"]
+        assert "Authorization" not in headers
 
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_returns_false_on_503_response(self, mock_client_cls: MagicMock) -> None:
@@ -239,20 +214,6 @@ class TestPublishMemory:
         cfg = _make_config()
         entry = _make_entry(importance=0.9)
         assert publish_memory(entry, cfg) is False
-
-    @patch("trw_memory.sync.remote.httpx.Client")
-    def test_includes_embedding_in_payload(self, mock_client_cls: MagicMock) -> None:
-        """When embedding is provided, it's included in the payload."""
-        mock_client = _mock_httpx_client(mock_client_cls, status_code=200)
-
-        cfg = _make_config()
-        entry = _make_entry(importance=0.9)
-        embedding = [0.1] * 384
-        publish_memory(entry, cfg, embedding=embedding)
-
-        call_args = mock_client.post.call_args
-        payload = call_args[1]["json"]
-        assert payload["embedding"] == embedding
 
     @patch("trw_memory.sync.remote.httpx.Client")
     def test_no_auth_header_without_api_key(self, mock_client_cls: MagicMock) -> None:
@@ -276,12 +237,6 @@ class TestFetchSharedMemories:
         cfg = _make_config(sync_enabled=False)
         fetched = fetch_shared_memories("query", cfg, admit=store_gate(cfg, gate_backend()))
         assert (fetched.results, fetched.status) == ([], "disabled")
-
-    def test_raises_when_local_only_enabled(self) -> None:
-        """Local-only mode blocks remote fetch entrypoints explicitly."""
-        cfg = _make_config(local_only=True)
-        with pytest.raises(LocalOnlyViolationError, match="memory_local_only=True"):
-            fetch_shared_memories("query", cfg, admit=store_gate(cfg, gate_backend()))
 
     def test_returns_empty_when_platform_url_empty(self) -> None:
         """No platform configured is "disabled", not an empty corpus (W13)."""
@@ -485,7 +440,8 @@ class TestRetireRemoteMemory:
     """FR05: local delete propagation uses the backend status endpoint."""
 
     @patch("trw_memory.sync.remote.httpx.Client")
-    def test_retire_marks_remote_entry_obsolete(self, mock_client_cls: MagicMock) -> None:
+    def test_retire_marks_remote_entry_obsolete(self, mock_client_cls: MagicMock, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setenv("TRW_PLATFORM_TRUSTED_HOSTS", "api.example.com")
         mock_client = _mock_httpx_client(mock_client_cls, status_code=200)
 
         assert retire_remote_memory("42", _make_config()) is True
@@ -495,12 +451,18 @@ class TestRetireRemoteMemory:
         assert call_args[1]["json"] == {"status": "obsolete"}
         assert call_args[1]["headers"]["Authorization"] == "Bearer test-key-123"
 
+    @patch("trw_memory.sync.remote.httpx.Client")
+    def test_retire_untrusted_host_never_gets_the_bearer(self, mock_client_cls: MagicMock) -> None:
+        """F5/P1-C: an untrusted platform_url gets no Authorization header on retire."""
+        mock_client = _mock_httpx_client(mock_client_cls, status_code=200)
+
+        assert retire_remote_memory("42", _make_config()) is True
+
+        headers = mock_client.patch.call_args[1]["headers"]
+        assert "Authorization" not in headers
+
     def test_retire_skips_invalid_platform_url(self) -> None:
         assert retire_remote_memory("42", _make_config(platform_url="file:///etc/passwd")) is True
-
-    def test_retire_raises_when_local_only_enabled(self) -> None:
-        with pytest.raises(LocalOnlyViolationError, match="memory_local_only=True"):
-            retire_remote_memory("42", _make_config(local_only=True))
 
 
 class TestModuleConstants:

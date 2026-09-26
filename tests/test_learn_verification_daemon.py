@@ -292,7 +292,7 @@ def _quarantined(config: MemoryConfig, entry_id: str) -> None:
 
 
 def _reviewer(config: MemoryConfig, entry_id: str) -> str:
-    return get_status_history(config, entry_id)[-1]["reviewer_id"]
+    return get_status_history(config, entry_id, namespace=NS)[-1]["reviewer_id"]
 
 
 async def test_memory_review_has_no_reviewer_parameter(store_env: MemoryConfig) -> None:
@@ -330,6 +330,7 @@ async def test_memory_review_over_http_records_the_bearer_principal(
     paths = DaemonPaths.resolve()
     secret = mint_grant(paths, [NS])  # PRD-CORE-298 FR02: a bearer is a namespace grant
     monkeypatch.setattr(server.mcp, "auth", server.mcp.auth)  # _build_app mutates the singleton
+    monkeypatch.setattr(server.mcp, "middleware", list(server.mcp.middleware))
     app = _build_app(paths)
     _quarantined(store_env, "M-http")
 
@@ -337,7 +338,17 @@ async def test_memory_review_over_http_records_the_bearer_principal(
         return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), **kwargs)
 
     def _client(token: str) -> Client[Any]:
-        return Client(StreamableHttpTransport("http://daemon/mcp", auth=token, httpx_client_factory=_asgi_client))
+        from trw_memory.daemon._version_gate import VERSION_HEADER
+        from trw_memory.daemon.client import _package_version
+
+        return Client(
+            StreamableHttpTransport(
+                "http://daemon/mcp",
+                auth=token,
+                headers={VERSION_HEADER: _package_version()},
+                httpx_client_factory=_asgi_client,
+            )
+        )
 
     async with app.router.lifespan_context(app):
         with pytest.raises(httpx.HTTPStatusError):

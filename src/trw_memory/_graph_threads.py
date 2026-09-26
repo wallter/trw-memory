@@ -45,11 +45,6 @@ class _GraphThreadRegistry:
             self._threads.discard(thread)
             self._owners.pop(thread, None)
 
-    def alive(self) -> list[threading.Thread]:
-        """Snapshot the currently-alive registered threads under the guard."""
-        with self._guard:
-            return [thread for thread in self._threads if thread.is_alive()]
-
     def wait(self, timeout: float = 5.0, *, owner: object | None = None) -> None:
         """Block until matching registered threads finish or *timeout* elapses.
 

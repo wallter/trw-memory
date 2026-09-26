@@ -22,6 +22,7 @@ class ClientContextMixin:
         client._tier_manager = None
         client._embedder = None
         client._embedder_initialized = False
+        client._embedder_refusal = ""
 
     async def __aenter__(self) -> MemoryClient:
         from trw_memory._client_lifecycle import aenter
@@ -44,11 +45,6 @@ class ClientContextMixin:
         from trw_memory._client_lifecycle import maybe_start_retry_drain
 
         maybe_start_retry_drain(self._client())
-
-    def _handle_sse_event(self, event: dict[str, object]) -> None:
-        from trw_memory._client_lifecycle import handle_sse_event
-
-        handle_sse_event(self._client(), event)
 
     async def _retire_remote_entry(self, memory_id: str, remote_id: str) -> None:
         from trw_memory._client_lifecycle import retire_remote_entry

@@ -38,10 +38,9 @@ _CONSTRUCTION_ALLOWLIST = {
     "trw-memory/src/trw_memory/storage/_yaml_row_mapper.py",
     "trw-memory/src/trw_memory/security/_runtime_canary.py",
     "trw-memory/src/trw_memory/sync/_remote_admission.py",
-    # Deserialisers of a REMOTE or LEGACY payload. Both must reproduce the clock
-    # the payload carries verbatim: stamping a local one over a peer's clock is
-    # precisely the causality corruption FR08 exists to prevent, only inverted.
-    "trw-memory/src/trw_memory/migration/from_trw.py",
+    # Deserialiser of a REMOTE payload. It must reproduce the clock the payload
+    # carries verbatim: stamping a local one over a peer's clock is precisely
+    # the causality corruption FR08 exists to prevent, only inverted.
     "trw-mcp/src/trw_mcp/sync/pull.py",
 }
 

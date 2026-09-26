@@ -1,9 +1,9 @@
-"""Offline with no cached model, the daemon's tools fall back to keyword search (L-0P5T).
+"""With no cached model, the daemon's tools fall back to keyword search (L-0P5T).
 
-``get_local_embedder`` refuses an uncached model under ``TRW_OFFLINE`` by raising
-``LocalOnlyViolationError``. Its keyword-only degradation used to live in
+``get_local_embedder`` refuses an uncached model (runtime loads are cache-only) by raising
+``ModelNotCachedError``. Its keyword-only degradation used to live in
 trw-mcp's embedder wrapper; since recall runs in the daemon nothing caught it, so
-every recall, store and consolidate failed on an offline machine without the model.
+every recall, store and consolidate failed on a machine without the model.
 """
 
 from __future__ import annotations
@@ -29,8 +29,7 @@ _NS = "project:default"
 
 @pytest.fixture
 def offline_without_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """TRW_OFFLINE with every model cache pointed at an empty directory."""
-    monkeypatch.setenv("TRW_OFFLINE", "1")
+    """Every model cache pointed at an empty directory."""
     for var in ("HF_HOME", "SENTENCE_TRANSFORMERS_HOME", "HF_HUB_CACHE", "TRANSFORMERS_CACHE"):
         monkeypatch.setenv(var, str(tmp_path / "empty-model-cache"))
     reset_provider_cache()

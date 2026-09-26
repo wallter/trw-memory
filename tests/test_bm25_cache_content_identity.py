@@ -10,7 +10,6 @@ from trw_memory.retrieval import bm25
 
 @pytest.fixture(autouse=True)
 def isolated_cache(monkeypatch):
-    pytest.importorskip("rank_bm25")
     monkeypatch.setattr(bm25, "_bm25_cache", OrderedDict())
 
 

@@ -119,3 +119,15 @@ def test_without_sqlite_vec_there_is_no_census() -> None:
 def test_a_non_string_namespace_is_refused(backend: SQLiteBackend) -> None:
     with pytest.raises(TypeError):
         backend.vector_space_census(namespace=None)  # type: ignore[arg-type]
+
+
+def test_an_orphan_vector_never_stands_in_for_a_row_without_one(backend: SQLiteBackend) -> None:
+    """C12 rc4: an orphan (a vector whose row was deleted while sqlite-vec was unavailable) offset a vectorless row,
+    so memory_similar trusted a window that never compared that row."""
+    _put(backend, "a1", SPACE_A)
+    orphan = VectorProvenance.for_vector(SPACE_A, "gone", VECTOR)
+    backend.upsert_vector("gone", VECTOR, namespace="default", provenance=orphan)  # no memories row
+    backend.store(MemoryEntry(id="bare", content="content bare", namespace="default"))  # a row with no vector
+
+    assert backend.vector_space_census(namespace="default") == {SPACE_A: 1}
+    assert backend.count(namespace="default") == 2

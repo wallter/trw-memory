@@ -14,7 +14,7 @@ import pytest
 
 import trw_memory.embeddings as embeddings_pkg
 from trw_memory.embeddings import get_local_embedder, reset_provider_cache
-from trw_memory.exceptions import LocalOnlyViolationError, RemoteCodeNotPermittedError
+from trw_memory.exceptions import ModelNotCachedError, RemoteCodeNotPermittedError
 
 
 class _FakeProvider:
@@ -131,13 +131,13 @@ def test_transient_failure_is_not_cached(monkeypatch):
 
 
 def test_policy_change_invalidates_the_cache(monkeypatch):
-    """FR03: a tightened offline policy is never served by the old provider."""
+    """FR03: a provider built from one snapshot source is never served for another."""
     _install(monkeypatch, lambda *, model_name, dim: _FakeProvider(model_name, dim))
-    monkeypatch.delenv("TRW_OFFLINE", raising=False)
+    monkeypatch.delenv("HF_HOME", raising=False)
 
     first = get_local_embedder()
     assert get_local_embedder() is first, "nothing was cached, so this proves nothing"
-    monkeypatch.setenv("TRW_OFFLINE", "1")
+    monkeypatch.setenv("HF_HOME", "/elsewhere")
     second = get_local_embedder()
 
     assert second is not first, "the provider survived a policy change"
@@ -163,7 +163,7 @@ def test_pid_change_invalidates_the_cache(monkeypatch):
 @pytest.mark.parametrize(
     "error",
     [
-        LocalOnlyViolationError("model not in the local cache"),
+        ModelNotCachedError("model not in the local cache"),
         RemoteCodeNotPermittedError("repository ships python modules"),
     ],
 )

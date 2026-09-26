@@ -94,6 +94,16 @@ class SQLiteCheckpointVectorMixin:
         with self._fresh_connection(), self._lock:
             return read_edges(cast("SQLiteBackend", self), namespace)
 
+    def graph_edge_count(self, namespace: str) -> int:
+        with self._fresh_connection(), self._lock:
+            row = self._conn.execute("SELECT COUNT(*) FROM memory_graph_edges WHERE namespace = ?", (namespace,))
+            return int(row.fetchone()[0])
+
+    def ids_by_source(self, namespace: str, source_identity: str, limit: int) -> list[str]:
+        with self._fresh_connection(), self._lock:
+            query = "SELECT id FROM memories WHERE namespace = ? AND source_identity = ? LIMIT ?"
+            return [str(row[0]) for row in self._conn.execute(query, (namespace, source_identity, limit))]
+
     def add_graph_edges(self, namespace: str, edges: Sequence[GraphEdge]) -> None:
         with self._fresh_connection(), self._lock:
             insert_edges(cast("SQLiteBackend", self), namespace, edges)

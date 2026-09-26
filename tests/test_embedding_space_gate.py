@@ -23,7 +23,7 @@ from trw_memory.embeddings._hf_cache import CacheProbe, CacheState
 from trw_memory.embeddings._query_prompts import embed_query, query_prefix
 from trw_memory.embeddings.local import LocalEmbeddingProvider
 from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
-from trw_memory.exceptions import EmbeddingUnavailableError, LocalOnlyViolationError
+from trw_memory.exceptions import EmbeddingUnavailableError, ModelNotCachedError
 from trw_memory.lifecycle.tiers._warm import WARM_TIER_NAMESPACE, WarmTierStore
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -383,6 +383,64 @@ async def test_reembed_migrates_warm_tier_vectors(cfg_env: Path) -> None:
         await client.close()
 
 
+async def test_warm_reembed_encodes_outside_the_process_wide_tier_lock(cfg_env: Path) -> None:
+    """rc9 sweep C1: another tenant's recall, store or forget must not wait on this encode."""
+    import threading
+
+    from trw_memory.lifecycle.tiers._runtime import _TIER_MANAGER_CACHE_LOCK, get_tier_manager
+
+    free_during_encode: list[bool] = []
+
+    class _Probing(SpacedEmbedder):
+        def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
+            def other_tenant() -> None:
+                acquired = _TIER_MANAGER_CACHE_LOCK.acquire(timeout=2)
+                free_during_encode.append(acquired)
+                if acquired:
+                    _TIER_MANAGER_CACHE_LOCK.release()
+
+            probe = threading.Thread(target=other_tenant)
+            probe.start()
+            probe.join()
+            return super().embed_batch(texts)
+
+    client = MemoryClient(namespace="default", mode="local")
+    try:
+        warm = get_tier_manager(client._config, "default")._warm_store
+        warm.warm_add("w-b", {"id": "w-b", "content": "mango", "detail": ""}, TARGET)
+        client._embedder, client._embedder_initialized = _Probing(SPACE_A), True
+
+        assert (await client.reembed())["warm_reembedded"] == 1
+        assert free_during_encode and all(free_during_encode)
+    finally:
+        await client.close()
+
+
+async def test_a_warm_row_rewritten_while_it_was_encoded_is_not_overwritten(cfg_env: Path) -> None:
+    """The encode runs unlocked, so the page's write re-checks the row's text and stored vector."""
+    from trw_memory.lifecycle.tiers._runtime import get_tier_manager
+
+    client = MemoryClient(namespace="default", mode="local")
+    try:
+        warm = get_tier_manager(client._config, "default")._warm_store
+
+        class _RewritingMidEncode(SpacedEmbedder):
+            def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
+                if any("mango" in text for text in texts):
+                    warm.warm_add("w-b", {"id": "w-b", "content": "mango, corrected", "detail": ""}, TARGET)
+                return super().embed_batch(texts)
+
+        warm.warm_add("w-b", {"id": "w-b", "content": "mango", "detail": ""}, TARGET)
+        client._embedder, client._embedder_initialized = _RewritingMidEncode(SPACE_A), True
+
+        assert (await client.reembed())["warm_reembedded"] == 0
+        backend = warm._get_warm_backend(dim=3)
+        assert backend is not None
+        assert backend.get_vector_records(["w-b"], namespace=WARM_TIER_NAMESPACE)["w-b"].provenance is None
+    finally:
+        await client.close()
+
+
 async def test_reembed_refuses_without_an_identifiable_embedder(cfg_env: Path) -> None:
     client = MemoryClient(namespace="default", mode="local")
     try:
@@ -398,10 +456,9 @@ async def test_reembed_refuses_without_an_identifiable_embedder(cfg_env: Path) -
         await client.close()
 
 
-async def test_reembed_offline_with_uncached_model_raises_instead_of_downloading(
+async def test_reembed_with_uncached_model_raises_instead_of_downloading(
     cfg_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("TRW_OFFLINE", "1")
     loads: list[dict[str, object]] = []
 
     def refuse(model_ref: str, **kwargs: object) -> None:
@@ -414,7 +471,7 @@ async def test_reembed_offline_with_uncached_model_raises_instead_of_downloading
     )
     client = MemoryClient(namespace="default", mode="local")
     try:
-        with pytest.raises(LocalOnlyViolationError, match="TRW_OFFLINE/HF_HUB_OFFLINE"):
+        with pytest.raises(ModelNotCachedError, match="trw-mcp models fetch"):
             await client.reembed()
         assert loads and all(load["local_files_only"] is True for load in loads)
         assert loads[0]["model"] == BGE

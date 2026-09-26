@@ -9,9 +9,7 @@ delegators.
 
 5 helpers:
 
-- ``connect`` — base ``dbapi.connect`` with WAL/synchronous defaults
-  + sqlcipher key-pragma application when ``sqlcipher_key_hex`` is
-  provided.
+- ``connect`` — base ``dbapi.connect`` with WAL/synchronous defaults.
 - ``open_and_configure`` — open + WAL mode + retry-once quick_check (once
   per process per store file when the caller asks for ``check_once``).
 - ``open_without_integrity_check`` — open without quick_check (reserved
@@ -31,10 +29,13 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import structlog
+
+from trw_memory._live_stores import connect_registered, note_store_sidecars
 
 logger = structlog.get_logger(__name__)
 
@@ -98,13 +99,18 @@ def apply_open_pragmas(conn: Any, *, verify: bool = False) -> None:
     conn.execute(f"PRAGMA mmap_size = {_MMAP_SIZE_BYTES}")
     conn.execute(f"PRAGMA wal_autocheckpoint = {_WAL_AUTOCHECKPOINT_PAGES}")
     conn.execute("PRAGMA temp_store = MEMORY")
+    # WAL mode opens -wal/-shm on the first read; take one, then record their inodes
+    # so an alias of either is refused even if the store's path is replaced later (C15).
+    conn.execute("PRAGMA schema_version").fetchone()
+    main = next((row[2] for row in conn.execute("PRAGMA database_list").fetchall() if row[1] == "main"), "")
+    if main:
+        note_store_sidecars(main)
 
 
-def _apply_sqlcipher_pragmas_safe(conn: Any) -> None:
-    """Apply the sqlcipher KDF + cipher pragmas via the parent module."""
-    from trw_memory.storage import sqlite_backend as _sqlite_backend_module
-
-    _sqlite_backend_module._apply_sqlcipher_pragmas(conn)
+def _file_backed(db_path: Path) -> bool:
+    """Whether *db_path* names a real on-disk file (not ``:memory:``/``file::memory:...``)."""
+    name = str(db_path)
+    return name != ":memory:" and not name.startswith("file::memory:")
 
 
 def connect(
@@ -114,16 +120,29 @@ def connect(
     timeout: float,
     check_same_thread: bool,
     cached_statements: int | None = None,
-    sqlcipher_key_hex: str | None = None,
 ) -> Any:
-    """Base sqlite connection with WAL/synchronous defaults + optional sqlcipher key."""
+    """Base sqlite connection with WAL/synchronous defaults.
+
+    A file-backed open goes through :func:`connect_registered`, which also runs
+    PRD-SEC-016's identity check: the store's inode is pinned before the
+    driver's by-path open and compared after it, and a store swapped for a
+    different file in between is refused (``StorageError``). A race inside
+    SQLite's own C-level ``open()`` stays the residual PRD-SEC-016 records for
+    G4 (same user or root, who can already open the store file directly).
+    """
     kwargs: dict[str, object] = {
         "timeout": timeout,
         "check_same_thread": check_same_thread,
     }
     if cached_statements is not None:
         kwargs["cached_statements"] = cached_statements
-    conn = dbapi.connect(str(db_path), **kwargs)
+    # Registered under the fd lock: nothing may open this inode by descriptor once a
+    # connection can hold its locks (C15, see _live_stores).
+    conn = (
+        connect_registered(db_path, dbapi, str(db_path), **kwargs)
+        if _file_backed(db_path)
+        else dbapi.connect(str(db_path), **kwargs)
+    )
     # Use the caller-provided ``dbapi`` for the Row factory so the type
     # matches the cursor. With the pysqlite3 shim live, ``dbapi`` is
     # usually pysqlite3 — but tests can pass stdlib ``sqlite3`` explicitly
@@ -131,13 +150,53 @@ def connect(
     # factory would raise ``TypeError: Row() argument 1 must be
     # sqlite3.Cursor, not pysqlite3.dbapi2.Cursor`` (or vice versa).
     conn.row_factory = getattr(dbapi, "Row", sqlite3.Row)
-    if sqlcipher_key_hex is not None:
-        if len(sqlcipher_key_hex) != 64 or any(ch not in "0123456789abcdef" for ch in sqlcipher_key_hex):
-            raise ValueError("sqlcipher_key_hex must be a 64-character lowercase hex string")
-        conn.execute(f"PRAGMA key = \"x'{sqlcipher_key_hex}'\"")
-        _apply_sqlcipher_pragmas_safe(conn)
-        conn.execute("SELECT count(*) FROM sqlite_master")
+    if (deadline := untrusted_deadline(db_path)) is not None:
+        conn.set_progress_handler(lambda: int(time.monotonic() > deadline), 10_000)
+        # Before any statement runs. 3.11+: the import refuses Python 3.10 before any open.
+        conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, UNTRUSTED_LENGTH_LIMIT)  # type: ignore[attr-defined]
     return conn
+
+
+#: Store files a caller is reading that trw-memory did not write (an import's private copy), by real
+#: path, each with its monotonic deadline. Every connection opened on one, from any thread -- the
+#: schema check's, the backend's own opens (migrations, snapshot source), a stale-handle reopen, the
+#: UTF-8 fallback's second connection -- runs no statement past that deadline (``OperationalError:
+#: interrupted``) and builds or reads no value past ``UNTRUSTED_LENGTH_LIMIT``. Keyed by file, not by
+#: context, so no connection opened on the copy escapes it (rc8 C12). The handler stays until close.
+_UNTRUSTED: dict[str, list[float]] = {}
+_UNTRUSTED_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def untrusted_store(db_path: Path | str, deadline: float) -> Iterator[None]:
+    """Treat *db_path* as a store trw-memory did not write until the block ends (see ``_UNTRUSTED``)."""
+    key = os.path.realpath(db_path)
+    with _UNTRUSTED_LOCK:
+        _UNTRUSTED.setdefault(key, []).append(deadline)
+    try:
+        yield
+    finally:
+        with _UNTRUSTED_LOCK:  # another registration of the same file keeps it registered
+            if (deadlines := _UNTRUSTED.get(key)) is not None:
+                deadlines.remove(deadline)
+                if not deadlines:
+                    del _UNTRUSTED[key]
+
+
+def untrusted_deadline(db_path: Path | str) -> float | None:
+    """The earliest deadline under which *db_path* is open as an untrusted store, or ``None``."""
+    if not _UNTRUSTED or not _file_backed(Path(db_path)):
+        return None
+    with _UNTRUSTED_LOCK:
+        deadlines = _UNTRUSTED.get(os.path.realpath(db_path))
+        return min(deadlines) if deadlines else None
+
+
+#: The largest string, BLOB or row such a connection may build or read (``SQLITE_LIMIT_LENGTH``), so
+#: no expression in a store trw-memory did not write can allocate past it (rc8 C12). The largest
+#: value trw-memory writes is a ``vec_memories`` chunk: 1024 vectors of ``dim`` float32s, 1.5 MiB at
+#: the default 384 dimensions and 12 MiB at 3072; rows of text are far smaller.
+UNTRUSTED_LENGTH_LIMIT = 16 * 1024 * 1024
 
 
 #: Store files whose ``quick_check`` passed in this process: (realpath, st_dev, st_ino).
@@ -154,17 +213,18 @@ def _store_identity(db_path: Path) -> tuple[str, int, int] | None:
     return (os.path.realpath(db_path), stat.st_dev, stat.st_ino)
 
 
-def forget_verified_stores() -> None:
-    """Test seam: make the next open of every store run ``quick_check`` again."""
-    with _VERIFIED_LOCK:
-        _VERIFIED_STORES.clear()
+def mark_verified(db_path: Path, verified: bool = True) -> None:
+    """Record (or retire) that *db_path*'s ``quick_check`` passed here, so a ``check_once`` open skips it."""
+    identity = _store_identity(db_path)
+    if identity is not None:
+        with _VERIFIED_LOCK:
+            (_VERIFIED_STORES.add if verified else _VERIFIED_STORES.discard)(identity)
 
 
 def open_and_configure(
     db_path: Path,
     *,
     dbapi: Any = sqlite3,
-    sqlcipher_key_hex: str | None = None,
     check_once: bool = False,
 ) -> Any:
     """Open a connection with WAL mode and run a quick integrity check.
@@ -192,7 +252,6 @@ def open_and_configure(
         timeout=30.0,
         check_same_thread=False,
         cached_statements=0,
-        sqlcipher_key_hex=sqlcipher_key_hex,
     )
     try:
         apply_open_pragmas(conn, verify=True)
@@ -214,7 +273,7 @@ def open_and_configure(
                     detail=rows[0][0] if rows else "empty",
                 )
                 time.sleep(1.0)
-        raise sqlite3.DatabaseError("database disk image is malformed (quick_check failed twice)")
+        raise IntegrityCheckFailed("database disk image is malformed (quick_check failed twice)")
     except BaseException:
         with contextlib.suppress(Exception):
             conn.close()
@@ -225,7 +284,6 @@ def open_without_integrity_check(
     db_path: Path,
     *,
     dbapi: Any = sqlite3,
-    sqlcipher_key_hex: str | None = None,
 ) -> Any:
     """Open a connection skipping integrity check for explicit lock/busy contention only."""
     conn = connect(
@@ -234,7 +292,6 @@ def open_without_integrity_check(
         timeout=30.0,
         check_same_thread=False,
         cached_statements=0,
-        sqlcipher_key_hex=sqlcipher_key_hex,
     )
     apply_open_pragmas(conn)
     return conn
@@ -250,7 +307,6 @@ def open_probe(
     db_path: Path,
     *,
     dbapi: Any = sqlite3,
-    sqlcipher_key_hex: str | None = None,
 ) -> Any:
     """Open a short-lived probe connection with the standard PRAGMA profile.
 
@@ -267,7 +323,6 @@ def open_probe(
         dbapi=dbapi,
         timeout=_PROBE_TIMEOUT_SECONDS,
         check_same_thread=True,
-        sqlcipher_key_hex=sqlcipher_key_hex,
     )
     try:
         apply_open_pragmas(conn)
@@ -282,7 +337,6 @@ def check_integrity(
     db_path: Path,
     *,
     dbapi: Any = sqlite3,
-    sqlcipher_key_hex: str | None = None,
 ) -> dict[str, object]:
     """Check database integrity without opening a full backend.
 
@@ -293,7 +347,7 @@ def check_integrity(
     """
     conn: Any = None
     try:
-        conn = open_probe(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
+        conn = open_probe(db_path, dbapi=dbapi)
         rows = conn.execute("PRAGMA quick_check").fetchall()
         healthy = len(rows) == 1 and rows[0][0] == "ok"
         return {"ok": healthy, "detail": rows[0][0] if rows else "empty", "db_path": str(db_path)}
@@ -307,40 +361,56 @@ def check_integrity(
                 conn.close()
 
 
-#: SQLite's primary result code for an I/O error; every extended IOERR code keeps it in the low byte.
-_SQLITE_IOERR = 10
+#: SQLite primary result codes; every extended code keeps its primary one in the low byte.
+_SQLITE_IOERR, _SQLITE_CORRUPT, _SQLITE_NOTADB = 10, 11, 26
+#: How a damaged file reads when the error carries no result code (Python 3.10, or raised here).
+_CORRUPTION_MESSAGES = ("database disk image is malformed", "file is not a database")
 
 
-def is_io_error(exc: BaseException) -> bool:
-    """True for ``SQLITE_IOERR`` and its extended codes: a read or write failed.
-
-    An I/O error says nothing about what the file holds, so it is never grounds
-    for treating a store as corrupt. It is how SQLite below 3.51.3 reports the
-    WAL-reset race when two processes write one WAL store (L-8QV8): ``quick_check``
-    raised ``vtable constructor failed: memories_fts`` on a healthy store, and
-    recovery then quarantined it. Needs ``sqlite_errorcode`` (Python 3.11+); on
-    3.10 no error reads as I/O, which is the behaviour before 3.1.0.
-    """
-    code = getattr(exc, "sqlite_errorcode", None)
-    return isinstance(code, int) and code & 0xFF == _SQLITE_IOERR
+class IntegrityCheckFailed(sqlite3.DatabaseError):
+    """``PRAGMA quick_check`` reported damage on both attempts of an open."""
 
 
-def is_lock_contention_error(exc: sqlite3.Error) -> bool:
-    """True for SQLite lock/busy errors, not structural corruption.
+def classify_open_error(exc: BaseException) -> Literal["io", "lock", "corrupt", "other"]:
+    """What a failed open says about the store. Only ``"corrupt"`` is grounds to quarantine it.
 
     Lives here, at the lowest layer that needs it, so ``db_has_data`` and
     ``open_connection_with_recovery`` cannot drift apart on what "transient"
-    means — they make the same destructive decision together.
+    means -- they make the same destructive decision together.
+
+    - ``"io"``: ``SQLITE_IOERR`` and its extended codes, a read or write failed.
+      It says nothing about what the file holds. It is how SQLite below 3.51.3
+      reports the WAL-reset race when two processes write one WAL store (L-8QV8):
+      ``quick_check`` raised ``vtable constructor failed: memories_fts`` on a
+      healthy store, and recovery then quarantined it. Needs ``sqlite_errorcode``
+      (Python 3.11+); on 3.10 no error reads as I/O.
+    - ``"lock"``: lock/busy, another connection holds the store.
+    - ``"corrupt"``: the file's content is damaged -- ``SQLITE_CORRUPT`` (and its
+      ``CORRUPT_*`` codes), ``SQLITE_NOTADB``, or a failed ``quick_check``.
+    - ``"other"``: out of descriptors, disk full, read-only, ``locking protocol``,
+      a schema change: the machine or another connection failed, not the file.
+      Quarantining on those moved healthy stores aside under connections that
+      kept committing into the moved file.
     """
+    code = getattr(exc, "sqlite_errorcode", None)
+    primary = code & 0xFF if isinstance(code, int) else None
     message = str(exc).lower()
-    return "locked" in message or "busy" in message
+    # A result code outranks the words: a CORRUPT error may quote "database is locked".
+    if primary == _SQLITE_IOERR:
+        return "io"
+    if isinstance(exc, IntegrityCheckFailed) or primary in (_SQLITE_CORRUPT, _SQLITE_NOTADB):
+        return "corrupt"
+    if "locked" in message or "busy" in message:
+        return "lock"
+    if primary is None and message.startswith(_CORRUPTION_MESSAGES):
+        return "corrupt"
+    return "other"
 
 
 def db_has_data(
     db_path: Path,
     *,
     dbapi: Any = sqlite3,
-    sqlcipher_key_hex: str | None = None,
 ) -> bool | None:
     """Rows in ``memories``? ``True``/``False``, or ``None`` when UNKNOWN.
 
@@ -359,17 +429,22 @@ def db_has_data(
     readable rows and the recovery path is designed for it. Only lock/busy — a
     transient condition that says nothing about content — is ``None``.
 
-    Found by a cross-family audit 2026-09-12.
+    Found by a cross-family audit 2026-09-12. Since 2026-09-24 that branch no
+    longer asks at all: an EMPTY store under contention is a new one being
+    created, and recovering it lost the writes of the connections creating it.
+    Lock/busy never reaches recovery; this probe now only feeds the corruption
+    log line.
     """
     conn: Any = None
     try:
-        conn = open_probe(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
+        conn = open_probe(db_path, dbapi=dbapi)
         count = conn.execute("SELECT count(*) FROM memories").fetchone()[0]
         return bool(count > 0)
     except sqlite3.Error as exc:
-        if is_lock_contention_error(exc):
+        if classify_open_error(exc) == "lock":
             logger.warning("db_has_data_probe_locked", db=str(db_path), error=str(exc))
             return None
+        # trw-fail-silent-allow: a structurally unreadable file has no readable rows (see docstring)
         return False
     finally:
         # Close in finally so an unexpected (non-sqlite) exception cannot leak it.

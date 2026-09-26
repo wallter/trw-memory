@@ -6,10 +6,9 @@ predicates it added to the sidecar cleanups pushed the facade past its
 grandfathered effective-LOC ceiling — the facade is a delegator, and this was
 the one method on it still carrying a body.
 
-The invariant it protects (S8): the entry-row DELETE, the ``wiki_refs`` cleanup,
-the graph-edge purge, the ``memory_tags`` purge and the vector purge
-are ONE transaction, so a crash can never leave a sidecar row pointing at an
-entry that is gone.
+The invariant it protects (S8): the entry-row DELETE, the graph-edge purge,
+the ``memory_tags`` purge and the vector purge are ONE transaction, so a crash
+can never leave a sidecar row pointing at an entry that is gone.
 """
 
 from __future__ import annotations
@@ -54,7 +53,6 @@ def delete_namespace(backend: SQLiteBackend, namespace: str) -> int:
             return 0
         deleted = _delete_rows(backend, namespace)
         with backend._lock:
-            backend._conn.execute("DELETE FROM wiki_refs WHERE namespace = ?", (namespace,))
             # SQLite enforces no FK cascade here, so the bulk delete cleans the
             # graph explicitly: first the namespace-qualified purge the per-row
             # delete() also uses, then the orphan sweep that catches any edge left

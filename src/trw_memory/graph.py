@@ -185,11 +185,12 @@ from trw_memory._graph_backfill import backfill_graph_page as backfill_graph_pag
 
 # Cross-project validation cluster extracted to _graph_cross_project.py
 # (PRD-DIST-245 batch 93). Re-exports preserve back-compat names.
+# ``merge_cross_validated_entry`` has no consumer through this facade -- import
+# it from `_graph_cross_project` directly (as the tests below do).
 from trw_memory._graph_cross_project import (  # noqa: E402
     _ENTRY_UPDATE_LOCKS as _ENTRY_UPDATE_LOCKS,
     _ENTRY_UPDATE_LOCKS_GUARD as _ENTRY_UPDATE_LOCKS_GUARD,
     cross_validate_entries as cross_validate_entries,
-    merge_cross_validated_entry as _merge_cross_validated_entry,
     project_scope_key as _project_scope_key,
 )
 
@@ -254,8 +255,8 @@ def list_org_shared_entries(
     if current_project is None:
         return []
     from trw_memory.integrations._backend import discover_namespace_backends
-    from trw_memory.security.rbac import Permission, require_namespace_permission
     from trw_memory.security.namespace_scope import NamespaceScopeError
+    from trw_memory.security.rbac import Permission, require_namespace_permission, within_grant
 
     seen = set(exclude_keys or set())
 
@@ -264,7 +265,9 @@ def list_org_shared_entries(
             for namespaces, backend in stores:
                 for candidate_namespace in namespaces:
                     project_id = _project_scope_key(candidate_namespace)
-                    if project_id is None or project_id == current_project:
+                    # A sibling outside the request's grant is skipped silently: org recall
+                    # visits every namespace in the store, so a refusal here is routine (W27).
+                    if project_id is None or project_id == current_project or not within_grant(candidate_namespace):
                         continue
                     try:
                         require_namespace_permission(config, candidate_namespace, Permission.READ, "read")

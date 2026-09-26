@@ -29,6 +29,9 @@ from pathlib import Path
 
 import structlog
 
+from trw_memory._dir_trust import make_private_dirs, open_verified_dir_fd, verify_and_harden_dir_fd
+from trw_memory.exceptions import UnsupportedPlatformError
+
 __all__ = ["USER_MEMORY_SUBDIR", "resolve_user_memory_dir"]
 
 logger = structlog.get_logger(__name__)
@@ -42,6 +45,18 @@ _XDG_APP_DIR = "trw"
 _HOME_TRW_DIR = ".trw"
 
 
+#: The refusal native Windows gets (C12, 7.0): no-follow directory descriptors do not exist there.
+UNSUPPORTED_PLATFORM_MESSAGE = (
+    "trw-memory 4.0 supports macOS and Linux (glibc); native Windows is not supported in this release; use WSL2"
+)
+
+
+def require_supported_platform() -> None:
+    """Refuse native Windows with a named error before any directory is opened or created."""
+    if os.name == "nt":
+        raise UnsupportedPlatformError(UNSUPPORTED_PLATFORM_MESSAGE)
+
+
 def resolve_user_memory_dir(*, create: bool = True) -> Path:
     """Resolve the machine-local user-space memory directory.
 
@@ -49,14 +64,17 @@ def resolve_user_memory_dir(*, create: bool = True) -> Path:
 
     Args:
         create: When True (default) ensure the directory exists
-            (``mkdir(parents=True, exist_ok=True)``). When False, resolve the
-            path without touching the filesystem (used by presence probes and
-            by the daemon discovery read, which must not create anything).
+            (every created component 0700). When False, create nothing (used
+            by presence probes and by the daemon discovery read). Either way an
+            EXISTING self-owned trw root and ``memory`` dir that are
+            group/world-writable are hardened to 0700 in place (fchmod on a
+            no-follow fd), and a foreign-owned one is refused.
 
     Returns:
         Absolute path to the user-space ``memory`` directory. The user-space
         ``memory.db`` lives at ``<returned>/memory.db``.
     """
+    require_supported_platform()
     user_dir = os.environ.get("TRW_USER_DIR")
     if user_dir:
         base = Path(user_dir) / USER_MEMORY_SUBDIR
@@ -72,6 +90,33 @@ def resolve_user_memory_dir(*, create: bool = True) -> Path:
 
     resolved = base.resolve()
     if create:
-        resolved.mkdir(parents=True, exist_ok=True)
+        make_private_dirs(resolved)
+        _verify_trusted(resolved.parent)
+        _verify_trusted(resolved)
+    elif resolved.exists():
+        # A presence probe / discovery read: do not create anything, but a
+        # directory that DOES already exist is still verified before any
+        # caller trusts it -- ``.resolve()`` above already followed any
+        # symlink in the base path, so this is the check on the real,
+        # final directory a swapped ``~/.trw`` (or ``TRW_USER_DIR``) would
+        # have redirected to (PRD-SEC-016).
+        _verify_trusted(resolved.parent)
+        _verify_trusted(resolved)
     logger.debug("user_memory_dir_resolved", path=str(resolved), source=source, created=create)
     return resolved
+
+
+def _verify_trusted(resolved: Path) -> None:
+    """Refuse *resolved* if it is a symlink, or group/world-writable and not ours; else harden it to 0700.
+
+    Called for the ``memory`` leaf AND its parent, the trw-owned root (``~/.trw``,
+    ``$XDG_DATA_HOME/trw`` or ``TRW_USER_DIR``): 3.x created that root with
+    ``mkdir(parents=True)``, so under a 0002 umask it is 0775 and the daemon's
+    :func:`~trw_memory._dir_trust.verify_ancestor_chain_trusted` would refuse to
+    start. Nothing above the trw root is ever chmodded.
+    """
+    fd = open_verified_dir_fd(resolved, create=False)
+    try:
+        verify_and_harden_dir_fd(fd, resolved)
+    finally:
+        os.close(fd)

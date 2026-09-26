@@ -6,9 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests._test_client_support import _RecordingSQLCipherDBAPI
 from trw_memory.client import MemoryClient
-from trw_memory.exceptions import EncryptionUnavailableError
 
 
 class TestConstructor:
@@ -22,43 +20,6 @@ class TestConstructor:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "s"))
         async with MemoryClient(namespace="default", mode="auto") as client:
             assert client.resolved_mode == "local"
-
-    def test_local_mode_raises_when_sqlite_encryption_requested(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "s"))
-        monkeypatch.setenv("MEMORY_ENCRYPTION_ENABLED", "true")
-
-        with pytest.raises(
-            EncryptionUnavailableError,
-            match=r"SQLCipher driver not installed",
-        ):
-            MemoryClient(namespace="default", mode="local")
-
-    async def test_local_mode_uses_sqlcipher_key_first_and_disables_tier_sidecars(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        statements: list[str] = []
-        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
-        monkeypatch.setenv("MEMORY_ENCRYPTION_ENABLED", "true")
-        monkeypatch.setenv("MEMORY_MASTER_KEY", "11" * 32)
-        monkeypatch.setattr(
-            "trw_memory.storage.sqlite_backend._import_sqlcipher_driver",
-            lambda: _RecordingSQLCipherDBAPI(statements),
-        )
-        monkeypatch.setattr(MemoryClient, "_get_embedder", lambda self: None)
-
-        async with MemoryClient(namespace="default", mode="local") as client:
-            await client.store("encrypted runtime path")
-            results = await client.recall("encrypted")
-
-            assert results
-            assert results[0]["content"] == "encrypted runtime path"
-            assert statements[0].startswith("PRAGMA key = \"x'")
-            assert "PRAGMA cipher = 'aes-256-cbc'" in statements
-            assert "PRAGMA cipher_page_size = 4096" in statements
-            assert "PRAGMA kdf_iter = 256000" in statements
-            assert (tmp_path / "storage" / "default" / "memory" / "warm.jsonl").exists() is False
 
     def test_mcp_mode_is_no_longer_a_supported_value(self) -> None:
         """UF-003 / DEAD-002: ``"mcp"`` was a type-advertised capability that
@@ -115,7 +76,6 @@ class TestConstructor:
     async def test_sync_enabled_starts_sse_subscription(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "s"))
         monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
-        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
         monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
         monkeypatch.setenv("MEMORY_PLATFORM_API_KEY", "test-key")
 

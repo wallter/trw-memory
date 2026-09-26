@@ -24,7 +24,6 @@ from trw_memory.lifecycle.tiers._manager import TierManager
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.persistence import write_yaml
 
-pytest.importorskip("rank_bm25")
 pytest.importorskip("sqlite_vec")
 
 ROWS = 12

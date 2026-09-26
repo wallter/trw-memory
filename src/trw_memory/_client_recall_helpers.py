@@ -314,9 +314,7 @@ def merge_local_candidates(
 
         floor = adaptive_rerank_floor(limit).min_score
         warm = [c for c in added if not c.cold]
-        scored = cross_encode_scores(
-            query, [c.entry for c in warm], model_name=config.recall_rerank_model, local_only=config.local_only
-        )
+        scored = cross_encode_scores(query, [c.entry for c in warm], model_name=config.recall_rerank_model)
         if scored is not None:
             passing = {e.id for e, s in scored if s >= floor}
             added = [c for c in added if c.cold or c.entry.id in passing]

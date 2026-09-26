@@ -97,7 +97,7 @@ def test_daemon_model_fixture_is_local_and_never_contacts_hub(tmp_path: Path, mo
     assert model_dir.is_absolute()
     assert model_dir.is_dir()
     assert list(model_dir.iterdir()) == []
-    for key in ("TRW_OFFLINE", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "MEMORY_LOCAL_ONLY"):
+    for key in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
         assert env.get(key) == os.environ.get(key)
     assert get_local_embedder(model_name=str(model_dir), dim=384) is None
     assert network_calls == []
@@ -153,7 +153,11 @@ async def _call(info: DaemonInfo, name: str, arguments: dict[str, object], *, to
     from fastmcp import Client
     from fastmcp.client.transports import StreamableHttpTransport
 
-    transport = StreamableHttpTransport(url=info.url, auth=token)
+    from trw_memory.daemon._version_gate import VERSION_HEADER
+    from trw_memory.daemon.client import _package_version
+
+    # A current client names its version; the daemon refuses one that does not (W45).
+    transport = StreamableHttpTransport(url=info.url, auth=token, headers={VERSION_HEADER: _package_version()})
 
     async def _once() -> object:
         async with Client(transport) as client:
@@ -446,30 +450,109 @@ def test_secret_files_are_written_through_an_exclusive_temp_and_renamed(paths: D
     assert read_secret_file(paths.user_memory_dir / "never-written") is None
 
 
-def test_the_daemon_refuses_to_start_under_encryption(monkeypatch: pytest.MonkeyPatch, user_dir: Path) -> None:
-    """FR09 preflight: refuse at STARTUP, not at the second namespace.
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX owner/mode bits")
+def test_serve_loopback_refuses_an_ancestor_another_principal_can_rewrite(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PRD-SEC-016 FR04, on the real ``serve_loopback`` entry point (not just
+    the helper it calls): a group/world-writable ancestor of the store
+    directory (without the sticky bit) refuses BEFORE the socket binds or
+    anything is written -- no discovery file, no claim, no store -- even
+    though the store directory itself is private and self-owned."""
+    from trw_memory.daemon._serve import DaemonServeOptions, serve_loopback
 
-    The daemon pins ``memory_single_store_path``, and a per-namespace SQLCipher
-    key cannot open a shared file. Without this refusal the failure would land
-    inside a served tool call for whichever namespace happened to be second --
-    an unopenable store reported far from its cause.
-    """
-    import trw_memory.server as server_mod
-    from trw_memory.exceptions import ConfigError
-
+    shared_ancestor = tmp_path / "shared-home"
+    shared_ancestor.mkdir(mode=0o777)
+    os.chmod(shared_ancestor, 0o777)
+    user_dir = shared_ancestor / "userhome"
     monkeypatch.setenv("TRW_USER_DIR", str(user_dir))
-    monkeypatch.setenv("MEMORY_ENCRYPTION_ENABLED", "true")
-    monkeypatch.delenv("MEMORY_SINGLE_STORE_PATH", raising=False)
-    monkeypatch.setattr(server_mod, "_preflight", lambda _config: None)
+    paths = DaemonPaths.resolve()
 
-    with pytest.raises(ConfigError) as refusal:
-        server_mod._serve_http(None, None)
+    with pytest.raises(ConfigError, match="group/world-writable"):
+        asyncio.run(serve_loopback(DaemonServeOptions(port=0, idle_shutdown_seconds=1.0), paths=paths))
 
-    message = str(refusal.value)
-    assert "encryption_enabled" in message
-    assert "FR09" in message
-    assert "serve stdio" in message, "the refusal must name the mode that still works"
-    # Nothing was claimed: no discovery file, no token, no store.
-    paths = DaemonPaths.resolve(create=False)
     assert not paths.discovery.exists()
     assert not paths.token.exists()
+    assert not paths.store.exists()
+
+
+def test_daemon_client_has_no_forwarding_methods() -> None:
+    """No ``DaemonClient`` method's body is a bare ``return await self.call_tool(...)`` (PRD-QUAL-145 FR04).
+
+    Every stub below the FR04 marker comment has an ``...`` body -- ``_forward``
+    replaces the function object after the class is built, so an AST scan of the
+    class body (which never sees that replacement) finds no forwarding pattern.
+    """
+    import ast
+    import inspect
+
+    from trw_memory.daemon import client as client_module
+
+    source = inspect.getsource(client_module)
+    tree = ast.parse(source)
+    (class_node,) = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "DaemonClient"]
+
+    def _is_bare_call_tool_forward(node: ast.AST) -> bool:
+        if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            return False
+        if len(node.body) != 1 or not isinstance(node.body[0], ast.Return):
+            return False
+        value = node.body[0].value
+        return (
+            isinstance(value, ast.Await)
+            and isinstance(value.value, ast.Call)
+            and isinstance(value.value.func, ast.Attribute)
+            and value.value.func.attr == "call_tool"
+        )
+
+    forwarding = [n.name for n in class_node.body if _is_bare_call_tool_forward(n)]
+    assert forwarding == [], f"these methods still hand-forward to call_tool: {forwarding}"
+
+    # And the fold is real, not vacuous: every name in the runtime rewiring
+    # table resolves to a function whose body actually dispatches through
+    # call_tool, so a typo in the table (silently leaving a stub inert) fails here.
+    for name in client_module._FORWARDED_METHODS:
+        method = getattr(client_module.DaemonClient, name)
+        assert method.__name__ == name
+
+
+async def test_forwarded_daemon_client_methods_build_the_same_payload_call_tool_saw() -> None:
+    """A forwarded method still reaches ``call_tool`` with the tool name and full payload (FR04)."""
+    from trw_memory.daemon.client import DaemonClient
+
+    calls: list[tuple[str, dict[str, object] | None]] = []
+
+    class _Recording(DaemonClient):
+        async def call_tool(self, name: str, arguments: dict[str, object] | None = None) -> object:
+            calls.append((name, arguments))
+            return {"ok": True}
+
+    client = _Recording.__new__(_Recording)
+    await client.list_page("ns", 10, None)
+    await client.graph_related("ns", "L-1", 1, None, 5)
+    await client.namespace_diagnose("ns")
+
+    assert calls[0] == (
+        "memory_list_page",
+        {"namespace": "ns", "limit": 10, "after": None, "status": None, "tags": None},
+    )
+    assert calls[1] == (
+        "memory_graph_related",
+        {"namespace": "ns", "learning_id": "L-1", "depth": 1, "edge_types": None, "limit": 5},
+    )
+    assert calls[2] == ("memory_namespace_diagnose", {"namespace": "ns"})
+
+
+def test_serve_loopback_refuses_a_store_that_is_not_sqlite(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """rc9 sol P1: the serialized lane's bounds assume the one SQLite store; a YAML store reads whole
+    namespaces to count or list, so the daemon refuses it before anything is opened."""
+    from trw_memory.daemon._serve import DaemonServeOptions, serve_loopback
+
+    monkeypatch.setenv("TRW_USER_DIR", str(tmp_path / "userhome"))
+    monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "yaml")
+    paths = DaemonPaths.resolve()
+
+    with pytest.raises(ConfigError, match="not storage_backend='yaml'"):
+        asyncio.run(serve_loopback(DaemonServeOptions(port=0, idle_shutdown_seconds=1.0), paths=paths))
+
+    assert not paths.discovery.exists()

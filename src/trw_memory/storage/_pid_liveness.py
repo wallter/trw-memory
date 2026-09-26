@@ -16,6 +16,13 @@ from pathlib import Path
 
 __all__ = ["_pid_is_live"]
 
+#: ``SZOMB`` in XNU's ``sys/proc.h``, and ``p_stat``'s byte offset in ``struct
+#: extern_proc`` (``p_un`` 16, two pointers, ``p_flag``) on 64-bit macOS.
+_DARWIN_SZOMB = 5
+_DARWIN_P_STAT_OFFSET = 36
+#: ``sizeof(struct kinfo_proc)`` on 64-bit macOS.
+_DARWIN_KINFO_PROC_SIZE = 648
+
 # Lock/marker files older than this are considered stale on non-POSIX hosts
 # where ``/proc/<pid>`` is unavailable. Chosen to be longer than any
 # reasonable process lifetime but shorter than "user manually copied the
@@ -23,8 +30,47 @@ __all__ = ["_pid_is_live"]
 _STALE_LOCK_MAX_AGE_SECONDS: float = 7 * 24 * 3600.0
 
 
+def _is_zombie(pid: int) -> bool:
+    """Whether *pid* has exited and waits to be reaped; ``False`` when it cannot tell."""
+    if sys.platform.startswith("linux"):
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii", errors="replace")
+        except (
+            OSError
+        ):  # trw-fail-silent-allow: a pid gone mid-read is not a zombie; the caller's liveness answer stands
+            return False
+        # The state letter follows the parenthesised command, which may hold spaces.
+        return stat[stat.rfind(")") + 2 : stat.rfind(")") + 3] == "Z"
+    if sys.platform == "darwin":
+        return _darwin_p_stat(pid) == _DARWIN_SZOMB
+    return False
+
+
+def _darwin_p_stat(pid: int) -> int | None:
+    """``kp_proc.p_stat`` of *pid* via ``sysctl(KERN_PROC_PID)``, or ``None``."""
+    import ctypes
+    import ctypes.util
+
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    except OSError:  # trw-fail-silent-allow: None means "state unknown", which keeps the pre-zombie-check answer
+        return None
+    ctl_kern, kern_proc, kern_proc_pid = 1, 14, 1
+    mib = (ctypes.c_int * 4)(ctl_kern, kern_proc, kern_proc_pid, pid)
+    buf = ctypes.create_string_buffer(_DARWIN_KINFO_PROC_SIZE)
+    size = ctypes.c_size_t(_DARWIN_KINFO_PROC_SIZE)
+    if libc.sysctl(mib, 4, buf, ctypes.byref(size), None, 0) != 0 or size.value < _DARWIN_P_STAT_OFFSET + 1:
+        return None
+    return buf.raw[_DARWIN_P_STAT_OFFSET]
+
+
 def _pid_is_live(pid: int, lock_file: Path) -> bool:
     """Check whether ``pid`` refers to a currently running process.
+
+    A zombie is not live: it has exited, holds no store and serves nothing, but
+    ``/proc/<pid>`` exists and ``kill(pid, 0)`` succeeds until its parent reaps it.
+    Reading it as live left every client "unreachable" behind a crashed daemon
+    whose parent never reaped it (2026-09-25).
 
     Uses ``/proc/<pid>`` on Linux. On other platforms falls back to
     ``os.kill(pid, 0)`` semantics with EPERM→live, ESRCH→dead. If neither
@@ -32,7 +78,7 @@ def _pid_is_live(pid: int, lock_file: Path) -> bool:
     :data:`_STALE_LOCK_MAX_AGE_SECONDS` as live (conservative).
     """
     if sys.platform.startswith("linux"):
-        return Path(f"/proc/{pid}").exists()
+        return Path(f"/proc/{pid}").exists() and not _is_zombie(pid)
 
     # POSIX (macOS) — signal 0 probe.
     if os.name == "posix":
@@ -42,10 +88,10 @@ def _pid_is_live(pid: int, lock_file: Path) -> bool:
             if exc.errno == errno.ESRCH:
                 return False
             if exc.errno == errno.EPERM:
-                return True
+                return not _is_zombie(pid)
             # EINVAL or other — fall through to mtime heuristic.
         else:
-            return True
+            return not _is_zombie(pid)
 
     # Windows or unknown — mtime heuristic.
     try:

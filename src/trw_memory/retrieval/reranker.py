@@ -29,15 +29,14 @@ Performance notes
 
 from __future__ import annotations
 
-from typing import Any
+import threading
+import time
+from typing import Any, NamedTuple
 
 import structlog
 
-# The embedder's offline switches (PRD-QUAL-110-FR04) govern the reranker too:
-# any truthy one forces ``local_files_only=True`` so an air-gapped deployer can
-# prove zero huggingface.co egress. ``local_only`` (config) is threaded in by
-# the caller for the same effect.
-from trw_memory.embeddings.local import _offline_download_blocked
+from trw_memory._model_pin import model_revision
+from trw_memory.embeddings.local import FETCH_COMMAND, INFERENCE_DEVICE
 from trw_memory.models.memory import MemoryEntry
 
 logger = structlog.get_logger(__name__)
@@ -46,7 +45,17 @@ _DEFAULT_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 # ms-marco-MiniLM models accept up to 512 tokens (~2048 chars at 4 chars/token).
 # The old 512-char limit wasted 75% of model capacity on long sessions.
 _MAX_PASSAGE_CHARS = 2048
+
+
+#: A failed load, and when: retried after ``_RETRY_AFTER_S`` so a daemon picks up a
+#: model fetched after it started, without trying to load on every recall.
+class _FailedLoad(NamedTuple):
+    at: float
+
+
+_RETRY_AFTER_S = 60.0
 _LOADED_MODELS: dict[str, object] = {}
+_LOAD_LOCK = threading.Lock()
 
 # Lazy-import state for ``sentence_transformers.CrossEncoder``.
 #
@@ -97,34 +106,36 @@ def __getattr__(name: str) -> object:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def _get_model(model_name: str, *, local_only: bool = False) -> object | None:
-    """Lazy-load and cache a CrossEncoder model by name.
+def _get_model(model_name: str) -> object | None:
+    """Lazy-load and cache a CrossEncoder model by name, from the local cache only.
 
-    Under ``TRW_OFFLINE`` / ``HF_HUB_OFFLINE`` or ``local_only`` the load is
-    ``local_files_only``: an uncached model yields ``None`` (callers keep
-    fusion order) instead of a huggingface.co download. Rerank is on by
-    default, so this is what keeps the README's "no outbound calls" contract.
-    A disclosure line is logged before any network-capable load.
+    A runtime load never downloads (PLAN W40): an uncached model yields ``None``
+    and callers keep fusion order, with a warning naming the fetch command. A
+    failed load is retried once ``_RETRY_AFTER_S`` has passed, so a model fetched
+    while the daemon runs is used without a restart.
     """
     if not _import_cross_encoder():
         return None
-    local_files_only = local_only or _offline_download_blocked()
-    key = f"{model_name}|offline" if local_files_only else model_name
-    if key not in _LOADED_MODELS:
-        if not local_files_only:
-            logger.info(
-                "reranker_model_load_may_download",
-                model=model_name,
-                host="huggingface.co",
-                disable="TRW_OFFLINE=1, HF_HUB_OFFLINE=1 or local_only",
-            )
-        try:
-            _LOADED_MODELS[key] = _cross_encoder_cls(model_name, max_length=512, local_files_only=local_files_only)
-            logger.debug("reranker_model_loaded", model=model_name, local_files_only=local_files_only)
-        except Exception:
-            logger.warning("reranker_model_load_failed", model=model_name, local_files_only=local_files_only)
-            _LOADED_MODELS[key] = None
-    return _LOADED_MODELS.get(key)
+    # One load per model: the daemon's first concurrent recalls must not load it twice (W27).
+    with _LOAD_LOCK:
+        cached = _LOADED_MODELS.get(model_name)
+        if isinstance(cached, _FailedLoad) and time.monotonic() - cached.at < _RETRY_AFTER_S:
+            return None
+        if cached is None or isinstance(cached, _FailedLoad):
+            try:
+                _LOADED_MODELS[model_name] = _cross_encoder_cls(
+                    model_name,
+                    max_length=512,
+                    revision=model_revision(model_name),
+                    local_files_only=True,
+                    device=INFERENCE_DEVICE,
+                )
+                logger.debug("reranker_model_loaded", model=model_name)
+            except Exception:  # trw-fail-silent-allow: logged at warning with the fetch command; recall keeps fusion order and the load is retried after _RETRY_AFTER_S
+                logger.warning("reranker_model_load_failed", model=model_name, fix=FETCH_COMMAND)
+                _LOADED_MODELS[model_name] = _FailedLoad(time.monotonic())
+                return None
+        return _LOADED_MODELS[model_name]
 
 
 def _entry_text(entry: MemoryEntry) -> str:
@@ -143,7 +154,6 @@ def cross_encode_scores(
     entries: list[MemoryEntry],
     *,
     model_name: str = _DEFAULT_MODEL,
-    local_only: bool = False,
 ) -> list[tuple[MemoryEntry, float]] | None:
     """Score every entry against *query* with the cross-encoder.
 
@@ -154,7 +164,7 @@ def cross_encode_scores(
     """
     if not entries:
         return []
-    model = _get_model(model_name, local_only=local_only)
+    model = _get_model(model_name)
     if model is None:
         logger.debug("cross_encode_scores_skipped", reason="model_unavailable", count=len(entries))
         return None
@@ -164,7 +174,7 @@ def cross_encode_scores(
         # A model that returns the wrong shape or non-numeric output counts as
         # "inference failed": callers must keep fusion order, never crash recall.
         scored = [(e, float(s)) for e, s in zip(entries, scores, strict=True)]
-    except Exception as exc:  # trw-fail-silent-allow: documented degradation -- an uncached model under an offline switch, a load failure or malformed model output returns None so callers keep fusion order; the warning names the cause
+    except Exception as exc:  # trw-fail-silent-allow: documented degradation -- an uncached model, a load failure or malformed model output returns None so callers keep fusion order; the warning names the cause
         logger.warning("cross_encode_rerank_error", error=str(exc)[:120])
         return None
     scored.sort(key=lambda x: x[1], reverse=True)

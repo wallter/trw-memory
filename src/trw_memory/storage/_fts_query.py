@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.retrieval.lexical import MAX_QUERY_CHARS, MAX_QUERY_TERMS
 from trw_memory.storage._query_ops import _append_exact_tag_filters, _execute_resilient
 
 if TYPE_CHECKING:
@@ -19,7 +20,6 @@ if TYPE_CHECKING:
 # A chunk is searchable when it holds at least one character the ``unicode61`` tokenizer
 # (``_schema.py``) indexes; a punctuation-only chunk would be an empty phrase.
 _TERM_RE = re.compile(r"[^\W_]")
-_MAX_TERMS = 64
 
 
 def _quote(chunk: str) -> str:
@@ -43,7 +43,7 @@ def build_match_query(query: str) -> str | None:
         inner = query[1:-1].strip()
         return _quote(inner) if _TERM_RE.search(inner) else None
     chunks = [chunk for chunk in dict.fromkeys(query.lower().split()) if _TERM_RE.search(chunk)]
-    return " OR ".join(_quote(chunk) for chunk in chunks[:_MAX_TERMS]) or None
+    return " OR ".join(_quote(chunk) for chunk in chunks[:MAX_QUERY_TERMS]) or None
 
 
 def search_fts_method(
@@ -106,7 +106,7 @@ def search_fts(
         return []
     # The empty guard, the length cap and the term cap bound the MATCH (DoS);
     # build_match_query keeps every operator literal.
-    fts_query = build_match_query(query.strip()[:1000])
+    fts_query = build_match_query(query.strip()[:MAX_QUERY_CHARS])
     if fts_query is None:
         return []
     filter_sql, filter_params = backend._build_filter_clause(

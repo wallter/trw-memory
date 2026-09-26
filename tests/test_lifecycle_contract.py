@@ -227,3 +227,95 @@ def test_a_failed_correction_leaves_a_prior_in_another_store_open(store: tuple[S
             reread = other.get("L-prior", namespace="user")
             assert reread is not None
             assert reread.invalid_from is None
+
+
+def test_a_correction_whose_replacement_was_forgotten_leaves_the_prior_open(
+    store: tuple[StorageBackend, MemoryConfig],
+) -> None:
+    """C12 rc7: an empty reread fell back to the caller's stale copy, update()'s None went unchecked, and the
+    prior was closed anyway -- ``updated`` for a learning that no longer existed."""
+    from trw_memory.lifecycle.correction import Store, apply_correction
+
+    backend, cfg = store
+    backend.store(MemoryEntry(id="L-prior", content="the old way", namespace=NAMESPACE))
+    backend.store(MemoryEntry(id="L-new", content="use the retry helper instead", namespace=NAMESPACE))
+    stale, prior = _get(store, "L-new"), _get(store, "L-prior")
+    backend.delete("L-new", namespace=NAMESPACE)  # a forget between the caller's read and the write
+
+    result = apply_correction(
+        Store(backend, cfg),
+        stale,
+        LearningPatch(detail="corrected", supersedes="L-prior"),
+        prior=(Store(backend, cfg), prior),
+    )
+
+    assert result["status"] == "not_found"
+    assert backend.get("L-new", namespace=NAMESPACE) is None
+    assert _get(store, "L-prior").invalid_from is None, "the prior was closed by a replacement that is gone"
+
+
+class _Encoder:
+    """A 3-d encoder in one fixed space: every text lands on the same axis, which is all this test reads."""
+
+    model_name = "test-encoder"
+
+    def available(self) -> bool:
+        return True
+
+    def embedding_space(self) -> object:
+        from trw_memory.embeddings.provenance import EmbeddingSpace
+
+        return EmbeddingSpace("c" * 64, "test-encoder:c", 3)
+
+    def embed(self, text: str) -> list[float]:
+        return [0.0, 1.0, 0.0]
+
+
+@pytest.fixture()
+def vec_store() -> Iterator[tuple[StorageBackend, MemoryConfig]]:
+    pytest.importorskip("sqlite_vec")
+    with tempfile.TemporaryDirectory() as td:
+        cfg = MemoryConfig(storage_backend="sqlite", storage_path=td, embedding_dim=3)
+        with create_backend_from_config(cfg, NAMESPACE) as backend:
+            backend.store(MemoryEntry(id="L-1", content="old summary", detail="old detail", namespace=NAMESPACE))
+            backend.upsert_vector("L-1", [1.0, 0.0, 0.0], namespace=NAMESPACE)
+            yield backend, cfg
+
+
+def test_a_text_correction_re_encodes_the_live_vector(
+    vec_store: tuple[StorageBackend, MemoryConfig], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRD-CORE-302 C5: the vector follows the committed text, with provenance for it."""
+    monkeypatch.setattr("trw_memory.tools._embedder.get_local_embedder", lambda **_kw: _Encoder())
+    backend, _cfg = vec_store
+
+    assert _update(vec_store, "L-1", detail="new detail")["status"] == "updated"
+
+    record = backend.get_vector_records(["L-1"], namespace=NAMESPACE)["L-1"]
+    assert list(record.embedding) == [0.0, 1.0, 0.0]
+    assert record.provenance is not None
+
+
+def test_a_text_correction_without_an_embedder_drops_the_stale_vector(
+    vec_store: tuple[StorageBackend, MemoryConfig], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("trw_memory.tools._embedder.get_local_embedder", lambda **_kw: None)
+    backend, _cfg = vec_store
+
+    assert _update(vec_store, "L-1", summary="new summary")["status"] == "updated"
+
+    assert not backend.vector_exists("L-1", namespace=NAMESPACE)
+
+
+def test_a_non_text_correction_keeps_the_vector_and_loads_no_model(
+    vec_store: tuple[StorageBackend, MemoryConfig], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _no_load(**_kw: object) -> None:
+        raise AssertionError("an impact change must not resolve an embedder")
+
+    monkeypatch.setattr("trw_memory.tools._embedder.get_local_embedder", _no_load)
+    backend, _cfg = vec_store
+
+    assert _update(vec_store, "L-1", impact=0.9)["status"] == "updated"
+
+    assert list(backend.get_vector_records(["L-1"], namespace=NAMESPACE)["L-1"].embedding) == [1.0, 0.0, 0.0]

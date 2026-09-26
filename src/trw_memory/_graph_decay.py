@@ -98,6 +98,8 @@ def apply_importance_decay(
 #: nothing about whether anyone has used it since, and gating decay on it made
 #: importance a one-directional ratchet.
 _DECAY_PREDICATE: Final = "COALESCE(last_accessed_at, created_at) < ?"
+#: The most qualifying rows one pass counts; past it ``remaining`` is a lower bound (``remaining_capped``).
+DECAY_COUNT_MAX: Final = 10_000
 
 
 def memory_decay_pass(
@@ -150,11 +152,14 @@ def memory_decay_pass(
             (cutoff, *scope, effective_batch_size),
         ).fetchall()
 
+        # Counted only up to DECAY_COUNT_MAX (+1 says "more"): an uncapped COUNT scanned every qualifying
+        # row on the daemon's serialized lane before a 1,000-row batch (rc9).
         total = conn.execute(
-            f"SELECT COUNT(*) FROM memories WHERE {predicate}",  # noqa: S608
-            (cutoff, *scope),
+            f"SELECT COUNT(*) FROM (SELECT 1 FROM memories WHERE {predicate} LIMIT ?)",  # noqa: S608
+            (cutoff, *scope, DECAY_COUNT_MAX + 1),
         ).fetchone()
-        total_qualifying = total[0] if total else 0
+        total_qualifying = min(total[0] if total else 0, DECAY_COUNT_MAX)
+        capped = bool(total) and total[0] > DECAY_COUNT_MAX
         try:
             for namespace, entry_id, raw_importance in rows:
                 new_value = max(round(float(raw_importance) - DECAY_DELTA, 4), 0.0)
@@ -179,4 +184,5 @@ def memory_decay_pass(
         "processed": decayed,
         "remaining": max(total_qualifying - decayed, 0),
         "total_decayed": decayed,
+        **({"remaining_capped": True} if capped else {}),
     }

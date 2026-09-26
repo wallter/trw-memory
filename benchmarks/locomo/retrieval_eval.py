@@ -184,11 +184,33 @@ async def run(args: argparse.Namespace) -> None:
             rec["query_s"] = query_s
             first = next((i for i, d in enumerate(ranked) if d in evidence), None)
             rec["mrr"] = 1.0 / (first + 1) if first is not None else 0.0
+            # Rank (1-based) of every required turn, in the dataset's evidence order;
+            # None when that turn never surfaced within kmax. Everything below is
+            # derived from this, so a saved run can be re-scored without retrieval.
+            pos: dict[str, int] = {}
+            for i, d in enumerate(ranked):
+                pos.setdefault(d, i + 1)
+            ev_ranks = [pos.get(d) for d in sorted(evidence)]
+            rec["evidence_ranks"] = ev_ranks
+            # Cost of context: characters returned, so coverage can be read per token budget.
+            rec["chars"] = [len(r.get("content") or "") + len(r.get("detail") or "") for r in rows]
+            found = [r for r in ev_ranks if r is not None]
+            # Rank of the LAST required turn: the depth a reader must see to answer
+            # fully. None when any required turn is missing entirely.
+            rec["last_required_rank"] = max(found) if evidence and len(found) == len(ev_ranks) else None
             for k in ks:
                 top = ranked[:k]
                 hits = sum(1 for d in evidence if d in top)
                 rec[f"hit@{k}"] = 1.0 if hits else 0.0
                 rec[f"recall@{k}"] = hits / len(evidence) if evidence else 0.0
+                # complete@k: EVERY required turn is in the top k. hit@k and MRR
+                # both score a single hit as success, which is what hid the
+                # multi-hop bottleneck.
+                rec[f"complete@{k}"] = 1.0 if evidence and hits == len(evidence) else 0.0
+                rec[f"missing@{k}"] = (len(evidence) - hits) / len(evidence) if evidence else 0.0
+            # Selection loss: complete at the deepest k, incomplete at the shallowest.
+            # These items need no better acquisition, only a better choice of what to keep.
+            rec["selection_loss"] = 1.0 if rec[f"complete@{kmax}"] and not rec[f"complete@{min(ks)}"] else 0.0
             per_q.append(rec)
         print(
             f"conv {ci}: {sum(1 for r in per_q if r['conv'] == ci)} questions in {time.monotonic() - t:.1f}s",
@@ -213,6 +235,23 @@ async def run(args: argparse.Namespace) -> None:
         rows = by_cat[cat]
         print(f"{CATEGORY_NAMES[cat]:12s}" + "".join(f"{agg(rows, m):10.1f}%" for m in metrics) + f"  {len(rows):4d}")
     print(f"{'ALL':12s}" + "".join(f"{agg(per_q, m):10.1f}%" for m in metrics) + f"  {len(per_q):4d}")
+
+    # Completeness view: a question is only answerable when EVERY required turn is
+    # visible, so complete@k is the metric a reader actually lives under. The gap
+    # between complete@kmin and complete@kmax is pure selection loss -- the evidence
+    # was acquired and then discarded.
+    comp = [f"complete@{k}" for k in ks] + ["selection_loss"]
+
+    def med_last(rows: list[dict[str, Any]]) -> str:
+        vals = [r["last_required_rank"] for r in rows if r["last_required_rank"] is not None]
+        return f"{statistics.median(vals):.0f}" if vals else "-"
+
+    print(f"\n-- completeness ({args.label or 'trw-memory'})")
+    print(f"{'category':12s}" + "".join(f"{m:>15s}" for m in comp) + "   med_last_rank")
+    for cat in sorted(by_cat):
+        rows = by_cat[cat]
+        print(f"{CATEGORY_NAMES[cat]:12s}" + "".join(f"{agg(rows, m):14.1f}%" for m in comp) + f"{med_last(rows):>15s}")
+    print(f"{'ALL':12s}" + "".join(f"{agg(per_q, m):14.1f}%" for m in comp) + f"{med_last(per_q):>15s}")
     if args.out:
         env = {k: v for k, v in os.environ.items() if k.startswith("MEMORY_")}
         write_json(args.out, {"label": args.label, "k": ks, "per_question": per_q, "env": env})

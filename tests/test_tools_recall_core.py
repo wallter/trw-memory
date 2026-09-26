@@ -297,7 +297,7 @@ class TestMemoryRecallImpl:
         # to filter out foreign-namespace neighbours. In production these tables
         # share one connection, so the test connection mirrors that — both rows
         # live in the recall namespace (project:default).
-        conn.execute("CREATE TABLE memories (id TEXT, namespace TEXT)")
+        conn.execute("CREATE TABLE memories (id TEXT, namespace TEXT, status TEXT DEFAULT 'active')")
         conn.executemany(
             "INSERT INTO memories (id, namespace) VALUES (?, ?)",
             [("M-root", "project:default"), ("M-related", "project:default")],
@@ -311,6 +311,40 @@ class TestMemoryRecallImpl:
         assert related_items[0]["content"] == "related entry"
         assert related_items[0]["edge_type"] == "similarity"
         assert related_items[0]["depth"] == 1
+        conn.close()
+
+    @pytest.mark.parametrize(("neighbours", "flag"), [(3, None), (4, True), (5, True)])
+    def test_graph_expansion_reads_at_most_the_node_bound_and_says_when_it_stopped(
+        self, monkeypatch: pytest.MonkeyPatch, neighbours: int, flag: bool | None
+    ) -> None:
+        """A root with more neighbours than GRAPH_RELATED_MAX hydrates only the bound (rc9 sweep: 20,000 with limit=1)."""
+        import sqlite3
+
+        from trw_memory.tools import _recall_helpers
+
+        monkeypatch.setattr(_recall_helpers, "GRAPH_RELATED_MAX", 3)
+        root = _make_entry("M-root", content="root entry")
+        rows = {"M-root": root, **{f"M-n{i}": _make_entry(f"M-n{i}", content=f"n{i}") for i in range(neighbours)}}
+        backend = _mock_backend([root])
+        backend.get.side_effect = lambda entry_id, **_kwargs: rows.get(entry_id)
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE memory_graph_edges (source_id TEXT, target_id TEXT, edge_type TEXT, weight REAL)")
+        conn.executemany(
+            "INSERT INTO memory_graph_edges VALUES (?, ?, ?, ?)",
+            [("M-root", f"M-n{i}", "similarity", 0.9) for i in range(neighbours)],
+        )
+        conn.execute("CREATE TABLE memories (id TEXT, namespace TEXT, status TEXT DEFAULT 'active')")
+        conn.executemany("INSERT INTO memories (id, namespace) VALUES (?, ?)", [(i, "project:default") for i in rows])
+        conn.commit()
+
+        result = memory_recall_impl("", "project:default", backend=backend, graph_depth=1, conn=conn)
+
+        hydrated = [c.args[0] for c in backend.get.call_args_list if str(c.args[0]).startswith("M-n")]
+        assert (len(cast("list[object]", result["related"])), len(hydrated), result.get("related_truncated")) == (
+            3,
+            3,
+            flag,
+        )
         conn.close()
 
     def test_graph_depth_excludes_foreign_namespace_related_entry(self) -> None:
@@ -328,7 +362,7 @@ class TestMemoryRecallImpl:
         )
         # M-foreign belongs to a DIFFERENT namespace — the namespace-scoped BFS
         # must not surface it for a project:default recall (data-isolation).
-        conn.execute("CREATE TABLE memories (id TEXT, namespace TEXT)")
+        conn.execute("CREATE TABLE memories (id TEXT, namespace TEXT, status TEXT DEFAULT 'active')")
         conn.executemany(
             "INSERT INTO memories (id, namespace) VALUES (?, ?)",
             [("M-root", "project:default"), ("M-foreign", "project:other")],

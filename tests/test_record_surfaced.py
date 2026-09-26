@@ -73,8 +73,8 @@ def test_a_recall_that_does_not_record_access_leaves_its_page_uncounted(backend:
     assert _counts(backend, "L-a")[0] == 1  # only the recording recall counted
 
 
-@pytest.mark.parametrize("ids", [[], [f"L-{i}" for i in range(1001)]])
-def test_the_tool_refuses_an_empty_or_oversized_id_list(ids: list[str]) -> None:
+def test_the_tool_refuses_an_empty_id_list() -> None:
+    """The upper bound moved to the middleware (below); this is the tool's own remaining check."""
     from trw_memory.tools.recall_support import register_recall_support_tools
 
     tools: dict[str, object] = {}
@@ -84,9 +84,34 @@ def test_the_tool_refuses_an_empty_or_oversized_id_list(ids: list[str]) -> None:
             return lambda fn: tools.setdefault(fn.__name__, fn)
 
     register_recall_support_tools(_Captured())  # type: ignore[arg-type]
-    answer = asyncio.run(tools["memory_record_surfaced"](namespace="default", ids=ids))  # type: ignore[operator]
+    answer = asyncio.run(tools["memory_record_surfaced"](namespace="default", ids=[]))  # type: ignore[operator]
 
-    assert answer["status"] == "invalid", answer
+    assert answer == {"error": "ids must hold at least one entry", "status": "invalid"}
+
+
+async def test_an_oversized_id_list_is_refused_by_the_middleware_before_the_tool_runs() -> None:
+    """The upper bound moved to ``daemon._arg_bounds.ArgumentBounds``
+    (``OVERRIDES["memory_record_surfaced"]["ids"] = SURFACED_MAX``): a call through the real served
+    surface with more than ``SURFACED_MAX`` ids is refused before the tool body runs at all, not by
+    a check inside ``memory_record_surfaced`` itself (which now only refuses an empty list, above).
+    """
+    from fastmcp import Client
+
+    from trw_memory.server import mcp
+    from trw_memory.tools.recall_support import SURFACED_MAX
+
+    ids = [f"L-{i}" for i in range(SURFACED_MAX + 1)]
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "memory_record_surfaced", {"namespace": "default", "ids": ids}, raise_on_error=False
+        )
+
+    data = result.data
+    assert isinstance(data, dict)
+    assert data.get("status") == "invalid", data
+    assert data.get("error") == "argument_too_large", data
+    assert data.get("argument") == "ids", data
+    assert data.get("limit") == SURFACED_MAX, data
 
 
 async def test_over_the_wire_a_grant_counts_its_own_namespace_only(

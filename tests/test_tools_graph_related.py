@@ -1,7 +1,8 @@
 """memory_graph_related: a learning's active graph neighbours in its own namespace, bounded (PRD-CORE-143, CORE-280 FR01).
 
-trw-mcp's ``trw_graph_related`` reads these over the daemon, so the traversal's
-namespace scoping, active-only hydration and breadth bound are pinned here.
+trw-mcp's ``trw_recall`` graph mode reads these over the daemon, so the
+traversal's namespace scoping, active-only hydration and breadth bound are
+pinned here.
 """
 
 from __future__ import annotations

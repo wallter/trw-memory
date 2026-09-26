@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "trw-memory"
-version = "3.1.0"
+version = "4.0.0"
 description = "Persistent memory engine with hybrid retrieval, tiered storage, and semantic dedup for AI agents"
 readme = "README.md"
 license = "BUSL-1.1"
@@ -32,7 +32,7 @@ classifiers = [
 dependencies = [
     # GHSA-g6cj-pr64-35w5 (CVE-2026-69247, Bleichenbacher oracle in PKCS#7
     # EnvelopedData decryption) is fixed in 50.0.0; trw-memory imports
-    # cryptography directly in security/encryption.py.
+    # cryptography directly in security/keys.py (the Ed25519 fallback).
     "cryptography>=50.0.0",
     "httpx>=0.27.0",
     # PyNaCl backs Ed25519 provenance signing AND verification. It used to be
@@ -54,7 +54,17 @@ dependencies = [
     # musllinux wheel or an sdist, so musl (Alpine) and Windows ARM fail at pip time:
     # an install failure is truthful where silently keyword-only recall is not.
     "sqlite-vec>=0.1.5",
+    # BM25 keyword ranking is on for every install (PRD-CORE-302 FR08, 7.0.0):
+    # without it EngMem complete@10 fell 0.988 -> 0.713 (N=80, 5 seeds) and
+    # the default-on entity-bridge hop raised NameError. rank-bm25 declares an
+    # unconstrained numpy dep; numpy>=2.5 drops Python 3.10, which trw-memory
+    # still supports, so the ceiling holds it on a 3.10-compatible numpy.
+    "rank-bm25>=0.2.0",
+    "numpy<2.5",
     "typing-extensions>=4.6.0",
+    # Assertion grep patterns are caller-supplied and run in the shared daemon: `regex`
+    # enforces a match deadline and releases the GIL, where stdlib `re` can hang (C12 ReDoS).
+    "regex>=2024.11.6",
     # --- formerly the [mcp] extra; now REQUIRED ---
     # The package's own console script already depended on it unconditionally:
     # `cli.py` imports `cli_namespace`, which imports `daemon.client`, which
@@ -62,7 +72,7 @@ dependencies = [
     # `pip install trw-memory` shipped a `trw-memory` entry point that raised
     # ModuleNotFoundError on EVERY invocation while the README presented that
     # install as supported. `import trw_memory` still worked, which is why it
-    # went unnoticed -- and CI installs `.[dev,vectors,bm25,mcp]`, so a
+    # went unnoticed -- and CI installed `.[dev,vectors,bm25,mcp]`, so a
     # core-only install was never exercised.
     "fastmcp>=3.2.0,<4.0.0",
     # The floors below pin fastmcp's own transitive deps past their patched
@@ -90,7 +100,8 @@ sqlite-fix = [
     # current CPython.
     "pysqlite3-binary>=0.5.4; platform_system == 'Linux' and platform_machine == 'x86_64'",
 ]
-encryption = ["sqlcipher3>=0.5.0", "keyring>=24.0.0", "cryptography>=50.0.0"]
+# No [encryption] extra: encryption at rest is refused (EncryptionAtRestUnsupportedError) and its
+# SQLCipher and master-key code was removed in 4.1; use full-disk encryption.
 embeddings = [
     "sentence-transformers>=2.0.0",
     # numpy>=2.5 drops Python 3.10 support (and ships PEP-695 `type X = ...`
@@ -104,18 +115,9 @@ embeddings = [
     "transformers>=5.10.0",  # GHSA-xrqw-3rrv-vx5w
     "setuptools>=83.0.0",  # GHSA-h35f-9h28-mq5c
 ]
-bm25 = [
-    "rank-bm25>=0.2.0",
-    # numpy>=2.5 drops Python 3.10 support (and ships PEP-695 `type X = ...`
-    # stubs that mypy rejects under python_version="3.10"), which trw-memory
-    # still supports. rank-bm25 declares an unconstrained numpy dep, so floor
-    # the ceiling here to keep the CI `.[dev,bm25]` install on a
-    # 3.10-compatible numpy.
-    "numpy<2.5",
-]
 # `mcp` dropped from this alias: it is now a required dependency, so naming
 # it here would reference a nonexistent extra and pip would warn.
-all = ["trw-memory[embeddings,bm25]"]
+all = ["trw-memory[embeddings]"]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",
@@ -178,15 +180,15 @@ exclude = [
 [tool.deptry]
 known_first_party = ["trw_memory"]
 optional_dependencies_dev_groups = ["dev"]
-package_module_name_map = { "sqlcipher3" = "sqlcipher3" }
 
 [tool.deptry.per_rule_ignores]
 # Optional probe: text embeddings can hide a broken torchcodec install during
 # sentence-transformers import, but torchcodec itself is not required.
 DEP001 = ["torchcodec"]
 # Optional extras / self-referential aggregate extras are intentionally not
-# imported in the core package scan.
-DEP002 = ["sqlcipher3", "trw-memory"]
+# imported in the core package scan. numpy is declared only for its <2.5
+# ceiling (Python 3.10); rank-bm25 is what imports it.
+DEP002 = ["numpy", "trw-memory"]
 # `nacl` is the import name for the pynacl distribution, which IS a declared
 # core dependency -- the mapping is what deptry cannot infer, not the absence
 # of a declaration. This ignore previously read "PyNaCl-backed signing is
@@ -342,7 +344,7 @@ module = "pysqlite3"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = "keyring"
+module = "regex"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

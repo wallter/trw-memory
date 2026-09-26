@@ -26,6 +26,9 @@ from collections.abc import Mapping
 #: ``favourite`` and ``language`` (the defect FR04 measures) and ``trw-memory``
 #: yields ``trw`` and ``memory``.
 _WORD_RE = re.compile(r"[a-z0-9]+")
+#: The bounds on caller query text every ranking leg shares: FTS MATCH, BM25 and lexical (C12 rc7).
+MAX_QUERY_CHARS = 1000
+MAX_QUERY_TERMS = 64
 
 #: CamelCase boundary, mirroring ``retrieval.bm25._CAMEL_RE`` so both surfaces
 #: index ``hybridSearch`` as ``hybrid`` and ``search``.
@@ -84,6 +87,16 @@ def tokenize(text: str) -> list[str]:
     return _WORD_RE.findall(_CAMEL_RE.sub(" ", text).lower())
 
 
+def bounded_query(query: str) -> str:
+    """*query* itself within the bounds, else the first ``MAX_QUERY_TERMS`` whitespace chunks of its first ``MAX_QUERY_CHARS``."""
+    chunks = query[:MAX_QUERY_CHARS].split()
+    return (
+        query
+        if len(query) <= MAX_QUERY_CHARS and len(chunks) <= MAX_QUERY_TERMS
+        else " ".join(chunks[:MAX_QUERY_TERMS])
+    )
+
+
 def tokenize_query(query: str) -> list[str]:
     """Return query tokens with stopwords removed.
 
@@ -91,7 +104,7 @@ def tokenize_query(query: str) -> list[str]:
     make every entry equally (ir)relevant, which is exactly the failure mode
     this function exists to remove.
     """
-    tokens = tokenize(query)
+    tokens = tokenize(bounded_query(query))
     meaningful = [token for token in tokens if token not in _STOPWORDS]
     return meaningful or tokens
 

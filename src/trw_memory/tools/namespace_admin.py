@@ -17,6 +17,7 @@ from collections.abc import Iterator
 
 import structlog
 
+from trw_memory.daemon._offload import run_serialized
 from trw_memory.exceptions import AuthorizationError, ConfigError, StorageError
 from trw_memory.integrations._backend import (
     create_backend_from_config,
@@ -67,6 +68,13 @@ def _curate_impl(
     operation = merge_namespace if merge else rename_namespace
     try:
         with _open_stores(cfg, source, destination) as stores:
+            rows = stores.source.count(namespace=source) + stores.source.graph_edge_count(source)
+            if rows > CURATE_ROWS_MAX:
+                return {
+                    "error": f"{source} holds {rows} rows and graph edges; one {'merge' if merge else 'rename'} "
+                    f"moves at most {CURATE_ROWS_MAX} in trw-memory 4.0, since the move holds every tenant's writes",
+                    "status": "too_large",
+                }
             result = operation(stores, source, destination)
     except ConfigError as exc:
         return {"error": str(exc), "status": "invalid"}
@@ -74,6 +82,12 @@ def _curate_impl(
         logger.warning("namespace_curate_failed", source=source, destination=destination, error=type(exc).__name__)
         return {"error": str(exc), "status": "error"}
     return dict(result.model_dump())
+
+
+#: The most rows and graph edges one merge or rename moves. The move runs as one job on the daemon's serialized write
+#: lane, about 1 ms a row with its vector (measured 2026-09-25), so this bounds the hold at about 50 s; it
+#: covers every measured store (the largest, 9,378 rows). Batched moves are B71-96 (rc9).
+CURATE_ROWS_MAX = 50_000
 
 
 @contextlib.contextmanager
@@ -194,16 +208,16 @@ def register_namespace_admin_tools(mcp: McpServer) -> None:
     async def memory_namespace_rename(source: str, destination: str) -> dict[str, object]:
         """Re-label every row of one namespace onto another, refusing a merge."""
 
-        return memory_namespace_rename_impl(source, destination)
+        return await run_serialized(memory_namespace_rename_impl, source, destination)
 
     @mcp.tool()
     async def memory_namespace_merge(source: str, destination: str) -> dict[str, object]:
         """Fold one namespace into another, keeping the destination on conflicts."""
 
-        return memory_namespace_merge_impl(source, destination)
+        return await run_serialized(memory_namespace_merge_impl, source, destination)
 
     @mcp.tool()
     async def memory_namespace_diagnose(namespace: str = "") -> dict[str, object]:
         """Report a moved or renamed checkout and the command that repairs it."""
 
-        return memory_namespace_diagnose_impl(namespace)
+        return await run_serialized(memory_namespace_diagnose_impl, namespace)

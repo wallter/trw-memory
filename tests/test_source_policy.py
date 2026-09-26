@@ -11,9 +11,20 @@ from trw_memory.client import MemoryClient, MemoryResultDict
 from trw_memory.retrieval.source_policy import SourcePolicy, classify_source_family
 
 
+def _apply_policy(policy: SourcePolicy, results: Any) -> list[dict[str, Any]]:
+    """Copy admitted results, applying the shared rank key exactly once.
+
+    Mirrors the removed ``SourcePolicy.apply`` — production now composes
+    ``allows``/``rank_key`` inline (see ``_client_recall_helpers.py``).
+    """
+    ranked = [(policy.rank_key(result), result) for result in results if policy.allows(result)]
+    ranked.sort(key=lambda item: item[0])
+    return [dict(result, score=-key[1]) for key, result in ranked]
+
+
 def _apply(rows: Any, **options: Any) -> list[dict[str, Any]]:
     """Admission plus the source-weighted order, as ``MemoryClient.recall`` applies it."""
-    return SourcePolicy.resolve(**options).apply(rows)
+    return _apply_policy(SourcePolicy.resolve(**options), rows)
 
 
 def _result(
@@ -350,7 +361,7 @@ def test_resolved_policy_snapshots_options_and_default_weights(monkeypatch: pyte
         _result(memory_id="episode", score=2.0, metadata={"source_kind": "episodic"}),
         _result(memory_id="git", score=1.0, metadata={"source_kind": "git"}),
     ]
-    result = policy.apply(rows)
+    result = _apply_policy(policy, rows)
     assert [r["memory_id"] for r in result] == ["episode", "unknown", "git"]
     assert result[-1]["score"] == pytest.approx(0.8)
     with pytest.raises(TypeError):
@@ -377,7 +388,7 @@ def test_resolved_policy_captures_one_clock_and_admission_never_reads_score(monk
     row: dict[str, object] = {"metadata": {"source_kind": "episodic"}, "expires": "2026-01-02", "score": object()}
     assert policy.allows(row)
     row["score"] = 1.0
-    assert len(policy.apply([row])) == 1
+    assert len(_apply_policy(policy, [row])) == 1
     assert policy.allows(row)
     assert calls == [True]
 
@@ -408,7 +419,7 @@ def test_resolved_admission_and_weighted_apply_agree(options: dict[str, Any]) ->
     ]
     now = datetime(2026, 1, 2, tzinfo=timezone.utc)
     policy = SourcePolicy.resolve(reference_time=now, **options)
-    applied = policy.apply(rows)
+    applied = _apply_policy(policy, rows)
     assert {row["memory_id"] for row in applied} == {row["memory_id"] for row in rows if policy.allows(row)}
     assert all(row["score"] in (1.0, 2.0, 3.0) for row in rows)  # inputs unchanged
     if options == {}:

@@ -17,6 +17,7 @@ def test_failed_review_persistence_does_not_record_terminal_status(decision: str
     entry = MemoryEntry(id="M-review", content="quarantined", namespace="default")
     active_backend = MagicMock()
     active_backend.get.return_value = None
+    active_backend.transaction.return_value.__enter__.return_value = active_backend
     quarantine_backend = MagicMock()
     quarantine_backend.get.return_value = entry
     failing_store = active_backend.store if decision == "approve" else quarantine_backend.store

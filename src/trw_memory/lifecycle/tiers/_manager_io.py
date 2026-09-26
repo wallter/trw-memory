@@ -7,10 +7,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from trw_memory.exceptions import StorageError
+from trw_memory.exceptions import StorageError, refuse_encryption_at_rest
 from trw_memory.models.config import MemoryConfig
-from trw_memory.security.encryption import derive_namespace_key
-from trw_memory.security.keys import get_master_key
 from trw_memory.storage.persistence import read_yaml
 
 if TYPE_CHECKING:
@@ -26,19 +24,14 @@ def open_canonical_backend(
     config: MemoryConfig,
 ) -> StorageBackend:
     """Open the canonical backend used for cold-tier promotion and sweep."""
+    refuse_encryption_at_rest(config)
     db_path = base_dir / config.sqlite_db_name
     if config.storage_backend == "sqlite" and db_path.exists():
         from trw_memory.storage.sqlite_backend import SQLiteBackend
 
-        sqlcipher_key_hex: str | None = None
-        if config.encryption_enabled:
-            master_key = get_master_key(config)
-            sqlcipher_key_hex = derive_namespace_key(master_key, namespace)
-
         return SQLiteBackend(
             db_path,
             dim=config.embedding_dim,
-            sqlcipher_key_hex=sqlcipher_key_hex,
             recovery_policy=config.memory_recovery_policy,
             corrupt_backup_keep=config.memory_corrupt_backup_keep,
             rebuild_from_cold=config.memory_recovery_rebuild_from_cold,

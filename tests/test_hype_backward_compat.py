@@ -7,7 +7,6 @@ import pytest
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.pipeline import hybrid_search
 
-from ._optional_extras import requires_bm25
 from ._test_scope_support import DEFAULT_SCOPE
 
 
@@ -22,7 +21,6 @@ def test_default_and_neutral_tombstone_preserve_frozen_baseline():
     assert [e.id for e in baseline] == [e.id for e in neutral] == ["a", "b", "c"]
 
 
-@requires_bm25
 def test_dense_hybrid_frozen_baseline_preserves_canonical_suffix_ids():
     entries = [
         MemoryEntry(id=i, content=c, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc))

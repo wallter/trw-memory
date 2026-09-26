@@ -25,6 +25,8 @@ from typing import Any
 
 import structlog
 
+from trw_memory._live_stores import connect_registered
+
 logger = structlog.get_logger(__name__)
 
 # Matches memory.db.corrupt.<ISO-UTC>.bak with optional -N collision suffix.
@@ -69,7 +71,7 @@ def salvage_via_recover_cli(backup_path: Path, dbapi: Any = sqlite3) -> list[Any
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_db = Path(tmpdir) / "recover.db"
         try:
-            tmp_conn = dbapi.connect(str(tmp_db))
+            tmp_conn = connect_registered(tmp_db, dbapi, str(tmp_db))
             tmp_conn.row_factory = sqlite3.Row
             try:
                 tmp_conn.executescript(dump_sql)
@@ -79,7 +81,7 @@ def salvage_via_recover_cli(backup_path: Path, dbapi: Any = sqlite3) -> list[Any
                 return []
             finally:
                 tmp_conn.close()
-        except sqlite3.Error:
+        except sqlite3.Error:  # trw-fail-silent-allow: best-effort CLI salvage into a scratch db -- [] means "this salvage tier recovered nothing", which recover_db already records as a salvage failure and falls through to the next tier; unchanged by C15 beyond routing the scratch connect through connect_registered
             return []
 
 

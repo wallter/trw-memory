@@ -424,7 +424,7 @@ def delete_by_namespace(backend: SQLiteBackend, namespace: str) -> int:
 
     Commit is suppressed when called inside a ``transaction()`` block
     (``_skip_commit_depth > 0``) so the memories DELETE batches with the
-    companion wiki_refs / vector cleanup into the outer COMMIT — see
+    companion graph/tag/vector cleanup into the outer COMMIT — see
     ``SQLiteBackend.delete_by_namespace`` for the atomic wrapper.
     """
     try:

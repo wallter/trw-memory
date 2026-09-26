@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 from trw_memory.retrieval.bm25 import bm25_search
 
-from ._optional_extras import requires_bm25
 from ._test_retrieval_support import make_entry
 
 
 class TestBM25Search:
-    @requires_bm25
     def test_returns_top_k_results(self) -> None:
         entries = [
             make_entry("e1", "pydantic validation error handling"),
@@ -36,7 +32,6 @@ class TestBM25Search:
             scores = [score for _, score in results]
             assert scores == sorted(scores, reverse=True)
 
-    @requires_bm25
     def test_hyphenated_tag_expansion(self) -> None:
         entries = [
             make_entry("tagged", "model configuration", tags=["pydantic-v2"]),
@@ -65,12 +60,6 @@ class TestBM25Search:
         # blank id must not appear in results (skipped in fallback loop)
         assert all(entry_id != "" for entry_id, _ in results)
 
-    def test_unavailable_returns_empty(self) -> None:
-        entries = [make_entry("x", "test content")]
-        with patch("trw_memory.retrieval.bm25._BM25_AVAILABLE", False):
-            results = bm25_search("test", entries)
-        assert results == []
-
     def test_result_ids_match_entry_ids(self) -> None:
         entries = [
             make_entry("alpha", "machine learning training data"),
@@ -87,7 +76,6 @@ class TestBM25Search:
         results = bm25_search("python", entries, top_k=5)
         assert len(results) <= 5
 
-    @requires_bm25
     def test_content_and_detail_both_indexed(self) -> None:
         entries = [
             make_entry("detail_match", "unrelated content", detail="pydantic validation"),
@@ -96,7 +84,6 @@ class TestBM25Search:
         results = bm25_search("pydantic", entries)
         assert "detail_match" in [entry_id for entry_id, _ in results]
 
-    @requires_bm25
     def test_query_hyphen_expansion_matches_split_tag_tokens(self) -> None:
         # Document: tagged "pydantic-v2" → indexed as ["pydantic-v2", "pydantic", "v2"]
         # Query: "pydantic-v2" → must expand to ["pydantic-v2", "pydantic", "v2"]
@@ -109,3 +96,19 @@ class TestBM25Search:
         ids = [entry_id for entry_id, _ in results]
         assert "tagged" in ids
         assert ids[0] == "tagged"  # tagged entry should rank first
+
+
+def test_a_missing_rank_bm25_fails_at_import_not_mid_recall() -> None:
+    """rank-bm25 is a base dependency (PRD-CORE-302 FR08).
+
+    It used to be an extra the default installer skipped, and the entity-bridge
+    hop then raised ``NameError: BM25Okapi`` inside a recall. A broken install
+    must now fail where it is broken: importing the retrieval package.
+    """
+    import subprocess
+    import sys
+
+    probe = "import sys; sys.modules['rank_bm25'] = None; import trw_memory.retrieval.bm25"
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=False)
+    assert result.returncode != 0
+    assert "ModuleNotFoundError: import of rank_bm25" in result.stderr

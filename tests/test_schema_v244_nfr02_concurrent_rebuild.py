@@ -54,7 +54,7 @@ import pytest
 import trw_memory.storage._dbapi  # noqa: F401  — installs pysqlite3 as ``sqlite3``
 import trw_memory.storage._schema as schema_module
 from trw_memory.models.memory import MemoryEntry
-from trw_memory.storage._schema import SchemaLockError, ensure_schema
+from trw_memory.storage._schema import SCHEMA_VERSION, SchemaLockError, ensure_schema
 from trw_memory.storage._schema_backup import BACKUP_DIR_NAME
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
@@ -128,7 +128,9 @@ def test_concurrent_openers_apply_schema5_exactly_once(
         thread.join(timeout=60)
 
     assert errors == [], f"a concurrent opener raised: {errors!r}"
-    assert results == [6] * openers, f"every opener must observe user_version==6, got {results!r}"
+    assert results == [SCHEMA_VERSION] * openers, (
+        f"every opener must observe user_version=={SCHEMA_VERSION}, got {results!r}"
+    )
     assert rebuilds() == 1, f"the schema-5 rebuild must apply exactly once, ran {rebuilds()} times"
 
     # Independent attribution on a different module's code path: the
@@ -136,7 +138,7 @@ def test_concurrent_openers_apply_schema5_exactly_once(
     # migration that ran is also the only one that wrote a restore point.
     # Before the fix every racing opener wrote one, all to the same
     # second-stamped filename, i.e. over each other.
-    snapshots = sorted((tmp_path / BACKUP_DIR_NAME).glob("concurrent.db.pre-schema-6.*"))
+    snapshots = sorted((tmp_path / BACKUP_DIR_NAME).glob(f"concurrent.db.pre-schema-{SCHEMA_VERSION}.*"))
     assert len(snapshots) == 1, f"exactly one pre-migration snapshot must be written, got {snapshots!r}"
 
     # The filename names the target, but recovery must restore the pre-v5
@@ -185,7 +187,7 @@ def test_opener_that_waited_out_the_migration_skips_the_rebuild(
         ensure_schema(conn)
 
         assert rebuilds() == 0, "an opener whose pre-read was invalidated must not rebuild"
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 6
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION
         assert int(conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]) == 20
         assert not conn.in_transaction, "the skip path must not leave the write lock held"
     finally:
@@ -271,7 +273,7 @@ def test_interrupted_rebuild_leaves_v4_and_a_clean_retry_completes(
     conn = sqlite3.connect(db)
     ensure_schema(conn)
 
-    assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 6
+    assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION
     assert int(conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]) == 30
     columns = [str(row[1]) for row in conn.execute("PRAGMA table_info(memories)").fetchall()]
     assert len(columns) == len(set(columns)), f"duplicate column after retry: {columns!r}"

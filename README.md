@@ -10,13 +10,13 @@ trw-memory gives your AI agents long-term memory that runs locally. Memories liv
 
 > **Status:** alpha, source-available under BSL 1.1. The public API may change in future releases; test an upgrade before you roll it out.
 
-**[What's new](#whats-new-in-3x)** · **[Quick start](#install-and-quick-start)** · **[Benchmarks](#benchmarks)** · **[How it works](#how-it-works)** · **[MCP server](#mcp-memory-server)** · **[Network and security](#telemetry-and-network-behavior)** · **[Upgrading](#upgrading)** · **[FAQ](#faq)**
+**[What's new](#whats-new-in-4x)** · **[Quick start](#install-and-quick-start)** · **[Benchmarks](#benchmarks)** · **[How it works](#how-it-works)** · **[MCP server](#mcp-memory-server)** · **[Network and security](#telemetry-and-network-behavior)** · **[Upgrading](#upgrading)** · **[FAQ](#faq)**
 
 ## Why trw-memory
 
-- **More right answers.** On the LOCOMO benchmark, trw-memory 2.0.0 answered 88.9% of 1,540 questions correctly against 84.1% for mem0 OSS, ahead in all ten conversations. On LongMemEval, the evidence for 93.8% of questions lands in its top 10 results.
+- **More right answers.** On the LOCOMO benchmark, trw-memory 2.0.0 answered 88.9% of 1,540 questions correctly against 84.1% for mem0 OSS, ahead in all ten conversations. Its search finds the evidence too: on LongMemEval, trw-memory 2.0.0 returned it in the top 10 search results for 93.8% of 470 questions.
 - **No LLM calls to store.** `store_conversation()` keeps each chat turn as written, with its date and the turn it replied to, so saving memory costs no API calls (by default). The reader does the inference at recall time.
-- **Runs on your machine.** Memories live in a local SQLite file. There is no hosted service, no account and no usage tracking. Once the models are cached, `TRW_OFFLINE=1` keeps it off the network; remote sync and the decision judge are opt-in and off by default.
+- **Runs on your machine.** Memories live in a local SQLite file. There is no hosted service, no account and no usage tracking. Models download once, when you fetch them, and runtime never touches the network; remote sync and the decision judge are opt-in and off by default.
 - **Hybrid recall.** Keyword ranking (BM25) and local vector search are fused, then a local cross-encoder re-ranks the results.
 - **Stale knowledge stays out.** Every memory has a lifecycle status, and superseded or retired memories are excluded from recall by default. Near-duplicates are merged and old memories move to colder storage tiers.
 - **Three ways in.** An async Python SDK (`MemoryClient`), a CLI (`trw-memory`), and an MCP server (`trw-memory-server`) that any MCP client can launch.
@@ -32,9 +32,9 @@ pip install trw-memory
 pip install "trw-memory[all]"
 ```
 
-Without the `[embeddings]` extra (included in `[all]`) nothing produces vectors, so recall is keyword-only. The embedding model (`BAAI/bge-small-en-v1.5`, about 130 MB) and the re-ranker download from Hugging Face on first use unless they are already cached; see [Telemetry and network behavior](#telemetry-and-network-behavior) to pre-fetch them or block the download.
+Without the `[embeddings]` extra (included in `[all]`) nothing produces vectors, so recall is keyword-only. Fetch the embedding model (`BAAI/bge-small-en-v1.5`, about 130 MB) and the re-ranker once with `trw-mcp models fetch` or `trw_memory.embeddings.fetch_models()`; runtime loads never download (see [Telemetry and network behavior](#telemetry-and-network-behavior)).
 
-**Supported platforms:** macOS arm64/x86_64, manylinux x86_64/aarch64 and Windows x86_64, the platforms `sqlite-vec` publishes wheels for. CPython 3.10 through 3.14.
+**Supported platforms:** macOS arm64/x86_64 and Linux with glibc (x86_64, aarch64). CPython 3.11 through 3.14. 3.10 also works, but `memory_import_checkout` (the checkout-store import behind `trw-mcp memory migrate`) needs 3.11 or later. On Windows, use WSL2, which works as Linux. Native Windows is not supported in 4.0, because the store's file-safety checks need POSIX.
 
 ### Python SDK
 
@@ -109,12 +109,6 @@ trw-memory status
 trw-memory reembed --namespace project:my-app    # re-encode vectors after a model change
 trw-memory restore --from-cold                   # or --from-snapshot latest
 trw-memory snapshot create --tier daily          # also: snapshot list, snapshot rotate
-
-# Wiki lint and the explicit code index
-trw-memory wiki-lint pages.json
-trw-memory code-index ./src
-trw-memory code-search ./src "hybrid_search" --language python --limit 5
-trw-memory code-symbol ./src MemoryClient
 ```
 
 `store`, `recall`, `search`, `forget`, `consolidate`, `export` and `status` run over the [loopback daemon](#loopback-daemon-serve-http). They start one if none is running and present this checkout's grant, which `trw-mcp memory token` mints; without a grant, or for a namespace outside it, the command prints the remedy and exits 1. `--namespace` defaults to the checkout's pinned `project_namespace` (pass `--namespace default` for the old default). `import`, `reembed`, `restore` and `snapshot create` open the store file directly, so they refuse while a daemon runs.
@@ -135,19 +129,19 @@ backend.store(entry)
 results = backend.search("query", top_k=10, namespace="default")
 ```
 
-## What's new in 3.x
+## What's new in 4.x
 
-<!-- whats-new: 3.1.0 -->
+<!-- whats-new: 4.0.0 -->
 
-- **One store for all your projects.** The CLI and trw-mcp share one local daemon per user account; each checkout's grant limits it to its own namespaces.
-- **Re-ranked recall everywhere.** With `[embeddings]` installed, the SDK, the daemon and trw-mcp's `trw_recall` all re-rank with the cross-encoder.
-- **Older memories stay reachable.** Recall adds full-text matches from beyond the 1,000 most recent rows.
-- **Vector storage built in.** `sqlite-vec` ships with every install; the `[vectors]` extra is gone.
-- **Offline keeps working.** Without a cached embedding model, the daemon's recall and store fall back to keyword search instead of failing.
-- **Sturdier daemon.** An I/O error no longer quarantines a healthy store (Python 3.11+), and a daemon that never starts is cleaned up.
-- **With trw-mcp 6.x:** the installer adds embeddings by default, and `doctor` reports whether each retrieval component works.
+- **No corrupted or lost writes.** A store shared by two processes keeps its SQLite locks, and a new store's first writes are kept. Both affected 2.x and 3.x.
+- **Recall works on a default install.** rank-bm25 is a base dependency, so the entity-bridge hop no longer crashes and default installs get the BM25 lane.
+- **A crashed daemon no longer strands clients.** A zombie daemon reads as dead, its starter reaps it, and models run on CPU on macOS, avoiding a Metal crash.
+- **Text in, never vectors.** The daemon embeds and dedups itself, and no vector leaves your machine.
+- **One download path.** `fetch_models()` gets the models, the embedding model at a pinned revision, and runtime loads are cache-only. `local_only` is retired.
+- **Re-embed in place, and clear version errors.** `memory_reembed` re-encodes vectors outside the active space; a 4.x daemon refuses a 3.x client by name.
+- **Faster daemon calls.** The daemon serves stateless JSON, and `DaemonClient(keep_session=True)` makes each call one HTTP request instead of six.
 
-3.0.0 is a breaking release for 2.x users: see [Upgrading](#upgrading-from-200). Full list: [CHANGELOG.md](https://github.com/wallter/trw-memory/blob/main/CHANGELOG.md).
+4.0.0 is a breaking release: read the [CHANGELOG](https://github.com/wallter/trw-memory/blob/main/CHANGELOG.md) before upgrading, and upgrade trw-mcp to 7.0.0 with it.
 
 ## Benchmarks
 
@@ -165,18 +159,24 @@ trw-memory answered 4.8 points more questions correctly (paired 95% CI +2.9 to +
 
 ### Finds the evidence on LOCOMO and LongMemEval
 
-With no LLM in the loop, how often the turn that holds the answer comes back in the top results (trw-memory 2.0.0 defaults):
+With no LLM in the loop, how often the turn that holds the answer comes back in the top results, on default settings:
 
-| Benchmark | Questions | In top 10 | In top 50 |
-|---|:---:|:---:|:---:|
-| LongMemEval_S (cleaned) | 470 | **93.8%** | **97.4%** |
-| LOCOMO, all ten conversations | 1,540 | **85.7%** | **92.7%** |
+| Benchmark | Questions | Measured on | In top 10 | In top 50 |
+|---|:---:|:---:|:---:|:---:|
+| LOCOMO, all ten conversations | 1,540 | 4.0.0 RC | **85.8%** (95% CI 83.9–87.4) | **92.7%** (91.3–93.9) |
+| LongMemEval_S (cleaned) | 470 | 2.0.0 | **93.8%** (95% CI 91.3–95.7) | **97.4%** |
+
+On the 4.0.0 release candidate, a 10% LongMemEval sample (47 questions) put the evidence in the top 10 for 95.7% of them (95% CI 85.8–98.8). The full 470-question run on the release candidate has not been completed; this sample's interval overlaps the full 2.0.0 result.
 
 These are retrieval hit rates, a different measure from the judged answer accuracy above. Every retrieval change has to hold up on both benchmarks, question by question, before it ships.
 
+<sub>4.0.0 RC: the trw-memory 4.0.0 release candidate (int `657629ecd`), September 2026. Intervals are Wilson 95% over questions. LOCOMO conversations were stored the way the product stores them (`store_conversation`) and searched with `MemoryClient.recall`.</sub>
+
 ### Keeps finding the right record as the store grows
 
-On EngMem, a synthetic benchmark of engineering learnings where newer records supersede older ones, the 3.0.0 recall path found every required record for 16 of 16 queries at 1,000 rows and 14 of 16 at 5,000 and 20,000 rows. It never returned a retired record in its top 10, and median recall stayed near 300 ms at 20,000 rows.
+On EngMem, a synthetic benchmark of engineering learnings where newer records supersede older ones, the MCP `memory_recall` tool found every required record for 16 of 16 queries at 1,000 rows, 14 of 16 at 5,000 and 20,000 rows, and 12 of 16 at 100,000 rows. It never returned a retired record in its top 10 at any size. Plain BM25 keyword search found every required record for none of the 16 queries at 5,000 rows and above, and grep returned a retired record for 8 of 16 at every size. Median `memory_recall` time was 272 ms at 20,000 rows and 467 ms at 100,000.
+
+<sub>16 queries per size, so each rate is coarse: the Wilson 95% intervals are 80.6–100% at 16 of 16, 64.0–96.5% at 14, 50.5–89.8% at 12, 28.0–72.0% at 8 and 0–19.4% at 0. The framework's retrieval core and the library call `MemoryClient.recall` found every required record, and returned no retired one, for the same number of queries as the tool at every size; the latencies above are the tool's. At 100,000 rows a paired McNemar test against the retrieval core gives p = 0.0005 for BM25 and p = 0.002 for grep. Seed 7, one run per size on one Apple-silicon machine, trw-memory 4.0.0 release candidate (int `657629ecd`), September 2026.</sub>
 
 ### Costs that stay small as the store grows
 
@@ -229,7 +229,7 @@ Candidates come from two places: the most recently updated rows of the namespace
 
 | Feature | Implementation |
 |---------|---------------|
-| Encryption at rest | Optional SQLCipher whole-database encryption (AES-256-CBC), keyed by an HKDF-SHA256 per-namespace derivation from the master key. It works for per-namespace stores (the Python SDK, `trw-memory-server serve stdio`), not the loopback daemon, which refuses to start with `encryption_enabled` because it keeps every namespace in one file; so the daemon-backed CLI verbs and trw-mcp cannot use it today. There is no key-rotation path (removed in 3.0.0). |
+| Encryption at rest | Not supported: trw-memory does not encrypt its store. It rejects `encryption_enabled=true` at config load, backend creation and `trw-memory-server` startup with `EncryptionAtRestUnsupportedError`. Protect the store with disk encryption (FileVault, LUKS, BitLocker) and the owner-only file permissions. |
 | PII detection | Regex patterns (email, phone, SSN, credit card, API keys) plus Shannon entropy. The store path **blocks** writes that contain a recognised credential (API keys and provider access tokens) and **records** every other detection as metadata without rewriting your text. Masking happens at the publish boundary (`strip_pii`). |
 | Poisoning defense | Z-score anomaly detection on frequency, size and content patterns. Observe mode by default; `enforce` is opt-in. |
 | Access control | Role-based (admin/editor/viewer) per namespace |
@@ -245,7 +245,7 @@ Candidates come from two places: the most recently updated rows of the namespace
 | `storage/` | SQLite backend (WAL, sqlite-vec vectors, snapshots, recovery) and the YAML backend |
 | `retrieval/` | BM25, dense search, RRF fusion, re-ranking and `hybrid_search()` |
 | `lifecycle/` | Utility scoring, dedup, consolidation, hot/warm/cold tiers |
-| `graph.py`, `embeddings/`, `sync/`, `security/`, `code_index/`, `wiki/` | Knowledge graph, embedding providers, remote sync, security, code index, wiki lint |
+| `graph.py`, `embeddings/`, `sync/`, `security/` | Knowledge graph, embedding providers, remote sync, security |
 
 For the full, current layout, browse `src/trw_memory/`.
 
@@ -272,16 +272,15 @@ The everyday tools:
 
 | Tool | Purpose |
 |------|---------|
-| `memory_store` | Store an entry, and a vector when embeddings are available (offline without a cached model, the row is stored without one). A refused write comes back as a status (`invalid`, `blocked` or `rate_limited`), not an MCP error |
+| `memory_store` | Store an entry, and a vector when embeddings are available (without a cached model, the row is stored without one). A refused write comes back as a status (`invalid`, `blocked` or `rate_limited`), not an MCP error |
 | `memory_recall` | Hybrid retrieval, with optional graph traversal; the same ranking as trw-mcp's `trw_recall` |
 | `memory_search` | List and filter by status and tags, with pagination |
 | `memory_get`, `memory_update`, `memory_forget` | Read, change or delete entries |
 | `memory_consolidate` | Episodic-to-semantic consolidation |
 | `memory_maintain` | Run decay, consolidation and WAL checkpointing for a namespace |
+| `memory_reembed` | Re-encode a namespace's vectors that are outside the active embedding space; safe to rerun. `memory_status` `coverage.outside_active_space` counts what is left |
 | `memory_status` | Store statistics and health; `security_settings_only=True` reports the daemon-wide security settings |
 | `memory_audit`, `memory_review`, `memory_quarantine_list` | Provenance audit and quarantine review |
-| `memory_code_index`, `memory_code_search`, `memory_code_symbol` | The explicit code index |
-| `memory_wiki_lint` | Lint wiki pages for missing targets, backlinks and provenance gaps |
 
 Graph, sync, namespace-administration and import tools are also registered; `REGISTERED_TOOL_NAMES` in `server.py` is the complete list.
 
@@ -311,91 +310,78 @@ Graph, sync, namespace-administration and import tools are also registered; `REG
 
 ## Telemetry and network behavior
 
-trw-memory is **local-first**: with the default configuration all data lives in a local SQLite store (and an optional YAML sidecar). With the default configuration it makes **no outbound network calls** except the model downloads below. Two opt-in features also reach the network: remote sync and the decision judge. There is no usage tracking or content phone-home.
+trw-memory is **local-first**: all data lives in a local SQLite store (and an optional YAML sidecar), and at runtime it makes **no outbound network calls** by default. Models download once, when you fetch them; after that, recall and store never contact Hugging Face. Two opt-in features reach the network: remote sync and the decision judge. There is no usage tracking or content phone-home.
 
-### What can touch the network, when, and how to turn it off
+### What can touch the network, and when
 
-| Surface | When | Default | Opt-out / control |
-|---------|------|---------|-------------------|
-| **Embedding model download** | Only with the `[embeddings]` extra installed, and only when the model (`BAAI/bge-small-en-v1.5` by default: 33M parameters, 384 dimensions, about 130 MB; set `MEMORY_EMBEDDING_MODEL` to change it) is **not** already complete in your local Hugging Face cache. The loader probes the cache first and forces `local_files_only=True` when the snapshot is complete, so a warm cache makes **zero** huggingface.co requests | enabled when the extra is present | `TRW_OFFLINE=1` / `HF_HUB_OFFLINE=1`, or `local_only: true` (alias `memory_local_only`), force `local_files_only` so no download is attempted; a disclosure log line precedes any network-capable load |
-| **Re-ranker load** | Only with the `[embeddings]` extra installed, on the first recall in a process. Unlike the embedder, the re-ranker loader does not probe the cache first: without an offline switch it loads `cross-encoder/ms-marco-MiniLM-L-6-v2` with `local_files_only=False`, so Hugging Face may be contacted even when the files are cached, and they are downloaded when they are not. Under an offline switch it loads from the cache only; an uncached re-ranker is then skipped and recall keeps fusion order (no download, no error) | enabled when the extra is present | `TRW_OFFLINE=1`, `HF_HUB_OFFLINE=1` or `local_only: true` (loads with `local_files_only=True`); a disclosure log line precedes any network-capable load |
-| **Remote sync / publish** | Only when `sync_enabled=true` AND `local_only=false` | **off** | leave sync disabled, or set `local_only: true` to hard-block it |
-| **Decision judge** (`trw_memory.decisions`) | Only when enabled **and** an `OPENROUTER_API_KEY` is present. For the store path, enabled means `TRW_JEV_ENABLED` in the process environment or `assess_enabled` in the user's `~/.trw/config.yaml`; that path does not read project `.trw/config.yaml` or `.env`, and it takes the key from the process environment only. `python -m trw_memory.decisions.cli` also reads project settings via `--dotenv`. When enabled, the store path's poisoning screen sends each written entry's text, after credential and PII redaction, to the judge endpoint (default `https://openrouter.ai`, an allowlisted https host) as a shadow check that never changes the outcome; `python -m trw_memory.decisions.cli` calls it directly | **off** | leave it disabled: unset `TRW_JEV_ENABLED` / `assess_enabled` at every layer, or set `TRW_JEV_ENABLED=false` in the process environment, which overrides the others. `local_only` does **not** turn it off |
+| Surface | When | Default | Control |
+|---------|------|---------|---------|
+| **Model fetch** | Only when you run it: `trw-mcp models fetch`, the TRW installer, or `trw_memory.embeddings.fetch_models()`. It downloads the embedding model (`BAAI/bge-small-en-v1.5` by default, pinned to one Hub commit: 33M parameters, 384 dimensions, about 130 MB; `MEMORY_EMBEDDING_MODEL` changes it) and the re-ranker (`cross-encoder/ms-marco-MiniLM-L-6-v2`) into your Hugging Face cache | runs only when invoked | don't run it; copy a populated Hugging Face cache instead |
+| **Model loads at runtime** | Never. The embedder and re-ranker load from the local Hugging Face cache only (`local_files_only=True`, and a complete snapshot is opened from its directory), so a warm cache makes **zero** huggingface.co requests | cache-only, always | nothing to turn off |
+| **Remote sync / publish** | Only when `sync_enabled=true` and a platform URL is set. Text only: no vector ever leaves the machine | **off** | leave sync disabled |
+| **Decision judge** (`trw_memory.decisions`) | Only when enabled **and** an `OPENROUTER_API_KEY` is present. For the store path, enabled means `TRW_JEV_ENABLED` in the process environment or `assess_enabled` in the user's `~/.trw/config.yaml`; that path does not read project `.trw/config.yaml` or `.env`, and it takes the key from the process environment only. `python -m trw_memory.decisions.cli` also reads project settings via `--dotenv`. When enabled, the store path's poisoning screen sends each written entry's text, after credential and PII redaction, to the judge endpoint (default `https://openrouter.ai`, an allowlisted https host) as a shadow check that never changes the outcome; `python -m trw_memory.decisions.cli` calls it directly | **off** | leave it disabled: unset `TRW_JEV_ENABLED` / `assess_enabled` at every layer, or set `TRW_JEV_ENABLED=false` in the process environment, which overrides the others |
 
-`learning_sharing_enabled` and `platform_telemetry_enabled` govern learning-content publishing and usage telemetry; **neither gates the model download**. Model egress is independent of the consent flags — it is governed by the local cache, the offline switches and `local_only`. Setting `local_only: true` is the hard block for model downloads and sync: a validator forces `sync_enabled=False`, clears `sync_namespace`, `platform_url` and `platform_api_key`, and pins `rbac_mode="local"`, so sync cannot be re-enabled while it is set. It does **not** disable the decision judge, whose on/off switch is separate; an offline deployment must also leave the judge disabled.
+`learning_sharing_enabled` governs learning-content publishing. Model downloads are not a runtime behaviour at all, so no consent flag gates them.
 
-**Offline with an uncached embedding model**, behaviour depends on the entry point. Since 3.1.0 the daemon's `memory_recall`, `memory_store` and `memory_consolidate` (and so the CLI and trw-mcp) run keyword-only, store rows without vectors, and report `"dense": "unavailable: <reason>"` in the recall response. The in-process `MemoryClient` raises `LocalOnlyViolationError` with instructions to pre-download the model. `RemoteCodeNotPermittedError` raises in both.
+**Without a cached embedding model**, behaviour depends on the entry point. The daemon's `memory_recall`, `memory_store` and `memory_consolidate` (and so the CLI and trw-mcp) run keyword-only, store rows without vectors, and report `"dense": "unavailable: <reason>"` with `trw-mcp models fetch` as the fix. The in-process `MemoryClient` does the same for store and recall (keyword-only, logged once); only `MemoryClient.reembed()`, which cannot degrade, raises `ModelNotCachedError` naming the same command. Without the re-ranker, recall keeps fusion order. `RemoteCodeNotPermittedError` raises in both.
 
 ### Environment-variable inventory
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `TRW_OFFLINE` | Master offline switch: blocks the embedding-model and re-ranker downloads | unset |
-| `HF_HUB_OFFLINE` | Upstream huggingface_hub offline switch, also honoured | unset |
-| `MEMORY_EMBEDDING_MODEL` | Sentence-transformers model for dense vectors. Changing it leaves stored vectors in the old model's space until `trw-memory reembed` re-encodes them (see [Changing the embedding model](#changing-the-embedding-model)) | `BAAI/bge-small-en-v1.5` |
+| `MEMORY_EMBEDDING_MODEL` | Sentence-transformers model for dense vectors. Changing it leaves stored vectors in the old model's space until they are re-encoded (see [Changing the embedding model](#changing-the-embedding-model)) | `BAAI/bge-small-en-v1.5` |
 | `MEMORY_STORAGE_PATH` | Where the Python SDK keeps its stores | `.memory/` |
-| `MEMORY_*` | Engine settings validated by `MemoryConfig` (for example `MEMORY_LOCAL_ONLY`, `MEMORY_EMBEDDING_TRUST_REMOTE_CODE`, retrieval and lifecycle tuning) | per field |
+| `MEMORY_*` | Engine settings validated by `MemoryConfig` (for example `MEMORY_SYNC_ENABLED`, `MEMORY_EMBEDDING_TRUST_REMOTE_CODE`, retrieval and lifecycle tuning) | per field |
+
+`TRW_OFFLINE`, `HF_HUB_OFFLINE` and `local_only` are gone in 4.0.0: runtime is always offline for models, and sync is opt-in. A leftover `local_only`, in any source (`.trw/config.yaml`, `MEMORY_LOCAL_ONLY`, dotenv) and at any value, stops startup with a `ConfigError` naming the key, so remove it.
 
 ### Security defaults
 
 | Capability | Default | Notes |
 |-----------|---------|-------|
-| Encryption at rest | **off** (`encryption_enabled=False`) | opt-in SQLCipher whole-database encryption (AES-256-CBC), HKDF-SHA256 per-namespace keys; needs the `[encryption]` extra. Per-namespace stores only (SDK, `serve stdio`): the loopback daemon refuses to start with it enabled |
+| Encryption at rest | **not supported** | `encryption_enabled=true` is rejected at config load, backend creation and `trw-memory-server` startup with `EncryptionAtRestUnsupportedError`. Use full-disk encryption (FileVault, LUKS, BitLocker) |
 | PII detection | **on** (`pii_enabled=True`) | scans `content`, `detail`, `tags`, `evidence[]` and `Assertion.last_evidence` on the store path. Recognised credentials (API keys and provider access tokens, detected as `PIIType.API_KEY`, the only type in `BLOCKING_PII_TYPES`) **block the write** (`PIIBlockError`); every other type is recorded in `pii_types` metadata and stored **verbatim**. `pii_action` (default `warn`) is only reported by `memory_status`; it does not change what the store path does. Emails, IPs, SSNs, phone numbers and card numbers are masked at the publish boundary. Set `pii_custom_patterns` to opt in to local masking with your own regexes |
 | Poisoning / size-anomaly detection | **observe** (`poisoning_detection_mode="observe"`) | records anomaly stats and telemetry but does **not** quarantine; `enforce` is opt-in. A caller-supplied `metadata['source']` cannot skip enforce-mode quarantine |
 | Trust scoring | **observe** (`trust_scoring_mode="observe"`) | logs intake trust decisions; `enforce` and `strict` are opt-in |
 | Provenance signing | **required** (`provenance_required=True`) | persisted rows carry a signed provenance hash chain |
 | Canary tamper response | **halt** (`canary_fail_mode="halt"`) | seeded canaries are probed on recall; tampering halts by default (`degrade` and `log-only` are opt-in) |
-| Remote sync / publishing | **off** (`sync_enabled=False`) | `local_only=True` hard-blocks it |
-| Decision judge (LLM calls to OpenRouter) | **off** (`TRW_JEV_ENABLED` unset) | needs both an enable switch and `OPENROUTER_API_KEY`; not covered by `local_only` |
+| Remote sync / publishing | **off** (`sync_enabled=False`) | text only; vectors never leave the machine |
+| Decision judge (LLM calls to OpenRouter) | **off** (`TRW_JEV_ENABLED` unset) | needs both an enable switch and `OPENROUTER_API_KEY` |
+| Model downloads at runtime | **never** | models arrive only through an explicit fetch; loads are `local_files_only` |
 | Model remote-code execution | **off** (`embedding_trust_remote_code=False`) | the only input to sentence-transformers' `trust_remote_code`. A model repository that ships its own Python modules is refused with `RemoteCodeNotPermittedError`; set it `true` only for a repository you trust. The default model needs no remote code |
 | `memory.db` permissions | `0600` | the store file is `chmod 0600` on creation; a non-POSIX platform logs a `db_chmod_failed` warning |
 
 ### Enterprise hardening recipe
 
-```bash
-export TRW_OFFLINE=1   # block the huggingface.co model download (local_files_only)
-```
-
-```yaml
-# MemoryConfig
-local_only: true       # hard-block remote sync + model download
-```
+Fetch the models once, in the environment that will run trw-memory (or copy a populated Hugging Face cache into it):
 
 ```bash
-export TRW_JEV_ENABLED=false   # local_only does not cover the decision judge; keep it off explicitly
+trw-mcp models fetch
+# standalone trw-memory:
+python -c "from trw_memory.embeddings import fetch_models; fetch_models()"
 ```
 
-For vector recall offline, populate the model cache **before** enabling either switch, in the same environment:
+Then keep the two opt-in network features off, which is the default:
 
 ```bash
-python -c "from sentence_transformers import SentenceTransformer, CrossEncoder; SentenceTransformer('BAAI/bge-small-en-v1.5'); CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"
+export TRW_JEV_ENABLED=false   # the decision judge
+# and leave sync_enabled / learning_sharing_enabled unset
 ```
 
-If the **embedding** model is not cached, the daemon's tools run keyword-only and the in-process `MemoryClient` raises `LocalOnlyViolationError` on its first embedding load. If only the re-ranker is uncached, recall still uses vectors and simply skips re-ranking. To run keyword-only on purpose, omit the `[embeddings]` extra. Verify that the on-disk `memory.db` is mode `0600`, that `TRW_JEV_ENABLED` / `assess_enabled` are not set in any layer, and that no outbound connection is attempted on first use.
+From then on nothing leaves the machine: model loads are cache-only, and there is no runtime download to block. To run keyword-only on purpose, omit the `[embeddings]` extra. Verify that the on-disk `memory.db` is mode `0600`, that `TRW_JEV_ENABLED` / `assess_enabled` are not set in any layer, and that no outbound connection is attempted.
 
 ## Upgrading
 
-### Upgrading from 2.0.0
+### Upgrading from 3.x
 
-If you use trw-memory through trw-mcp, upgrade both together (trw-mcp 6.1.0 requires trw-memory 3.1.0 or later 3.x) and follow the [trw-mcp README](https://github.com/wallter/trw-mcp). For a standalone install:
+If you use trw-memory through trw-mcp, upgrade both together (trw-mcp 7.0.0 needs trw-memory 4.x) and follow the [trw-mcp README](https://github.com/wallter/trw-mcp#upgrading). For a standalone install:
 
-1. **Keep a way back.** 3.x opens a 2.0.0 store in place and never alters its schema, so 2.0.0 can still open that store afterwards. A store that 3.x *creates* has no legacy columns, and 2.0.0 fails on it (`no such column: q_value`). Before upgrading, export each namespace with 2.0.0 (`trw-memory export --namespace <ns> --format json > <ns>.json`); to roll back, re-import into a store 2.0.0 creates. Export does not include stored vectors, and 2.0.0's `import` keeps only content, detail, tags and importance, under new ids.
-2. **Install:** `pip install -U "trw-memory[all]==3.1.0"` (or with the extras you use). Drop `[vectors]` from your requirements; pip only warns about it.
-3. **Restart the daemon**, if one runs, so it serves 3.x code, and set the daemon-wide security settings in its environment: `MEMORY_RBAC_ENABLED`, `MEMORY_DEFAULT_ROLE`, `MEMORY_NAMESPACE_ROLES`, `MEMORY_ENABLE_RECALL_FILTER`, `MEMORY_RECALL_FILTER_MODE`, `MEMORY_CANARY_FAIL_MODE`, `MEMORY_POISONING_DETECTION_MODE`, `MEMORY_ENABLE_TRUST_SCORING`, `MEMORY_TRUST_SCORING_MODE` and `MEMORY_PROVENANCE_REQUIRED`.
-4. **Update scripts that call the CLI.** `store`, `recall`, `search`, `forget`, `consolidate`, `export` and `status` need a checkout grant (`trw-mcp memory token`). Pass `--namespace default` where you relied on the old default. `search` lost `--min-importance` and `--since` and gained `--status`. Stop the daemon before `import`, `reembed`, `restore` or `snapshot create`. Treat exit 1 from `import` as "some rows were rejected" and read `<file>.rejected.jsonl`.
-5. **Update code that uses the Python API:**
-   - Stop reading or writing `q_value`, `q_observations`, `helpful_count` and `unhelpful_count` on `MemoryEntry`.
-   - Drop the `learning_id=` keyword from `compute_anchor_validity()`.
-   - Pass `namespace=` to `increment_recall_access`, `increment_session_counts` and `record_recall_access`.
-   - Call `acquire_candidates(limit=..., config=...)` in place of `pool_size` / `fts_top_k`.
-   - Pass `admit=store_gate(config, backend)` to `fetch_shared_memories` in place of `backend=`.
-   - Replace `apply_source_policy()` with `SourcePolicy.resolve(...).apply(rows)`, and `count_with_assertions` with `entries_with_assertions`.
-   - Branch on `memory_store`'s `status` (`invalid`, `blocked`, `rate_limited`) where you caught an MCP error.
-   - Remove imports of the deleted APIs (among them `PoisoningDetector`, `ProvenanceChain`, `rotate_master_key`, `security.encryption.rotate_key`, `seed_canaries`, `verify_canaries`, the bandit selectors and `trw_memory.adapters`); the [CHANGELOG](https://github.com/wallter/trw-memory/blob/main/CHANGELOG.md) lists them all.
-6. **Remove retired settings:** `lifecycle_use_fsrs`, `key_rotation_backup`, `concurrent_writer_warn_threshold` (`memory_concurrent_writer_warn_threshold`) and, in 3.1.0, `q_learning_rate`. Each logs `retired_setting_ignored` and is ignored. At-rest encryption (`encryption_enabled`) is unchanged; there is no key-rotation path.
-
-Expect recall order to change on the same store: ranking no longer blends in reward feedback.
+1. **Remove `local_only` first.** 4.0.0 refuses to start while it is set, in any source and at any value (a `ConfigError` naming the key). It used to force `sync_enabled: false` and `rbac_mode: local`, so where sharing must stay off, set `sync_enabled: false` explicitly and check `rbac_mode`.
+2. **Install:** `pip install -U "trw-memory[embeddings]==4.0.0"`. rank-bm25 is now a base dependency: drop `bm25` from any extras list (`[all]` is now `[embeddings]`).
+3. **Restart the daemon**, if one runs. A 4.x daemon refuses a 3.x client with `daemon_version_mismatch`, and a 4.x client refuses a 3.x daemon. The 4.0.0 daemon also refuses to start when its store directory, or any ancestor, is owned by a user other than you or root, or is group- or world-writable without the sticky bit.
+4. **Fetch the models:** `trw_memory.embeddings.fetch_models()` (or `trw-mcp models fetch`). Runtime loads are cache-only: without the model the SDK and the daemon fall back to keyword search, and only `MemoryClient.reembed()` raises `ModelNotCachedError` (renamed from `LocalOnlyViolationError`).
+5. **Check your stores.** Releases before 4.0.0 could corrupt a store shared by two processes, and 2.0.0, 3.0.0 and 3.1.0 could lose a new store's first writes. Run `sqlite3 <store> 'pragma integrity_check'` on the user store (`~/.trw/memory/memory.db`, or under `$TRW_USER_DIR` / `$XDG_DATA_HOME/trw` when set) and on any project store (`<project>/.trw/memory/memory.db`); output other than `ok` reports a problem, and `trw-memory restore --from-snapshot latest --db <path>` or `--from-cold` rebuilds it (stop every process using the store first). Look for `memory.db.corrupt.*.bak` files beside a store too: one from the store's first use may hold lost writes, so open it read-only before deleting it.
+6. **Update code that calls the daemon or the Python API.** `memory_similar(namespace, text, skip_threshold, merge_threshold, top_k=10)` takes text, not a vector; `memory_vectors` drops `space`; `memory_maintain` takes the caller's consolidation policy. `trw_memory.bandit`, `trw_memory.code_index`, `trw_memory.migration` and `trw_memory.wiki` are deleted, with the `code-index`, `code-search`, `code-symbol` and `wiki-lint` subcommands. The [CHANGELOG](https://github.com/wallter/trw-memory/blob/main/CHANGELOG.md) lists every change.
 
 ### Changing the embedding model
 
@@ -412,7 +398,7 @@ async with MemoryClient(namespace="default") as client:
     counts = await client.reembed()
 ```
 
-`reembed` works on a store the SDK opens in local mode (under your `storage_path`), not on the daemon's store at `~/.trw/memory/memory.db`; 3.x has no command that re-embeds the daemon's store, and the CLI refuses to run while a daemon runs. It honours `TRW_OFFLINE` / `HF_HUB_OFFLINE` / `local_only` like every other load, so pre-download the model first. To keep the previous model, set `MEMORY_EMBEDDING_MODEL=all-MiniLM-L6-v2`; a process only ever scores vectors from the space its embedder reports, so switching back and forth never mixes spaces.
+`trw-memory reembed` works on a store the SDK opens in local mode (under your `storage_path`), and the CLI refuses to run while a daemon runs. For the daemon's store at `~/.trw/memory/memory.db`, use the daemon's `memory_reembed` tool (`trw-mcp memory reembed`). Both are idempotent and resumable, and neither downloads a model, so fetch the new one first. To keep the previous model, set `MEMORY_EMBEDDING_MODEL=all-MiniLM-L6-v2`; a process only ever scores vectors from the space its embedder reports, so switching back and forth never mixes spaces.
 
 ### Older releases
 
@@ -425,7 +411,7 @@ async with MemoryClient(namespace="default") as client:
 
 Stop old-version writers first; they can regenerate retired vectors. Take a verified backup with SQLite's online backup API (the approach in `storage/_schema_backup.py`), **not** a copy of a live database without its WAL, and never overwrite canonical writes made since the snapshot to recover optional vectors.
 
-This recipe is for an existing, disposable, unencrypted snapshot, not a live store. Choose its embedding dimension, namespace and parent IDs explicitly; opening `SQLiteBackend` can run normal schema initialization. Encrypted stores need their key-aware backup and open procedure instead. `apply = False` only lists the selected vectors; `True` removes those derived vectors atomically. It never deletes canonical records or other namespaces, and "no vectors installed" means unavailable, not a successful cleanup.
+This recipe is for an existing, disposable, unencrypted snapshot, not a live store. Choose its embedding dimension, namespace and parent IDs explicitly; opening `SQLiteBackend` can run normal schema initialization. `apply = False` only lists the selected vectors; `True` removes those derived vectors atomically. It never deletes canonical records or other namespaces, and "no vectors installed" means unavailable, not a successful cleanup.
 
 ```python
 from pathlib import Path
@@ -465,7 +451,7 @@ The SQLite engine is selected at import by `storage/_dbapi.py`, which ranks the 
 
 ### Platform notes
 
-- **sqlite-vec is a base dependency** (since 3.1.0), which is why musl Linux (Alpine) and Windows ARM are unsupported. If its extension fails to load, the backend reports `supports_vectors()` as False and recall uses keyword search.
+- **sqlite-vec is a base dependency** (since 3.1.0), which is why musl Linux (Alpine) is unsupported. If its extension fails to load, the backend reports `supports_vectors()` as False and recall uses keyword search.
 - **`pysqlite3-binary` is not a runtime dependency** on any platform. It used to be a hard Linux dependency, which broke aarch64 Linux installs while delivering SQLite 3.51.1, below the 3.51.3 fix it existed for. The runtime probe in `storage/_dbapi.py` decides and reports which engine is active.
 
 ## Development
@@ -489,9 +475,7 @@ python -m pytest tests/test_retrieval_*.py -v
 | Extra | Packages | Purpose |
 |-------|----------|---------|
 | `[embeddings]` | sentence-transformers | Dense vectors (`BAAI/bge-small-en-v1.5` by default) and the cross-encoder re-ranker |
-| `[bm25]` | rank-bm25 | BM25 keyword ranking |
-| `[all]` | embeddings + bm25 | The full retrieval stack (sqlite-vec is in the core install) |
-| `[encryption]` | sqlcipher3, keyring, cryptography | SQLCipher encryption at rest and key storage |
+| `[all]` | embeddings | The full retrieval stack (sqlite-vec and rank-bm25 are in the core install) |
 | `[sqlite-fix]` | pysqlite3-binary (x86_64 Linux only) | Optional SQLite engine override; see [Supported interpreters](#supported-interpreters) |
 | `[dev]` | pytest, mypy, ruff, coverage, pip-audit, vulture, deptry | Testing and linting |
 
@@ -501,7 +485,7 @@ There is no `[llm]` extra and no LLM-backed consolidation.
 
 | Command | Purpose |
 |---------|---------|
-| `trw-memory` | CLI: store, recall, search, forget, consolidate, export and import, plus restore, snapshot, reembed, wiki-lint and the code index |
+| `trw-memory` | CLI: store, recall, search, forget, consolidate, export and import, plus restore, snapshot and reembed |
 | `trw-memory-server` | MCP server (stdio by default; `serve http` runs the loopback daemon) |
 
 ## FAQ
@@ -520,7 +504,7 @@ On all 1,540 LOCOMO questions, run through mem0's own evaluation harness with th
 
 ### Does it work offline?
 
-Yes. With the default configuration all data is local, and remote sync and the decision judge are off. `TRW_OFFLINE=1`, `HF_HUB_OFFLINE=1` or `local_only: true` stop model downloads; `local_only` also blocks sync, but not the judge, so leave the judge disabled. Pre-download the models for full recall offline. Without the embedding model the daemon and CLI run keyword-only and the in-process `MemoryClient` raises `LocalOnlyViolationError`; without the re-ranker, recall just skips re-ranking. See [Telemetry and network behavior](#telemetry-and-network-behavior).
+Yes, always. All data is local, remote sync and the decision judge are off by default, and runtime never downloads a model. Fetch the models once for full recall. Without the embedding model the daemon, the CLI and the in-process `MemoryClient` run keyword-only (only `MemoryClient.reembed()` raises `ModelNotCachedError`); without the re-ranker, recall just skips re-ranking. See [Telemetry and network behavior](#telemetry-and-network-behavior).
 
 ### Does recall search every stored memory?
 

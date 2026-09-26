@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from trw_memory.exceptions import LocalOnlyViolationError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.sync.conflict import MAX_MERGED_DETAIL_LENGTH
 from trw_memory.sync.subscriber import RECONNECT_DELAY, SSESubscriber
@@ -25,14 +24,6 @@ class TestSSESubscriber:
         cfg = _make_config(sync_enabled=False)
         sub = SSESubscriber(cfg, on_event=lambda data: None)
         sub.start()
-        assert sub._thread is None
-
-    def test_start_raises_when_local_only_enabled(self) -> None:
-        """Local-only mode blocks the live SSE network subscriber."""
-        cfg = _make_config(local_only=True)
-        sub = SSESubscriber(cfg, on_event=lambda data: None)
-        with pytest.raises(LocalOnlyViolationError, match="memory_local_only=True"):
-            sub.start()
         assert sub._thread is None
 
     def test_start_does_nothing_when_platform_url_empty(self) -> None:
@@ -182,7 +173,6 @@ class TestConfigFields:
             "MEMORY_SYNC_NAMESPACE",
             "MEMORY_PLATFORM_URL",
             "MEMORY_PLATFORM_API_KEY",
-            "MEMORY_LOCAL_ONLY",
         ):
             monkeypatch.delenv(key, raising=False)
 
@@ -334,8 +324,11 @@ class TestSSESubscriberDaemonThread:
         assert sub._stop_event.is_set()
 
     @patch("trw_memory.sync.subscriber.httpx.Client")
-    def test_subscriber_last_event_id_sent_on_reconnect(self, mock_client_cls: MagicMock) -> None:
+    def test_subscriber_last_event_id_sent_on_reconnect(
+        self, mock_client_cls: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """After setting _last_event_id, reconnect sends it in headers."""
+        monkeypatch.setenv("TRW_PLATFORM_TRUSTED_HOSTS", "api.example.com")
         cfg = _make_config(platform_api_key="test-key")
         sub = SSESubscriber(cfg, on_event=lambda _data: None)
         sub._last_event_id = "evt-99"
@@ -368,3 +361,38 @@ class TestSSESubscriberDaemonThread:
         assert len(captured_headers) >= 1
         assert captured_headers[0].get("Last-Event-ID") == "evt-99"
         assert "Authorization" in captured_headers[0]
+
+    @patch("trw_memory.sync.subscriber.httpx.Client")
+    def test_subscriber_untrusted_host_never_gets_the_bearer(self, mock_client_cls: MagicMock) -> None:
+        """F5/P1-C: an untrusted platform_url SSE stream gets no Authorization header."""
+        cfg = _make_config(platform_api_key="test-key")
+        sub = SSESubscriber(cfg, on_event=lambda _data: None)
+        sub._last_event_id = "evt-1"  # ensures headers is non-empty so the side effect captures it
+
+        captured_headers: list[dict[str, str]] = []
+
+        def stream_side_effect(
+            _method: str,
+            _url: str,
+            headers: dict[str, str] | None = None,
+            **_kw: Any,
+        ) -> MagicMock:
+            if headers:
+                captured_headers.append(dict(headers))
+            sub._stop_event.set()
+            mock_resp = MagicMock()
+            mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_resp.iter_lines.return_value = iter([])
+            return mock_resp
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.stream.side_effect = stream_side_effect
+        mock_client_cls.return_value = mock_client
+
+        sub._listen_loop()
+
+        assert len(captured_headers) >= 1
+        assert "Authorization" not in captured_headers[0]

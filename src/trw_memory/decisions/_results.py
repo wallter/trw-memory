@@ -9,13 +9,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from trw_memory.decisions._models import (
-    ChoiceAnswer,
-    DecisionAnswer,
-    DecisionFailure,
-    NoulAnswer,
-    ScoreAnswer,
-)
+from trw_memory.decisions._models import ChoiceAnswer, DecisionAnswer, DecisionFailure, NoulAnswer, ScoreAnswer
+
+# Moved to _models.py; re-exported (mypy --strict wants the explicit "as" form) so toolkit.py's
+# import site is unchanged.
+from trw_memory.decisions._models import InvalidCriteria as InvalidCriteria
+from trw_memory.decisions._models import InvalidRequest as InvalidRequest
 
 #: Server-enforced ceiling; 256+ returns 400 "Too many choices. Must have at most 255 choices."
 MAX_CHOICE_OPTIONS = 255
@@ -26,18 +25,20 @@ DEAD_BAND = 0.03
 #: 1 in 10 identical repeat sets returned a different top label; below this gap, do not act.
 MIN_MARGIN = 0.05
 
+#: Below this choice margin, ``to_wire`` attaches ``advice`` (W19, PRD-CORE-295) — wider than
+#: MIN_MARGIN (0.05) on purpose: a caller who never reads margin still needs a nudge well before
+#: the "unreliable" line, not exactly at it.
+NEAR_TIE_MARGIN = 0.2
+
+#: A noul probability inside this band is a near-tie: neither side has a real edge.
+NEAR_TIE_NOUL_BAND = (0.4, 0.6)
+
+_NEAR_TIE_ADVICE = "near-tie: take the safer or reversible option, or ask."
+
 #: Where a batched item's text travels. See :meth:`Toolkit.batch_items`.
 BatchSchema = Literal["embedded", "keyed"]
 
 Route = Literal["act", "escalate", "abstain"]
-
-
-class InvalidRequest(ValueError):
-    """The caller built a request the provider would reject or silently degrade. Fix it; do not retry."""
-
-
-class InvalidCriteria(InvalidRequest):
-    """A noul question was given criteria the transport would discard."""
 
 
 @dataclass(frozen=True)
@@ -62,11 +63,6 @@ class ClassifyResult:
         chosen = self.probabilities[self.label]
         rivals = [p for key, p in self.probabilities.items() if key != self.label]
         return chosen - max(rivals) if rivals else chosen
-
-    def is_decisive(self, *, min_probability: float, min_margin: float = MIN_MARGIN) -> bool:
-        if not self.answered:
-            return False
-        return self.probabilities.get(self.label or "", 0.0) >= min_probability and self.margin >= min_margin
 
 
 @dataclass(frozen=True)
@@ -132,17 +128,36 @@ class AskResult:
         return ScoreResult(None, failure=failure)
 
     def to_wire(self) -> dict[str, Any]:
-        """A JSON-friendly rendering: answers as dicts, failures as ``{"failure": {...}}``."""
+        """A JSON-friendly rendering: answers as dicts, failures as ``{"failure": {...}}``.
+
+        A choice within :data:`NEAR_TIE_MARGIN` of its nearest rival, or a noul probability inside
+        :data:`NEAR_TIE_NOUL_BAND`, additionally carries an ``advice`` string (W19, PRD-CORE-295):
+        the answer alone does not tell a caller the two options were nearly indistinguishable.
+        """
         out: dict[str, Any] = {}
         for key, value in self.outcomes.items():
             if isinstance(value, DecisionFailure):
                 out[key] = {"failure": value.model_dump()}
-            else:
-                rendered = value.model_dump()
-                if isinstance(value, ChoiceAnswer):
-                    rendered["margin"] = round(self.choice(key).margin, 4)
-                out[key] = rendered
+                continue
+            rendered = value.model_dump()
+            margin = None
+            if isinstance(value, ChoiceAnswer):
+                margin = self.choice(key).margin
+                rendered["margin"] = round(margin, 4)
+            advice = _near_tie_advice(value, margin)
+            if advice:
+                rendered["advice"] = advice
+            out[key] = rendered
         return out
+
+
+def _near_tie_advice(answer: DecisionAnswer, margin: float | None) -> str | None:
+    """``advice`` text for a near-tie answer, or ``None`` — see :data:`NEAR_TIE_MARGIN`/:data:`NEAR_TIE_NOUL_BAND`."""
+    if isinstance(answer, ChoiceAnswer) and margin is not None and margin < NEAR_TIE_MARGIN:
+        return _NEAR_TIE_ADVICE
+    if isinstance(answer, NoulAnswer) and NEAR_TIE_NOUL_BAND[0] <= answer.noul <= NEAR_TIE_NOUL_BAND[1]:
+        return _NEAR_TIE_ADVICE
+    return None
 
 
 def _wrong_type(question_id: str, answer: object, expected: str) -> DecisionFailure:

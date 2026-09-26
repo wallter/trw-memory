@@ -39,7 +39,6 @@ def recall_path(request: pytest.FixtureRequest, source_client: MemoryClient, mon
     if request.param == "fallback":
         monkeypatch.setattr(source_client, "_try_hybrid_recall", AsyncMock(return_value=None))
     else:
-        pytest.importorskip("rank_bm25")
         monkeypatch.setattr(
             source_client, "_fallback_recall", AsyncMock(side_effect=AssertionError("actual hybrid must not fall back"))
         )
@@ -121,7 +120,6 @@ async def test_default_durable_containment_survives_owned_acquisition_cap(
 async def test_reranking_cannot_promote_deferred_durable_over_live_transient(
     source_client: MemoryClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    pytest.importorskip("rank_bm25")
     monkeypatch.setattr(source_client, "_fallback_recall", AsyncMock(side_effect=AssertionError("hybrid required")))
     reranked = []
 

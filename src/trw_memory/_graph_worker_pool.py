@@ -76,7 +76,7 @@ _clock: Callable[[], float] = time.monotonic
 # Recoverable job failures, logged as the per-thread dispatcher always did.
 _JOB_ERRORS = (StorageError, sqlite3.Error, ValueError, OSError)
 
-_WorkerKey = tuple[str, str, int, bool, str]
+_WorkerKey = tuple[str, str, int]
 
 
 class _GraphJob:
@@ -121,10 +121,7 @@ def _worker_key(config: MemoryConfig, namespace: str) -> _WorkerKey:
     from trw_memory.integrations._backend import resolve_backend_location
 
     location = os.path.abspath(resolve_backend_location(config, namespace))
-    # An encrypted store's key is derived from the namespace, so it is part of
-    # what the open needs; unencrypted stores are shared across namespaces.
-    key_scope = namespace if config.encryption_enabled else ""
-    return (location, config.storage_backend, config.embedding_dim, config.encryption_enabled, key_scope)
+    return (location, config.storage_backend, config.embedding_dim)
 
 
 def _file_identity(path: str) -> tuple[int, int] | None:
@@ -314,18 +311,6 @@ class _GraphWorkerPool:
             worker.thread.join(max(0.0, deadline - time.monotonic()))
         return [worker for worker in workers if worker.thread.is_alive()]
 
-    def live_worker_count(self) -> int:
-        with self._lock:
-            return sum(1 for worker in self._live if worker.thread.is_alive())
-
-    def open_backend_count(self) -> int:
-        with self._lock:
-            return sum(1 for worker in self._live if worker.backend is not None)
-
-    def worker_for(self, config: MemoryConfig, namespace: str) -> _GraphWorker | None:
-        with self._lock:
-            return self._workers.get(_worker_key(config, namespace))
-
 
 _POOL = _GraphWorkerPool()
 if hasattr(os, "register_at_fork"):
@@ -359,14 +344,3 @@ def worker_backend(config: MemoryConfig, namespace: str) -> Iterator[StorageBack
 
     with create_backend_from_config(config, namespace) as backend:
         yield backend
-
-
-def _reset_graph_worker_pool_for_tests(timeout: float = 5.0) -> None:
-    """Test-only: stop every worker thread and close every worker backend.
-
-    Raises ``TimeoutError`` when a worker is still running a job at the deadline,
-    rather than reporting a reset that did not happen.
-    """
-    survivors = _POOL.stop_all(timeout)
-    if survivors:
-        raise TimeoutError(f"{len(survivors)} graph worker(s) still running after {timeout}s")

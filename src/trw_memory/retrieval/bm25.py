@@ -5,12 +5,8 @@ against a query using the BM25Okapi algorithm.  Falls back to token-overlap
 scoring when all BM25 scores are zero (common in small corpora where IDF
 becomes zero for frequently appearing terms).
 
-Requires the optional ``bm25`` extra::
-
-    pip install "trw-memory[bm25]"
-
-When ``rank_bm25`` is not installed the function returns an empty list so
-callers degrade gracefully without raising.
+``rank-bm25`` is a base dependency (PRD-CORE-302 FR08): without the lane EngMem
+complete@10 fell from 0.975 to 0.713, and the entity-bridge hop reads this model.
 """
 
 from __future__ import annotations
@@ -18,21 +14,12 @@ from __future__ import annotations
 import re
 import threading
 from collections import OrderedDict
-from typing import TYPE_CHECKING
 
 import structlog
+from rank_bm25 import BM25Okapi
 
 from trw_memory.models.memory import MemoryEntry
-
-try:
-    from rank_bm25 import BM25Okapi
-
-    _BM25_AVAILABLE = True
-except ImportError:  # pragma: no cover
-    _BM25_AVAILABLE = False
-
-if TYPE_CHECKING:  # pragma: no cover
-    from rank_bm25 import BM25Okapi as _BM25OkapiType
+from trw_memory.retrieval.lexical import bounded_query
 
 logger = structlog.get_logger(__name__)
 
@@ -60,17 +47,11 @@ logger = structlog.get_logger(__name__)
 #   ordered_ids   — entry ids in the order the corpus rows were built
 #   corpus_tokens — the tokenized corpus rows (reused for the Jaccard fallback)
 _CorpusSignature = frozenset[tuple[str, str, str, tuple[str, ...]]]
-_CachedModel = tuple["_BM25OkapiType", list[str], list[list[str]]]
+_CachedModel = tuple[BM25Okapi, list[str], list[list[str]]]
 _BM25_CACHE_MAX_MODELS = 8
 _BM25_CACHE_MAX_ROWS = 200_000
 _bm25_cache: OrderedDict[_CorpusSignature, _CachedModel] = OrderedDict()
 _bm25_cache_lock = threading.Lock()
-
-
-def clear_bm25_cache() -> None:
-    """Drop every cached BM25 model (the next search rebuilds)."""
-    with _bm25_cache_lock:
-        _bm25_cache.clear()
 
 
 def _cache_store(signature: _CorpusSignature, value: _CachedModel) -> None:
@@ -166,6 +147,11 @@ def _stem_token(token: str) -> str:
     return token
 
 
+def _with_hyphen_parts(tokens: list[str]) -> list[str]:
+    """Each token, then its hyphen-separated parts: ``pydantic-v2`` also meets ``pydantic`` and ``v2``."""
+    return [part for token in tokens for part in (token, *(token.split("-") if "-" in token else ()))]
+
+
 def _split_identifiers(tokens: list[str]) -> list[str]:
     """Expand ``snake_case`` tokens into their parts, keeping the composite.
 
@@ -199,21 +185,14 @@ def _tokenize_entry(entry: MemoryEntry) -> list[str]:
     content = _normalize_text(entry.content)
     detail = _normalize_text(entry.detail)
 
-    tag_parts: list[str] = []
-    for tag in entry.tags:
-        tag_str = _normalize_text(tag)
-        tag_parts.append(tag_str)
-        if "-" in tag_str:
-            tag_parts.extend(tag_str.split("-"))
-
-    tags_str = " ".join(tag_parts)
+    tags_str = " ".join(_with_hyphen_parts([_normalize_text(tag) for tag in entry.tags]))
     text = f"{content} {detail} {tags_str}"
     return [_stem_token(t) for t in _split_identifiers([t for t in text.split() if t])]
 
 
 def _build_or_reuse_model(
     entries: list[MemoryEntry],
-) -> tuple[_BM25OkapiType, list[str], list[list[str]]]:
+) -> tuple[BM25Okapi, list[str], list[list[str]]]:
     """Return a BM25Okapi model + the entry-id order and corpus it was built on.
 
     Reuses a model from the module-level LRU when ids and all lexical inputs
@@ -276,15 +255,9 @@ def bm25_search(
 
     Returns:
         List of ``(entry_id, score)`` pairs sorted by score descending.
-        Returns an empty list when ``rank_bm25`` is unavailable or *entries*
-        is empty.
+        Returns an empty list when *entries* is empty.
     """
-    if not _BM25_AVAILABLE or not entries:
-        logger.debug(
-            "bm25_search_skipped",
-            reason="unavailable" if not _BM25_AVAILABLE else "empty_entries",
-            entry_count=len(entries),
-        )
+    if not entries:
         return []
 
     # Reuse a cached BM25Okapi model + tokenized corpus only when ids and lexical
@@ -294,16 +267,9 @@ def bm25_search(
     # never by ``entries`` position (the two can differ on a reordered cache hit).
     bm25, ordered_ids, corpus = _build_or_reuse_model(entries)
 
-    # Mirror the document tokenizer's hyphen-expansion so "pydantic-v2" in a
-    # query matches both the composite token and the split tokens indexed from tags.
-    _raw_q = [t for t in _normalize_text(query).split() if t]
-    tokenized_query: list[str] = []
-    for _t in _raw_q:
-        tokenized_query.append(_t)
-        if "-" in _t:
-            tokenized_query.extend(_t.split("-"))
-    # ...and the identifier expansion, for the same reason (PRD-CORE-278 FR04).
-    tokenized_query = _split_identifiers(tokenized_query)
+    # Mirror the document tokenizer's hyphen and identifier expansion (PRD-CORE-278 FR04), so
+    # "pydantic-v2" in a query matches both the composite token and the parts indexed from tags.
+    tokenized_query = _split_identifiers(_with_hyphen_parts(_normalize_text(bounded_query(query)).split()))
 
     # Drop function words from the query; keep them only when nothing else
     # survives so an all-stopword query still degrades to the old behaviour.

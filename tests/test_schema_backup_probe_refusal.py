@@ -22,7 +22,7 @@ import pytest
 
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage import _schema_backup
-from trw_memory.storage._schema import ensure_schema
+from trw_memory.storage._schema import SCHEMA_VERSION, ensure_schema
 from trw_memory.storage._schema_backup import BACKUP_DIR_NAME, SchemaBackupError, snapshot_before_migration
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
@@ -140,10 +140,10 @@ def test_readable_populated_store_still_snapshots_then_migrates(tmp_path: Path) 
     finally:
         conn.close()
 
-    backups = sorted((tmp_path / BACKUP_DIR_NAME).glob("memory.db.pre-schema-6.*"))
+    backups = sorted((tmp_path / BACKUP_DIR_NAME).glob(f"memory.db.pre-schema-{SCHEMA_VERSION}.*"))
     assert len(backups) == 1, f"expected exactly one pre-migration snapshot, got {backups!r}"
-    # The complete upgrade now includes additive v6 after destructive v5.
-    assert _observed(db) == (6, 3)
+    # The complete upgrade now includes additive v6 and v7 (W10) after destructive v5.
+    assert _observed(db) == (SCHEMA_VERSION, 3)
     restored = sqlite3.connect(f"file:{backups[0]}?mode=ro", uri=True)
     try:
         assert restored.execute("PRAGMA integrity_check").fetchone()[0] == "ok"

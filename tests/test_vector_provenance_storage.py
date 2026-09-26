@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
-from trw_memory.storage._schema import _migrate_v6_vector_provenance, ensure_schema
+from trw_memory.storage._schema import SCHEMA_VERSION, _migrate_v6_vector_provenance, ensure_schema
 from trw_memory.storage._vector_ops import get_vector_records
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
@@ -40,7 +40,7 @@ def test_v5_migration_preserves_vector_bytes_and_is_idempotent(backend) -> None:
     backend._conn.commit()
     ensure_schema(backend._conn)
     ensure_schema(backend._conn)
-    assert backend._conn.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert backend._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert backend._conn.execute("SELECT embedding FROM vec_memories").fetchone()[0] == before
     assert backend.get_vector_records(["entry"], namespace="default")["entry"].provenance is None
 

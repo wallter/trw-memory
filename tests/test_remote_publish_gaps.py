@@ -8,9 +8,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import httpx
-import pytest
 
-from trw_memory.exceptions import LocalOnlyViolationError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.sync._remote_publish import (
     _extract_remote_id,
@@ -25,7 +23,6 @@ def _cfg_sync_enabled(url: str = "https://platform.example.com") -> MemoryConfig
     cfg.sync_enabled = True
     cfg.platform_url = url
     cfg.platform_api_key = "test-key"
-    cfg.local_only = False
     return cfg
 
 
@@ -64,7 +61,6 @@ class TestPublishPayload:
         cfg = MemoryConfig()
         cfg.sync_enabled = True
         cfg.platform_url = "not-a-valid-url"
-        cfg.local_only = False
         result = _publish_payload_result({}, cfg)
         assert result == {"success": False, "remote_id": None, "retryable": False}
 
@@ -97,7 +93,6 @@ class TestDrainRetryQueue:
         cfg = MemoryConfig()
         cfg.sync_enabled = False
         cfg.platform_url = ""
-        cfg.local_only = False
         q = self._mock_queue(depth=3)
         result = drain_retry_queue(q, cfg)
         assert result["skipped"] == 3
@@ -108,7 +103,6 @@ class TestDrainRetryQueue:
         cfg = MemoryConfig()
         cfg.sync_enabled = True
         cfg.platform_url = "bad-url"
-        cfg.local_only = False
         q = self._mock_queue(depth=2)
         result = drain_retry_queue(q, cfg)
         assert result["skipped"] == 2
@@ -148,7 +142,6 @@ class TestRetireRemoteMemory:
         cfg = MemoryConfig()
         cfg.sync_enabled = False
         cfg.platform_url = ""
-        cfg.local_only = False
         assert retire_remote_memory("REMOTE-1", cfg) is True
 
     def test_non_2xx_returns_false(self) -> None:
@@ -173,21 +166,6 @@ class TestRetireRemoteMemory:
         with patch("trw_memory.sync._remote_publish.httpx.Client", return_value=mock_client):
             result = retire_remote_memory("REMOTE-1", cfg)
         assert result is False
-
-
-# ---------------------------------------------------------------------------
-# local_only gate tests
-# ---------------------------------------------------------------------------
-
-
-class TestLocalOnlyGates:
-    def test_drain_retry_queue_local_only_raises(self) -> None:
-        """drain_retry_queue with local_only=True → LocalOnlyViolationError (lines 130-131)."""
-        cfg = MemoryConfig()
-        cfg.local_only = True
-        q = MagicMock()
-        with pytest.raises(LocalOnlyViolationError):
-            drain_retry_queue(q, cfg)
 
 
 # ---------------------------------------------------------------------------

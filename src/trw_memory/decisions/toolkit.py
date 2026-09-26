@@ -35,10 +35,18 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 
 from trw_memory.decisions._judge import DecisionJudge, DecisionState
-from trw_memory.decisions._models import OVER_CEILING_HINT, DecisionFailure, DecisionQuestion, DecisionResult
+from trw_memory.decisions._models import (
+    OVER_CEILING_HINT,
+    DecisionFailure,
+    DecisionQuestion,
+    DecisionResult,
+    QuestionShapeError,
+    format_validation_error,
+    parse_questions,
+)
 from trw_memory.decisions._policy import Policy, reliability
 from trw_memory.decisions._redaction import default_redactor, redact_state, unique_key
 from trw_memory.decisions._results import (
@@ -104,9 +112,6 @@ def score(instructions: str, levels: Sequence[str]) -> dict[str, Any]:
     return {"type": "score", "instructions": instructions, "criteria": list(levels)}
 
 
-_QUESTIONS_ADAPTER: TypeAdapter[dict[str, DecisionQuestion]] = TypeAdapter(dict[str, DecisionQuestion])
-
-
 class Toolkit:
     """Capability-shaped wrapper over any :class:`DecisionJudge`."""
 
@@ -157,11 +162,12 @@ class Toolkit:
     ) -> tuple[dict[str, dict[str, Any]], dict[str, DecisionQuestion]]:
         plain = {k: (v.model_dump() if hasattr(v, "model_dump") else dict(v)) for k, v in questions.items()}
         try:
-            return plain, _QUESTIONS_ADAPTER.validate_python(plain)
+            return plain, parse_questions(plain)
+        except QuestionShapeError as exc:
+            # A named-mistake message; it may echo the offending field name, scrub like any question prose.
+            raise InvalidRequest(self._redact_text(str(exc))) from exc
         except ValidationError as exc:
-            # The message may echo the offending input; scrub it like any other question prose.
-            first = self._redact_text(str(exc.errors()[0].get("msg", "")))
-            raise InvalidRequest(f"invalid questions: {exc.error_count()} error(s); first: {first}") from exc
+            raise InvalidRequest(self._redact_text(format_validation_error(exc, plain))) from exc
 
     def ask(
         self,
@@ -180,13 +186,11 @@ class Toolkit:
         if not questions:
             raise InvalidRequest("ask needs at least one question")
         plain, typed = self._typed_questions(questions)
+        # Noul criteria keys are enforced by NoulQuestion itself (parse-time, in _models.py); only the
+        # choice cap is left here — it is a server-side limit, not a question shape.
         for qid, q in typed.items():
             if q.type == "choice" and len(q.criteria) > MAX_CHOICE_OPTIONS:
                 raise InvalidRequest(f"{qid!r}: {len(q.criteria)} options exceeds the {MAX_CHOICE_OPTIONS} cap")
-            if q.type == "noul" and q.criteria and "true" not in q.criteria and "false" not in q.criteria:
-                raise InvalidCriteria(
-                    f"{qid!r}: noul criteria must use the keys 'true' and 'false'; got {sorted(q.criteria)}"
-                )
         # Question ids are JSON keys in the POST body, so they egress like state does (release-verify
         # N1). They are redacted on the wire and mapped back, so the caller's own ids stay usable.
         wire_id: dict[str, str] = {}

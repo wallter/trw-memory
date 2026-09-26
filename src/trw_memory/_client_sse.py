@@ -35,7 +35,6 @@ __all__ = [
 def should_start_sse_subscription(client: MemoryClient) -> bool:
     return (
         not client._sse_subscriber_started
-        and not client._config.local_only
         and client._config.sync_enabled
         and bool(client._config.platform_url)
         and bool(client._config.platform_api_key)

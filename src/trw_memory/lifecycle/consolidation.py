@@ -36,6 +36,7 @@ from trw_memory.lifecycle._consolidation_rollback import (
 )
 from trw_memory.lifecycle._redaction import redact_paths
 from trw_memory.lifecycle.dedup import _stronger_protection_tier, _union_assertions
+from trw_memory.lifecycle.protection import is_removal_exempt
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.entry_factory import local_node_id_for, new_entry
 from trw_memory.models.memory import MemoryEntry, MemoryStatus, ProtectionTier
@@ -54,6 +55,12 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 T = TypeVar("T")
+
+#: The most rows one consolidation cycle reads, embeds and clusters. ``consolidation_max_per_cycle``
+#: (the daemon's config, or a caller's policy on ``memory_maintain``) can only lower it. The whole
+#: cycle runs on the daemon's serialized write lane, so this bounds how long it can hold the lane
+#: (about 0.2 s warm at 50 rows, measured 2026-09-25; a first model load adds seconds, once).
+CONSOLIDATION_ROWS_MAX = 50
 
 
 def complete_linkage_cluster(
@@ -136,7 +143,7 @@ def find_clusters(
     *,
     similarity_threshold: float = 0.75,
     min_cluster_size: int = 3,
-    max_entries: int = 50,
+    max_entries: int = CONSOLIDATION_ROWS_MAX,
     namespace: str | None = None,
 ) -> list[list[MemoryEntry]]:
     """Detect clusters of semantically similar active memory entries.
@@ -169,8 +176,18 @@ def find_clusters(
         limit=max_entries,
     )
 
-    # Filter out already-consolidated entries and entries already archived
-    entries = [e for e in entries if e.source != "consolidated" and e.consolidated_into is None]
+    # Filter out already-consolidated entries and entries already archived. A cluster's
+    # members are all archived, so neither a protected or permanent entry (PRD-CORE-244
+    # FR10) nor a security canary row ever joins one; trw-mcp enforced both before
+    # PRD-CORE-302 FR03 made this the only consolidation.
+    entries = [
+        e
+        for e in entries
+        if e.source != "consolidated"
+        and e.consolidated_into is None
+        and not is_removal_exempt({"protection_tier": e.protection_tier})
+        and e.metadata.get("system_canary") != "true"
+    ]
 
     if len(entries) < min_cluster_size:
         return []
@@ -367,7 +384,7 @@ def consolidate_cycle(
     storage: StorageBackend,
     embedder: EmbeddingProvider | None = None,
     *,
-    max_entries: int = 50,
+    max_entries: int = CONSOLIDATION_ROWS_MAX,
     dry_run: bool = False,
     namespace: str | None = None,
     config: MemoryConfig | None = None,

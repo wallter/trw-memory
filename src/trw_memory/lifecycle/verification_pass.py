@@ -20,7 +20,11 @@ Seams:
 from __future__ import annotations
 
 import math
+import os
+import sys
 import time
+from collections.abc import Sequence
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,6 +32,7 @@ from typing import Any, Literal, cast
 
 import structlog
 
+from trw_memory._sweep import sweep
 from trw_memory.namespaces.validation import DEFAULT_NAMESPACE
 
 logger = structlog.get_logger(__name__)
@@ -271,10 +276,14 @@ def run_verification_pass(
     return outcome
 
 
-def persist_verification_outcome(backend: Any, outcome: VerificationOutcome) -> bool:
+def persist_verification_outcome(backend: Any, outcome: VerificationOutcome, read: Any = None) -> bool | None:
     """Write an outcome through in ONE ``backend.update()`` call (FR02/FR03).
 
-    Returns ``True`` when the write landed. Emits the NFR02
+    Returns ``True`` when the write landed. Given the row *read* the outcome was computed
+    from, the write happens only while the row's assertions and anchors are still those
+    (C12 rc7): an edit since would be reverted to the checked list and stamped with a
+    verdict on evidence it no longer carries, so the verdict is dropped for the next sweep and
+    ``None`` returned: superseded, not failed. Emits the NFR02
     ``verification_status_persist_drift`` warning when the value the caller
     computed is not the value that came back from storage — that warning firing
     means the persistence wiring is broken, which is a P1 bug, not a design gap.
@@ -286,8 +295,14 @@ def persist_verification_outcome(backend: Any, outcome: VerificationOutcome) -> 
         logger.debug("verification_pass_unverifiable_skipped", entry_id=outcome.entry_id)
         return False
     try:
-        updated = backend.update(outcome.entry_id, namespace=outcome.namespace, **outcome.update_fields())
-    except Exception:  # justified: persist is best-effort, recall must not fail
+        with backend.transaction() if read is not None else nullcontext():
+            if read is not None and _checked(backend.get(outcome.entry_id, namespace=outcome.namespace)) != _checked(
+                read
+            ):
+                logger.info("verification_superseded", entry_id=outcome.entry_id)
+                return None
+            updated = backend.update(outcome.entry_id, namespace=outcome.namespace, **outcome.update_fields())
+    except Exception:  # trw-fail-silent-allow: persist is best-effort (recall must not fail); the sweep counts it
         logger.debug("assertion_result_persist_failed", entry_id=outcome.entry_id, exc_info=True)
         return False
 
@@ -342,20 +357,113 @@ class MaintainVerifySummary:
     entry_failures: int = 0
     #: Prior "verified" verdicts cleared because nothing could re-check them.
     invalidated: int = 0
+    #: 1 when a configured root was refused by the no-follow walk (swapped for a symlink).
+    root_unwalkable: int = 0
     duration_ms: int = 0
+    #: The (namespace, id) after which a sweep stopped at its deadline resumes; ``None`` once it finished.
+    #: A position, not a count, so it is not in :meth:`as_dict`.
+    resume_after: tuple[str, str] | None = None
 
     def as_dict(self) -> dict[str, int]:
         """Plain mapping for CLI/JSON output."""
-        return asdict(self)
+        return {key: value for key, value in asdict(self).items() if key != "resume_after"}
 
 
 def _serialized(items: list[Any]) -> list[object]:
     """Normalize stored pydantic models to the dict shape the pass consumes."""
-    out: list[object] = []
-    for item in items:
-        dump = getattr(item, "model_dump", None)
-        out.append(dump() if callable(dump) else item)
-    return out
+    return [item.model_dump() if callable(getattr(item, "model_dump", None)) else item for item in items]
+
+
+def _checked(entry: Any) -> tuple[list[object], list[object]] | None:
+    """What a verdict was computed from: the row's assertions and anchors, or ``None`` for a deleted row."""
+    return (
+        None if entry is None else (_serialized(list(entry.assertions or [])), _serialized(list(entry.anchors or [])))
+    )
+
+
+def _walkable_root(project_root: Path | None) -> Path | None:
+    """*project_root*, or ``None`` when the no-follow anchor walk refuses it (release-verify F4).
+
+    Every anchor read walks the root without following symlinks, so a root it
+    refuses (an unresolved symlinked path) would score every anchor 0.0 and
+    persist that as staleness. Checked once per sweep: nothing is then checkable,
+    so no score is overwritten. A root swapped mid-sweep can still read as stale,
+    never as verified.
+    """
+    if project_root is None:
+        return None
+    from trw_memory._dir_trust import open_anchored_walk
+    from trw_memory.exceptions import UntrustedDirectoryError
+
+    try:
+        os.close(open_anchored_walk(project_root))
+    except UntrustedDirectoryError as exc:  # trw-fail-silent-allow: logged at warning; an unwalkable root sweeps as no root, so no anchor score is overwritten with 0.0
+        logger.warning("maintain_verify_root_unwalkable", root=str(project_root), error=str(exc))
+        return None
+    return project_root
+
+
+#: The most rows a sweep with a time budget reads at once: the read runs before any clock check, so a
+#: caller's ``batch_limit`` must not make one slice's read long (rc9).
+SLICED_PAGE_MAX = 64
+
+
+def _position(entry: Any) -> tuple[str, str]:
+    return (str(entry.namespace), str(entry.id))
+
+
+def _verify_entry(
+    backend: Any,
+    entry: Any,
+    summary: MaintainVerifySummary,
+    *,
+    namespace: str | None,
+    project_root: Path | None,
+    assertion_failure_penalty: float,
+    assertion_stale_threshold_days: int,
+    anchor_validity_verified_floor: float,
+) -> None:
+    """Check one entry and persist its verdict, counting the result in *summary*."""
+    entry_id = str(getattr(entry, "id", ""))
+    prior = getattr(entry, "verification_status", None)
+    try:
+        if not getattr(entry, "assertions", None) and not getattr(entry, "anchors", None):
+            # Selected for a non-empty stored column yet nothing decoded:
+            # the row mapper degraded a malformed payload to [].
+            raise ValueError("stored assertions/anchors did not decode")
+        outcome = run_verification_pass(
+            entry_id,
+            _serialized(list(getattr(entry, "assertions", []) or [])),
+            _serialized(list(getattr(entry, "anchors", []) or [])),
+            namespace=str(getattr(entry, "namespace", namespace)),
+            assertion_failure_penalty=assertion_failure_penalty,
+            assertion_stale_threshold_days=assertion_stale_threshold_days,
+            anchor_validity_verified_floor=anchor_validity_verified_floor,
+            project_root=project_root,
+        )
+        # Nothing could be checked: never convict on historical
+        # timestamps, and never let an old "verified" stand unexamined.
+        if not outcome.verifiable and prior == "verified":
+            backend.update(entry_id, namespace=outcome.namespace, verification_status=None)
+            summary.invalidated += 1
+    except Exception:  # trw-fail-silent-allow: counted in entry_failures (fails the pass) and logged
+        logger.warning("maintain_verify_entry_failed", entry_id=entry_id, exc_info=True)
+        summary.entry_failures += 1
+        return
+
+    summary.entries_processed += 1
+    if not outcome.verifiable:
+        return
+    if not (landed := persist_verification_outcome(backend, outcome, read=entry)):
+        summary.persist_failures += landed is False
+        return
+    if outcome.verification_status == "stale" and prior != "stale":
+        summary.stale_transitions += 1
+    elif prior == "stale" and outcome.verification_status != "stale":
+        # PRD-CORE-244 FR03: clearing a stale verdict now usually lands on
+        # "verified" rather than None, so keying this on ``is None`` stopped
+        # counting the very transition it exists to report.
+        summary.cleared_transitions += 1
 
 
 def run_maintain_verify(
@@ -367,6 +475,9 @@ def run_maintain_verify(
     assertion_stale_threshold_days: int = DEFAULT_ASSERTION_STALE_THRESHOLD_DAYS,
     anchor_validity_verified_floor: float = DEFAULT_ANCHOR_VALIDITY_VERIFIED_FLOOR,
     batch_limit: int = DEFAULT_MAINTAIN_VERIFY_BATCH_LIMIT,
+    after: tuple[str, str] | None = None,
+    seconds: float | None = None,
+    max_rows: int | None = None,
 ) -> MaintainVerifySummary:
     """Verify every active assertion/anchor entry and persist observed verdicts.
 
@@ -386,81 +497,56 @@ def run_maintain_verify(
         assertion_stale_threshold_days: See :func:`run_verification_pass`.
         anchor_validity_verified_floor: See :func:`run_verification_pass`.
         batch_limit: Page size for each keyset acquisition.
+        after: Resume after this (namespace, id): a prior sweep's ``resume_after``.
+        seconds: Stop starting entries after about this long (``None``: the whole sweep) and set
+            ``resume_after`` (a slice of a sweep, so one caller's sweep does not hold a serialized
+            lane for its whole length). The first entry always runs, and one entry's own checks can
+            run past the time.
 
     Returns:
         A :class:`MaintainVerifySummary` describing the sweep.
     """
     started = time.monotonic()
     summary = MaintainVerifySummary()
+    configured, project_root = project_root, _walkable_root(project_root)
+    summary.root_unwalkable = int(configured is not None and project_root is None)
 
-    cursor: tuple[str, str] | None = None
-    while batch_limit > 0:
-        entries = backend.entries_with_assertions(
-            namespace=namespace, limit=batch_limit, include_anchors=True, after=cursor
-        )
-        if not entries:
-            break
-        next_cursor = (str(entries[-1].namespace), str(entries[-1].id))
-        if cursor is not None and next_cursor <= cursor:
+    def fetch(cursor: tuple[str, str] | None, limit: int) -> list[Any]:
+        entries = backend.entries_with_assertions(namespace=namespace, limit=limit, include_anchors=True, after=cursor)
+        if entries and cursor is not None and _position(entries[-1]) <= cursor:
             raise ValueError("Maintenance backend did not advance its keyset cursor")
-        # Advance independently of verification/persistence success.
-        cursor = next_cursor
-        for entry in entries:
-            entry_id = str(getattr(entry, "id", ""))
-            prior = getattr(entry, "verification_status", None)
-            try:
-                if not getattr(entry, "assertions", None) and not getattr(entry, "anchors", None):
-                    # Selected for a non-empty stored column yet nothing decoded:
-                    # the row mapper degraded a malformed payload to [].
-                    raise ValueError("stored assertions/anchors did not decode")
-                outcome = run_verification_pass(
-                    entry_id,
-                    _serialized(list(getattr(entry, "assertions", []) or [])),
-                    _serialized(list(getattr(entry, "anchors", []) or [])),
-                    namespace=str(getattr(entry, "namespace", namespace)),
-                    assertion_failure_penalty=assertion_failure_penalty,
-                    assertion_stale_threshold_days=assertion_stale_threshold_days,
-                    anchor_validity_verified_floor=anchor_validity_verified_floor,
-                    project_root=project_root,
-                )
-                # Nothing could be checked: never convict on historical
-                # timestamps, and never let an old "verified" stand unexamined.
-                if not outcome.verifiable and prior == "verified":
-                    backend.update(entry_id, namespace=outcome.namespace, verification_status=None)
-                    summary.invalidated += 1
-            except Exception:  # justified: sweep-resilience, counted and surfaced via entry_failures
-                logger.warning("maintain_verify_entry_failed", entry_id=entry_id, exc_info=True)
-                summary.entry_failures += 1
-                continue
+        return list(entries)
 
-            summary.entries_processed += 1
-            if not outcome.verifiable:
-                continue
-            if not persist_verification_outcome(backend, outcome):
-                summary.persist_failures += 1
-                continue
-            if outcome.verification_status == "stale" and prior != "stale":
-                summary.stale_transitions += 1
-            elif prior == "stale" and outcome.verification_status != "stale":
-                # PRD-CORE-244 FR03: clearing a stale verdict now usually lands on
-                # "verified" rather than None, so keying this on ``is None`` stopped
-                # counting the very transition it exists to report.
-                summary.cleared_transitions += 1
+    def visit(page: Sequence[Any], ends: float) -> int:
+        # The clock is read after each entry, never before the first: every call advances.
+        for done, entry in enumerate(page, 1):
+            _verify_entry(
+                backend,
+                entry,
+                summary,
+                namespace=namespace,
+                project_root=project_root,
+                assertion_failure_penalty=assertion_failure_penalty,
+                assertion_stale_threshold_days=assertion_stale_threshold_days,
+                anchor_validity_verified_floor=anchor_validity_verified_floor,
+            )
+            if time.monotonic() > ends:
+                return done
+        return len(page)
 
-        if len(entries) < batch_limit:
-            break
+    if batch_limit > 0:
+        summary.resume_after = sweep(
+            fetch,
+            _position,
+            visit,
+            after=after,
+            page=batch_limit if seconds is None else min(batch_limit, SLICED_PAGE_MAX),
+            rows=sys.maxsize if max_rows is None else max(1, max_rows),
+            seconds=math.inf if seconds is None else seconds,
+        )
 
     summary.duration_ms = int((time.monotonic() - started) * 1000)
-    logger.info(
-        "maintain_verify_sweep_complete",
-        entries_processed=summary.entries_processed,
-        stale_transitions=summary.stale_transitions,
-        cleared_transitions=summary.cleared_transitions,
-        persist_failures=summary.persist_failures,
-        entry_failures=summary.entry_failures,
-        invalidated=summary.invalidated,
-        duration_ms=summary.duration_ms,
-    )
+    logger.info("maintain_verify_sweep_complete", **summary.as_dict())
     return summary
 
 

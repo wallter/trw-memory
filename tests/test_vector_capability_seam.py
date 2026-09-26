@@ -109,46 +109,36 @@ def test_sqlite_capability_false_when_vec_unavailable() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _config(
-    *,
-    encryption_enabled: bool = False,
-    local_only: bool = True,
-    sync_enabled: bool = False,
-    platform_url: str = "",
-) -> MemoryConfig:
-    return MemoryConfig(
-        encryption_enabled=encryption_enabled,
-        local_only=local_only,
-        sync_enabled=sync_enabled,
-        platform_url=platform_url,
-    )
+def _config(*, sync_enabled: bool = False, platform_url: str = "") -> MemoryConfig:
+    return MemoryConfig(sync_enabled=sync_enabled, platform_url=platform_url)
 
 
-def test_consumer_true_when_backend_supports_vectors() -> None:
+@pytest.fixture
+def tiers_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tier_runtime, "tier_runtime_enabled", lambda _cfg: False)
+
+
+def test_consumer_true_when_backend_supports_vectors(tiers_off: None) -> None:
     # Even with every other sink off, a vector-capable backend is a consumer.
-    cfg = _config(encryption_enabled=True)  # tiers off
+    cfg = _config()
     assert embedding_has_consumer(cfg, _RecordingVectorBackend()) is True
 
 
 def test_consumer_true_when_tier_runtime_enabled() -> None:
     # Non-vector backend, but the warm tier keeps its own vector sidecar.
-    cfg = _config(encryption_enabled=False)  # tiers on
+    cfg = _config()  # tiers on
     assert embedding_has_consumer(cfg, _MinimalBackend()) is True
 
 
-def test_consumer_true_when_remote_publish_configured() -> None:
-    cfg = _config(
-        encryption_enabled=True,  # tiers off
-        local_only=False,
-        sync_enabled=True,
-        platform_url="https://example.invalid",
-    )
-    assert embedding_has_consumer(cfg, _MinimalBackend()) is True
+def test_remote_publish_is_not_a_consumer(tiers_off: None) -> None:
+    # No vector leaves the machine (PRD-CORE-302 FR04), so publish never needs one.
+    cfg = _config(sync_enabled=True, platform_url="https://example.invalid")
+    assert embedding_has_consumer(cfg, _MinimalBackend()) is False
 
 
-def test_consumer_false_when_no_sink_is_live() -> None:
-    # Non-vector backend, tiers off (encryption), no publish → pure waste.
-    cfg = _config(encryption_enabled=True)
+def test_consumer_false_when_no_sink_is_live(tiers_off: None) -> None:
+    # Non-vector backend, tiers off, no publish → pure waste.
+    cfg = _config()
     assert embedding_has_consumer(cfg, _MinimalBackend()) is False
 
 
@@ -184,10 +174,9 @@ async def test_store_skips_embedder_when_no_vector_sink(client: MemoryClient, mo
     """(1) A non-vector write path must not call the embedder just to no-op."""
     backend = client._get_backend()
     monkeypatch.setattr(backend, "supports_vectors", lambda: False)
-    # Disable the warm tier and remote publish so no sink remains.
+    # Disable the warm tier so no sink remains.
     monkeypatch.setattr(tier_runtime, "tier_runtime_enabled", lambda _cfg: False)
     client._config.sync_enabled = False
-    client._config.local_only = True
 
     spy = _SpyEmbedder(client._config.embedding_dim)
     monkeypatch.setattr(client, "_get_embedder", lambda: spy)
@@ -232,7 +221,6 @@ async def test_bulk_store_skips_batch_embed_when_no_vector_sink(
     monkeypatch.setattr(backend, "supports_vectors", lambda: False)
     monkeypatch.setattr(tier_runtime, "tier_runtime_enabled", lambda _cfg: False)
     client._config.sync_enabled = False
-    client._config.local_only = True
 
     spy = _SpyEmbedder(client._config.embedding_dim)
     monkeypatch.setattr(client, "_get_embedder", lambda: spy)
@@ -260,7 +248,6 @@ async def test_no_consumer_never_acquires_provider(
     monkeypatch.setattr(backend, "supports_vectors", lambda: False)
     monkeypatch.setattr(tier_runtime, "tier_runtime_enabled", lambda _cfg: False)
     client._config.sync_enabled = False
-    client._config.local_only = True
 
     def forbidden() -> None:
         pytest.fail("no-consumer write acquired an embedding provider")
@@ -321,15 +308,15 @@ async def test_bulk_real_consumer_preserves_provider_security_refusal(
     client: MemoryClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trw_memory.exceptions import LocalOnlyViolationError
+    from trw_memory.exceptions import ModelNotCachedError
 
     monkeypatch.setattr(client._get_backend(), "supports_vectors", lambda: True)
 
     def refused() -> None:
-        raise LocalOnlyViolationError("synthetic offline refusal")
+        raise ModelNotCachedError("synthetic offline refusal")
 
     monkeypatch.setattr(client, "_get_embedder", refused)
     before = client._get_backend().count(namespace="default")
-    with pytest.raises(LocalOnlyViolationError, match="synthetic offline refusal"):
+    with pytest.raises(ModelNotCachedError, match="synthetic offline refusal"):
         await client.bulk_store([BulkStoreRequest(content="requires actual provider")])
     assert client._get_backend().count(namespace="default") == before

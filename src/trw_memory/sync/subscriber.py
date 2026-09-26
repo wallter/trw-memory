@@ -13,14 +13,13 @@ from collections.abc import Callable
 import httpx
 import structlog
 
-from trw_memory.exceptions import LocalOnlyViolationError
 from trw_memory.models.config import MemoryConfig
+from trw_memory.sync._remote_common import build_platform_headers
 from trw_memory.sync.remote import is_valid_platform_url
 
 logger = structlog.get_logger(__name__)
 
 RECONNECT_DELAY = 5.0  # seconds
-HEARTBEAT_TIMEOUT = 30.0
 
 
 class SSESubscriber:
@@ -48,10 +47,6 @@ class SSESubscriber:
 
     def start(self) -> None:
         """Start the SSE subscription in a daemon thread."""
-        if self._cfg.local_only:
-            logger.warning("sse_subscriber_blocked_local_only")
-            raise LocalOnlyViolationError("Operation blocked: memory_local_only=True disables all network access.")
-
         if not self._cfg.sync_enabled or not self._cfg.platform_url:
             return
         if not is_valid_platform_url(self._cfg.platform_url):
@@ -88,9 +83,12 @@ class SSESubscriber:
 
         while not self._stop_event.is_set():
             try:
-                headers: dict[str, str] = {}
-                if self._cfg.platform_api_key:
-                    headers["Authorization"] = f"Bearer {self._cfg.platform_api_key}"
+                # build_platform_headers is the ONE function that may build
+                # this header (see trw_memory.sync._remote_common); it drops
+                # "Content-Type" is harmless on a GET and withholds the
+                # bearer from an untrusted host.
+                headers: dict[str, str] = build_platform_headers(self._cfg.platform_api_key, url)
+                headers.pop("Content-Type", None)
                 if self._last_event_id:
                     headers["Last-Event-ID"] = self._last_event_id
 

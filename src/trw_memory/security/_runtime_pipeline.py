@@ -42,7 +42,7 @@ from types import ModuleType
 
 import structlog
 
-from trw_memory.exceptions import ProvenanceKeyUnavailableError, ScorerUnavailableError
+from trw_memory.exceptions import PIIBlockError, ProvenanceKeyUnavailableError, RateLimitError, ScorerUnavailableError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.pii import PIIMatch
@@ -50,6 +50,7 @@ from trw_memory.security.poisoning import (
     MIN_ANOMALY_BASELINE,
     quarantine_entry,
     scannable_text,
+    strip_reserved_metadata as _strip,
     validate_entry_payload,
 )
 from trw_memory.security.provenance import build_entry_provenance
@@ -144,8 +145,6 @@ def _resolve_security_trace_context(*, session_id: str | None = None) -> tuple[s
 
 
 def _rejection_reason(exc: Exception) -> str:
-    from trw_memory.exceptions import PIIBlockError, RateLimitError
-
     if isinstance(exc, RateLimitError):
         return "rate_limited"
     if isinstance(exc, PIIBlockError):
@@ -468,8 +467,13 @@ def prepare_entry_for_store(
     session_id: str | None = None,
     trw_dir: Path | None = None,
 ) -> PreparedStoreEntry:
-    """Apply rate limits, PII handling, and anomaly scoring before a write."""
-    ctx = _StoreContext(entry=entry, backend=backend, config=config, session_id=session_id, trw_dir=trw_dir)
+    """Apply rate limits, PII handling, and anomaly scoring before a write.
+
+    ``strip_reserved_metadata`` (Q1) runs UNCONDITIONALLY, before any stage —
+    not as a list entry — so a caller-set ``quarantined``/etc. metadata key
+    can never reach the trust-quarantine short-circuit's own check below.
+    """
+    ctx = _StoreContext(entry=_strip(entry), backend=backend, config=config, session_id=session_id, trw_dir=trw_dir)
     for stage in _PRE_QUARANTINE_STAGES:
         stage(ctx)
 

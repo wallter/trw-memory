@@ -160,6 +160,13 @@ def _move_rows(
     skipped = 0
     cursor: EntryCursor | None = None
     with stores.source.transaction(), stores.destination_transaction():
+        # A rename's empty-destination check holds the write lock through the move (rc5 C12):
+        # checked before it, a concurrent store could land a row the move then overwrote.
+        if not skip_conflicts and (held := stores.destination.count(namespace=destination)):
+            raise ConfigError(
+                f"refusing to rename {source!r} onto {destination!r}: the destination already holds "
+                f"{held} rows. Use merge if folding them together is what you mean."
+            )
         # Edges first: deleting a moved row purges its edges from the source.
         stores.destination.add_graph_edges(destination, stores.source.graph_edges(source))
         while True:
@@ -270,12 +277,6 @@ def rename_namespace(stores: NamespaceStores, source: str, destination: str) -> 
     if not source_rows:
         return NamespaceCurateResult(
             source=source, destination=destination, source_rows=0, moved=0, skipped=0, status="noop"
-        )
-    destination_rows = stores.destination.count(namespace=destination)
-    if destination_rows:
-        raise ConfigError(
-            f"refusing to rename {source!r} onto {destination!r}: the destination already holds "
-            f"{destination_rows} rows. Use merge if folding them together is what you mean."
         )
     moved, skipped = _move_rows(stores, source, destination, skip_conflicts=False)
     logger.info("namespace_renamed", source=source, destination=destination, moved=moved)

@@ -16,7 +16,7 @@ from trw_memory.lifecycle.tiers._scoring import compute_importance_score
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.retrieval.lexical import lexical_relevance, tokenize_query
-from trw_memory.security.recall_filter import filter_recall_window
+from trw_memory.security.recall_filter import filter_recall_window, redacted_scan_fields
 from trw_memory.security.telemetry_emit import build_security_traceability, emit_security_event
 from trw_memory.storage.interface import StorageBackend
 
@@ -71,8 +71,7 @@ def _apply_sec001_recall_policy(
                 source["id"] = entry.id.rsplit("::", 1)[0]
         else:
             source = dict(source_result)
-        source["content"] = entry.content
-        source["detail"] = entry.detail
+        source.update(redacted_scan_fields(entry))
         source["metadata"] = dict(entry.metadata)
         secured.append(source)
     return secured
@@ -173,6 +172,10 @@ def _entry_matches_query(entry: dict[str, object], query_tokens: list[str]) -> b
     return lexical_relevance(entry, query_tokens) > 0.0
 
 
+#: The most neighbours one graph read returns (``memory_graph_related`` and recall's expansion).
+GRAPH_RELATED_MAX = 1000
+
+
 def _graph_related(
     result_dicts: list[dict[str, object]],
     depth: int,
@@ -180,7 +183,7 @@ def _graph_related(
     conn: sqlite3.Connection | None,
     *,
     namespace: str,
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], bool]:
     """Query the knowledge graph for entries related to the recall results.
 
     ``namespace`` scopes BFS traversal AND the hydration read, so related
@@ -193,17 +196,24 @@ def _graph_related(
         effective_conn = getattr(backend, "_conn", None)
     if effective_conn is None:
         logger.debug("graph_related_skip", reason="no_sqlite_connection")
-        return []
+        return [], False
 
     root_ids = [str(d["id"]) for d in result_dicts if "id" in d]
 
     try:
-        related_nodes = graph_query(effective_conn, root_ids, depth=depth, namespace=namespace)
+        nodes = graph_query(
+            effective_conn,
+            root_ids,
+            depth=depth,
+            namespace=namespace,
+            max_nodes=GRAPH_RELATED_MAX + 1,
+            active_only=True,
+        )
     except (sqlite3.Error, ValueError, KeyError):
         logger.debug("graph_related_error", exc_info=True)
-        return []
-
-    return hydrate_active(related_nodes, backend, namespace)
+        return [], False
+    # Breadth is bounded before any row is read: one root can have thousands of neighbours.
+    return hydrate_active(nodes[:GRAPH_RELATED_MAX], backend, namespace), len(nodes) > GRAPH_RELATED_MAX
 
 
 def hydrate_active(

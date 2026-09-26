@@ -19,8 +19,6 @@ from typing import Any
 
 from trw_memory.security.pii import strip_pii
 
-__all__ = ["default_redactor", "redact_state"]
-
 _PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL)
 _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
 _AUTH = re.compile(r"(Authorization\s*:\s*)(?:Bearer|Token|Basic|ApiKey)?\s*\S+", re.IGNORECASE)

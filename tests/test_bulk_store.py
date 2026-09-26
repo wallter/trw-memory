@@ -188,12 +188,6 @@ async def test_bulk_store_completes_50_records_in_reasonable_time(
 # ---------------------------------------------------------------- summary calc
 
 
-def test_summary_per_item_ms_safe_at_zero() -> None:
-    s = BulkStoreSummary(total=0, stored=0, updated=0, quarantined=0, rejected=0, duration_ms=0.0)
-    assert s.per_item_ms == 0.0
-
-
 def test_summary_succeeded_is_stored_plus_updated() -> None:
     s = BulkStoreSummary(total=10, stored=7, updated=2, quarantined=1, rejected=0, duration_ms=100.0)
     assert s.succeeded == 9
-    assert s.per_item_ms == 10.0

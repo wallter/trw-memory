@@ -26,10 +26,15 @@ from __future__ import annotations
 
 import contextlib
 import sqlite3
+import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import cast
 
 import structlog
+
+from trw_memory._live_stores import connect_registered
 
 logger = structlog.get_logger(__name__)
 
@@ -62,9 +67,46 @@ def _main_database_path(conn: sqlite3.Connection) -> Path | None:
 #: with no distinguishing error code, so its message is the sole discriminator.
 _MISSING_TABLE_MESSAGE = "no such table"
 
+#: Sidecar tables a pending migration might destroy or irreversibly rewrite,
+#: even though it never touches ``memories`` itself. A store whose ``memories``
+#: table is empty but one of these still holds rows must still get a snapshot:
+#: - ``wiki_refs`` (schema 7 / W10, ``DROP TABLE``): can survive a direct
+#:   delete of its parent rows, e.g. a bypassed cascade or a legacy build with
+#:   foreign keys off.
+#: - ``quarantine_reviews`` (schema 8, Q3, additive ``ALTER`` + a backfill
+#:   ``UPDATE``): every quarantined row it once logged may already be
+#:   approved-and-deleted or rejected-and-removed by the time this delta runs,
+#:   leaving ``memories`` empty while the review log — the exact history this
+#:   migration reshapes — is not.
+#: "nothing in ``memories``" is not "nothing to protect".
+_MIGRATION_SENSITIVE_SIDECAR_TABLES: tuple[str, ...] = ("wiki_refs", "quarantine_reviews")
+
+
+def _table_has_rows(conn: sqlite3.Connection, table: str) -> bool:
+    """Return whether *table* exists and holds at least one row.
+
+    Table names come only from the trusted constants in this module, never
+    from user input, so the interpolated ``SELECT`` is safe.
+    """
+    try:
+        row = conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()  # noqa: S608 - trusted constant table name
+    except sqlite3.OperationalError as exc:
+        if _MISSING_TABLE_MESSAGE in str(exc).lower():
+            return False
+        raise SchemaBackupError(_probe_failure_message(exc)) from exc
+    except sqlite3.Error as exc:
+        raise SchemaBackupError(_probe_failure_message(exc)) from exc
+    return row is not None
+
 
 def _has_rows(conn: sqlite3.Connection) -> bool:
-    """Return whether ``memories`` exists and holds at least one row.
+    """Return whether this store holds data a destructive delta could destroy.
+
+    Checks ``memories`` AND every table in :data:`_MIGRATION_SENSITIVE_SIDECAR_TABLES`
+    -- a store whose primary table is empty but still carries rows in a sidecar
+    a pending delta is about to drop or irreversibly rewrite must not skip the
+    snapshot just because ``memories`` itself is empty; those sidecar rows are
+    exactly what the migration is seconds away from destroying with no way back.
 
     Only an absent table counts as "empty". Every other failure -- a locked
     store, a disk I/O error, a corrupt page -- leaves the row count UNKNOWN,
@@ -73,18 +115,12 @@ def _has_rows(conn: sqlite3.Connection) -> bool:
     so it raises instead.
 
     Raises:
-        SchemaBackupError: the probe failed for any reason other than the table
+        SchemaBackupError: a probe failed for any reason other than the table
             not existing. The caller must NOT proceed with the migration.
     """
-    try:
-        row = conn.execute("SELECT 1 FROM memories LIMIT 1").fetchone()
-    except sqlite3.OperationalError as exc:
-        if _MISSING_TABLE_MESSAGE in str(exc).lower():
-            return False
-        raise SchemaBackupError(_probe_failure_message(exc)) from exc
-    except sqlite3.Error as exc:
-        raise SchemaBackupError(_probe_failure_message(exc)) from exc
-    return row is not None
+    if _table_has_rows(conn, "memories"):
+        return True
+    return any(_table_has_rows(conn, table) for table in _MIGRATION_SENSITIVE_SIDECAR_TABLES)
 
 
 def _probe_failure_message(exc: BaseException) -> str:
@@ -114,8 +150,29 @@ def _open_snapshot_source(db_path: Path) -> sqlite3.Connection:
     connection's SHARED read lock, and under WAL — the mode ``ensure_schema``'s
     callers run in — a reader sees a consistent pre-transaction snapshot even
     while the writer's transaction is still open.
+
+    Routed through ``storage._connection.connect`` (PRD-SEC-016 round-5)
+    rather than a bare ``sqlite3.connect`` -- *db_path* is the LIVE store
+    (the same file ``ensure_schema``'s caller is migrating), and this is the
+    exact shape ``connect()`` already checks: a plain, non-URI, read-write
+    open of a file expected to already exist.
     """
-    return sqlite3.connect(db_path, timeout=30)
+    from trw_memory.storage._connection import connect
+
+    return cast("sqlite3.Connection", connect(db_path, dbapi=sqlite3, timeout=30, check_same_thread=True))
+
+
+def _stop_past_deadline_of(db_path: Path) -> Callable[[int, int, int], None]:
+    """``backup``'s progress callback: raise ``interrupted`` once *db_path*'s untrusted-store deadline passes."""
+    from trw_memory.storage._connection import untrusted_deadline
+
+    deadline = untrusted_deadline(db_path)
+
+    def stop(_status: int, _remaining: int, _total: int) -> None:
+        if deadline is not None and time.monotonic() > deadline:
+            raise sqlite3.OperationalError("interrupted")
+
+    return stop
 
 
 def snapshot_before_migration(
@@ -158,10 +215,12 @@ def snapshot_before_migration(
         # holds a file descriptor on the half-written snapshot. ``closing``
         # makes the close explicit on every path, success and failure alike.
         with (
-            contextlib.closing(sqlite3.connect(destination)) as target,
+            contextlib.closing(connect_registered(destination, sqlite3, destination)) as target,
             contextlib.closing(_open_snapshot_source(db_path)) as source,
         ):
-            source.backup(target)
+            # A store trw-memory did not write, open under a deadline (``untrusted_store``): the progress
+            # handler never runs inside backup(), so the copy checks it between steps (rc8, B71-74).
+            source.backup(target, pages=4096, progress=_stop_past_deadline_of(db_path))
             target.commit()
         harden_db_file_mode(destination)
     except (sqlite3.Error, OSError) as exc:

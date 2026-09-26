@@ -62,6 +62,25 @@ class TestFindClusters:
         result = find_clusters(storage, embedder, similarity_threshold=0.5, min_cluster_size=3)
         assert result == []
 
+    def test_protected_and_permanent_entries_never_join_a_cluster(self) -> None:
+        """A cluster's members are archived, so an exempt tier never enters one (PRD-CORE-244 FR10)."""
+        storage = _InMemoryBackend()
+        for i, tier in enumerate(["protected", "permanent", "normal", "normal", "critical"]):
+            entry = _make_entry(f"e{i}").model_copy(update={"protection_tier": tier})
+            storage.store(entry)
+        embedder = _make_embedder(vectors=[_V1, _V2, _V3])
+        result = find_clusters(storage, embedder, similarity_threshold=0.5, min_cluster_size=3)
+        assert [sorted(entry.id for entry in cluster) for cluster in result] == [["e2", "e3", "e4"]]
+
+    def test_a_canary_row_never_joins_a_cluster(self) -> None:
+        storage = _InMemoryBackend()
+        for i in range(4):
+            entry = _make_entry(f"e{i}")
+            storage.store(entry.model_copy(update={"metadata": {"system_canary": "true"}}) if i == 0 else entry)
+        embedder = _make_embedder(vectors=[_V1, _V2, _V3])
+        result = find_clusters(storage, embedder, similarity_threshold=0.5, min_cluster_size=3)
+        assert [sorted(entry.id for entry in cluster) for cluster in result] == [["e1", "e2", "e3"]]
+
     def test_outlier_not_merged_into_cluster(self) -> None:
         storage = _InMemoryBackend()
         for i in range(3):

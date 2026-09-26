@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from trw_memory._model_pin import model_revision
+
 __all__ = ["CacheProbe", "CacheState", "probe_model_cache"]
 
 # sentence-transformers resolves a bare model id against its own org before
@@ -169,10 +171,10 @@ def _inspect_snapshot(snapshot: Path) -> CacheProbe:
     )
 
 
-def _cached_snapshot_dir(repo_id: str, cache_dir: str | None) -> Path | None:
+def _cached_snapshot_dir(repo_id: str, cache_dir: str | None, revision: str) -> Path | None:
     from huggingface_hub import try_to_load_from_cache
 
-    hit = try_to_load_from_cache(repo_id=repo_id, filename=_ANCHOR_FILE, cache_dir=cache_dir)
+    hit = try_to_load_from_cache(repo_id=repo_id, filename=_ANCHOR_FILE, cache_dir=cache_dir, revision=revision)
     if isinstance(hit, str) and os.path.isfile(hit):
         return Path(hit).parent
     return None
@@ -217,9 +219,10 @@ def probe_model_cache(model_name: str) -> CacheProbe:
         return _inspect_snapshot(local_dir)
 
     cache_dir = _resolve_cache_dir()
+    revision = model_revision(model_name)
     try:
         for repo_id in repo_ids:
-            snapshot = _cached_snapshot_dir(repo_id, cache_dir)
+            snapshot = _cached_snapshot_dir(repo_id, cache_dir, revision)
             if snapshot is not None:
                 return _inspect_snapshot(snapshot)
         cached = _repo_is_cached(repo_ids, cache_dir)

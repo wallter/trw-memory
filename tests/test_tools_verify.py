@@ -88,7 +88,8 @@ def test_a_foreign_root_is_refused_before_any_sweep(tmp_path: Path, swept: list[
 
 
 def test_the_granted_root_is_used_when_the_caller_names_it_or_none(tmp_path: Path, swept: list[Path | None]) -> None:
-    checkout = tmp_path / "repo"
+    checkout = tmp_path.resolve() / "repo"
+    checkout.mkdir()
     for _ in _token(str(checkout)):
         assert _verify(project_root=str(checkout))["status"] == "ok"
         assert _verify(project_root=None)["status"] == "ok"

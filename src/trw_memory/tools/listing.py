@@ -55,7 +55,7 @@ def memory_list_page_impl(
 
 def register_list_page_tool(mcp: McpServer) -> None:
     """Register memory_list_page with a FastMCP server instance."""
-    from trw_memory.tools.entry import in_namespace
+    from trw_memory.tools.entry import serve_namespace
 
     async def memory_list_page(
         namespace: str,
@@ -65,7 +65,7 @@ def register_list_page_tool(mcp: McpServer) -> None:
         tags: list[str] | None = None,
     ) -> dict[str, object]:
         """One page of *namespace*'s rows, newest first, optionally filtered by status and tags."""
-        return in_namespace(
+        return await serve_namespace(
             namespace,
             Permission.READ,
             "list",

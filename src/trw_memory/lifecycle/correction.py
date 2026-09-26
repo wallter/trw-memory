@@ -28,17 +28,21 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from trw_memory.embeddings.provenance import generation_provenance_kwargs
 from trw_memory.exceptions import SchemaValidationError
 from trw_memory.lifecycle.tiers._runtime import (
     remember_entries_data_in_tiers,
     remove_entry_from_tiers,
     supports_tier_runtime,
 )
+from trw_memory.models._assertion_cap import OVERLONG, overlong
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import Assertion, Confidence, MemoryStatus, MemoryType, ProtectionTier
 from trw_memory.security.poisoning import reject_unsubstantiated_verified
 
 if TYPE_CHECKING:
+    from trw_memory.embeddings.interface import EmbeddingProvider
+    from trw_memory.embeddings.provenance import VectorProvenance
     from trw_memory.models.memory import MemoryEntry
     from trw_memory.storage.interface import StorageBackend
 
@@ -95,7 +99,9 @@ class LearningPatch(BaseModel):
     def _lax_assertions(cls, value: object) -> object:
         # Assertion is strict (enum instances only); callers send JSON strings.
         if isinstance(value, list):
-            return [Assertion.model_validate(item, strict=False) if isinstance(item, dict) else item for item in value]
+            value = [Assertion.model_validate(item, strict=False) if isinstance(item, dict) else item for item in value]
+            if any(isinstance(item, Assertion) and overlong(item) for item in value):
+                raise ValueError(OVERLONG)
         return value
 
 
@@ -199,12 +205,24 @@ def _refuse_unsubstantiated(entry: MemoryEntry, fields: dict[str, object], min_i
     return None
 
 
+def _encode_patched(
+    entry: MemoryEntry, patch: LearningPatch, embedder: EmbeddingProvider | None
+) -> tuple[str, list[float] | None, dict[str, VectorProvenance]]:
+    """Encode the text *patch* gives *entry*, before the write transaction (encoding holds no row lock)."""
+    content = patch.summary if patch.summary is not None else entry.content
+    detail = patch.detail if patch.detail is not None else entry.detail
+    text = f"{content} {detail}"
+    vector = embedder.embed(text) if embedder is not None else None
+    return text, vector, generation_provenance_kwargs(embedder, text, vector) if vector is not None else {}
+
+
 def apply_correction(
     store: Store,
     entry: MemoryEntry,
     patch: LearningPatch,
     *,
     prior: tuple[Store, MemoryEntry | None] | None = None,
+    embedder: EmbeddingProvider | None = None,
 ) -> dict[str, str]:
     """Apply ``patch`` to ``entry`` in ``store``; return ``updated`` / ``no_changes`` / ``invalid``.
 
@@ -213,20 +231,39 @@ def apply_correction(
     store and entry of ``patch.supersedes``, resolved by the caller (which knows
     every store the id could live in). A missing or already-closed prior is a
     no-op; the primary edit still applies.
+
+    A summary or detail change replaces the row's live vector in the same
+    transaction (PRD-CORE-302 C5): re-encoded with *embedder* when the text it
+    encoded is still the committed text, else dropped -- never left beside text it
+    was not computed from. A row with no live vector (pruned, or never embedded)
+    stays without one; ``memory_reembed`` owns that backfill.
     """
     backend = store.backend
+    text_changed = patch.summary is not None or patch.detail is not None
+    encoded_text, vector, proof = _encode_patched(entry, patch, embedder) if text_changed else ("", None, {})
+    same_store, closed = prior is not None and prior[0].backend is backend, None
     with backend.transaction():
-        current = backend.get(entry.id, namespace=entry.namespace) or entry
+        # A row deleted since the caller read it is gone, not a stale copy to patch (C12 rc7).
+        if (current := backend.get(entry.id, namespace=entry.namespace)) is None:
+            return not_found(entry.id)
         fields, changes = _collect(current, patch)
         refusal = _refuse_unsubstantiated(current, fields, int(store.config.min_evidence_items_for_verified))
         if refusal is not None:
             return refusal
-        if fields:
-            backend.update(entry.id, namespace=entry.namespace, **fields)
-    # The prior may live in another store, outside this transaction: close it only
-    # once the new row has committed. A failure between the two leaves the prior
-    # open, and repeating the correction closes it.
-    closed = _close_prior(entry.id, patch, prior)
+        if fields and backend.update(entry.id, namespace=entry.namespace, **fields) is None:
+            return not_found(entry.id)
+        if text_changed and backend.vector_exists(entry.id, namespace=entry.namespace):
+            backend.delete_vector(entry.id, namespace=entry.namespace)
+            committed = f"{fields.get('content', current.content)} {fields.get('detail', current.detail)}"
+            if vector is not None and committed == encoded_text:
+                backend.upsert_vector(entry.id, vector, namespace=entry.namespace, **proof)
+        if same_store:  # one commit with its replacement, so no forget of that lands between them
+            closed = _close_prior(entry.id, patch, prior)
+    # A prior in another store is outside this transaction: close it only once the new
+    # row has committed. A failure between the two leaves the prior open, and repeating
+    # the correction closes it.
+    if not same_store:
+        closed = _close_prior(entry.id, patch, prior)
     if closed is not None:
         changes.append(f"supersedes→{patch.supersedes}")
     if not changes:
@@ -244,6 +281,9 @@ def _close_prior(
     if patch.supersedes is None or patch.supersedes == entry_id or prior is None:
         return None
     prior_store, prior_entry = prior
+    # Re-read: the caller's copy predates this write, and a closer committed since keeps its window.
+    if prior_entry is not None:
+        prior_entry = prior_store.backend.get(prior_entry.id, namespace=prior_entry.namespace)
     if prior_entry is None or prior_entry.invalid_from is not None:
         logger.info("supersession_prior_skipped", supersedes=patch.supersedes, found=prior_entry is not None)
         return None

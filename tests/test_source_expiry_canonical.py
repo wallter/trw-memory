@@ -10,8 +10,15 @@ from trw_memory.retrieval.validity_prior import expiry_has_passed
 
 
 def _apply(rows: Any, **options: Any) -> list[dict[str, Any]]:
-    """Admission plus the source-weighted order, as ``MemoryClient.recall`` applies it."""
-    return SourcePolicy.resolve(**options).apply(rows)
+    """Admission plus the source-weighted order, as ``MemoryClient.recall`` applies it.
+
+    Mirrors the removed ``SourcePolicy.apply`` — production now composes
+    ``allows``/``rank_key`` inline (see ``_client_recall_helpers.py``).
+    """
+    policy = SourcePolicy.resolve(**options)
+    ranked = [(policy.rank_key(row), row) for row in rows if policy.allows(row)]
+    ranked.sort(key=lambda item: item[0])
+    return [dict(row, score=-key[1]) for key, row in ranked]
 
 
 @pytest.mark.parametrize(

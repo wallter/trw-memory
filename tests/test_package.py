@@ -96,8 +96,6 @@ def test_core_exports_exist() -> None:
     """All core exports from __all__ are importable."""
     from trw_memory import (
         ConfigError,
-        EncryptionUnavailableError,
-        MasterKeyNotFoundError,
         MemoryConfig,
         MemoryEntry,
         MemoryError,
@@ -111,14 +109,12 @@ def test_core_exports_exist() -> None:
     )
 
     assert issubclass(ConfigError, Exception)
-    assert issubclass(EncryptionUnavailableError, Exception)
     assert issubclass(MemoryConfig, object)
     assert issubclass(MemoryEntry, object)
     assert issubclass(MemoryError, Exception)
     assert issubclass(MemoryEvent, object)
     assert issubclass(MemoryEventType, object)
     assert issubclass(MemoryIndex, object)
-    assert issubclass(MasterKeyNotFoundError, Exception)
     assert issubclass(MemoryStatus, object)
     assert issubclass(StorageError, Exception)
     assert callable(namespace_to_path)
@@ -141,9 +137,7 @@ def test_all_exports_complete() -> None:
         "AuthorizationError",
         "ConfigError",
         "DimensionMismatchError",
-        "LocalOnlyViolationError",
-        "EncryptionUnavailableError",
-        "MasterKeyNotFoundError",
+        "ModelNotCachedError",
         "MemoryClient",
         "MemoryConfig",
         "MemoryConnectionError",
@@ -174,12 +168,10 @@ def test_exceptions_inherit_properly() -> None:
         AuthorizationError,
         ConfigError,
         DimensionMismatchError,
-        EncryptionUnavailableError,
-        LocalOnlyViolationError,
-        MasterKeyNotFoundError,
         MemoryConnectionError,
         MemoryError,
         MemoryNotFoundError,
+        ModelNotCachedError,
         PIIBlockError,
         PoisoningError,
         RateLimitError,
@@ -196,9 +188,7 @@ def test_exceptions_inherit_properly() -> None:
     assert issubclass(ToolAlreadyRegisteredError, MemoryError)
     assert issubclass(AuthorizationError, MemoryError)
     assert issubclass(DimensionMismatchError, MemoryError)
-    assert issubclass(LocalOnlyViolationError, MemoryError)
-    assert issubclass(EncryptionUnavailableError, MemoryError)
-    assert issubclass(MasterKeyNotFoundError, MemoryError)
+    assert issubclass(ModelNotCachedError, MemoryError)
     # Store-path exceptions are now top-level exported so callers can catch them
     # without reaching into trw_memory.exceptions (they all subclass MemoryError).
     assert issubclass(SchemaValidationError, MemoryError)
@@ -276,13 +266,14 @@ def test_pyproject_declares_current_optional_extras_and_scripts() -> None:
     # risk-acceptances. See CHANGELOG.md [Unreleased] Removed.
     assert set(optional) == {
         "sqlite-fix",
-        "encryption",
         "embeddings",
-        "bm25",
         "all",
         "dev",
     }
-    assert optional["all"] == ["trw-memory[embeddings,bm25]"]
+    assert optional["all"] == ["trw-memory[embeddings]"]
+    # rank-bm25 is a base dependency (PRD-CORE-302 FR08): the entity-bridge hop
+    # reads its model, and EngMem complete@10 fell 25 pp without it.
+    assert "rank-bm25>=0.2.0" in project["dependencies"]
     # sqlite-vec is a base dependency (3.1.0): vectors are on for every install,
     # and a platform without a wheel (musl, Windows ARM) fails at pip time
     # rather than silently losing dense recall.
@@ -290,7 +281,8 @@ def test_pyproject_declares_current_optional_extras_and_scripts() -> None:
     # The retired extras must not come back by name without a deliberate edit
     # here: each one either shipped a dependency nothing imported or pulled a
     # package with an unpatched advisory into a public install.
-    for retired in ("llm", "langchain", "llamaindex", "crewai", "all-integrations", "vectors"):
+    # [encryption] went in 4.0: its SQLCipher path never worked with a real driver.
+    for retired in ("llm", "langchain", "llamaindex", "crewai", "all-integrations", "vectors", "bm25", "encryption"):
         assert retired not in optional, f"the [{retired}] extra was removed; re-adding it needs a PRD"
     declared = "\n".join(str(value) for value in optional.values())
     assert "chromadb" not in declared, "chromadb has no patched release for GHSA-36p7-vc44-83pf"
@@ -321,15 +313,16 @@ def test_pyproject_deptry_config_keeps_static_audit_signal_focused() -> None:
 
     assert deptry["known_first_party"] == ["trw_memory"]
     assert deptry["optional_dependencies_dev_groups"] == ["dev"]
-    assert deptry["package_module_name_map"] == {"sqlcipher3": "sqlcipher3"}
+    # The [encryption] extra (and with it sqlcipher3) went in 4.0; the SQLCipher code went in 4.1.
+    assert "package_module_name_map" not in deptry
 
     per_rule = deptry["per_rule_ignores"]
     assert isinstance(per_rule, dict)
     assert per_rule["DEP001"] == ["torchcodec"]
     # `anthropic` and `crewai` left with the extras that declared them; the
-    # self-referential `trw-memory[...]` aggregate and the optional sqlcipher3
-    # driver are the only remaining unimported declarations.
-    assert per_rule["DEP002"] == ["sqlcipher3", "trw-memory"]
+    # self-referential `trw-memory[...]` aggregate is the only remaining
+    # unimported declaration besides numpy's version ceiling.
+    assert per_rule["DEP002"] == ["numpy", "trw-memory"]
     assert per_rule["DEP003"] == ["nacl"]
 
 

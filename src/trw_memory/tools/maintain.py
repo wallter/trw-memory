@@ -34,22 +34,21 @@ and update by bare ``id``, and this tool refused to run it on such a store).
 
 from __future__ import annotations
 
-import contextlib
 import json
 import sqlite3
-from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from trw_memory.exceptions import ConfigError, StorageError
+from trw_memory.exceptions import StorageError
 from trw_memory.models.config import MemoryConfig
-from trw_memory.namespaces.validation import validate_namespace
-from trw_memory.security.rbac import Permission, require_namespace_permission, transport_grant, transport_root
+from trw_memory.security.rbac import Permission, transport_grant, transport_root
 from trw_memory.storage.persistence import lock_for_rmw
 from trw_memory.tools._types import McpServer
+from trw_memory.tools.entry import refused_namespace
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from trw_memory.storage.interface import StorageBackend
@@ -65,6 +64,8 @@ GRAPH_BACKFILL_PAGE_MAX = 10_000
 #: describes THAT store. A store replaced underneath a stale file is why the
 #: record carries the store path it was written for.
 MAINTENANCE_STATE_FILE = "maintenance.json"
+#: The most unfinished verification sweeps a namespace's stamp keeps (one per root and verify settings).
+VERIFY_SWEEPS_KEPT = 8
 
 _OK = "ok"
 _SKIPPED = "skipped"
@@ -119,11 +120,15 @@ def _record_stamp(
     backend: StorageBackend,
     namespace: str,
     *,
-    attempted_at: str,
-    succeeded: bool,
-    passes: dict[str, object],
+    attempted_at: str | None,
+    succeeded: bool = False,
+    passes: dict[str, object] | None = None,
+    sweep: dict[str, object] | None = None,
+    sweep_key: str = "",
 ) -> dict[str, object]:
-    """Write the attempt (and, on full success, the completion) under a lock."""
+    """Write the attempt (and, on full success, the completion) under a lock, with the unfinished
+    verification *sweep* under *sweep_key* to resume (``None`` once it finished). Without *attempted_at* (a
+    ``memory_verify``) only the sweep is written."""
     path = _state_path(backend)
     if path is None:
         return {}
@@ -132,23 +137,22 @@ def _record_stamp(
         entry = state.get(namespace)
         record: dict[str, object] = dict(entry) if isinstance(entry, dict) else {}
         record["store"] = str(getattr(backend, "db_path", ""))
-        record["last_attempted_at"] = attempted_at
-        record["last_passes"] = passes
+        if attempted_at is not None:
+            record["last_attempted_at"], record["last_passes"] = attempted_at, passes
         if succeeded:
             record["last_maintained_at"] = attempted_at
+        found = record.pop("verify_sweeps", None)
+        sweeps = {key: value for key, value in (found if isinstance(found, dict) else {}).items() if key != sweep_key}
+        if sweep is not None:
+            sweeps[sweep_key] = {**sweep, "at": _now()}
+        # The newest few unfinished sweeps are kept (one per root and settings); an abandoned one ages out.
+        if kept := sorted(
+            sweeps.items(), key=lambda item: str(item[1].get("at", "")) if isinstance(item[1], dict) else ""
+        ):
+            record["verify_sweeps"] = dict(kept[-VERIFY_SWEEPS_KEPT:])
         state[namespace] = record
         locked.write_text(json.dumps(state, indent=2, sort_keys=True))
     return record
-
-
-@contextlib.contextmanager
-def _optional(lock: object) -> Iterator[None]:
-    """Hold *lock* when there is one; otherwise do nothing."""
-    if lock is None or not hasattr(lock, "__enter__"):
-        yield
-        return
-    with lock:  # type: ignore[attr-defined]
-        yield
 
 
 def _run_decay(backend: StorageBackend) -> dict[str, object]:
@@ -207,8 +211,18 @@ def _run_checkpoint(backend: StorageBackend) -> dict[str, object]:
     return {"status": _ERROR if failed else _OK, "scope": "store", **result}
 
 
-def _run_verification(namespace: str, backend: StorageBackend, config: MemoryConfig) -> dict[str, object]:
-    """Verify *namespace*'s assertions/anchors against ``config.project_root``.
+def _run_verification(
+    namespace: str,
+    backend: StorageBackend,
+    config: MemoryConfig,
+    *,
+    after: tuple[str, str] | None = None,
+    seconds: float | None = None,
+    rows: int | None = None,
+    **knobs: Any,
+) -> dict[str, object]:
+    """Verify *namespace*'s assertions/anchors against ``config.project_root``, resuming *after* a
+    position and stopping after about *seconds* (``complete`` and ``next`` say where it stopped).
 
     Without a usable root nothing is checked: no entry becomes verified and
     any prior "verified" verdict is cleared, since it can no longer be re-checked.
@@ -219,14 +233,29 @@ def _run_verification(namespace: str, backend: StorageBackend, config: MemoryCon
     usable = root is not None and root.is_dir()
     try:
         # Runs even without a usable root: the sweep then clears any prior
-        # "verified" verdict it can no longer re-check.
+        # "verified" verdict it can no longer re-check. An in-process caller's own root
+        # is resolved once here, so a symlinked path (macOS /tmp) survives the no-follow
+        # anchor walk. A grant's root was resolved at mint and is never re-resolved: that
+        # would follow a root or ancestor swapped for a symlink after the grant (C12).
+        if root is not None and usable and not transport_root()[0]:
+            root = root.resolve()
         summary = verification_pass.run_maintain_verify(
-            backend, project_root=root if usable else None, namespace=namespace
+            backend,
+            project_root=root if usable else None,
+            namespace=namespace,
+            after=after,
+            seconds=seconds,
+            max_rows=rows,
+            **knobs,
         )
     except Exception as exc:  # justified: one failing pass must not abort the others
         logger.warning("maintenance_verification_failed", namespace=namespace, error=str(exc))
         return {"status": _ERROR, "reason": type(exc).__name__}
-    counts = summary.as_dict()
+    counts: dict[str, object] = {
+        **summary.as_dict(),
+        "complete": summary.resume_after is None,
+        "next": None if summary.resume_after is None else list(summary.resume_after),
+    }
     # Sweep failures outrank the no-root skip: the verdict-clearing sweep ran
     # either way, and a skip would report ok and advance last_maintained_at.
     # A configured root that is missing is a misconfiguration, not a skip.
@@ -234,6 +263,7 @@ def _run_verification(namespace: str, backend: StorageBackend, config: MemoryCon
         ("entry_failures", counts["entry_failures"]),
         ("persist_failures", counts["persist_failures"]),
         ("project_root_not_a_directory", root is not None and not usable),
+        ("project_root_unwalkable", counts["root_unwalkable"]),
     )
     failure = next((reason for reason, failed in checks if failed), "")
     if root is None and not failure:
@@ -246,11 +276,48 @@ def _run_verification(namespace: str, backend: StorageBackend, config: MemoryCon
     }
 
 
+class ConsolidationPolicy(BaseModel):
+    """One project's consolidation settings, validated with the ranges ``MemoryConfig`` enforces."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    similarity_threshold: float = Field(ge=0.0, le=1.0)
+    min_cluster: int = Field(ge=2)
+    max_per_cycle: int = Field(gt=0)
+
+    def config_fields(self) -> dict[str, object]:
+        """The ``MemoryConfig`` fields this policy sets."""
+        return {
+            "consolidation_enabled": self.enabled,
+            "consolidation_similarity_threshold": self.similarity_threshold,
+            "consolidation_min_cluster": self.min_cluster,
+            "consolidation_max_per_cycle": self.max_per_cycle,
+        }
+
+
+def maintain_config(consolidation: dict[str, object] | None) -> MemoryConfig | dict[str, object]:
+    """The daemon's config with the caller's consolidation *policy*, verifying the root a grant
+    records (never the daemon's own); or why the policy is refused."""
+    cfg = MemoryConfig()
+    if consolidation is not None:
+        try:
+            policy = ConsolidationPolicy.model_validate(consolidation)
+        except ValidationError as exc:
+            return {"error": f"invalid consolidation policy: {exc}", "status": "invalid"}
+        cfg = cfg.model_copy(update=policy.config_fields())
+    on_transport, granted_root = transport_root()
+    if on_transport:
+        cfg = cfg.model_copy(update={"project_root": granted_root or ""})
+    return cfg
+
+
 def memory_maintain_impl(
     namespace: str,
     *,
     backend: StorageBackend,
     config: MemoryConfig | None = None,
+    verify_seconds: float | None = None,
 ) -> dict[str, object]:
     """Run decay, consolidation, verification and a WAL checkpoint; record the attempt.
 
@@ -258,51 +325,27 @@ def memory_maintain_impl(
         namespace: Namespace to consolidate and to stamp.
         backend: Storage backend for the store being maintained.
         config: Optional config; constructed when omitted.
+        verify_seconds: Stop the verification sweep after about this long (``None``: the whole
+            sweep). It resumes where the namespace's last maintenance of this store and root left
+            it unfinished.
 
     Returns:
         ``{"namespace", "passes", "last_attempted_at", "last_maintained_at",
         "previous_maintained_at", "status"}``. ``status`` is ``"ok"`` only when
-        every pass reported success.
+        every pass reported success. ``passes["verification"]`` carries ``complete``
+        and, while it is ``false``, ``next``: where the next call resumes.
     """
-    try:
-        validate_namespace(namespace)
-    except ConfigError as exc:
-        return {"error": str(exc), "status": "invalid"}
+    from trw_memory.tools import _maintain_sweep as sweep
 
     cfg = config or MemoryConfig()
-    require_namespace_permission(cfg, namespace, Permission.WRITE, "maintain")
-
-    previous = _namespace_stamp(backend, namespace).get("last_maintained_at", "")
-    attempted_at = _now()
-    passes: dict[str, object] = {
-        "decay": _run_decay(backend),
-        "consolidation": _run_consolidation(namespace, backend, cfg),
-        "verification": _run_verification(namespace, backend, cfg),
-        "wal_checkpoint": _run_checkpoint(backend),
-    }
-    succeeded = all(str(p.get("status")) != _ERROR for p in passes.values() if isinstance(p, dict))
-    record = _record_stamp(
-        backend,
-        namespace,
-        attempted_at=attempted_at,
-        succeeded=succeeded,
-        passes=passes,
-    )
-    logger.info(
-        "memory_maintain",
-        namespace=namespace,
-        status=_OK if succeeded else _ERROR,
-        decay=passes["decay"],
-        consolidation=passes["consolidation"],
-    )
-    return {
-        "namespace": namespace,
-        "status": _OK if succeeded else _ERROR,
-        "passes": passes,
-        "last_attempted_at": attempted_at,
-        "last_maintained_at": record.get("last_maintained_at", ""),
-        "previous_maintained_at": previous,
-    }
+    if refused := refused_namespace(namespace, Permission.WRITE, "maintain", cfg):
+        return refused
+    run = sweep.begin(namespace, backend, cfg)
+    run.passes["decay"] = _run_decay(backend)
+    run.passes["consolidation"] = _run_consolidation(namespace, backend, cfg)
+    sweep.verify_slice(run, backend, verify_seconds)
+    run.passes["wal_checkpoint"] = _run_checkpoint(backend)
+    return sweep.finish(run, backend)
 
 
 def register_maintain_tool(mcp: McpServer) -> None:
@@ -311,11 +354,12 @@ def register_maintain_tool(mcp: McpServer) -> None:
     Args:
         mcp: FastMCP server instance (imported lazily to keep fastmcp optional).
     """
-    from trw_memory.daemon._offload import run_offloaded
-    from trw_memory.tools.entry import in_namespace
+    from trw_memory.tools.entry import serve_namespace
 
     @mcp.tool()
-    async def memory_maintain(namespace: str = "project:default") -> dict[str, object]:
+    async def memory_maintain(
+        namespace: str = "project:default", consolidation: dict[str, object] | None = None
+    ) -> dict[str, object]:
         """Run memory maintenance now: decay, consolidation, verification, WAL checkpoint.
 
         Intended for a long-lived server, which has no session end to hang
@@ -330,30 +374,30 @@ def register_maintain_tool(mcp: McpServer) -> None:
         namespace's stored assertions against MEMORY_PROJECT_ROOT; without a
         root it is skipped and verdicts stay unknown.
 
+        One call verifies a bounded part of a large namespace (about a minute or
+        10,000 rows), then returns; call again to continue. While one maintain
+        of a namespace runs, another returns {"status": "busy"}.
+
         Args:
             namespace: Namespace to consolidate and stamp.
+            consolidation: The caller's project policy for the consolidation pass --
+                ``enabled``, ``similarity_threshold``, ``min_cluster``, ``max_per_cycle``.
+                The daemon's config is process-wide, so one project's policy travels
+                with its request (PRD-CORE-302 FR03). Omitted: the daemon's defaults.
 
         Returns:
             {"namespace": str, "status": "ok" | "error", "passes": {...},
              "last_attempted_at": str, "last_maintained_at": str,
-             "previous_maintained_at": str}. last_maintained_at advances only
-            when every pass succeeded; last_attempted_at always advances.
+             "previous_maintained_at": str}. passes["verification"] carries
+            "complete": bool and "next": [namespace, id] | null. While complete
+            is false the sweep stopped at its bound; the next call resumes after
+            "next". last_maintained_at advances only when every pass succeeded
+            and the sweep completed; last_attempted_at always advances.
         """
 
-        def _run() -> dict[str, object]:
-            # Over the transport the sweep verifies the checkout the grant records, never the daemon's root.
-            cfg = MemoryConfig()
-            on_transport, granted_root = transport_root()
-            if on_transport:
-                cfg = cfg.model_copy(update={"project_root": granted_root or ""})
-            return in_namespace(
-                namespace,
-                Permission.WRITE,
-                "maintain",
-                lambda backend, _config: memory_maintain_impl(namespace, backend=backend, config=cfg),
-            )
+        from trw_memory.tools._maintain_sweep import serve_maintain
 
-        return await run_offloaded(_run)
+        return await serve_maintain(namespace, consolidation)
 
     @mcp.tool()
     async def memory_graph_backfill(
@@ -379,16 +423,15 @@ def register_maintain_tool(mcp: McpServer) -> None:
             return {"error": f"invalid cursor: {exc}", "status": "invalid"}
         if not 1 <= limit <= GRAPH_BACKFILL_PAGE_MAX or (deadline_seconds is not None and deadline_seconds < 0):
             return {"error": f"invalid page: limit={limit}, deadline_seconds={deadline_seconds}", "status": "invalid"}
-        return await run_offloaded(
-            lambda: in_namespace(
-                namespace,
-                Permission.WRITE,
-                "graph_backfill",
-                lambda backend, config: {
-                    "status": _OK,
-                    **backfill_graph_page(
-                        backend, namespace, after=cursor, limit=limit, deadline_seconds=deadline_seconds, config=config
-                    ),
-                },
-            )
+        return await serve_namespace(
+            namespace,
+            Permission.WRITE,
+            "graph_backfill",
+            lambda backend, config: {
+                "status": _OK,
+                **backfill_graph_page(
+                    backend, namespace, after=cursor, limit=limit, deadline_seconds=deadline_seconds, config=config
+                ),
+            },
+            exclusive=False,
         )

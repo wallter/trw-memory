@@ -1,7 +1,7 @@
 """PRD-QUAL-110-FR06: trw-memory README carries the disclosure surfaces.
 
 The public trw-memory README must contain a "Telemetry & network behavior"
-section, an env-var inventory (TRW_OFFLINE / HF_HUB_OFFLINE / MEMORY_*), a
+section, an env-var inventory (MEMORY_EMBEDDING_MODEL / MEMORY_*), a
 security-defaults table, and an enterprise hardening recipe.
 """
 
@@ -24,7 +24,7 @@ def test_has_telemetry_network_section(readme_text: str) -> None:
 
 
 def test_has_env_var_inventory(readme_text: str) -> None:
-    for var in ("TRW_OFFLINE", "HF_HUB_OFFLINE", "MEMORY_*"):
+    for var in ("MEMORY_EMBEDDING_MODEL", "MEMORY_*"):
         assert var in readme_text, f"env var {var} missing"
 
 
@@ -33,4 +33,5 @@ def test_has_security_defaults_and_recipe(readme_text: str) -> None:
     assert "security defaults" in lowered
     assert "0600" in readme_text
     assert "hardening recipe" in lowered
-    assert "TRW_OFFLINE=1" in readme_text
+    assert "fetch_models()" in readme_text
+    assert "trw-mcp models fetch" in readme_text

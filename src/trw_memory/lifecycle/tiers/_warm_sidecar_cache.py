@@ -242,10 +242,6 @@ class SidecarCache:
         with self._lock:
             self._entry = (key, parsed) if key is not None else None
 
-    def invalidate(self) -> None:
-        with self._lock:
-            self._entry = None
-
     def record_rewrite(self, sidecar: Path, rows: list[dict[str, object]]) -> None:
         """Re-seed after the caller replaced the file with *rows*, one JSON line each.
 

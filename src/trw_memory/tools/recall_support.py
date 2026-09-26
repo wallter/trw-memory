@@ -7,27 +7,31 @@ read one run here, inside the namespace grant, before any backend is opened:
   platform through the admission gate of the granted namespace's store. The gate
   rate-limits, audits and quarantines what it refuses, so a second run is not a
   no-op and a lost call is not replayed.
-- ``memory_vectors`` returns the stored vectors of some ids that were encoded in
-  one embedding space, for near-duplicate collapse. A read.
+- ``memory_vectors`` returns the stored vectors of some ids in the daemon's active
+  embedding space, with that space and its calibrated collapse threshold, for
+  near-duplicate collapse (PRD-CORE-302 C2). A read.
 - ``memory_record_surfaced`` counts the rows a caller actually showed as accessed
   (and, at session start, surfaced), so over-fetched candidates it filtered out
   never inflate a score. It increments, so a lost call is not replayed.
 - ``memory_graph_related`` returns a learning's active knowledge-graph neighbours in
-  its namespace, bounded in depth and breadth (trw-mcp's ``trw_graph_related``). A read.
+  its namespace, bounded in depth and breadth (trw-mcp's trw_recall graph mode). A read.
 """
 
 from __future__ import annotations
 
-from trw_memory.embeddings._space_gate import admit_space_vectors
-from trw_memory.embeddings.provenance import EmbeddingSpace
+import dataclasses
+
+from trw_memory.embeddings._similarity_calibration import calibrated_threshold
+from trw_memory.embeddings._space_gate import active_embedding_space, admit_space_vectors
 from trw_memory.graph import MAX_TRAVERSAL_DEPTH, VALID_EDGE_TYPES, graph_query
 from trw_memory.models.config import MemoryConfig
 from trw_memory.security.rbac import Permission
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.sync._remote_admission import admit_remote_results
-from trw_memory.tools._recall_helpers import hydrate_active
+from trw_memory.tools._embedder import resolve_embedder
+from trw_memory.tools._recall_helpers import GRAPH_RELATED_MAX, hydrate_active
 from trw_memory.tools._types import McpServer
-from trw_memory.tools.entry import in_namespace
+from trw_memory.tools.entry import serve_namespace
 
 
 def memory_admit_shared_impl(
@@ -43,18 +47,30 @@ def memory_admit_shared_impl(
     }
 
 
+#: Recall's near-duplicate collapse threshold on the reference scale (moved from trw-mcp, PRD-CORE-302 C2).
+RECALL_DUP_THRESHOLD = 0.9
+
+
 def memory_vectors_impl(
-    ids: list[str], namespace: str, space: dict[str, object], *, backend: StorageBackend
+    ids: list[str], namespace: str, *, backend: StorageBackend, config: MemoryConfig
 ) -> dict[str, object]:
-    """Return ``{"status": "ok", "vectors": {id: [...]}}``: only vectors encoded in *space*."""
-    try:
-        wanted = EmbeddingSpace(**space)  # type: ignore[arg-type]
-    except (TypeError, ValueError) as exc:
-        return {"error": f"invalid embedding space: {exc}", "status": "invalid"}
+    """``{"status": "ok", "vectors": {id: [...]}, "space": {...}, "dup_threshold": t}`` in the active space.
+
+    Vectors, space and threshold come from one call, so a caller can never mix
+    model generations; with no embedder the contract C1 ``unavailable`` answer.
+    """
+    embedder = resolve_embedder(config, surface="memory_vectors")
+    if isinstance(embedder, dict):
+        return embedder
+    space = active_embedding_space(embedder)
+    if space is None:
+        return {"status": "unavailable", "reason": "embedder_error"}
     records = backend.get_vector_records(list(dict.fromkeys(ids)), namespace=namespace) if ids else {}
     return {
         "status": "ok",
-        "vectors": admit_space_vectors(records, wanted, namespace=namespace, surface="memory_vectors"),
+        "vectors": admit_space_vectors(records, space, namespace=namespace, surface="memory_vectors"),
+        "space": dataclasses.asdict(space),
+        "dup_threshold": calibrated_threshold(RECALL_DUP_THRESHOLD, embedder),
     }
 
 
@@ -78,10 +94,6 @@ def memory_record_surfaced_impl(
         if session_start and held:
             backend.increment_session_counts(held, namespace=namespace, updated_at=now)
     return {"status": "ok", "counted": held}
-
-
-#: The most neighbours one ``memory_graph_related`` call returns.
-GRAPH_RELATED_MAX = 1000
 
 
 def memory_graph_related_impl(
@@ -113,20 +125,22 @@ def register_recall_support_tools(mcp: McpServer) -> None:
 
     async def memory_admit_shared(namespace: str, results: list[dict[str, object]]) -> dict[str, object]:
         """Admit fetched shared results through *namespace*'s write gate; refused ones are quarantined."""
-        return in_namespace(
+        return await serve_namespace(
             namespace,
             Permission.WRITE,
             "admit_shared",
             lambda backend, config: memory_admit_shared_impl(results, namespace, backend=backend, config=config),
         )
 
-    async def memory_vectors(namespace: str, ids: list[str], space: dict[str, object]) -> dict[str, object]:
-        """Return the stored vectors of *ids* in *namespace* that were encoded in *space*."""
-        return in_namespace(
+    async def memory_vectors(namespace: str, ids: list[str]) -> dict[str, object]:
+        """Stored vectors of *ids* in *namespace* in the active space, with that space and its collapse threshold."""
+        # Off the event loop: resolving the space loads the embedding model.
+        return await serve_namespace(
             namespace,
             Permission.READ,
             "vectors",
-            lambda backend, _config: memory_vectors_impl(ids, namespace, space, backend=backend),
+            lambda backend, config: memory_vectors_impl(ids, namespace, backend=backend, config=config),
+            exclusive=False,
         )
 
     mcp.tool()(memory_admit_shared)
@@ -144,7 +158,7 @@ def register_recall_support_tools(mcp: McpServer) -> None:
                 "error": f"invalid traversal: depth={depth}, limit={limit}, edge_types={edge_types}",
                 "status": "invalid",
             }
-        return in_namespace(
+        return await serve_namespace(
             namespace,
             Permission.READ,
             "graph_related",
@@ -157,9 +171,9 @@ def register_recall_support_tools(mcp: McpServer) -> None:
 
     async def memory_record_surfaced(namespace: str, ids: list[str], session_start: bool = False) -> dict[str, object]:
         """Count *ids* of *namespace* as accessed (and surfaced, at session start): the rows a caller showed."""
-        if not ids or len(ids) > SURFACED_MAX:
-            return {"error": f"ids must hold 1 to {SURFACED_MAX} entries, not {len(ids)}", "status": "invalid"}
-        return in_namespace(
+        if not ids:  # the most is bounded before the call arrives (daemon/_arg_bounds.py)
+            return {"error": "ids must hold at least one entry", "status": "invalid"}
+        return await serve_namespace(
             namespace,
             Permission.WRITE,
             "record_surfaced",

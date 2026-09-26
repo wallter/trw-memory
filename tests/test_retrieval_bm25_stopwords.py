@@ -9,8 +9,6 @@ from __future__ import annotations
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.bm25 import _QUERY_STOPWORDS, _stem_token, bm25_search
 
-from ._optional_extras import requires_bm25
-
 
 def _entries() -> list[MemoryEntry]:
     return [
@@ -20,13 +18,11 @@ def _entries() -> list[MemoryEntry]:
     ]
 
 
-@requires_bm25
 def test_content_terms_outrank_function_word_overlap() -> None:
     results = bm25_search("What did Caroline research?", _entries())
     assert results[0][0] == "q2"
 
 
-@requires_bm25
 def test_all_stopword_query_keeps_its_tokens() -> None:
     results = bm25_search("what did", _entries())
     assert {eid for eid, _ in results} >= {"q1", "q3"}
@@ -49,7 +45,6 @@ def test_stem_token_strips_common_suffixes_but_not_identifiers() -> None:
     ]
 
 
-@requires_bm25
 def test_inflected_document_meets_query_stem() -> None:
     entries = [
         MemoryEntry(id="s1", content="Caroline researched adoption agencies", tags=[]),

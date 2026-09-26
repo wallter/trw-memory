@@ -36,7 +36,6 @@ def _config(tmp_path: Path) -> MemoryConfig:
         storage_path=str(tmp_path),
         sync_enabled=True,
         platform_url="https://api.test.invalid",
-        local_only=False,
     )
 
 
@@ -113,7 +112,6 @@ async def test_the_recall_consumer_reads_the_status(tmp_path: Path, monkeypatch:
     monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
     monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
     monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
-    monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
     monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.invalid")
     monkeypatch.setenv("MEMORY_PLATFORM_API_KEY", "test-key")
 

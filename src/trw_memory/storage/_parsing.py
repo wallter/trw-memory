@@ -58,9 +58,8 @@ def parse_dt_safe(val: object, *, default: datetime | None) -> datetime | None:
 def parse_optional_float(raw: object) -> float | None:
     """Coerce a persisted value to ``float``, or ``None`` when absent/unparseable.
 
-    The nullable twin of :func:`parse_float`, for columns where SQL ``NULL``
-    carries meaning of its own — ``anchor_validity`` reads ``None`` as "never
-    assessed" (PRD-CORE-244-FR01), which is a different statement from any
+    For columns where SQL ``NULL`` carries meaning of its own — ``anchor_validity``
+    reads ``None`` as "never assessed" (PRD-CORE-244-FR01), which is a different statement from any
     score including ``0.0``. A legitimately falsy ``0.0`` survives.
 
     >>> parse_optional_float(0.0)
@@ -76,32 +75,6 @@ def parse_optional_float(raw: object) -> float | None:
         return float(str(raw))
     except (TypeError, ValueError):
         return None
-
-
-def parse_float(raw: object, *, default: float) -> float:
-    """Coerce a persisted value to ``float``, falling back to *default*.
-
-    *default* is returned only when the value is genuinely absent (``None``)
-    or unparseable — a legitimately falsy ``0.0`` is preserved. The
-    distinction matters for fields like ``anchor_validity`` where ``0.0`` (all
-    code anchors stale) is a meaningful signal that must survive the
-    persistence round-trip; a naïve ``float(raw) if raw else default`` would
-    silently resurrect it to *default* (1.0 = fresh), inverting the staleness
-    score that the lifecycle relies on.
-
-    >>> parse_float(0.0, default=1.0)
-    0.0
-    >>> parse_float(None, default=1.0)
-    1.0
-    >>> parse_float("nope", default=1.0)
-    1.0
-    """
-    if raw is None:
-        return default
-    try:
-        return float(str(raw))
-    except (TypeError, ValueError):
-        return default
 
 
 def parse_json_list(raw: object, *, fallback: list[str] | None = None) -> list[str]:

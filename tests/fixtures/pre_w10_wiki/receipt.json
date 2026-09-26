@@ -1,0 +1,13 @@
+{
+  "user_version": 6,
+  "wiki_rows": 6,
+  "indexes": [
+    "idx_wiki_refs_source",
+    "idx_wiki_refs_target"
+  ],
+  "ids": [
+    "M-wiki-legacy-0000",
+    "M-wiki-legacy-0001",
+    "M-wiki-legacy-0002"
+  ]
+}

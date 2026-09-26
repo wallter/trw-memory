@@ -24,6 +24,13 @@ def _entry(i: int, ns: str = "project:t") -> MemoryEntry:
     return MemoryEntry(id=f"M-{i:04d}", content=f"content {i}", namespace=ns, tags=["t"])
 
 
+def _invalidate_sidecar_cache(store: WarmTierStore) -> None:
+    """Test seam mirroring the removed ``SidecarCache.invalidate``."""
+    cache = store._sidecar_cache
+    with cache._lock:
+        cache._entry = None
+
+
 def _sidecar_rows(store: WarmTierStore) -> dict[str, dict[str, object]]:
     path = store._warm_sidecar_path()
     if not path.exists():
@@ -54,7 +61,7 @@ class TestWarmAddMany:
         store = WarmTierStore(tmp_path)
         entries = [_entry(i) for i in range(20)]
         store.warm_add_many([(e.id, e.model_dump(mode="json"), None) for e in entries])
-        store._sidecar_cache.invalidate()  # as if another process wrote last
+        _invalidate_sidecar_cache(store)  # as if another process wrote last
         with patch.object(WarmTierStore, "_parse_sidecar_records", wraps=store._parse_sidecar_records) as spy:
             store.warm_add_many([(e.id, e.model_dump(mode="json"), None) for e in entries])
         assert spy.call_count == 1
@@ -115,7 +122,7 @@ class TestSidecarParseCache:
         store.warm_add_many([(e.id, e.model_dump(mode="json"), None) for e in entries])
         path = store._warm_sidecar_path()
         with patch.object(WarmTierStore, "_parse_sidecar_records", wraps=store._parse_sidecar_records) as parse:
-            store._sidecar_cache.invalidate()  # drop the writer's re-seed so the first read parses
+            _invalidate_sidecar_cache(store)  # drop the writer's re-seed so the first read parses
             first = list(store._iter_sidecar_records(path))
             second = list(store._iter_sidecar_records(path))
             assert parse.call_count == 1

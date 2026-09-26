@@ -26,11 +26,14 @@ def _stored(vector: Sequence[float], space: EmbeddingSpace | None) -> StoredVect
     return StoredVector(tuple(vector), proof)
 
 
-def _backend(hits: list[tuple[str, float]], records: dict[str, StoredVector], census: object) -> MagicMock:
+def _backend(
+    hits: list[tuple[str, float]], records: dict[str, StoredVector], census: object, rows: int | None = None
+) -> MagicMock:
     backend = MagicMock()
     backend.search_vectors.return_value = hits
     backend.get_vector_records.return_value = records
     backend.vector_space_census.return_value = census
+    backend.count.return_value = len(hits) if rows is None else rows
     return backend
 
 
@@ -92,6 +95,13 @@ def test_a_census_smaller_than_the_window_proves_nothing() -> None:
     records = {"L-a": _stored((1.0, 0.0), NEW_SPACE), "L-b": _stored((1.0, 0.0), NEW_SPACE)}
 
     assert _window(_backend(hits, records, {NEW_SPACE: 1})) is None
+
+
+def test_a_census_that_misses_a_vectorless_row_proves_nothing() -> None:
+    """C12 rc4: one in-space vector proved a window although a vectorless near-duplicate was never compared."""
+    backend = _backend([("L-unrelated", 1.4)], {"L-unrelated": _stored((0.0, 1.0), NEW_SPACE)}, {NEW_SPACE: 1}, rows=2)
+
+    assert _window(backend) is None
 
 
 def test_an_empty_window_is_a_complete_empty_verdict() -> None:

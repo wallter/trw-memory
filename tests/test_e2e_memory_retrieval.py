@@ -15,7 +15,6 @@ class TestHybridRetrieval:
 
     def test_bm25_keyword_search(self) -> None:
         """3.1 — BM25 ranks entries with query keyword overlap highest."""
-        pytest.importorskip("rank_bm25")
         from trw_memory.retrieval.bm25 import bm25_search
 
         entries = [
@@ -58,7 +57,6 @@ class TestHybridRetrieval:
 
     def test_hybrid_pipeline_bm25_only(self) -> None:
         """3.9 — Hybrid pipeline degrades to BM25-only when embedder is None."""
-        pytest.importorskip("rank_bm25")
         from trw_memory.retrieval.pipeline import hybrid_search
 
         entries = [

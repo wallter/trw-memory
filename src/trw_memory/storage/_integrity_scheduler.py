@@ -34,6 +34,9 @@ from pathlib import Path
 
 import structlog
 
+from trw_memory._live_stores import connect_registered
+from trw_memory.exceptions import StorageError
+
 __all__ = ["IntegrityScheduler"]
 
 logger = structlog.get_logger(__name__)
@@ -135,26 +138,6 @@ class IntegrityScheduler:
                 db=str(self._db_path),
             )
 
-    @property
-    def is_running(self) -> bool:
-        """True when the background thread is alive."""
-        with self._lock:
-            t = self._thread
-        return t is not None and t.is_alive()
-
-    def run_once(self) -> bool:
-        """Run one probe synchronously and return the result.
-
-        Useful for tests and for the C3 session-start dashboard which wants
-        a fresh reading without waiting for the next scheduled tick.
-        """
-        ok, detail = self._probe()
-        self.last_check_at = time.time()
-        self.last_check_ok = ok
-        self._write_sentinel()
-        self._report(ok, detail)
-        return ok
-
     # ------------------------------------------------------------------
     # Sentinel file (PRD-INFRA-063 + PRD-INFRA-068 cross-PRD contract)
     # ------------------------------------------------------------------
@@ -200,7 +183,7 @@ class IntegrityScheduler:
         conn: sqlite3.Connection | None = None
         try:
             uri = f"file:{self._db_path}?mode=ro"
-            conn = sqlite3.connect(uri, uri=True, timeout=5.0, check_same_thread=False)
+            conn = connect_registered(self._db_path, sqlite3, uri, uri=True, timeout=5.0, check_same_thread=False)
             # Belt-and-suspenders: enforce read-only at the PRAGMA layer too.
             # Reconfirms the URI mode=ro intent and blocks any accidental write.
             with contextlib.suppress(sqlite3.Error):
@@ -214,6 +197,10 @@ class IntegrityScheduler:
             detail = rows[0][0] if rows else "empty"
             ok = len(rows) == 1 and rows[0][0] == "ok"
             return ok, str(detail)
+        except StorageError:
+            # connect_registered refused a store swapped during the open (PRD-SEC-016):
+            # exactly the anomaly this scheduler exists to surface.
+            return False, f"db identity changed during open: {self._db_path}"
         except sqlite3.Error as exc:
             # Treat connect/query errors as a regression signal rather than
             # silently skipping — the scheduler exists to surface problems.

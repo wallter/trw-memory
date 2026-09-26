@@ -20,7 +20,7 @@ import pytest
 
 from trw_memory.embeddings import get_local_embedder
 from trw_memory.embeddings.local import LocalEmbeddingProvider
-from trw_memory.exceptions import LocalOnlyViolationError
+from trw_memory.exceptions import ModelNotCachedError
 
 from ._test_hf_cache_support import use_fixture_cache
 
@@ -188,23 +188,32 @@ class TestGracefulDegradationViaImport:
         assert result == [None, None]
 
 
-class TestLocalOnlyModelLoading:
-    def test_load_model_uses_local_files_only_when_local_only_enabled(
+class TestCacheOnlyModelLoading:
+    """PLAN W40: every runtime load is cache-only; no setting turns downloads on."""
+
+    def test_load_model_is_always_local_files_only(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
         # PRD-SEC-014-FR01 made the resolution consult the local HF cache, so the
         # cache must be pinned or this test's outcome would depend on whatever the
-        # developer happens to have downloaded. An empty cache isolates the
-        # local_only branch this test is about.
+        # developer happens to have downloaded. An empty cache is the case where a
+        # download would have happened before W40.
         use_fixture_cache(monkeypatch, tmp_path)
         (tmp_path / "hub").mkdir()
-        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "true")
         captured: dict[str, object] = {}
 
         class FakeSentenceTransformer:
-            def __init__(self, model_name: str, *, local_files_only: bool, trust_remote_code: bool = False) -> None:
+            def __init__(
+                self,
+                model_name: str,
+                *,
+                revision: str = "main",
+                local_files_only: bool,
+                trust_remote_code: bool = False,
+                device: str | None = None,
+            ) -> None:
                 captured["model_name"] = model_name
                 captured["local_files_only"] = local_files_only
                 captured["trust_remote_code"] = trust_remote_code
@@ -222,17 +231,24 @@ class TestLocalOnlyModelLoading:
             "trust_remote_code": False,
         }
 
-    def test_load_model_raises_local_only_violation_when_uncached_model_requires_download(
+    def test_an_uncached_model_raises_with_the_fetch_command(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
         use_fixture_cache(monkeypatch, tmp_path)
         (tmp_path / "hub").mkdir()
-        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "true")
 
         class FakeSentenceTransformer:
-            def __init__(self, model_name: str, *, local_files_only: bool, trust_remote_code: bool = False) -> None:
+            def __init__(
+                self,
+                model_name: str,
+                *,
+                revision: str = "main",
+                local_files_only: bool,
+                trust_remote_code: bool = False,
+                device: str | None = None,
+            ) -> None:
                 assert model_name == "BAAI/bge-small-en-v1.5"
                 assert local_files_only is True
                 raise OSError("model not cached")
@@ -242,20 +258,17 @@ class TestLocalOnlyModelLoading:
         with patch.dict("sys.modules", {"sentence_transformers": fake_module}):
             provider = LocalEmbeddingProvider()
             with pytest.raises(
-                LocalOnlyViolationError,
-                match=(
-                    "Model 'BAAI/bge-small-en-v1.5' not found in local cache. Download is blocked "
-                    r"\(memory_local_only=True\)"
-                ),
+                ModelNotCachedError,
+                match=r"Model 'BAAI/bge-small-en-v1.5' is not in the local cache.*trw-mcp models fetch",
             ):
                 provider._load_model()
 
-    def test_get_local_embedder_propagates_local_only_violation(self) -> None:
+    def test_get_local_embedder_propagates_a_missing_model(self) -> None:
         with patch(
             "trw_memory.embeddings.local.LocalEmbeddingProvider.available",
-            side_effect=LocalOnlyViolationError("blocked"),
+            side_effect=ModelNotCachedError("blocked"),
         ):
-            with pytest.raises(LocalOnlyViolationError, match="blocked"):
+            with pytest.raises(ModelNotCachedError, match="blocked"):
                 get_local_embedder()
 
 

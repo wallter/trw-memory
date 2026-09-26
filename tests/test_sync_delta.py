@@ -434,55 +434,6 @@ def test_normalize_hash_value_datetime() -> None:
     assert "2024-06-01" in result
 
 
-def test_mark_dirty_existing_entry_increments_seq(tmp_path: Path) -> None:
-    """mark_dirty on an existing entry increments sync_seq and recomputes hash."""
-    backend = SQLiteBackend(tmp_path / "test.db")
-    backend.store(MemoryEntry(id="M-dirty-1", content="initial content"))
-    entry_before = backend.get("M-dirty-1", namespace="default")
-    assert entry_before is not None
-    seq_before = entry_before.sync_seq
-
-    DeltaTracker.mark_dirty("M-dirty-1", backend, namespace="default")
-
-    entry_after = backend.get("M-dirty-1", namespace="default")
-    assert entry_after is not None
-    assert entry_after.sync_seq == seq_before + 1
-    assert entry_after.sync_hash != ""
-    backend.close()
-
-
-def test_mark_dirty_nonexistent_entry_leaves_real_entries_alone(tmp_path: Path) -> None:
-    """mark_dirty on a missing entry returns early without error (line 76).
-
-    The assertion used to be ``get_dirty_entries(backend) == []`` against a store
-    that had never held a row, which is trivially true and says nothing about the
-    guard. A cross-family audit flagged it 2026-09-12: query an empty table and
-    you get false assurance that the early return was responsible for the zero.
-
-    Seeding a real entry first makes the dirty set a meaningful measurement —
-    it distinguishes "the missing id was skipped" from "nothing was tracked".
-    """
-    backend = SQLiteBackend(tmp_path / "test.db")
-    try:
-        backend.store(MemoryEntry(id="M-present", content="already here"))
-        before = backend.get("M-present", namespace="default")
-        assert before is not None
-        # A freshly stored entry is legitimately dirty — it has never been synced.
-        # The claim is that the missing id changes NOTHING, so the measurement is a
-        # before/after comparison, not an emptiness check. Writing it the other way
-        # round is what produced the original vacuous assertion.
-        dirty_before = sorted(entry.id for entry in DeltaTracker.get_dirty_entries(backend))
-
-        DeltaTracker.mark_dirty("DOES-NOT-EXIST", backend, namespace="default")
-
-        after = backend.get("M-present", namespace="default")
-        assert after is not None
-        assert after.sync_seq == before.sync_seq, "a missing id bumped an unrelated entry's sync_seq"
-        assert sorted(entry.id for entry in DeltaTracker.get_dirty_entries(backend)) == dirty_before
-    finally:
-        backend.close()
-
-
 def test_get_dirty_entries_without_lock(tmp_path: Path) -> None:
     """get_dirty_entries takes the no-lock branch when backend._lock is None (line 104)."""
     backend = SQLiteBackend(tmp_path / "test.db")

@@ -1,10 +1,9 @@
-"""PRD-SEC-014-FR01/NFR01/NFR02: the local cache decides ``local_files_only``.
+"""PRD-SEC-014-FR01/NFR01/NFR02 and PLAN W40: the cache decides how a model is loaded, never whether it downloads.
 
-Before this PRD the loader resolved ``bool(config.local_only) or offline`` and
-never looked at the cache, so a machine holding the entire model snapshot still
-permitted a huggingface.co revision check on the most basic write path. These
-tests pin the new resolution, the once-per-instance budget, and the fail-open
-degradation when the probe cannot answer.
+A complete snapshot is loaded from its directory, which cannot make a request.
+Anything else is still ``local_files_only`` (W40: runtime loads never download).
+These tests pin that resolution, the once-per-instance probe budget, and the
+fail-open degradation when the probe cannot answer.
 """
 
 from __future__ import annotations
@@ -65,29 +64,24 @@ def test_complete_cache_forces_local_files_only(
     assert seam.calls == 0
 
 
-def test_absent_cache_stays_network_capable_and_discloses_once(
+def test_absent_cache_is_still_loaded_cache_only_and_dials_nothing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """FR01: no snapshot + no offline switch -> one disclosure naming host + switch."""
+    """W40: no snapshot and no offline switch, and still no Hub request."""
     use_fixture_cache(monkeypatch, tmp_path)
     (tmp_path / "hub").mkdir()
     captured = install_fake_sentence_transformers(monkeypatch)
-    # The fake would dial the Hub; record the attempt instead of refusing it so
-    # the network-capable disclosure path can be observed end to end.
+    # The fake dials the Hub for any load that is not local_files_only; record
+    # the attempt instead of refusing it, so a regression shows up as a count.
     attempts: list[object] = []
     monkeypatch.setattr(socket, "create_connection", lambda *a, **k: attempts.append(a))
 
     provider = local_mod.LocalEmbeddingProvider(model_name="all-MiniLM-L6-v2")
-    with capture_logs() as logs:
-        provider.available()
+    provider.available()
 
-    disclosures = [entry for entry in logs if entry.get("event") == "embedding_model_download_disclosure"]
-    assert len(disclosures) == 1
-    assert disclosures[0]["source"] == "huggingface.co"
-    assert "TRW_OFFLINE" in disclosures[0]["detail"]
-    assert captured["local_files_only"] is False
-    assert len(attempts) == 1
+    assert captured["local_files_only"] is True
+    assert attempts == []
 
 
 def test_cache_probe_runs_once_per_instance(
@@ -138,7 +132,7 @@ def test_probe_failure_degrades_to_prior_resolution(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """NFR02: a raising probe logs once and falls back to config/env resolution."""
+    """NFR02: a raising probe logs once, and the load is still cache-only."""
     use_fixture_cache(monkeypatch, tmp_path)
     build_model_cache(tmp_path)
     captured = install_fake_sentence_transformers(monkeypatch)
@@ -155,18 +149,16 @@ def test_probe_failure_degrades_to_prior_resolution(
 
     degraded = [entry for entry in logs if entry.get("event") == "embedding_cache_probe_degraded"]
     assert len(degraded) == 1
-    # Prior resolution: no offline switch, local_only False -> network-capable.
-    assert captured["local_files_only"] is False
+    assert captured["local_files_only"] is True
 
 
-def test_probe_failure_still_honors_offline_switch(
+def test_probe_failure_never_opens_the_network(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     seam: NetworkSeam,
 ) -> None:
-    """NFR02: degradation never loosens the offline switch resolution."""
+    """NFR02: degradation never loosens the cache-only load."""
     use_fixture_cache(monkeypatch, tmp_path)
-    monkeypatch.setenv("TRW_OFFLINE", "1")
     captured = install_fake_sentence_transformers(monkeypatch)
     monkeypatch.setattr(local_mod, "probe_model_cache", _raise_probe)
 
@@ -222,11 +214,11 @@ class TestCacheProbeStates:
     def test_huggingface_hub_absent_is_unknown(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         # Env only, not use_fixture_cache: this case must run where huggingface_hub is absent.
         monkeypatch.setenv("HF_HOME", str(tmp_path))
-        for var in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "TRW_OFFLINE", "HF_HUB_OFFLINE", "MEMORY_LOCAL_ONLY"):
+        for var in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
             monkeypatch.delenv(var, raising=False)
         build_model_cache(tmp_path)
 
-        def _no_hub(repo_id: str, cache_dir: str | None) -> Path | None:
+        def _no_hub(repo_id: str, cache_dir: str | None, revision: str) -> Path | None:
             raise ImportError("No module named 'huggingface_hub'")
 
         monkeypatch.setattr(_hf_cache, "_cached_snapshot_dir", _no_hub)

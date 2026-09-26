@@ -117,7 +117,6 @@ def test_round_trip_closed_window_survives_store_get(tmp_path: Path) -> None:
     assert got is not None
     assert got.invalid_from == close
     assert got.invalidated_by == "M-new"
-    assert got.validity_state() == "superseded"
 
 
 def test_anchor_validity_null_when_no_anchors(tmp_path: Path) -> None:

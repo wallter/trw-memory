@@ -164,8 +164,7 @@ def init_client(
 
 def should_attempt_remote_publish(client: MemoryClient, entry: MemoryEntry) -> bool:
     return (
-        not client._config.local_only
-        and client._config.sync_enabled
+        client._config.sync_enabled
         and bool(client._config.platform_url)
         and entry.importance >= client._config.sync_min_importance
     )
@@ -190,7 +189,6 @@ def schedule_background_task(client: MemoryClient, coro: Coroutine[object, objec
 async def publish_entry(
     client: MemoryClient,
     entry: MemoryEntry,
-    embedding: list[float] | None,
 ) -> None:
     from trw_memory import client as _c
 
@@ -199,20 +197,14 @@ async def publish_entry(
             _c.publish_memory_result,
             entry,
             client._config,
-            embedding=embedding,
             project_root=client._project_root,
         )
     )
     if publish_result["success"]:
+        from trw_memory.sync.delta import ack_publish
+
         async with client._lock:
-            backend = client._get_backend()
-            backend.update(
-                entry.id,
-                namespace=entry.namespace,
-                published_to_platform=True,
-                remote_id=publish_result["remote_id"],
-                last_synced_at=datetime.now(timezone.utc),
-            )
+            ack_publish(client._get_backend(), entry, published_to_platform=True, remote_id=publish_result["remote_id"])
         return
 
     retryable = publish_result.get("retryable", not publish_result["success"])
@@ -220,8 +212,6 @@ async def publish_entry(
         return
 
     payload = await asyncio.to_thread(_c._anonymize_entry, entry, client._project_root)
-    if embedding is not None:
-        payload["embedding"] = embedding
     queue_payload = cast("dict[str, object]", payload)
     enqueued = await asyncio.to_thread(client._retry_queue.enqueue, entry.id, queue_payload)
     if not enqueued:
@@ -329,7 +319,6 @@ async def close_client(client: MemoryClient) -> None:
 def should_start_retry_drain(client: MemoryClient) -> bool:
     return (
         not client._retry_drain_started
-        and not client._config.local_only
         and client._config.sync_enabled
         and bool(client._config.platform_url)
         and client._retry_queue.depth() > 0
@@ -365,21 +354,10 @@ async def _drain_retry_queue_once(client: MemoryClient) -> None:
             synced_at = datetime.now(timezone.utc)
             for entry_id in drained_ids:
                 remote_id = result["remote_ids"].get(entry_id)
-                if remote_id is not None:
-                    backend.update(
-                        entry_id,
-                        namespace=client._namespace,
-                        published_to_platform=True,
-                        remote_id=remote_id,
-                        last_synced_at=synced_at,
-                    )
-                else:
-                    backend.update(
-                        entry_id,
-                        namespace=client._namespace,
-                        published_to_platform=True,
-                        last_synced_at=synced_at,
-                    )
+                known = {"remote_id": remote_id} if remote_id is not None else {}
+                backend.update(
+                    entry_id, namespace=client._namespace, published_to_platform=True, last_synced_at=synced_at, **known
+                )
     _client_logger().debug(
         "memory_sync_queue_drained",
         op="session_start",

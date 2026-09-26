@@ -10,6 +10,8 @@ from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, Field
 
+from trw_memory._model_pin import DEFAULT_EMBEDDING_MODEL
+
 __all__ = ["_StorageConfigMixin"]
 
 
@@ -20,37 +22,18 @@ class _StorageConfigMixin(BaseModel):
     sqlite_db_name: str = Field(default="memory.db", description="SQLite database filename within namespace dir")
     embedding_dim: int = Field(default=384, gt=0, description="Dimensionality of dense embedding vectors")
     embedding_model: str = Field(
-        default="BAAI/bge-small-en-v1.5",
+        default=DEFAULT_EMBEDDING_MODEL,
         description=(
             "Sentence-transformer model for embeddings. Changing it leaves stored vectors in the old "
             "space: dense recall ignores them until `trw-memory reembed` re-encodes them"
         ),
     )
 
-    # Encryption
+    # Encryption at rest is not supported: true is refused (EncryptionAtRestUnsupportedError).
     encryption_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("encryption_enabled", "memory_encryption_enabled"),
-        description="Enable field-level encryption",
-    )
-    encryption_algorithm: str = Field(
-        default="AES-256-GCM", description="Encryption algorithm for field-level encryption"
-    )
-    key_source: Literal["keyring", "env", "file"] = Field(default="env", description="Source for encryption master key")
-    key_file_path: str = Field(
-        default="~/.trw-memory/master.key", description="Path to master key file when key_source='file'"
-    )
-    auto_generate_key: bool = Field(
-        default=True,
-        validation_alias=AliasChoices("auto_generate_key", "memory_auto_generate_key"),
-        description="Generate and persist a master key if none exists",
-    )
-
-    # Local-only mode
-    local_only: bool = Field(
-        default=False,
-        validation_alias=AliasChoices("local_only", "memory_local_only"),
-        description="Restrict to local storage only (no remote sync)",
+        description="Refused when true: trw-memory does not encrypt its store; use full-disk encryption",
     )
 
     # RBAC

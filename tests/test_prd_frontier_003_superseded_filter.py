@@ -149,7 +149,6 @@ class TestYAMLExcludeSuperseded:
 @pytest.mark.asyncio
 async def test_hybrid_recall_excludes_superseded_at_candidate_level() -> None:
     """Superseded entries must not consume candidate slots in BM25+dense pool."""
-    pytest.importorskip("rank_bm25")
     import uuid
 
     from trw_memory.client import MemoryClient
@@ -177,7 +176,6 @@ async def test_hybrid_recall_excludes_superseded_at_candidate_level() -> None:
 @pytest.mark.asyncio
 async def test_hybrid_recall_include_superseded_surfaces_them() -> None:
     """include_superseded=True must surface superseded entries in results."""
-    pytest.importorskip("rank_bm25")
     import uuid
 
     from trw_memory.client import MemoryClient

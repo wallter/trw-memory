@@ -11,19 +11,30 @@ from __future__ import annotations
 
 from pydantic import ValidationError
 
+from trw_memory.models._assertion_cap import OVERLONG, overlong
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.rbac import Permission
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.sync.delta import DeltaTracker, apply_synced_entry, find_synced_entry
 from trw_memory.tools._types import McpServer
-from trw_memory.tools.entry import in_namespace, refused_namespace
+from trw_memory.tools.entry import refused_namespace, serve_namespace
+
+#: Same ceiling as ``tools/listing.py``'s ``LIST_PAGE_MAX`` (trw-mcp's own
+#: paging loop already caps a page at this size). A shared daemon serves every
+#: tenant from one process; this reads and materializes *limit* rows in one
+#: call, so an unbounded value is a single-caller resource exhaustion of the
+#: whole daemon. trw-mcp's sync client pages at 500 (``DIRTY_PAGE_SIZE``),
+#: well under this cap, so no caller needs to change.
+MAX_SYNC_DIRTY_PAGE = 1000
 
 
 def memory_sync_dirty_page_impl(
     namespace: str, limit: int, *, backend: StorageBackend, config: MemoryConfig
 ) -> dict[str, object]:
     """The oldest *limit* rows of *namespace* that still need a push."""
+    if limit < 1 or limit > MAX_SYNC_DIRTY_PAGE:
+        return {"error": f"limit must be in [1, {MAX_SYNC_DIRTY_PAGE}]", "status": "invalid"}
     if refused := refused_namespace(namespace, Permission.READ, "sync_dirty_page", config):
         return refused
     entries = DeltaTracker.get_dirty_entries(backend, namespace=namespace, limit=limit)
@@ -74,6 +85,8 @@ def memory_sync_apply_impl(
         return {"error": str(exc), "status": "invalid"}
     if row.namespace != namespace:
         return {"error": f"entry namespace {row.namespace!r} is not {namespace!r}", "status": "invalid"}
+    if any(map(overlong, row.assertions)):  # a pulled row is a write like any other (rc6 C12)
+        return {"error": OVERLONG, "status": "invalid"}
     status, reason = apply_synced_entry(backend, config, row, synced=synced)
     return {"status": status, "reason": reason}
 
@@ -83,7 +96,7 @@ def register_sync_tools(mcp: McpServer) -> None:
 
     async def memory_sync_dirty_page(namespace: str, limit: int = 500) -> dict[str, object]:
         """Return the oldest *limit* rows of *namespace* that still need a push."""
-        return in_namespace(
+        return await serve_namespace(
             namespace,
             Permission.READ,
             "sync_dirty_page",
@@ -92,7 +105,7 @@ def register_sync_tools(mcp: McpServer) -> None:
 
     async def memory_sync_mark_synced(namespace: str, acks: dict[str, int]) -> dict[str, object]:
         """Mark pushed rows of *namespace* synced, each only while it still has the paged ``sync_seq``."""
-        return in_namespace(
+        return await serve_namespace(
             namespace,
             Permission.WRITE,
             "sync_mark_synced",
@@ -101,7 +114,7 @@ def register_sync_tools(mcp: McpServer) -> None:
 
     async def memory_sync_find(namespace: str, remote_id: str, ids: list[str]) -> dict[str, object]:
         """Find the row in *namespace* a pulled learning maps to."""
-        return in_namespace(
+        return await serve_namespace(
             namespace,
             Permission.READ,
             "sync_find",
@@ -110,7 +123,7 @@ def register_sync_tools(mcp: McpServer) -> None:
 
     async def memory_sync_apply(namespace: str, entry: dict[str, object], synced: bool = True) -> dict[str, object]:
         """Write a merged pulled row into *namespace* through the write gate; ``synced=False`` leaves it dirty."""
-        return in_namespace(
+        return await serve_namespace(
             namespace,
             Permission.WRITE,
             "sync_apply",

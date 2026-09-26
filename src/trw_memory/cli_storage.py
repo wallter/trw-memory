@@ -9,7 +9,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from trw_memory._live_stores import connect_registered
 from trw_memory.cli_json_input import JsonInputError, load_json_document, read_source_text
+from trw_memory.models._assertion_cap import OVERLONG, overlong
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.validation import validate_namespace
@@ -94,6 +96,8 @@ def _rebuild_own_export(row: dict[str, Any], namespace: str) -> MemoryEntry:
     original provenance/trust keys are preserved under ``imported_provenance`` instead.
     """
     entry = MemoryEntry.model_validate(row)
+    if any(map(overlong, entry.assertions)):
+        raise ValueError(OVERLONG)
     original = {k: v for k, v in entry.metadata.items() if k.startswith(("provenance_", "trust_"))}
     # Every attested key leaves active metadata: the gate overwrites only the keys it writes, so a
     # prefixed key it does not write would otherwise survive as unearned trust.
@@ -276,7 +280,7 @@ def handle_restore(
     cold_base = base_dir / "memory" / "cold"
     total_yaml = sum(1 for _ in cold_base.rglob("*.yaml")) if cold_base.exists() else 0
 
-    conn = sqlite3.connect(str(db_path))
+    conn = connect_registered(db_path, sqlite3, str(db_path))
     try:
         ensure_schema(conn)
         rebuilt = rebuild_from_cold(base_dir, conn)

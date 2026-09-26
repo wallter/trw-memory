@@ -166,3 +166,77 @@ def test_a_store_it_cannot_read_answers_an_error_not_an_empty_graph(tmp_path: Pa
 
     assert answer["status"] == "error"
     assert "health" not in answer
+
+
+def test_status_reports_the_embedder_without_loading_it_and_coverage_by_space(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRD-CORE-302 C3: trw-mcp reads embedder state and coverage here; a status read never loads a model."""
+    pytest.importorskip("sqlite_vec")
+    from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
+
+    def _no_load(**_kw: object) -> None:
+        raise AssertionError("memory_status must not load a model")
+
+    monkeypatch.setattr("trw_memory.tools._embedder.get_local_embedder", _no_load, raising=False)
+    store = SQLiteBackend(tmp_path / "memory.db", dim=3)
+    try:
+        space = EmbeddingSpace("d" * 64, "test-encoder:d", 3)
+        for entry_id in ("L-proven", "L-unknown", "L-plain"):
+            store.store(make_entry(entry_id=entry_id, namespace=_NS))
+        proof = VectorProvenance.for_vector(space, "x", [1.0, 0.0, 0.0])
+        store.upsert_vector("L-proven", [1.0, 0.0, 0.0], namespace=_NS, provenance=proof)
+        store.upsert_vector("L-unknown", [0.0, 1.0, 0.0], namespace=_NS)
+
+        answer = memory_status_impl(_NS, backend=store)
+    finally:
+        store.close()
+
+    embedder = answer["embedder"]
+    assert isinstance(embedder, dict) and embedder["loaded"] is False and embedder["space"] is None
+    # Nothing is loaded, so which stored space is the active one is not known yet.
+    assert answer["coverage"] == {
+        "active_space": None,
+        "other_space": None,
+        "unknown_provenance": 1,
+        "outside_active_space": None,
+        "no_vector": 1,
+    }
+
+
+def test_coverage_splits_active_and_other_space_once_the_model_is_loaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("sqlite_vec")
+    from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
+
+    active, other = EmbeddingSpace("e" * 64, "test-encoder:e", 3), EmbeddingSpace("f" * 64, "test-encoder:f", 3)
+
+    class _Loaded:
+        def embedding_space(self) -> EmbeddingSpace:
+            return active
+
+    monkeypatch.setattr("trw_memory.tools._embedder.loaded_local_embedder", lambda _key: _Loaded())
+    store = SQLiteBackend(tmp_path / "memory.db", dim=3)
+    try:
+        for entry_id, space in (("L-a1", active), ("L-a2", active), ("L-o", other)):
+            store.store(make_entry(entry_id=entry_id, namespace=_NS))
+            store.upsert_vector(
+                entry_id,
+                [1.0, 0.0, 0.0],
+                namespace=_NS,
+                provenance=VectorProvenance.for_vector(space, "x", [1.0, 0.0, 0.0]),
+            )
+
+        answer = memory_status_impl(_NS, backend=store)
+    finally:
+        store.close()
+
+    assert answer["coverage"] == {
+        "active_space": 2,
+        "other_space": 1,
+        "unknown_provenance": 0,
+        "outside_active_space": 1,
+        "no_vector": 0,
+    }
+    assert answer["embedder"]["loaded"] is True  # type: ignore[index]

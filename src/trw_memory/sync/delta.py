@@ -74,16 +74,6 @@ class DeltaTracker:
         return hashlib.sha256(raw.encode()).hexdigest()
 
     @staticmethod
-    def mark_dirty(entry_id: str, backend: StorageBackend, *, namespace: str) -> None:
-        """Mark the ``(namespace, entry_id)`` entry as dirty (needs re-sync)."""
-        entry = backend.get(entry_id, namespace=namespace)
-        if entry is None:
-            return
-        new_seq = entry.sync_seq + 1
-        new_hash = DeltaTracker.compute_sync_hash(entry)
-        backend.update(entry_id, namespace=namespace, sync_seq=new_seq, sync_hash=new_hash, last_synced_at=None)
-
-    @staticmethod
     def get_dirty_entries(
         backend: StorageBackend, since_seq: int = 0, *, namespace: str | None = None, limit: int | None = None
     ) -> list[MemoryEntry]:
@@ -177,6 +167,24 @@ class DeltaTracker:
         return count
 
 
+def ack_publish(backend: StorageBackend, entry: MemoryEntry, **fields: object) -> bool:
+    """Record a publish of *entry*'s snapshot: *fields* always, ``last_synced_at`` only while the row is
+    still the published revision (``sync_seq`` and ``sync_hash``), so an edit made since stays dirty for the next
+    push (C12 rc7)."""
+    with backend.transaction():
+        if (current := backend.get(entry.id, namespace=entry.namespace)) is None:
+            return False
+        # The hash too: store() numbers a revision from the writer's copy, so two contents can share a seq.
+        clean = (current.sync_seq, current.sync_hash) == (entry.sync_seq, entry.sync_hash)
+        backend.update(
+            entry.id,
+            namespace=entry.namespace,
+            **fields,
+            **({"last_synced_at": datetime.now(tz=timezone.utc)} if clean else {}),
+        )
+        return clean
+
+
 def find_synced_entry(backend: StorageBackend, namespace: str, remote_id: str, ids: list[str]) -> MemoryEntry | None:
     """The row in *namespace* that a pulled learning maps to: its ``remote_id`` or one of *ids*.
 
@@ -215,7 +223,9 @@ def apply_synced_entry(
     if decision.quarantined:
         store_quarantined_entry(config, decision.entry)
         return "quarantined", ""
-    backend.store(decision.entry)
-    if synced:
-        DeltaTracker.mark_synced([entry.id], backend, namespace=entry.namespace)
+    # One commit: an edit that lands between the write and its ack must not be marked clean (C12 rc7).
+    with backend.transaction():
+        backend.store(decision.entry)
+        if synced:
+            DeltaTracker.mark_synced([entry.id], backend, namespace=entry.namespace)
     return "stored", ""

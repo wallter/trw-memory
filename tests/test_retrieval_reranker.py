@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
+import structlog.testing
 
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval import reranker
@@ -102,3 +103,59 @@ class TestLazyCrossEncoderImport:
         entries = [_entry(f"e{i}", f"content {i}") for i in range(6)]
         result = cross_encode_rerank("test query", entries, top_k=2)
         assert [e.id for e in result] == ["e0", "e1"]
+
+
+class TestFailedLoadRetry:
+    """Release-verify F3: a failed load is retried after a bounded backoff, not cached for the process."""
+
+    def _setup(self, monkeypatch: pytest.MonkeyPatch, outcomes: list[object]) -> tuple[list[float], list[str]]:
+        from trw_memory.retrieval import reranker
+
+        now = [1000.0]
+        loads: list[str] = []
+
+        def fake_cross_encoder(model_name: str, **_kw: object) -> object:
+            loads.append(model_name)
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        monkeypatch.setattr(reranker, "_import_cross_encoder", lambda: True)
+        monkeypatch.setattr(reranker, "_cross_encoder_cls", fake_cross_encoder)
+        monkeypatch.setattr(reranker, "_LOADED_MODELS", {})
+        monkeypatch.setattr(reranker.time, "monotonic", lambda: now[0])
+        return now, loads
+
+    def test_a_model_fetched_after_a_failed_load_is_used_once_the_backoff_passes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trw_memory.retrieval import reranker
+
+        model = object()
+        now, loads = self._setup(monkeypatch, [OSError("not in the local cache"), model])
+
+        assert reranker._get_model("m") is None
+        now[0] += reranker._RETRY_AFTER_S - 1
+        assert reranker._get_model("m") is None
+        assert loads == ["m"], "no retry inside the backoff window"
+
+        now[0] += 1
+        assert reranker._get_model("m") is model
+        assert reranker._get_model("m") is model
+        assert loads == ["m", "m"], "a success stays cached"
+
+    def test_repeated_failures_warn_once_per_backoff_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from trw_memory.retrieval import reranker
+
+        now, _loads = self._setup(monkeypatch, [OSError("absent"), OSError("absent")])
+        with structlog.testing.capture_logs() as logs:
+            for _ in range(3):
+                reranker._get_model("m")
+            now[0] += reranker._RETRY_AFTER_S
+            for _ in range(3):
+                reranker._get_model("m")
+
+        warnings = [log for log in logs if log["event"] == "reranker_model_load_failed"]
+        assert len(warnings) == 2
+        assert "fetch_models()" in str(warnings[0]["fix"])

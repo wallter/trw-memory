@@ -6,11 +6,9 @@ import argparse
 import asyncio
 import functools
 import inspect
-import json
 import sys
 import threading
 from collections.abc import Awaitable, Callable, Coroutine
-from pathlib import Path
 from typing import ParamSpec, TypeVar, cast, overload
 
 import structlog
@@ -19,7 +17,6 @@ from trw_memory.cli_client import handle_daemon_verb, handle_reembed
 from trw_memory.cli_formatters import (
     format_import_summary,
 )
-from trw_memory.cli_json_input import JsonInputError, json_type_name, load_json_array
 from trw_memory.cli_namespace import handle_namespace
 from trw_memory.cli_parser import build_parser
 from trw_memory.cli_storage import (
@@ -29,8 +26,6 @@ from trw_memory.cli_storage import (
 )
 from trw_memory.client import MemoryClient, _create_local_backend
 from trw_memory.models.config import MemoryConfig
-from trw_memory.tools.code_index import memory_code_index_impl, memory_code_search_impl, memory_code_symbol_impl
-from trw_memory.tools.wiki_lint import memory_wiki_lint_impl
 
 __all__ = ["main"]
 
@@ -64,11 +59,6 @@ def _run_async(coro: Coroutine[object, object, R]) -> R:
     if errors:
         raise errors[0]
     return results[0]
-
-
-def _emit_json(payload: object) -> int:
-    print(json.dumps(payload, sort_keys=True))
-    return 0
 
 
 @overload
@@ -148,53 +138,6 @@ async def _handle_namespace(args: argparse.Namespace) -> int:
     return await handle_namespace(args)
 
 
-@_cli_error_boundary
-def _handle_wiki_lint(args: argparse.Namespace) -> int:
-    try:
-        raw_pages = load_json_array(Path(args.path), source=args.path)
-        pages: list[dict[str, object]] = []
-        for index, raw_page in enumerate(raw_pages):
-            if not isinstance(raw_page, dict):
-                raise JsonInputError(f"{args.path} item {index} must be a JSON object, got {json_type_name(raw_page)}")
-            pages.append({str(key): value for key, value in raw_page.items()})
-    except JsonInputError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-    return _emit_json(memory_wiki_lint_impl(pages, top_limit=args.top_limit))
-
-
-@_cli_error_boundary
-def _handle_code_index(args: argparse.Namespace) -> int:
-    return _emit_json(memory_code_index_impl(args.root, namespace=args.namespace))
-
-
-@_cli_error_boundary
-def _handle_code_search(args: argparse.Namespace) -> int:
-    return _emit_json(
-        memory_code_search_impl(
-            args.root,
-            args.query,
-            namespace=args.namespace,
-            path_glob=args.path_glob,
-            language=args.language,
-            limit=args.limit,
-        )
-    )
-
-
-@_cli_error_boundary
-def _handle_code_symbol(args: argparse.Namespace) -> int:
-    return _emit_json(
-        memory_code_symbol_impl(
-            args.root,
-            args.name,
-            namespace=args.namespace,
-            kind=args.kind,
-            path=args.path,
-        )
-    )
-
-
 async def _dispatch(args: argparse.Namespace) -> int:
     handlers: dict[str, Callable[..., object]] = {
         "store": _handle_daemon_verb,
@@ -209,10 +152,6 @@ async def _dispatch(args: argparse.Namespace) -> int:
         "restore": _handle_restore,
         "snapshot": _handle_snapshot,
         "namespace": _handle_namespace,
-        "wiki-lint": _handle_wiki_lint,
-        "code-index": _handle_code_index,
-        "code-search": _handle_code_search,
-        "code-symbol": _handle_code_symbol,
     }
     handler = handlers.get(args.command)
     if handler is None:

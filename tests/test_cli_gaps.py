@@ -1,13 +1,12 @@
 """Wave 15: coverage gap-fill for cli.py.
 
-Target lines: 69, 80, 163, 168, 173-184, 189-190, 195-208, 213-225, 247-249, 270, 277.
+Target lines: 69, 80, 163, 168, 189-190, 195-208, 213-225, 247-249, 270, 277.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -112,101 +111,6 @@ class TestHandleRestoreAndSnapshot:
                 rc = await _dispatch(args)
         mock_snapshot.assert_called_once()
         assert rc == 0
-
-
-# ---------------------------------------------------------------------------
-# lines 173-184: _handle_wiki_lint
-# ---------------------------------------------------------------------------
-
-
-class TestHandleWikiLint:
-    async def test_wiki_lint_valid_pages(self, tmp_path: Path, capsys) -> None:
-        """_dispatch('wiki-lint') with valid JSON file → prints lint result (lines 173-184)."""
-        pages_file = tmp_path / "pages.json"
-        pages_file.write_text(json.dumps([{"title": "Page 1", "content": "body"}]))
-        args = argparse.Namespace(command="wiki-lint", path=str(pages_file), top_limit=10)
-        with patch("trw_memory.cli.memory_wiki_lint_impl", return_value={"ok": True}) as mock_lint:
-            rc = await _dispatch(args)
-        assert rc == 0
-        mock_lint.assert_called_once()
-        captured = capsys.readouterr()
-        assert "ok" in captured.out
-
-    async def test_wiki_lint_non_dict_item_returns_1(self, tmp_path: Path, capsys) -> None:
-        """wiki-lint with non-dict item → JsonInputError → return 1 (line 182)."""
-        pages_file = tmp_path / "pages.json"
-        pages_file.write_text(json.dumps(["not a dict"]))
-        args = argparse.Namespace(command="wiki-lint", path=str(pages_file), top_limit=10)
-        rc = await _dispatch(args)
-        assert rc == 1
-        captured = capsys.readouterr()
-        assert "Error" in captured.err
-
-
-# ---------------------------------------------------------------------------
-# lines 189-190: _handle_code_index
-# ---------------------------------------------------------------------------
-
-
-class TestHandleCodeIndex:
-    async def test_code_index_dispatched(self, tmp_path: Path, capsys) -> None:
-        """_dispatch('code-index') → memory_code_index_impl called (lines 189-190)."""
-        args = argparse.Namespace(command="code-index", root=str(tmp_path), namespace="project:default")
-        with patch("trw_memory.cli.memory_code_index_impl", return_value={"indexed": 0}) as mock_idx:
-            rc = await _dispatch(args)
-        assert rc == 0
-        mock_idx.assert_called_once_with(str(tmp_path), namespace="project:default")
-        captured = capsys.readouterr()
-        assert "indexed" in captured.out
-
-
-# ---------------------------------------------------------------------------
-# lines 195-208: _handle_code_search
-# ---------------------------------------------------------------------------
-
-
-class TestHandleCodeSearch:
-    async def test_code_search_dispatched(self, tmp_path: Path, capsys) -> None:
-        """_dispatch('code-search') → memory_code_search_impl called (lines 195-208)."""
-        args = argparse.Namespace(
-            command="code-search",
-            root=str(tmp_path),
-            query="def main",
-            namespace="project:default",
-            path_glob=None,
-            language=None,
-            limit=10,
-        )
-        with patch("trw_memory.cli.memory_code_search_impl", return_value=[]) as mock_srch:
-            rc = await _dispatch(args)
-        assert rc == 0
-        mock_srch.assert_called_once()
-        captured = capsys.readouterr()
-        assert "[]" in captured.out
-
-
-# ---------------------------------------------------------------------------
-# lines 213-225: _handle_code_symbol
-# ---------------------------------------------------------------------------
-
-
-class TestHandleCodeSymbol:
-    async def test_code_symbol_dispatched(self, tmp_path: Path, capsys) -> None:
-        """_dispatch('code-symbol') → memory_code_symbol_impl called (lines 213-225)."""
-        args = argparse.Namespace(
-            command="code-symbol",
-            root=str(tmp_path),
-            name="my_func",
-            namespace="project:default",
-            kind=None,
-            path=None,
-        )
-        with patch("trw_memory.cli.memory_code_symbol_impl", return_value={"symbols": []}) as mock_sym:
-            rc = await _dispatch(args)
-        assert rc == 0
-        mock_sym.assert_called_once()
-        captured = capsys.readouterr()
-        assert "symbols" in captured.out
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import MappingProxyType
@@ -142,12 +142,6 @@ class SourcePolicy:
         elif str(result.get("source", "")) in {"org", "shared"}:
             bucket = 1
         return bucket, -float(cast("float", result.get("score", 0.0))) * self.weights.get(family, 1.0)
-
-    def apply(self, results: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
-        """Copy admitted results, applying the shared rank key exactly once."""
-        ranked = [(self.rank_key(result), result) for result in results if self.allows(result)]
-        ranked.sort(key=lambda item: item[0])
-        return [dict(result, score=-key[1]) for key, result in ranked]
 
 
 __all__ = [

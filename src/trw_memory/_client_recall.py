@@ -42,6 +42,8 @@ from trw_memory.lifecycle._recall import record_recall_access
 from trw_memory.lifecycle.tiers._runtime import get_tier_manager, tier_runtime_enabled
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
+from trw_memory.retrieval.lexical import bounded_query
+from trw_memory.retrieval.recall_policy import MAX_RECALL_LIMIT
 from trw_memory.retrieval.source_policy import SourcePolicy
 from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocation, RemoteCandidate
 from trw_memory.retrieval.temporal_selection import TemporalSelection
@@ -89,8 +91,9 @@ async def recall_impl(
 
     See the method docstring for full arg/return semantics.
     """
-    if limit < 1:
-        raise ValueError(f"limit must be >= 1, got {limit}")
+    if not 1 <= limit <= MAX_RECALL_LIMIT:
+        raise ValueError(f"limit must be >= 1 and <= {MAX_RECALL_LIMIT}, got {limit}")
+    query = bounded_query(query)  # every leg below, tiers and fallback included, reads at most this (C12 rc7)
     if token_budget is not None and token_budget <= 0:
         raise ValueError(f"token_budget must be positive, got {token_budget}")
     evaluation_time = as_of or datetime.now(timezone.utc)
@@ -173,7 +176,8 @@ async def recall_impl(
         async with client._lock:
             tier_local_results = cast(
                 "list[LocalCandidate]",
-                client._tier_results(
+                tier_results(
+                    client,
                     client._get_backend(),
                     query,
                     tags,
@@ -238,7 +242,7 @@ async def _finalize_recall(
 
     async with client._lock:
         results = filter_conflicting_results(client, results)
-    final = client._apply_recall_security(client._apply_budget(results[:limit], token_budget))
+    final = client._apply_recall_security(apply_budget(results[:limit], token_budget))
     if candidates is not None:
         selected_keys = {(row["namespace"], row["memory_id"]) for row in final}
         selected = [
@@ -259,7 +263,7 @@ async def _finalize_recall(
         data={"query": query[:80], "entries_returned": len(final)},
     )
     if candidates is None:
-        client._remember_results_in_tiers(final)
+        remember_results_in_tiers(client, final)
     else:
         from trw_memory._client_recall_helpers import remember_selected_candidates
 

@@ -11,6 +11,19 @@ from trw_memory.models.memory import MemoryEntry
 from trw_memory.tools.recall import _merge_tier_entries, memory_recall_impl
 
 
+def _hot_get(manager: object, entry_id: str) -> MemoryEntry | None:
+    """Test seam mirroring the removed ``TierManager.hot_get`` body exactly
+    (MRU move + ``last_accessed_at`` refresh included), used here only to
+    observe hot-cache state after ``memory_recall_impl``."""
+    with manager._hot_lock:  # type: ignore[attr-defined]
+        if entry_id not in manager._hot:  # type: ignore[attr-defined]
+            return None
+        manager._hot.move_to_end(entry_id)  # type: ignore[attr-defined]
+        entry = manager._hot[entry_id]  # type: ignore[attr-defined]
+        entry.last_accessed_at = datetime.now(timezone.utc)
+        return entry
+
+
 class TestMemoryRecallImpl:
     def test_recall_surfaces_semantic_warm_tier_hit(self, tmp_path: Path) -> None:
         from trw_memory.lifecycle.tiers._runtime import get_tier_manager
@@ -71,7 +84,7 @@ class TestMemoryRecallImpl:
 
             memories = cast("list[dict[str, object]]", result["memories"])
             assert any(memory["id"] == "M-tool-hot-ttl" for memory in memories)
-            hot_entry = manager.hot_get("M-tool-hot-ttl")
+            hot_entry = _hot_get(manager, "M-tool-hot-ttl")
             assert hot_entry is not None
             sweep_result = manager.sweep(config=cfg)
             assert sweep_result.demoted == 0

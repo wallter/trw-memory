@@ -39,6 +39,7 @@ from trw_memory.security.runtime import (
     prepare_entry_for_store,
     store_quarantined_entry,
 )
+from trw_memory.storage._shared import _BOOKKEEPING_FIELDS
 
 if TYPE_CHECKING:
     from trw_memory.client import MemoryClient, StoreResultDict
@@ -57,6 +58,11 @@ def _existing_entry_for_namespace(backend: StorageBackend, entry_id: str, namesp
     if existing.namespace != namespace:
         raise MemoryNotFoundError(f"Memory entry {entry_id!r} not found in namespace {namespace!r}")
     return existing
+
+
+def _revision(entry: MemoryEntry | None) -> dict[str, object] | None:
+    """Everything a store must not overwrite unseen: the row less the counters a recall bumps."""
+    return None if entry is None else entry.model_dump(exclude=set(_BOOKKEEPING_FIELDS))
 
 
 def _make_id() -> str:
@@ -151,7 +157,9 @@ async def store_impl(
     here lives outside the class so ``client.py`` clears the 350-LOC gate.
     """
     try:
-        validate_store_inputs(content=content, detail=detail, tags=tags, metadata=metadata, importance=importance)
+        validate_store_inputs(
+            content=content, detail=detail, tags=tags, metadata=metadata, importance=importance, assertions=assertions
+        )
     except SchemaValidationError as exc:
         append_audit_event(
             client._config,
@@ -282,7 +290,7 @@ async def store_impl(
         importance=importance,
     )
     if client._should_attempt_remote_publish(entry):
-        client._schedule_background_task(client._publish_entry(entry, embedding))
+        client._schedule_background_task(client._publish_entry(entry))
     store_result: StoreResultDict = {
         "memory_id": memory_id,
         "namespace": client._namespace,

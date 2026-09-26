@@ -15,13 +15,13 @@ from typing import Any, cast
 
 import pytest
 
-from trw_memory.client import (
-    DEFAULT_DISTILLED_RECALL_WEIGHT,
-    MemoryResultDict,
-    _get_distilled_recall_weight,
-    _is_distilled_result,
-    apply_distilled_tiering,
+from trw_memory._client_distilled_tiering import (
+    get_distilled_recall_weight as _get_distilled_recall_weight,
 )
+from trw_memory._client_distilled_tiering import (
+    is_distilled_result as _is_distilled_result,
+)
+from trw_memory.client import DEFAULT_DISTILLED_RECALL_WEIGHT, MemoryResultDict, apply_distilled_tiering
 
 
 def _make_result(

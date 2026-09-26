@@ -194,9 +194,8 @@ def ensure_security_maintenance(config: MemoryConfig) -> None:
 def _drain_security_maintenance_key(config: MemoryConfig, cache_key: str) -> None:
     """Drain one maintenance item outside scoring/write-lock paths.
 
-    Caller holds ``_AUDIT_MAINTENANCE_LOCK`` (both call sites — ``ensure_*``
-    and ``drain_security_maintenance_queue`` — hold it), so the bounded-set
-    eviction below is race-free.
+    Caller holds ``_AUDIT_MAINTENANCE_LOCK`` (``ensure_security_maintenance``
+    does), so the bounded-set eviction below is race-free.
     """
     get_audit_log(config).compact(config.audit_retention_days)
     # Clear-on-overflow eviction keeps the dedup set bounded. Re-running an
@@ -209,24 +208,6 @@ def _drain_security_maintenance_key(config: MemoryConfig, cache_key: str) -> Non
         )
         _AUDIT_MAINTENANCE_CACHE.clear()
     _AUDIT_MAINTENANCE_CACHE.add(cache_key)
-
-
-def drain_security_maintenance_queue(config: MemoryConfig) -> dict[str, object]:
-    """Drain queued audit-retention maintenance and report compact status."""
-    drained = 0
-    cache_key = f"{config.audit_log_path}:{config.audit_retention_days}"
-    retained: list[str] = []
-    with _AUDIT_MAINTENANCE_LOCK:
-        while _AUDIT_MAINTENANCE_QUEUE:
-            queued_key = _AUDIT_MAINTENANCE_QUEUE.popleft()
-            if queued_key != cache_key:
-                retained.append(queued_key)
-                continue
-            _drain_security_maintenance_key(config, queued_key)
-            drained += 1
-        _AUDIT_MAINTENANCE_QUEUE.extend(retained)
-        queued = len(_AUDIT_MAINTENANCE_QUEUE)
-    return {"drained": drained, "queued": queued}
 
 
 def security_maintenance_status() -> dict[str, object]:
@@ -261,7 +242,8 @@ def audit_entry(
     active_backend: StorageBackend,
     namespace: str | None = None,
 ) -> dict[str, object]:
-    entry = active_backend.get(learning_id, namespace=namespace if namespace is not None else DEFAULT_NAMESPACE)
+    effective_namespace = namespace if namespace is not None else DEFAULT_NAMESPACE
+    entry = active_backend.get(learning_id, namespace=effective_namespace)
     current_status = "active"
     if entry is None:
         quarantined = list_quarantined_entries(config, namespace=namespace, limit=10_000)
@@ -274,7 +256,7 @@ def audit_entry(
         return {
             "learning_id": learning_id,
             "status": "legacy_unsigned",
-            "status_history": get_status_history(config, learning_id),
+            "status_history": get_status_history(config, learning_id, namespace=effective_namespace),
         }
     verify_key = None
     try:
@@ -301,7 +283,7 @@ def audit_entry(
         "content_hash": metadata.get("provenance_content_hash", ""),
         "signature": metadata.get("provenance_signature", ""),
         "verified": verify_entry_provenance(entry, verify_key),
-        "status_history": get_status_history(config, learning_id),
+        "status_history": get_status_history(config, learning_id, namespace=effective_namespace),
     }
 
 

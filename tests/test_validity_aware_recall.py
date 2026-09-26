@@ -54,7 +54,6 @@ def test_ttl_decay_does_not_set_invalid_from(tmp_path: Path) -> None:
     assert decayed.importance < entry.importance  # confidence/importance downgraded
     assert decayed.invalid_from is None  # window NOT closed by decay
     assert decayed.invalidated_by is None
-    assert decayed.validity_state() == "open"
 
 
 def test_supersession_preserves_confidence() -> None:
@@ -63,17 +62,17 @@ def test_supersession_preserves_confidence() -> None:
     closed = entry.model_copy(update={"invalid_from": T1, "invalidated_by": "M-new"})
     # use_enum_values=True stores the string value.
     assert closed.confidence == Confidence.HIGH.value
-    assert closed.validity_state() == "superseded"
+    assert closed.invalid_from is not None
 
 
 def test_derived_state_orthogonal_to_unverified_stale() -> None:
-    """validity_state reflects only the window; confidence is the orthogonal signal."""
+    """The validity window is derived only from invalid_from; confidence is the orthogonal signal."""
     superseded_high = MemoryEntry(
         id="M-x", content="c", confidence=Confidence.HIGH, created_at=T0, invalid_from=T1, invalidated_by="M-y"
     )
     open_stale = MemoryEntry(id="M-z", content="c", confidence=Confidence.UNVERIFIED)
-    assert superseded_high.validity_state() == "superseded"
-    assert open_stale.validity_state() == "open"
+    assert superseded_high.invalid_from is not None
+    assert open_stale.invalid_from is None
 
 
 # ---------------------------------------------------------------------------

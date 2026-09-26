@@ -1,20 +1,18 @@
-"""Integration tests for bandit and graph primitives working together.
+"""Integration tests for the KnowledgeGraph primitives.
 
-Exercises PageHinkleyDetector change detection and KnowledgeGraph operations
-(co-anchored edges, cluster detection, impact propagation) with real SQLite
-state. No mocks.
+Exercises co-anchored edges, cluster detection and impact propagation with
+real SQLite state. No mocks. (The PageHinkley cases left with the bandit
+package in 4.0.0, PRD-CORE-303 FR04.)
 """
 
 from __future__ import annotations
 
 import json
-import random
 import sqlite3
 from datetime import datetime, timezone
 
 import pytest
 
-from trw_memory.bandit.change_detection import PageHinkleyDetector
 from trw_memory.graph import (
     create_co_anchored_edges,
     detect_clusters,
@@ -78,63 +76,6 @@ def _get_importance(conn: sqlite3.Connection, entry_id: str) -> float:
     row = conn.execute("SELECT importance FROM memories WHERE id = ?", (entry_id,)).fetchone()
     assert row is not None, f"Entry {entry_id} not found"
     return float(row[0])
-
-
-# ===========================================================================
-# PageHinkley Change Detection
-# ===========================================================================
-
-
-@pytest.mark.unit
-class TestPageHinkleyDetectsShift:
-    """PageHinkleyDetector fires alarm on mean shift."""
-
-    def test_no_alarm_stationary(self) -> None:
-        """50 observations from N(0,1) with no shift -- no alarm expected."""
-        rng = random.Random(42)
-        detector = PageHinkleyDetector(delta=0.01, alarm_threshold=20.0)
-
-        alarm_fired = False
-        for _ in range(50):
-            obs = rng.gauss(0.0, 1.0)
-            if detector.update(obs):
-                alarm_fired = True
-        assert not alarm_fired, "Alarm should not fire on stationary data"
-
-    def test_alarm_after_shift(self) -> None:
-        """50 stationary observations then 50 shifted by +3 -- alarm fires."""
-        rng = random.Random(42)
-        detector = PageHinkleyDetector(delta=0.01, alarm_threshold=20.0)
-
-        # Stationary phase
-        for _ in range(50):
-            detector.update(rng.gauss(0.0, 1.0))
-
-        # Shifted phase -- alarm should fire at some point
-        alarm_fired = False
-        for _ in range(50):
-            obs = rng.gauss(3.0, 1.0)
-            if detector.update(obs):
-                alarm_fired = True
-                break
-        assert alarm_fired, "Alarm should fire after mean shift from 0 to 3"
-
-    def test_serialization_roundtrip(self) -> None:
-        """to_dict / from_dict preserves internal state."""
-        rng = random.Random(99)
-        detector = PageHinkleyDetector(delta=0.02, alarm_threshold=15.0)
-
-        for _ in range(30):
-            detector.update(rng.gauss(1.0, 0.5))
-
-        state = detector.to_dict()
-        restored = PageHinkleyDetector.from_dict(state)
-
-        assert restored._delta == pytest.approx(detector._delta)
-        assert restored._alarm_threshold == pytest.approx(detector._alarm_threshold)
-        assert restored._n == detector._n
-        assert restored._sum == pytest.approx(detector._sum)
-        assert restored._h == pytest.approx(detector._h)
 
 
 # ===========================================================================

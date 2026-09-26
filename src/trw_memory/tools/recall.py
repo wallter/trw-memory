@@ -35,8 +35,8 @@ from trw_memory.namespaces.validation import validate_namespace
 # import with no local reference.
 from trw_memory.retrieval import hybrid_search_scored as hybrid_search_scored
 from trw_memory.retrieval.admission_policy import apply_admission_filter
-from trw_memory.retrieval.lexical import tokenize_query
-from trw_memory.retrieval.recall_policy import RECALL_PREFETCH_MULTIPLIER, acquire_candidates
+from trw_memory.retrieval.lexical import bounded_query, tokenize_query
+from trw_memory.retrieval.recall_policy import MAX_RECALL_LIMIT, RECALL_PREFETCH_MULTIPLIER, acquire_candidates
 from trw_memory.retrieval.source_policy import SourcePolicy
 from trw_memory.security.namespace_scope import authorize_namespaces
 from trw_memory.security.rbac import Permission, require_namespace_permission
@@ -118,7 +118,7 @@ def memory_recall_impl(
         backend: Storage backend instance.
         namespace_backend_factory: Optional factory for opening additional
             namespace-scoped backends when include_namespaces is provided.
-        limit: Maximum number of results to return.
+        limit: Maximum number of results to return, 1 to ``MAX_RECALL_LIMIT`` (10,000).
         min_score: Minimum utility score threshold (0.0 = no filter).
         tags: If provided, only entries containing ALL of these tags are returned.
         include_namespaces: Additional namespaces to search alongside primary.
@@ -134,10 +134,12 @@ def memory_recall_impl(
         status: Lifecycle status searched; ``None`` searches every status.
 
     Returns:
-        {"memories": list[dict], "total_matches": int, "query": str,
+        {"memories": list[dict], "total_matches": int,
+         "query": str (the query as read: past MAX_QUERY_CHARS or MAX_QUERY_TERMS, its bounded prefix),
          "tokens_used": int, "tokens_budget": int | None,
          "tokens_truncated": bool,
-         "related": list[dict] (when graph_depth > 0),
+         "related": list[dict] (when graph_depth > 0; at most GRAPH_RELATED_MAX),
+         "related_truncated": True (only when that bound cut the neighbours),
          "partial": True and "namespaces_omitted": {"denied": int,
          "expired": int} when one of the requested namespaces was refused by
          the authorizer or skipped as an expired team namespace -- present ONLY
@@ -155,6 +157,9 @@ def memory_recall_impl(
         wanted_status = MemoryStatus(status) if status is not None else None
     except (ConfigError, ValueError) as exc:
         return {"error": str(exc), "status": "invalid"}
+    if not 1 <= limit <= MAX_RECALL_LIMIT:  # *limit* sizes the scored candidate pool (C12 rc7)
+        return {"error": f"limit must be in [1, {MAX_RECALL_LIMIT}]", "status": "invalid"}
+    query = bounded_query(query)  # every leg below, reranker included, reads at most this
     cfg = config or MemoryConfig()
     require_namespace_permission(cfg, namespace, Permission.READ, "recall")
     initialize_canaries(cfg, backend=backend)
@@ -435,8 +440,9 @@ def memory_recall_impl(
 
     # Graph traversal for related entries
     if graph_depth > 0 and result_dicts:
-        related = _graph_related(result_dicts, graph_depth, backend, conn, namespace=namespace)
-        response["related"] = related
+        response["related"], truncated = _graph_related(result_dicts, graph_depth, backend, conn, namespace=namespace)
+        if truncated:
+            response["related_truncated"] = True
 
     return response
 

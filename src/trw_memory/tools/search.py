@@ -8,14 +8,14 @@ from __future__ import annotations
 
 import structlog
 
-from trw_memory.exceptions import ConfigError
+from trw_memory.daemon._offload import run_serialized
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
-from trw_memory.namespaces.validation import validate_namespace
-from trw_memory.security.rbac import Permission, require_namespace_permission
+from trw_memory.security.rbac import Permission
 from trw_memory.security.runtime import append_audit_event, list_quarantined_entries
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools._types import McpServer
+from trw_memory.tools.entry import refused_namespace
 
 logger = structlog.get_logger(__name__)
 
@@ -23,6 +23,17 @@ logger = structlog.get_logger(__name__)
 _VALID_STATUSES = {s.value for s in MemoryStatus}
 _SPECIAL_STATUSES = {"quarantined"}
 _MAX_SEARCH_LIMIT = 500
+#: The most rows any search reads. The filters run over what was read, on the serialized lane, so an
+#: actor filter reads this many of the newest rows, never the whole namespace (rc9).
+_SCAN_ROWS = 10_000
+
+
+def _quarantine_rows(config: MemoryConfig, namespace: str) -> int:
+    """Rows of any status in *namespace*'s quarantine store: its read takes the newest 10,000 of them."""
+    from trw_memory.security._runtime_quarantine import open_quarantine_backend
+
+    with open_quarantine_backend(config) as store:
+        return store.count(namespace=namespace)
 
 
 def memory_search_impl(
@@ -49,15 +60,13 @@ def memory_search_impl(
         limit: Maximum entries to return per page.
 
     Returns:
-        {"entries": list[dict], "total": int, "offset": int, "limit": int}
+        {"entries": list[dict], "total": int, "offset": int, "limit": int}; with
+        *actor*, "truncated": true when the newest 10,000 rows were searched and older ones were not
         or {"error": str, "status": "invalid"} on validation failure.
     """
-    try:
-        validate_namespace(namespace)
-    except ConfigError as exc:
-        return {"error": str(exc), "status": "invalid"}
     cfg = config or MemoryConfig()
-    require_namespace_permission(cfg, namespace, Permission.READ, "search")
+    if refused := refused_namespace(namespace, Permission.READ, "search", cfg):
+        return refused
     if limit < 1 or limit > _MAX_SEARCH_LIMIT:
         return {"error": f"limit must be in [1, {_MAX_SEARCH_LIMIT}]", "status": "invalid"}
     if offset < 0:
@@ -75,15 +84,13 @@ def memory_search_impl(
             memory_status = MemoryStatus(status)
 
     # Fetch all matching entries (apply status + namespace, handle pagination here)
-    fetch_limit = min(max(limit + offset, 500), 10_000)
-    if actor is not None and status != "quarantined":
-        fetch_limit = max(fetch_limit, backend.count(namespace=namespace))
+    # With an actor, one row past the window says whether older rows went unread.
+    fetch_limit = _SCAN_ROWS + 1 if actor is not None else min(max(limit + offset, 500), _SCAN_ROWS)
     if status == "quarantined":
         entries = list_quarantined_entries(
             cfg,
             namespace=namespace,
-            actor=actor,
-            limit=max(fetch_limit, 10_000) if actor is not None else fetch_limit,
+            limit=fetch_limit,
         )
     else:
         entries = backend.list_entries(
@@ -92,6 +99,8 @@ def memory_search_impl(
             limit=fetch_limit,
         )
 
+    unread = len(entries) > _SCAN_ROWS or (status == "quarantined" and _quarantine_rows(cfg, namespace) > _SCAN_ROWS)
+    truncated, entries = actor is not None and unread, entries[:_SCAN_ROWS]
     # Apply tag filter in Python (not all backends support tag filtering in list_entries)
     if tags:
         tag_set = set(tags)
@@ -133,6 +142,7 @@ def memory_search_impl(
         "total": total,
         "offset": offset,
         "limit": limit,
+        **({"truncated": True} if truncated else {}),
     }
 
 
@@ -143,7 +153,6 @@ def register_search_tool(mcp: McpServer) -> None:
         mcp: FastMCP server instance (imported lazily to keep fastmcp optional).
     """
     from trw_memory.integrations._backend import create_backend_from_config
-    from trw_memory.models.config import MemoryConfig
 
     async def memory_search(
         namespace: str = "project:default",
@@ -167,18 +176,21 @@ def register_search_tool(mcp: McpServer) -> None:
         Returns:
             {"entries": [...], "total": int, "offset": int, "limit": int}
         """
-        cfg = MemoryConfig()
-        with create_backend_from_config(cfg, namespace) as backend:
-            return memory_search_impl(
-                namespace,
-                backend=backend,
-                config=cfg,
-                status=status,
-                tags=tags,
-                sort_by=sort_by,
-                offset=offset,
-                limit=limit,
-                actor=actor,
-            )
+
+        def search() -> dict[str, object]:
+            with create_backend_from_config(cfg := MemoryConfig(), namespace) as backend:
+                return memory_search_impl(
+                    namespace,
+                    backend=backend,
+                    config=cfg,
+                    status=status,
+                    tags=tags,
+                    sort_by=sort_by,
+                    offset=offset,
+                    limit=limit,
+                    actor=actor,
+                )
+
+        return await run_serialized(search)
 
     mcp.tool()(memory_search)

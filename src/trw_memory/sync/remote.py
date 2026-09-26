@@ -8,7 +8,6 @@ import httpx
 from trw_memory.sync._remote_common import (
     AnonymizedEntry,
     FETCH_TIMEOUT,
-    LOCAL_ONLY_ERROR_MESSAGE,
     MAX_DETAIL_LENGTH,
     MAX_TAGS_COUNT,
     MAX_SUMMARY_LENGTH,
@@ -16,7 +15,6 @@ from trw_memory.sync._remote_common import (
     PublishResult,
     RetryDrainResult,
     SnapshotHashPayload,
-    _raise_local_only_violation,
     is_valid_platform_url,
 )
 from trw_memory.sync._remote_fetch import SharedFetchResult, fetch_shared_memories
@@ -30,7 +28,6 @@ from trw_memory.sync._remote_publish import (
 __all__ = [
     "AnonymizedEntry",
     "FETCH_TIMEOUT",
-    "LOCAL_ONLY_ERROR_MESSAGE",
     "MAX_DETAIL_LENGTH",
     "MAX_TAGS_COUNT",
     "MAX_SUMMARY_LENGTH",
@@ -39,7 +36,6 @@ __all__ = [
     "RetryDrainResult",
     "SnapshotHashPayload",
     "_anonymize_entry",
-    "_raise_local_only_violation",
     "drain_retry_queue",
     "SharedFetchResult",
     "fetch_shared_memories",

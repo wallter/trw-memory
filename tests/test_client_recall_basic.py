@@ -150,7 +150,6 @@ class TestRecall:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
         monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
         monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
-        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
         monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
         monkeypatch.setenv("MEMORY_PLATFORM_API_KEY", "test-key")
         client = MemoryClient(namespace="default", mode="local")

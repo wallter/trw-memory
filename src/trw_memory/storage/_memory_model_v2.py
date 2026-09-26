@@ -31,17 +31,14 @@ import contextlib
 import json
 import sqlite3
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import structlog
 from pydantic import BaseModel, Field
 
+from trw_memory._live_stores import connect_registered
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryType
 from trw_memory.storage.persistence import read_yaml, write_yaml
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 logger = structlog.get_logger(__name__)
 
@@ -246,7 +243,7 @@ def _apply_yaml_rewrites(plan: dict[Path, dict[str, object]]) -> int:
 def _snapshot_backup(conn: sqlite3.Connection, backup_path: Path) -> None:
     """Create a SQLite backup-API snapshot of *conn* at *backup_path*."""
     backup_path.parent.mkdir(parents=True, exist_ok=True)
-    dest = sqlite3.connect(str(backup_path))
+    dest = connect_registered(backup_path, sqlite3, str(backup_path))
     try:
         conn.backup(dest)
     finally:
@@ -261,8 +258,8 @@ def restore_from_backup(db_path: Path, backup_path: Path) -> None:
     """
     if not backup_path.exists():
         raise StorageError(f"backup snapshot not found: {backup_path}", path=str(backup_path))
-    source = sqlite3.connect(str(backup_path))
-    dest = sqlite3.connect(str(db_path))
+    source = connect_registered(backup_path, sqlite3, str(backup_path))
+    dest = connect_registered(db_path, sqlite3, str(db_path))
     try:
         source.backup(dest)
         dest.commit()
@@ -321,7 +318,7 @@ def run_memory_model_v2_cutover(
     cold_plan, cold_report = _plan_yaml_rewrites(cold_dir, kind="cold_yaml")
     yaml_report = active_report + cold_report
 
-    conn = sqlite3.connect(str(db_path))
+    conn = connect_registered(db_path, sqlite3, str(db_path))
     backup_path: Path | None = None
     try:
         # WAL checkpoint before snapshot; a non-WAL db raises OperationalError.
@@ -390,8 +387,3 @@ def run_memory_model_v2_cutover(
         )
     finally:
         conn.close()
-
-
-# Static type-checker anchor: the schema module imports this callable to register
-# _MIGRATIONS[2]. Keeping the alias explicit documents the wiring contract.
-_MIGRATION_V2: Callable[[sqlite3.Cursor], None] = migrate_sqlite_importance_type

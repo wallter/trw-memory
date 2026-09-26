@@ -33,7 +33,7 @@ MAX_TRAVERSAL_DEPTH = 3
 
 
 #: The one edge type that is no longer materialised. It stays a member of
-#: :data:`VALID_EDGE_TYPES` — ``trw_graph_related`` still accepts it — but it is
+#: :data:`VALID_EDGE_TYPES` — the graph traversal callable behind trw-mcp's trw_recall graph mode still accepts it — but it is
 #: answered by derivation over the ``memory_tags`` index instead of by a row.
 DERIVED_EDGE_TYPE = "tag_cooccurrence"
 

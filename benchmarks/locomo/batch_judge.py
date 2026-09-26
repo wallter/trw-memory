@@ -59,6 +59,7 @@ STOP_FILE = ROOT / "STOP"
 TERMINAL = {"completed", "failed", "expired", "cancelled"}
 MAX_TOKENS = 4096  # the stock runner's default for both roles
 JUDGE_ATTEMPTS = 5  # the stock LLMClient's max_retries
+NEW_BATCH_GRACE = 300.0  # seconds a freshly submitted batch id may 404 before it counts as missing
 ANSWER_ATTEMPTS = 3  # --retry-bad-answers cap
 PROTOCOL = 3  # bump when request construction or parsing changes
 
@@ -112,7 +113,9 @@ def sha256(data: bytes) -> str:
 
 def chat_body(model: str, system: str, user: str, *, json_mode: bool, reasoning: str | None) -> dict[str, Any]:
     messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": user}]
-    body: dict[str, Any] = {"model": model, "messages": messages, "max_tokens": MAX_TOKENS}
+    # usage accounting: without it OpenRouter reports cost 0, and a BYOK-routed call reports none at all
+    body: dict[str, Any] = {"model": model, "messages": messages, "max_tokens": MAX_TOKENS,
+                            "usage": {"include": True}}  # fmt: skip
     if reasoning:
         body["reasoning"] = {"effort": reasoning}
     else:
@@ -325,9 +328,22 @@ def key_info() -> dict[str, Any] | None:
         return None
 
 
+def key_spend(info: dict[str, Any] | None) -> float | None:
+    """Total spend on the key. ``usage`` excludes BYOK (requests billed to the provider account
+    through a connected key), so add ``byok_usage``; prefer the limit's own accounting when set."""
+    if not info:
+        return None
+    limit, remaining = info.get("limit"), info.get("limit_remaining")
+    if limit is not None and remaining is not None and info.get("include_byok_in_limit"):
+        return float(limit) - float(remaining)
+    usage = info.get("usage")
+    if usage is None:
+        return None
+    return float(usage) + float(info.get("byok_usage") or 0.0)
+
+
 def key_usage() -> float | None:
-    info = key_info()
-    return float(info["usage"]) if info and info.get("usage") is not None else None
+    return key_spend(key_info())
 
 
 def result_rows(batch: dict[str, Any]) -> list[dict[str, Any]]:
@@ -414,7 +430,15 @@ def poll_batches(state: State, role: str, phase: str, interval: float, fetch: Ca
         if not open_rows:
             return
         for r in open_rows:
-            b = fetch(r["id"])
+            try:
+                b = fetch(r["id"])
+            except SystemExit as exc:
+                # A just-submitted batch can 404 for a few seconds before it is readable. Only a
+                # lasting 404 is real: the batch id must resolve within NEW_BATCH_GRACE.
+                if "HTTP 404" in str(exc) and time.time() - r["submitted"] < NEW_BATCH_GRACE:
+                    print(f"batch {r['id']} not visible yet; retrying", flush=True)
+                    continue
+                raise
             b = b["data"] if isinstance(b.get("data"), dict) else b
             r["status"] = b.get("status", r["status"])
             if r["status"] in TERMINAL:

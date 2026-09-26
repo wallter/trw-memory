@@ -5,8 +5,8 @@ Reads two per-question JSON files written by ``locomo/retrieval_eval.py`` or
 ``(conv, q)``, and reports:
 
 * a per-category table (LOCOMO categories by name, including multi-hop):
-  exact McNemar for every ``hit@k``, Wilcoxon signed-rank for ``recall@k`` and
-  ``mrr``;
+  exact McNemar for every binary metric (``hit@k``, ``complete@k``), Wilcoxon
+  signed-rank for ``recall@k`` and ``mrr``;
 * overall McNemar with the discordant counts, the two-sided p-value and the
   one-sided p-value in the REGRESSION direction (B worse than A) -- the number a
   "no significant regression" gate needs;
@@ -87,8 +87,13 @@ def wilcoxon_p(diffs: list[float], alternative: str = "two-sided") -> float:
     return float(wilcoxon(diffs, zero_method="wilcox", alternative=alternative).pvalue)
 
 
+def is_binary(metric: str) -> bool:
+    """A 0/1 per-question outcome, so a paired comparison is exact McNemar on the discordant pairs."""
+    return metric.startswith(("hit@", "complete@"))
+
+
 def paired_p(keys: list[Key], a: Rows, b: Rows, metric: str) -> float:
-    if metric.startswith("hit@"):
+    if is_binary(metric):
         return mcnemar(*discordant(keys, a, b, metric))
     return wilcoxon_p([float(b[i][metric]) - float(a[i][metric]) for i in keys])
 
@@ -158,7 +163,7 @@ def rows_returned(keys: list[Key], a: Rows, b: Rows) -> dict[str, Any] | None:
 def default_metrics(payload: dict[str, Any], rows: Rows) -> list[str]:
     ks = payload.get("k") or [10, 50]
     sample = next(iter(rows.values()), {})
-    names = [f"hit@{k}" for k in ks] + [f"recall@{k}" for k in ks] + ["mrr"]
+    names = [f"{m}@{k}" for m in ("hit", "complete", "recall") for k in ks] + ["mrr"]
     return [m for m in names if m in sample]
 
 
@@ -195,7 +200,7 @@ def compare(
     }
     overall = {}
     for m in metrics:
-        if m.startswith("hit@"):
+        if is_binary(m):
             a_only, b_only = discordant(keys, a, b, m)
             overall[m] = {
                 "a_only": a_only,
@@ -219,7 +224,7 @@ def render(result: dict[str, Any], metrics: list[str], label_a: str, label_b: st
     print(f"A={label_a}  B={label_b}  paired n={result['n']}", end="")
     if result["unpaired_a"] or result["unpaired_b"]:
         print(f"  (unpaired dropped: A {result['unpaired_a']}, B {result['unpaired_b']})", end="")
-    print("\ncells: A% > B%, p (McNemar for hit@k, Wilcoxon otherwise)")
+    print("\ncells: A% > B%, p (McNemar for hit@k and complete@k, Wilcoxon otherwise)")
     print(f"{'category':26s} {'n':>4s} " + " ".join(f"{m:>18s}" for m in metrics))
     for group, row in result["table"].items():
         cells = [f"{100 * row[m]['a']:5.1f}>{100 * row[m]['b']:5.1f} p{row[m]['p']:.3f}" for m in metrics]
@@ -267,7 +272,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("b", help="candidate per-question JSON (B)")
     p.add_argument("--label-a", default=None)
     p.add_argument("--label-b", default=None)
-    p.add_argument("--metrics", default="", help="comma list; default: hit@k, recall@k for the run's k, and mrr")
+    p.add_argument(
+        "--metrics", default="", help="comma list; default: hit@k, complete@k, recall@k for the run's k, and mrr"
+    )
     p.add_argument("--tost", default=None, metavar="METRIC", help="TOST equivalence on this metric")
     p.add_argument("--margin", type=float, default=None, help="TOST equivalence margin (metric units)")
     p.add_argument("--tost-test", choices=("wilcoxon", "t"), default="wilcoxon")

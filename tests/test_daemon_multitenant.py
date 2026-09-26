@@ -100,13 +100,16 @@ def _spawn_counted_daemon(user_dir: Path, constructions: Path, hf_cache: str) ->
         "HF_HUB_CACHE": hf_cache,
         "CORE298_CONSTRUCTIONS": str(constructions),
     }
-    return subprocess.Popen(
-        [sys.executable, "-c", _LAUNCHER, "serve", "http", "--idle-shutdown-seconds", "120"],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+    # A file, never an undrained pipe: the daemon logs each refused call's traceback from its
+    # event loop, and once a pipe's buffer fills that write blocks every request (C2 Linux, 7.0).
+    with (constructions.parent / "daemon.log").open("w", encoding="utf-8") as log:
+        return subprocess.Popen(
+            [sys.executable, "-c", _LAUNCHER, "serve", "http", "--idle-shutdown-seconds", "120"],
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
 
 
 def _events(constructions: Path, kind: str) -> list[str]:

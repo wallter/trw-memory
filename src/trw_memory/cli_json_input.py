@@ -1,8 +1,8 @@
 """Structural JSON-file input seam for the trw-memory CLI.
 
-A small deep module whose Interface is three functions and one exception, and
+A small deep module whose Interface is two functions and one exception, and
 whose Implementation hides every way reading a JSON document from disk can fail.
-Callers (``import``, ``wiki-lint``) hand it a path and receive either valid data
+Callers (e.g. ``import``) hand it a path and receive either valid data
 or a single :class:`JsonInputError` whose message is *content-free*: it names the
 source and the structural reason (error class / shape) but never echoes payload
 bytes, failing JSON snippets, or the raw interpreter exception string.
@@ -62,32 +62,3 @@ def load_json_document(path: Path, *, source: str) -> Any:
         return json.loads(text)
     except json.JSONDecodeError as exc:
         raise JsonInputError(f"{source} is not valid JSON ({exc.msg} at line {exc.lineno} column {exc.colno})") from exc
-
-
-def load_json_array(path: Path, *, source: str) -> list[Any]:
-    """Load a JSON document and require its top-level value to be an array.
-
-    Raises a structural :class:`JsonInputError` (naming the actual JSON type,
-    not its contents) when the document is not a list.
-    """
-    value = load_json_document(path, source=source)
-    if not isinstance(value, list):
-        raise JsonInputError(f"{source} must be a JSON array, got {json_type_name(value)}")
-    return value
-
-
-def json_type_name(value: object) -> str:
-    """Return the JSON type name for ``value`` for use in structural diagnostics."""
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "boolean"
-    if isinstance(value, str):
-        return "string"
-    if isinstance(value, (int, float)):
-        return "number"
-    if isinstance(value, dict):
-        return "object"
-    if isinstance(value, list):
-        return "array"
-    return type(value).__name__

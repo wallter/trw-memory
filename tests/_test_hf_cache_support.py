@@ -17,6 +17,8 @@ from typing import Any
 
 import pytest
 
+from trw_memory._model_pin import pinned_revision
+
 DEFAULT_REPO_ID = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_REVISION = "0f1e2d3c4b5a69788796a5b4c3d2e1f009182736"
 
@@ -49,7 +51,7 @@ def build_model_cache(
     repo_id: str = DEFAULT_REPO_ID,
     *,
     files: Mapping[str, str] | None = None,
-    revision: str = DEFAULT_REVISION,
+    revision: str | None = None,
 ) -> Path:
     """Create an HF hub cache under ``root/hub`` and return the snapshot dir.
 
@@ -58,6 +60,8 @@ def build_model_cache(
     payload = dict(DEFAULT_SNAPSHOT_FILES if files is None else files)
     repo_cache = root / "hub" / _repo_folder(repo_id)
     blobs = repo_cache / "blobs"
+    # A pinned model is only found at its pinned commit (PRD-CORE-302 FR06).
+    revision = revision or pinned_revision(repo_id) or DEFAULT_REVISION
     snapshot = repo_cache / "snapshots" / revision
     (repo_cache / "refs").mkdir(parents=True, exist_ok=True)
     blobs.mkdir(parents=True, exist_ok=True)
@@ -95,7 +99,7 @@ def use_fixture_cache(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
 
     monkeypatch.setenv("HF_HOME", str(root))
     monkeypatch.setattr(constants, "HF_HUB_CACHE", str(root / "hub"))
-    for var in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "TRW_OFFLINE", "HF_HUB_OFFLINE", "MEMORY_LOCAL_ONLY"):
+    for var in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HUB_OFFLINE"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -130,10 +134,14 @@ def install_fake_sentence_transformers(
             self,
             model_name: str,
             *,
+            revision: str = "main",
             local_files_only: bool = False,
             trust_remote_code: bool = False,
+            device: str | None = None,
         ) -> None:
             captured["model_name"] = model_name
+            captured["device"] = device
+            captured["revision"] = revision
             captured["local_files_only"] = local_files_only
             captured["trust_remote_code"] = trust_remote_code
             if not local_files_only:
@@ -183,7 +191,7 @@ def build_loadable_model_cache(
     root: Path,
     repo_id: str = DEFAULT_REPO_ID,
     *,
-    revision: str = DEFAULT_REVISION,
+    revision: str | None = None,
 ) -> Path:
     """Build a real, loadable ST model inside an HF-layout cache under ``root``.
 
@@ -198,6 +206,8 @@ def build_loadable_model_cache(
     from transformers import BertConfig, BertModel, BertTokenizerFast
 
     repo_cache = root / "hub" / _repo_folder(repo_id)
+    # A pinned model is only found at its pinned commit (PRD-CORE-302 FR06).
+    revision = revision or pinned_revision(repo_id) or DEFAULT_REVISION
     snapshot = repo_cache / "snapshots" / revision
     snapshot.mkdir(parents=True, exist_ok=True)
     (repo_cache / "refs").mkdir(parents=True, exist_ok=True)

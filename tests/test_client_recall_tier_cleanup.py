@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from trw_memory._client_recall import merge_tier_results
 from trw_memory.client import MemoryClient, MemoryResultDict
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -136,7 +137,7 @@ class TestRecall:
             )
         ]
 
-        merged = MemoryClient._merge_tier_results(local_results, tier_results, 5, ["deploy"], cfg, None)
+        merged = merge_tier_results(local_results, tier_results, 5, ["deploy"], cfg, None)
         assert [result["memory_id"] for result in merged] == ["M-tier", "M-local"]
 
     def test_merge_tier_results_preserves_hybrid_order_by_default(self) -> None:
@@ -197,7 +198,7 @@ class TestRecall:
             )
         ]
 
-        merged = MemoryClient._merge_tier_results(local_results, tier_results, 2, ["deploy"], cfg, None)
+        merged = merge_tier_results(local_results, tier_results, 2, ["deploy"], cfg, None)
 
         assert cfg.recall_preserve_hybrid_order is True
         assert [result["memory_id"] for result in merged] == ["M-local-1", "M-local-2"]

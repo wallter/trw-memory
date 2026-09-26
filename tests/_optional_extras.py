@@ -11,10 +11,6 @@ from importlib.util import find_spec
 
 import pytest
 
-requires_bm25 = pytest.mark.skipif(
-    find_spec("rank_bm25") is None,
-    reason="needs rank_bm25: bm25_search returns [] without it; install trw-memory[bm25]",
-)
 requires_sqlite_vec = pytest.mark.skipif(
     find_spec("sqlite_vec") is None,
     reason="needs sqlite-vec: the SQLite backend reports supports_vectors() False without it; it is a base dependency, so reinstall trw-memory",

@@ -24,9 +24,9 @@ class TestHandleIntegrityRegression:
         assert backend.integrity_warning is True
 
 
-class TestReconnectSqlCipherPath:
-    def test_sqlcipher_path_calls_open_and_configure_with_key(self, tmp_path: Path) -> None:
-        """_sqlcipher_key_hex is not None → open_and_configure called with key (line 57).
+class TestReconnectPath:
+    def test_reconnect_reopens_through_open_and_configure(self, tmp_path: Path) -> None:
+        """reconnect reopens the store through ``open_and_configure(db_path)``.
 
         ``prepare_db_file_mode`` is deliberately NOT patched here — it is part of
         the path under test — so the db path must be a real, non-symlinked
@@ -34,7 +34,6 @@ class TestReconnectSqlCipherPath:
         symlink to ``/private/tmp`` and the secure-open check refuses it.
         """
         backend = MagicMock()
-        backend._sqlcipher_key_hex = "deadbeef"
         backend._db_path = str(tmp_path / "test.db")
         backend._dbapi = MagicMock()
         backend.reconnect_count = 0
@@ -49,11 +48,7 @@ class TestReconnectSqlCipherPath:
         ):
             reconnect(backend)
 
-        backend._open_and_configure.assert_called_once_with(
-            backend._db_path,
-            dbapi=backend._dbapi,
-            sqlcipher_key_hex="deadbeef",
-        )
+        backend._open_and_configure.assert_called_once_with(backend._db_path)
         assert backend.reconnect_count == 1
 
     @pytest.mark.parametrize(("depth", "in_transaction"), [(1, False), (0, True)])
@@ -71,7 +66,6 @@ class TestReconnectSqlCipherPath:
         old_conn = backend._conn
         old_conn.in_transaction = False
         backend._skip_commit_depth = 0
-        backend._sqlcipher_key_hex = None
         backend._db_path = "/tmp/test.db"
         backend.reconnect_count = 4
         candidate = backend._open_and_configure.return_value

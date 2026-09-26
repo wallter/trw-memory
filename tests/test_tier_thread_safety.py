@@ -19,6 +19,19 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 
 
+def _hot_get(mgr: TierManager, entry_id: str) -> MemoryEntry | None:
+    """Test seam mirroring the removed ``TierManager.hot_get`` body exactly
+    (MRU move + ``last_accessed_at`` refresh included), for tests that use it
+    only to observe hot-cache state after some other operation under test."""
+    with mgr._hot_lock:
+        if entry_id not in mgr._hot:
+            return None
+        mgr._hot.move_to_end(entry_id)
+        entry = mgr._hot[entry_id]
+        entry.last_accessed_at = datetime.now(timezone.utc)
+        return entry
+
+
 def _make_entry(entry_id: str, content: str = "test", last_accessed_at: datetime | None = None) -> MemoryEntry:
     """Create a minimal MemoryEntry for testing."""
     now = datetime.now(timezone.utc)
@@ -78,7 +91,7 @@ class TestHotTierThreadSafety:
         # Verify all entries exist (up to hot_max_entries capacity)
         found = 0
         for i in range(num_entries):
-            entry = mgr.hot_get(f"entry-{i}")
+            entry = _hot_get(mgr, f"entry-{i}")
             if entry is not None:
                 found += 1
                 assert entry.content == f"content-{i}"
@@ -103,7 +116,7 @@ class TestHotTierThreadSafety:
         def get_worker(i: int) -> None:
             try:
                 # May or may not find the entry depending on timing
-                mgr.hot_get(f"interleaved-{i}")
+                _hot_get(mgr, f"interleaved-{i}")
             except Exception as exc:
                 errors.append(exc)
 
@@ -142,7 +155,7 @@ class TestHotTierThreadSafety:
 
         assert not errors, f"Errors during concurrent overwrite: {errors}"
         # The key should exist with SOME valid content
-        result = mgr.hot_get(key)
+        result = _hot_get(mgr, key)
         assert result is not None
         assert result.content.startswith("content-")
         mgr.close()
@@ -173,12 +186,12 @@ class TestHotTierEvictOnWarmAddFailure:
         mgr.hot_put("entry-new", _make_entry("entry-new", "fresh-write"))
 
         # The freshly written entry MUST survive — it was not discarded.
-        kept = mgr.hot_get("entry-new")
+        kept = _hot_get(mgr, "entry-new")
         assert kept is not None
         assert kept.content == "fresh-write"
 
         # The LRU evictee (entry-0) was dropped to resolve overflow.
-        assert mgr.hot_get("entry-0") is None
+        assert _hot_get(mgr, "entry-0") is None
 
         # Overflow is resolved: hot tier is back at capacity, not capacity + 1.
         assert len(mgr._hot) == cfg.hot_max_entries

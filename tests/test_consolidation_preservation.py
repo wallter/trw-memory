@@ -39,10 +39,10 @@ def _sources() -> list[MemoryEntry]:
         MemoryEntry(
             id="M-second",
             namespace="project/preservation",
-            content="Preserve permanent constraints too",
+            content="Preserve high constraints too",
             access_count=10,
             recall_count=11,
-            protection_tier=ProtectionTier.PERMANENT,
+            protection_tier=ProtectionTier.HIGH,
             assertions=[common, extra],
             confidence=Confidence.HIGH,
         ),
@@ -83,7 +83,7 @@ def test_public_cycle_preserves_constraints_and_feedback(tmp_path: Path, monkeyp
         replacement = active[0]
         assert replacement.access_count == 15
         assert replacement.recall_count == 17
-        assert replacement.protection_tier == ProtectionTier.PERMANENT
+        assert replacement.protection_tier == ProtectionTier.CRITICAL
         assert len(replacement.assertions) == 2
         assert {(a.type, a.pattern, a.target) for a in replacement.assertions} == {
             (a.type, a.pattern, a.target) for source in originals for a in source.assertions

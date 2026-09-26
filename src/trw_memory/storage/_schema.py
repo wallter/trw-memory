@@ -64,12 +64,32 @@ logger = structlog.get_logger(__name__)
 # ``sessions_surfaced`` / ``avg_rework_delta`` / ``outcome_correlation`` are
 # dropped). It is registered ONCE, in :mod:`trw_memory.storage._schema_v5`.
 # Schema 6 adds nullable vector provenance; legacy vectors stay unknown.
-SCHEMA_VERSION = 6
+# ``SCHEMA_VERSION`` == 7 is W10 (trw-memory 4.0.0): the wiki subsystem
+# (``trw_memory.wiki``, ``memory_wiki_lint``, the ``wiki-lint`` CLI verb) is
+# retired, and its sole persisted artifact — the ``wiki_refs`` sidecar table
+# and its two indexes — is dropped. A pre-migration snapshot preserves any
+# historical wiki data on disk; an entry's own ``metadata`` (where a wiki
+# payload lived) is untouched and stays readable.
+# ``SCHEMA_VERSION`` == 8 (trw-memory 4.0.0, security review Q3) adds a
+# ``namespace`` column to the ``quarantine_reviews`` table (created lazily by
+# ``security._runtime_quarantine.append_review_log``, outside this module's
+# DDL, so it needs an explicit ALTER rather than a fresh-bootstrap column).
+# ``learning_id`` there is caller-choosable and can collide across namespaces
+# (PRD-CORE-294); without the column, one namespace's terminal review decision
+# for id ``x`` made every OTHER namespace's own ``x`` permanently
+# "already_resolved" and leaked the first namespace's reviewer identity to the
+# second. See ``_migrate_v8_quarantine_review_namespace``.
+SCHEMA_VERSION = 8
 
 #: The highest schema version whose delta DROPS or RENAMES rather than adding.
 #: ``ensure_schema`` snapshots the store before migrating a database below this
 #: and not above it, so an additive delta does not pay for a whole-file copy.
-_LAST_DESTRUCTIVE_SCHEMA_VERSION = 5
+#: Schema 8 is additive (ALTER ADD COLUMN + an UPDATE backfill, no DROP/RENAME)
+#: but still moves this bound up to 8: the quarantine DB is exactly the store a
+#: security reviewer may need to recover the pre-migration reviewer/decision
+#: history from, so it gets the same protect-before-rewrite snapshot as the
+#: v7 wiki_refs drop rather than a bare, unprotected ALTER.
+_LAST_DESTRUCTIVE_SCHEMA_VERSION = 8
 
 
 class SchemaDowngradeError(RuntimeError):
@@ -288,7 +308,6 @@ def _bootstrap_and_backfill(cursor: sqlite3.Cursor) -> None:
     """
     cursor.execute(CREATE_MEMORIES)
     cursor.execute(CREATE_GRAPH_EDGES)
-    cursor.execute(CREATE_WIKI_REFS)
     cursor.execute(CREATE_NAMESPACES)
     cursor.execute(CREATE_MEMORY_TAGS)
 
@@ -305,8 +324,6 @@ def _bootstrap_and_backfill(cursor: sqlite3.Cursor) -> None:
 
     cursor.execute(CREATE_IDX_MGE_SOURCE)
     cursor.execute(CREATE_IDX_MGE_TARGET)
-    cursor.execute(CREATE_IDX_WIKI_REFS_SOURCE)
-    cursor.execute(CREATE_IDX_WIKI_REFS_TARGET)
 
     # Migration: add missing columns to memory_namespaces
     for col_name, col_def in [
@@ -712,6 +729,85 @@ def _migrate_v6_vector_provenance(cursor: sqlite3.Cursor) -> None:
 
 
 _MIGRATIONS[6] = _migrate_v6_vector_provenance
+
+
+def _migrate_v7_retire_wiki_refs(cursor: sqlite3.Cursor) -> None:
+    """Drop the retired ``wiki_refs`` sidecar table and its indexes (W10, trw-memory 4.0.0).
+
+    ``trw_memory.wiki`` (the ``memory_wiki_lint`` tool, the ``wiki-lint`` CLI
+    verb, and the ``query_wiki_*_refs`` backend methods) was removed with no
+    replacement. This delta only drops the sidecar edge index it maintained;
+    an entry's own ``metadata`` column — where a wiki payload actually lived —
+    is untouched by a bare ``DROP TABLE`` and stays readable. Idempotent: a
+    fresh database that never created ``wiki_refs`` (see
+    ``_bootstrap_and_backfill``, which stopped creating it at this version)
+    hits ``IF EXISTS`` no-ops on both statements.
+    """
+    cursor.execute("DROP INDEX IF EXISTS idx_wiki_refs_source")
+    cursor.execute("DROP INDEX IF EXISTS idx_wiki_refs_target")
+    cursor.execute("DROP TABLE IF EXISTS wiki_refs")
+
+
+_MIGRATIONS[7] = _migrate_v7_retire_wiki_refs
+
+
+def _migrate_v8_quarantine_review_namespace(cursor: sqlite3.Cursor) -> None:
+    """Add ``namespace`` to a pre-existing ``quarantine_reviews`` table (Q3).
+
+    ``quarantine_reviews`` is created lazily, outside this module's DDL, by
+    ``security._runtime_quarantine.append_review_log``/``get_status_history`` —
+    so most databases (anything that never quarantined anything) simply do not
+    have the table, and this is a no-op for them; a database created by the
+    fixed code already gets the column from the updated ``CREATE TABLE IF NOT
+    EXISTS`` those functions issue.
+
+    For a database that DOES carry the pre-fix table: add the column (additive,
+    idempotent — a duplicate-column ``OperationalError`` is suppressed like
+    every other ALTER in this file), then best-effort backfill it from
+    ``memories`` in the SAME database file (the quarantine DB's own store of
+    still-quarantined rows) by matching on id.
+
+    A row is backfilled ONLY when both hold:
+      1. exactly one namespace currently names this id in ``memories`` here, and
+      2. this id was quarantined (a ``"quarantined"`` review-log row) exactly
+         ONCE, ever, in this database.
+
+    (2) closes an adversarial-review counter-example to a naive "match on
+    current `memories`" backfill: if namespace A's row for id ``x`` was
+    approved (and so deleted from this quarantine DB) and namespace B *later*
+    quarantined its OWN, unrelated ``x``, condition (1) alone would match
+    uniquely to B — mislabelling A's historical reviewer and decision as B's,
+    reproducing the exact cross-namespace leak this migration exists to close.
+    Two review-log rows for the same id is exactly that signal, so such an id
+    is left at ``''`` (unknown) rather than guessed, even where (1) holds.
+    """
+    tables = {
+        str(row[0])
+        for row in cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'quarantine_reviews'"
+        ).fetchall()
+    }
+    if "quarantine_reviews" not in tables:
+        return
+    columns = {str(row[1]) for row in cursor.execute("PRAGMA table_info(quarantine_reviews)").fetchall()}
+    if "namespace" not in columns:
+        with contextlib.suppress(sqlite3.OperationalError):
+            cursor.execute("ALTER TABLE quarantine_reviews ADD COLUMN namespace TEXT NOT NULL DEFAULT ''")
+    cursor.execute(
+        """
+        UPDATE quarantine_reviews
+        SET namespace = (SELECT namespace FROM memories WHERE memories.id = quarantine_reviews.learning_id)
+        WHERE (namespace IS NULL OR namespace = '')
+          AND (SELECT COUNT(*) FROM memories WHERE memories.id = quarantine_reviews.learning_id) = 1
+          AND (
+                SELECT COUNT(*) FROM quarantine_reviews r2
+                WHERE r2.learning_id = quarantine_reviews.learning_id AND r2.decision = 'quarantined'
+              ) = 1
+        """
+    )
+
+
+_MIGRATIONS[8] = _migrate_v8_quarantine_review_namespace
 
 
 CREATE_MEMORIES_FTS = """

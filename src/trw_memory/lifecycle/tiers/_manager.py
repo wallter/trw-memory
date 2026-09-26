@@ -5,7 +5,6 @@ from __future__ import annotations
 import threading
 from collections import OrderedDict
 from contextlib import closing
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -79,16 +78,6 @@ class TierManager:
         exc_tb: object,
     ) -> None:
         self.close()
-
-    def hot_get(self, entry_id: str) -> MemoryEntry | None:
-        """Return a cached entry, moving it to MRU position on hit."""
-        with self._hot_lock:
-            if entry_id not in self._hot:
-                return None
-            self._hot.move_to_end(entry_id)
-            entry = self._hot[entry_id]
-            entry.last_accessed_at = datetime.now(timezone.utc)
-            return entry
 
     def hot_put(self, entry_id: str, entry: MemoryEntry) -> None:
         """Add or refresh an entry in the hot cache."""
@@ -171,11 +160,6 @@ class TierManager:
         with self._hot_lock:
             for entry_id in entry_ids:
                 self._hot.pop(entry_id, None)
-
-    def hot_clear(self) -> None:
-        """Evict all entries from the hot cache."""
-        with self._hot_lock:
-            self._hot.clear()
 
     def hot_remove(self, entry_id: str) -> None:
         """Delete an entry from the hot cache without touching lower tiers."""

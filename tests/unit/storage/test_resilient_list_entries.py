@@ -23,7 +23,6 @@ from trw_memory.storage._resilient_fetch import (
     fetch_rows_resilient,
     fetch_rows_via_bytes_fallback,
     is_utf8_decode_error,
-    reset_bytes_fallback_failures,
 )
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
@@ -31,6 +30,11 @@ from trw_memory.storage.sqlite_backend import SQLiteBackend
 def _bytes_fallback_failures() -> int:
     """Direct module-state read replacing the removed public getter."""
     return _resilient_fetch._fallback_metrics.bytes_fallback_failures
+
+
+def _reset_bytes_fallback_failures() -> None:
+    """Direct module-state reset replacing the removed public reset helper."""
+    _resilient_fetch._fallback_metrics.bytes_fallback_failures = 0
 
 
 def _schema_row_quarantines() -> int:
@@ -400,7 +404,7 @@ def test_bytes_fallback_logs_fallback_failed_when_connect_fails(tmp_path: Path) 
     """If the secondary bytes-mode connection fails, return [] and log the outcome."""
 
     class _FailingDBAPI:
-        def connect(self, database: str) -> object:
+        def connect(self, database: str, **kwargs: object) -> object:
             raise sqlite3.OperationalError("unable to open database file")
 
     query = FetchQuery(select_columns_sql="id, content", where_sql="1", limit=10)
@@ -427,10 +431,10 @@ def test_bytes_fallback_failure_increments_distinct_counter(tmp_path: Path) -> N
     """
 
     class _FailingDBAPI:
-        def connect(self, database: str) -> object:
+        def connect(self, database: str, **kwargs: object) -> object:
             raise sqlite3.OperationalError("unable to open database file")
 
-    reset_bytes_fallback_failures()
+    _reset_bytes_fallback_failures()
     assert _bytes_fallback_failures() == 0
 
     query = FetchQuery(select_columns_sql="id, content", where_sql="1", limit=10)
@@ -455,7 +459,7 @@ def test_bytes_fallback_success_does_not_increment_failure_counter(tmp_path: Pat
     backend.close()
     _inject_bad_utf8_row(db_path, "M-bad-001")
 
-    reset_bytes_fallback_failures()
+    _reset_bytes_fallback_failures()
     backend2 = SQLiteBackend(db_path)
     # Force the execute-time decode error so the (working) bytes fallback runs.
     backend2._conn = _ExecuteRaisesConn(backend2._conn)  # type: ignore[assignment]

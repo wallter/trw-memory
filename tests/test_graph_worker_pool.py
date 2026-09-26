@@ -21,12 +21,33 @@ from trw_memory.storage.sqlite_backend import SQLiteBackend
 from .conftest import make_entry
 
 
+def _reset_pool(timeout: float = 5.0) -> None:
+    """Test-only: stop every worker thread, mirroring the removed ``_reset_graph_worker_pool_for_tests``."""
+    survivors = pool._POOL.stop_all(timeout)
+    assert not survivors, f"{len(survivors)} graph worker(s) still running after {timeout}s"
+
+
+def _live(p: pool._GraphWorkerPool) -> int:
+    with p._lock:
+        return sum(1 for worker in p._live if worker.thread.is_alive())
+
+
+def _open_backends(p: pool._GraphWorkerPool) -> int:
+    with p._lock:
+        return sum(1 for worker in p._live if worker.backend is not None)
+
+
+def _worker_for(p: pool._GraphWorkerPool, config: MemoryConfig, namespace: str) -> object:
+    with p._lock:
+        return p._workers.get(pool._worker_key(config, namespace))
+
+
 @pytest.fixture(autouse=True)
 def fresh_pool() -> Iterator[None]:
-    pool._reset_graph_worker_pool_for_tests()
+    _reset_pool()
     yield
     graph.wait_for_graph_updates(timeout=5.0)
-    pool._reset_graph_worker_pool_for_tests()
+    _reset_pool()
 
 
 def _config(root: Path, backend: str = "sqlite") -> MemoryConfig:
@@ -102,7 +123,7 @@ def test_backend_open_failure_is_logged_and_does_not_stop_the_worker(
     with capture_logs() as logs:
         assert graph.schedule_graph_update(make_entry(entry_id="M-1"), owner, config=config)  # type: ignore[arg-type]
         graph.wait_for_graph_updates(timeout=10.0, owner=owner)
-        worker = pool._POOL.worker_for(config, "default")
+        worker = _worker_for(pool._POOL, config, "default")
         assert worker is not None
         assert worker.backend is None
         assert graph.schedule_graph_update(make_entry(entry_id="M-2"), owner, config=config)  # type: ignore[arg-type]
@@ -111,7 +132,7 @@ def test_backend_open_failure_is_logged_and_does_not_stop_the_worker(
     assert [log["event"] for log in logs if log["event"].startswith("graph_update_background")] == [
         "graph_update_background_failed"
     ]
-    assert pool._POOL.worker_for(config, "default") is worker
+    assert _worker_for(pool._POOL, config, "default") is worker
     assert worker.thread.is_alive()
     assert worker.backend is not None  # the second job's retry opened it
     assert calls == 2
@@ -139,7 +160,7 @@ def test_unexpected_job_error_is_logged_and_the_worker_keeps_serving(
     assert len(crashed) == 1
     assert crashed[0]["log_level"] == "error"
     assert ran == ["M-after"]
-    worker = pool._POOL.worker_for(config, "default")
+    worker = _worker_for(pool._POOL, config, "default")
     assert worker is not None
     assert worker.thread.is_alive()
 
@@ -150,7 +171,7 @@ def test_replaced_store_file_is_reopened_not_written_through_the_old_handle(tmp_
     with create_backend_from_config(config, "default") as owner:
         assert graph.schedule_graph_update(make_entry(entry_id="M-1"), owner, config=config)
         graph.wait_for_graph_updates(timeout=10.0, owner=owner)
-    worker = pool._POOL.worker_for(config, "default")
+    worker = _worker_for(pool._POOL, config, "default")
     assert worker is not None
     first_backend = worker.backend
 
@@ -162,7 +183,7 @@ def test_replaced_store_file_is_reopened_not_written_through_the_old_handle(tmp_
         assert graph.schedule_graph_update(make_entry(entry_id="M-2"), owner, config=config)
         graph.wait_for_graph_updates(timeout=10.0, owner=owner)
 
-    assert pool._POOL.worker_for(config, "default") is worker
+    assert _worker_for(pool._POOL, config, "default") is worker
     assert worker.backend is not None
     assert worker.backend is not first_backend
 
@@ -175,8 +196,8 @@ def test_yaml_store_gets_one_worker_keyed_on_its_entries_directory(tmp_path: Pat
             owner.store(entry)
             assert graph.schedule_graph_update(entry, owner, config=config)
         graph.wait_for_graph_updates(timeout=10.0, owner=owner)
-    assert pool._POOL.live_worker_count() == 1
-    worker = pool._POOL.worker_for(config, "default")
+    assert _live(pool._POOL) == 1
+    worker = _worker_for(pool._POOL, config, "default")
     assert worker is not None
     assert worker.key[0] == str(tmp_path / "yaml" / "default" / "entries")
 
@@ -185,7 +206,7 @@ def test_direct_call_off_a_worker_opens_and_closes_a_one_shot_backend(tmp_path: 
     config = _config(tmp_path / "store")
     with graph._worker_backend(config, "default") as backend:
         assert isinstance(backend, SQLiteBackend)
-    assert pool._POOL.live_worker_count() == 0
+    assert _live(pool._POOL) == 0
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is POSIX-only")
@@ -194,7 +215,7 @@ def test_forked_child_builds_its_own_worker_and_never_touches_the_parents(tmp_pa
     with create_backend_from_config(config, "default") as owner:
         assert graph.schedule_graph_update(make_entry(entry_id="M-parent"), owner, config=config)
         graph.wait_for_graph_updates(timeout=10.0, owner=owner)
-        parent_worker = pool._POOL.worker_for(config, "default")
+        parent_worker = _worker_for(pool._POOL, config, "default")
         assert parent_worker is not None
         parent_backend = parent_worker.backend
         assert parent_backend is not None
@@ -206,10 +227,10 @@ def test_forked_child_builds_its_own_worker_and_never_touches_the_parents(tmp_pa
         if pid == 0:  # child: report and _exit, never return into pytest
             code = 1
             try:
-                inherited = pool._POOL.live_worker_count()
+                inherited = _live(pool._POOL)
                 ok = graph.schedule_graph_update(make_entry(entry_id="M-child"), owner, config=config)
                 graph.wait_for_graph_updates(timeout=10.0)
-                child_worker = pool._POOL.worker_for(config, "default")
+                child_worker = _worker_for(pool._POOL, config, "default")
                 fresh = child_worker is not None and child_worker is not parent_worker
                 fresh = fresh and child_worker.backend is not None and child_worker.backend is not parent_backend
                 os.write(write_fd, f"{inherited} {ok} {fresh}".encode())
@@ -224,7 +245,7 @@ def test_forked_child_builds_its_own_worker_and_never_touches_the_parents(tmp_pa
         assert os.waitstatus_to_exitcode(status) == 0
         assert report == "0 True True"
         # The parent's worker and connection are untouched by the child's exit.
-        assert pool._POOL.worker_for(config, "default") is parent_worker
+        assert _worker_for(pool._POOL, config, "default") is parent_worker
         assert parent_worker.backend is parent_backend
         assert parent_backend.count() == 0
         assert graph.schedule_graph_update(make_entry(entry_id="M-parent-2"), owner, config=config)

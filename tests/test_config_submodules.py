@@ -370,11 +370,9 @@ class TestStorageConfig:
         assert cfg.sqlite_db_name == "memory.db"
         assert isinstance(cfg.embedding_dim, int)
         assert cfg.embedding_dim == 384
-        assert cfg.key_source == "env"
         assert cfg.rbac_mode == "local"
         assert cfg.default_role == "admin"
         assert cfg.encryption_enabled is False
-        assert cfg.local_only is False
 
     def test_embedding_dim_must_be_positive(self) -> None:
         with pytest.raises(ValidationError):
@@ -385,10 +383,6 @@ class TestStorageConfig:
     def test_unknown_storage_backend_rejected(self) -> None:
         with pytest.raises(ValidationError):
             _StorageModel(storage_backend="postgres")
-
-    def test_unknown_key_source_rejected(self) -> None:
-        with pytest.raises(ValidationError):
-            _StorageModel(key_source="vault")
 
     def test_unknown_rbac_mode_rejected(self) -> None:
         with pytest.raises(ValidationError):
@@ -401,12 +395,10 @@ class TestStorageConfig:
     def test_valid_enum_members_accepted(self) -> None:
         cfg = _StorageModel(
             storage_backend="yaml",
-            key_source="file",
             rbac_mode="remote",
             default_role="reader",
         )
         assert cfg.storage_backend == "yaml"
-        assert cfg.key_source == "file"
         assert cfg.rbac_mode == "remote"
         assert cfg.default_role == "reader"
 

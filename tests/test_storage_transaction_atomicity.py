@@ -10,8 +10,8 @@ Covers:
   (``skip_commit`` flag) so the vector lands at the outermost COMMIT.
 - S1: a row + its vector written inside ``transaction()`` commit exactly once
   and are atomic — both present on success, neither on a mid-transaction error.
-- S8: ``delete_by_namespace`` removes entries + wiki_refs + vectors inside ONE
-  transaction so a crash can never leave orphan wiki refs or vector rows.
+- S8: ``delete_by_namespace`` removes entries + vectors inside ONE
+  transaction so a crash can never leave orphan vector rows.
 """
 
 from __future__ import annotations
@@ -169,50 +169,6 @@ def test_store_standalone_commits_immediately(tmp_path: Path) -> None:
             assert count == 1
         finally:
             observer.close()
-    finally:
-        backend.close()
-
-
-@pytest.mark.parametrize("operation", ["store", "update", "delete"])
-def test_wiki_side_effect_failure_rolls_back_canonical_write(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
-) -> None:
-    """Canonical rows and their wiki references commit or roll back together."""
-    import sqlite3
-
-    from trw_memory.wiki import storage as wiki_storage
-
-    db_path = tmp_path / f"wiki_{operation}.db"
-    backend = SQLiteBackend(db_path)
-    try:
-        entry_id = f"M-wiki-{operation}"
-        if operation != "store":
-            backend.store(make_entry(entry_id=entry_id, content="before"))
-
-        helper = "purge_wiki_refs_for_entry" if operation == "delete" else "replace_wiki_refs_for_entry"
-
-        def fail_wiki_side_effect(*_args: object, **_kwargs: object) -> None:
-            raise RuntimeError("wiki write failed")
-
-        monkeypatch.setattr(wiki_storage, helper, fail_wiki_side_effect)
-        with pytest.raises(RuntimeError, match="wiki write failed"):
-            if operation == "store":
-                backend.store(make_entry(entry_id=entry_id, content="new"))
-            elif operation == "update":
-                backend.update(entry_id, content="after", metadata={}, namespace="default")
-            else:
-                backend.delete(entry_id, namespace="default")
-
-        observer = sqlite3.connect(str(db_path))
-        try:
-            row = observer.execute("SELECT content FROM memories WHERE id = ?", (entry_id,)).fetchone()
-        finally:
-            observer.close()
-
-        if operation == "store":
-            assert row is None
-        else:
-            assert row == ("before",)
     finally:
         backend.close()
 
@@ -603,34 +559,12 @@ def test_transaction_commits_exactly_once(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# S8 — delete_by_namespace: entries + wiki_refs + vectors atomic (both-or-neither)
+# S8 — delete_by_namespace: entries + tag postings atomic (both-or-neither)
 # ---------------------------------------------------------------------------
 
 
-def _wiki_entry_with_ref(entry_id: str, *, namespace: str, slug: str) -> MemoryEntry:
-    """Build an entry carrying a single outbound wiki ref so a row lands in wiki_refs.
-
-    ``slug`` must satisfy WikiPage validation (lowercase alphanumeric, single
-    hyphen separators) — independent of the entry id, which has no such rule.
-    """
-    from trw_memory.wiki.models import WikiPage, WikiReference
-
-    page = WikiPage(
-        kind="topic",
-        slug=f"topic/{slug}",
-        title=entry_id,
-        outbound_refs=[WikiReference(target_slug="topic/target", ref_type="related")],
-    )
-    return MemoryEntry(
-        id=entry_id,
-        content=page.title,
-        namespace=namespace,
-        metadata=page.to_memory_metadata(),
-    )
-
-
-def test_delete_by_namespace_removes_entries_and_wiki_refs_atomically(tmp_path: Path) -> None:
-    """S8: a successful namespace delete clears entries AND companion wiki_refs.
+def test_delete_by_namespace_removes_entries_and_tags_atomically(tmp_path: Path) -> None:
+    """S8: a successful namespace delete clears entries AND companion memory_tags.
 
     Observed via a second connection that reads committed-only state.
     """
@@ -639,69 +573,72 @@ def test_delete_by_namespace_removes_entries_and_wiki_refs_atomically(tmp_path: 
     db_path = tmp_path / "s8ok.db"
     backend = SQLiteBackend(db_path)
     try:
-        backend.store(_wiki_entry_with_ref("M-ns1", namespace="doomed", slug="ns-one"))
-        backend.store(_wiki_entry_with_ref("M-ns2", namespace="doomed", slug="ns-two"))
-        backend.store(_wiki_entry_with_ref("M-keep", namespace="other", slug="ns-keep"))
+        backend.store(make_entry(entry_id="M-ns1", namespace="doomed", tags=["alpha"]))
+        backend.store(make_entry(entry_id="M-ns2", namespace="doomed", tags=["beta"]))
+        backend.store(make_entry(entry_id="M-keep", namespace="other", tags=["gamma"]))
 
         observer = sqlite3.connect(str(db_path))
         try:
-            # Precondition: 2 doomed entries + 2 doomed wiki_refs are committed.
+            # Precondition: 2 doomed entries + 2 doomed tag postings are committed.
             assert observer.execute("SELECT COUNT(*) FROM memories WHERE namespace = ?", ("doomed",)).fetchone()[0] == 2
             assert (
-                observer.execute("SELECT COUNT(*) FROM wiki_refs WHERE namespace = ?", ("doomed",)).fetchone()[0] == 2
+                observer.execute("SELECT COUNT(*) FROM memory_tags WHERE namespace = ?", ("doomed",)).fetchone()[0] == 2
             )
 
             deleted = backend.delete_by_namespace("doomed")
             assert deleted == 2
 
-            # Both entries and their wiki_refs are gone; the other namespace
-            # is untouched — no orphan refs survive.
+            # Both entries and their tag postings are gone; the other namespace
+            # is untouched — no orphan postings survive.
             assert observer.execute("SELECT COUNT(*) FROM memories WHERE namespace = ?", ("doomed",)).fetchone()[0] == 0
             assert (
-                observer.execute("SELECT COUNT(*) FROM wiki_refs WHERE namespace = ?", ("doomed",)).fetchone()[0] == 0
+                observer.execute("SELECT COUNT(*) FROM memory_tags WHERE namespace = ?", ("doomed",)).fetchone()[0] == 0
             )
-            assert observer.execute("SELECT COUNT(*) FROM wiki_refs WHERE namespace = ?", ("other",)).fetchone()[0] == 1
+            assert (
+                observer.execute("SELECT COUNT(*) FROM memory_tags WHERE namespace = ?", ("other",)).fetchone()[0] == 1
+            )
         finally:
             observer.close()
     finally:
         backend.close()
 
 
-def test_delete_by_namespace_rollback_leaves_entries_and_wiki_refs_intact(tmp_path: Path) -> None:
-    """S8: a crash AFTER the entry DELETE but BEFORE wiki_refs cleanup rolls BOTH back.
+def test_delete_by_namespace_rollback_leaves_entries_and_tags_intact(tmp_path: Path) -> None:
+    """S8: a crash AFTER the entry DELETE but BEFORE tag-posting cleanup rolls BOTH back.
 
     Without the single-transaction wrapper the memories DELETE had already
-    committed on its own, so a later crash would leave orphan wiki_refs (and the
-    entries gone). We force a failure on the wiki_refs DELETE and prove — via a
-    fresh observer connection reading committed-only state — that the entry rows
-    AND the wiki_refs are both still present (neither side of the delete landed).
+    committed on its own, so a later crash would leave orphan tag postings (and
+    the entries gone). We force a failure on the ``memory_tags`` DELETE and prove
+    — via a fresh observer connection reading committed-only state — that the
+    entry rows AND the tag postings are both still present (neither side of the
+    delete landed).
     """
     import sqlite3
 
     db_path = tmp_path / "s8rollback.db"
     backend = SQLiteBackend(db_path)
     try:
-        backend.store(_wiki_entry_with_ref("M-rb1", namespace="doomed", slug="rb-one"))
-        backend.store(_wiki_entry_with_ref("M-rb2", namespace="doomed", slug="rb-two"))
+        backend.store(make_entry(entry_id="M-rb1", namespace="doomed", tags=["alpha"]))
+        backend.store(make_entry(entry_id="M-rb2", namespace="doomed", tags=["beta"]))
 
         # The C-extension Connection's ``execute`` attribute is read-only, so we
         # wrap the live connection in a thin delegating proxy that raises on the
-        # companion wiki_refs DELETE (after the memories DELETE has been staged
+        # companion memory_tags DELETE (after the memories DELETE has been staged
         # inside the open transaction) and forwards everything else verbatim.
         real_conn = backend._conn
 
-        class _FailingWikiCleanupConn:
+        class _FailingTagCleanupConn:
             def execute(self, sql: str, *args: object) -> object:
-                if "DELETE FROM wiki_refs" in sql:
-                    raise RuntimeError("crash-before-wiki-cleanup")
+                if "DELETE FROM memory_tags" in sql:
+                    raise RuntimeError("crash-before-tag-cleanup")
                 return real_conn.execute(sql, *args)
 
             def __getattr__(self, name: str) -> object:
                 return getattr(real_conn, name)
 
-        backend._conn = _FailingWikiCleanupConn()
+        backend._conn = _FailingTagCleanupConn()
         try:
-            with pytest.raises(RuntimeError, match="crash-before-wiki-cleanup"):
+            with pytest.raises(RuntimeError, match="crash-before-tag-cleanup"):
                 backend.delete_by_namespace("doomed")
         finally:
             backend._conn = real_conn
@@ -712,10 +649,10 @@ def test_delete_by_namespace_rollback_leaves_entries_and_wiki_refs_intact(tmp_pa
             assert (
                 observer.execute("SELECT COUNT(*) FROM memories WHERE namespace = ?", ("doomed",)).fetchone()[0] == 2
             ), "entries were deleted despite the rolled-back transaction"
-            # wiki_refs survived too — no orphan/partial state.
+            # memory_tags survived too — no orphan/partial state.
             assert (
-                observer.execute("SELECT COUNT(*) FROM wiki_refs WHERE namespace = ?", ("doomed",)).fetchone()[0] == 2
-            ), "wiki_refs were partially cleaned despite rollback"
+                observer.execute("SELECT COUNT(*) FROM memory_tags WHERE namespace = ?", ("doomed",)).fetchone()[0] == 2
+            ), "memory_tags were partially cleaned despite rollback"
         finally:
             observer.close()
         # Backend's own connection agrees the entries are still live.

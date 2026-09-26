@@ -83,3 +83,20 @@ def test_cli_refuses_runs_with_no_shared_questions(tmp_path: Path) -> None:
     b = tmp_path / "b.json"
     b.write_text(json.dumps({"label": "b", "k": [10], "per_question": [{"conv": 99, "q": 0, "hit@10": 1.0}]}))
     assert rpc.main([str(a), str(b)]) == 2
+
+
+def test_complete_at_k_is_paired_by_mcnemar_and_in_the_default_metrics(tmp_path: Path) -> None:
+    # complete@k is 0/1 per question like hit@k, so it is an exact McNemar, not a Wilcoxon.
+    def run(path: Path, complete: list[int]) -> Path:
+        rows = [
+            {"conv": 0, "q": i, "category": 1, "hit@10": 1.0, "complete@10": float(c)} for i, c in enumerate(complete)
+        ]
+        path.write_text(json.dumps({"label": path.stem, "k": [10], "per_question": rows}))
+        return path
+
+    payload, a = rpc.load(str(run(tmp_path / "a.json", [1] * 20 + [0] * 10)))
+    _, b = rpc.load(str(run(tmp_path / "b.json", [1] * 27 + [0] * 3)))
+    assert rpc.default_metrics(payload, a) == ["hit@10", "complete@10"]
+    result = rpc.compare(a, b, ["complete@10"], n_boot=100)
+    assert result["mcnemar"]["complete@10"]["b_only"] == 7
+    assert result["table"]["ALL"]["complete@10"]["p"] == pytest.approx(rpc.mcnemar(0, 7))

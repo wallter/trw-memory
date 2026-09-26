@@ -49,7 +49,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = structlog.get_logger(__name__)
 
-__all__ = ["OFFLOAD_MAX_WORKERS", "run_offloaded", "shutdown_offload_pool"]
+__all__ = ["OFFLOAD_MAX_WORKERS", "run_offloaded", "run_serialized", "shutdown_offload_pool"]
 
 T = TypeVar("T")
 
@@ -68,25 +68,27 @@ OFFLOAD_MAX_WORKERS = 4
 OFFLOAD_SHUTDOWN_GRACE_SECONDS = 5.0
 
 _EXECUTOR_LOCK = threading.Lock()
-_EXECUTOR: ThreadPoolExecutor | None = None
+#: By worker count: the shared pool, and the one-thread lane of :func:`run_serialized`.
+_EXECUTORS: dict[int, ThreadPoolExecutor] = {}
 _EXECUTOR_PID: int | None = None
 
 
-def _executor() -> ThreadPoolExecutor:
-    """Return the process's worker pool, creating it on first use.
+def _executor(workers: int = OFFLOAD_MAX_WORKERS) -> ThreadPoolExecutor:
+    """Return the process's executor with *workers* threads, creating it on first use.
 
     Recreated after a fork: a child inherits the parent's executor object, but
     not the parent's worker threads, so submitting to it would hang forever.
     """
-    global _EXECUTOR, _EXECUTOR_PID
+    global _EXECUTOR_PID
     with _EXECUTOR_LOCK:
-        if _EXECUTOR is None or os.getpid() != _EXECUTOR_PID:
-            _EXECUTOR = ThreadPoolExecutor(
-                max_workers=OFFLOAD_MAX_WORKERS,
-                thread_name_prefix="trw-memory-tool",
-            )
+        if os.getpid() != _EXECUTOR_PID:
+            _EXECUTORS.clear()
             _EXECUTOR_PID = os.getpid()
-        return _EXECUTOR
+        if workers not in _EXECUTORS:
+            _EXECUTORS[workers] = ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix=f"trw-memory-tool-{workers}"
+            )
+        return _EXECUTORS[workers]
 
 
 def shutdown_offload_pool(*, timeout: float = OFFLOAD_SHUTDOWN_GRACE_SECONDS) -> bool:
@@ -105,17 +107,17 @@ def shutdown_offload_pool(*, timeout: float = OFFLOAD_SHUTDOWN_GRACE_SECONDS) ->
         True when the pool drained, False when the grace period expired with
         work still running (the caller continues either way).
     """
-    global _EXECUTOR, _EXECUTOR_PID
+    global _EXECUTOR_PID
     with _EXECUTOR_LOCK:
-        executor, _EXECUTOR, _EXECUTOR_PID = _EXECUTOR, None, None
-    if executor is None:
-        return True
+        executors, _EXECUTOR_PID = list(_EXECUTORS.values()), None
+        _EXECUTORS.clear()
     # Queued-but-unstarted work is dropped; only started calls are waited for.
-    executor.shutdown(wait=False, cancel_futures=True)
+    for executor in executors:
+        executor.shutdown(wait=False, cancel_futures=True)
     deadline = time.monotonic() + max(timeout, 0.0)
     # ``_threads`` is the only handle the stdlib exposes on the running workers,
     # and shutdown(wait=True) has no timeout parameter -- the bound is the point.
-    threads = list(getattr(executor, "_threads", ()) or ())
+    threads = [thread for executor in executors for thread in getattr(executor, "_threads", ()) or ()]
     for thread in threads:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -138,7 +140,22 @@ async def run_offloaded(fn: Callable[..., T], /, *args: object, **kwargs: object
     Returns:
         Whatever *fn* returns; exceptions propagate unchanged.
     """
-    loop = asyncio.get_running_loop()
-    context = contextvars.copy_context()
-    call = functools.partial(context.run, fn, *args, **kwargs)
-    return await loop.run_in_executor(_executor(), call)
+    return await _submit(_executor(), fn, *args, **kwargs)
+
+
+async def _submit(executor: ThreadPoolExecutor, fn: Callable[..., T], /, *args: object, **kwargs: object) -> T:
+    call = functools.partial(contextvars.copy_context().run, fn, *args, **kwargs)
+    return await asyncio.get_running_loop().run_in_executor(executor, call)
+
+
+async def run_serialized(fn: Callable[..., T], /, *args: object, **kwargs: object) -> T:
+    """:func:`run_offloaded`, but on a one-thread lane of its own, so these bodies run one at a time (C12 rc4).
+
+    Every body that changes or removes an existing learning row runs here -- forget, update and
+    correction, consolidate, maintain, rename and merge, review, import -- so none interleaves with
+    another: a rename's emptiness check and its move, a consolidation's cluster and its archival
+    against a forget (rc7: the rollback re-stored a forgotten row). A cancelled caller cannot free
+    the lane: its body finishes first. Bodies that only add rows, vectors or edges, or only read
+    (store, recall, similar, vectors, reembed, graph backfill), keep ``run_offloaded``.
+    """
+    return await _submit(_executor(1), fn, *args, **kwargs)

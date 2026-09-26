@@ -49,6 +49,7 @@ def _mock_backend(entries: list[MemoryEntry] | None = None) -> MagicMock:
     backend.get.return_value = entries[0] if entries else None
     backend.delete.return_value = True
     backend.count.return_value = len(entries)
+    backend.vector_space_census.return_value = None  # no census: memory_status omits coverage
     backend.store.return_value = None
     backend.update.return_value = entries[0] if entries else None
     return backend

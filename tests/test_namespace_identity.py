@@ -9,6 +9,7 @@ computes from a filesystem it did not create.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -23,6 +24,8 @@ from trw_memory.namespaces.identity import (
 )
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.user_paths import resolve_user_memory_dir
+
+_needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="drives a real git init and git worktree")
 
 
 def _git(*args: str, cwd: Path) -> None:
@@ -45,6 +48,7 @@ def _init_repo(root: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
+@_needs_git
 def test_project_identity_is_path_digest_not_basename(tmp_path: Path) -> None:
     """Two checkouts whose basenames differ only by suffix resolve apart.
 
@@ -59,6 +63,7 @@ def test_project_identity_is_path_digest_not_basename(tmp_path: Path) -> None:
     assert project_slug(left) == project_slug(right) == "trw-framework"
 
 
+@_needs_git
 def test_a_worktree_resolves_to_the_main_checkouts_namespace(tmp_path: Path) -> None:
     """FR01: the digest input is --git-common-dir, so worktrees share one namespace.
 
@@ -74,6 +79,7 @@ def test_a_worktree_resolves_to_the_main_checkouts_namespace(tmp_path: Path) -> 
     assert resolve_project_identity(linked).canonical_root == main.resolve()
 
 
+@_needs_git
 def test_a_symlinked_checkout_resolves_to_the_same_namespace(tmp_path: Path) -> None:
     """realpath: reaching a checkout through a link is not a different project."""
     real = _init_repo(tmp_path / "real-project")
@@ -83,6 +89,7 @@ def test_a_symlinked_checkout_resolves_to_the_same_namespace(tmp_path: Path) -> 
     assert resolve_project_namespace(link) == resolve_project_namespace(real)
 
 
+@_needs_git
 def test_a_subdirectory_resolves_to_the_repository_namespace(tmp_path: Path) -> None:
     """Entering from a subdirectory must not change which slice you see."""
     root = _init_repo(tmp_path / "proj")
@@ -92,6 +99,7 @@ def test_a_subdirectory_resolves_to_the_repository_namespace(tmp_path: Path) -> 
     assert resolve_project_namespace(nested) == resolve_project_namespace(root)
 
 
+@_needs_git
 def test_a_second_clone_is_a_distinct_namespace(tmp_path: Path) -> None:
     """Decided in FR01: two clones are two working states, kept apart by default."""
     origin = _init_repo(tmp_path / "origin")
@@ -112,6 +120,7 @@ def test_a_non_git_directory_resolves_without_error(tmp_path: Path) -> None:
     assert resolve_project_identity(plain).canonical_root == plain.resolve()
 
 
+@_needs_git
 def test_resolution_defaults_to_trw_project_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """With no argument the resolver honours TRW_PROJECT_ROOT, then the cwd."""
     root = _init_repo(tmp_path / "envproj")
@@ -142,6 +151,7 @@ def test_slug_sanitises_to_the_namespace_grammar(tmp_path: Path, directory: str,
     assert len(namespace) <= 128
 
 
+@_needs_git
 def test_identity_is_stable_across_repeated_resolution(tmp_path: Path) -> None:
     """The digest is a pure function of the canonical root, not of the clock."""
     root = _init_repo(tmp_path / "stable")
@@ -254,60 +264,8 @@ def test_git_timeout_does_not_leak_the_environments_project_root(tmp_path: Path)
 
 
 # ---------------------------------------------------------------------------
-# PRD-CORE-253 FR03/FR09 — the encryption + single-store refusal, and the
-# daemon env aliases
+# PRD-CORE-253 FR03 — the daemon env aliases
 # ---------------------------------------------------------------------------
-
-
-def test_encryption_and_a_single_store_are_refused_together() -> None:
-    """A per-NAMESPACE SQLCipher key cannot open a shared FILE.
-
-    SQLCipher keys the whole file; ``derive_namespace_key`` derives a different
-    key per namespace. Combined, the first namespace to open the shared store
-    sets ``PRAGMA key`` to its own key and every other namespace then cannot
-    decrypt the file it is supposed to share — silent at config time, fatal at
-    the second namespace. Refused until the per-file key redesign (FR09).
-    """
-    from trw_memory.exceptions import ConfigError
-
-    with pytest.raises(ConfigError) as refusal:
-        MemoryConfig(encryption_enabled=True, memory_single_store_path="/tmp/x/memory.db")
-
-    message = str(refusal.value)
-    assert "encryption_enabled" in message and "memory_single_store_path" in message
-    assert "FR09" in message, "the error must name the follow-up that unblocks it"
-
-    # Each alone stays valid — the refusal is the COMBINATION, not either field.
-    assert MemoryConfig(encryption_enabled=True).encryption_enabled
-    assert MemoryConfig(memory_single_store_path="/tmp/x/memory.db").memory_single_store_path
-
-
-def test_discovery_never_opens_an_encrypted_single_store_keyless(tmp_path: Path) -> None:
-    """The single-store discovery branch passes ``sqlcipher_key_hex=None``.
-
-    That is only correct because the combination is refused. If the guard were
-    removed, discovery would hand SQLCipher no key for an encrypted file — which
-    does not read plaintext, it fails to open, reported far from its cause. This
-    pins the guard at the point of use, not just at config construction.
-    """
-    from trw_memory.exceptions import ConfigError
-    from trw_memory.integrations._backend import (
-        create_backend_from_config,
-        discover_namespace_backends,
-    )
-
-    store = tmp_path / "memory.db"
-    config = MemoryConfig(storage_path=str(tmp_path), memory_single_store_path=str(store))
-    # Mutate past the model validator, which is exactly the shape a caller that
-    # assigns to a validated model would produce.
-    object.__setattr__(config, "encryption_enabled", True)
-
-    with pytest.raises(ConfigError, match="mutually exclusive"):
-        with discover_namespace_backends(config) as stores:
-            list(stores)
-
-    with pytest.raises(ConfigError, match="mutually exclusive"):
-        create_backend_from_config(config, "project:enc-aaaaaaaa")
 
 
 @pytest.mark.parametrize(

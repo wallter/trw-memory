@@ -23,6 +23,12 @@ def secure_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClie
     monkeypatch.setenv("MEMORY_PROVENANCE_REQUIRED", "true")
     monkeypatch.setenv("MEMORY_CANARY_PROBE_INTERVAL", "1")
     monkeypatch.setenv("MEMORY_CANARY_FAIL_MODE", "halt")
+    # The oversized-content live path below deliberately trips the trust
+    # scorer's own size heuristic (_DEFAULT_SIZE_CEILING=100_000) to reach
+    # trust-quarantine without also tripping the unrelated hard payload-size
+    # cap that Q1's approve-time revalidation now enforces (max_entry_chars
+    # default 10_240 is far below that heuristic's ceiling).
+    monkeypatch.setenv("MEMORY_MAX_ENTRY_CHARS", "250000")
     return MemoryClient(namespace="default", mode="local")
 
 

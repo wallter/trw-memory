@@ -391,13 +391,14 @@ class TestConsolidateCycle:
         for i in range(3):
             storage.store(_make_entry(f"e{i}"))
         embedder = _make_embedder(vectors=[_V1, _V2, _V3])
+        before = {f"e{i}": storage.get(f"e{i}", namespace="default").updated_at for i in range(3)}  # type: ignore[union-attr]
 
         def _real_update(entry_id: str, fields: dict[str, object]) -> MemoryEntry | None:
             # Apply the update without re-entering update_override (which would
             # recurse). Mirrors _InMemoryBackend.update's non-override branch.
             prev, storage.update_override = storage.update_override, None
             try:
-                return storage.update(entry_id, **fields, namespace="default")
+                return storage.update(entry_id, **fields)  # *fields* carries the namespace; naming it again raised
             finally:
                 storage.update_override = prev
 
@@ -437,3 +438,84 @@ class TestConsolidateCycle:
             assert entry is not None, f"e{i} was lost"
             assert str(entry.status) == "active", f"e{i} left archived after rollback"
             assert entry.consolidated_into is None
+            assert entry.updated_at == before[f"e{i}"], f"e{i} kept the failed cycle's timestamp"
+
+    def test_a_rollback_keeps_a_retirement_committed_after_partial_archival(self) -> None:
+        """C12 rc7 sol: without a real transaction e0 stays archived while e1 fails, and a writer that retired e0
+        in between must keep its status; only the fields still holding what archival wrote are put back."""
+        import contextlib
+        from collections.abc import Iterator
+
+        from trw_memory.models.memory import MemoryStatus
+        from trw_memory.storage.interface import StorageBackend
+
+        class _NoOpTxnBackend(_InMemoryBackend):
+            @contextlib.contextmanager
+            def transaction(self) -> Iterator[StorageBackend]:
+                yield self
+
+        storage = _NoOpTxnBackend()
+        for i in range(3):
+            storage.store(_make_entry(f"e{i}"))
+
+        def _real_update(entry_id: str, **fields: object) -> MemoryEntry | None:
+            prev, storage.update_override = storage.update_override, None
+            try:
+                return storage.update(entry_id, **fields)  # *fields* carries the namespace
+            finally:
+                storage.update_override = prev
+
+        def _archive_e0_then_retire_it(entry_id: str, fields: dict[str, object]) -> MemoryEntry | None:
+            if fields.get("status") != MemoryStatus.ARCHIVED:
+                return _real_update(entry_id, **fields)  # the rollback's own writes
+            if entry_id != "e0":
+                raise RuntimeError("archive failed mid-loop")
+            _real_update(entry_id, **fields)
+            return _real_update(
+                entry_id, status=MemoryStatus.OBSOLETE, namespace="default"
+            )  # another writer retires e0
+
+        storage.update_override = _archive_e0_then_retire_it
+
+        storage.update_override = _archive_e0_then_retire_it
+        cfg = MemoryConfig(consolidation_similarity_threshold=0.5, consolidation_min_cluster=3)
+
+        result = consolidate_cycle(storage, _make_embedder(vectors=[_V1, _V2, _V3]), config=cfg)
+
+        assert result["consolidated_count"] == 0 and result.get("errors")
+        retired = storage.get("e0", namespace="default")
+        assert retired is not None and retired.consolidated_into is None and retired.invalidated_by is None
+        assert str(retired.status) == "obsolete", "the rollback reverted a retirement committed after archival"
+
+
+def test_a_rollback_never_resurrects_a_forgotten_row_or_reverts_a_correction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C12 rc7: a forget that deleted a clustered row made archival fail, and the rollback re-stored every
+    pre-cycle snapshot whole -- the forgotten row came back and a concurrent correction was reverted."""
+    from trw_memory.lifecycle import consolidation
+    from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+    create = consolidation._create_consolidated_entry
+
+    def _create_then_race(*args: object, **kwargs: object) -> MemoryEntry:
+        entry = create(*args, **kwargs)  # type: ignore[arg-type]
+        storage.delete("e1", namespace="default")  # a forget between clustering and archival
+        storage.update("e2", namespace="default", content="corrected")
+        return entry
+
+    monkeypatch.setattr(consolidation, "_create_consolidated_entry", _create_then_race)
+    with SQLiteBackend(tmp_path / "memory.db") as storage:
+        for i in range(3):
+            storage.store(_make_entry(f"e{i}", content=f"content {i}"))
+        cfg = MemoryConfig(consolidation_similarity_threshold=0.5, consolidation_min_cluster=3)
+
+        result = consolidate_cycle(storage, _make_embedder(vectors=[_V1, _V2, _V3]), config=cfg)
+
+        assert result["consolidated_count"] == 0 and result.get("errors")
+        assert storage.get("e1", namespace="default") is None, "the rollback resurrected a forgotten row"
+        corrected = storage.get("e2", namespace="default")
+        assert corrected is not None and corrected.content == "corrected"
+        untouched = storage.get("e0", namespace="default")
+        assert untouched is not None and str(untouched.status) == "active" and untouched.consolidated_into is None
+        assert [e for e in storage.list_entries(namespace="default") if e.source == "consolidated"] == []

@@ -184,11 +184,9 @@ def test_the_gate_follows_the_backend_driver_not_the_process_driver(
 ) -> None:
     """PRD-INFRA-185 FR07.
 
-    An encrypted store opens ``sqlcipher3``, whose bundled SQLite is unrelated to
-    the stdlib/pysqlite3 selection. Reading the gate from the PROCESS driver let a
-    capable stdlib authorise a resetting checkpoint against an unsafe SQLCipher
-    build. Here the process driver is forced SAFE and the backend's own driver
-    reports an unsafe version; the gate must follow the backend.
+    The gate reads the backend's own driver, not the process-wide selection.
+    Here the process driver is forced SAFE and the backend's own driver reports
+    an unsafe version; the gate must follow the backend.
     """
     from trw_memory.storage import _dbapi
     from trw_memory.storage.sqlite_backend import SQLiteBackend
@@ -198,9 +196,8 @@ def test_the_gate_follows_the_backend_driver_not_the_process_driver(
 
     backend = SQLiteBackend(tmp_path / "m.db")
     try:
-        # Real construction used the real driver; re-derive with a stub standing in
-        # for an encrypted store's DB-API module.
-        stub = SimpleNamespace(sqlite_version="3.44.0", Error=sqlite3.Error, __name__="sqlcipher3")
+        # Real construction used the real driver; re-derive with a stub DB-API module.
+        stub = SimpleNamespace(sqlite_version="3.44.0", Error=sqlite3.Error, __name__="stub_dbapi")
         backend._dbapi = stub
         assert _dbapi.wal_reset_safe_version(str(stub.sqlite_version)) is False
         assert _dbapi.is_wal_reset_safe() is True, "the process driver is deliberately safe here"

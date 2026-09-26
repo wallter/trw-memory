@@ -119,7 +119,12 @@ def _sidecar_census(cursor: sqlite3.Cursor) -> dict[str, int]:
     vec = (
         int(cursor.execute("SELECT COUNT(*) FROM vec_index").fetchone()[0]) if _table_exists(cursor, "vec_index") else 0
     )
-    wiki = int(cursor.execute("SELECT COUNT(*) FROM wiki_refs").fetchone()[0])
+    # ``wiki_refs`` was retired at schema 7 (W10); a database created by a build
+    # at or after that version never has the table, so this rebuild-parity
+    # check is skipped rather than raising on a missing table.
+    wiki = (
+        int(cursor.execute("SELECT COUNT(*) FROM wiki_refs").fetchone()[0]) if _table_exists(cursor, "wiki_refs") else 0
+    )
     return {"memory_graph_edges": edges, "vec_index": vec, "wiki_refs": wiki}
 
 
@@ -186,11 +191,24 @@ def _rebuild_graph_edges(cursor: sqlite3.Cursor) -> None:
 
 
 def _rebuild_wiki_refs(cursor: sqlite3.Cursor) -> None:
+    """Rebuild ``wiki_refs`` alongside the ``memories`` rename, if it exists.
+
+    ``wiki_refs`` was retired at schema 7 (W10); a fresh database built at or
+    after that version never creates it, so a schema-5 migration on such a
+    database (opening an old dump that never had the table, or a database that
+    already had the table dropped) has nothing to rebuild here. A legacy
+    database still on disk with the table intact goes through the historical
+    rebuild exactly as before, so the schema-5 delta remains correct for the
+    real databases it must still open.
+    """
     from trw_memory.storage._schema import (
         CREATE_IDX_WIKI_REFS_SOURCE,
         CREATE_IDX_WIKI_REFS_TARGET,
         CREATE_WIKI_REFS,
     )
+
+    if not _table_exists(cursor, "wiki_refs"):
+        return
 
     columns = "source_entry_id, source_slug, target_slug, ref_type, label, bidirectional, namespace, updated_at"
     cursor.execute("DROP TABLE IF EXISTS wiki_refs_v5_rebuild")

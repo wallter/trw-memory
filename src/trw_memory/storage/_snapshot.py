@@ -16,8 +16,7 @@ Key invariants (do not relax without updating PRD-INFRA-065):
   enough. Weekly snapshots are only taken on Sunday UTC (collapse frequency).
 - Pruning uses filename-parsed dates exclusively. Unparseable names are
   skipped (never deleted, never counted).
-- All public functions are safe to call under `config.local_only=True`;
-  snapshots are strictly local filesystem artifacts.
+- Snapshots are strictly local filesystem artifacts; nothing here touches the network.
 - Destination paths are validated against a base directory
   (``_assert_within_snapshots_dir``) to prevent path traversal on restore.
 """
@@ -33,6 +32,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 import structlog
+
+from trw_memory._live_stores import connect_registered
 
 __all__ = [
     "SnapshotError",
@@ -157,7 +158,7 @@ def create_snapshot(db_path: Path, dest: Path) -> Path:
 
     conn: sqlite3.Connection | None = None
     try:
-        conn = sqlite3.connect(str(db_path), timeout=30.0, check_same_thread=False)
+        conn = connect_registered(db_path, sqlite3, str(db_path), timeout=30.0, check_same_thread=False)
         # Belt and suspenders against multi-process WAL contention while the
         # snapshot runs: 30s busy_timeout matches the primary backend so
         # snapshot can't be starved by foreground writers, and vice versa.
@@ -387,8 +388,8 @@ def restore_from_snapshot(base_dir: Path, snapshot: Path, db_path: Path) -> None
                 staged.unlink(missing_ok=True)
     # Clear stale WAL/SHM sidecars left by the prior DB at this path: applying old
     # WAL frames on top of a freshly-restored base file would corrupt the restore.
-    for suffix in (".db-wal", ".db-shm"):
-        sidecar = db_path.with_name(db_path.name.replace(".db", suffix))
+    # SQLite appends "-wal"/"-shm" to the whole name; replacing ".db" in a "store.sqlite" named the store itself.
+    for sidecar in (Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):
         with contextlib.suppress(OSError):
             sidecar.unlink(missing_ok=True)
     logger.info(

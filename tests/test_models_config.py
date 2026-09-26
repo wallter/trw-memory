@@ -22,7 +22,6 @@ def test_memory_config_defaults() -> None:
     assert cfg.storage_path == ".memory"
     assert cfg.sqlite_db_name == "memory.db"
     assert cfg.embedding_dim == 384
-    assert cfg.auto_generate_key is True
     assert cfg.bm25_candidates == 50
     assert cfg.vector_candidates == 50
     assert cfg.rrf_k == 5  # promoted 2026-06-13 by the memory meta-harness loop (LME +0.8pp)
@@ -33,7 +32,6 @@ def test_memory_config_defaults() -> None:
     assert cfg.decay_half_life_days == 14.0
     assert cfg.consolidation_enabled is True
     assert cfg.consolidation_max_per_cycle == 50
-    assert cfg.local_only is False
     assert cfg.rbac_mode == "local"
 
 
@@ -164,21 +162,16 @@ def test_memory_config_reads_security_fields_from_trw_config_yaml(
     _write_trw_config(
         tmp_path,
         [
-            "memory_encryption_enabled: true",
-            "memory_auto_generate_key: false",
             "memory_rbac_enabled: true",
             "memory_rbac_mode: remote",
             "memory_namespace_roles:",
             "  project:default: reader",
-            "memory_local_only: false",
         ],
     )
     monkeypatch.chdir(tmp_path)
 
     cfg = MemoryConfig()
 
-    assert cfg.encryption_enabled is True
-    assert cfg.auto_generate_key is False
     assert cfg.rbac_enabled is True
     assert cfg.rbac_mode == "remote"
     assert cfg.namespace_roles == {"project:default": "reader"}
@@ -186,19 +179,13 @@ def test_memory_config_reads_security_fields_from_trw_config_yaml(
 
 def test_memory_config_accepts_memory_prefixed_init_fields() -> None:
     cfg = MemoryConfig(
-        memory_encryption_enabled=True,
-        memory_auto_generate_key=False,
-        memory_local_only=True,
         memory_rbac_enabled=True,
         memory_rbac_mode="remote",
         memory_namespace_roles={"project:default": "reader"},
     )
 
-    assert cfg.encryption_enabled is True
-    assert cfg.auto_generate_key is False
-    assert cfg.local_only is True
     assert cfg.rbac_enabled is True
-    assert cfg.rbac_mode == "local"
+    assert cfg.rbac_mode == "remote"
     assert cfg.namespace_roles == {"project:default": "reader"}
 
 
@@ -218,45 +205,6 @@ def test_memory_config_env_overrides_yaml(tmp_path: Path, monkeypatch: pytest.Mo
 
     assert cfg.sync_enabled is True
     assert cfg.platform_api_key == "env-key"
-
-
-def test_memory_config_sync_enabled_keeps_local_only_false(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
-
-    cfg = MemoryConfig()
-
-    assert cfg.sync_enabled is True
-    assert cfg.local_only is False
-
-
-def test_memory_config_explicit_local_only_is_preserved_with_sync_enabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
-    monkeypatch.setenv("MEMORY_LOCAL_ONLY", "true")
-
-    cfg = MemoryConfig()
-
-    assert cfg.sync_enabled is False
-    assert cfg.local_only is True
-
-
-def test_memory_config_local_only_forces_local_rbac_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MEMORY_LOCAL_ONLY", "true")
-    monkeypatch.setenv("MEMORY_RBAC_MODE", "remote")
-    monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
-    monkeypatch.setenv("MEMORY_SYNC_NAMESPACE", "org:test")
-    monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://platform.example.com")
-    monkeypatch.setenv("MEMORY_PLATFORM_API_KEY", "secret")
-
-    cfg = MemoryConfig()
-
-    assert cfg.local_only is True
-    assert cfg.rbac_mode == "local"
-    assert cfg.sync_enabled is False
-    assert cfg.sync_namespace == ""
-    assert cfg.platform_url == ""
-    assert cfg.platform_api_key == ""
 
 
 def test_memory_config_consolidation_enabled_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -283,12 +231,23 @@ _RETIRED_RERANK = {
 }
 
 
+#: Encryption at rest's key settings, removed with its master key in trw-memory 4.1 (B71-50).
+_RETIRED_KEY_SOURCE = ("encryption_algorithm", "key_source", "key_file_path", "auto_generate_key", "master_key")
+
+
 @pytest.fixture()
 def fresh_rerank_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
     from trw_memory.models import _config_sources
 
     monkeypatch.setattr(_config_sources, "_warned_retired_settings", set())
-    for name in (*_RETIRED_RERANK, "lifecycle_use_fsrs", "key_rotation_backup", "q_learning_rate"):
+    for name in (
+        *_RETIRED_RERANK,
+        *_RETIRED_KEY_SOURCE,
+        "lifecycle_use_fsrs",
+        "key_rotation_backup",
+        "q_learning_rate",
+        "local_only",
+    ):
         for spelling in (name, f"memory_{name}"):
             monkeypatch.delenv(spelling.upper(), raising=False)
             monkeypatch.delenv(spelling, raising=False)
@@ -393,6 +352,34 @@ def test_key_rotation_backup_is_retired_with_a_warning(
 
 
 @pytest.mark.usefixtures("fresh_rerank_warnings")
+@pytest.mark.parametrize("name", _RETIRED_KEY_SOURCE)
+@pytest.mark.parametrize("source", ["yaml", "environment", "constructor"])
+def test_encryption_key_settings_are_retired_with_a_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, source: str
+) -> None:
+    """A leftover key setting (or MEMORY_MASTER_KEY) says it does nothing now, then is dropped."""
+    from structlog.testing import capture_logs
+
+    monkeypatch.chdir(tmp_path)
+    kwargs: dict[str, object] = {}
+    if source == "environment":
+        monkeypatch.setenv(f"MEMORY_{name.upper()}", "x")
+    elif source == "yaml":
+        _write_trw_config(tmp_path, [f"memory_{name}: x"])
+    else:
+        kwargs[f"memory_{name}"] = "x"
+    with capture_logs() as logs:
+        cfg = MemoryConfig(**kwargs)
+    warned = _rerank_warnings(logs)
+    assert len(warned) == 1, warned
+    assert str(warned[0]["setting"]).lower().removeprefix("memory_") == name
+    assert warned[0]["prd"] == "B71-50"
+    assert "full-disk encryption" in str(warned[0]["replacement"])
+    assert name not in MemoryConfig.model_fields
+    assert not hasattr(cfg, name)
+
+
+@pytest.mark.usefixtures("fresh_rerank_warnings")
 @pytest.mark.parametrize("source", ["yaml", "environment"])
 def test_q_learning_rate_is_retired_with_a_warning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
@@ -423,3 +410,21 @@ def test_absent_recall_rerank_settings_are_silent(tmp_path: Path, monkeypatch: p
     with capture_logs() as logs:
         MemoryConfig()
     assert _rerank_warnings(logs) == []
+
+
+@pytest.mark.usefixtures("fresh_rerank_warnings")
+def test_a_leftover_local_only_refuses_instead_of_silently_syncing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """F5 (2026-09-24): local_only no longer warns-and-ignores; see test_local_only_retired.py.
+
+    Was: PLAN W40 asserted local_only warned once and MemoryConfig() still
+    constructed with sync_enabled=True -- exactly the privacy-flip regression
+    the F5 security fix closes (an upgrader relying on local_only to force
+    sync off got a warning, not a refusal, while sync silently turned on).
+    """
+    from trw_memory.exceptions import ConfigError
+
+    monkeypatch.setenv("MEMORY_LOCAL_ONLY", "true")
+    monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
+    monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://platform.example.com")
+    with pytest.raises(ConfigError, match="local_only"):
+        MemoryConfig()

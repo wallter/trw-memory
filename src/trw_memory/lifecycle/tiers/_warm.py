@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, cast
 
 import structlog
 
+from trw_memory._live_stores import connect_registered
+from trw_memory.exceptions import StorageError
 from trw_memory.lifecycle.tiers._warm_sidecar_cache import (
     ParsedSidecar,
     SidecarCache,
@@ -385,7 +387,12 @@ class WarmTierStore:
         try:
             import sqlite_vec
 
-            with closing(sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)) as conn:
+            # connect_registered refuses (StorageError) a store swapped during the open
+            # (PRD-SEC-016); that degrades to "vectors unavailable" like every other
+            # failure here -- this is a ranking enhancement, not a data path.
+            with closing(
+                connect_registered(db_path, sqlite3, f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+            ) as conn:
                 conn.enable_load_extension(True)
                 sqlite_vec.load(conn)
                 conn.enable_load_extension(False)
@@ -404,6 +411,8 @@ class WarmTierStore:
                     continue
                 distance_squared = sum((a - b) ** 2 for a, b in zip(vector, query_embedding, strict=True))
                 entries[entry_id]["_tier_relevance"] = 1.0 - distance_squared / 2.0
+        except StorageError:
+            logger.warning("warm_tier_db_identity_changed_during_open", path=str(db_path))
         except (ImportError, sqlite3.Error, OSError, AttributeError):
             logger.debug("warm_tier_discovery_vectors_unavailable", exc_info=True)
         return list(entries.values())

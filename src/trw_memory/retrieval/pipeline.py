@@ -5,7 +5,6 @@ ranking, Reciprocal Rank Fusion, and optional cross-encoder re-ranking into a
 single ``hybrid_search`` entry point.
 
 Graceful degradation matrix:
-- ``rank_bm25`` unavailable → BM25 step skipped
 - ``embedder`` is ``None`` or unavailable → dense step skipped
 - Both unavailable → returns empty list
 - Only one source available → uses that source directly (no fusion needed)
@@ -116,7 +115,6 @@ def hybrid_search_scored(
     rerank_query: str | None = None,
     rerank_min_score: float | None = None,
     rerank_min_keep: int = 5,
-    rerank_local_only: bool = False,
     collapse_hype: object = _RETIRED_UNSET,
     dense_observer: Callable[[tuple[tuple[str, float], ...]], None] | None = None,
     bridge_hop: bool = False,
@@ -129,7 +127,6 @@ def hybrid_search_scored(
     source search without raising.
 
     Graceful degradation:
-    - ``rank_bm25`` not installed → BM25 skipped
     - *embedder* is ``None`` or ``embedder.available()`` is ``False`` →
       dense search skipped
     - Both skipped → returns ``[]``
@@ -297,8 +294,11 @@ def hybrid_search_scored(
     # below and ``top_k``. Doing it in the caller would resurrect superseded and
     # ``as_of``-excluded records, because those exclusions live in the prior.
     lexical_fallback: list[tuple[str, float]] = []
-    if not rankings and query.strip():
-        query_tokens = tokenize_query(query)
+    # A query with no searchable token ("!!!", "-") gets no lexical source:
+    # ``lexical_relevance`` scores an empty token list 1.0 for every entry, which
+    # returned the whole candidate set as filler (W07c).
+    query_tokens = tokenize_query(query) if not rankings else []
+    if query_tokens:
         lexical_fallback = sorted(
             (
                 (entry.id, relevance)
@@ -401,9 +401,7 @@ def hybrid_search_scored(
         rerank_input = fused_entries[:rerank_candidates]
         tail = fused_entries[rerank_candidates:]
         pre_rerank_order = [entry.id for entry in rerank_input]
-        scored = cross_encode_scores(
-            effective_rerank_query, rerank_input, model_name=rerank_model, local_only=rerank_local_only
-        )
+        scored = cross_encode_scores(effective_rerank_query, rerank_input, model_name=rerank_model)
         # Entity-bridge second hop: salient terms of the best first-hop rows
         # pull further candidates out of the un-reranked tail, scored against
         # the same query so the cross-encoder still decides where they land.
@@ -416,9 +414,7 @@ def hybrid_search_scored(
                 scored,
                 tail,
                 entries,
-                score=lambda fresh: cross_encode_scores(
-                    effective_rerank_query, fresh, model_name=rerank_model, local_only=rerank_local_only
-                ),
+                score=lambda fresh: cross_encode_scores(effective_rerank_query, fresh, model_name=rerank_model),
             )
         if scored is None:
             pass  # cross-encoder unavailable: keep fusion order and every candidate

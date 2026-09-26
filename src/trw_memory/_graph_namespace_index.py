@@ -41,10 +41,11 @@ change token (non-SQLite) or without numpy.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import weakref
-from collections import OrderedDict
-from collections.abc import Collection, Sequence
+from collections import OrderedDict, deque
+from collections.abc import Collection, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
@@ -187,25 +188,41 @@ class NamespaceIndexCache:
         self.max_bytes = max_bytes
         self._states: OrderedDict[tuple[str, str], _IndexState] = OrderedDict()
         self._guard = threading.Lock()
+        #: Keys whose in-memory store was garbage-collected. The finalizer runs on whatever thread
+        #: triggered the collection, possibly one already holding ``_guard``, which does not
+        #: re-enter: so it only appends here (atomic, no lock) and :meth:`_locked` drops the keys.
+        self._collected: deque[tuple[str, str]] = deque()
+
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        with self._guard:
+            while self._collected:
+                self._states.pop(self._collected.popleft(), None)
+            yield
+
+    def forget_when_collected(self, backend: object, key: tuple[str, str]) -> None:
+        """Drop *key*'s index once *backend* is garbage-collected (an in-memory store has no file to key on)."""
+        weakref.finalize(backend, self._collected.append, key)
 
     @property
     def nbytes(self) -> int:
-        with self._guard:
+        with self._locked():
             return sum(state.nbytes for state in self._states.values())
 
     def __len__(self) -> int:
-        return len(self._states)
+        with self._locked():
+            return len(self._states)
 
     def clear(self) -> None:
-        with self._guard:
+        with self._locked():
             self._states.clear()
 
     def discard(self, key: tuple[str, str]) -> None:
-        with self._guard:
+        with self._locked():
             self._states.pop(key, None)
 
     def state(self, key: tuple[str, str], file_id: tuple[int, int] | None) -> _IndexState:
-        with self._guard:
+        with self._locked():
             state = self._states.get(key)
             if state is None or state.file_id != file_id:  # a replaced database file starts over
                 state = self._states[key] = _IndexState(file_id)
@@ -214,7 +231,7 @@ class NamespaceIndexCache:
 
     def evict(self) -> None:
         """Drop least-recently-used indexes until the cached total fits the budget."""
-        with self._guard:
+        with self._locked():
             total = sum(state.nbytes for state in self._states.values())
             while len(self._states) > 1 and (total > self.max_bytes or len(self._states) > MAX_CACHED_NAMESPACES):
                 _key, removed = self._states.popitem(last=False)
@@ -288,7 +305,7 @@ def namespace_candidates(
     file_id = _file_id(getattr(backend, "_db_path", ""))
     state = cache.state(key, file_id)
     if file_id is None and state.token is None:  # an in-memory store: forget its index with the backend
-        weakref.finalize(backend, cache.discard, key)
+        cache.forget_when_collected(backend, key)
     with state.lock:
         token = backend.namespace_change_token(namespace)  # read BEFORE the data, under the index lock
         if token is None:

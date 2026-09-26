@@ -18,7 +18,6 @@ from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.temporal_selection import TemporalSelection
 from trw_memory.storage._resilient_fetch import (
     FetchQuery,
-    _apply_fallback_sqlcipher_key,
     _ConnectionLike,
     _DBAPILike,
     _decode_bytes_rows,
@@ -119,11 +118,13 @@ def _fetch_selection(
     except (sqlite3.OperationalError, UnicodeDecodeError) as exc:
         if not is_utf8_decode_error(exc):
             raise
-    secondary = dbapi.connect(str(db_path))
+    # PRD-SEC-016 round-4 finding 3: routed through the identity-checked
+    # helper, same as the sibling fallback in _resilient_fetch.py.
+    from trw_memory.storage._connection import connect as _checked_connect
+
+    secondary = _checked_connect(db_path, dbapi=dbapi, timeout=5.0, check_same_thread=True)
     try:
         secondary.text_factory = bytes
-        if query.sqlcipher_key_hex is not None:
-            _apply_fallback_sqlcipher_key(secondary, query.sqlcipher_key_hex)
         return _select_stream(secondary, query, selection, limit, db_path, batch_size, entry_filter)
     finally:
         secondary.close()

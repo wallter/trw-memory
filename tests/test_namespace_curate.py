@@ -8,6 +8,7 @@ afterwards rather than on what the function reported.
 from __future__ import annotations
 
 import hashlib
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -121,6 +122,45 @@ def test_rename_refuses_a_populated_destination(backend: StorageBackend) -> None
 
     assert backend.count(namespace=OLD) == 1, "the refusal must not have moved anything"
     assert backend.count(namespace=NEW) == 1
+
+
+@pytest.mark.parametrize("two_stores", [False, True])
+def test_a_rename_never_overwrites_a_row_another_connection_committed(
+    backend: SQLiteBackend, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, two_stores: bool
+) -> None:
+    """rc5 C12: a store landing between the empty-destination check and the move must survive it."""
+    destination = SQLiteBackend(tmp_path / "destination.db") if two_stores else backend
+    stores = NamespaceStores(source=backend, destination=destination)
+    _seed(backend, OLD, ["M-1"])
+    other = SQLiteBackend(Path(destination._db_path))  # another connection, open before the rename
+    real_count = destination.count
+    threads: list[threading.Thread] = []
+
+    def count_then_race(*, namespace: str | None = None) -> int:
+        seen = real_count(namespace=namespace)
+        if namespace == NEW:  # another connection commits into the destination right after the check
+            writer = threading.Thread(
+                target=other.store,
+                args=(make_entry(entry_id="M-1", namespace=NEW, content="committed by another writer"),),
+            )
+            writer.start()
+            threads.append(writer)
+            # Unguarded, the commit lands well inside this window; a check that holds the
+            # write lock keeps the writer waiting until the move has committed.
+            writer.join(timeout=5.0)
+        return seen
+
+    monkeypatch.setattr(destination, "count", count_then_race)
+    rename_namespace(stores, OLD, NEW)
+    for writer in threads:
+        writer.join()
+    other.close()
+
+    stored = destination.get("M-1", namespace=NEW)
+    if two_stores:
+        destination.close()
+    assert stored is not None
+    assert stored.content == "committed by another writer", "the rename overwrote a committed row"
 
 
 def test_rename_refuses_a_self_rename(backend: StorageBackend) -> None:
@@ -487,3 +527,41 @@ def test_a_cross_store_merge_carries_the_moved_rows_edges(tmp_path: Path) -> Non
     finally:
         source.close()
         destination.close()
+
+
+def test_a_namespace_over_the_row_cap_is_refused_before_any_row_moves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rc9: a merge or rename moves the whole namespace in one job on the daemon's serialized lane, so one
+    call is capped at CURATE_ROWS_MAX rows and edges (about 50 s, measured) and a larger namespace is refused."""
+    from trw_memory.tools import namespace_admin
+
+    monkeypatch.setattr(namespace_admin, "CURATE_ROWS_MAX", 2)
+    config = _config(tmp_path)
+    with create_backend_from_config(config, OLD) as backend:
+        _seed(backend, OLD, ["M-1", "M-2", "M-3"])
+
+    for impl in (memory_namespace_rename_impl, memory_namespace_merge_impl):
+        refused = impl(OLD, NEW, config=config)
+        assert refused["status"] == "too_large", refused
+        assert "3 rows" in str(refused["error"])
+    with create_backend_from_config(config, OLD) as backend:
+        assert backend.count(namespace=OLD) == 3
+
+
+def test_the_row_cap_counts_the_namespaces_graph_edges_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """rc9 sol P1: the move copies every source edge before any row, so the cap counts edges as well."""
+    from trw_memory.tools import namespace_admin
+
+    monkeypatch.setattr(namespace_admin, "CURATE_ROWS_MAX", 3)
+    config = _config(tmp_path)
+    with create_backend_from_config(config, OLD) as backend:
+        _seed(backend, OLD, ["M-1", "M-2"])
+        _edge(backend, OLD, "M-1", "M-2")
+        _edge(backend, OLD, "M-2", "M-1")
+        assert backend.graph_edge_count(OLD) == 2
+
+    refused = memory_namespace_rename_impl(OLD, NEW, config=config)
+
+    assert refused["status"] == "too_large", refused
+    assert "4 rows and graph edges" in str(refused["error"])

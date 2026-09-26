@@ -140,10 +140,13 @@ def test_over_cap_options_are_a_caller_error_at_build_and_at_ask() -> None:
     assert judge.calls == []
 
 
-def test_wrong_noul_criteria_keys_raise_invalid_criteria() -> None:
+def test_wrong_noul_criteria_keys_name_the_fix() -> None:
+    """Enforced at parse time (NoulQuestion, _models.py) now, not only at ask()-time; the message
+    names the bad keys and points at the right ones (2026-09-24 usage audit)."""
     bad = {"type": "noul", "instructions": "?", "criteria": {"yes": "x", "no": "y"}}
-    with pytest.raises(InvalidCriteria):
+    with pytest.raises(InvalidRequest, match=r"true.*false") as excinfo:
         Toolkit(_FakeJudge()).ask({}, {"a": bad})
+    assert "yes" in str(excinfo.value) and "no" in str(excinfo.value)
 
 
 def test_whole_request_is_redacted_state_instructions_criteria() -> None:
@@ -170,8 +173,57 @@ def test_to_wire_renders_answers_failures_and_choice_margin() -> None:
     )
     wire = Toolkit(judge).ask({}, {"r": choice("?", {"a": "a", "b": "b"})}).to_wire()
     assert wire["r"]["margin"] == pytest.approx(0.4)
+    assert "advice" not in wire["r"], "margin 0.4 is well clear of the near-tie threshold (0.2)"
     wire2 = Toolkit(NullJudge()).ask({}, {"r": choice("?", {"a": "a"})}).to_wire()
     assert wire2["r"]["failure"]["kind"] == "disabled"
+
+
+# ---------------------------------------------------------------- near-tie advice (W19, PRD-CORE-295)
+
+
+def test_choice_below_margin_threshold_carries_advice() -> None:
+    judge = _FakeJudge(
+        {"r": {"type": "choice", "choice": "a", "probabilities": {"a": 0.55, "b": 0.45}, "confidence": 0.55}}
+    )
+    wire = Toolkit(judge).ask({}, {"r": choice("?", {"a": "a", "b": "b"})}).to_wire()
+    assert wire["r"]["margin"] == pytest.approx(0.1)
+    assert wire["r"]["advice"] == "near-tie: take the safer or reversible option, or ask."
+
+
+def test_choice_above_margin_threshold_carries_no_advice() -> None:
+    """A margin clearly at/above NEAR_TIE_MARGIN (0.2) is decisive enough for no advice."""
+    judge = _FakeJudge(
+        {"r": {"type": "choice", "choice": "a", "probabilities": {"a": 0.625, "b": 0.375}, "confidence": 0.625}}
+    )
+    wire = Toolkit(judge).ask({}, {"r": choice("?", {"a": "a", "b": "b"})}).to_wire()
+    assert wire["r"]["margin"] >= 0.2
+    assert "advice" not in wire["r"]
+
+
+@pytest.mark.parametrize("probability", [0.4, 0.5, 0.6])
+def test_noul_inside_the_near_tie_band_carries_advice(probability: float) -> None:
+    judge = _FakeJudge({"r": {"type": "noul", "noul": probability}})
+    wire = Toolkit(judge).ask({}, {"r": noul("?", true="y", false="n")}).to_wire()
+    assert wire["r"]["advice"] == "near-tie: take the safer or reversible option, or ask."
+
+
+@pytest.mark.parametrize("probability", [0.0, 0.1, 0.39, 0.61, 0.9, 1.0])
+def test_noul_outside_the_near_tie_band_carries_no_advice(probability: float) -> None:
+    judge = _FakeJudge({"r": {"type": "noul", "noul": probability}})
+    wire = Toolkit(judge).ask({}, {"r": noul("?", true="y", false="n")}).to_wire()
+    assert "advice" not in wire["r"]
+
+
+def test_score_answers_never_carry_advice() -> None:
+    """Only choice margin and noul probability are near-tie signals (W19 scope); score is not."""
+    judge = _FakeJudge({"r": {"type": "score", "score": 1.0, "legend": {}, "probabilities": {}}})
+    wire = Toolkit(judge).ask({}, {"r": score("?", ["lo", "mid", "hi"])}).to_wire()
+    assert "advice" not in wire["r"]
+
+
+def test_a_decision_failure_never_carries_advice() -> None:
+    wire = Toolkit(NullJudge()).ask({}, {"r": noul("?", true="y", false="n")}).to_wire()
+    assert "advice" not in wire["r"] and "failure" in wire["r"]
 
 
 # ---------------------------------------------------------------- seam failure kinds (HTTP)
@@ -314,7 +366,8 @@ def test_batch_items_rejects_unknown_schema_and_bad_chunk_before_any_call() -> N
     with pytest.raises(InvalidRequest):
         Toolkit(judge).batch_items({"a": {}}, {"q": noul("?", true="y", false="n")}, chunk_size=0)
     # A malformed question is the caller's error too, not a KeyError from building item requests.
-    with pytest.raises(InvalidRequest, match="Field required"):
+    # 'question' is the recurring typo (2026-09-24 usage audit) — the message names 'instructions'.
+    with pytest.raises(InvalidRequest, match="use 'instructions', not 'question'"):
         Toolkit(judge).batch_items({"a": {}}, {"q": {"type": "noul", "question": "?"}})
     assert judge.calls == []
 
@@ -325,6 +378,11 @@ def test_batch_items_chunks_and_records_chunk_provenance() -> None:
         {f"i{n}": {} for n in range(5)}, {"q": noul("?", true="y", false="n")}, chunk_size=2
     )
     assert len(judge.calls) == 3 and sorted(set(result.chunk_of.values())) == [0, 1, 2]
+
+
+def test_rank_rejects_criteria_missing_true_and_false() -> None:
+    with pytest.raises(InvalidCriteria):
+        Toolkit(_FakeJudge()).rank({"a": {}}, instructions="?", criteria={"maybe": "x"})
 
 
 def test_rank_orders_and_reports_unanswered_with_chunk() -> None:
@@ -388,7 +446,7 @@ def test_reliability_reports_ece_and_brier() -> None:
 
 
 def test_decision_failure_helpers() -> None:
-    assert DecisionFailure(kind="auth").is_caller_error and not DecisionFailure(kind="auth").retryable
+    assert not DecisionFailure(kind="auth").retryable
     assert DecisionFailure(kind="rate_limited").retryable
 
 

@@ -121,7 +121,6 @@ def _attempt_primary_salvage(
     backup_path: Path,
     *,
     dbapi: Any,
-    sqlcipher_key_hex: str | None,
 ) -> tuple[bool, list[Any]]:
     """Robustly salvage ``memories`` rows from a (possibly corrupt) backup.
 
@@ -139,7 +138,6 @@ def _attempt_primary_salvage(
             dbapi=dbapi,
             timeout=15.0,
             check_same_thread=True,
-            sqlcipher_key_hex=sqlcipher_key_hex,
         )
     except sqlite3.DatabaseError:
         return True, []
@@ -178,7 +176,6 @@ def _open_recovered_conn(
     db_path: Path,
     *,
     dbapi: Any,
-    sqlcipher_key_hex: str | None,
 ) -> Any:
     """Open the post-recovery DB with WAL + ensure_schema."""
     prepare_db_file_mode(db_path)
@@ -187,7 +184,6 @@ def _open_recovered_conn(
         dbapi=dbapi,
         timeout=30.0,
         check_same_thread=False,
-        sqlcipher_key_hex=sqlcipher_key_hex,
     )
     # Match the hardened open profile (busy_timeout + WAL + journal_size_limit)
     # so a recovered connection is configured identically to a normal open.
@@ -240,8 +236,7 @@ def _cleanup_strict_refuse(new_conn: Any, db_path: Path) -> None:
         new_conn.close()
     with contextlib.suppress(OSError):
         db_path.unlink(missing_ok=True)
-    for suffix in (".db-wal", ".db-shm"):
-        sidecar = db_path.with_name(db_path.name.replace(".db", suffix))
+    for sidecar in (Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):  # SQLite appends; never derive from ".db"
         with contextlib.suppress(OSError):
             sidecar.unlink(missing_ok=True)
 
@@ -250,7 +245,6 @@ def recover_db(
     db_path: Path,
     *,
     dbapi: Any = sqlite3,
-    sqlcipher_key_hex: str | None = None,
     recovery_policy: Literal["strict", "empty_ok"] = "strict",
     corrupt_backup_keep: int = 5,
     rebuild_from_cold: bool = True,
@@ -259,16 +253,13 @@ def recover_db(
     _backend = _backend_corrupt_backup_helpers()
     backup_path = _backend._rotate_corrupt_backup(db_path)
     _backend._prune_corrupt_backups(db_path.parent, keep_n=corrupt_backup_keep)
-    for suffix in (".db-wal", ".db-shm"):
-        wal = db_path.with_name(db_path.name.replace(".db", suffix))
+    for sidecar in (Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):  # SQLite appends; never derive from ".db"
         with contextlib.suppress(OSError):
-            wal.unlink()
+            sidecar.unlink()
 
     write_sentinel(db_path, backup_path)
 
-    salvage_primary_failed, rows = _attempt_primary_salvage(
-        backup_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex
-    )
+    salvage_primary_failed, rows = _attempt_primary_salvage(backup_path, dbapi=dbapi)
 
     salvage_cli_failed = False
     cli_used = False
@@ -299,7 +290,7 @@ def recover_db(
         )
         from trw_memory.storage._cold_rebuild import rebuild_from_cold as _rebuild_fn
 
-        new_conn = _open_recovered_conn(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
+        new_conn = _open_recovered_conn(db_path, dbapi=dbapi)
         rebuild_base = _resolve_cold_rebuild_base_safe(db_path)
         try:
             cold_rebuild_rows = _rebuild_fn(rebuild_base, new_conn)
@@ -345,7 +336,7 @@ def recover_db(
         )
 
     if new_conn is None:
-        new_conn = _open_recovered_conn(db_path, dbapi=dbapi, sqlcipher_key_hex=sqlcipher_key_hex)
+        new_conn = _open_recovered_conn(db_path, dbapi=dbapi)
 
     _restore_rows(new_conn, rows, db_path=db_path)
 

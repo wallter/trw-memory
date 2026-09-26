@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from trw_memory._client_lifecycle import handle_sse_event
 from trw_memory.client import SHARED_EVENT_CACHE_MAX, MemoryClient
 from trw_memory.sync import SharedFetchResult
 
@@ -18,13 +19,12 @@ class TestRecall:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
         monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
         monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
-        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
         monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
 
         with patch("trw_memory.client.SSESubscriber"):
             client = MemoryClient(namespace="default", mode="local")
 
-        client._handle_sse_event({"type": "learning_published", "id": 42, "summary": "deployment rollback guide"})
+        handle_sse_event(client, {"type": "learning_published", "id": 42, "summary": "deployment rollback guide"})
 
         with patch("trw_memory.client.fetch_shared_memories", return_value=SharedFetchResult([], "ok", 0, 0)):
             results = await client.recall("deployment", include_shared=True)
@@ -40,7 +40,6 @@ class TestRecall:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
         monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
         monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
-        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
         monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
         monkeypatch.setenv("MEMORY_PLATFORM_API_KEY", "test-key")
 
@@ -48,7 +47,7 @@ class TestRecall:
             client = MemoryClient(namespace="default", mode="local")
 
         await client.store("Local deployment advice", importance=0.5)
-        client._handle_sse_event({"type": "learning_published", "id": 42, "summary": "Remote deployment guidance"})
+        handle_sse_event(client, {"type": "learning_published", "id": 42, "summary": "Remote deployment guidance"})
 
         embedder = MagicMock()
         embedder.available.return_value = True
@@ -77,7 +76,7 @@ class TestRecall:
             client = MemoryClient(namespace="default", mode="local")
 
         for idx in range(SHARED_EVENT_CACHE_MAX + 20):
-            client._handle_sse_event({"type": "learning_published", "id": idx, "summary": f"entry {idx}"})
+            handle_sse_event(client, {"type": "learning_published", "id": idx, "summary": f"entry {idx}"})
 
         assert len(client._shared_event_cache) == SHARED_EVENT_CACHE_MAX
         assert client._shared_event_cache[0]["memory_id"] == "20"
@@ -92,7 +91,6 @@ class TestRecall:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
         monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
         monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
-        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
         monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
 
         with patch("trw_memory.client.SSESubscriber"):
@@ -106,7 +104,7 @@ class TestRecall:
             if client._background_tasks:
                 await asyncio.gather(*list(client._background_tasks))
 
-        client._handle_sse_event({"type": "learning_retired", "id": 42})
+        handle_sse_event(client, {"type": "learning_retired", "id": 42})
 
         with patch("trw_memory.client.fetch_shared_memories", return_value=SharedFetchResult([], "ok", 0, 0)):
             await client.recall("published", include_shared=True)

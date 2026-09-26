@@ -34,11 +34,16 @@ Four behaviours, one per FR08 clause:
 from __future__ import annotations
 
 import contextlib
+import functools
+import inspect
 import os
 import subprocess
 import sys
+import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -49,9 +54,17 @@ from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
 
 from trw_memory.daemon._discovery import DaemonInfo, DiscoveryInvalid, read_live_discovery
+from trw_memory.daemon._held_session import HeldSessions
 from trw_memory.daemon._paths import DaemonPaths, open_private_log
-from trw_memory.exceptions import DaemonAuthError, DaemonRecordInvalidError, DaemonUnreachableError
+from trw_memory.daemon._version_gate import VERSION_HEADER
+from trw_memory.exceptions import (
+    DaemonAuthError,
+    DaemonRecordInvalidError,
+    DaemonUnreachableError,
+    DaemonVersionMismatchError,
+)
 from trw_memory.models.config import MemoryConfig
+from trw_memory.user_paths import require_supported_platform
 
 __all__ = ["DAEMON_START_COMMAND", "DaemonClient", "start_daemon_detached"]
 
@@ -60,6 +73,21 @@ logger = structlog.get_logger(__name__)
 #: The command an operator runs to start the daemon by hand. Quoted verbatim in
 #: every unreachable error, so the failure carries its own remedy.
 DAEMON_START_COMMAND = "trw-memory-server serve http"
+
+
+def _package_version() -> str:
+    """This installation's trw-memory version, or ``"unknown"`` in a source tree without metadata."""
+    try:
+        return package_version("trw-memory")
+    except PackageNotFoundError:  # pragma: no cover - only in a source tree without metadata
+        return "unknown"
+
+
+def _major(version: str) -> int | None:
+    """The leading integer of *version*, or ``None`` when it has none (``"unknown"``)."""
+    head = version.split(".", 1)[0]
+    return int(head) if head.isdigit() else None
+
 
 #: Total attempts per call: the first, plus exactly one retry (FR08 clause 1).
 _MAX_ATTEMPTS = 2
@@ -83,6 +111,7 @@ _UNAUTHORIZED_STATUS = 401
 #: the lost attempt wrote instead of adding a second one. ``memory_update`` (a
 #: correction) sets values, ``tags_add`` dedups and a closed prior is skipped, so a
 #: replay leaves the row as the first run did; only its audit event repeats.
+#: ``memory_reembed`` skips rows already in the active space.
 _REPLAYABLE_TOOLS = frozenset(
     {
         "memory_assertion_health",
@@ -94,6 +123,7 @@ _REPLAYABLE_TOOLS = frozenset(
         "memory_namespace_diagnose",
         "memory_quarantine_list",
         "memory_recall",
+        "memory_reembed",
         "memory_search",
         "memory_status",
         "memory_store",
@@ -118,7 +148,7 @@ def start_daemon_detached(paths: DaemonPaths) -> subprocess.Popen[bytes]:
     logger.info("daemon_auto_start", discovery=str(paths.discovery))
     log = open_private_log(paths.start_log)
     try:
-        return subprocess.Popen(  # noqa: S603 -- fixed argv: this interpreter and a module constant
+        spawned = subprocess.Popen(  # noqa: S603 -- fixed argv: this interpreter and a module constant
             [sys.executable, *_DAEMON_ARGV],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -127,6 +157,11 @@ def start_daemon_detached(paths: DaemonPaths) -> subprocess.Popen[bytes]:
         )
     finally:
         os.close(log)
+    # This process stays the daemon's parent, so it must reap it: unreaped, a daemon
+    # that crashed stayed a zombie for the life of this process (2026-09-25). A thread,
+    # not a double fork: forking a multi-threaded process is unsafe on macOS.
+    threading.Thread(target=spawned.wait, name=f"trw-memory-daemon-reaper-{spawned.pid}", daemon=True).start()
+    return spawned
 
 
 def _stop_unpublished(spawned: object) -> bool:
@@ -178,6 +213,36 @@ def _never_sent(exc: BaseException) -> bool:
     return any(isinstance(current, (httpx.ConnectError, httpx.ConnectTimeout)) for current in _chain(exc))
 
 
+def _forward(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Replace a stub method's ``...`` body with a ``call_tool`` request (FR04).
+
+    Applied by name, after the class body, to every method in
+    ``_FORWARDED_METHODS`` -- mypy --strict still type-checks every caller
+    against the method exactly as written in the class body; only the
+    runtime function object is swapped, once, per name.
+
+    *fn* (the still-real stub ``async def``, body ``...``) is read once with
+    ``inspect.signature``: its name gives the served tool (``"memory_" +
+    fn.__name__``), and its parameter list -- including declared defaults --
+    gives the payload shape, so that shape is stated exactly once, in the
+    stub's own signature, rather than duplicated a second time in a
+    hand-written dict literal.
+    """
+    tool = f"memory_{fn.__name__}"
+    params = tuple(inspect.signature(fn).parameters.values())[1:]  # drop ``self``
+    names = tuple(p.name for p in params)
+    defaults = {p.name: p.default for p in params if p.default is not inspect.Parameter.empty}
+
+    @functools.wraps(fn)
+    async def wrapper(self: DaemonClient, *args: Any, **kwargs: Any) -> Any:
+        payload = dict(defaults)
+        payload.update(zip(names, args, strict=False))
+        payload.update(kwargs)
+        return await self.call_tool(tool, payload)
+
+    return wrapper
+
+
 class DaemonClient:
     """Calls daemon-served tools, failing closed when the daemon is absent."""
 
@@ -188,15 +253,22 @@ class DaemonClient:
         paths: DaemonPaths | None = None,
         *,
         instance: tuple[int, str] | None = None,
+        keep_session: bool = False,
     ) -> None:
         """Args: token: the checkout's grant. config: source of the startup deadline. paths: daemon files.
 
         instance: the ``(pid, started_at)`` a caller checked; every call to any other daemon is refused.
+        keep_session: hold one MCP session open across calls made on the same event loop (W27).
+        Only for a caller whose loop outlives its calls: a session opened on a loop that
+        ``asyncio.run`` then closes is abandoned, not reused.
         """
+        require_supported_platform()  # before explicit paths skip the resolver's own check (C12)
         self._token = token
         self._config = config or MemoryConfig()
         self._paths = paths or DaemonPaths.resolve()
         self._instance = instance
+        self._keep_session = keep_session
+        self._sessions = HeldSessions()
 
     @property
     def paths(self) -> DaemonPaths:
@@ -220,6 +292,18 @@ class DaemonClient:
             f"Inspect the file and remove it if no daemon is running, then retry."
         )
 
+    def _compatible(self, info: DaemonInfo) -> DaemonInfo:
+        """*info*, unless it serves another major version than this client's (PRD-CORE-302 C7)."""
+        mine = _major(_package_version())
+        theirs = _major(info.version)
+        if mine is None or theirs is None or mine == theirs:
+            return info
+        raise DaemonVersionMismatchError(
+            f"daemon_version_mismatch: the trw-memory daemon (pid {info.pid}) serves {info.version}, but this client "
+            f"is {_package_version()}; their tool signatures differ. No memory was read or written. Stop process "
+            f"{info.pid} and retry: the next call starts a daemon from this installation."
+        )
+
     def _attach(self) -> DaemonInfo:
         """Return a live daemon, auto-starting one only if the slot is free.
 
@@ -229,7 +313,7 @@ class DaemonClient:
         """
         result = read_live_discovery(self._paths)
         if isinstance(result, DaemonInfo):
-            return result
+            return self._compatible(result)
         if isinstance(result, DiscoveryInvalid):
             raise self._refuse_invalid(result)
         spawned = start_daemon_detached(self._paths)
@@ -237,7 +321,7 @@ class DaemonClient:
         while time.monotonic() < deadline:
             result = read_live_discovery(self._paths)
             if isinstance(result, DaemonInfo):
-                return result
+                return self._compatible(result)
             if isinstance(result, DiscoveryInvalid):
                 raise self._refuse_invalid(result)
             time.sleep(_DISCOVERY_POLL_SECONDS)
@@ -247,6 +331,37 @@ class DaemonClient:
         if _stop_unpublished(spawned):
             reason += f"; the client stopped the daemon it started, whose stderr is in {self._paths.start_log}"
         raise self._unreachable(reason)
+
+    async def retire(self) -> None:
+        """Stop holding a session: close it now if idle, else when its last in-flight call returns.
+
+        For an owner that replaced this client (a restarted daemon, a changed setting).
+        A caller still holding it keeps working, on a session per call.
+        """
+        await self._sessions.retire()
+
+    async def _call_once(self, info: DaemonInfo, name: str, arguments: dict[str, Any]) -> Any:
+        if self._keep_session and not self._sessions.retired:
+            held = await self._sessions.acquire(
+                (info.url, info.pid, info.started_at), lambda: Client(self._transport(info))
+            )
+            try:
+                return (await held.client.call_tool(name, arguments)).data
+            except ToolError:
+                raise  # the daemon answered: the session is fine
+            except Exception:
+                # A transport failure: the retry must not reuse this session. Released, not
+                # closed: another call may still be using it, and closes it when it returns.
+                await self._sessions.release(held)
+                raise
+            finally:
+                await self._sessions.done_with(held)
+        async with Client(self._transport(info)) as client:
+            return (await client.call_tool(name, arguments)).data
+
+    def _transport(self, info: DaemonInfo) -> StreamableHttpTransport:
+        """*info*'s endpoint with this checkout's grant and this client's version (W45)."""
+        return StreamableHttpTransport(url=info.url, auth=self._token, headers={VERSION_HEADER: _package_version()})
 
     async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
         """Call a daemon-served tool, or fail closed.
@@ -286,10 +401,7 @@ class DaemonClient:
                     f"{self._instance[1]}, which this client was checked against; attach again"
                 )
             try:
-                transport = StreamableHttpTransport(url=info.url, auth=self._token)
-                async with Client(transport) as client:
-                    result = await client.call_tool(name, arguments)
-                return result.data
+                return await self._call_once(info, name, arguments)
             except ToolError:
                 # The daemon answered: the tool itself refused (a namespace outside
                 # the grant, invalid input). Retrying cannot change that answer, and
@@ -318,9 +430,15 @@ class DaemonClient:
                     ) from exc
         raise self._unreachable(type(last_error).__name__ if last_error else "unknown error") from last_error
 
+    # Below this line, every method is a typed stub whose ``...`` body never
+    # runs: ``_forward`` (FR04) replaces each one, by name, right after the
+    # class body ends, deriving the served tool and the payload shape from the
+    # stub's own signature. A method stays hand-written only when it carries
+    # logic beyond "shape the arguments and name the tool" -- ``namespace_move``
+    # picks its tool name from an argument, which no generic forwarder can express.
+
     async def store(self, content: str, namespace: str, **kwargs: Any) -> Any:
         """Write a memory entry through the daemon, or fail closed."""
-        return await self.call_tool("memory_store", {"content": content, "namespace": namespace, **kwargs})
 
     async def recall(self, query: str, namespace: str, **kwargs: Any) -> Any:
         """Read memory entries through the daemon, or fail closed.
@@ -328,85 +446,57 @@ class DaemonClient:
         Failing closed on a READ is the deliberate part: an empty-but-truthful
         error beats a partial view the caller cannot tell is partial.
         """
-        return await self.call_tool("memory_recall", {"query": query, "namespace": namespace, **kwargs})
 
     async def get(self, memory_id: str, namespace: str) -> Any:
         """Read one entry by ``(namespace, id)`` through the daemon, or fail closed."""
-        return await self.call_tool("memory_get", {"memory_id": memory_id, "namespace": namespace})
 
     async def find_duplicate(self, namespace: str, content: str, detail: str) -> Any:
         """Id of an ACTIVE exact-content copy in *namespace* through the daemon, or fail closed."""
-        return await self.call_tool(
-            "memory_find_duplicate", {"namespace": namespace, "content": content, "detail": detail}
-        )
 
     async def update(self, entry_id: str, namespace: str, patch: dict[str, Any]) -> Any:
         """Correct one entry with a ``memory_update`` *patch* through the daemon, or fail closed."""
-        return await self.call_tool("memory_update", {"entry_id": entry_id, "namespace": namespace, "patch": patch})
 
     async def admit_shared(self, namespace: str, results: list[dict[str, object]]) -> Any:
         """Admit fetched shared results through *namespace*'s gate (not replayed: the gate quarantines), or fail closed."""
-        return await self.call_tool("memory_admit_shared", {"namespace": namespace, "results": results})
 
-    async def vectors(self, namespace: str, ids: list[str], space: dict[str, object]) -> Any:
-        """Stored vectors of *ids* in *namespace* encoded in *space*, or fail closed."""
-        return await self.call_tool("memory_vectors", {"namespace": namespace, "ids": ids, "space": space})
+    async def vectors(self, namespace: str, ids: list[str]) -> Any:
+        """Active-space vectors of *ids* in *namespace*, with that space and its collapse threshold, or fail closed."""
 
     async def verify(self, namespace: str, project_root: str | None, settings: dict[str, object] | None = None) -> Any:
         """Run the maintain-verify sweep over *namespace* against *project_root*, or fail closed."""
-        return await self.call_tool(
-            "memory_verify", {"namespace": namespace, "project_root": project_root, "settings": settings}
-        )
 
     async def assertion_health(self, namespace: str, stale_days: int) -> Any:
         """*namespace*'s cached assertion verdicts as counts (``health`` is ``None`` when none exist), or fail closed."""
-        return await self.call_tool("memory_assertion_health", {"namespace": namespace, "stale_days": stale_days})
 
     async def graph_related(
         self, namespace: str, learning_id: str, depth: int, edge_types: list[str] | None, limit: int
     ) -> Any:
         """*learning_id*'s active graph neighbours in *namespace*, or fail closed."""
-        return await self.call_tool(
-            "memory_graph_related",
-            {
-                "namespace": namespace,
-                "learning_id": learning_id,
-                "depth": depth,
-                "edge_types": edge_types,
-                "limit": limit,
-            },
-        )
 
     async def graph_backfill(
         self, namespace: str, after: dict[str, str] | None, limit: int, deadline_seconds: float | None
     ) -> Any:
         """Graph one page of *namespace*'s existing rows after the *after* cursor, or fail closed."""
-        return await self.call_tool(
-            "memory_graph_backfill",
-            {"namespace": namespace, "after": after, "limit": limit, "deadline_seconds": deadline_seconds},
-        )
 
     async def record_surfaced(self, namespace: str, ids: list[str], *, session_start: bool = False) -> Any:
         """Count *ids* of *namespace* as accessed (and surfaced at session start), or fail closed."""
-        return await self.call_tool(
-            "memory_record_surfaced", {"namespace": namespace, "ids": ids, "session_start": session_start}
-        )
 
-    async def maintain(self, namespace: str) -> Any:
-        """Run the daemon's maintenance passes for *namespace* (decay, consolidation, verification, WAL)."""
-        return await self.call_tool("memory_maintain", {"namespace": namespace})
+    async def maintain(self, namespace: str, consolidation: dict[str, object] | None = None) -> Any:
+        """Run the daemon's maintenance passes for *namespace* (decay, consolidation, verification, WAL).
+
+        *consolidation* is the caller's project policy for the consolidation pass.
+        """
+
+    async def reembed(self, namespace: str, cursor: str | None = None) -> Any:
+        """One bounded pass re-encoding *namespace*'s vectors outside the active space; resume with its ``cursor``."""
 
     async def import_checkout(self, namespace: str, source_path: str, ids: list[str]) -> Any:
         """Merge the checkout's project store at *source_path* into *namespace*; counts what it holds of *ids*."""
-        return await self.call_tool(
-            "memory_import_checkout", {"namespace": namespace, "source_path": source_path, "ids": ids}
-        )
 
-    async def similar(self, namespace: str, vector: list[float], space: dict[str, Any] | None, top_k: int = 10) -> Any:
-        """The dedup KNN window for *vector* (encoded in *space*) in *namespace*, or fail closed."""
-        return await self.call_tool(
-            "memory_similar", {"namespace": namespace, "vector": vector, "space": space, "top_k": top_k}
-        )
+    async def similar(
+        self, namespace: str, text: str, skip_threshold: float, merge_threshold: float, top_k: int = 10
+    ) -> Any:
+        """The daemon's skip/merge/store verdict for *text* in *namespace*, or fail closed."""
 
     async def list_page(
         self,
@@ -418,45 +508,71 @@ class DaemonClient:
         tags: list[str] | None = None,
     ) -> Any:
         """One keyset page of *namespace*'s rows as ``MemoryEntry`` JSON, or fail closed."""
-        arguments = {"namespace": namespace, "limit": limit, "after": after, "status": status, "tags": tags}
-        return await self.call_tool("memory_list_page", arguments)
 
     async def status(self, namespace: str) -> Any:
         """Count *namespace*'s rows through the daemon, or fail closed."""
-        return await self.call_tool("memory_status", {"namespace": namespace})
 
     async def sync_dirty_page(self, namespace: str, limit: int) -> Any:
         """The oldest *limit* rows of *namespace* that still need a push, or fail closed."""
-        return await self.call_tool("memory_sync_dirty_page", {"namespace": namespace, "limit": limit})
 
     async def sync_mark_synced(self, namespace: str, acks: dict[str, int]) -> Any:
         """Mark pushed rows of *namespace* synced, each at the ``sync_seq`` it was paged at, or fail closed."""
-        return await self.call_tool("memory_sync_mark_synced", {"namespace": namespace, "acks": acks})
 
     async def sync_find(self, namespace: str, remote_id: str, ids: list[str]) -> Any:
         """The row in *namespace* a pulled learning maps to, or fail closed."""
-        return await self.call_tool("memory_sync_find", {"namespace": namespace, "remote_id": remote_id, "ids": ids})
 
     async def sync_apply(self, namespace: str, entry: dict[str, Any], *, synced: bool = True) -> Any:
         """Write a merged pulled row into *namespace* through the write gate, or fail closed."""
-        return await self.call_tool("memory_sync_apply", {"namespace": namespace, "entry": entry, "synced": synced})
 
     async def search(self, namespace: str, **kwargs: Any) -> Any:
         """Filter one namespace's entries through the daemon, or fail closed."""
-        return await self.call_tool("memory_search", {"namespace": namespace, **kwargs})
 
     async def forget(self, memory_id: str, namespace: str) -> Any:
         """Delete one entry through the daemon, or fail closed."""
-        return await self.call_tool("memory_forget", {"memory_id": memory_id, "namespace": namespace})
 
     async def consolidate(self, namespace: str, *, dry_run: bool = False) -> Any:
         """Run one consolidation pass through the daemon, or fail closed."""
-        return await self.call_tool("memory_consolidate", {"namespace": namespace, "dry_run": dry_run})
 
     async def namespace_diagnose(self, namespace: str | None) -> Any:
         """Report whether a checkout looks moved, through the daemon; read-only."""
-        return await self.call_tool("memory_namespace_diagnose", {"namespace": namespace})
 
     async def namespace_move(self, action: Literal["merge", "rename"], source: str, destination: str) -> Any:
         """Merge or rename one namespace's rows into another through the daemon."""
         return await self.call_tool(f"memory_namespace_{action}", {"source": source, "destination": destination})
+
+
+#: Every stub method above whose body is generated by ``_forward`` (FR04). Kept as
+#: one list rather than a decorator per method: mypy --strict type-checks each stub
+#: exactly as written in the class body above, and applying ``_forward`` here,
+#: after the class exists, changes nothing that mypy's static pass ever sees.
+_FORWARDED_METHODS = (
+    "store",
+    "recall",
+    "get",
+    "find_duplicate",
+    "update",
+    "admit_shared",
+    "vectors",
+    "verify",
+    "assertion_health",
+    "graph_related",
+    "graph_backfill",
+    "record_surfaced",
+    "maintain",
+    "reembed",
+    "import_checkout",
+    "similar",
+    "list_page",
+    "status",
+    "sync_dirty_page",
+    "sync_mark_synced",
+    "sync_find",
+    "sync_apply",
+    "search",
+    "forget",
+    "consolidate",
+    "namespace_diagnose",
+)
+for _name in _FORWARDED_METHODS:
+    setattr(DaemonClient, _name, _forward(getattr(DaemonClient, _name)))
+del _name

@@ -106,6 +106,17 @@ def apply_runtime_pii_policy(
         entropy_threshold=config.pii_entropy_threshold,
         custom_patterns=config.pii_custom_patterns,
     )
+    # Adversarial audit 2026-09-24 (Q1 approval-revalidation review): nudge_line
+    # is a caller-writable free-form field (``LearningFields.nudge_line`` via
+    # memory_store) never covered by this PII policy, though it IS one of
+    # ``poisoning.SCANNED_ENTRY_FIELDS`` for injection scanning. A credential
+    # placed there passed both ordinary intake and the quarantine-approval
+    # recheck.
+    nudge_line_matches = detect_pii(
+        entry.nudge_line,
+        entropy_threshold=config.pii_entropy_threshold,
+        custom_patterns=config.pii_custom_patterns,
+    )
     # Security audit 2026-06-09: scan tags too. A credential (API key) placed in
     # a tag previously bypassed the block gate entirely.
     tag_matches_by_index: list[list[PIIMatch]] = [
@@ -139,7 +150,9 @@ def apply_runtime_pii_policy(
         for assertion in entry.assertions
     ]
     assertion_matches = [match for matches in assertion_matches_by_index for match in matches]
-    all_matches = content_matches + detail_matches + tag_matches + evidence_matches + assertion_matches
+    all_matches = (
+        content_matches + detail_matches + nudge_line_matches + tag_matches + evidence_matches + assertion_matches
+    )
     if not all_matches:
         return entry, []
 
@@ -159,6 +172,7 @@ def apply_runtime_pii_policy(
 
     new_content = replace_pii(entry.content, content_matches)
     new_detail = replace_pii(entry.detail, detail_matches)
+    new_nudge_line = replace_pii(entry.nudge_line, nudge_line_matches)
     new_tags = [replace_pii(tag, matches) for tag, matches in zip(entry.tags, tag_matches_by_index, strict=True)]
     new_evidence = [
         replace_pii(item, matches) for item, matches in zip(entry.evidence, evidence_matches_by_index, strict=True)
@@ -183,6 +197,7 @@ def apply_runtime_pii_policy(
             update={
                 "content": new_content,
                 "detail": new_detail,
+                "nudge_line": new_nudge_line,
                 "tags": new_tags,
                 "evidence": new_evidence,
                 "assertions": new_assertions,

@@ -18,14 +18,20 @@ from pathlib import Path
 import pytest
 
 from trw_memory.storage import _connection
-from trw_memory.storage._connection import forget_verified_stores, open_and_configure
+from trw_memory.storage._connection import open_and_configure
+
+
+def _forget_verified_stores() -> None:
+    """Test seam mirroring the removed ``forget_verified_stores``."""
+    with _connection._VERIFIED_LOCK:
+        _connection._VERIFIED_STORES.clear()
 
 
 @pytest.fixture(autouse=True)
 def _fresh_record() -> Iterator[None]:
-    forget_verified_stores()
+    _forget_verified_stores()
     yield
-    forget_verified_stores()
+    _forget_verified_stores()
 
 
 @pytest.fixture

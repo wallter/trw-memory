@@ -64,14 +64,7 @@ def reconnect(backend: SQLiteBackend) -> None:
         candidate = None
         try:
             prepare_db_file_mode(backend._db_path)
-            if backend._sqlcipher_key_hex is not None:
-                candidate = backend._open_and_configure(
-                    backend._db_path,
-                    dbapi=backend._dbapi,
-                    sqlcipher_key_hex=backend._sqlcipher_key_hex,
-                )
-            else:
-                candidate = backend._open_and_configure(backend._db_path)
+            candidate = backend._open_and_configure(backend._db_path)
             ensure_schema(candidate)
             vec_available = load_vec_extension(candidate, backend._db_path, backend._dim)
             fts_available = ensure_fts_table(candidate)

@@ -25,7 +25,6 @@ from trw_memory.security.pii import mask_query_credentials
 from trw_memory.sync._remote_admission import Gate
 from trw_memory.sync._remote_common import (
     FETCH_TIMEOUT,
-    _raise_local_only_violation,
     build_platform_headers,
     decode_learning_api_v1_result,
     encode_learning_api_v1_search,
@@ -132,7 +131,6 @@ def fetch_shared_memories(
     cfg: MemoryConfig,
     *,
     admit: Gate,
-    embedding: list[float] | None = None,
     limit: int = 10,
     local_entries: list[MemoryEntry] | None = None,
     embedder: EmbeddingProvider | None = None,
@@ -153,9 +151,6 @@ def fetch_shared_memories(
         "nothing was asked", "the platform did not answer" or "everything was
         refused".
     """
-    if cfg.local_only:
-        logger.warning("memory_fetch_blocked_local_only")
-        _raise_local_only_violation()
     if not cfg.sync_enabled or not cfg.platform_url:
         return SharedFetchResult([], "disabled", 0, 0)
     if not is_valid_platform_url(cfg.platform_url):
@@ -165,15 +160,14 @@ def fetch_shared_memories(
     request_payload: dict[str, object] = encode_learning_api_v1_search(
         query=mask_query_credentials(query), limit=limit, min_importance=cfg.sync_min_importance
     )
-    if embedding:
-        request_payload["embedding"] = embedding
 
     try:
+        fetch_url = f"{cfg.platform_url.rstrip('/')}/v1/learnings/search"
         with httpx.Client(timeout=FETCH_TIMEOUT) as client:
             resp = client.post(
-                f"{cfg.platform_url.rstrip('/')}/v1/learnings/search",
+                fetch_url,
                 json=request_payload,
-                headers=build_platform_headers(cfg.platform_api_key),
+                headers=build_platform_headers(cfg.platform_api_key, fetch_url),
             )
             # A failed fetch and an empty shared corpus both arrive as ``[]``, and
             # the caller merges either one identically. Log the failure (status

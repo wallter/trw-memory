@@ -118,11 +118,6 @@ class BulkStoreSummary:
         """Count of records that landed in the main store (stored + updated)."""
         return self.stored + self.updated
 
-    @property
-    def per_item_ms(self) -> float:
-        """Mean wall-time per record across the whole batch."""
-        return self.duration_ms / self.total if self.total else 0.0
-
 
 async def bulk_store_impl(
     client: MemoryClient,
@@ -154,6 +149,7 @@ async def bulk_store_impl(
                 tags=req.tags,
                 metadata=req.metadata,
                 importance=req.importance,
+                assertions=req.assertions,
             )
             prepared.append((req, None))
         except SchemaValidationError as exc:
@@ -324,7 +320,7 @@ async def bulk_store_impl(
                 )
 
                 if not skip_remote_publish and client._should_attempt_remote_publish(entry):
-                    client._schedule_background_task(client._publish_entry(entry, embedding))
+                    client._schedule_background_task(client._publish_entry(entry))
         finally:
             # Also for the rows persisted before a mid-batch StorageError.
             if graph_items:

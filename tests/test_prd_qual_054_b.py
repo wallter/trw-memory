@@ -2,7 +2,7 @@
 
 FR-04: Export completeness — entry_to_export_dict returns all MemoryEntry fields.
 FR-05: Audit log durability — flush() called after each append.
-FR-06: Key file path validation — rejects path traversal.
+FR-06 (key file path validation) left with the master key it guarded.
 FR-07: Code quality — __all__ exports, MemoryConfig __repr__.
 """
 
@@ -161,37 +161,6 @@ class TestAuditFlush:
         assert bytes(written).endswith(b"\n"), "audit record was not terminated/flushed as a full line"
         # ... and fsync forced them to stable storage after the write.
         assert fsynced_fds, "os.fsync was not called after writing audit record"
-
-
-# -----------------------------------------------------------------------
-# FR-06: Key file path validation
-# -----------------------------------------------------------------------
-
-
-class TestKeyPathValidation:
-    """FR-06: key file paths must reject traversal attacks."""
-
-    def test_key_path_traversal_rejected(self) -> None:
-        """Paths containing '..' must be rejected."""
-        from trw_memory.security.keys import _validate_key_path
-
-        with pytest.raises(Exception, match=r"[Tt]raversal"):
-            _validate_key_path(Path("../../etc/passwd"))
-
-    def test_key_path_traversal_in_middle_rejected(self) -> None:
-        """Paths with '..' in the middle must be rejected."""
-        from trw_memory.security.keys import _validate_key_path
-
-        with pytest.raises(Exception, match=r"[Tt]raversal"):
-            _validate_key_path(Path("/home/user/../../../etc/shadow"))
-
-    def test_key_path_valid_accepted(self) -> None:
-        """Valid paths like ~/.trw-memory/master.key must be accepted."""
-        from trw_memory.security.keys import _validate_key_path
-
-        result = _validate_key_path(Path("~/.trw-memory/master.key"))
-        assert result.is_absolute(), "Result must be an absolute resolved path"
-        assert ".." not in result.parts
 
 
 # -----------------------------------------------------------------------

@@ -1,19 +1,14 @@
-"""Security — encryption, access control, key management, audit, PII, poisoning.
+"""Security — access control, signing keys, audit, PII, poisoning.
 
 Public API re-exported from submodules:
-- ``encryption`` — AES-256-GCM field-level encrypt/decrypt
-- ``keys`` — master key retrieval and storage (no rotation — retired, PRD-CORE-293)
+- ``keys`` — Ed25519 provenance-signing keys
 - ``rbac`` — role-based access control
 - ``audit`` — immutable SHA-256 hash chain audit log
 - ``pii`` — PII detection and redaction
 - ``poisoning`` — memory poisoning anomaly detection
 """
 
-from trw_memory.exceptions import (
-    EncryptionUnavailableError,
-    LocalOnlyViolationError,
-    MasterKeyNotFoundError,
-)
+from trw_memory.exceptions import ModelNotCachedError
 from trw_memory.security.audit import (
     AuditLog,
     AuditRecord,
@@ -23,21 +18,10 @@ from trw_memory.security.canary import (
     CanaryStore,
     CanaryVerificationResult,
 )
-from trw_memory.security.encryption import (
-    decrypt_entry_fields,
-    decrypt_field,
-    derive_namespace_key,
-    derive_namespace_key_bytes,
-    encrypt_entry_fields,
-    encrypt_field,
-    generate_master_key,
-)
 from trw_memory.security.keys import (
     generate_ed25519_signing_key,
-    get_master_key,
     get_or_create_ed25519_key,
     load_ed25519_signing_key,
-    store_master_key,
 )
 from trw_memory.security.observe_clock import (
     ObserveClockState,
@@ -93,9 +77,7 @@ __all__ = [
     "CanaryLearning",
     "CanaryStore",
     "CanaryVerificationResult",
-    "EncryptionUnavailableError",
-    "LocalOnlyViolationError",
-    "MasterKeyNotFoundError",
+    "ModelNotCachedError",
     "ObserveClockState",
     "PIIAction",
     "PIIMatch",
@@ -106,17 +88,9 @@ __all__ = [
     "Role",
     "TrustScore",
     "check_permission",
-    "decrypt_entry_fields",
-    "decrypt_field",
-    "derive_namespace_key",
-    "derive_namespace_key_bytes",
     "detect_pii",
-    "encrypt_entry_fields",
-    "encrypt_field",
     "filter_recall_window",
     "generate_ed25519_signing_key",
-    "generate_master_key",
-    "get_master_key",
     "get_or_create_ed25519_key",
     "load_ed25519_signing_key",
     "provenance_append",
@@ -130,5 +104,4 @@ __all__ = [
     "score_intake",
     "shannon_entropy",
     "start_observe_clock",
-    "store_master_key",
 ]

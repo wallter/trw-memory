@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, cast
 
 from trw_memory.models.memory import MemoryEntry
-from trw_memory.security.recall_filter import filter_recall_window
+from trw_memory.security.recall_filter import filter_recall_window, redacted_scan_fields
 from trw_memory.security.runtime import probe_canaries
 from trw_memory.security.telemetry_emit import build_security_traceability, emit_security_event
 
@@ -67,8 +67,7 @@ def apply_recall_security(
         if entry.metadata.get("system_canary") == "true":
             continue
         original = dict(result_by_id[entry.id])
-        original["content"] = entry.content
-        original["detail"] = entry.detail
+        original.update(redacted_scan_fields(entry))
         original["metadata"] = dict(entry.metadata)
         original["score"] = score_by_id[entry.id]
         secured.append(cast("MemoryResultDict", original))

@@ -90,7 +90,6 @@ EXPECTED_TABLES = [
     "memory_namespaces",
     "memory_tags",
     "vec_index",
-    "wiki_refs",
 ]
 
 
@@ -124,10 +123,12 @@ def test_schema_5_is_registered_exactly_once() -> None:
     assignment, no error. This asserts against the imported module AND the
     source text, because only the second catches a duplicate assignment.
     """
-    # Schema 6 adds vector provenance; the historical v5 migration must still
-    # be registered exactly once and retain its composite-key behavior.
-    assert SCHEMA_VERSION == 6
-    assert sorted(schema_module._MIGRATIONS) == [2, 3, 4, 5, 6]
+    # Schema 6 adds vector provenance, schema 7 retires wiki_refs (W10), and
+    # schema 8 adds the quarantine_reviews namespace column (Q3, security
+    # review); the historical v5 migration must still be registered exactly
+    # once and retain its composite-key behavior.
+    assert SCHEMA_VERSION == 8
+    assert sorted(schema_module._MIGRATIONS) == [2, 3, 4, 5, 6, 7, 8]
 
     source = Path(schema_module.__file__).read_text()
     assignments = re.findall(r"^_MIGRATIONS\[5\]\s*=", source, flags=re.MULTILINE)

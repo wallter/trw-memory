@@ -17,7 +17,7 @@ cd trw-memory
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 # With optional acceleration deps (dense vectors + BM25):
-pip install -e ".[dev,vectors,bm25]"
+pip install -e ".[dev,embeddings]"
 ```
 
 ## Running Tests

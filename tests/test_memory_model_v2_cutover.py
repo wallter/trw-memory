@@ -381,7 +381,6 @@ def test_remote_boundary_encoder_decoder_round_trips_impact_importance() -> None
         detail=None,
         tags=["t"],
         importance=0.83,
-        embedding=None,
         source_project="p",
         source_learning_id="L-1",
     )
@@ -473,7 +472,6 @@ _DATA_KEY_ALLOWED = frozenset(
         "sync/_remote_common.py",
         "storage/_schema.py",
         "storage/_memory_model_v2.py",
-        "migration/from_trw.py",
     }
 )
 

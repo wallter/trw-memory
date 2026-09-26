@@ -38,7 +38,6 @@ class TestSyncE2E:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "e2e_sync"))
         monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
         monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
-        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
         monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
 
         client = MemoryClient(namespace="default", mode="local")
@@ -61,7 +60,6 @@ class TestSyncE2E:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "e2e_sync"))
         monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
         monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
-        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
         monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
 
         client = MemoryClient(namespace="default", mode="local")

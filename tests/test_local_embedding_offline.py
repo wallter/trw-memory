@@ -1,54 +1,31 @@
-"""PRD-QUAL-110-FR04: LocalEmbeddingProvider honors the offline switch.
+"""PLAN W40: LocalEmbeddingProvider's runtime load is always cache-only.
 
-The embedding init forces ``local_files_only=True`` (no huggingface.co
-download) when ``TRW_OFFLINE`` or ``HF_HUB_OFFLINE`` is engaged, even if the
-``local_only`` config field is False, and discloses the potential egress on a
-network-capable first load.
-
-PRD-SEC-014-FR01 narrowed what "network-capable" means: the disclosure is
-emitted only when the cache cannot answer, so the egress-disclosure case now
-pins ``HF_HOME`` at an empty directory instead of depending on whatever the
-developer happens to have cached. The paired
-``test_complete_cache_suppresses_the_disclosure`` covers the other side.
+No setting or environment variable turns a download on; models arrive through
+``trw-mcp models fetch`` (``trw_memory.embeddings.fetch_models``). A busy GPU
+still falls back to CPU.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from pathlib import Path
-
 import pytest
-from structlog.testing import capture_logs
 
 from trw_memory.embeddings import local as local_mod
 
-from ._test_hf_cache_support import build_model_cache, use_fixture_cache
 
-
-@pytest.fixture(autouse=True)
-def _clear_offline(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.delenv("TRW_OFFLINE", raising=False)
+def test_every_load_is_local_files_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No offline switch is set, and the load still never reaches the Hub."""
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
-    yield
-
-
-def test_offline_helper_detects_switches(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TRW_OFFLINE", "1")
-    assert local_mod._offline_download_blocked() is True
-    monkeypatch.delenv("TRW_OFFLINE")
-    monkeypatch.setenv("HF_HUB_OFFLINE", "yes")
-    assert local_mod._offline_download_blocked() is True
-    monkeypatch.delenv("HF_HUB_OFFLINE")
-    assert local_mod._offline_download_blocked() is False
-
-
-def test_offline_forces_local_files_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With TRW_OFFLINE=1, the model is loaded with local_files_only=True."""
-    monkeypatch.setenv("TRW_OFFLINE", "1")
     captured: dict[str, object] = {}
 
     class _FakeST:
-        def __init__(self, model_name: str, local_files_only: bool = False, trust_remote_code: bool = False) -> None:
+        def __init__(
+            self,
+            model_name: str,
+            revision: str = "main",
+            local_files_only: bool = False,
+            trust_remote_code: bool = False,
+            device: str | None = None,
+        ) -> None:
             captured["model_name"] = model_name
             captured["local_files_only"] = local_files_only
 
@@ -67,102 +44,17 @@ def test_offline_forces_local_files_only(monkeypatch: pytest.MonkeyPatch) -> Non
     assert captured["local_files_only"] is True
 
 
-def _install_fake_st(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _FakeST:
-        def __init__(
-            self,
-            model_name: str,
-            local_files_only: bool = False,
-            trust_remote_code: bool = False,
-        ) -> None:
-            pass
-
-        def encode(self, *a: object, **k: object) -> list[float]:
-            return [0.0]
-
-    import sys
-    import types
-
-    fake_mod = types.ModuleType("sentence_transformers")
-    fake_mod.SentenceTransformer = _FakeST  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_mod)
-
-
-def test_online_load_discloses_egress(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A network-capable load (no cache, not offline, not local_only) discloses egress."""
-    use_fixture_cache(monkeypatch, tmp_path)
-    (tmp_path / "hub").mkdir()
-    _install_fake_st(monkeypatch)
-
-    provider = local_mod.LocalEmbeddingProvider(model_name="all-MiniLM-L6-v2")
-    with capture_logs() as logs:
-        provider.available()
-    events = {e.get("event") for e in logs}
-    assert "embedding_model_download_disclosure" in events
-
-
-def test_the_daemon_discloses_before_its_network_capable_load(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The daemon's model load (``get_local_embedder``) logs the egress before the model is fetched.
-
-    The fake model records the log events already emitted when it is constructed,
-    so the assertion is on order, not only on the disclosure existing somewhere.
-    """
-    import sys
-    import types
-
-    from trw_memory.embeddings import get_local_embedder, reset_provider_cache
-
-    use_fixture_cache(monkeypatch, tmp_path)
-    (tmp_path / "hub").mkdir()
-    loads: list[tuple[bool, list[object]]] = []
-
-    with capture_logs() as logs:
-
-        class _RecordingST:
-            def __init__(
-                self, model_name: str, local_files_only: bool = False, trust_remote_code: bool = False
-            ) -> None:
-                loads.append((local_files_only, [entry.get("event") for entry in logs]))
-
-            def encode(self, *a: object, **k: object) -> list[float]:
-                return [0.0]
-
-        fake_mod = types.ModuleType("sentence_transformers")
-        fake_mod.SentenceTransformer = _RecordingST  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "sentence_transformers", fake_mod)
-        reset_provider_cache()
-        try:
-            get_local_embedder(model_name="all-MiniLM-L6-v2", dim=1)
-        finally:
-            reset_provider_cache()
-
-    assert len(loads) == 1
-    network_capable, emitted_before_load = loads[0]
-    assert network_capable is False  # local_files_only=False: the load may reach huggingface.co
-    assert "embedding_model_download_disclosure" in emitted_before_load
-
-
-def test_complete_cache_suppresses_the_disclosure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """PRD-SEC-014-FR01: no egress is possible on a warm cache, so none is disclosed."""
-    use_fixture_cache(monkeypatch, tmp_path)
-    build_model_cache(tmp_path)
-    _install_fake_st(monkeypatch)
-
-    provider = local_mod.LocalEmbeddingProvider(model_name="all-MiniLM-L6-v2")
-    with capture_logs() as logs:
-        provider.available()
-    events = {e.get("event") for e in logs}
-    assert "embedding_model_download_disclosure" not in events
-
-
 def _install_cuda_failing_st(monkeypatch: pytest.MonkeyPatch, *, message: str) -> list[dict[str, object]]:
     """Fake SentenceTransformer whose default-device load raises; ``device="cpu"`` succeeds."""
+    # The CUDA retry is the non-macOS path: macOS already loads on CPU (INFERENCE_DEVICE).
+    monkeypatch.setattr(local_mod, "INFERENCE_DEVICE", None)
     calls: list[dict[str, object]] = []
 
     class _FakeST:
         def __init__(
             self,
             model_name: str,
+            revision: str = "main",
             local_files_only: bool = False,
             trust_remote_code: bool = False,
             device: str | None = None,
@@ -185,7 +77,6 @@ def _install_cuda_failing_st(monkeypatch: pytest.MonkeyPatch, *, message: str) -
 
 def test_cuda_load_failure_falls_back_to_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
     """A CUDA out-of-memory at load time retries on CPU instead of disabling embeddings."""
-    monkeypatch.setenv("TRW_OFFLINE", "1")
     calls = _install_cuda_failing_st(monkeypatch, message="CUDA error: out of memory")
 
     provider = local_mod.LocalEmbeddingProvider(model_name="all-MiniLM-L6-v2")
@@ -196,7 +87,6 @@ def test_cuda_load_failure_falls_back_to_cpu(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_non_cuda_runtime_error_does_not_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only CUDA failures earn the CPU retry; any other RuntimeError stays a load failure."""
-    monkeypatch.setenv("TRW_OFFLINE", "1")
     calls = _install_cuda_failing_st(monkeypatch, message="tokenizer vocabulary mismatch")
 
     provider = local_mod.LocalEmbeddingProvider(model_name="all-MiniLM-L6-v2")

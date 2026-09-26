@@ -40,10 +40,8 @@ Operational notes
 - Selection is silent on the happy path; a debug log records the outcome.
 - ``pysqlite3`` supports ``conn.enable_load_extension(True)`` on every platform we
   ship to, so sqlite-vec continues to load when it is selected.
-- An ENCRYPTED store opens its own DB-API module (``sqlcipher3``) and is therefore
-  NOT described by ``backend()`` / ``sqlite_version()`` here. ``SQLiteBackend``
-  derives its own ``wal_reset_safe`` from the driver it opened, via
-  :func:`wal_reset_safe_version`.
+- ``SQLiteBackend`` derives its own ``wal_reset_safe`` from the driver it opened,
+  via :func:`wal_reset_safe_version`.
 """
 
 from __future__ import annotations

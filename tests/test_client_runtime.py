@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from trw_memory._client_tools_binding import make_tool_functions
 from trw_memory.client import MemoryClient, MemoryResultDict, StoreResultDict
 from trw_memory.exceptions import ToolAlreadyRegisteredError
 
@@ -56,7 +57,6 @@ class TestContextManager:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "ctx"))
         monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
         monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
-        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
         monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
 
         seed_client = MemoryClient(namespace="default", mode="local")
@@ -100,7 +100,6 @@ class TestContextManager:
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "ctx"))
         monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
         monkeypatch.setenv("MEMORY_SYNC_ENABLED", "true")
-        monkeypatch.setenv("MEMORY_LOCAL_ONLY", "false")
         monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://api.test.com")
 
         seed_client = MemoryClient(namespace="default", mode="local")
@@ -178,7 +177,7 @@ class TestRegisterTools:
 
     @pytest.mark.asyncio
     async def test_memory_recall_tool_wrapper_forwards_source_aware_args(self, client: MemoryClient) -> None:
-        tools = client._make_tool_functions()
+        tools = make_tool_functions(client)
         recall_mock = AsyncMock(return_value=[])
         client.recall = recall_mock  # type: ignore[method-assign]
 

@@ -10,6 +10,8 @@ Covers:
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -29,6 +31,17 @@ def test_3_of_3_valid_returns_1(tmp_path: Path) -> None:
         {"file": "c.py", "symbol_name": "baz"},
     ]
     assert compute_anchor_validity(anchors, tmp_path) == 1.0
+
+
+def test_an_anchor_file_over_the_read_cap_is_not_valid_and_not_read_whole(tmp_path: Path) -> None:
+    """C12 rc4: an unbounded read of a multi-GB anchor file could exhaust the shared daemon."""
+    from trw_memory.lifecycle.verification import MAX_FILE_SIZE_BYTES
+
+    (tmp_path / "big.py").write_bytes(b"def foo(): pass\n" + b"#" * MAX_FILE_SIZE_BYTES)
+    (tmp_path / "small.py").write_text("def foo(): pass")
+
+    assert compute_anchor_validity([{"file": "big.py", "symbol_name": "foo"}], tmp_path) == 0.0
+    assert compute_anchor_validity([{"file": "small.py", "symbol_name": "foo"}], tmp_path) == 1.0
 
 
 def test_2_of_3_returns_067(tmp_path: Path) -> None:
@@ -124,18 +137,22 @@ def test_anchor_model_instance_invalid_file(tmp_path: Path) -> None:
 
 
 def test_os_error_on_read_skips_anchor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """OSError during file read is caught and the anchor is skipped (not counted)."""
+    """OSError during file read is caught and the anchor is skipped (not counted).
+
+    Reads now go through ``open_checkout_file_fd`` (PRD-SEC-016 round-2
+    finding 2), so the OSError is simulated at ``os.fdopen`` -- the read call
+    ``_read_anchor_file`` actually makes -- rather than the retired
+    ``Path.read_text``.
+    """
+    import trw_memory.lifecycle.anchor_validation as anchor_validation_module
+
     (tmp_path / "mod.py").write_text("def my_func(): pass")
     anchors = [{"file": "mod.py", "symbol_name": "my_func"}]
 
-    original_read_text = Path.read_text
+    def _raise_fdopen(*args: object, **kwargs: object) -> object:
+        raise OSError("simulated read error")
 
-    def _raise_on_mod(self: Path, *args: object, **kwargs: object) -> str:
-        if self.name == "mod.py":
-            raise OSError("simulated read error")
-        return original_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(Path, "read_text", _raise_on_mod)
+    monkeypatch.setattr(anchor_validation_module.os, "fdopen", _raise_fdopen)
     result = compute_anchor_validity(anchors, tmp_path)
     assert result == 0.0
 
@@ -210,3 +227,69 @@ def test_a_recall_marker_never_changes_the_score(tmp_path: Path) -> None:
     anchors = [{"file": "good.py", "symbol_name": "present_fn"}, {"file": "gone.py", "symbol_name": "x"}]
 
     assert compute_anchor_validity(anchors, tmp_path) == 0.5
+
+
+# --- PRD-SEC-016 round-2 finding 2: a stored (raw-dict) anchor's `file` cannot escape project_root ---
+
+
+def test_an_absolute_anchor_file_never_reads_outside_the_root(tmp_path: Path) -> None:
+    """``root / "/etc/passwd"`` in the old implementation discards ``root`` entirely (pathlib semantics).
+
+    Anchor.file's OWN pydantic validator would reject this if the data
+    arrived as an ``Anchor`` instance, but ``_reverify_anchors`` reads raw
+    stored dicts straight off a learning -- exactly the shape this test uses
+    -- never through that validator.
+    """
+    outside = tmp_path.parent / f"outside-secret-{tmp_path.name}.txt"
+    outside.write_text("root\n")  # the "symbol_name" this test searches for
+    try:
+        anchors = [{"file": str(outside), "symbol_name": "root"}]
+
+        result = compute_anchor_validity(anchors, tmp_path)
+
+        assert result == 0.0, "an absolute anchor path must never be read, let alone score as valid"
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+def test_a_traversal_anchor_file_never_reads_outside_the_root(tmp_path: Path) -> None:
+    """A relative ``..`` escape must be refused, not merely 'not found'."""
+    outside = tmp_path.parent / f"outside-secret-{tmp_path.name}-2.txt"
+    outside.write_text("needle\n")
+    try:
+        traversal = os.path.relpath(outside, tmp_path)
+        assert traversal.startswith("..")
+        anchors = [{"file": traversal, "symbol_name": "needle"}]
+
+        result = compute_anchor_validity(anchors, tmp_path)
+
+        assert result == 0.0
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.symlink requires elevated privileges on Windows")
+def test_a_symlinked_anchor_file_never_reads_outside_the_root(tmp_path: Path) -> None:
+    """A symlink INSIDE project_root pointing outside it must be refused, matching FR03's verify_assertions rule."""
+    outside = tmp_path.parent / f"outside-secret-{tmp_path.name}-3.txt"
+    outside.write_text("def leaked_symbol(): pass\n")
+    try:
+        (tmp_path / "link.py").symlink_to(outside)
+        anchors = [{"file": "link.py", "symbol_name": "leaked_symbol"}]
+
+        result = compute_anchor_validity(anchors, tmp_path)
+
+        assert result == 0.0
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+def test_an_anchor_model_instance_with_a_legitimate_relative_file_still_works(tmp_path: Path) -> None:
+    """Regression control: the fix must not break the ordinary, validated ``Anchor``-instance case."""
+    from trw_memory.models.memory import Anchor
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "mod.py").write_text("def my_func(): pass")
+    anchor = Anchor(file="src/mod.py", symbol_name="my_func")
+
+    assert compute_anchor_validity([anchor], tmp_path) == 1.0

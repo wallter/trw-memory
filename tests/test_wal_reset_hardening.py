@@ -330,9 +330,7 @@ def test_robust_salvage_skips_corrupt_rows(monkeypatch: pytest.MonkeyPatch) -> N
     fake = _FakeConn()
     monkeypatch.setattr(_recovery, "_connection_connect", lambda *a, **k: fake)
 
-    failed, rows = _recovery._attempt_primary_salvage(
-        Path("/nonexistent/backup.db"), dbapi=sqlite3, sqlcipher_key_hex=None
-    )
+    failed, rows = _recovery._attempt_primary_salvage(Path("/nonexistent/backup.db"), dbapi=sqlite3)
 
     assert failed is False
     salvaged_ids = sorted(r["id"] for r in rows)
@@ -350,7 +348,7 @@ def test_robust_salvage_recovers_all_rows_on_healthy_db(tmp_path: Path) -> None:
         backend.store(MemoryEntry(id=f"e{i}", content=f"content {i}"))
     backend.close()
 
-    failed, rows = _recovery._attempt_primary_salvage(db, dbapi=sqlite3, sqlcipher_key_hex=None)
+    failed, rows = _recovery._attempt_primary_salvage(db, dbapi=sqlite3)
     assert failed is False
     assert len(rows) == 5
 
@@ -383,9 +381,7 @@ def test_robust_salvage_falls_back_to_plain_rowid_scan(monkeypatch: pytest.Monke
     fake = _AllIndexCorruptConn()
     monkeypatch.setattr(_recovery, "_connection_connect", lambda *a, **k: fake)
 
-    failed, rows = _recovery._attempt_primary_salvage(
-        Path("/nonexistent/backup.db"), dbapi=sqlite3, sqlcipher_key_hex=None
-    )
+    failed, rows = _recovery._attempt_primary_salvage(Path("/nonexistent/backup.db"), dbapi=sqlite3)
 
     assert failed is False
     assert sorted(r["id"] for r in rows) == ["id-7", "id-9"]
@@ -416,9 +412,7 @@ def test_robust_salvage_reports_failure_when_nothing_readable(monkeypatch: pytes
     fake = _EmptyConn()
     monkeypatch.setattr(_recovery, "_connection_connect", lambda *a, **k: fake)
 
-    failed, rows = _recovery._attempt_primary_salvage(
-        Path("/nonexistent/backup.db"), dbapi=sqlite3, sqlcipher_key_hex=None
-    )
+    failed, rows = _recovery._attempt_primary_salvage(Path("/nonexistent/backup.db"), dbapi=sqlite3)
 
     assert failed is True
     assert rows == []
@@ -431,7 +425,7 @@ def test_robust_salvage_logs_partial_when_pages_fail(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(_recovery, "_connection_connect", lambda *a, **k: fake)
 
     with structlog.testing.capture_logs() as logs:
-        _recovery._attempt_primary_salvage(Path("/nonexistent/backup.db"), dbapi=sqlite3, sqlcipher_key_hex=None)
+        _recovery._attempt_primary_salvage(Path("/nonexistent/backup.db"), dbapi=sqlite3)
 
     partials = [log for log in logs if log.get("event") == "db_salvage_partial"]
     assert len(partials) == 1

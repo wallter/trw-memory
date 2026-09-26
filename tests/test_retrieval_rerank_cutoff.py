@@ -25,7 +25,7 @@ def _scope():
     return authorize_namespaces(MemoryConfig(rbac_enabled=False), [NS], Permission.READ, "test")
 
 
-def _scored(query, entries, *, model_name, local_only=False):
+def _scored(query, entries, *, model_name):
     # e0 and e1 strong, e2 weak, the rest clearly unrelated; order flipped to prove re-ranking happened
     table = {"e0": 4.0, "e1": 2.5, "e2": -7.0, "e3": -9.0, "e4": -9.5, "e5": -10.0, "e6": -10.5, "e7": -11.0}
     return sorted(((e, table[e.id]) for e in entries), key=lambda x: x[1], reverse=True)
@@ -130,7 +130,6 @@ async def test_recall_keeps_the_adaptive_min_keep_when_everything_is_below_the_f
 ) -> None:
     """End to end: MemoryClient.recall(limit) returns exactly adaptive min_keep rows
     when the cross-encoder scores every candidate below -8."""
-    pytest.importorskip("rank_bm25")
     client = _recall_client(tmp_path, monkeypatch, 60)
 
     def all_low(query, entries, **kwargs):
@@ -142,19 +141,17 @@ async def test_recall_keeps_the_adaptive_min_keep_when_everything_is_below_the_f
 
 
 async def test_unavailable_cross_encoder_on_recall_returns_the_full_limit(tmp_path, monkeypatch) -> None:
-    """FR03: with the model uncached under TRW_OFFLINE, recall keeps fusion order and
+    """FR03: with the model uncached, recall keeps fusion order and
     count -- the automatic "off" path, with no floor applied."""
     from trw_memory.retrieval import reranker
 
-    pytest.importorskip("rank_bm25")
     client = _recall_client(tmp_path, monkeypatch, 60)
 
     class Uncached:
         def __init__(self, name, **kwargs):
-            assert kwargs["local_files_only"] is True  # offline: never a download
+            assert kwargs["local_files_only"] is True  # runtime: never a download
             raise OSError("not in local cache")
 
-    monkeypatch.setenv("TRW_OFFLINE", "1")
     monkeypatch.setattr(reranker, "_import_cross_encoder", lambda: True)
     monkeypatch.setattr(reranker, "_cross_encoder_cls", Uncached)
     monkeypatch.setattr(reranker, "_LOADED_MODELS", {})
@@ -173,7 +170,7 @@ def test_confidence_bounded_merge_holds_tier_rows_to_the_same_floor() -> None:
     cold = LocalCandidate(MemoryEntry(id="c1", content="archived hit", namespace=NS), 0.3, cold=True)
     table = {"w1": -10.0, "w2": 1.0}
 
-    def scores(query, entries, *, model_name, local_only=False):
+    def scores(query, entries, *, model_name):
         return sorted(((e, table[e.id]) for e in entries), key=lambda x: x[1], reverse=True)
 
     with patch("trw_memory.retrieval.reranker.cross_encode_scores", side_effect=scores):
@@ -197,10 +194,8 @@ def test_malformed_model_output_degrades_to_none_not_an_exception() -> None:
         assert [e.id for e in reranker.cross_encode_rerank("q", _entries())] == [e.id for e in _entries()]
 
 
-@pytest.mark.parametrize("offline_variable", ["TRW_OFFLINE", "HF_HUB_OFFLINE"])
-def test_offline_switch_forces_local_files_only_and_never_downloads(monkeypatch, offline_variable) -> None:
-    """TRW_OFFLINE / HF_HUB_OFFLINE / local_only must reach the cross-encoder loader
-    (rerank is on by default, so this is the README's no-outbound-calls contract)."""
+def test_the_reranker_loads_cache_only_and_an_uncached_model_keeps_fusion_order(monkeypatch) -> None:
+    """PLAN W40: a runtime load never downloads, whatever the environment says."""
     from trw_memory.retrieval import reranker
 
     calls: list[dict] = []
@@ -208,22 +203,48 @@ def test_offline_switch_forces_local_files_only_and_never_downloads(monkeypatch,
     class FakeCrossEncoder:
         def __init__(self, name, **kwargs):
             calls.append(kwargs)
-            if kwargs.get("local_files_only"):
-                raise OSError("not in local cache")  # what huggingface_hub raises offline
+            raise OSError("not in local cache")  # what huggingface_hub raises with local_files_only
 
     monkeypatch.setattr(reranker, "_cross_encoder_cls", FakeCrossEncoder)
     monkeypatch.setattr(reranker, "_cross_encoder_available", True)
     monkeypatch.setattr(reranker, "_LOADED_MODELS", {})
-    # Control both switches: an inherited offline flag must not contaminate
-    # the online branch below. The fake loader never accesses the network.
-    monkeypatch.delenv("TRW_OFFLINE", raising=False)
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
-    monkeypatch.setenv(offline_variable, "1")
+
     assert reranker._get_model("some/model") is None
-    assert calls[-1]["local_files_only"] is True
+    from trw_memory.embeddings.local import INFERENCE_DEVICE
+
+    assert calls == [{"max_length": 512, "revision": "main", "local_files_only": True, "device": INFERENCE_DEVICE}]
     assert reranker.cross_encode_scores("q", _entries(), model_name="some/model") is None
-    monkeypatch.delenv(offline_variable)
-    assert reranker._get_model("some/model", local_only=True) is None
-    assert calls[-1]["local_files_only"] is True
-    reranker._get_model("some/model")  # online: a network-capable load is allowed
-    assert calls[-1]["local_files_only"] is False
+
+
+def test_concurrent_first_loads_construct_the_cross_encoder_once(monkeypatch) -> None:
+    """W27: two recalls at daemon start must not each load the re-ranker."""
+    import threading
+
+    from trw_memory.retrieval import reranker
+
+    built: list[str] = []
+    both_waiting = threading.Barrier(2)
+
+    class SlowCrossEncoder:
+        def __init__(self, name, **kwargs):
+            built.append(name)
+            threading.Event().wait(0.05)  # long enough for an unlocked second caller to enter
+
+    monkeypatch.setattr(reranker, "_cross_encoder_cls", SlowCrossEncoder)
+    monkeypatch.setattr(reranker, "_cross_encoder_available", True)
+    monkeypatch.setattr(reranker, "_LOADED_MODELS", {})
+    loaded: list[object] = []
+
+    def load() -> None:
+        both_waiting.wait(timeout=10)
+        loaded.append(reranker._get_model("some/model"))
+
+    threads = [threading.Thread(target=load) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert built == ["some/model"]
+    assert len(loaded) == 2 and loaded[0] is loaded[1]

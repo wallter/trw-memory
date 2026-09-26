@@ -181,12 +181,12 @@ class TestHybridSearchDegradation:
             make_entry("e3", "structlog event keyword", tags=["logging"]),
         ]
 
-    def test_hybrid_search_bm25_unavailable(self) -> None:
+    def test_hybrid_search_bm25_finds_nothing_dense_still_answers(self) -> None:
         embedder = StubEmbedder()
         entries = self._entries()
         stored = stored_embeddings_for([entry.id for entry in entries], embedder)
 
-        with patch("trw_memory.retrieval.bm25._BM25_AVAILABLE", False):
+        with patch("trw_memory.retrieval.pipeline.bm25_search", return_value=[]):
             results = hybrid_search(
                 "pydantic", entries, embedder=embedder, stored_embeddings=stored, scope=DEFAULT_SCOPE
             )
@@ -206,25 +206,23 @@ class TestHybridSearchDegradation:
         assert len(results) >= 1
         assert "e1" in [entry.id for entry in results]
 
-    def test_hybrid_search_both_unavailable_falls_back_to_lexical(self) -> None:
-        """PRD-CORE-278 FR04: both sources down is not a reason to answer nothing.
-
-        This asserted ``[]``. An empty result then meant two different things —
-        "nothing matched" and "retrieval could not run" — and the tool path had
-        no fallback, so a whole recall returned zero rows for a query whose
-        words are in the corpus.
-        """
+    def test_hybrid_search_without_dense_is_answered_by_bm25(self) -> None:
         entries = self._entries()
-        with patch("trw_memory.retrieval.bm25._BM25_AVAILABLE", False):
+        results = hybrid_search("pydantic", entries, embedder=None, stored_embeddings=None, scope=DEFAULT_SCOPE)
+        assert [entry.id for entry in results] == ["e1"]
+
+    def test_hybrid_search_falls_back_to_lexical_when_bm25_and_dense_are_empty(self) -> None:
+        """PRD-CORE-278 FR04: nothing from either source is not a reason to answer nothing."""
+        entries = self._entries()
+        with patch("trw_memory.retrieval.pipeline.bm25_search", return_value=[]):
             results = hybrid_search("pydantic", entries, embedder=None, stored_embeddings=None, scope=DEFAULT_SCOPE)
         assert [entry.id for entry in results] == ["e1"]
 
-    def test_hybrid_search_both_unavailable_and_no_lexical_match_is_empty(self) -> None:
+    def test_hybrid_search_without_dense_and_no_keyword_match_is_empty(self) -> None:
         entries = self._entries()
-        with patch("trw_memory.retrieval.bm25._BM25_AVAILABLE", False):
-            results = hybrid_search(
-                "wholly unrelated vocabulary", entries, embedder=None, stored_embeddings=None, scope=DEFAULT_SCOPE
-            )
+        results = hybrid_search(
+            "wholly unrelated vocabulary", entries, embedder=None, stored_embeddings=None, scope=DEFAULT_SCOPE
+        )
         assert results == []
 
     def test_hybrid_search_single_source_passthrough(self) -> None:

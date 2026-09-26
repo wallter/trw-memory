@@ -180,6 +180,10 @@ class _SecurityConfigMixin(BaseModel):
 
     # Sync configuration (PRD-CORE-047)
     sync_enabled: bool = Field(default=False, description="Enable remote platform sync")
+    #: trw-mcp's one switch for platform egress (same YAML key and env var); off forces sync off (rc11).
+    platform_contact_enabled: bool = Field(
+        default=True, validation_alias=AliasChoices("platform_contact_enabled", "trw_platform_contact_enabled")
+    )
     sync_min_importance: float = Field(default=0.7, ge=0.0, le=1.0, description="Min importance to publish remotely")
     sync_namespace: str = Field(default="", description="Remote namespace for sync operations")
     platform_url: str = Field(default="", description="TRW platform API URL for remote sync")
