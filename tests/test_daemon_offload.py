@@ -328,7 +328,8 @@ async def test_reading_config_does_not_stall_another_request(tmp_path, monkeypat
     [
         ("memory_namespace_rename", "trw_memory.tools.namespace_admin", "memory_namespace_rename_impl", {}),
         ("memory_namespace_merge", "trw_memory.tools.namespace_admin", "memory_namespace_merge_impl", {}),
-        ("memory_consolidate", "trw_memory.tools.consolidate", "memory_consolidate_impl", {"dry_run": True}),
+        # memory_consolidate clusters on the pool and writes each cluster on the lane (PRD-CORE-307,
+        # test_daemon_lane.py::test_consolidation_clusters_off_the_lane_and_writes_each_cluster_on_it)
     ],
 )
 async def test_check_then_write_curation_never_interleaves(tmp_path, monkeypatch, name, module, impl, args):
@@ -382,7 +383,7 @@ async def test_token_verification_reads_the_grants_file_off_the_loop(tmp_path, m
 
 async def test_a_cancelled_curation_caller_holds_the_lock_until_its_body_finishes():
     """C12 rc4: cancelling the caller released the lock while its body kept running, so a second rename interleaved."""
-    from trw_memory.daemon._offload import run_serialized
+    from trw_memory.daemon._lane import INTERACTIVE, run_on_lane
 
     started, release, order = threading.Event(), threading.Event(), []
 
@@ -391,10 +392,10 @@ async def test_a_cancelled_curation_caller_holds_the_lock_until_its_body_finishe
         release.wait(timeout=3.0)
         order.append("first")
 
-    caller = asyncio.ensure_future(run_serialized(_first))
+    caller = asyncio.ensure_future(run_on_lane(INTERACTIVE, "a", _first))
     assert await asyncio.to_thread(started.wait, _DEADLINE)
     caller.cancel()
-    follower = asyncio.ensure_future(run_serialized(order.append, "second"))
+    follower = asyncio.ensure_future(run_on_lane(INTERACTIVE, "b", order.append, "second"))
     await asyncio.sleep(0.1)
     ran_early = list(order)
     release.set()
@@ -432,7 +433,6 @@ async def test_the_bodies_the_loop_ran_one_at_a_time_still_never_interleave(tmp_
             "memory_review_impl",
             {"learning_id": "L-x", "decision": "approve"},
         ),
-        ("memory_consolidate", "trw_memory.tools.consolidate", "memory_consolidate_impl", {"dry_run": True}),
         (
             "memory_namespace_rename",
             "trw_memory.tools.namespace_admin",
@@ -460,7 +460,7 @@ async def test_the_bodies_the_loop_ran_one_at_a_time_still_never_interleave(tmp_
             "memory_sync_apply",
             "trw_memory.tools.sync",
             "memory_sync_apply_impl",
-            {"namespace": "project:default", "entry": {"id": "L-x"}},
+            {"namespace": "project:default", "entry": {"id": "L-x"}, "if_revision": None},
         ),
         (
             "memory_update",
@@ -468,7 +468,11 @@ async def test_the_bodies_the_loop_ran_one_at_a_time_still_never_interleave(tmp_
             "memory_update_impl",
             {"entry_id": "L-x", "patch": {"summary": "s"}, "namespace": "project:default"},
         ),
-        ("memory_maintain", "trw_memory.tools.maintain", "memory_maintain_impl", {}),
+        # memory_maintain's registered tool calls serve_maintain (_maintain_sweep.py), whose first
+        # lane job runs maintain._run_decay -- patch that, not memory_maintain_impl (dead: no
+        # production caller reaches it; the served tool never calls it, so patching it there was
+        # vacuous).
+        ("memory_maintain", "trw_memory.tools.maintain", "_run_decay", {}),
         # rc9: only the import's write step takes the lane; the copy, its checks and reads run off it
         (
             "memory_import_checkout",

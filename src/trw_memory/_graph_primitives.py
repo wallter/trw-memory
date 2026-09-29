@@ -1,11 +1,5 @@
-"""Graph primitives — edge upsert + cosine-similarity helper.
+"""Graph primitives shared by every helper cluster of the ``graph.py`` facade.
 
-Belongs to the ``graph.py`` facade. Re-exported there for back-compat.
-
-Two primitives shared by every helper cluster:
-
-- ``_safe_cosine_similarity`` — :mod:`retrieval.dense.cosine_similarity`
-  wrapper that returns 0.0 on dimension mismatch instead of raising.
 - ``_upsert_edge`` — INSERT/UPDATE edge row in ``memory_graph_edges``
   with edge-type validation and 4096-byte metadata cap.
 - ``CandidateVectors`` — a candidate set normalised ONCE and scored against
@@ -29,31 +23,6 @@ import operator
 import sqlite3
 from collections.abc import Iterable, Sequence
 from typing import Any, Protocol
-
-import structlog
-
-from trw_memory.exceptions import DimensionMismatchError
-from trw_memory.retrieval.dense import cosine_similarity
-
-logger = structlog.get_logger(__name__)
-
-
-def _safe_cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Cosine similarity with graceful degradation for graph operations.
-
-    Delegates to ``retrieval.dense.cosine_similarity`` but returns 0.0
-    on dimension mismatch.  Other ``ValueError`` subclasses are re-raised
-    so callers can distinguish true zero-similarity from incompatible vectors.
-    """
-    try:
-        return cosine_similarity(a, b)
-    except DimensionMismatchError:
-        logger.debug(
-            "cosine_dimension_mismatch",
-            len_a=len(a),
-            len_b=len(b),
-        )
-        return 0.0
 
 
 def _upsert_edge(
@@ -138,7 +107,7 @@ class ScoredCandidates(Protocol):
 class CandidateVectors:
     """Unit-normalised candidate vectors, scored against query vectors in one pass.
 
-    Scores equal :func:`_safe_cosine_similarity` for every candidate: zero
+    Scores equal :func:`trw_memory.retrieval.dense.cosine_similarity` for every candidate: zero
     vectors score 0.0 and a candidate of a different dimension than the query
     is never returned (the helper scores it 0.0, which no positive threshold
     admits). Candidates are normalised once here instead of once per pair.

@@ -25,7 +25,7 @@ def _scope():
     return authorize_namespaces(MemoryConfig(rbac_enabled=False), [NS], Permission.READ, "test")
 
 
-def _scored(query, entries, *, model_name):
+def _scored(query, entries, *, model_name, passage_chars=None):
     # e0 and e1 strong, e2 weak, the rest clearly unrelated; order flipped to prove re-ranking happened
     table = {"e0": 4.0, "e1": 2.5, "e2": -7.0, "e3": -9.0, "e4": -9.5, "e5": -10.0, "e6": -10.5, "e7": -11.0}
     return sorted(((e, table[e.id]) for e in entries), key=lambda x: x[1], reverse=True)
@@ -170,7 +170,7 @@ def test_confidence_bounded_merge_holds_tier_rows_to_the_same_floor() -> None:
     cold = LocalCandidate(MemoryEntry(id="c1", content="archived hit", namespace=NS), 0.3, cold=True)
     table = {"w1": -10.0, "w2": 1.0}
 
-    def scores(query, entries, *, model_name):
+    def scores(query, entries, *, model_name, passage_chars=None):
         return sorted(((e, table[e.id]) for e in entries), key=lambda x: x[1], reverse=True)
 
     with patch("trw_memory.retrieval.reranker.cross_encode_scores", side_effect=scores):

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import importlib.util
 import json
 import os
 import stat
@@ -32,15 +33,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from trw_memory.exceptions import ProvenanceVerifierUnavailableError, StorageError
 from trw_memory.storage.persistence import lock_for_rmw
 
-try:
-    from nacl.exceptions import BadSignatureError
-    from nacl.signing import SigningKey
-
-    _NACL_AVAILABLE = True
-except ImportError:  # pragma: no cover — PyNaCl is optional
-    _NACL_AVAILABLE = False
-    SigningKey = Any  # type: ignore[misc,assignment]
-    BadSignatureError = Exception  # type: ignore[misc,assignment]
+#: Whether PyNaCl is installed, found WITHOUT importing it. Importing nacl (and the
+#: cryptography it pulls in) cost every recall ~0.1-0.2 s on the edit hook's path, which
+#: only hashes rows and never checks a signature; :func:`verify_signed` imports
+#: ``nacl.exceptions`` at the point a verify_key makes it check one. A nacl that is found
+#: but fails to import raises there -- a verifier that cannot verify still refuses.
+_NACL_AVAILABLE = importlib.util.find_spec("nacl") is not None
 
 __all__ = [
     "ProvenanceEntry",
@@ -55,6 +53,25 @@ __all__ = [
 
 _LOG = structlog.get_logger(__name__)
 _GENESIS = "GENESIS"
+
+#: The signed per-row provenance chain :func:`build_entry_provenance` writes, in its order.
+PROVENANCE_METADATA_KEYS = (
+    "provenance_author",
+    "provenance_session_id",
+    "provenance_ts",
+    "provenance_content_hash",
+    "provenance_signature",
+)
+#: The other metadata the store's intake writes onto a row it admits: the trust verdict
+#: (``_runtime_pipeline``), the PII finding (``_runtime_pii``) and a re-imported row's original
+#: provenance (``cli_storage``). ``classify_canary`` ignores all of them (PRD-CORE-309).
+TRUST_SCORE, TRUST_FLAGS, PII_TYPES, IMPORTED_PROVENANCE = (
+    "trust_score",
+    "trust_flags",
+    "pii_types",
+    "imported_provenance",
+)
+INTAKE_METADATA_KEYS = frozenset({*PROVENANCE_METADATA_KEYS, TRUST_SCORE, TRUST_FLAGS, PII_TYPES, IMPORTED_PROVENANCE})
 
 
 class ProvenanceEntry(BaseModel):
@@ -270,13 +287,7 @@ def build_entry_provenance(
         signed = signing_key.sign(payload)
         signature_bytes = signed.signature if hasattr(signed, "signature") else signed
         signature = bytes(signature_bytes).hex()
-    return {
-        "provenance_author": author,
-        "provenance_session_id": session_id,
-        "provenance_ts": ts,
-        "provenance_content_hash": content_hash,
-        "provenance_signature": signature,
-    }
+    return dict(zip(PROVENANCE_METADATA_KEYS, (author, session_id, ts, content_hash, signature), strict=True))
 
 
 def derive_verify_key(signing_key: Any | None) -> Any | None:
@@ -394,6 +405,11 @@ def verify_signed(chain_path: Path, verify_key: Any) -> str | None:
             "as verified. PyNaCl is a required dependency of trw-memory -- reinstall the "
             "package, or pass verify_key=None to request hash-link-only verification."
         )
+    bad_signature: tuple[type[BaseException], ...] = (ValueError,)
+    if verify_key is not None:
+        from nacl.exceptions import BadSignatureError  # deferred: only a signature check needs it
+
+        bad_signature = (BadSignatureError, ValueError)
     if not chain_path.exists():
         return None
 
@@ -428,7 +444,7 @@ def verify_signed(chain_path: Path, verify_key: Any) -> str | None:
                     sig = bytes.fromhex(entry.signature)
                     msg = _sign_message(entry.learning_id, entry.content_hash, entry.prev_hash)
                     verify_key.verify(msg, sig)
-                except (BadSignatureError, ValueError):
+                except bad_signature:
                     _LOG.warning(
                         "provenance.verify_signed_bad_signature",
                         learning_id=entry.learning_id,

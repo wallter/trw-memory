@@ -28,6 +28,8 @@ logger = structlog.get_logger(__name__)
 
 def resolve_embedder(config: MemoryConfig, *, surface: str) -> EmbeddingProvider | dict[str, object]:
     """The embedder, or the ``{"status": "unavailable", "reason": ..., ["fix"]}`` answer to return instead."""
+    if not config.embeddings_enabled:
+        return {"status": "unavailable", "reason": "embeddings_disabled"}
     try:
         embedder = get_local_embedder(model_name=config.embedding_model, dim=config.embedding_dim)
     except ModelNotCachedError as exc:
@@ -46,7 +48,9 @@ def embedder_status(config: MemoryConfig) -> dict[str, object]:
     space = provider_embedding_space(loaded) if loaded is not None else None
     probe = probe_model_cache(config.embedding_model)
     reason: str | None = None
-    if loaded is None and find_spec("sentence_transformers") is None:
+    if not config.embeddings_enabled:
+        reason = "embeddings_disabled"
+    elif loaded is None and find_spec("sentence_transformers") is None:
         reason = "embedder_error"
     elif loaded is None and probe.state is not CacheState.COMPLETE:
         reason = "model_not_cached"

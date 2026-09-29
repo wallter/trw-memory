@@ -9,6 +9,8 @@ from trw_memory.exceptions import DimensionMismatchError
 
 from ._test_scope_support import DEFAULT_SCOPE
 
+pytestmark = pytest.mark.e2e
+
 
 class TestHybridRetrieval:
     """Section 3 of E2E plan: BM25, dense, hybrid pipeline."""

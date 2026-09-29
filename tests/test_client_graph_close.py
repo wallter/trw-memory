@@ -140,7 +140,16 @@ async def test_close_does_not_wait_for_other_backend(
             await client.close()
 
 
-async def test_owner_timeout_is_not_successful_close(client: MemoryClient, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_owner_timeout_abandons_pending_jobs_without_raising(
+    client: MemoryClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRD-CORE-331 FR08 (B71-53): a timed-out drain must not fail close() -- it abandons the wait.
+
+    Pre-fix (79e84147d), the equivalent test asserted the opposite: both calls below
+    raised ``TimeoutError`` and the backend was left half torn-down (``client._backend``
+    already ``None`` but ``client._pending_close_backend`` never cleared, so a second
+    ``close()`` retried the same doomed wait and raised again).
+    """
     entered, release = threading.Event(), threading.Event()
     original_wait = graph.wait_for_graph_updates
 
@@ -158,16 +167,64 @@ async def test_owner_timeout_is_not_successful_close(client: MemoryClient, monke
         await client.store("timeout lifecycle regression")
         assert await asyncio.to_thread(entered.wait, 1)
         monkeypatch.setattr(graph, "wait_for_graph_updates", short_wait)
-        with pytest.raises(TimeoutError, match="background graph"):
-            await client.close()
+        await asyncio.wait_for(client.close(), timeout=1.0)
         with pytest.raises(MemoryConnectionError, match="closed"):
-            await client.store("must not reuse a partially closed backend")
-        with pytest.raises(TimeoutError, match="background graph"):
-            await client.close()
+            await client.store("must not reuse a closed backend")
+        # A second close() is now a plain no-op: the pending handle was cleared, not
+        # left dangling on a backend the first call already tore down.
+        await client.close()
     finally:
         release.set()
         await asyncio.to_thread(original_wait)
         await client.close()
+
+
+async def test_close_bounds_a_large_backlog_and_nothing_in_it_writes_after(
+    client: MemoryClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRD-CORE-331 FR08 (B71-53): close() bounds the drain even with a large pending queue.
+
+    ``held-1`` holds the worker past close()'s bound; the other 24 rows queue behind
+    it and never start. Pre-fix, ``close()`` raised past the 5s default; here the bound
+    is monkeypatched down so the test stays fast, but the shape -- one held job plus a
+    backlog behind it -- is the FR08 scenario ("a bulk write of ~5k+ rows").
+    """
+    entered, release = threading.Event(), threading.Event()
+    ran: list[str] = []
+    original_run = graph._run_scheduled_graph_update
+    original_wait = graph.wait_for_graph_updates
+
+    def gate_first(entry: MemoryEntry, config: MemoryConfig, embedding: list[float] | None) -> None:
+        if entry.id == "M-held-1":
+            entered.set()
+            assert release.wait(3)
+        ran.append(entry.id)
+        original_run(entry, config, embedding)
+
+    def bounded_wait(*, owner: object) -> None:
+        original_wait(timeout=0.05, owner=owner)
+
+    monkeypatch.setattr(graph, "_run_scheduled_graph_update", gate_first)
+    monkeypatch.setattr(client, "_get_embedder", lambda: None)
+    await client.__aenter__()
+    try:
+        await client.store("held entry", entry_id="M-held-1")
+        assert await asyncio.to_thread(entered.wait, 1)
+        for index in range(24):
+            await client.store(f"backlog entry {index}", entry_id=f"M-backlog-{index}")
+
+        monkeypatch.setattr(graph, "wait_for_graph_updates", bounded_wait)
+        before = time.monotonic()
+        await asyncio.wait_for(client.close(), timeout=1.0)
+        elapsed = time.monotonic() - before
+        assert elapsed < 1.0, f"close() took {elapsed}s -- it must bound the drain, not hang on the backlog"
+    finally:
+        release.set()
+        await asyncio.to_thread(original_wait)
+        await client.close()
+
+    # The backlog never ran: abandoned before any of its jobs started.
+    assert ran == ["M-held-1"]
 
 
 async def test_backend_close_failure_keeps_retry_handle(client: MemoryClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -349,6 +406,54 @@ def test_worker_cap_evicts_only_idle_workers_and_never_drops_a_job(
         gate.set()
     graph.wait_for_graph_updates(timeout=5.0, owner=owner)
     assert sorted(ran) == ["a", "b", "c", "d"]
+
+
+@pytest.mark.usefixtures("fresh_pool")
+def test_abandoning_an_owner_skips_its_jobs_without_reordering_another_owners(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRD-CORE-331 FR08 sol r1 P2: abandon must not touch the queue -- FIFO holds for every other owner.
+
+    The first fix drained and requeued the whole worker queue to filter one owner,
+    which let a later job overtake a requeued one (sol reproduced b2, b1 from
+    b1, b2 while abandoning owner a). This version marks the owner instead, and
+    a dequeued job for it is skipped, never requeued -- so owner b's jobs, which
+    share the SAME worker/queue as owner a's, keep their submitted order exactly.
+    """
+    config = _store_config(tmp_path / "store")
+    owner_a, owner_b = MagicMock(name="owner-a"), MagicMock(name="owner-b")
+    gate = threading.Event()
+    started_first = threading.Event()
+    ran: list[str] = []
+
+    def held_first_then_record(entry: MemoryEntry, cfg: MemoryConfig, embedding: list[float] | None) -> None:
+        if entry.id == "M-a0":
+            started_first.set()
+            assert gate.wait(5)
+        ran.append(entry.id)
+
+    monkeypatch.setattr(graph, "_run_scheduled_graph_update", held_first_then_record)
+
+    # a0 is dequeued first and holds the (single, shared) worker; everything else
+    # queues behind it in submission order: a1, b0, a2, b1, b2.
+    assert graph.schedule_graph_update(make_entry(entry_id="M-a0"), owner_a, config=config)
+    assert started_first.wait(5)
+    assert graph.schedule_graph_update(make_entry(entry_id="M-a1"), owner_a, config=config)
+    assert graph.schedule_graph_update(make_entry(entry_id="M-b0"), owner_b, config=config)
+    assert graph.schedule_graph_update(make_entry(entry_id="M-a2"), owner_a, config=config)
+    assert graph.schedule_graph_update(make_entry(entry_id="M-b1"), owner_b, config=config)
+    assert graph.schedule_graph_update(make_entry(entry_id="M-b2"), owner_b, config=config)
+
+    # Only a0 is already running (and may still write); the queued a1/a2 are skipped.
+    assert graph.abandon_graph_jobs(owner_a) == 1
+
+    gate.set()
+    graph.wait_for_graph_updates(timeout=5.0)
+
+    # a0 was already running when abandoned, so it still ran; a1/a2 never did.
+    # b's three jobs ran in exactly the order they were submitted -- not reordered
+    # around the gap a1/a2 leave behind.
+    assert ran == ["M-a0", "M-b0", "M-b1", "M-b2"]
 
 
 @pytest.mark.usefixtures("fresh_pool")

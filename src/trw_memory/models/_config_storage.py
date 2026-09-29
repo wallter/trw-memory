@@ -18,8 +18,21 @@ __all__ = ["_StorageConfigMixin"]
 class _StorageConfigMixin(BaseModel):
     # Storage
     storage_backend: Literal["sqlite", "yaml"] = Field(default="sqlite", description="Storage backend type")
-    storage_path: str = Field(default=".memory", description="Root directory for memory storage files")
+    storage_path: str = Field(
+        default=".memory",
+        description=(
+            "Root directory for memory storage files. The default resolves beside the project's .trw "
+            "(never the cwd) and is refused without one; an explicit value is used as given"
+        ),
+    )
     sqlite_db_name: str = Field(default="memory.db", description="SQLite database filename within namespace dir")
+    embeddings_enabled: bool = Field(
+        default=True,
+        description=(
+            "Load the local embedding model for dense recall. False (MEMORY_EMBEDDINGS_ENABLED=false) never "
+            "loads it: stores write no vectors and recall is keyword-only"
+        ),
+    )
     embedding_dim: int = Field(default=384, gt=0, description="Dimensionality of dense embedding vectors")
     embedding_model: str = Field(
         default=DEFAULT_EMBEDDING_MODEL,
@@ -32,24 +45,24 @@ class _StorageConfigMixin(BaseModel):
     # Encryption at rest is not supported: true is refused (EncryptionAtRestUnsupportedError).
     encryption_enabled: bool = Field(
         default=False,
-        validation_alias=AliasChoices("encryption_enabled", "memory_encryption_enabled"),
+        validation_alias=AliasChoices("memory_encryption_enabled"),
         description="Refused when true: trw-memory does not encrypt its store; use full-disk encryption",
     )
 
     # RBAC
     rbac_enabled: bool = Field(
         default=False,
-        validation_alias=AliasChoices("rbac_enabled", "memory_rbac_enabled"),
+        validation_alias=AliasChoices("memory_rbac_enabled"),
         description="Enable role-based access control",
     )
-    rbac_mode: Literal["local", "remote"] = Field(
-        default="local",
-        validation_alias=AliasChoices("rbac_mode", "memory_rbac_mode"),
-        description="RBAC enforcement layer",
-    )
+    # `rbac_mode` was REMOVED on 2026-09-26 (PRD-QUAL-145 wave 3, DEFECT-LEDGER
+    # UF-030): no enforcement path ever read it -- `require_namespace_permission`
+    # (security/rbac.py) gates only on `rbac_enabled`. A settable "local"/"remote"
+    # selector with no reader misrepresented RBAC as having a remote enforcement
+    # mode it never had.
     default_role: Literal["admin", "reader", "writer", "none"] = "admin"
     namespace_roles: dict[str, str] = Field(
         default_factory=dict,
-        validation_alias=AliasChoices("namespace_roles", "memory_namespace_roles"),
+        validation_alias=AliasChoices("memory_namespace_roles"),
         description="Per-namespace role overrides used when RBAC is enabled",
     )

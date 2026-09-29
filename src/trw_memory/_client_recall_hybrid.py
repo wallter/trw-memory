@@ -23,6 +23,8 @@ Public surface (delegated from ``MemoryClient._try_hybrid_recall``):
 from __future__ import annotations
 
 import asyncio
+import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from time import perf_counter
@@ -34,12 +36,14 @@ from trw_memory._client_distilled_tiering import entry_to_result as _entry_to_re
 from trw_memory.embeddings._query_prompts import embed_query
 from trw_memory.embeddings._space_gate import active_embedding_space, admit_space_vectors
 from trw_memory.retrieval.recall_policy import acquire_candidates, hybrid_policy, resolve_query
-from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocation
+from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocation, entry_policy_fields
 from trw_memory.security.namespace_scope import NamespaceScopeError, authorize_namespaces
 from trw_memory.security.rbac import Permission
 
 if TYPE_CHECKING:
     from trw_memory.client import MemoryClient, MemoryResultDict
+    from trw_memory.models.memory import MemoryEntry
+    from trw_memory.retrieval.pipeline import ScoredCandidate
 
 logger = structlog.get_logger(__name__)
 
@@ -131,20 +135,39 @@ async def try_hybrid_recall(
         pool.complete = scan_complete
 
     namespace_size = len(all_entries)
-    if not all_entries:
-        _emit_hybrid_recall_telemetry(
-            outcome="no_candidates",
+    effective_bm25_candidates = effective_vector_candidates = 0
+    # PRD-DIST-2050 c804: deepen the candidate pool when the admission filter
+    # is opt-in enabled, so baseline records ranked past top-30 can survive the
+    # filter and enter the merged top-K. Default multiplier=3 preserves pre-c804
+    # behaviour (top-30); operators raise via MEMORY_RECALL_TOP_K_MULTIPLIER.
+    effective_top_k = limit * client._config.recall_top_k_multiplier
+
+    def emit_telemetry(outcome: str, returned_count: int = 0, hybrid_search_ms: float = 0.0) -> None:
+        """PRD-DIST-2047 Phase 2: one per-recall latency + shape event, with the candidate caps current at the call.
+
+        Operators sample this event stream to right-size
+        ``hybrid_search_candidate_pool_size`` for very large namespaces (where
+        BM25 cost grows linearly with namespace_size). Latencies are reported in
+        milliseconds rounded to 3 decimals.
+        """
+        logger.info(
+            "hybrid_recall_complete",
+            op="recall",
+            outcome=outcome,
             namespace=client._namespace,
             namespace_size=namespace_size,
             candidate_pool_size=candidate_pool_size,
-            effective_bm25_candidates=0,
-            effective_vector_candidates=0,
-            effective_top_k=limit * client._config.recall_top_k_multiplier,
-            returned_count=0,
-            list_entries_ms=list_entries_ms,
-            hybrid_search_ms=0.0,
-            total_ms=(perf_counter() - total_start) * 1000.0,
+            effective_bm25_candidates=effective_bm25_candidates,
+            effective_vector_candidates=effective_vector_candidates,
+            effective_top_k=effective_top_k,
+            returned_count=returned_count,
+            list_entries_ms=round(list_entries_ms, 3),
+            hybrid_search_ms=round(hybrid_search_ms, 3),
+            total_ms=round((perf_counter() - total_start) * 1000.0, 3),
         )
+
+    if not all_entries:
+        emit_telemetry("no_candidates")
         return None
 
     embedder = client._get_embedder()
@@ -162,12 +185,6 @@ async def try_hybrid_recall(
     # structural cap on recall@10 for namespaces > 50 records.
     effective_bm25_candidates = max(client._config.bm25_candidates, namespace_size)
     effective_vector_candidates = max(client._config.vector_candidates, namespace_size)
-
-    # PRD-DIST-2050 c804: deepen the candidate pool when the admission filter
-    # is opt-in enabled, so baseline records ranked past top-30 can survive the
-    # filter and enter the merged top-K. Default multiplier=3 preserves pre-c804
-    # behaviour (top-30); operators raise via MEMORY_RECALL_TOP_K_MULTIPLIER.
-    effective_top_k = limit * client._config.recall_top_k_multiplier
     # When a tag filter is requested it is applied AFTER hybrid_search ranks and
     # truncates to top_k (below). Tag-matching entries ranked past top_k would be
     # silently dropped, reducing recall below the caller-requested limit. Rank the
@@ -208,6 +225,7 @@ async def try_hybrid_recall(
     # by hand, so the RBAC check runs on this surface too.
     scope = authorize_namespaces(client._config, [client._namespace], Permission.READ, "recall")
     hybrid_search_start = perf_counter()
+    observed: list[tuple[ScoredCandidate, ...]] = []
     try:
         ranked = hybrid_search(
             query=retrieval_query,
@@ -224,6 +242,9 @@ async def try_hybrid_recall(
             validity_reference_time=invocation.temporal.reference_time if invocation else None,
             # PRD-CORE-284/292: the one resolved policy every recall surface ranks with.
             **hybrid_policy(client._config, limit=limit, recency_weight=effective_recency_weight),
+            # PRD-CORE-336 FR01: the distilled weight enters the order here, once.
+            distilled_weight=invocation.source.weights.get("git_distilled", 1.0) if invocation else None,
+            score_observer=observed.append,
             # When prefix was stripped, the cross-encoder also uses the stripped
             # query — the original "latest guidance on X" confuses the ms-marco
             # reranker (entries lack "guidance" vocabulary): -4.5pp T-HR.
@@ -242,101 +263,85 @@ async def try_hybrid_recall(
             outcome="failure",
             exc_info=True,
         )
-        _emit_hybrid_recall_telemetry(
-            outcome="hybrid_search_failed",
-            namespace=client._namespace,
-            namespace_size=namespace_size,
-            candidate_pool_size=candidate_pool_size,
-            effective_bm25_candidates=effective_bm25_candidates,
-            effective_vector_candidates=effective_vector_candidates,
-            effective_top_k=effective_top_k,
-            returned_count=0,
-            list_entries_ms=list_entries_ms,
-            hybrid_search_ms=hybrid_search_ms,
-            total_ms=(perf_counter() - total_start) * 1000.0,
-        )
+        emit_telemetry("hybrid_search_failed", hybrid_search_ms=hybrid_search_ms)
         return None
     hybrid_search_ms = (perf_counter() - hybrid_search_start) * 1000.0
 
     if not ranked:
-        _emit_hybrid_recall_telemetry(
-            outcome="empty_ranking",
-            namespace=client._namespace,
-            namespace_size=namespace_size,
-            candidate_pool_size=candidate_pool_size,
-            effective_bm25_candidates=effective_bm25_candidates,
-            effective_vector_candidates=effective_vector_candidates,
-            effective_top_k=effective_top_k,
-            returned_count=0,
-            list_entries_ms=list_entries_ms,
-            hybrid_search_ms=hybrid_search_ms,
-            total_ms=(perf_counter() - total_start) * 1000.0,
-        )
+        emit_telemetry("empty_ranking", hybrid_search_ms=hybrid_search_ms)
         return None
 
     if tags:
         tag_set = set(tags)
         ranked = [e for e in ranked if tag_set.issubset(set(e.tags))]
 
-    results: list[MemoryResultDict] = []
-    for rank, entry in enumerate(ranked):
-        score = round(1.0 / (1 + rank), 4)
-        results.append(_entry_to_result(entry, score=score))
-
-    _emit_hybrid_recall_telemetry(
-        outcome="ok",
-        namespace=client._namespace,
-        namespace_size=namespace_size,
-        candidate_pool_size=candidate_pool_size,
-        effective_bm25_candidates=effective_bm25_candidates,
-        effective_vector_candidates=effective_vector_candidates,
-        effective_top_k=effective_top_k,
-        returned_count=len(results),
-        list_entries_ms=list_entries_ms,
-        hybrid_search_ms=hybrid_search_ms,
-        total_ms=(perf_counter() - total_start) * 1000.0,
+    scored = {candidate.entry.id: candidate for candidate in observed[0]} if observed else {}
+    policy = invocation.source if invocation is not None else None
+    scores = positional_scores(
+        [scored.get(entry.id) for entry in ranked],
+        None
+        if policy is None
+        else lambda e, score: policy.rank_key(entry_policy_fields(e, score=score), pipeline_weighted=True),
     )
+    emit_telemetry("ok", len(ranked), hybrid_search_ms)
     if invocation is not None:
         return [
-            LocalCandidate(entry, round(1.0 / (1 + rank), 4), relevance_hint=round(1.0 / (1 + rank), 4))
-            for rank, entry in enumerate(ranked)
+            LocalCandidate(entry, score, relevance_hint=score, distilled_weighted=True)
+            for entry, score in zip(ranked, scores, strict=True)
         ]
-    return results
+    return [_entry_to_result(entry, score=score) for entry, score in zip(ranked, scores, strict=True)]
 
 
-def _emit_hybrid_recall_telemetry(
-    *,
-    outcome: str,
-    namespace: str,
-    namespace_size: int,
-    candidate_pool_size: int,
-    effective_bm25_candidates: int,
-    effective_vector_candidates: int,
-    effective_top_k: int,
-    returned_count: int,
-    list_entries_ms: float,
-    hybrid_search_ms: float,
-    total_ms: float,
-) -> None:
-    """PRD-DIST-2047 Phase 2: emit a per-recall latency + shape event.
+def positional_scores(
+    ranked: list[ScoredCandidate | None], sort_key: Callable[[MemoryEntry, float], tuple[int, float]] | None = None
+) -> list[float]:
+    """The library's positional score per row of the pipeline's final order (PRD-CORE-336 NFR01).
 
-    Operators sample this event stream to right-size
-    ``hybrid_search_candidate_pool_size`` for very large namespaces (where
-    BM25 cost grows linearly with namespace_size). Latencies are reported in
-    milliseconds rounded to 3 decimals.
+    Every non-distilled row scores ``round(1/(1+i), 4)`` at its index ``i`` in
+    the PRE-weight order -- its lead/int-700 score -- so ``SourcePolicy.rank_key``
+    multiplies the same gaps it always did and a distilled row moving past two
+    rows of different families cannot swap them. Re-scoring positions after the
+    distilled re-sort did exactly that, because 1/(1+i) is nonlinear.
+
+    A distilled row the pipeline weighted is placed in *sort_key*'s space -- the
+    ``(bucket, -score x family weight)`` key ``finish_candidates`` sorts by, where
+    such a row's own weight is 1.0 -- not in raw positions: its own pre-weight
+    position, raised to the best key of any non-distilled row the pipeline ranked
+    BEHIND it, then capped at the worst key of every row ranked AHEAD of it in its
+    bucket. A tie keeps the pipeline order (the sort is stable), so a distilled
+    row is never promoted above a row the pipeline ranked ahead of it. If a lower
+    row's family weight already lifts it above a higher one (the pre-existing
+    cross-family reorder), the cap wins: demotion is never undone.
+
+    With no weighted row (no distilled rows, weight 1.0, or no scores observed)
+    this is ``round(1/(1+i), 4)`` over *ranked*, unchanged.
     """
-    logger.info(
-        "hybrid_recall_complete",
-        op="recall",
-        outcome=outcome,
-        namespace=namespace,
-        namespace_size=namespace_size,
-        candidate_pool_size=candidate_pool_size,
-        effective_bm25_candidates=effective_bm25_candidates,
-        effective_vector_candidates=effective_vector_candidates,
-        effective_top_k=effective_top_k,
-        returned_count=returned_count,
-        list_entries_ms=round(list_entries_ms, 3),
-        hybrid_search_ms=round(hybrid_search_ms, 3),
-        total_ms=round(total_ms, 3),
+    order = sorted(
+        range(len(ranked)),
+        key=lambda i: row.preweight_rank if (row := ranked[i]) and row.preweight_rank is not None else i,
     )
+    own = [0.0] * len(ranked)
+    for position, index in enumerate(order):
+        own[index] = round(1.0 / (1 + position), 4)
+    rows = [row for row in ranked if row is not None]
+    if len(rows) != len(ranked) or not any(row.distilled_weighted for row in rows):
+        return own
+    key = sort_key or (lambda _entry, score: (0, -score))
+    buckets = [key(row.entry, own[index])[0] for index, row in enumerate(rows)]
+    floor = [0.0] * len(rows)
+    best_below: dict[int, float] = {}
+    for index in reversed(range(len(rows))):
+        floor[index] = best_below.get(buckets[index], 0.0)
+        if not rows[index].distilled_weighted:
+            below = -key(rows[index].entry, own[index])[1]
+            best_below[buckets[index]] = max(below, best_below.get(buckets[index], 0.0))
+    ceiling: dict[int, float] = {}
+    scores: list[float] = []
+    for index, row in enumerate(rows):
+        score = own[index]
+        if row.distilled_weighted:
+            score = min(ceiling.get(buckets[index], math.inf), max(floor[index], score))
+        effective = -key(row.entry, score)[1]
+        ceiling[buckets[index]] = min(effective, ceiling.get(buckets[index], math.inf))
+        scores.append(score)
+    return scores

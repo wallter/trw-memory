@@ -92,6 +92,20 @@ def test_reranker_getattr_rejects_unknown_name() -> None:
         _ = reranker.does_not_exist  # type: ignore[attr-defined]
 
 
+def test_retrieval_dir_lists_every_lazy_export_before_first_access() -> None:
+    """dir() on a fresh import lists the lazy exports, as the eager re-exports did."""
+    code = (
+        "import trw_memory.retrieval as r\n"
+        "missing = sorted(set(r.__all__) - set(dir(r)))\n"
+        "assert not missing, missing\n"
+        "assert 'hybrid_search' not in vars(r)  # still unresolved: dir() did not import it\n"
+        "print('OK')\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "OK"
+
+
 def test_retrieval_getattr_rejects_unknown_name() -> None:
     """The package-level PEP 562 hook raises AttributeError for unknown names."""
     import pytest
@@ -126,3 +140,48 @@ def test_import_trw_memory_package_is_lazy() -> None:
     assert "trw_memory.models.memory" not in loaded
     assert "trw_memory.storage.sqlite_backend" not in loaded
     assert {"trw_memory", "trw_memory.storage", "trw_memory.storage._dbapi"} <= loaded
+
+
+def _loaded_after(module: str) -> set[str]:
+    """Every module name a clean interpreter holds after importing *module*."""
+    proc = subprocess.run(
+        [sys.executable, "-c", f"import sys, {module}\nprint('|'.join(sorted(sys.modules)))\n"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    return set(proc.stdout.strip().split("|"))
+
+
+def test_daemon_client_does_not_import_the_server_side_version_gate() -> None:
+    """The client needs only the header NAME; the gate pulls in ``fastmcp.server`` (~0.2 s per edit hook).
+
+    Every edit-hint hook is a fresh interpreter that imports ``DaemonClient`` to
+    recall learnings, inside a 2.4 s bound it was measured running out of.
+    """
+    loaded = _loaded_after("trw_memory.daemon.client")
+    assert "trw_memory.daemon._version_gate" not in loaded
+    assert not {m for m in loaded if m.startswith("fastmcp.server")}
+    from trw_memory.daemon._discovery import VERSION_HEADER
+    from trw_memory.daemon._version_gate import VERSION_HEADER as GATE_HEADER
+
+    assert VERSION_HEADER == GATE_HEADER == "x-trw-memory-version"  # client and gate agree on one name
+
+
+def test_a_retrieval_submodule_does_not_load_numpy_through_the_package() -> None:
+    """``retrieval/__init__`` re-exports lazily, so the recall-admission path stays numpy-free."""
+    loaded = _loaded_after("trw_memory.retrieval.temporal_selection")
+    assert "numpy" not in loaded
+    assert "trw_memory.retrieval.dense" not in loaded
+
+
+def test_every_lazy_retrieval_export_resolves_to_its_submodule_object() -> None:
+    import trw_memory.retrieval as retrieval
+    from trw_memory.retrieval import dense, token_budget
+
+    assert set(retrieval.__all__) == set(retrieval._LAZY)
+    assert retrieval.dense_search is dense.dense_search
+    assert retrieval.TOKEN_MULTIPLIER == token_budget.TOKEN_MULTIPLIER
+    for name in retrieval.__all__:
+        assert getattr(retrieval, name) is not None, name

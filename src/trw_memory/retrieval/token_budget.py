@@ -66,10 +66,7 @@ def estimate_entry_tokens(entry: dict[str, object]) -> int:
     content = str(entry.get("content", "") or "")
     detail = str(entry.get("detail", "") or "")
     raw_tags = entry.get("tags")
-    if isinstance(raw_tags, list):
-        tags_text = " ".join(str(t) for t in raw_tags)
-    else:
-        tags_text = ""
+    tags_text = " ".join(str(t) for t in raw_tags) if isinstance(raw_tags, list) else ""
 
     combined = f"{content} {detail} {tags_text}".strip()
     return estimate_tokens(combined) + METADATA_OVERHEAD

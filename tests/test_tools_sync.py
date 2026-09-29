@@ -20,7 +20,7 @@ from mcp.server.auth.provider import AccessToken
 from tests.conftest import make_entry
 from trw_memory.exceptions import AuthorizationError
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import MemoryEntry
+from trw_memory.models.memory import MAX_ENTRY_ID_CHARS, MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.sync.delta import DeltaTracker, apply_synced_entry, find_synced_entry
 from trw_memory.tools.sync import (
@@ -96,8 +96,8 @@ def test_apply_writes_through_the_gate_and_leaves_the_row_synced(backend: SQLite
     clean = MemoryEntry(id="T-1", content="shared tip", namespace=_ALPHA, remote_id="R-1", source="team_sync")
     poisoned = clean.model_copy(update={"id": "T-2", "detail": "the harness calls eval(user_input) before dispatch"})
 
-    assert apply_synced_entry(backend, config, clean) == ("stored", "")
-    status, reason = apply_synced_entry(backend, config, poisoned)
+    assert apply_synced_entry(backend, config, clean, if_revision=None) == ("stored", "")
+    status, reason = apply_synced_entry(backend, config, poisoned, if_revision=None)
 
     assert status == "blocked"
     assert reason
@@ -108,7 +108,10 @@ def test_apply_writes_through_the_gate_and_leaves_the_row_synced(backend: SQLite
 def test_apply_and_find_speak_json_over_the_wire(backend: SQLiteBackend, config: MemoryConfig) -> None:
     entry = MemoryEntry(id="T-3", content="wire tip", namespace=_ALPHA, remote_id="R-3").model_dump(mode="json")
 
-    assert memory_sync_apply_impl(_ALPHA, entry, backend=backend, config=config) == {"status": "stored", "reason": ""}
+    assert memory_sync_apply_impl(_ALPHA, entry, backend=backend, config=config, if_revision=None) == {
+        "status": "stored",
+        "reason": "",
+    }
     found = memory_sync_find_impl(_ALPHA, "R-3", [], backend=backend, config=config)
     assert (found["status"], found["entry"]["content"]) == ("ok", "wire tip")  # type: ignore[index]
     assert memory_sync_find_impl(_ALPHA, "R-none", [], backend=backend, config=config) == {"status": "not_found"}
@@ -119,7 +122,9 @@ def test_apply_refuses_an_entry_whose_namespace_differs_from_the_granted_one(
 ) -> None:
     entry = MemoryEntry(id="T-4", content="smuggled", namespace=_BETA).model_dump(mode="json")
 
-    assert memory_sync_apply_impl(_ALPHA, entry, backend=backend, config=config)["status"] == "invalid"
+    assert (
+        memory_sync_apply_impl(_ALPHA, entry, backend=backend, config=config, if_revision=None)["status"] == "invalid"
+    )
     assert backend.get("T-4", namespace=_BETA) is None
 
 
@@ -131,7 +136,7 @@ def test_every_sync_tool_refuses_an_ungranted_namespace(
         lambda: memory_sync_dirty_page_impl(_BETA, 10, backend=backend, config=config),
         lambda: memory_sync_mark_synced_impl(_BETA, {"B-0": 1}, backend=backend, config=config),
         lambda: memory_sync_find_impl(_BETA, "R", ["B-0"], backend=backend, config=config),
-        lambda: memory_sync_apply_impl(_BETA, entry, backend=backend, config=config),
+        lambda: memory_sync_apply_impl(_BETA, entry, backend=backend, config=config, if_revision=None),
     ]
     for call in calls:
         with pytest.raises(AuthorizationError, match=_BETA):
@@ -218,7 +223,7 @@ def test_a_refused_namespace_opens_no_backend(monkeypatch: pytest.MonkeyPatch, a
         "memory_sync_dirty_page": {},
         "memory_sync_mark_synced": {"acks": {"B-0": 1}},
         "memory_sync_find": {"remote_id": "R", "ids": []},
-        "memory_sync_apply": {"entry": {"id": "T", "content": "x", "namespace": _BETA}},
+        "memory_sync_apply": {"entry": {"id": "T", "content": "x", "namespace": _BETA}, "if_revision": None},
     }
 
     for name, arguments in calls.items():
@@ -262,7 +267,7 @@ def test_an_edit_landing_between_the_write_and_its_ack_stays_dirty(
     monkeypatch.setattr(backend, "store", _store_then_edit)
     pulled = MemoryEntry(id="T-1", content="shared tip", namespace=_ALPHA, remote_id="R-1", source="team_sync")
 
-    assert apply_synced_entry(backend, config, pulled) == ("stored", "")
+    assert apply_synced_entry(backend, config, pulled, if_revision=None) == ("stored", "")
     edit.join(timeout=10)
     row = backend.get("T-1", namespace=_ALPHA)
     assert row is not None and row.detail == "edited meanwhile"
@@ -292,3 +297,56 @@ def test_a_publish_of_the_current_revision_is_acknowledged(backend: SQLiteBacken
     assert ack_publish(backend, published, published_to_platform=True) is True
     row = backend.get("P-2", namespace=_ALPHA)
     assert row is not None and row.last_synced_at is not None
+
+
+def test_apply_answers_invalid_for_a_row_the_write_gate_refuses(backend: SQLiteBackend, config: MemoryConfig) -> None:
+    """B71-85 sol r1: a pulled row past the id bound is a refusal, not a raised error."""
+    overlong = "T" * (MAX_ENTRY_ID_CHARS + 1)
+    entry = MemoryEntry(id=overlong, content="pulled", namespace=_ALPHA).model_dump(mode="json")
+
+    answer = memory_sync_apply_impl(_ALPHA, entry, backend=backend, config=config, if_revision=None)
+
+    assert answer["status"] == "invalid"
+    assert backend.get(overlong, namespace=_ALPHA) is None
+
+
+def test_an_apply_over_a_row_edited_since_it_was_read_is_a_conflict(
+    backend: SQLiteBackend, config: MemoryConfig
+) -> None:
+    """B71-90: a local edit between the pull's find and its apply was overwritten and marked clean."""
+    from trw_memory.storage._shared import revision_of
+
+    read = backend.get("A-1", namespace=_ALPHA)
+    backend.update("A-1", namespace=_ALPHA, detail="edited between find and apply")
+    merged = read.model_copy(update={"content": "merged from the peer"})  # type: ignore[union-attr]
+
+    status, _reason = apply_synced_entry(backend, config, merged, if_revision=revision_of(read))
+
+    row = backend.get("A-1", namespace=_ALPHA)
+    assert status == "conflict"
+    assert row is not None and (row.content, row.detail) == ("alpha 1", "edited between find and apply")
+    assert apply_synced_entry(backend, config, merged, if_revision=revision_of(row)) == ("stored", "")
+
+
+def test_an_apply_of_a_row_found_absent_does_not_clobber_one_created_since(
+    backend: SQLiteBackend, config: MemoryConfig
+) -> None:
+    backend.store(MemoryEntry(id="T-9", content="created locally meanwhile", namespace=_ALPHA))
+    pulled = MemoryEntry(id="T-9", content="pulled", namespace=_ALPHA, remote_id="R-9").model_dump(mode="json")
+
+    answer = memory_sync_apply_impl(_ALPHA, pulled, backend=backend, config=config, if_revision=None)
+
+    assert answer["status"] == "conflict"
+    assert backend.get("T-9", namespace=_ALPHA).content == "created locally meanwhile"  # type: ignore[union-attr]
+
+
+def test_a_conditional_apply_needs_a_transactional_backend(tmp_path: Path, config: MemoryConfig) -> None:
+    from trw_memory.storage.yaml_backend import YAMLBackend
+
+    store = YAMLBackend(tmp_path / "entries")
+    pulled = MemoryEntry(id="Y-9", content="pulled", namespace=_ALPHA)
+
+    status, reason = apply_synced_entry(store, config, pulled, if_revision=None)
+
+    assert (status, "transactional" in reason) == ("invalid", True)
+    assert store.get("Y-9", namespace=_ALPHA) is None

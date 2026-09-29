@@ -38,6 +38,9 @@ class LocalCandidate:
     cold: bool = False
     # Request-local ordering only; never replace raw relevance or persist this flag.
     tier_fallback: bool = False
+    # Ranked by the pipeline, whose one weighting step already put the
+    # git_distilled weight into this row's order (PRD-CORE-336 FR01).
+    distilled_weighted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +96,8 @@ class RecallInvocation:
     temporal: TemporalSelection
     namespace: str
     tags: frozenset[str] = frozenset()
+    #: PRD-CORE-334: only these ``MemoryType`` values; empty keeps every type.
+    types: frozenset[str] = frozenset()
     confidence_floor: float | None = None
     exclude_historical_only: bool = False
 
@@ -104,6 +109,8 @@ class RecallInvocation:
         if self.temporal.exclude_system_canaries and entry.metadata.get("system_canary") == "true":
             return False
         if self.tags and not self.tags.issubset(entry.tags):
+            return False
+        if self.types and entry.type not in self.types:
             return False
         fields = entry_policy_fields(entry)
         return self.source.allows(fields) and bool(

@@ -25,6 +25,7 @@ from ._test_sqlite_backend_recovery_support import (
     _write_timestamped_backup,
 )
 from ._timing import assert_budget
+from .test_store_lock import Probe
 
 
 def test_fr05_salvage_semantics_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -202,3 +203,44 @@ def test_migration_upgrade_preserves_legacy_files(tmp_path: Path, monkeypatch: p
     assert (tmp_path / "memory.db.corrupt.bak").read_bytes() == b"pre-upgrade-0"
     assert (tmp_path / "memory.db.corrupt.bak.1").read_bytes() == b"pre-upgrade-1"
     assert _find_timestamped_backup(tmp_path).exists()
+
+
+# --- B71-133 (b): a pruned backup takes its .oplock with it ----------------------------------
+
+
+def test_pruning_rotated_backups_leaves_no_orphaned_lock_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The salvage opens the rotated backup as a store, which creates ``<backup>.oplock``; pruning removed the
+    backup and its sidecars but never that lock file, so one was left behind per pruned backup."""
+    db = tmp_path / "memory.db"
+    for second in range(4):
+        _freeze_utc(monkeypatch, datetime(2026, 9, 26, 12, 0, second, tzinfo=timezone.utc))
+        _populate_db(db, entries=1)
+        SQLiteBackend.recover_db(db, corrupt_backup_keep=2).close()
+
+    backups = sorted(tmp_path.glob("memory.db.corrupt.*.bak"))
+    lock_files = sorted(tmp_path.glob("memory.db.corrupt.*.bak.oplock"))
+    assert len(backups) == 2
+    assert [Path(str(lock)[: -len(".oplock")]) for lock in lock_files] == backups
+
+
+def test_a_backup_another_process_holds_is_not_pruned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Its lock file is deleted only with no lock held on it; a held one is kept, backup included, and logged."""
+    db = tmp_path / "memory.db"
+    for second in range(2):
+        _freeze_utc(monkeypatch, datetime(2026, 9, 26, 12, 0, second, tzinfo=timezone.utc))
+        _populate_db(db, entries=1)
+        SQLiteBackend.recover_db(db, corrupt_backup_keep=5).close()
+    oldest = sorted(tmp_path.glob("memory.db.corrupt.*.bak"))[0]
+    probe = Probe(oldest)
+    try:
+        assert probe.ask("take open") == ["ok"]
+        with structlog.testing.capture_logs() as logs:
+            SQLiteBackend._prune_corrupt_backups(tmp_path, keep_n=1)
+        assert oldest.exists()
+        assert Path(f"{oldest}.oplock").exists()
+        assert [log["backup"] for log in logs if log["event"] == "corrupt_backup_prune_skipped_in_use"] == [str(oldest)]
+    finally:
+        probe.close()
+    SQLiteBackend._prune_corrupt_backups(tmp_path, keep_n=1)  # released: pruned now
+    assert not oldest.exists()
+    assert not Path(f"{oldest}.oplock").exists()

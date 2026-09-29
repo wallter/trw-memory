@@ -18,6 +18,7 @@ from trw_memory.graph import (
     detect_clusters,
     propagate_impact,
 )
+from trw_memory.storage._anchor_index import replace_anchor_postings
 from trw_memory.storage._schema import ensure_schema
 
 # ---------------------------------------------------------------------------
@@ -26,7 +27,7 @@ from trw_memory.storage._schema import ensure_schema
 
 
 def _make_conn() -> sqlite3.Connection:
-    """Create an in-memory SQLite connection with the full schema."""
+    """Create an in-memory SQLite connection with the full schema (including ``anchor_postings``)."""
     conn = sqlite3.connect(":memory:")
     ensure_schema(conn)
     return conn
@@ -41,8 +42,9 @@ def _insert_memory_row(
     anchors_json: str = "[]",
     tags_json: str = "[]",
     outcome_history_json: str = "[]",
+    namespace: str = "default",
 ) -> None:
-    """Insert a minimal memory row for graph tests."""
+    """Insert a minimal memory row for graph tests, posting its anchors to ``anchor_postings``."""
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         "INSERT INTO memories "
@@ -50,6 +52,7 @@ def _insert_memory_row(
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (entry_id, content, now, now, importance, anchors_json, tags_json, outcome_history_json),
     )
+    replace_anchor_postings(conn, namespace, entry_id, json.loads(anchors_json) if anchors_json else [])
     conn.commit()
 
 

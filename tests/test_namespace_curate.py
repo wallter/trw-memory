@@ -163,6 +163,29 @@ def test_a_rename_never_overwrites_a_row_another_connection_committed(
     assert stored.content == "committed by another writer", "the rename overwrote a committed row"
 
 
+def test_rename_refuses_a_non_transactional_destination_rather_than_race_it(tmp_path: Path) -> None:
+    """B71-61: YAML's store()/delete() take no lock at all, and update()'s lock is
+    per-entry-file rather than per-namespace, so there is no shared lock the
+    rename's empty-destination check could hold to make the check-and-move atomic
+    the way 8d1ad71cc made it atomic on SQLite. Rather than let a row another
+    process writes into the destination between the check and the move be
+    silently overwritten, the rename refuses outright.
+    """
+    from trw_memory.storage.yaml_backend import YAMLBackend
+
+    source = SQLiteBackend(tmp_path / "source.db")
+    destination = YAMLBackend(tmp_path / "dest-entries")
+    stores = NamespaceStores(source=source, destination=destination)
+    _seed(source, OLD, ["M-1"])
+
+    with pytest.raises(ConfigError, match="does not support transactions"):
+        rename_namespace(stores, OLD, NEW)
+
+    assert source.count(namespace=OLD) == 1, "the refusal must not have moved anything out of source"
+    assert destination.count(namespace=NEW) == 0, "the refusal must not have written anything to the destination"
+    source.close()
+
+
 def test_rename_refuses_a_self_rename(backend: StorageBackend) -> None:
     _seed(backend, OLD, ["M-1"])
 
@@ -340,15 +363,17 @@ def test_a_yaml_backend_crosses_two_stores_rather_than_sharing_one(tmp_path: Pat
     treated every non-SQLite config as "shared", so a cross-namespace YAML move
     opened the DESTINATION's directory, found zero source rows and reported a
     clean no-op -- the worst possible answer for a bulk re-key, because it looks
-    like success.
+    like success. Exercised via merge, not rename: B71-61 makes rename refuse on
+    YAML outright (see ``test_rename_refuses_a_non_transactional_destination...``),
+    so merge is the write verb left to prove the crossed-directory resolution.
     """
     config = MemoryConfig(storage_path=str(tmp_path / "store"), storage_backend="yaml")
     with create_backend_from_config(config, OLD) as backend:
         _seed(backend, OLD, ["M-1", "M-2"])
 
-    renamed = memory_namespace_rename_impl(OLD, NEW, config=config)
+    merged = memory_namespace_merge_impl(OLD, NEW, config=config)
 
-    assert (renamed["status"], renamed["moved"]) == ("renamed", 2)
+    assert (merged["status"], merged["moved"]) == ("merged", 2)
     with create_backend_from_config(config, NEW) as backend:
         assert backend.count(namespace=NEW) == 2
     with create_backend_from_config(config, OLD) as backend:
@@ -529,39 +554,257 @@ def test_a_cross_store_merge_carries_the_moved_rows_edges(tmp_path: Path) -> Non
         destination.close()
 
 
-def test_a_namespace_over_the_row_cap_is_refused_before_any_row_moves(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+# ---------------------------------------------------------------------------
+# B71-96 (PRD-CORE-307 FR06): the served verbs move in batches, each its own lane job
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def served(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryConfig:
+    """The served tools read ``MemoryConfig()`` from the environment; batches of two rows."""
+    from trw_memory.daemon._lane import LaneBudget
+    from trw_memory.daemon._offload import shutdown_offload_pool
+    from trw_memory.tools import namespace_admin
+
+    monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "store"))
+    monkeypatch.delenv("MEMORY_SINGLE_STORE_PATH", raising=False)
+    small = LaneBudget("maintenance", seconds=0.25, rows=2, background=True)
+    monkeypatch.setattr(namespace_admin, "MAINTENANCE", small, raising=False)
+    shutdown_offload_pool()
+    yield MemoryConfig()
+    shutdown_offload_pool()
+
+
+async def _serve(verb: str, source: str = OLD, destination: str = NEW) -> dict[str, object]:
+    from trw_memory.server import mcp
+
+    tool = await mcp.get_tool(f"memory_namespace_{verb}")
+    result = await tool.run({"source": source, "destination": destination})
+    assert isinstance(result.structured_content, dict)
+    return result.structured_content
+
+
+def _ids(config: MemoryConfig, namespace: str) -> list[str]:
+    with create_backend_from_config(config, namespace) as store:
+        return sorted(entry.id for entry in store.list_entries(namespace=namespace, limit=1_000))
+
+
+async def test_a_merge_larger_than_one_batch_gives_the_lane_to_another_tenant_between_batches(
+    served: MemoryConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """rc9: a merge or rename moves the whole namespace in one job on the daemon's serialized lane, so one
-    call is capped at CURATE_ROWS_MAX rows and edges (about 50 s, measured) and a larger namespace is refused."""
+    """B71-96: the move was ONE lane job, so a forget from another tenant waited for the whole namespace."""
+    from trw_memory.daemon import _lane
     from trw_memory.tools import namespace_admin
 
-    monkeypatch.setattr(namespace_admin, "CURATE_ROWS_MAX", 2)
-    config = _config(tmp_path)
-    with create_backend_from_config(config, OLD) as backend:
-        _seed(backend, OLD, ["M-1", "M-2", "M-3"])
+    with create_backend_from_config(served, OLD) as store:
+        _seed(store, OLD, [f"M-{index}" for index in range(5)])
+    order: list[str] = []
+    real = namespace_admin.memory_namespace_merge_impl
 
-    for impl in (memory_namespace_rename_impl, memory_namespace_merge_impl):
-        refused = impl(OLD, NEW, config=config)
-        assert refused["status"] == "too_large", refused
-        assert "3 rows" in str(refused["error"])
-    with create_backend_from_config(config, OLD) as backend:
-        assert backend.count(namespace=OLD) == 3
+    def _batch(*args: object, **kwargs: object) -> dict[str, object]:
+        if not order:  # another tenant's interactive job queues while the first batch holds the lane
+            _lane.submit(_lane.INTERACTIVE, OTHER, order.append, "other tenant")
+        order.append("batch")
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(namespace_admin, "memory_namespace_merge_impl", _batch)
+
+    reply = await _serve("merge")
+
+    assert (reply["status"], reply["moved"], reply.get("complete")) == ("merged", 5, True), reply
+    assert order.count("batch") == 3, order
+    assert order.index("other tenant") < len(order) - 1, f"no batch ran after the other tenant's job: {order}"
+    assert _ids(served, NEW) == [f"M-{index}" for index in range(5)]
 
 
-def test_the_row_cap_counts_the_namespaces_graph_edges_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """rc9 sol P1: the move copies every source edge before any row, so the cap counts edges as well."""
+@pytest.mark.parametrize("verb", ["merge", "rename"])
+async def test_a_call_whose_budget_ends_mid_move_resumes_on_the_next_call(
+    served: MemoryConfig, monkeypatch: pytest.MonkeyPatch, verb: str
+) -> None:
+    """Each call moves one batch here (its budget is spent), says so, and the next call resumes: no row lost or
+    duplicated, a merge's conflict still skipped, and a resumed rename accepts its own half-moved destination."""
+    from trw_memory.daemon import _lane
+
+    monkeypatch.setattr(_lane, "CALL_SECONDS", 0.0)
+    source_ids = [f"M-{index}" for index in range(5)]
+    with create_backend_from_config(served, OLD) as store:
+        _seed(store, OLD, source_ids)
+    if verb == "merge":
+        with create_backend_from_config(served, NEW) as store:
+            store.store(make_entry(entry_id="M-2", namespace=NEW, content="the destination's version"))
+
+    replies = [await _serve(verb)]
+    while replies[-1].get("complete") is False:
+        assert replies[-1]["status"] == "moving", replies[-1]
+        assert len(replies) < 10, replies
+        replies.append(await _serve(verb))
+
+    assert len(replies) >= 3, replies
+    final = replies[-1]
+    assert final["status"] == ("merged" if verb == "merge" else "renamed"), final
+    expected = (5, 4, 1) if verb == "merge" else (5, 5, 0)
+    assert (final["source_rows"], final["moved"], final["skipped"]) == expected, final
+    assert _ids(served, NEW) == source_ids
+    assert _ids(served, OLD) == (["M-2"] if verb == "merge" else [])
+
+
+async def test_a_rename_refuses_a_row_it_did_not_move_even_mid_move(
+    served: MemoryConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The empty-destination check survives batching: a foreign row before the move, or one another tenant
+    stores between two batches, is refused; the rows this rename already moved are not."""
+    from trw_memory.daemon import _lane
+
+    with create_backend_from_config(served, OLD) as store:
+        _seed(store, OLD, ["M-1"])
+    with create_backend_from_config(served, NEW) as store:
+        _seed(store, NEW, ["M-9"])
+    refused = await _serve("rename")
+    assert refused["status"] == "invalid" and "Use merge" in str(refused["error"]), refused
+
+    monkeypatch.setattr(_lane, "CALL_SECONDS", 0.0)
+    fresh = "project:fresh-44444444"
+    with create_backend_from_config(served, OTHER) as store:
+        _seed(store, OTHER, ["O-1", "O-2", "O-3", "O-4"])
+    first = await _serve("rename", OTHER, fresh)
+    assert (first["status"], first["moved"]) == ("moving", 2), first
+    with create_backend_from_config(served, fresh) as store:
+        _seed(store, fresh, ["X-1"])
+
+    again = await _serve("rename", OTHER, fresh)
+
+    assert again["status"] == "invalid" and "Use merge" in str(again["error"]), again
+    assert len(_ids(served, OTHER)) == 2, "the refusal moved nothing"
+
+
+async def test_a_resumed_rename_never_overwrites_a_row_written_under_an_upcoming_source_id(
+    served: MemoryConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRD-CORE-307 sol r3 P1: the resume check compared only counts, so deleting one moved row and writing a
+    destination row under an upcoming source id kept the count and the next batch overwrote the new row."""
+    from trw_memory.daemon import _lane
+
+    monkeypatch.setattr(_lane, "CALL_SECONDS", 0.0)
+    fresh = "project:fresh-55555555"
+    with create_backend_from_config(served, OTHER) as store:
+        _seed(store, OTHER, ["O-1", "O-2", "O-3", "O-4"])
+    first = await _serve("rename", OTHER, fresh)
+    assert (first["status"], first["moved"]) == ("moving", 2), first
+    with create_backend_from_config(served, fresh) as store:
+        moved = sorted(entry.id for entry in store.list_entries(namespace=fresh, limit=10))
+        store.delete(moved[0], namespace=fresh)
+        upcoming = next(entry_id for entry_id in ["O-1", "O-2", "O-3", "O-4"] if entry_id not in moved)
+        store.store(make_entry(entry_id=upcoming, namespace=fresh, content="new destination content must survive"))
+
+    again = await _serve("rename", OTHER, fresh)
+
+    assert again["status"] == "invalid" and "Use merge" in str(again["error"]), again
+    with create_backend_from_config(served, fresh) as store:
+        kept = store.get(upcoming, namespace=fresh)
+    assert kept is not None and kept.content == "new destination content must survive"
+
+
+async def test_a_namespace_past_the_old_whole_move_cap_moves_with_its_edges(
+    served: MemoryConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rc9 refused a namespace over CURATE_ROWS_MAX rows and edges (50,000); batched, any size moves."""
     from trw_memory.tools import namespace_admin
 
-    monkeypatch.setattr(namespace_admin, "CURATE_ROWS_MAX", 3)
-    config = _config(tmp_path)
-    with create_backend_from_config(config, OLD) as backend:
-        _seed(backend, OLD, ["M-1", "M-2"])
-        _edge(backend, OLD, "M-1", "M-2")
-        _edge(backend, OLD, "M-2", "M-1")
-        assert backend.graph_edge_count(OLD) == 2
+    monkeypatch.setattr(namespace_admin, "CURATE_ROWS_MAX", 2, raising=False)
+    with create_backend_from_config(served, OLD) as store:
+        assert isinstance(store, SQLiteBackend)
+        _seed(store, OLD, ["M-1", "M-2", "M-3"])
+        _edge(store, OLD, "M-1", "M-3")
+        _edge(store, OLD, "M-2", "M-3")
 
-    refused = memory_namespace_rename_impl(OLD, NEW, config=config)
+    reply = await _serve("rename")
 
-    assert refused["status"] == "too_large", refused
-    assert "4 rows and graph edges" in str(refused["error"])
+    assert (reply["status"], reply["moved"], reply.get("complete")) == ("renamed", 3, True), reply
+    with create_backend_from_config(served, NEW) as store:
+        assert sorted((e.source_id, e.target_id) for e in store.graph_edges(NEW)) == [("M-1", "M-3"), ("M-2", "M-3")]
+
+
+async def test_a_row_written_behind_the_cursor_between_batches_is_moved_by_a_second_pass(
+    served: MemoryConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lane is free between batches, so a tenant can store a source row the scan already passed (the
+    newest sorts first); the drained-source check scans again instead of stranding or refusing it."""
+    from trw_memory.daemon import _lane
+
+    monkeypatch.setattr(_lane, "CALL_SECONDS", 0.0)
+    with create_backend_from_config(served, OLD) as store:
+        _seed(store, OLD, ["M-1", "M-2", "M-3", "M-4"])
+    first = await _serve("merge")
+    assert (first["status"], first["moved"]) == ("moving", 2), first
+    with create_backend_from_config(served, OLD) as store:
+        _seed(store, OLD, ["M-late"])
+
+    replies = [first]
+    while replies[-1].get("complete") is False and len(replies) < 10:
+        replies.append(await _serve("merge"))
+
+    assert (replies[-1]["status"], replies[-1]["moved"], replies[-1]["skipped"]) == ("merged", 5, 0), replies
+    assert _ids(served, NEW) == ["M-1", "M-2", "M-3", "M-4", "M-late"]
+    assert _ids(served, OLD) == []
+
+
+def test_a_longer_sibling_slug_sharing_the_prefix_is_not_reported(tmp_path: Path) -> None:
+    """B71-124 M3: ``project:trw-framework-extra-*`` is a DIFFERENT project (slug
+    ``trw-framework-extra``), not a moved copy of ``trw-framework``, even though its
+    namespace string starts with the same ``project:trw-framework-`` prefix.
+    """
+    config = _census_config(tmp_path)
+    _seed_via_config(config, "project:trw-framework-extra-44444444", ["M-1"])
+
+    assert detect_moved_checkout(NEW, store_census(config)) is None
+
+
+def test_a_true_same_slug_sibling_is_still_reported(tmp_path: Path) -> None:
+    """The same-prefix guard above must not swallow the real moved-checkout case."""
+    config = _census_config(tmp_path)
+    _seed_via_config(config, OLD, ["M-1"])
+
+    observation = detect_moved_checkout(NEW, store_census(config))
+
+    assert observation is not None
+    assert [candidate.namespace for candidate in observation.candidates] == [OLD]
+
+
+@pytest.mark.parametrize("verb", ["merge", "rename"])
+async def test_a_half_moved_source_resumes_after_the_daemon_forgets_it_in_memory(
+    served: MemoryConfig, monkeypatch: pytest.MonkeyPatch, verb: str
+) -> None:
+    """CORE-331 FR03 (CORE-307 audit row f): _MOVES is in-memory only, so a daemon restart used to
+    forget a half-done batch -- a resumed merge re-counted from zero (understating moved/source_rows
+    in its final reply) and a resumed rename was refused, pointing at merge, because its own
+    drained-source check reads progress.moved to tell an already-moved row from a foreign one and
+    that counter reset to 0. Dropping the dict entry (simulating the restart) must do neither: the
+    next call reloads the persisted progress and resumes exactly where the dropped-from-memory batch
+    left off."""
+    from trw_memory.daemon import _lane
+    from trw_memory.tools import namespace_admin
+
+    monkeypatch.setattr(_lane, "CALL_SECONDS", 0.0)
+    source_ids = [f"M-{index}" for index in range(5)]
+    with create_backend_from_config(served, OLD) as store:
+        _seed(store, OLD, source_ids)
+    if verb == "merge":
+        with create_backend_from_config(served, NEW) as store:
+            store.store(make_entry(entry_id="M-2", namespace=NEW, content="the destination's version"))
+
+    first = await _serve(verb)
+    assert first["status"] == "moving", first
+    namespace_admin._MOVES.clear()  # the daemon-restart simulation: in-memory progress is gone
+
+    replies = [first]
+    while replies[-1].get("complete") is False:
+        assert replies[-1]["status"] == "moving", replies[-1]
+        assert len(replies) < 10, replies
+        replies.append(await _serve(verb))
+
+    final = replies[-1]
+    assert final["status"] == ("merged" if verb == "merge" else "renamed"), final
+    expected = (5, 4, 1) if verb == "merge" else (5, 5, 0)
+    assert (final["source_rows"], final["moved"], final["skipped"]) == expected, final
+    assert _ids(served, NEW) == source_ids
+    assert _ids(served, OLD) == (["M-2"] if verb == "merge" else [])

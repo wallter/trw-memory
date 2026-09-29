@@ -24,16 +24,22 @@ Key invariants (do not relax without updating PRD-INFRA-065):
 from __future__ import annotations
 
 import contextlib
+import os
 import re
 import shutil
 import sqlite3
+import stat
 import tempfile
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import BinaryIO
 
 import structlog
 
 from trw_memory._live_stores import connect_registered
+from trw_memory._store_lock import store_access
+from trw_memory._tree_removal import remove_tree
+from trw_memory.storage._connection import clear_journal_sidecars
 
 __all__ = [
     "SnapshotError",
@@ -41,8 +47,10 @@ __all__ = [
     "create_snapshot",
     "latest_snapshot",
     "list_snapshots",
+    "publish_no_clobber",
     "restore_from_snapshot",
     "rotate_snapshots",
+    "seed_no_clobber",
     "snapshots_base_dir",
     "take_daily_snapshot",
     "take_weekly_snapshot",
@@ -163,10 +171,8 @@ def create_snapshot(db_path: Path, dest: Path) -> Path:
         # snapshot runs: 30s busy_timeout matches the primary backend so
         # snapshot can't be starved by foreground writers, and vice versa.
         conn.execute("PRAGMA busy_timeout = 30000")
-        # Use parameterized-literal quoting — VACUUM INTO does not support
-        # bind parameters, so escape single quotes defensively.
-        escaped = str(tmp).replace("'", "''")
-        conn.execute(f"VACUUM INTO '{escaped}'")
+        # The destination is a bound parameter, never part of the SQL text.
+        conn.execute("VACUUM INTO ?", (str(tmp),))
     except sqlite3.Error as exc:
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
@@ -326,6 +332,51 @@ def _parse_snapshot_date(name: str) -> date | None:
     return None
 
 
+def publish_no_clobber(tmp: Path, dest: Path) -> tuple[int, int]:
+    """Publish *tmp* at *dest* only if nothing is there; the published file's ``(st_dev, st_ino)``.
+
+    ``os.link`` is the gate: it raises ``FileExistsError`` when *dest* exists, where a rename would
+    replace it (a file created at *dest* after any earlier check would be lost). *tmp* must be on
+    *dest*'s filesystem (the same directory); the caller unlinks it afterwards either way.
+    """
+    os.link(tmp, dest)
+    st = os.lstat(tmp)
+    return st.st_dev, st.st_ino
+
+
+def seed_no_clobber(source: Path, destination: Path) -> tuple[int, int] | None:
+    """Copy the SQLite file at *source* to *destination* as one snapshot; the published ``(st_dev, st_ino)``.
+
+    ``None`` only when *source* does not exist; one that cannot be looked up (EACCES on a parent
+    directory) raises, so an unreadable file is never mistaken for an absent one. The copy is
+    :func:`create_snapshot` (``VACUUM INTO`` over a registered connection, 30 s busy timeout) into
+    a 0600 file in a fresh private staging directory beside *destination*, published by
+    :func:`publish_no_clobber`, so a file that appears at *destination* at any point (a starting
+    daemon's first write) is never replaced, and no staging name can collide with another file.
+
+    Raises ``SnapshotError`` for a symlinked, unreadable or locked source, ``FileExistsError``
+    when *destination* exists by the publish, and ``OSError`` (``PermissionError`` for EACCES) for
+    any other filesystem failure, the lookup of *source* included.
+    """
+    try:
+        mode = os.lstat(source).st_mode
+    except FileNotFoundError:  # trw-fail-silent-allow: None IS the documented "no source" answer; EACCES raises
+        return None
+    if stat.S_ISLNK(mode):
+        raise SnapshotError(f"{source} is a symlink")
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # A fresh private directory (mkdtemp: unique, 0700) beside *destination*, so the staging
+    # name can never collide with, overwrite or delete a file anyone else put there.
+    staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}.seeding-", dir=destination.parent))
+    try:
+        tmp = staging / destination.name
+        create_snapshot(source, tmp)
+        os.chmod(tmp, 0o600)
+        return publish_no_clobber(tmp, destination)
+    finally:
+        remove_tree(staging, purpose="seed staging directory")
+
+
 def latest_snapshot(base_dir: Path) -> Path | None:
     """Return the single newest snapshot across the daily AND weekly tiers.
 
@@ -355,8 +406,11 @@ def latest_snapshot(base_dir: Path) -> Path | None:
 def restore_from_snapshot(base_dir: Path, snapshot: Path, db_path: Path) -> None:
     """Stage ``snapshot`` then atomically replace ``db_path`` after path validation.
 
-    Copy or replacement failure preserves the prior database and its sidecars.
-    Callers must quiesce database users; this is not a live-writer restore.
+    Holds the store's ``restore`` op throughout (PRD-CORE-306): a store another
+    process has open is refused with :class:`StoreBusyError`, nothing changed. The
+    old store's WAL is checkpointed before the replace, so a process killed at any
+    step leaves either the old store with every committed row or the restored one
+    with no stale frames to replay; a copy or replacement failure preserves both.
 
     Args:
         base_dir: Root memory directory — used to enforce path boundary.
@@ -373,30 +427,64 @@ def restore_from_snapshot(base_dir: Path, snapshot: Path, db_path: Path) -> None
         raise SnapshotError(f"snapshot not found: {snapshot}")
     db_path.parent.mkdir(parents=True, exist_ok=True)
     staged: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            dir=db_path.parent, prefix=f".{db_path.name}.", suffix=".restore", delete=False
-        ) as tmp:
-            staged = Path(tmp.name)
-        shutil.copy2(str(snapshot), str(staged))
-        staged.replace(db_path)
-    except OSError as exc:
-        raise SnapshotError(f"snapshot restore failed: {exc}") from exc
-    finally:
-        if staged is not None:
-            with contextlib.suppress(OSError):
-                staged.unlink(missing_ok=True)
-    # Clear stale WAL/SHM sidecars left by the prior DB at this path: applying old
-    # WAL frames on top of a freshly-restored base file would corrupt the restore.
-    # SQLite appends "-wal"/"-shm" to the whole name; replacing ".db" in a "store.sqlite" named the store itself.
-    for sidecar in (Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):
-        with contextlib.suppress(OSError):
-            sidecar.unlink(missing_ok=True)
+    with store_access(db_path, "restore"):
+        try:
+            with (
+                _open_contained(base_dir, snapshot) as source,
+                tempfile.NamedTemporaryFile(
+                    dir=db_path.parent, prefix=f".{db_path.name}.", suffix=".restore", delete=False
+                ) as tmp,
+            ):
+                staged = Path(tmp.name)
+                shutil.copyfileobj(source, tmp)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            _checkpoint(db_path)
+            staged.replace(db_path)
+        except OSError as exc:
+            raise SnapshotError(f"snapshot restore failed: {exc}") from exc
+        finally:
+            if staged is not None:
+                with contextlib.suppress(OSError):
+                    staged.unlink(missing_ok=True)
+        clear_journal_sidecars(db_path)  # the old store's -wal/-shm/-journal must not apply to the new file (B71-59b)
     logger.info(
         "snapshot_restored",
         snapshot=str(snapshot),
         dest=str(db_path),
     )
+
+
+def _open_contained(base_dir: Path, snapshot: Path) -> BinaryIO:
+    """The snapshot, opened once and read by descriptor: the path must still name it inside the snapshots dir (B71-04).
+
+    ``O_NONBLOCK`` keeps a FIFO from blocking the open while the exclusive restore lock is held; only a regular
+    file is read (sol r1)."""
+    source = open(os.open(snapshot.resolve(), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb")  # noqa: SIM115
+    try:
+        _assert_within_snapshots_dir(base_dir, snapshot)
+        opened = os.fstat(source.fileno())
+        if not stat.S_ISREG(opened.st_mode):
+            raise SnapshotError(f"snapshot is not a regular file: {snapshot}")
+        if not os.path.samestat(opened, os.stat(snapshot.resolve())):
+            raise SnapshotError(f"snapshot changed while it was opened: {snapshot}")
+    except BaseException:
+        source.close()
+        raise
+    return source
+
+
+def _checkpoint(db_path: Path) -> None:
+    """Fold the old store's WAL into its file, so no committed frame lives only in a sidecar the restore clears."""
+    if not db_path.exists():
+        return
+    conn = connect_registered(db_path, sqlite3, str(db_path))
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.DatabaseError:  # trw-fail-silent-allow: a store too damaged to checkpoint is the one being replaced
+        logger.warning("snapshot_restore_checkpoint_failed", db=str(db_path))
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

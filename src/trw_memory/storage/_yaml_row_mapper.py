@@ -205,6 +205,7 @@ def dict_to_entry(data: dict[str, object]) -> ParsedRow:
         nudge_line=_str("nudge_line", ""),
         expires=_str("expires", ""),
         confidence=_str("confidence", "unverified"),
+        evidence_level=_str("evidence_level", "unknown"),  # PRD-CORE-312-FR01
         task_type=_str("task_type", ""),
         domain=_str_list("domain"),
         phase_origin=_str("phase_origin", ""),

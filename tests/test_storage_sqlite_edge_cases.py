@@ -20,6 +20,7 @@ from trw_memory.storage._vector_ops import (
 )
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
+from ._optional_extras import vec_unavailable
 from ._test_storage_sqlite_support import backend, make_entry
 
 
@@ -205,9 +206,13 @@ class TestDeleteVectorAbsentRow:
 
 
 class TestStoredEmbeddings:
-    def test_get_stored_embeddings_returns_empty_when_vec_unavailable(self, backend: SQLiteBackend) -> None:
-        if backend._vec_available:
-            pytest.skip("sqlite-vec available; use round-trip test instead")
+    def test_get_stored_embeddings_returns_empty_when_vec_unavailable(
+        self, backend: SQLiteBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Force the fallback path regardless of whether sqlite-vec loaded in this
+        # environment (every gate today), so the vec-unavailable branch is always
+        # exercised rather than only when the extension happens to be missing.
+        monkeypatch.setattr(backend, "_vec_available", False)
         assert backend.get_stored_embeddings(["missing"]) == {}
 
     def test_get_stored_embeddings_round_trip(self, backend: SQLiteBackend) -> None:
@@ -253,9 +258,13 @@ class TestStoredEmbeddings:
 
 
 class TestExistingVectorIds:
-    def test_existing_vector_ids_returns_empty_when_vec_unavailable(self, backend: SQLiteBackend) -> None:
-        if backend._vec_available:
-            pytest.skip("sqlite-vec available; covered by populated test")
+    def test_existing_vector_ids_returns_empty_when_vec_unavailable(
+        self, backend: SQLiteBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Force the fallback path regardless of whether sqlite-vec loaded in this
+        # environment (every gate today), so the vec-unavailable branch is always
+        # exercised rather than only when the extension happens to be missing.
+        monkeypatch.setattr(backend, "_vec_available", False)
         assert backend.existing_vector_ids() == set()
 
     def test_existing_vector_ids_returns_all_stored_ids(self, backend: SQLiteBackend) -> None:
@@ -459,7 +468,7 @@ class TestVectorDimensionMismatch:
 
         be = SQLiteBackend(tmp_path / "dim.db", dim=384)
         if not be._vec_available:
-            pytest.skip("sqlite-vec did not load in this environment")
+            vec_unavailable("sqlite-vec did not load in this environment")
         entry = make_entry("e2e-dim", "content that must survive")
         be.store(entry)
         # Wrong-length vector (config drift). Must not raise; row must persist.

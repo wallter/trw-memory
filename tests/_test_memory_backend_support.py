@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime
 
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
@@ -36,6 +36,10 @@ class _InMemoryBackend(StorageBackend):
 
     def get(self, entry_id: str, *, namespace: str = "default") -> MemoryEntry | None:
         return self._data.get(entry_id)
+
+    def get_many(self, entry_ids: Sequence[str], *, namespace: str) -> dict[str, MemoryEntry]:
+        found = (self.get(entry_id, namespace=namespace) for entry_id in entry_ids)
+        return {entry.id: entry for entry in found if entry is not None}
 
     def update(self, entry_id: str, **fields: object) -> MemoryEntry | None:
         if self.update_override is not None:

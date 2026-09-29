@@ -249,7 +249,7 @@ class TestWarmTier:
             def get_vector_records(self, entry_ids: list[str], *, namespace: str) -> dict[str, StoredVector]:
                 return _records_in_space(entry_ids)
 
-        monkeypatch.setattr(mgr._warm_store, "_get_warm_backend", lambda dim=None: _FakeBackend())
+        monkeypatch.setattr(mgr._warm_store, "_get_warm_backend", lambda dim=None, **_kw: _FakeBackend())
 
         assert mgr.warm_search(["semantic"], [1.0, 0.0], top_k=5, query_space=_SPACE) == []
 
@@ -272,7 +272,7 @@ class TestWarmTier:
             def get_vector_records(self, entry_ids: list[str], *, namespace: str) -> dict[str, StoredVector]:
                 return _records_in_space(entry_ids)
 
-        monkeypatch.setattr(mgr._warm_store, "_get_warm_backend", lambda dim=None: _FakeBackend())
+        monkeypatch.setattr(mgr._warm_store, "_get_warm_backend", lambda dim=None, **_kw: _FakeBackend())
 
         results = mgr.warm_search(["shared"], [1.0, 0.0], top_k=5, query_space=_SPACE)
         assert results, "in-sidecar hit should be returned"
@@ -386,7 +386,7 @@ class TestWarmTier:
                 return True
 
         fake_backend = _FakeBackend()
-        monkeypatch.setattr(mgr._warm_store, "_get_warm_backend", lambda dim=None: fake_backend)
+        monkeypatch.setattr(mgr._warm_store, "_get_warm_backend", lambda dim=None, **_kw: fake_backend)
 
         mgr.warm_add("e1", {"id": "e1", "content": "x", "tags": []}, None)
 

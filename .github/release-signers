@@ -1,0 +1,6 @@
+# Release signers (PRD-INFRA-198-FR01). The publish workflow publishes a v* tag only when
+# its SSH signature verifies against a key listed here (.github/scripts/verify_release_tag.py),
+# and `release_public.py cut` signs with the key TRW_RELEASE_SIGNING_KEY names.
+# One line per key:  <principal> namespaces="git" <key-type> <base64-key>
+# Rotation: list the new key here in the release commit that first signs with it, then drop the old one.
+release@trwframework.com namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAoqkavk2eIHBOr/FI4mtenRbkYB7dYJ3tgafMjeur6Q

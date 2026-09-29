@@ -32,6 +32,7 @@ from trw_memory.daemon import (
     require_loopback,
 )
 from trw_memory.exceptions import ConfigError, DaemonAlreadyRunningError, DaemonSecretUnreadableError
+from trw_memory.storage._pid_liveness import process_start
 
 from ._test_daemon_support import read_discovery
 
@@ -342,7 +343,9 @@ def test_stale_lock_reaped_only_when_pid_is_dead(paths: DaemonPaths) -> None:
     """
     live = claim_single_instance(paths, port=0, version="test")
     try:
-        held_by_another = live.info.model_copy(update={"pid": os.getppid()})
+        # The parent's own start too: with this process's start the record names a reused pid (PRD-CORE-310).
+        parent = os.getppid()
+        held_by_another = live.info.model_copy(update={"pid": parent, "process_start": process_start(parent)})
         paths.discovery.write_text(held_by_another.model_dump_json(), encoding="utf-8")
 
         with pytest.raises(DaemonAlreadyRunningError, match="already running"):

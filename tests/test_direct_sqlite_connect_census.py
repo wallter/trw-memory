@@ -51,13 +51,14 @@ _AUDITED_EXCEPTIONS: dict[tuple[str, str, int], str] = {
         "operator-named db off the daemon transport, matching the PRD's in-process-SDK non-goal. NOT audited for the "
         "checkout-boundary race (no caller-supplied path; the CLI operator names the path)."
     ),
-    ("lifecycle/tiers/_warm.py", "WarmTierStore.discovery_entries", 1): (
+    ("lifecycle/tiers/_warm_discovery.py", "_nearest", 1): (
         "Round-5: no longer an unchecked gap. A read-only (mode=ro) connection to a warm-tier "
         "sidecar db, opened during the daemon's own background tier-promotion sweep -- reachable "
         "during live daemon operation. Cannot route through storage._connection.connect (its "
         "signature has no uri=True/read-only mode), so it calls connect_registered directly, which "
         "runs the same pinned before/after identity check. Its StorageError on a mismatch degrades "
-        "to 'vectors unavailable' (this is a ranking enhancement, not a data path)."
+        "to 'vectors unavailable' (this is a ranking enhancement, not a data path). Moved out of "
+        "_warm.py's WarmTierStore.discovery_entries by PRD-CORE-318 FR02b (the KNN window)."
     ),
     ("storage/_integrity_scheduler.py", "IntegrityScheduler._probe", 1): (
         "Round-5: no longer an unchecked gap. A read-only (mode=ro) periodic integrity check that "
@@ -75,18 +76,11 @@ _AUDITED_EXCEPTIONS: dict[tuple[str, str, int], str] = {
         "SOURCE connection in the same function (_open_snapshot_source, opening the LIVE db_path) IS "
         "routed through connect() -- see the docstring there."
     ),
-    ("storage/_memory_model_v2.py", "_snapshot_backup", 1): (
-        "Backup-API snapshot during the v1->v2 schema migration CLI utility, off the daemon "
-        "transport (operator-invoked migration, not a served request)."
-    ),
-    ("storage/_memory_model_v2.py", "restore_from_backup", 2): (
-        "Same v1->v2 migration CLI utility as the _snapshot_backup entry."
-    ),
-    ("storage/_memory_model_v2.py", "restore_from_backup", 1): (
-        "Same v1->v2 migration CLI utility as the _snapshot_backup entry."
-    ),
-    ("storage/_memory_model_v2.py", "run_memory_model_v2_cutover", 1): (
-        "Same v1->v2 migration CLI utility as the _snapshot_backup entry."
+    ("storage/_init_helpers.py", "_migration_due", 1): (
+        "PRD-CORE-306 S3: a read-only (mode=ro) user_version read of the store, before the open, "
+        "deciding whether the open must take the EXCLUSIVE migrate op first. It holds no store "
+        "lock by design (taking OPEN first would make the migrate an upgrade); it reads one "
+        "PRAGMA, and the open that follows re-reads the version under its own hold."
     ),
     ("storage/_corrupt_backup.py", "salvage_via_recover_cli", 1): (
         "RESIDUAL, not fixed this session: reachable from the corrupt-recovery branch of "
@@ -96,6 +90,9 @@ _AUDITED_EXCEPTIONS: dict[tuple[str, str, int], str] = {
         "PRD defends against (a principal redirecting an ALREADY-VERIFIED live store) does not "
         "apply the same way. Left unfixed pending a decision on whether recovery-scratch files "
         "warrant the same check; flagged rather than silently accepted."
+    ),
+    ("storage/_snapshot.py", "_checkpoint", 1): (
+        "The snapshot restore's checkpoint of the store it replaces, inside the CLI restore's own RESTORE hold."
     ),
     ("storage/_snapshot.py", "create_snapshot", 1): (
         "A read-write connection used by the maintenance/export snapshot CLI path (VACUUM INTO), "
@@ -197,3 +194,48 @@ def test_every_audited_exception_still_exists_at_its_recorded_site() -> None:
     assert stale == set(), (
         f"_AUDITED_EXCEPTIONS entries no longer match any call site (moved or removed): {sorted(stale)}"
     )
+
+
+#: (path, line) -> why this connection holds no store lock (B71-00 design §1): it does not open a store.
+_UNLOCKED: dict[tuple[str, int], str] = {
+    ("storage/_corrupt_backup.py", 76): "a scratch salvage db inside a TemporaryDirectory",
+    ("storage/_schema_backup.py", 228): "the pre-migration snapshot target, created fresh",
+    ("storage/_connection.py", 170): "connect(read_only=True): a read of a file trw-memory did not write (a "
+    "checkout's) must create no <db>.oplock beside it; immutable read plus re-stat, identity check kept (PRD-QUAL-147)",
+    ("storage/_init_helpers.py", 105): "a read-only user_version read that must hold nothing: it decides whether "
+    "the open takes MIGRATE before any shared hold (PRD-CORE-306 S3, no upgrade)",
+}
+
+
+def _package_trees() -> list[tuple[str, ast.Module]]:
+    package_root = Path(trw_memory.__file__).parent
+    return [
+        (str(path.relative_to(package_root)), ast.parse(path.read_text()))
+        for path in sorted(package_root.rglob("*.py"))
+    ]
+
+
+def test_every_connection_without_a_store_lock_is_listed() -> None:
+    """B71-00: ``store_lock=False`` anywhere but a listed, reasoned site fails by name, and so does a stale entry."""
+    found = {
+        (relative, node.lineno)
+        for relative, tree in _package_trees()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and any(
+            k.arg == "store_lock" and not (isinstance(k.value, ast.Constant) and k.value.value is True)
+            for k in node.keywords
+        )
+    }
+    assert found == set(_UNLOCKED)
+
+
+def test_only_the_store_lock_names_its_lock_file() -> None:
+    """B71-00: a second opener of ``<db>.oplock`` would drop the process's lock on close, so only one module may name it."""
+    namers = {
+        relative
+        for relative, tree in _package_trees()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and ".oplock" in node.value
+    }
+    assert namers == {"_store_lock.py"}

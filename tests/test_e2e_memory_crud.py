@@ -10,6 +10,8 @@ from trw_memory.exceptions import MemoryNotFoundError
 
 from ._test_e2e_memory_support import client, client_ns_a, client_ns_b
 
+pytestmark = pytest.mark.e2e
+
 
 class TestStoreCRUD:
     """Section 1 of E2E plan: core CRUD operations."""

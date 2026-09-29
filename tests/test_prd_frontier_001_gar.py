@@ -1,7 +1,7 @@
 """Tests for Graph-Augmented Recall (GAR) — frontier-001.
 
 NOTE: the knowledge-graph edge-insertion primitive is ``_upsert_edge``
-(``trw_memory.graph._upsert_edge``), not a hypothetical
+(``trw_memory._graph_primitives._upsert_edge``), not a hypothetical
 ``update_entry_graph(conn, src, dst, ...)`` helper. ``update_entry_graph``
 is a *whole-backend enrichment* pass with a different signature
 (``update_entry_graph(entry, backend, *, embedding, config)``).  These
@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from trw_memory.graph import _upsert_edge
+from trw_memory._graph_primitives import _upsert_edge
 from trw_memory.retrieval.recall_selection import LocalCandidate
 
 
@@ -57,6 +57,10 @@ class TestMemoryClientRecallGraphExpansion:
         neighbour_id = entries["totally different vocabulary here"].id
         non_neighbour_id = entries["unrelated orchard pruning notes"].id
         _upsert_edge(backend._conn, anchor.id, neighbour_id, "related_to", 1.0, _now(), namespace=namespace)
+        # _upsert_edge leaves committing to its caller. Without this the open
+        # write transaction makes recall's namespace discovery wait out the 30 s
+        # SQLite busy timeout on a second connection to the same file.
+        backend._conn.commit()
 
         async def _anchor_only(*_args: object, **_kwargs: object) -> list[LocalCandidate]:
             return [LocalCandidate(anchor, 1.0)]

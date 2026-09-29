@@ -8,6 +8,8 @@ import pytest
 
 from tests.conftest import make_entry_dict
 
+pytestmark = pytest.mark.e2e
+
 
 class TestDecayScoring:
     """Section 2 of E2E plan: time decay, Q-learning, composite utility."""

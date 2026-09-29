@@ -36,11 +36,12 @@ import structlog
 from trw_memory._client_backend import client_logger as _client_logger
 from trw_memory._client_backend import create_local_backend as _create_local_backend
 from trw_memory._client_distilled_tiering import entry_to_result as _entry_to_result
+from trw_memory._client_org_shared import merge_shared_results
 from trw_memory._client_recall_hybrid import HybridPool
 from trw_memory.embeddings._query_prompts import embed_query
 from trw_memory.lifecycle._recall import record_recall_access
 from trw_memory.lifecycle.tiers._runtime import get_tier_manager, tier_runtime_enabled
-from trw_memory.models.memory import MemoryStatus
+from trw_memory.models.memory import MemoryStatus, MemoryType
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.retrieval.lexical import bounded_query
 from trw_memory.retrieval.recall_policy import MAX_RECALL_LIMIT
@@ -86,6 +87,7 @@ async def recall_impl(
     as_of: datetime | None = None,
     include_superseded: bool = False,
     include_graph_expansion: bool = False,
+    types: list[str] | None = None,
 ) -> list[MemoryResultDict]:
     """Async impl for :meth:`MemoryClient.recall`.
 
@@ -115,6 +117,7 @@ async def recall_impl(
         ),
         namespace=client._namespace,
         tags=frozenset(tags or ()),
+        types=frozenset(MemoryType(kind).value for kind in types or ()),
         confidence_floor=confidence_floor if confidence_floor is not None else client._config.recall_confidence_filter,
         exclude_historical_only=exclude_historical_only
         if exclude_historical_only is not None
@@ -211,7 +214,8 @@ async def recall_impl(
     if include_shared:
         remote = [
             RemoteCandidate(row)
-            for row in await client._merge_shared_results(query, [], limit, local_entries=[c.entry for c in candidates])
+            for row in await merge_shared_results(client, query, [], limit, local_entries=[c.entry for c in candidates])
+            if not invocation.types or row.get("type") in invocation.types
         ]
     final = await finish_candidates(
         client, candidates, remote, invocation, query=query, limit=limit, min_score=min_score, token_budget=token_budget

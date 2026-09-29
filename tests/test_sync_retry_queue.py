@@ -464,7 +464,7 @@ class TestRetryQueue:
             _mock_httpx_client(mock_client_cls, status_code=200, json_data={"id": "42"})
             result, published_ids = _drain_retry_queue_with_ids(queue, _make_config())
 
-        assert published_ids == ["M-canonical"]
+        assert published_ids == [("M-canonical", None, "42")]
         assert result["remote_ids"] == {"M-canonical": "42"}
 
     def test_drain_retry_queue_skips_when_sync_disabled(self, tmp_path: Path) -> None:

@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 from trw_memory.storage import _dbapi as _dbapi
 
 if TYPE_CHECKING:
+    from trw_memory.storage._probe import StoreProbe, StoreState, probe_store
     from trw_memory.storage._wal_checkpoint import CheckpointMode, CheckpointResult
     from trw_memory.storage.interface import StorageBackend
     from trw_memory.storage.persistence import (
@@ -37,6 +38,9 @@ _LAZY: dict[str, tuple[str, str]] = {
     "CheckpointMode": ("trw_memory.storage._wal_checkpoint", "CheckpointMode"),
     "CheckpointResult": ("trw_memory.storage._wal_checkpoint", "CheckpointResult"),
     "StorageBackend": ("trw_memory.storage.interface", "StorageBackend"),
+    "StoreProbe": ("trw_memory.storage._probe", "StoreProbe"),
+    "StoreState": ("trw_memory.storage._probe", "StoreState"),
+    "probe_store": ("trw_memory.storage._probe", "probe_store"),
     "append_jsonl": ("trw_memory.storage.persistence", "append_jsonl"),
     "json_serializer": ("trw_memory.storage.persistence", "json_serializer"),
     "lock_for_rmw": ("trw_memory.storage.persistence", "lock_for_rmw"),
@@ -51,10 +55,13 @@ __all__ = [
     "CheckpointResult",
     "SQLiteBackend",
     "StorageBackend",
+    "StoreProbe",
+    "StoreState",
     "YAMLBackend",
     "append_jsonl",
     "json_serializer",
     "lock_for_rmw",
+    "probe_store",
     "read_yaml",
     "write_yaml",
 ]

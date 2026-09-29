@@ -8,7 +8,6 @@ async.  This module provides a thin sync wrapper around
 from __future__ import annotations
 
 import os
-import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -17,12 +16,15 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from trw_memory._project_anchor import resolve_storage_root
 from trw_memory.exceptions import refuse_encryption_at_rest
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.entry_factory import local_node_id_for, new_entry
+from trw_memory.models.entry_factory import local_node_id_for, new_entry, new_memory_id
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.namespaces.validation import validate_namespace
 
 if TYPE_CHECKING:
+    from trw_memory.security.quarantine_ledger import QuarantineLedger
     from trw_memory.storage.interface import StorageBackend
 
 __all__ = [
@@ -34,6 +36,7 @@ __all__ = [
     "make_entry",
     "namespace_store_locations",
     "open_namespace_store",
+    "quarantine_ledger_for",
     "resolve_backend_db_path",
     "resolve_backend_location",
 ]
@@ -42,18 +45,21 @@ _NAMESPACE_METADATA_FILE = "namespace.txt"
 logger = structlog.get_logger(__name__)
 
 
-def _make_id() -> str:
-    """Generate a unique memory ID with ``M-`` prefix and 16 hex characters.
-
-    Uses 64 bits of entropy from UUID4, giving collision probability
-    < 0.0001% at 1 million entries (birthday paradox).
-    """
-    return f"M-{uuid.uuid4().hex[:16]}"
-
-
 def _write_namespace_metadata(namespace_dir: Path, namespace: str) -> None:
     namespace_dir.mkdir(parents=True, exist_ok=True)
     (namespace_dir / _NAMESPACE_METADATA_FILE).write_text(namespace, encoding="utf-8")
+
+
+def quarantine_ledger_for(config: MemoryConfig) -> QuarantineLedger:
+    """The quarantine ledger every backend this module builds filters its reads against.
+
+    PRD-CORE-333 FR02 / NFR01: resolved from *config*'s security paths, never from the
+    store's own location, so it is one file for every namespace and store the config
+    names, and a restore of any of them leaves it alone.
+    """
+    from trw_memory.security.quarantine_ledger import ledger_for_config
+
+    return ledger_for_config(config)
 
 
 def _create_sqlite_backend(
@@ -75,6 +81,7 @@ def _create_sqlite_backend(
         rebuild_from_cold=config.memory_recovery_rebuild_from_cold,
         recovery_inline_max_bytes=config.memory_recovery_inline_max_bytes,
         check_integrity_once=check_integrity_once,
+        quarantine_ledger=quarantine_ledger_for(config),
     )
 
 
@@ -107,7 +114,7 @@ def resolve_backend_db_path(config: MemoryConfig, namespace: str) -> Path:
     """
     if config.memory_single_store_path:
         return Path(config.memory_single_store_path)
-    return Path(config.storage_path) / namespace.replace(":", "_") / config.sqlite_db_name
+    return resolve_storage_root(config) / namespace.replace(":", "_") / config.sqlite_db_name
 
 
 def resolve_backend_location(config: MemoryConfig, namespace: str) -> Path:
@@ -121,7 +128,7 @@ def resolve_backend_location(config: MemoryConfig, namespace: str) -> Path:
     """
     if config.storage_backend == "sqlite":
         return resolve_backend_db_path(config, namespace)
-    return Path(config.storage_path) / namespace.replace(":", "_") / "entries"
+    return resolve_storage_root(config) / namespace.replace(":", "_") / "entries"
 
 
 def create_backend(
@@ -168,14 +175,10 @@ def create_backend_from_config(
     the on-disk directory layout from the queried namespace.
     """
     refuse_encryption_at_rest(config)  # before anything touches disk (C12)
-    base = Path(config.storage_path)
-    ns_dir = namespace.replace(":", "_")
+    validate_namespace(namespace)  # M6: the directory below is named from it
 
     if config.storage_backend == "sqlite":
-        if db_path_override is not None:
-            db_path = Path(db_path_override)
-        else:
-            db_path = resolve_backend_db_path(config, namespace)
+        db_path = Path(db_path_override) if db_path_override is not None else resolve_backend_db_path(config, namespace)
         if config.memory_single_store_path:
             # One file holds every namespace, so a per-directory ``namespace.txt``
             # would be N namespaces overwriting one sidecar with the last writer's
@@ -188,10 +191,9 @@ def create_backend_from_config(
 
     from trw_memory.storage.yaml_backend import YAMLBackend
 
-    namespace_dir = base / ns_dir
-    _write_namespace_metadata(namespace_dir, namespace)
-    entries_dir = namespace_dir / "entries"
-    return YAMLBackend(entries_dir=entries_dir)
+    entries_dir = resolve_backend_location(config, namespace)
+    _write_namespace_metadata(entries_dir.parent, namespace)
+    return YAMLBackend(entries_dir=entries_dir, quarantine_ledger=quarantine_ledger_for(config))
 
 
 @dataclass(frozen=True)
@@ -216,7 +218,7 @@ def namespace_store_locations(config: MemoryConfig) -> list[NamespaceStoreLocati
         # (the store is a FILE in ``base``).
         single = Path(config.memory_single_store_path)
         return [NamespaceStoreLocation(single)] if single.exists() else []
-    base = Path(config.storage_path)
+    base = resolve_storage_root(config)
     if config.storage_backend != "sqlite" or not base.exists():
         return []
     locations: list[NamespaceStoreLocation] = []
@@ -268,20 +270,23 @@ def discover_namespace_backends(
             yield stores
         return
 
-    base = Path(config.storage_path)
+    base = resolve_storage_root(config)
     if not base.exists():
         yield []
         return
 
     from trw_memory.storage.yaml_backend import YAMLBackend
 
+    ledger = quarantine_ledger_for(config)
     with ExitStack() as stack:
         yaml_stores: list[tuple[list[str], StorageBackend]] = []
         for candidate in sorted(base.iterdir()):
             entries_dir = candidate / "entries"
             if not candidate.is_dir() or not entries_dir.is_dir():
                 continue
-            yaml_backend: StorageBackend = stack.enter_context(YAMLBackend(entries_dir=entries_dir))
+            yaml_backend: StorageBackend = stack.enter_context(
+                YAMLBackend(entries_dir=entries_dir, quarantine_ledger=ledger)
+            )
             namespaces = yaml_backend.list_namespaces()
             if namespaces:
                 yaml_stores.append((namespaces, yaml_backend))
@@ -304,7 +309,7 @@ def make_entry(
     constructor stamps the same causality fields every other writer does.
     """
     return new_entry(
-        entry_id=_make_id(),
+        entry_id=new_memory_id(),
         content=content,
         namespace=namespace,
         local_node_id=local_node_id_for(namespace),

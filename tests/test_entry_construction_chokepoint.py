@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._layout import MONOREPO_ROOT
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.entry_factory import local_node_id_for, new_entry, revise_entry
 from trw_memory.models.memory import MemoryEntry
@@ -25,8 +26,6 @@ from trw_memory.sync.conflict import resolve_conflict
 from trw_memory.tools.store import memory_store_impl
 
 pytestmark = pytest.mark.unit
-
-_REPO = Path(__file__).resolve().parents[2]
 
 #: Files allowed to build a ``MemoryEntry`` directly: the helper itself, the row
 #: mappers that rebuild entries FROM storage (they are deserialisers, not
@@ -53,7 +52,7 @@ async def test_every_writer_populates_the_vector_clock(tmp_path: Path) -> None:
     """
     from trw_memory.client import MemoryClient
 
-    cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path), embeddings_enabled=False)
+    cfg = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
 
     # Writer 1 — MemoryClient.store (the SDK path).
     client = MemoryClient(namespace="project:default", db_path=tmp_path / "client.db")
@@ -121,14 +120,25 @@ def test_an_unstamped_local_row_is_what_used_to_lose() -> None:
 
 
 def test_no_bare_constructor_outside_the_helper() -> None:
-    """FR08: a grep-absent assertion over both source trees, by AST not by regex."""
+    """FR08: a grep-absent assertion over both source trees, by AST not by regex.
+
+    B71-127b: the allowlist and tree list below are monorepo-relative paths
+    (``trw-memory/src/...``, ``trw-mcp/src/...``); a public package-alone
+    checkout has no such layout and no sibling trw-mcp tree to check at all.
+    Skip explicitly rather than trust an unqualified ``parents[2]`` — that used
+    to resolve to whatever sits one directory above the checkout and made both
+    ``root.exists()`` checks silently false (a vacuous pass, not a deliberate
+    skip) instead of failing loud or skipping loud.
+    """
+    if MONOREPO_ROOT is None:
+        pytest.skip("needs the monorepo checkout (public repo has no sibling trw-mcp tree to check)")
     offenders: list[str] = []
     for tree in ("trw-memory/src/trw_memory", "trw-mcp/src/trw_mcp"):
-        root = _REPO / tree
+        root = MONOREPO_ROOT / tree
         if not root.exists():
             continue
         for path in root.rglob("*.py"):
-            relative = path.relative_to(_REPO).as_posix()
+            relative = path.relative_to(MONOREPO_ROOT).as_posix()
             if relative in _CONSTRUCTION_ALLOWLIST:
                 continue
             module = ast.parse(path.read_text())

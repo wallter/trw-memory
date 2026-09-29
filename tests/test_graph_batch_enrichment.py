@@ -18,7 +18,7 @@ from unittest.mock import patch
 import pytest
 
 from trw_memory import graph
-from trw_memory._graph_primitives import CandidateVectors, _safe_cosine_similarity
+from trw_memory._graph_primitives import CandidateVectors
 from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
 from trw_memory.integrations import _backend as backend_module
 from trw_memory.integrations._backend import create_backend_from_config
@@ -85,7 +85,7 @@ class TestCandidateVectors:
 
         assert len(scored) == len(vectors)
         for i, vec in enumerate(vectors):
-            assert scored[f"c{i}"] == pytest.approx(_safe_cosine_similarity(query, vec), abs=1e-9)
+            assert scored[f"c{i}"] == pytest.approx(_cos(query, vec), abs=1e-9)
 
     @pytest.mark.parametrize("use_numpy", [True, False])
     def test_threshold_zero_vectors_and_other_dimensions(

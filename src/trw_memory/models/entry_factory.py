@@ -28,6 +28,7 @@ fields, so a future writer cannot omit one by building the model directly.
 from __future__ import annotations
 
 import socket
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -39,7 +40,12 @@ from trw_memory.sync.conflict import increment_clock, init_clock
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ["local_node_id_for", "new_entry", "revise_entry"]
+__all__ = ["local_node_id_for", "new_entry", "new_memory_id", "revise_entry"]
+
+
+def new_memory_id() -> str:
+    """A fresh ``M-`` id: 16 hex characters (64 bits) of a UUID4, ~2.7e-12 collision odds at 10k rows."""
+    return f"M-{uuid.uuid4().hex[:16]}"
 
 
 def local_node_id_for(storage_path: str | Path) -> str:

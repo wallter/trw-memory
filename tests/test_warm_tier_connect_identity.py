@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._optional_extras import vec_unavailable
 from trw_memory.lifecycle.tiers._warm import WarmTierStore
 
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -32,7 +33,7 @@ def _store_with_a_vector(tmp_path: Path) -> WarmTierStore:
     store.warm_add("M-0001", _payload(1), [0.1, 0.2, 0.3, 0.4])
     db_path = tmp_path / "memory" / "warm.db"
     if not db_path.exists():
-        pytest.skip("sqlite-vec unavailable: warm.db was never created")
+        vec_unavailable("sqlite-vec unavailable: warm.db was never created")
     return store
 
 

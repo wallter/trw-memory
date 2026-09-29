@@ -69,6 +69,32 @@ def _reload_server_with_mock() -> tuple[types.ModuleType, MagicMock, list[str]]:
     return server_mod, mcp_instance, registered_tools
 
 
+def _cleanup_server_module() -> None:
+    """Undo a mock reload so the NEXT importer gets the real module, not this one's mock.
+
+    ``sys.modules.pop("trw_memory.server", None)`` alone clears the import
+    cache, but ``import trw_memory.server as server_mod`` also binds a
+    ``server`` attribute directly on the ``trw_memory`` package object, and
+    popping the cache entry does not touch that attribute. A later
+    ``from trw_memory import server`` in the same process -- e.g.
+    ``tests/test_tools_recall_support.py::test_memory_anchored_is_registered_replayable_and_bounded``
+    running after this file in the same xdist worker -- reads the attribute
+    directly and gets the mock-built module, whose ``mcp`` is a ``MagicMock``
+    that cannot be awaited. Confirmed pre-existing (not introduced by this
+    branch): ``pytest -p no:randomly -n 0 tests/test_arg_bounds.py
+    tests/test_server.py
+    tests/test_tools_recall_support.py::test_memory_anchored_is_registered_replayable_and_bounded``
+    fails identically on this branch's HEAD and on a ``git archive`` of base
+    ``6edf0500a``. Deleting the package attribute too forces the next
+    importer to do a fresh, real import.
+    """
+    sys.modules.pop("trw_memory.server", None)
+    import trw_memory as pkg
+
+    if "server" in vars(pkg):
+        del pkg.server
+
+
 class TestServerModule:
     def test_mcp_instance_exists(self) -> None:
         """Server module must export a FastMCP instance named 'mcp'."""
@@ -76,20 +102,20 @@ class TestServerModule:
         assert hasattr(server_mod, "mcp")
         assert server_mod.mcp is not None
         # Cleanup
-        sys.modules.pop("trw_memory.server", None)
+        _cleanup_server_module()
 
     def test_mcp_named_trw_memory(self) -> None:
         """FastMCP must be instantiated with 'trw-memory'."""
         server_mod, mcp_instance, _ = _reload_server_with_mock()
         # The mcp_instance.name is set to "trw-memory" in our mock
         assert mcp_instance.name == "trw-memory"
-        sys.modules.pop("trw_memory.server", None)
+        _cleanup_server_module()
 
     def test_main_callable(self) -> None:
         """server.main must be callable."""
         server_mod, _, _ = _reload_server_with_mock()
         assert callable(server_mod.main)
-        sys.modules.pop("trw_memory.server", None)
+        _cleanup_server_module()
 
     def test_registered_tools_match_the_published_surface(self) -> None:
         """What ``_register_tools`` actually registers must equal what we publish.
@@ -108,7 +134,7 @@ class TestServerModule:
         assert set(registered_tools) == published, (
             f"registered tool set drift: {sorted(set(registered_tools) ^ published)}"
         )
-        sys.modules.pop("trw_memory.server", None)
+        _cleanup_server_module()
 
     def test_all_tool_modules_importable(self) -> None:
         """All tool modules must be importable with their impl functions."""

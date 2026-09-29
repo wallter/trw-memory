@@ -18,7 +18,8 @@ import structlog
 
 from trw_memory.exceptions import PoisoningError, SchemaValidationError
 from trw_memory.models._assertion_cap import overlong
-from trw_memory.models.memory import Assertion, Confidence, MemoryEntry
+from trw_memory.models.memory import MAX_ENTRY_ID_CHARS, Assertion, Confidence, MemoryEntry
+from trw_memory.storage._utf8_validator import overlong_text_field
 
 if TYPE_CHECKING:
     # trw_memory.decisions imports trw_memory.security (via _redaction ->
@@ -282,6 +283,14 @@ def reject_unsubstantiated_verified(entry: MemoryEntry, *, min_items: int) -> No
     hold exactly the payload the PII stage exists to contain — its ``content``,
     ``detail`` and ``evidence`` text must never reach a log line.
     """
+    # PRD-CORE-312: the evidence_level axis ("Observed/Verified only") used to
+    # live here too, but a per-call-site chokepoint check (this function is
+    # reached from SOME writers, not all) churned through 3 review rounds
+    # chasing bypasses -- consolidation's and sync's direct
+    # ``backend.store()``/``backend.update()`` calls never reached it at all.
+    # It is now a data invariant enforced once, in the storage layer every
+    # entry-producing path already goes through: see
+    # ``trw_memory.security._evidence_invariant``.
     if entry.confidence != Confidence.VERIFIED:
         return
     if _count_substantiation(entry) >= min_items:
@@ -462,12 +471,15 @@ def validate_store_inputs(
     metadata: object,
     importance: object,
     assertions: list[Assertion] | None = None,
+    entry_id: object = None,
 ) -> None:
     """Strictly validate public store inputs before coercion or persistence."""
     failed_fields: list[str] = []
-    if not isinstance(content, str) or not content.strip():
+    if entry_id is not None and (not isinstance(entry_id, str) or len(entry_id) > MAX_ENTRY_ID_CHARS):
+        failed_fields.append("id")  # the write path refuses it too; this refuses it before any work (B71-85)
+    if not isinstance(content, str) or not content.strip() or overlong_text_field(content):
         failed_fields.append("content")
-    if not isinstance(detail, str):
+    if not isinstance(detail, str) or overlong_text_field(detail):
         failed_fields.append("detail")
     if tags is not None and (not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags)):
         failed_fields.append("tags")

@@ -15,15 +15,16 @@ from __future__ import annotations
 
 import argparse
 import sys
-import xml.etree.ElementTree as ET
 from pathlib import Path
+
+import defusedxml.ElementTree as ET
 
 SUITES = ("unit", "full")
 
 
 def _counts(junit: Path) -> tuple[int, int]:
     """(tests, skipped) summed over every <testsuite> in a pytest JUnit report."""
-    root = ET.parse(junit).getroot()  # noqa: S314 -- same file as above
+    root = ET.parse(junit).getroot()
     suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
     tests = sum(int(s.get("tests", "0")) for s in suites)
     skipped = sum(int(s.get("skipped", "0")) for s in suites)

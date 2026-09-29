@@ -206,3 +206,21 @@ def test_the_namespace_verbs_are_registered_on_the_cli() -> None:
 
     doctored = parser.parse_args(["namespace", "doctor"])
     assert (doctored.namespace_action, doctored.namespace) == ("doctor", "")
+
+
+async def test_the_cli_calls_again_until_a_batched_move_is_complete(capsys: pytest.CaptureFixture[str]) -> None:
+    """B71-96: one tool call moves a call budget's worth and answers ``complete: false``; the verb resumes it."""
+    calls: list[tuple[str, str, str]] = []
+
+    class _Batched:
+        async def namespace_move(self, action: str, source: str, destination: str) -> dict[str, object]:
+            calls.append((action, source, destination))
+            done = len(calls) == 3
+            reply = {"source": source, "destination": destination, "source_rows": 5, "skipped": 0}
+            return {**reply, "moved": 2 * len(calls), "status": "renamed" if done else "moving", "complete": done}
+
+    exit_code = await handle_namespace(_args("rename", source=OLD, destination=NEW), client=_Batched())  # type: ignore[arg-type]
+
+    assert exit_code == 0
+    assert calls == [("rename", OLD, NEW)] * 3
+    assert capsys.readouterr().out.startswith(f"renamed: {OLD} -> {NEW} (source_rows=5, moved=6")

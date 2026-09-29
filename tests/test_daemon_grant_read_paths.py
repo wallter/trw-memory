@@ -21,8 +21,9 @@ from tests.conftest import make_entry
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.namespaces.curate import store_census
-from trw_memory.tools.maintain import memory_maintain_impl
 from trw_memory.tools.status import memory_status_impl
+
+from ._maintain_sync import run_maintain_sync
 
 _ALPHA = "project:alpha-11111111"
 _BETA = "project:beta-22222222"
@@ -70,7 +71,7 @@ def test_the_census_holds_only_granted_namespaces(config: MemoryConfig, alpha_to
 
 def test_maintain_decays_only_granted_rows(config: MemoryConfig, alpha_token: None) -> None:
     with create_backend_from_config(config, _ALPHA) as backend:
-        memory_maintain_impl(_ALPHA, backend=backend, config=config)
+        run_maintain_sync(_ALPHA, backend=backend, config=config)
         importance = dict(
             backend._conn.execute("SELECT namespace, importance FROM memories").fetchall()  # type: ignore[attr-defined]
         )

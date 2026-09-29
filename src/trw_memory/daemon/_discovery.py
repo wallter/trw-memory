@@ -33,22 +33,29 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import structlog
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from trw_memory.daemon._paths import DaemonPaths, read_secret_file, write_secret_file
 from trw_memory.exceptions import DaemonSecretUnreadableError
-from trw_memory.storage._pid_liveness import _pid_is_live
+from trw_memory.storage._pid_liveness import is_process_live, process_start
 
 __all__ = [
+    "DAEMON_CAPABILITIES",
     "DISCOVERY_SCHEMA_VERSION",
+    "DRAINING_HEADER",
+    "DRAINING_STATUS",
+    "DRAIN_CAPABILITY",
+    "VERSION_HEADER",
     "DaemonInfo",
     "DiscoveryAbsent",
     "DiscoveryInvalid",
     "DiscoveryRead",
     "read_discovery_result",
     "read_live_discovery",
+    "refused_while_draining",
     "write_discovery",
 ]
 
@@ -59,6 +66,56 @@ logger = structlog.get_logger(__name__)
 #: this is a safe way to make older clients re-start a daemon they can talk to.
 DISCOVERY_SCHEMA_VERSION = 1
 
+#: The header a ``DaemonClient`` carries its trw-memory version in (PLAN W45).
+#: Defined here, beside the rest of what a client needs to reach the daemon, so
+#: the client never imports the server-side gate that enforces it: that module
+#: pulls in ``fastmcp.server``, which cost every edit hook ~0.2 s at import.
+VERSION_HEADER = "x-trw-memory-version"
+
+#: Marks the 503 a draining daemon answers at its door, before the app sees the request: the call was never
+#: applied, so a client may retry it on the successor (DRAIN-503-NEVER-SENT). An unmarked 503 (the MCP
+#: session manager's own, a pre-5.0.1 daemon's) proves nothing and keeps the "may have been applied" answer.
+DRAINING_HEADER = "x-trw-memory-draining"
+DRAINING_STATUS = 503
+
+
+#: JSON-RPC requests an MCP session sends before any tool runs. A refusal on one of these, or on the
+#: ``tools/call`` itself, applied nothing. mcp's ``ClientSession.call_tool`` sends ``tools/list`` AFTER a
+#: successful call whose output schema it has not cached, so a refused ``tools/list`` (or any other
+#: request) may follow an applied write (DRAIN-503-REQUEST-SCOPE).
+_BEFORE_ANY_EFFECT = frozenset({"initialize", "notifications/initialized", "tools/call"})
+
+
+def _refused_method(request: object) -> str | None:
+    """The JSON-RPC method of the refused *request*, or None when its body does not say."""
+    try:
+        body = json.loads(getattr(request, "content", b"") or b"null")
+    except (
+        ValueError,
+        RuntimeError,
+    ):  # trw-fail-silent-allow: an unreadable body proves nothing, so the refusal stays "may have been applied"
+        return None
+    method = body.get("method") if isinstance(body, dict) else None
+    return method if isinstance(method, str) else None
+
+
+def refused_while_draining(error: BaseException) -> bool:
+    """Whether *error* is a draining daemon's marked door refusal of a request that precedes any tool effect."""
+    response = getattr(error, "response", None)
+    marked = getattr(response, "status_code", None) == DRAINING_STATUS and DRAINING_HEADER in getattr(
+        response, "headers", {}
+    )
+    return marked and _refused_method(getattr(error, "request", None)) in _BEFORE_ANY_EFFECT
+
+
+#: The drain handshake: ``memory_drain`` finishes in-flight calls, withdraws the record and exits.
+DRAIN_CAPABILITY = "drain"
+#: The drain tool's name. A wire constant beside its capability, so the client side (``_upgrade``) can
+#: name it without importing ``_drain``, whose server code loads fastmcp (PRD-CORE-333 S3b).
+DRAIN_TOOL = "memory_drain"
+#: What a daemon of this build advertises in its record, so a client can tell before it calls.
+DAEMON_CAPABILITIES: tuple[str, ...] = (DRAIN_CAPABILITY,)
+
 
 class DaemonInfo(BaseModel):
     """A running daemon's advertised endpoint."""
@@ -68,15 +125,109 @@ class DaemonInfo(BaseModel):
     url: str = Field(description="Loopback MCP endpoint, e.g. http://127.0.0.1:41234/mcp")
     started_at: str = Field(description="ISO-8601 UTC timestamp of the bind")
     version: str = Field(description="trw-memory version serving this endpoint")
+    process_start: str | None = Field(
+        default=None, description="The daemon's OS process start (PRD-CORE-310 FR01); absent from 4.0 records"
+    )
+    capabilities: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Handshakes this daemon serves, e.g. 'drain' (DAEMON-AUTO-RESTART-ON-UPGRADE). Absent from 5.0.0 and "
+            "older records, which read as none; an older reader ignores the field, so the schema stays 1."
+        ),
+    )
+
+    @field_validator("url")
+    @classmethod
+    def _url_must_be_loopback(cls, value: str) -> str:
+        """Refuse any URL a forged record could name that the daemon itself never emits.
+
+        The only production writer, ``endpoint_url()``, always emits
+        ``http://127.0.0.1:<port>/mcp`` (PRD-FIX-157-FR01), so this rejects
+        nothing today's code produces -- only a record an attacker with
+        same-user filesystem access could plant. ``urlsplit`` is used instead
+        of a regex so scheme and host are parsed the same way a client would
+        resolve them, and userinfo (``user@host``) never contributes to the
+        host check: ``.hostname`` is always the part after ``@``.
+
+        Refused, deliberately, rather than accepted:
+          - any scheme other than exactly ``http``/``https`` (blocks
+            ``file:``, and blocks scheme confusion generally);
+          - a host that fails to parse at all (``urlsplit`` raising, or an
+            empty/`` None`` hostname) -- treated as untrusted, not as
+            "no opinion";
+          - a malformed port (``.port`` raises ``ValueError`` for a
+            non-numeric or out-of-range port) -- refused rather than ignored,
+            since a malformed port is exactly the kind of thing a forged
+            record would carry;
+          - any hostname that is not exactly one of the three trusted forms
+            once IPv6 brackets are stripped and case is folded: the fold is
+            applied only for the ``localhost`` hostname comparison (DNS names
+            are case-insensitive; ``LOCALHOST`` is refused only because the
+            comparison target is lower-cased, not because case is otherwise
+            ignored), and no fold or fuzzy match is applied to
+            ``127.0.0.1``/``::1`` -- ``127.1`` (a valid but non-canonical
+            shorthand some resolvers accept for ``127.0.0.1``) is refused
+            because it is not the literal string ``127.0.0.1``;
+          - ``127.0.0.1.evil.com`` (a suffix trick) and ``127.0.0.1@evil.com``
+            (a userinfo trick) are both refused by the same mechanism: the
+            hostname parsed by ``urlsplit`` for the first is the whole
+            ``127.0.0.1.evil.com`` string (not a member of the trusted set),
+            and for the second is ``evil.com`` (the part after ``@``).
+        """
+        try:
+            parts = urlsplit(value)
+        except ValueError as exc:
+            raise ValueError(f"daemon discovery URL is not a parseable URL: {value!r} ({exc})") from exc
+        if parts.scheme not in {"http", "https"}:
+            raise ValueError(f"daemon discovery URL scheme must be http or https, got {parts.scheme!r} in {value!r}")
+        try:
+            hostname = parts.hostname
+        except ValueError as exc:
+            raise ValueError(f"daemon discovery URL host is not parseable: {value!r} ({exc})") from exc
+        if not hostname:
+            raise ValueError(f"daemon discovery URL has no host: {value!r}")
+        try:
+            _ = parts.port
+        except ValueError as exc:
+            raise ValueError(f"daemon discovery URL has a malformed port: {value!r} ({exc})") from exc
+        candidate = hostname.strip("[]")
+        if candidate.lower() == "localhost":
+            candidate = "localhost"
+        if candidate not in {"127.0.0.1", "::1", "localhost"}:
+            raise ValueError(
+                f"daemon discovery URL host must be one of 127.0.0.1, ::1, or localhost, got {hostname!r} in {value!r}"
+            )
+        return value
 
     def is_live(self, lock_file: Path) -> bool:
-        """Whether the recorded process is still running.
+        """Whether the recorded process is still running: THE liveness decision for a daemon record.
 
-        Reuses the package's existing liveness predicate rather than adding a
-        third one (FR03 property 4); *lock_file* is the mtime fallback it uses
-        on platforms without ``/proc`` or POSIX signals.
+        The pid must run and not be a zombie, and, when the record carries the
+        daemon's start, the process now at that pid must have started then. A
+        record outlives its daemon across a crash or a reboot, and a pid reused by
+        an unrelated process answers ``kill(pid, 0)``: read as live, it held the
+        slot so no successor could claim it (PRD-CORE-310 FR01). *lock_file* is
+        the mtime fallback on platforms without ``/proc`` or signals.
         """
-        return _pid_is_live(self.pid, lock_file)
+        return is_process_live(self.pid, self.process_start, lock_file)
+
+    def stop_remedy(self, discovery: Path) -> str:
+        """How the USER clears a live holder that serves nothing: stop only a pid its start proves is the daemon.
+
+        A 4.0 record carries no start, and its pid may now be any process (a reboot reuses pids).
+        """
+        if self.process_start is not None:
+            return f"the user can stop process {self.pid} (the old daemon). {AGENT_MUST_NOT_STOP}"
+        return (
+            f"if pid {self.pid} is not trw_memory.server, the user can remove {discovery}; otherwise the user can "
+            f"stop process {self.pid}. {AGENT_MUST_NOT_STOP}"
+        )
+
+
+#: Every remedy that names a process to stop is addressed to the USER. An agent that reads it must not act on it:
+#: CONSTITUTION HB-2 (agents never kill a process they did not start). An opencode agent once ran ``kill <pid>``
+#: from the earlier imperative wording, stopped only by a bash:ask permission (DoD-5 run, 2026-09-26).
+AGENT_MUST_NOT_STOP = "Agents must not stop or remove it themselves; report this to the user."
 
 
 @dataclass(frozen=True)
@@ -120,14 +271,21 @@ def this_daemon() -> tuple[int, str] | None:
     return (_published.pid, _published.started_at) if _published is not None else None
 
 
-def write_discovery(paths: DaemonPaths, *, url: str, version: str) -> DaemonInfo:
-    """Write the discovery record for THIS process at mode 0600."""
+def offers_drain() -> bool:
+    """Whether this build's daemon serves the drain handshake (read at call time: tests override it)."""
+    return DRAIN_CAPABILITY in DAEMON_CAPABILITIES
+
+
+def write_discovery(paths: DaemonPaths, *, url: str, version: str, drain_key: bool = False) -> DaemonInfo:
+    """Write the discovery record for THIS process at mode 0600; ``drain`` is advertised only with a *drain_key*."""
     global _published
     info = _published = DaemonInfo(
         pid=os.getpid(),
         url=url,
         started_at=datetime.now(timezone.utc).isoformat(),
         version=version,
+        process_start=process_start(os.getpid()),
+        capabilities=[c for c in DAEMON_CAPABILITIES if c != DRAIN_CAPABILITY or drain_key],
     )
     write_secret_file(paths.discovery, info.model_dump_json())
     logger.info("daemon_discovery_written", path=str(paths.discovery), pid=info.pid, url=url)

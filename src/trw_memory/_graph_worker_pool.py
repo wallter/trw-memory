@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING, cast
 
 import structlog
 
-from trw_memory._graph_threads import _track_graph_thread, _untrack_graph_thread
+from trw_memory._graph_threads import GRAPH_DRAIN_SECONDS, GRAPH_THREADS
 from trw_memory.exceptions import StorageError
 
 if TYPE_CHECKING:
@@ -68,8 +68,12 @@ _GRAPH_WORKER_MAX_COUNT = 16
 _IDLE_POLL_SECONDS = 1.0
 """How often an idle worker re-reads the clock to decide whether it has been idle long enough."""
 
-_EXIT_JOIN_SECONDS = 1.0
-"""Total time interpreter exit spends letting workers close their backends."""
+_EXIT_JOIN_SECONDS = GRAPH_DRAIN_SECONDS
+"""Total time interpreter exit spends letting workers finish and close their backends.
+
+The same bound as close()'s drain: a job still running when close() stopped waiting
+(PRD-CORE-331 FR08) must finish before exit kills its daemon thread, or its connection
+never closes and memory.db-wal survives uncheckpointed (1.0 s lost it on a loaded host)."""
 
 _clock: Callable[[], float] = time.monotonic
 
@@ -103,13 +107,14 @@ class _GraphJob:
 
     def finish(self) -> None:
         self._done.set()
-        _untrack_graph_thread(cast("threading.Thread", self))
+        GRAPH_THREADS.untrack(cast("threading.Thread", self))
 
 
 @dataclass
 class _Job:
     handle: _GraphJob
     run: Callable[[], None]
+    owner: object = None
 
 
 _STOP = object()
@@ -150,11 +155,30 @@ class _GraphWorker:
     def owns(self, config: MemoryConfig, namespace: str) -> bool:
         return _worker_key(config, namespace) == self.key
 
-    def open_backend(self) -> StorageBackend:
-        """Return this worker's backend, reopening when the store file was replaced."""
-        if self.backend is not None and self.key[1] == "sqlite" and _file_identity(self.key[0]) != self._identity:
+    def _is_stale(self) -> bool:
+        """Whether the file this worker's backend has open is no longer the file at its path."""
+        return self.backend is not None and self.key[1] == "sqlite" and _file_identity(self.key[0]) != self._identity
+
+    def _evict_if_stale(self) -> None:
+        """Close a stale backend with no job to trigger a reopen (idle-poll self-heal).
+
+        A worker's SHARED store-lock ``open`` hold on its path outlives the file it
+        was opened against: PRD-CORE-306 S3 gave a fresh, empty file at that path its
+        own EXCLUSIVE ``migrate`` hold (nothing to protect otherwise, but ``ensure_schema``'s
+        bootstrap storm still runs under it), which self-deadlocks against this worker's
+        stale SHARED hold until a job reaches :meth:`open_backend` -- and nothing schedules
+        that job while the very open it would trigger is what is blocked. Closing here, on
+        the same idle-poll that already runs every ``_IDLE_POLL_SECONDS``, releases the
+        hold without waiting for a job (regression:
+        test_replaced_store_file_is_reopened_not_written_through_the_old_handle).
+        """
+        if self._is_stale():
             logger.info("graph_worker_store_replaced", db_path=self.key[0])
             self._close_backend()
+
+    def open_backend(self) -> StorageBackend:
+        """Return this worker's backend, reopening when the store file was replaced."""
+        self._evict_if_stale()
         if self.backend is None:
             from trw_memory.integrations._backend import create_backend_from_config
 
@@ -185,6 +209,7 @@ class _GraphWorker:
             try:
                 item = self.queue.get(timeout=_IDLE_POLL_SECONDS)
             except queue.Empty:
+                self._evict_if_stale()
                 if self._pool.retire_if_idle(self):
                     return None
                 continue
@@ -193,6 +218,12 @@ class _GraphWorker:
             return cast("_Job", item)
 
     def _execute(self, job: _Job) -> None:
+        if not self._pool.start_unless_abandoned(job.owner):
+            # Skip, not run: the queue keeps FIFO order for every other owner: this
+            # item is simply never handed to job.run() (PRD-CORE-331 FR08, sol r1 P2).
+            self._pool.job_finished(self, job.owner, started=False)
+            job.handle.finish()
+            return
         try:
             job.run()
         except _JOB_ERRORS:
@@ -201,7 +232,7 @@ class _GraphWorker:
             logger.exception("graph_update_background_crashed", entry_id=job.handle.name)
         finally:
             # Idle in the registry BEFORE the owner's wait returns.
-            self._pool.job_finished(self)
+            self._pool.job_finished(self, job.owner, started=True)
             job.handle.finish()
 
 
@@ -215,6 +246,13 @@ class _GraphWorkerPool:
         self._pid = os.getpid()
         # Workers inherited across a fork. Never closed in the child (see module docstring).
         self._abandoned: list[_GraphWorker] = []
+        # Owners whose queued-but-not-yet-run jobs a worker must skip (PRD-CORE-331 FR08).
+        # Paired with ``_owner_pending`` (queued or running) and ``_owner_running``: the mark is
+        # added only while jobs are pending and cleared once none are pending or running, so
+        # none of the three can grow without bound.
+        self._abandoned_owners: set[object] = set()
+        self._owner_pending: dict[object, int] = {}
+        self._owner_running: dict[object, int] = {}
 
     def after_fork_in_child(self) -> None:
         if self._pid == os.getpid():
@@ -223,6 +261,11 @@ class _GraphWorkerPool:
         self._lock = threading.Lock()
         self._workers = {}
         self._live = set()
+        # The parent's pending counts and abandonment marks describe jobs that never run here; an inherited
+        # mark would skip the child's own jobs for that owner (B71-133 (d)).
+        self._abandoned_owners = set()
+        self._owner_pending = {}
+        self._owner_running = {}
         self._pid = os.getpid()
 
     def submit(self, config: MemoryConfig, namespace: str, owner: object, label: str, run: Callable[[], None]) -> bool:
@@ -230,7 +273,7 @@ class _GraphWorkerPool:
         self.after_fork_in_child()
         key = _worker_key(config, namespace)
         handle = _GraphJob(label)
-        _track_graph_thread(cast("threading.Thread", handle), owner=owner)
+        GRAPH_THREADS.track(cast("threading.Thread", handle), owner)
         try:
             with self._lock:
                 worker = self._workers.get(key)
@@ -238,11 +281,12 @@ class _GraphWorkerPool:
                     worker = self._create(key, config, namespace)
                 worker.pending += 1
                 worker.last_active = _clock()
+                self._owner_pending[owner] = self._owner_pending.get(owner, 0) + 1
                 # Enqueued under the lock: a worker only retires while holding it
                 # with nothing pending, so a job can never land on a retired worker.
-                worker.queue.put(_Job(handle, run))
+                worker.queue.put(_Job(handle, run, owner))
         except RuntimeError:  # trw-fail-silent-allow: thread start refused; logged, and False tells the caller nothing was queued (the pre-pool contract)
-            _untrack_graph_thread(cast("threading.Thread", handle))
+            GRAPH_THREADS.untrack(cast("threading.Thread", handle))
             logger.warning("graph_update_dispatch_failed", entry_id=label, exc_info=True)
             return False
         return True
@@ -273,10 +317,41 @@ class _GraphWorkerPool:
             del self._workers[worker.key]
             return True
 
-    def job_finished(self, worker: _GraphWorker) -> None:
+    def start_unless_abandoned(self, owner: object) -> bool:
+        """Record one of *owner*'s jobs as started, unless *owner* is abandoned (PRD-CORE-331 FR08 r2).
+
+        The mark check and the start are one transition under the pool lock that
+        :meth:`abandon_owner` also takes: an abandon either lands first (the job is
+        skipped) or finds the job already counted as running. Checking the mark and
+        then starting as two steps let an abandon between them start a job after
+        ``close()`` returned that it had not counted. "Started" means committed to
+        run: a job counted here may still enter ``job.run()`` after an abandon
+        returns, and that abandon's count includes it.
+        """
+        with self._lock:
+            if owner in self._abandoned_owners:
+                return False
+            self._owner_running[owner] = self._owner_running.get(owner, 0) + 1
+            return True
+
+    def job_finished(self, worker: _GraphWorker, owner: object, *, started: bool) -> None:
         with self._lock:
             worker.pending -= 1
             worker.last_active = _clock()
+            if started:
+                running = self._owner_running.pop(owner, 0) - 1
+                if running > 0:
+                    self._owner_running[owner] = running
+            self._owner_done_locked(owner)
+
+    def _owner_done_locked(self, owner: object) -> None:
+        """One less job pending for *owner*; clear its abandon mark once none are pending or running (lock held)."""
+        remaining = self._owner_pending.get(owner, 0) - 1
+        if remaining <= 0 and owner not in self._owner_running:
+            self._owner_pending.pop(owner, None)
+            self._abandoned_owners.discard(owner)
+        else:
+            self._owner_pending[owner] = remaining
 
     def worker_exited(self, worker: _GraphWorker) -> None:
         with self._lock:
@@ -293,9 +368,28 @@ class _GraphWorkerPool:
                 break
             if isinstance(item, _Job):
                 dropped += 1
+                with self._lock:
+                    self._owner_done_locked(item.owner)
                 item.handle.finish()
         if dropped:
             logger.error("graph_worker_exited_with_jobs", db_path=worker.key[0], dropped=dropped)
+
+    def abandon_owner(self, owner: object) -> int:
+        """Mark *owner*'s still-pending jobs to be skipped, not run (PRD-CORE-331 FR08).
+
+        No queue surgery: each worker keeps draining its queue in the order jobs
+        were submitted, for every owner. A job for *owner* is simply never handed
+        to ``job.run()`` once dequeued (see :meth:`start_unless_abandoned`, which
+        takes the same lock) -- a job already running when this is called keeps
+        going on the worker's own backend (a separate connection to the same store,
+        by PRD-FIX-143 design), since a Python thread cannot be preempted mid-write.
+        Returns how many of *owner*'s jobs were already running: exactly the ones
+        that may still write after this returns.
+        """
+        with self._lock:
+            if self._owner_pending.get(owner, 0):
+                self._abandoned_owners.add(owner)
+            return self._owner_running.get(owner, 0)
 
     def stop_all(self, timeout: float) -> list[_GraphWorker]:
         """Retire every worker and join them; returns the ones still alive at the deadline.
@@ -327,6 +421,11 @@ atexit.register(_stop_workers_at_exit)
 def submit_graph_job(config: MemoryConfig, namespace: str, owner: object, label: str, run: Callable[[], None]) -> bool:
     """Queue *run* on the persistent worker for the store (*config*, *namespace*) resolves to."""
     return _POOL.submit(config, namespace, owner, label, run)
+
+
+def abandon_graph_jobs(owner: object) -> int:
+    """Mark *owner*'s pending graph jobs to be skipped, not run; return how many were already running."""
+    return _POOL.abandon_owner(owner)
 
 
 @contextlib.contextmanager

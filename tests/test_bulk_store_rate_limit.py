@@ -7,7 +7,9 @@ lost every row after the tenth -- 79 of 504 turns in one LongMemEval question --
 visible only as per-item statuses. These tests pin the repaired semantics:
 
 * ``store_conversation`` is transcript ingest, not agent writes: every turn lands,
-  in one 600-turn call or in 600 one-turn calls at ~20 calls/second.
+  in one many-turn call or in many one-turn calls at ~20 calls/second. The
+  counts are a few multiples of the limit: enough that per-row or per-call
+  charging refuses most of them, small enough to stay fast.
 * ``bulk_store`` charges ONE write per distinct writer session per call.
 * a genuine flood (many separate writes under one session) is still refused, and
   a refused batch is refused whole, loudly: summary counts + a structured warning.
@@ -27,6 +29,8 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.security.runtime import enforce_write_rate_limit, single_write_operation
 
 _LIMIT = 10
+_ONE_CALL_TURNS = 60  # 6x the limit: per-row charging would refuse 50 of them
+_PER_CALL_TURNS = 40  # 4x the limit: per-call charging would refuse the 11th call on
 
 
 @pytest.fixture()
@@ -56,9 +60,9 @@ class _Clock:
 
 
 @pytest.mark.integration
-async def test_one_call_600_turn_conversation_stores_every_turn(limited_client: MemoryClient) -> None:
-    summary = await limited_client.store_conversation(_turns(600), session_id="conv-1")
-    assert (summary.total, summary.succeeded, summary.rejected) == (600, 600, 0)
+async def test_one_call_many_turn_conversation_stores_every_turn(limited_client: MemoryClient) -> None:
+    summary = await limited_client.store_conversation(_turns(_ONE_CALL_TURNS), session_id="conv-1")
+    assert (summary.total, summary.succeeded, summary.rejected) == (_ONE_CALL_TURNS, _ONE_CALL_TURNS, 0)
     assert summary.rejected_reasons == {}
     backend = limited_client._get_backend()
     assert all(backend.get(it.memory_id, namespace="default") is not None for it in summary.items)
@@ -70,7 +74,7 @@ async def test_one_turn_per_call_at_20_calls_per_second_stores_every_turn(
 ) -> None:
     """The LOCOMO shim shape: one turn per call, 20 calls/second, one session id."""
     monkeypatch.setattr("trw_memory.security.runtime.time", _Clock(step=0.05))
-    turns = _turns(600)
+    turns = _turns(_PER_CALL_TURNS)
     stored = 0
     for i, turn in enumerate(turns):
         summary = await limited_client.store_conversation(
@@ -78,7 +82,7 @@ async def test_one_turn_per_call_at_20_calls_per_second_stores_every_turn(
         )
         stored += summary.succeeded
         assert summary.rejected == 0, summary.rejected_reasons
-    assert stored == 600
+    assert stored == _PER_CALL_TURNS
 
 
 @pytest.mark.integration

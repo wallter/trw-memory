@@ -16,11 +16,12 @@ from datetime import datetime, timezone
 
 import structlog
 
-from trw_memory.daemon._offload import run_serialized
+from trw_memory.daemon._lane import INTERACTIVE, run_on_lane
+from trw_memory.daemon._offload import run_offloaded
 from trw_memory.embeddings import get_local_embedder, keyword_only_on_refusal
 from trw_memory.exceptions import AuthorizationError, ConfigError, StorageError
 from trw_memory.integrations._backend import discover_namespace_backends
-from trw_memory.lifecycle.consolidation import consolidate_cycle
+from trw_memory.lifecycle.consolidation import ClusterWrite, consolidate_cycle
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.namespaces.manager import NamespaceManager
@@ -105,26 +106,29 @@ def _promote_team_memories(
         promotion_threshold: Minimum importance to promote (default 0.7).
 
     Returns:
-        {"promoted_count": int, "discarded_count": int, "namespace_id": str,
-         "completed_at": str}
+        {"promoted_count": int, "discarded_count": int, "namespace_id": str, "completed_at": str}
+        (idempotent rerun, B71-135 c: skips already-promoted ids instead of re-storing them).
     """
-    entries = source_backend.list_entries(
-        status=MemoryStatus.ACTIVE,
-        namespace=namespace,
-        limit=10_000,
-    )
+    entries = source_backend.list_entries(status=MemoryStatus.ACTIVE, namespace=namespace, limit=10_000)
 
     project_backend = target_backend or source_backend
+    candidate_ids = [f"promoted-{entry.id}" for entry in entries]
+    already_promoted = (
+        project_backend.existing_ids(candidate_ids, namespace=target_namespace) if candidate_ids else set()
+    )
     promoted_count = 0
     discarded_count = 0
     now = datetime.now(timezone.utc)
 
     for entry in entries:
+        promoted_id = f"promoted-{entry.id}"
+        if promoted_id in already_promoted:
+            continue
         if entry.importance >= promotion_threshold:
             outcome = f"promoted_from:{namespace}:timestamp={now.isoformat()}"
             promoted = entry.model_copy(
                 update={
-                    "id": f"promoted-{entry.id}",
+                    "id": promoted_id,
                     "namespace": target_namespace,
                     "source_identity": namespace,
                     "outcome_history": [*entry.outcome_history, outcome],
@@ -136,12 +140,7 @@ def _promote_team_memories(
         else:
             discarded_count += 1
 
-    logger.info(
-        "team_memories_promoted",
-        namespace=namespace,
-        promoted=promoted_count,
-        discarded=discarded_count,
-    )
+    logger.info("team_memories_promoted", namespace=namespace, promoted=promoted_count, discarded=discarded_count)
 
     NamespaceManager(source_backend).mark_team_namespace_completed(namespace, completed_at=now)
 
@@ -228,6 +227,7 @@ def memory_consolidate_impl(
     dry_run: bool = False,
     config: MemoryConfig | None = None,
     namespace_backend_factory: Callable[[str], StorageBackend] | None = None,
+    lane: Callable[[ClusterWrite], str] | None = None,
 ) -> dict[str, object]:
     """Core implementation of memory_consolidate (callable without MCP).
 
@@ -238,6 +238,7 @@ def memory_consolidate_impl(
         config: Optional MemoryConfig. When omitted, the default config is loaded.
         namespace_backend_factory: Optional backend factory used when team namespace
             promotion must write into a different namespace store.
+        lane: Where each cluster's writes run (``consolidate_cycle``); ``None``: on *backend*.
 
     Returns:
         {"clusters_found": int, "entries_consolidated": int, "dry_run": bool}
@@ -263,7 +264,10 @@ def memory_consolidate_impl(
     require_namespace_permission(cfg, namespace, Permission.WRITE, "consolidate")
 
     embedder, _ = keyword_only_on_refusal(
-        lambda: get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim), surface="memory_consolidate"
+        lambda: get_local_embedder(
+            model_name=cfg.embedding_model, dim=cfg.embedding_dim, enabled=cfg.embeddings_enabled
+        ),
+        surface="memory_consolidate",
     )
 
     try:
@@ -275,6 +279,7 @@ def memory_consolidate_impl(
             dry_run=dry_run,
             namespace=namespace,
             config=cfg,
+            lane=lane,
         )
     except (StorageError, ValueError) as exc:
         logger.exception("memory_consolidate_failed", namespace=namespace, error=str(exc))
@@ -310,8 +315,21 @@ def memory_consolidate_impl(
         **({"clusters": result["clusters"]} if "clusters" in result else {}),
         **({"status": str(result["status"])} if "status" in result else {}),
         **({"skipped_reason": str(result["skipped_reason"])} if "skipped_reason" in result else {}),
+        **({"clusters_skipped": result["clusters_skipped"]} if "clusters_skipped" in result else {}),
         **({"errors": result["errors"]} if "errors" in result else {}),
     }
+
+
+def lane_writes(namespace: str, operation: str) -> Callable[[ClusterWrite], str]:
+    """Each cluster's write step as one job on the daemon's write lane (``entry.lane_step``), waited for
+    by the pool thread clustering; a refusal is that cluster's failure."""
+    from trw_memory.tools.entry import lane_step
+
+    def write(step: ClusterWrite) -> str:
+        done = lane_step(namespace, operation, step).result()
+        return done if isinstance(done, str) else f"refused: {done.get('error', done)}"
+
+    return write
 
 
 def register_consolidate_tool(mcp: McpServer) -> None:
@@ -341,6 +359,8 @@ def register_consolidate_tool(mcp: McpServer) -> None:
             {"clusters_found": int, "entries_consolidated": int, "dry_run": bool}
         """
 
+        write = lane_writes(namespace, "consolidate")
+
         def consolidate() -> dict[str, object]:  # clusters by embedding: never on the event loop (C12 rc4)
             cfg = MemoryConfig()
 
@@ -351,7 +371,15 @@ def register_consolidate_tool(mcp: McpServer) -> None:
                 return _promote_all_team_namespaces(cfg, namespace_backend_factory=backend_factory)
             with create_backend_from_config(cfg, namespace) as backend:
                 return memory_consolidate_impl(
-                    namespace, backend=backend, dry_run=dry_run, config=cfg, namespace_backend_factory=backend_factory
+                    namespace,
+                    backend=backend,
+                    dry_run=dry_run,
+                    config=cfg,
+                    namespace_backend_factory=backend_factory,
+                    lane=None if promotes else write,
                 )
 
-        return await run_serialized(consolidate)
+        # B71-89: the read, embed and cluster run on the pool; each cluster's writes take the lane. A team
+        # promotion writes throughout, so it stays one lane job.
+        promotes = namespace.startswith("team:")
+        return await (run_on_lane(INTERACTIVE, namespace, consolidate) if promotes else run_offloaded(consolidate))

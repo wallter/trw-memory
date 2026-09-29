@@ -19,6 +19,15 @@ from trw_memory.decisions._models import InvalidRequest as InvalidRequest
 #: Server-enforced ceiling; 256+ returns 400 "Too many choices. Must have at most 255 choices."
 MAX_CHOICE_OPTIONS = 255
 
+#: The largest per-call wire-question volume the batching calibration actually measured as safe
+#: (`CAPABILITY-PROBES-2026-09-19.md` P1: 28 items x 1 `noul` question, keyed state, 28/28
+#: answered `complete=true`). `jev-1.13-20260917` regressed above this volume (a 21-item x
+#: 3-question call, 63 wire questions, one `score` question: near-zero confidence on most items,
+#: a critical item's score split 0.36/0.59 across adjacent levels) -- :meth:`Toolkit.batch_items`
+#: enforces this as the total wire-question ceiling per call, not the (much larger) item-count
+#: ``chunk_size`` a caller may pass.
+CALIBRATED_MAX_WIRE_QUESTIONS = 28
+
 #: Measured repeat SD 0.012; a threshold decision inside this band is not distinguishable.
 DEAD_BAND = 0.03
 

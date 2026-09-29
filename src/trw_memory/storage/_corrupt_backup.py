@@ -25,7 +25,9 @@ from typing import Any
 
 import structlog
 
-from trw_memory._live_stores import connect_registered
+from trw_memory import _store_lock
+from trw_memory._live_stores import _SIDECAR_SUFFIXES, connect_registered
+from trw_memory.exceptions import StorageError
 
 logger = structlog.get_logger(__name__)
 
@@ -71,7 +73,7 @@ def salvage_via_recover_cli(backup_path: Path, dbapi: Any = sqlite3) -> list[Any
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_db = Path(tmpdir) / "recover.db"
         try:
-            tmp_conn = connect_registered(tmp_db, dbapi, str(tmp_db))
+            tmp_conn = connect_registered(tmp_db, dbapi, str(tmp_db), store_lock=False)
             tmp_conn.row_factory = sqlite3.Row
             try:
                 tmp_conn.executescript(dump_sql)
@@ -92,7 +94,8 @@ def rotate_corrupt_backup(db_path: Path) -> Path:
     portion are replaced with hyphens for Windows/shell safety. On a
     same-second collision with an existing backup (NFR02), appends a
     ``-1``, ``-2``, ... suffix — names remain parseable by
-    :data:`_TIMESTAMPED_BACKUP_RE`.
+    :data:`_TIMESTAMPED_BACKUP_RE`. The ``-wal``/``-shm``/``-journal`` sidecars
+    move with it, never unlinked: committed rows not yet checkpointed live there.
 
     Looks up ``datetime`` via the parent sqlite_backend module so test
     monkeypatches on ``_sqlite_backend_module.datetime`` propagate
@@ -107,7 +110,19 @@ def rotate_corrupt_backup(db_path: Path) -> Path:
         candidate = db_path.with_name(f"memory.db.corrupt.{ts}-{i}.bak")
         i += 1
     shutil.move(str(db_path), str(candidate))
+    for suffix in _SIDECAR_SUFFIXES:  # its WAL holds committed rows: the salvage reads them beside the backup
+        with contextlib.suppress(FileNotFoundError):
+            shutil.move(f"{db_path}{suffix}", f"{candidate}{suffix}")
     return candidate
+
+
+def find_rotated_backup(db_path: Path, identity: list[int] | None) -> Path | None:
+    """The rotated backup beside *db_path* that is the file *identity* names: a rename keeps the inode."""
+    with contextlib.suppress(OSError):
+        for child in db_path.parent.iterdir():
+            if _TIMESTAMPED_BACKUP_RE.fullmatch(child.name) and [(st := child.stat()).st_dev, st.st_ino] == identity:
+                return child
+    return None
 
 
 def prune_corrupt_backups(parent: Path, keep_n: int) -> None:
@@ -141,9 +156,7 @@ def prune_corrupt_backups(parent: Path, keep_n: int) -> None:
     pruned = 0
     while excess > 0 and timestamped:
         _, victim = timestamped.pop(0)
-        with contextlib.suppress(OSError):
-            victim.unlink()
-            pruned += 1
+        pruned += _prune_one(victim)
         excess -= 1
     if excess > 0:
         logger.warning(
@@ -159,3 +172,25 @@ def prune_corrupt_backups(parent: Path, keep_n: int) -> None:
         total_legacy=legacy_count,
         pruned=pruned,
     )
+
+
+def _prune_one(victim: Path) -> bool:
+    """Delete *victim*, its sidecars and the store lock file its salvage created (B71-133 (b)), under an EXCLUSIVE
+    hold on that lock; a backup another holder has open keeps all of them, and is logged. True if it was deleted."""
+    lock_file = Path(f"{victim}{_store_lock._SUFFIX}")
+    try:
+        hold = _store_lock.acquire(victim, "restore") if lock_file.exists() else None
+    except StorageError as exc:
+        logger.warning("corrupt_backup_prune_skipped_in_use", backup=str(victim), reason=str(exc))
+        return False
+    try:
+        deleted = False
+        with contextlib.suppress(OSError):
+            victim.unlink()
+            deleted = True
+        for path in [*(Path(f"{victim}{suffix}") for suffix in _SIDECAR_SUFFIXES), lock_file]:
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)
+        return deleted
+    finally:
+        _store_lock.release(hold)

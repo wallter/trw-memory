@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from trw_memory.graph import _upsert_edge
+from trw_memory._graph_primitives import _upsert_edge
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools.recall_support import memory_graph_related_impl

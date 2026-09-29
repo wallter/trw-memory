@@ -15,6 +15,8 @@ read one run here, inside the namespace grant, before any backend is opened:
   never inflate a score. It increments, so a lost call is not replayed.
 - ``memory_graph_related`` returns a learning's active knowledge-graph neighbours in
   its namespace, bounded in depth and breadth (trw-mcp's trw_recall graph mode). A read.
+- ``memory_anchored`` returns the namespace's rows whose code anchors name one file,
+  from the ``anchor_postings`` index (the pre-edit hint, PRD-CORE-332 FR04). A read.
 """
 
 from __future__ import annotations
@@ -25,6 +27,8 @@ from trw_memory.embeddings._similarity_calibration import calibrated_threshold
 from trw_memory.embeddings._space_gate import active_embedding_space, admit_space_vectors
 from trw_memory.graph import MAX_TRAVERSAL_DEPTH, VALID_EDGE_TYPES, graph_query
 from trw_memory.models.config import MemoryConfig
+from trw_memory.models.memory import MemoryStatus
+from trw_memory.retrieval.recall_policy import MAX_RECALL_LIMIT
 from trw_memory.security.rbac import Permission
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.sync._remote_admission import admit_remote_results
@@ -120,8 +124,22 @@ def memory_graph_related_impl(
     }
 
 
+def memory_anchored_impl(
+    namespace: str, file: str, limit: int, status: str | None, *, backend: StorageBackend
+) -> dict[str, object]:
+    """``{"status": "ok", "memories": [...]}``: *namespace*'s rows anchored to *file*, best first, as ``memory_recall`` rows."""
+    try:
+        wanted = MemoryStatus(status) if status is not None else None
+    except ValueError as exc:
+        return {"error": str(exc), "status": "invalid"}
+    if not 1 <= limit <= MAX_RECALL_LIMIT:
+        return {"error": f"limit must be in [1, {MAX_RECALL_LIMIT}]", "status": "invalid"}
+    rows = backend.anchored_to(namespace, file, status=wanted, limit=limit)
+    return {"status": "ok", "memories": [entry.model_dump(mode="json") for entry in rows]}
+
+
 def register_recall_support_tools(mcp: McpServer) -> None:
-    """Register memory_admit_shared and memory_vectors with a FastMCP server instance."""
+    """Register the recall-support tools with a FastMCP server instance."""
 
     async def memory_admit_shared(namespace: str, results: list[dict[str, object]]) -> dict[str, object]:
         """Admit fetched shared results through *namespace*'s write gate; refused ones are quarantined."""
@@ -168,6 +186,20 @@ def register_recall_support_tools(mcp: McpServer) -> None:
         )
 
     mcp.tool()(memory_graph_related)
+
+    async def memory_anchored(
+        namespace: str, file: str, limit: int = 10, status: str | None = None
+    ) -> dict[str, object]:
+        """Up to *limit* rows of *namespace* whose code anchors name the repo-relative *file*, best first."""
+        return await serve_namespace(
+            namespace,
+            Permission.READ,
+            "anchored",
+            lambda backend, _config: memory_anchored_impl(namespace, file, limit, status, backend=backend),
+            exclusive=False,
+        )
+
+    mcp.tool()(memory_anchored)
 
     async def memory_record_surfaced(namespace: str, ids: list[str], session_start: bool = False) -> dict[str, object]:
         """Count *ids* of *namespace* as accessed (and surfaced, at session start): the rows a caller showed."""

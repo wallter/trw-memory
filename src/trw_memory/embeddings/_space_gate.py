@@ -147,7 +147,7 @@ def comparable_neighbours(
     An excluded hit (another space, or no provenance) has a meaningless distance and
     may be a textual duplicate or hide in-space rows past the window; and a window
     all in *space* proves nothing about rows past it unless the store's census
-    shows the WHOLE namespace in *space*. ``None`` tells the caller to decide
+    proves the WHOLE namespace in *space*. ``None`` tells the caller to decide
     exhaustively. An empty window is a complete (empty) verdict.
     """
     hits = backend.search_vectors(vector, top_k=top_k, namespace=namespace)
@@ -155,21 +155,10 @@ def comparable_neighbours(
         return []
     records = backend.get_vector_records([entry_id for entry_id, _ in hits], namespace=namespace)
     admitted = admit_space_vectors(records, space, namespace=namespace, surface=surface)
-    census = backend.vector_space_census(namespace=namespace)
-    # the census must cover every row _exhaustive would examine: a vectorless row may be the duplicate (C12 rc4)
-    if len(admitted) < len(hits) or not _census_proves(census, space, rows=backend.count(namespace=namespace)):
+    # proven: every existing row's vector is in *space*, and they cover every row _exhaustive would
+    # examine, since a vectorless row may be the duplicate (C12 rc4)
+    proven = backend.vectors_proven_in_space(namespace=namespace, space=space) if len(admitted) == len(hits) else None
+    if not (type(proven) is int and 0 < proven >= backend.count(namespace=namespace)):
         logger.debug("dense_window_incomplete", surface=surface, window=len(hits), admitted=len(admitted))
         return None
     return [(entry_id, distance) for entry_id, distance in hits if entry_id in admitted]
-
-
-def _census_proves(census: object, space: EmbeddingSpace, *, rows: int) -> bool:
-    """A census proves one space only if it is a mapping of positive int counts, all
-    keyed by *space*, that accounts for at least the namespace's *rows* (not just the window). An
-    empty census beside a nonempty window, or any invalid count, proves nothing."""
-    if not isinstance(census, dict) or not census:
-        return False
-    counts = list(census.values())
-    if not all(type(count) is int and count > 0 for count in counts):
-        return False
-    return all(key == space for key in census) and sum(counts) >= rows

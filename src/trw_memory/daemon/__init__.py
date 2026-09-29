@@ -25,6 +25,7 @@ from trw_memory.daemon._grants import mint_grant, read_checkout_grant, read_chec
 from trw_memory.daemon._instance import claim_single_instance, release_single_instance
 from trw_memory.daemon._loopback import LOOPBACK_HOST, bind_loopback_socket, require_loopback
 from trw_memory.daemon._paths import DaemonPaths
+from trw_memory.daemon._spawn import OutdatedDaemonStop, stop_outdated_daemon
 
 __all__ = [
     "DAEMON_START_COMMAND",
@@ -36,6 +37,7 @@ __all__ = [
     "DiscoveryAbsent",
     "DiscoveryInvalid",
     "DiscoveryRead",
+    "OutdatedDaemonStop",
     "bind_loopback_socket",
     "claim_single_instance",
     "mint_grant",
@@ -47,6 +49,7 @@ __all__ = [
     "require_loopback",
     "serve_loopback",
     "start_daemon_detached",
+    "stop_outdated_daemon",
     "write_checkout_grant",
 ]
 

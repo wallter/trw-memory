@@ -11,6 +11,7 @@ from uuid import uuid4
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
+from trw_memory._project_anchor import resolve_state_path
 from trw_memory.exceptions import SecurityTelemetryUnavailableError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.storage.persistence import append_jsonl, read_yaml
@@ -50,36 +51,19 @@ class MemorySecurityEvent(BaseModel):
 
 
 def resolve_security_events_path(config: MemoryConfig, *, now: datetime | None = None) -> Path:
-    return Path(config.audit_log_path).expanduser().resolve().parent / _events_filename(now)
+    return resolve_state_path(config, "audit_log_path").parent / _events_filename(now)
 
 
 def _discover_trw_dirs(config: MemoryConfig) -> tuple[Path, ...]:
-    candidates: list[Path] = []
     env_trw_dir = os.environ.get("TRW_DIR", "").strip()
-    if env_trw_dir:
-        candidates.append(Path(env_trw_dir).expanduser().resolve())
-
     audit_path = Path(config.audit_log_path).expanduser().resolve()
-    audit_trw_dir = next((parent for parent in audit_path.parents if parent.name == ".trw"), None)
-    if audit_trw_dir is not None:
-        candidates.append(audit_trw_dir)
-
     current = Path.cwd().resolve()
-    cwd_trw_dir = next(
-        ((candidate / ".trw").resolve() for candidate in (current, *current.parents) if (candidate / ".trw").exists()),
-        None,
+    candidates = (
+        Path(env_trw_dir).expanduser().resolve() if env_trw_dir else None,
+        next((parent for parent in audit_path.parents if parent.name == ".trw"), None),
+        next(((d / ".trw").resolve() for d in (current, *current.parents) if (d / ".trw").exists()), None),
     )
-    if cwd_trw_dir is not None:
-        candidates.append(cwd_trw_dir)
-
-    unique: list[Path] = []
-    seen: set[Path] = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        unique.append(candidate)
-    return tuple(unique)
+    return tuple(dict.fromkeys(candidate for candidate in candidates if candidate is not None))
 
 
 def _load_surface_snapshot_id_from_manifest(config: MemoryConfig, *, run_id: str | None) -> str:

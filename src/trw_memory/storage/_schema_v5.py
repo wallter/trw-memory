@@ -32,7 +32,11 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
-__all__ = ["MigrationCensusMismatchError", "migrate_v5_namespace_boundary"]
+__all__ = [
+    "MigrationCensusMismatchError",
+    "migrate_v5_namespace_boundary",
+    "rebuild_memory_tags_postings",
+]
 
 
 class MigrationCensusMismatchError(RuntimeError):
@@ -133,7 +137,7 @@ def _rebuild_memories(cursor: sqlite3.Cursor) -> None:
     from trw_memory.storage._shared import ENTRY_COLUMNS
 
     # Copy only the columns the SOURCE table actually has. A database written by
-    # a build old enough to predate a column never got it — ``_migrate_cols``
+    # a build old enough to predate a column never got it — ``MIGRATE_COLS``
     # only backfills the columns it enumerates — and naming it in the SELECT
     # would fail the whole migration on exactly the legacy shapes the bootstrap
     # exists to normalise. Anything omitted takes the new table's DEFAULT.
@@ -251,12 +255,18 @@ def _rebuild_vec_index(cursor: sqlite3.Cursor) -> None:
     cursor.execute("ALTER TABLE vec_index_v5_rebuild RENAME TO vec_index")
 
 
-def _backfill_memory_tags(cursor: sqlite3.Cursor) -> int:
-    """Populate ``memory_tags`` from the JSON ``tags`` column of every row.
+def rebuild_memory_tags_postings(cursor: sqlite3.Cursor, *, trigger: str = "migration") -> int:
+    """Delete every ``memory_tags`` row and re-derive them all from ``memories.tags``; log the count.
 
     ``json_each`` is available in every SQLite build trw-memory supports
     (JSON1 has been compiled in by default since 3.38). Measured 115,660 rows in
     154.5 ms on the 9,366-entry reference store.
+
+    Idempotent, mirroring :func:`trw_memory.storage._anchor_index.rebuild_anchor_postings`.
+    *trigger* names the caller (``migration``, ``salvage_restore``, ``cold_rebuild``) in the
+    ``tag_postings_backfilled`` event (PRD-CORE-332 F2: raw-INSERT recovery paths bypass the
+    normal write path's ``_replace_tag_postings``, so ``memory_tags`` must be re-derived here
+    the same way ``anchor_postings`` already is).
     """
     cursor.execute("DELETE FROM memory_tags")
     cursor.execute(
@@ -265,7 +275,9 @@ def _backfill_memory_tags(cursor: sqlite3.Cursor) -> int:
         "WHERE json_valid(m.tags) AND json_type(m.tags) = 'array' AND json_each.value IS NOT NULL "
         "AND TRIM(CAST(json_each.value AS TEXT)) != ''"
     )
-    return int(cursor.execute("SELECT COUNT(*) FROM memory_tags").fetchone()[0])
+    count = int(cursor.execute("SELECT COUNT(*) FROM memory_tags").fetchone()[0])
+    logger.info("tag_postings_backfilled", trigger=trigger, tag_rows=count)
+    return count
 
 
 def _apply_rebuilds(cursor: sqlite3.Cursor) -> int:
@@ -282,7 +294,7 @@ def _apply_rebuilds(cursor: sqlite3.Cursor) -> int:
     cursor.execute("DROP TABLE IF EXISTS memories_fts")
     cursor.execute(CREATE_MEMORY_TAGS)
     cursor.execute(CREATE_IDX_MEMORY_TAGS_ENTRY)
-    return _backfill_memory_tags(cursor)
+    return rebuild_memory_tags_postings(cursor, trigger="migration")
 
 
 def migrate_v5_namespace_boundary(cursor: sqlite3.Cursor) -> None:

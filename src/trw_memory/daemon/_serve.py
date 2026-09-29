@@ -28,12 +28,18 @@ from collections.abc import Iterator
 import structlog
 import uvicorn
 from pydantic import BaseModel, Field
+from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from trw_memory import _store_lock
 from trw_memory._dir_trust import verify_ancestor_chain_trusted
 from trw_memory.daemon._arg_bounds import call_with_body_cap
+from trw_memory.daemon._discovery import DRAINING_HEADER, DRAINING_STATUS
+from trw_memory.daemon._drain import arm_drain, disarm_drain
+from trw_memory.daemon._drain_key import remove_drain_key
 from trw_memory.daemon._instance import claim_single_instance, release_single_instance
-from trw_memory.daemon._offload import shutdown_offload_pool
+from trw_memory.daemon._lane import refuse_lane_submissions
+from trw_memory.daemon._offload import refuse_offload_submissions, shutdown_offload_pool
 from trw_memory.daemon._paths import DaemonPaths
 from trw_memory.daemon._verifier import LoopbackTokenVerifier
 from trw_memory.daemon.client import _package_version
@@ -116,16 +122,26 @@ class _IdleTracker:
     the window, and the caller waited on a response that never came. The
     ``lifespan`` scope passes through uncounted: it spans the server's whole
     life and would otherwise keep the daemon up forever.
+
+    It is also the door ``memory_drain`` closes: while ``draining``, a new
+    request is answered 503 uncounted, so the calls in flight can only finish.
     """
 
     def __init__(self, app: ASGIApp) -> None:
         self._app = app
         self.last_request_at = time.monotonic()
         self.in_flight = 0
+        self.draining = False
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self._app(scope, receive, send)
+            return
+        if self.draining:
+            refused = PlainTextResponse(
+                "the trw-memory daemon is draining", status_code=DRAINING_STATUS, headers={DRAINING_HEADER: "1"}
+            )
+            await refused(scope, receive, send)
             return
         self.in_flight += 1
         self.last_request_at = time.monotonic()
@@ -268,9 +284,14 @@ async def serve_loopback(options: DaemonServeOptions, *, paths: DaemonPaths | No
             resolved,
             port=options.port,
             version=_package_version(),
+            drain_key=True,
         )
         watchdog: asyncio.Task[None] | None = None
+        serving = None
         try:
+            # The daemon's SHARED hold on its store for its whole life (B71-00): no other
+            # process can replace the store while it serves, even between requests.
+            serving = await asyncio.to_thread(_store_lock.acquire, resolved.store, "serve")
             # Everything past the claim is inside the try: a failure while
             # building the app or the server is the case that used to leak a
             # record naming a process that never served (FR06).
@@ -278,18 +299,28 @@ async def serve_loopback(options: DaemonServeOptions, *, paths: DaemonPaths | No
             server = uvicorn.Server(uvicorn.Config(tracker, log_config=None, lifespan="on"))
             logger.info("daemon_serving", url=claim.info.url, pid=claim.info.pid)
             watchdog = asyncio.create_task(_watch_idle(tracker, server, options.idle_shutdown_seconds))
+            arm_drain(tracker, server, claim.drain_key, resolved)
             if not captured:
                 await server.serve(sockets=[claim.sock])
         finally:
             try:
+                disarm_drain()
+                if claim.drain_key is not None:  # before the record goes: no successor may see a stale key
+                    remove_drain_key(resolved, claim.drain_key)
                 if watchdog is not None:
                     watchdog.cancel()
                 claim.sock.close()
+                # Close the door before draining (B71-135 e, audit F5): once no call can recreate
+                # the pool, a body still running when the drain starts can only finish or time out,
+                # never submit a next call onto a pool silently recreated behind the drain.
+                refuse_offload_submissions()
                 # Drain the workers BEFORE withdrawing the endpoint, so a store
                 # write that finishes in time cannot outlive the record that
                 # advertised it. The drain is bounded; a stuck worker does not
                 # get to hold the daemon past its shutdown.
                 shutdown_offload_pool()
+                refuse_lane_submissions()
+                _store_lock.release(serving)
                 release_single_instance(resolved, claimed=claim.info)
             finally:
                 # Redelivery lives in a finally so an exception on the way out

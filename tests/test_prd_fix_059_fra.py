@@ -7,6 +7,7 @@ FR-03: Complete StorageBackend ABC with non-abstract default methods.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -48,21 +49,21 @@ class TestMakeIdFormat:
 
     def test_make_id_format(self) -> None:
         """FR-01: ID must match pattern M-[0-9a-f]{16}."""
-        from trw_memory.client import _make_id
+        from trw_memory.models.entry_factory import new_memory_id as _make_id
 
         mid = _make_id()
         assert re.fullmatch(r"M-[0-9a-f]{16}", mid), f"Expected M-<16 hex chars>, got {mid!r}"
 
     def test_make_id_uniqueness(self) -> None:
         """FR-01: 100 generated IDs must all be unique (collision resistance)."""
-        from trw_memory.client import _make_id
+        from trw_memory.models.entry_factory import new_memory_id as _make_id
 
         ids = {_make_id() for _ in range(100)}
         assert len(ids) == 100, f"Expected 100 unique IDs, got {len(ids)}"
 
     def test_make_id_length(self) -> None:
         """FR-01: Total ID length must be 2 (prefix) + 16 (hex) = 18."""
-        from trw_memory.client import _make_id
+        from trw_memory.models.entry_factory import new_memory_id as _make_id
 
         mid = _make_id()
         assert len(mid) == 18, f"Expected length 18, got {len(mid)}"
@@ -113,6 +114,9 @@ class TestStorageBackendDefaults:
 
             def get(self, entry_id: str, *, namespace: str = "default") -> MemoryEntry | None:
                 return None
+
+            def get_many(self, entry_ids: Sequence[str], *, namespace: str) -> dict[str, MemoryEntry]:
+                return {}
 
             def update(self, entry_id: str, **fields: object) -> MemoryEntry | None:
                 return None

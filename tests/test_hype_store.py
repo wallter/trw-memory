@@ -53,15 +53,6 @@ async def test_store_update_forget_preserve_canonical_suffix_and_other_namespace
         await client.close()
 
 
-async def test_neutral_generator_warns_and_creates_no_generator_state(tmp_path):
-    with pytest.warns(UserWarning, match="retired"):
-        client = MemoryClient("default", mode="local", db_path=tmp_path / "empty.db", question_generator=None)
-    try:
-        assert not hasattr(client, "_question_generator")
-    finally:
-        await client.close()
-
-
 async def test_actor_forget_cleans_legacy_vectors_before_canonical_delete(tmp_path, monkeypatch):
     from tests.conftest import make_entry
 

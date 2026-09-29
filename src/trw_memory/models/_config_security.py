@@ -53,8 +53,19 @@ class _SecurityConfigMixin(BaseModel):
         default="observe",
         description="SEC-001 intake mode: observe logs only, enforce quarantines, strict rejects",
     )
-    quarantine_ttl_seconds: int = Field(default=1_209_600, ge=0, description="Retention window for quarantine rows")
+    # `quarantine_ttl_seconds` was REMOVED on 2026-09-26 (PRD-QUAL-145 wave 3).
+    # `security/_runtime_quarantine.py` has no TTL sweep -- `delete_quarantined_entries`
+    # only deletes what a caller names explicitly (memory_id or actor), and no lane job
+    # ever calls it unattended. The field described itself as a "Retention window for
+    # quarantine rows" while enforcing no retention at all: the same wiring-defect P12
+    # shape as `anomaly_bypass_source_prefixes` (removed 2026-07-30, see
+    # `test_retired_anomaly_bypass_field_is_gone` below) -- a settable security-shaped
+    # knob that silently does nothing is worse than an absent one.
     quarantine_db_path: str = Field(default="", description="SQLite DB path for SEC-001 quarantine records")
+    quarantine_ledger_path: str = Field(
+        default="",
+        description="Append-only quarantine decision ledger (PRD-CORE-333 FR01); its own file, never an active store",
+    )
     enable_recall_filter: bool = Field(default=True, description="Enable SEC-001 recall filtering")
     recall_filter_mode: Literal["strict", "redact", "observe"] = Field(
         default="redact",
@@ -78,10 +89,7 @@ class _SecurityConfigMixin(BaseModel):
     # Embedding remote-code consent (PRD-SEC-014-FR02)
     embedding_trust_remote_code: bool = Field(
         default=False,
-        validation_alias=AliasChoices(
-            "embedding_trust_remote_code",
-            "memory_embedding_trust_remote_code",
-        ),
+        validation_alias=AliasChoices("memory_embedding_trust_remote_code"),
         description=(
             "Permit the embedding loader to execute Python modules shipped by the "
             "model repository (sentence-transformers' trust_remote_code). Default "
@@ -97,7 +105,7 @@ class _SecurityConfigMixin(BaseModel):
     # Recovery policy (PRD-CORE-138)
     memory_recovery_policy: Literal["strict", "empty_ok"] = Field(
         default="strict",
-        validation_alias=AliasChoices("memory_recovery_policy", "recovery_policy"),
+        validation_alias=AliasChoices("memory_recovery_policy"),
         description=(
             "Behavior when DB corruption salvage yields 0 rows on a non-empty backup: "
             "'strict' raises CorruptDatabaseUnsalvageableError (default); "
@@ -107,6 +115,7 @@ class _SecurityConfigMixin(BaseModel):
 
     # Corruption backup rotation (PRD-CORE-139)
     memory_corrupt_backup_keep: int = Field(
+        validation_alias=AliasChoices("memory_corrupt_backup_keep"),
         default=5,
         ge=1,
         le=50,
@@ -120,10 +129,7 @@ class _SecurityConfigMixin(BaseModel):
     # Cold-tier rebuild on recovery (PRD-CORE-140)
     memory_recovery_rebuild_from_cold: bool = Field(
         default=True,
-        validation_alias=AliasChoices(
-            "memory_recovery_rebuild_from_cold",
-            "recovery_rebuild_from_cold",
-        ),
+        validation_alias=AliasChoices("memory_recovery_rebuild_from_cold"),
         description=(
             "When True AND memory_recovery_policy='strict' AND salvage yields 0 rows from "
             "a non-empty backup, rebuild the DB from the cold YAML tier before raising "
@@ -131,6 +137,7 @@ class _SecurityConfigMixin(BaseModel):
         ),
     )
     memory_recovery_inline_max_bytes: int = Field(
+        validation_alias=AliasChoices("memory_recovery_inline_max_bytes"),
         default=64 * 1024 * 1024,
         ge=0,
         description=(
@@ -144,10 +151,7 @@ class _SecurityConfigMixin(BaseModel):
         default=0,
         ge=0,
         le=1440,
-        validation_alias=AliasChoices(
-            "memory_integrity_check_interval_minutes",
-            "integrity_check_interval_minutes",
-        ),
+        validation_alias=AliasChoices("memory_integrity_check_interval_minutes"),
         description=(
             "Interval in minutes between background PRAGMA quick_check runs on a read-only "
             "connection. 0 disables (default — opt-in). Max 1440 (1 day). Observability-only: "
@@ -161,30 +165,25 @@ class _SecurityConfigMixin(BaseModel):
         default=7,
         ge=1,
         le=365,
-        validation_alias=AliasChoices(
-            "memory_snapshot_daily_keep",
-            "snapshot_daily_keep",
-        ),
+        validation_alias=AliasChoices("memory_snapshot_daily_keep"),
         description="Number of daily snapshots retained under snapshots/daily/ before oldest-by-filename eviction.",
     )
     memory_snapshot_weekly_keep: int = Field(
         default=4,
         ge=1,
         le=52,
-        validation_alias=AliasChoices(
-            "memory_snapshot_weekly_keep",
-            "snapshot_weekly_keep",
-        ),
+        validation_alias=AliasChoices("memory_snapshot_weekly_keep"),
         description="Number of weekly snapshots retained under snapshots/weekly/ before oldest-by-filename eviction.",
     )
 
     # Sync configuration (PRD-CORE-047)
     sync_enabled: bool = Field(default=False, description="Enable remote platform sync")
-    #: trw-mcp's one switch for platform egress (same YAML key and env var); off forces sync off (rc11).
-    platform_contact_enabled: bool = Field(
-        default=True, validation_alias=AliasChoices("platform_contact_enabled", "trw_platform_contact_enabled")
-    )
+    #: An in-process veto only: False stops every platform contact from this config. The operator's
+    #: switch (files and TRW_PLATFORM_CONTACT_ENABLED) is read live by trw_memory.platform_contact.
+    platform_contact_enabled: bool = True
     sync_min_importance: float = Field(default=0.7, ge=0.0, le=1.0, description="Min importance to publish remotely")
-    sync_namespace: str = Field(default="", description="Remote namespace for sync operations")
+    # `sync_namespace` was REMOVED on 2026-09-26 (PRD-QUAL-145 wave 3): PRD-CORE-047
+    # declared it as an additive field but nothing in `sync/` ever read it -- every
+    # sync path takes its namespace from the caller/entry, not this config value.
     platform_url: str = Field(default="", description="TRW platform API URL for remote sync")
     platform_api_key: str = Field(default="", description="API key for platform authentication")

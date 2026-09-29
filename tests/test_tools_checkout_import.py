@@ -28,6 +28,7 @@ from mcp.server.auth.middleware.auth_context import auth_context_var
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
 from mcp.server.auth.provider import AccessToken
 
+from tests._optional_extras import vec_unavailable
 from tests.conftest import make_entry
 from trw_memory._graph_primitives import _upsert_edge
 from trw_memory._inode_pin import current_identity
@@ -84,7 +85,7 @@ def _identical_copy(store: SQLiteBackend, entry_id: str, index: int = 0) -> None
 def user_store(tmp_path: Path) -> Iterator[SQLiteBackend]:
     store = SQLiteBackend(tmp_path / "user.db", dim=_DIM)
     if not store.vec_available:
-        pytest.skip("sqlite-vec unavailable")
+        vec_unavailable("sqlite-vec unavailable")
     yield store
     store.close()
 
@@ -301,7 +302,7 @@ def test_a_strict_vector_read_raises_where_the_lenient_one_returns_none(tmp_path
     store = SQLiteBackend(tmp_path / "s.db", dim=_DIM)
     try:
         if not store.vec_available:
-            pytest.skip("sqlite-vec unavailable")
+            vec_unavailable("sqlite-vec unavailable")
         store.store(make_entry(entry_id="L-1", namespace="default"))
         store.upsert_vector("L-1", [1.0, 0.0, 0.0, 0.0], namespace="default")
         with store._lock:
@@ -540,7 +541,7 @@ def test_a_copy_the_backend_cannot_migrate_is_invalid_and_leaves_no_verified_mar
     "script",
     [
         "CREATE TABLE memories(id TEXT PRIMARY KEY); PRAGMA user_version = 7;",  # migrated, but keeps its shape
-        "CREATE TABLE unrelated(x); PRAGMA user_version = 8;",  # stamped current: no migration creates memories
+        f"CREATE TABLE unrelated(x); PRAGMA user_version = {_schema.SCHEMA_VERSION};",  # stamped current: no migration creates memories
     ],
 )
 def test_a_copy_this_build_cannot_read_is_invalid_not_a_tool_error(
@@ -776,7 +777,7 @@ def test_imports_of_a_pre_migration_store_leave_nothing_in_import_tmp(
     source = root / "memory.db"
     _project_store(source, ["L-1", "L-2"])
     with contextlib.closing(sqlite3.connect(source)) as conn:
-        conn.execute("PRAGMA user_version = 7")  # pre-v8: opening it takes a pre-schema-8 snapshot
+        conn.execute("PRAGMA user_version = 7")  # pre-v8: opening it takes a pre-migration snapshot
         conn.commit()
     before = source.read_bytes()
 
@@ -848,87 +849,94 @@ def test_a_private_copy_unchanged_through_use_reports_the_real_result(
     assert answer.get("status") != "refused"
 
 
+class _ServedSwapFixture:
+    """PRD-SEC-016 round-4 finding 4, made deterministic (PRD-QUAL-146 FR11, B80-62).
+
+    ``TestSymlinkSwapRace`` calls ``_private_checkout_copy`` directly, which proves the
+    opener's own walk is safe but never exercises the served ``memory_import_checkout``
+    tool as a whole -- namespace authorization, a REAL destination backend, and the
+    actual merge. The earlier version raced a flipper thread across up to 200 served
+    calls until one landed. This fixture instead places the swap in the exact window
+    the FR names -- after ``checkout_path`` validated the source, before the private
+    copy opens it -- by wrapping the module's ``_private_checkout_copy``, so each arm
+    runs once, with no thread and no retry loop.
+    """
+
+    def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "dest-storage"))
+        monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+        self.root = tmp_path / "repo"
+        (self.root / "x" / "y").mkdir(parents=True)
+        _project_store(self.root / "x" / "y" / "memory.db", ["L-1"])
+        self.source_path = str(self.root / "x" / "y" / "memory.db")
+        self.outside_root = tmp_path / "outside"
+        (self.outside_root / "y").mkdir(parents=True)
+        self.redirected_leaf = self.outside_root / "y" / "memory.db"  # where root/x/y/memory.db resolves once swapped
+        _project_store(self.redirected_leaf, ["L-EVIL"])  # a distinct id: if this ever merged, it would be unmistakable
+        self.sha_before = hashlib.sha256(self.redirected_leaf.read_bytes()).hexdigest()
+        self.swaps: list[str] = []
+        real_copy = checkout_import._private_checkout_copy
+
+        def _copy_after_a_swap(root: str, source_path: str, operation: str) -> object:
+            if self.swap:
+                shutil.move(str(self.root / "x"), str(tmp_path / "x-real-backup"))
+                (self.root / "x").symlink_to(self.outside_root)
+                self.swaps.append(source_path)
+            return real_copy(root, source_path, operation)
+
+        monkeypatch.setattr(checkout_import, "_private_checkout_copy", _copy_after_a_swap)
+        self.swap = False
+
+    def import_once(self) -> object:
+        from trw_memory.tools.checkout_import import register_checkout_import_tools
+
+        server = _Captured()
+        register_checkout_import_tools(server)  # type: ignore[arg-type]
+        token = AccessToken(token="t", client_id="c", scopes=[f"ns:{_NS}"], claims={"root": str(self.root)})
+        reset = auth_context_var.set(AuthenticatedUser(token))
+        try:
+            return asyncio.run(
+                server.tools["memory_import_checkout"](namespace=_NS, source_path=self.source_path, ids=["L-1"])  # type: ignore[operator]
+            )
+        finally:
+            auth_context_var.reset(reset)
+
+    def destination_row(self, entry_id: str) -> MemoryEntry | None:
+        from trw_memory.integrations._backend import create_backend_from_config
+
+        with create_backend_from_config(MemoryConfig(), _NS) as destination:
+            return destination.get(entry_id, namespace=_NS)
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="os.symlink requires elevated privileges on Windows")
-def test_a_concurrent_swap_through_the_served_import_never_reaches_the_outside_store(
+def test_a_served_import_swapped_after_validation_is_refused_and_never_reaches_the_outside_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """PRD-SEC-016 round-4 finding 4: an end-to-end race through the REAL served tool, not the internal helper.
+    fx = _ServedSwapFixture(tmp_path, monkeypatch)
+    fx.swap = True
 
-    ``TestSymlinkSwapRace`` calls ``_private_checkout_copy`` directly, which
-    proves the opener's own walk is safe but never exercises the served
-    ``memory_import_checkout`` tool as a whole -- namespace authorization, a
-    REAL destination backend, and the actual merge. This test races the
-    SAME symlink swap across the whole served call, with a real SQLite
-    destination namespace, and checks both ends: the destination namespace
-    never holds the outside store's row, and the outside store's own bytes
-    never change.
-    """
-    from trw_memory.integrations._backend import create_backend_from_config
-    from trw_memory.tools.checkout_import import register_checkout_import_tools
+    answer = fx.import_once()
 
-    monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "dest-storage"))
-    monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
+    assert fx.swaps == [fx.source_path], "the swap must land inside the validate-then-copy window"
+    assert isinstance(answer, dict) and answer["status"] == "refused", answer
+    assert "L-EVIL" not in str(answer)
+    assert hashlib.sha256(fx.redirected_leaf.read_bytes()).hexdigest() == fx.sha_before, "the outside store was written"
+    assert fx.destination_row("L-EVIL") is None, "the outside store's row must never land"
+    assert fx.destination_row("L-1") is None, "a refused import moves nothing"
 
-    root = tmp_path / "repo"
-    real_dir = tmp_path / "x-real-backup"
-    (root / "x" / "y").mkdir(parents=True)
-    _project_store(root / "x" / "y" / "memory.db", ["L-1"])
-    source_path = str(root / "x" / "y" / "memory.db")
 
-    outside_root = tmp_path / "outside"
-    (outside_root / "y").mkdir(parents=True)
-    redirected_leaf = outside_root / "y" / "memory.db"  # exactly where root/x/y/memory.db resolves once swapped
-    _project_store(redirected_leaf, ["L-EVIL"])  # a distinct id: if this ever merged, it would be unmistakable
-    sha_before = hashlib.sha256(redirected_leaf.read_bytes()).hexdigest()
+@pytest.mark.skipif(sys.platform == "win32", reason="os.symlink requires elevated privileges on Windows")
+def test_a_served_import_with_no_swap_moves_the_legitimate_row(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Control arm: the same fixture unswapped imports, so the refused arm above is not vacuous."""
+    fx = _ServedSwapFixture(tmp_path, monkeypatch)
 
-    server = _Captured()
-    register_checkout_import_tools(server)  # type: ignore[arg-type]
-    token = AccessToken(token="t", client_id="c", scopes=[f"ns:{_NS}"], claims={"root": str(root)})
-    reset = auth_context_var.set(AuthenticatedUser(token))
+    answer = fx.import_once()
 
-    stop = threading.Event()
-
-    def flipper() -> None:
-        while not stop.is_set():
-            x = root / "x"
-            try:
-                if x.is_symlink():
-                    x.unlink()
-                    shutil.move(str(real_dir), str(x))
-                elif x.is_dir():
-                    shutil.move(str(x), str(real_dir))
-                    x.symlink_to(outside_root)
-            except OSError:  # trw-fail-silent-allow: a lost race against the main thread's own call is expected on every iteration; the test asserts the OUTCOME, not that every flip lands
-                pass
-
-    thread = threading.Thread(target=flipper, daemon=True)
-    thread.start()
-    outcomes: list[object] = []
-    try:
-        # At least 20 racing attempts, and on until one lands: each attempt wins
-        # the race only now and then, so a fixed count failed ~10% of runs with
-        # every attempt refused (measured 2026-09-24, 7/70 on int-700).
-        for attempt in range(200):
-            answer = asyncio.run(
-                server.tools["memory_import_checkout"](namespace=_NS, source_path=source_path, ids=["L-1"])  # type: ignore[operator]
-            )
-            outcomes.append(answer)
-            if attempt >= 19 and any(isinstance(o, dict) and o.get("status") == "ok" for o in outcomes):
-                break
-    finally:
-        stop.set()
-        thread.join(timeout=5)
-        auth_context_var.reset(reset)
-
-    assert hashlib.sha256(redirected_leaf.read_bytes()).hexdigest() == sha_before, "the outside store was written to"
-    for answer in outcomes:
-        assert isinstance(answer, dict)
-        assert "L-EVIL" not in str(answer)
-
-    with create_backend_from_config(MemoryConfig(), _NS) as destination:
-        assert destination.get("L-EVIL", namespace=_NS) is None, "the outside store's row must never land"
-        held = destination.get("L-1", namespace=_NS)
-        assert held is not None and held.content == "row L-1", "the legitimate row must still have moved"
+    assert fx.swaps == []
+    assert isinstance(answer, dict) and answer["status"] == "ok", answer
+    held = fx.destination_row("L-1")
+    assert held is not None and held.content == "row L-1", "the legitimate row must move"
+    assert fx.destination_row("L-EVIL") is None
 
 
 def test_a_path_swapped_while_it_is_being_resolved_is_refused_not_raised(
@@ -1028,8 +1036,7 @@ def test_the_no_follow_copy_fits_inside_the_import_deadline(tmp_path: Path, monk
             copy_backend.close()
     finally:
         result.pin.close()
-        Path(result.path).unlink(missing_ok=True)
-        Path(result.path).parent.rmdir()
+        shutil.rmtree(Path(result.path).parent)  # the copy's dir also holds its store lock file (PRD-CORE-306)
 
 
 @pytest.mark.slow
@@ -1634,3 +1641,33 @@ class TestTheCopyIsAQuietSnapshot:
         finally:
             holder._conn.execute("ROLLBACK")
             holder.close()
+
+
+def test_a_schema_8_copy_migrates_to_9_and_its_space_keys_reach_the_namespace(
+    tmp_path: Path, user_store: SQLiteBackend
+) -> None:
+    """B71-83: a checkout written before ``vec_index.space_key`` existed imports, and its claims keep their space."""
+    from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
+
+    space = EmbeddingSpace("c" * 64, "test-encoder:c", _DIM)
+    work = tmp_path / "work.db"
+    _project_store(work, ["L-1", "L-2"], vectors=False)
+    copy = SQLiteBackend(work, dim=_DIM)
+    try:
+        copy.upsert_vector("L-1", [1.0, 0.0, 0.0, 0.0], namespace="default")
+        row = _row("L-2", "default")
+        proof = VectorProvenance.for_vector(space, f"{row.content} {row.detail}", [0.0, 1.0, 0.0, 0.0])
+        copy.upsert_vector("L-2", [0.0, 1.0, 0.0, 0.0], namespace="default", provenance=proof)
+    finally:
+        copy.close()
+    with contextlib.closing(sqlite3.connect(work)) as conn:
+        conn.execute("DROP INDEX idx_vec_index_space")
+        conn.execute("ALTER TABLE vec_index DROP COLUMN space_key")
+        conn.execute("PRAGMA user_version = 8")
+        conn.commit()
+
+    answer = _import_within(work, user_store, ["L-1", "L-2"], 5.0)
+
+    assert (answer["status"], answer["moved"]) == ("ok", 2), answer
+    assert user_store.vector_space_census(namespace=_NS) == {None: 1, space: 1}
+    assert user_store.vectors_proven_in_space(namespace=_NS, space=space) is None  # L-1 has no provenance

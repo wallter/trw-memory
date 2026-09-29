@@ -2,29 +2,34 @@
 
 Belongs to ``tools/maintain.py``, which keeps the passes and the stamp file.
 
-The daemon runs every row-changing body on one lane (``run_serialized``), so a maintain that ran its
+The daemon runs every row-changing body on one lane (``daemon._lane``), so a maintain that ran its
 passes and its whole verification sweep as one job held every other tenant's writes for as long as the
-sweep took. Here each pass is its own job and the sweep runs in slices of about ``SLICE_SECONDS``. One
-call stops after about ``BUDGET_SECONDS`` or ``BUDGET_ROWS``, stamps where the sweep stopped (for this
-store and root only), and the next call resumes there. A failure in any call of a sweep is carried to
+sweep took. Here each pass is its own background job under the lane's ``MAINTENANCE`` budget and the
+sweep runs in slices of about ``SLICE_SECONDS``. One call stops after about ``CALL_SECONDS`` or
+``BUDGET_ROWS``, stamps where the sweep stopped (for this store and root only), and the next call
+resumes there. A failure in any call of a sweep is carried to
 the call that completes it, so ``last_maintained_at`` advances only for a sweep with none.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trw_memory.daemon._lane import INTERACTIVE, MAINTENANCE, run_on_lane, run_slices
+from trw_memory.daemon._offload import run_offloaded
 from trw_memory.lifecycle.verification_pass import MaintainVerifySummary, VerifySettings
 from trw_memory.models.config import MemoryConfig
 from trw_memory.security.rbac import Permission
 from trw_memory.tools import maintain
+from trw_memory.tools.consolidate import lane_writes
+from trw_memory.tools.entry import in_namespace, lane_step
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from trw_memory.storage.interface import StorageBackend
@@ -33,10 +38,9 @@ logger = structlog.get_logger(__name__)
 
 __all__ = ["add_sweep_counts", "serve_maintain", "serve_verify"]
 
-#: One serialized job verifies for about this long (plus one row's own checks), then gives the lane back.
-SLICE_SECONDS = 2.0
-#: What one daemon ``memory_maintain`` call verifies at most, over all its slices.
-BUDGET_SECONDS = 60.0
+#: One lane job verifies for about this long (plus one row's own checks), then gives the lane back.
+SLICE_SECONDS = MAINTENANCE.seconds
+#: What one daemon ``memory_maintain`` call verifies at most, over all its slices (and ``CALL_SECONDS``).
 BUDGET_ROWS = 10_000
 
 #: Namespaces with a daemon maintain or verify in progress: a second one would interleave its slices.
@@ -48,13 +52,11 @@ _Job = Callable[[_Step], Awaitable[dict[str, object]]]
 
 
 def lane_job(namespace: str, operation: str) -> _Job:
-    """Run a step as one job on the daemon's serialized lane, authorized again for every job: a
+    """Run a step as one background job on the daemon's write lane, authorized again for every job: a
     refusal (a revoked grant) comes back as the step's reply and ends the sweep with it."""
-    from trw_memory.daemon._offload import run_serialized
-    from trw_memory.tools.entry import in_namespace
 
     async def job(step: _Step) -> dict[str, object]:
-        return await run_serialized(in_namespace, namespace, Permission.WRITE, operation, lambda b, _c: step(b))
+        return await asyncio.wrap_future(lane_step(namespace, operation, step))
 
     return job
 
@@ -72,19 +74,6 @@ def claim(namespace: str) -> dict[str, object]:
 def release(namespace: str) -> None:
     """End :func:`claim`'s hold on *namespace* (event loop only)."""
     _RUNNING.discard(namespace)
-
-
-async def run_slices(
-    job: _Job, step: _Step, unfinished: Callable[[], bool], rows: Callable[[], int]
-) -> dict[str, object]:
-    """Run *step* one lane job at a time until the sweep is finished or this call's daemon-owned
-    budget (``BUDGET_SECONDS``, ``BUDGET_ROWS``) is spent; a step's non-empty reply (a refusal)
-    stops it and is returned."""
-    ends = time.monotonic() + BUDGET_SECONDS
-    while not (refused := await job(step)):
-        if not unfinished() or rows() >= BUDGET_ROWS or time.monotonic() >= ends:
-            return {}
-    return refused
 
 
 def add_sweep_counts(done: dict[str, object], more: dict[str, object]) -> dict[str, object]:
@@ -258,14 +247,30 @@ async def serve_maintain(namespace: str, consolidation: dict[str, object] | None
         if refused := await job(start):
             return refused
         run = runs[0]
-        for step in (
-            lambda b: _passed(run, "decay", maintain._run_decay(b)),
-            lambda b: _passed(run, "consolidation", maintain._run_consolidation(namespace, b, run.config)),
-        ):
-            if refused := await job(step):
-                return refused
+        if refused := await job(lambda b: _passed(run, "decay", maintain._run_decay(b, namespace, run.config))):
+            return refused
+        # B71-89: consolidation reads, embeds and clusters on the pool; each cluster's writes take the lane.
+        # A team promotion writes throughout, so it stays one lane job, as memory_consolidate runs it.
+        write = None if namespace.startswith("team:") else lane_writes(namespace, "maintain")
+        consolidate = lambda b, _c: _passed(  # noqa: E731
+            run, "consolidation", maintain._run_consolidation(namespace, b, run.config, lane=write)
+        )
+        if write is None:
+            refused = await run_on_lane(
+                INTERACTIVE, namespace, in_namespace, namespace, Permission.WRITE, "maintain", consolidate
+            )
+        else:
+            refused = await run_offloaded(in_namespace, namespace, Permission.WRITE, "maintain", consolidate)
+        if refused:
+            return refused
         verify = lambda b: verify_slice(run, b, SLICE_SECONDS, BUDGET_ROWS - run.rows_verified())  # noqa: E731
-        if refused := await run_slices(job, verify, lambda: run.after is not None, run.rows_verified):
+        if refused := await run_slices(
+            job, verify, lambda: run.after is not None, run.rows_verified, max_rows=BUDGET_ROWS
+        ):
+            return refused
+        # Store-wide, not namespace-scoped (like the checkpoint below): drains audit logs queued
+        # while security_maintenance_inline was False (B71-97 -- nothing else drains that queue).
+        if refused := await job(lambda b: _passed(run, "security_maintenance", maintain._run_security_maintenance())):
             return refused
         return await job(lambda b: (_passed(run, "wal_checkpoint", maintain._run_checkpoint(b)), finish(run, b))[1])
     finally:
@@ -302,9 +307,11 @@ async def serve_verify(
             return refused
         run = runs[0]
         step = lambda b: verify_slice(run, b, SLICE_SECONDS, BUDGET_ROWS - run.rows_verified())  # noqa: E731
-        if (refused := await run_slices(job, step, lambda: run.after is not None, run.rows_verified)) or (
-            refused := await job(lambda b: _save_sweep(run, b))
-        ):
+        if (
+            refused := await run_slices(
+                job, step, lambda: run.after is not None, run.rows_verified, max_rows=BUDGET_ROWS
+            )
+        ) or (refused := await job(lambda b: _save_sweep(run, b))):
             return refused
     finally:
         release(namespace)

@@ -149,6 +149,39 @@ def test_probe_canaries_emits_canary_hash_drift_event(
     _assert_traceability(drift_payload, live_path="security.runtime.probe_canaries", requirement_id="FR-009")
 
 
+def test_canary_event_payloads_keep_their_exact_shape(tmp_path: Path) -> None:
+    """Every canary event: name first, its own fields in order, then the traceability block."""
+    config = MemoryConfig(storage_path=str(tmp_path / "storage"), canary_probe_interval=1, canary_fail_mode="log-only")
+    with SQLiteBackend(tmp_path / "memory.db", dim=config.embedding_dim) as backend:
+        initialize_canaries(config, backend=backend)
+        assert backend.delete("canary-001", namespace="default") is True
+        canary = backend.get("canary-002", namespace="default")
+        assert canary is not None
+        backend.store(canary.model_copy(update={"content": "tampered canary"}))
+        probe_canaries(config, backend=backend)
+
+    payloads = {
+        p["event_name"]: p for row in _events_rows(config) if row.get("emitter") == "canary" for p in [row["payload"]]
+    }
+    base = ["FR-007", "NFR-010", "NFR-011"]
+    expected = {
+        "canary_seeded": (["seeded_count", "canary_injection_rate"], "initialize_canaries", base),
+        "canary_reseeded": (["canary_id", "fail_mode"], "probe_canaries", base),
+        "canary_hash_drift": (
+            ["canary_id", "expected_hash", "observed_hash", "fail_mode"],
+            "probe_canaries",
+            ["FR-007", "FR-009", "NFR-010", "NFR-011"],
+        ),
+    }
+    for name, (fields, live_path, requirement_ids) in expected.items():
+        payload = payloads[name]
+        assert list(payload) == ["event_name", *fields, "traceability"], name
+        assert payload["traceability"]["live_path"] == f"security.runtime.{live_path}"
+        assert payload["traceability"]["requirement_ids"] == requirement_ids
+    assert payloads["canary_reseeded"]["canary_id"] == "canary-001"
+    assert payloads["canary_hash_drift"]["canary_id"] == "canary-002"
+
+
 def test_probe_canaries_self_heals_missing_canary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

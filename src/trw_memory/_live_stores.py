@@ -40,8 +40,10 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import ctypes
 import fcntl
 import os
+import sqlite3
 import threading
 import weakref
 from collections.abc import Iterator
@@ -56,6 +58,78 @@ from trw_memory.exceptions import StorageError
 #: opened, registered or released, or a reader descriptor admitted or closed.
 FD_LOCK = threading.RLock()
 _LEASE_RELEASED = threading.Condition(FD_LOCK)
+#: Every registered connection -> (its path, its inode, its release-once flag, the thread that opened it if it is
+#: confined to that thread (``check_same_thread``), else None), for :func:`_after_fork_in_child`.
+_CONNECTIONS: weakref.WeakKeyDictionary[Any, tuple[Path, Identity, list[bool], int | None]] = (
+    weakref.WeakKeyDictionary()
+)
+#: Inherited connections the child quarantined: referenced (and made immortal) so no collection ever closes them.
+_KEPT_AFTER_FORK: list[Any] = []
+#: This process's pid (re-read in a forked child): a connection is usable only in the process that opened it.
+_PID = os.getpid()
+
+
+def _after_fork_in_child() -> None:
+    """FD_LOCK is held across fork(): a child forked while another thread held it would inherit it locked, by
+    nobody. A child holds no store lock, so no connection it inherited is usable: every method of one, and of
+    a cursor made from it, refuses in a process other than the one that opened it (:func:`_refuse_inherited`).
+
+    Only a connection confined to the forking thread is closed, with the driver's close: no other thread can
+    have been inside SQLite on it at the fork. That close touches no file of the parent's: a WAL store's close
+    sees the parent's SHARED lock and skips its checkpoint, and an idle rollback-journal connection has nothing
+    to roll back. Every other connection is quarantined without one call into SQLite (B71-133): another
+    thread's may have been mid-SQL, its mutex inherited locked by a thread that does not exist here, and even
+    its close would wait forever; a rollback-journal write in flight would play the journal back over the
+    parent's transaction. A quarantined connection leaves the registry and is never closed or collected."""
+    global _PID
+    _PID = os.getpid()
+    FD_LOCK.release()
+    forking_thread = threading.get_ident()
+    for conn, (path, identity, done, confined_to) in list(_CONNECTIONS.items()):
+        if done[0]:
+            continue
+        closable = confined_to == forking_thread
+        try:
+            closable = closable and (not conn.in_transaction or os.path.exists(f"{os.path.realpath(path)}-wal"))
+            if closable:  # the driver's own close: the child has no store hold to release
+                getattr(type(conn).__mro__[1], "close")(conn)  # noqa: B009 - the driver class is typed as a bare type
+        except Exception:  # trw-fail-silent-allow: a close the driver refused leaves it quarantined, still refused
+            closable = False
+        if not closable:
+            _KEPT_AFTER_FORK.append(conn)
+            ctypes.pythonapi.Py_IncRef(ctypes.py_object(conn))  # immortal: interpreter teardown would close it
+        _apply_release(identity, done)
+
+
+def _refuse_inherited(conn: Any) -> None:
+    if getattr(conn, "_trw_pid", _PID) != _PID:
+        raise StorageError("this SQLite connection was inherited across fork(); open a connection of your own")
+
+
+def _guarded(method: Any, owner: Any = lambda self: self) -> Any:
+    def guarded(self: Any, *args: Any, **kwargs: Any) -> Any:
+        _refuse_inherited(owner(self))
+        return method(self, *args, **kwargs)
+
+    return guarded
+
+
+def _guarded_cursor_class(factory: Any) -> type:
+    """*factory*'s subclass whose methods refuse in a process other than the one that opened the connection. A
+    factory that is not a ``sqlite3.Cursor`` subclass could return a cursor nothing guards: it is refused."""
+    if not (isinstance(factory, type) and issubclass(factory, sqlite3.Cursor)):
+        raise StorageError(f"a registered connection's cursor factory must subclass sqlite3.Cursor, not {factory!r}")
+    cached = _FACTORIES.get(factory)
+    if cached is None:
+        guards = {
+            name: _guarded(getattr(factory, name), lambda cursor: cursor.connection)
+            for name in ("execute", "executemany", "executescript", "fetchone", "fetchmany", "fetchall")
+        }
+        cached = _FACTORIES[factory] = type(f"Guarded{factory.__name__}", (factory,), guards)
+    return cached
+
+
+os.register_at_fork(before=FD_LOCK.acquire, after_in_parent=FD_LOCK.release, after_in_child=_after_fork_in_child)
 
 _SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 
@@ -81,6 +155,7 @@ _PARKED: list[tuple[Identity, int]] = []
 #: so a swap loop cannot exhaust the process's descriptors.
 MAX_PARKED = 64
 _LEASE_POLL_SECONDS = 0.5
+#: Driver class (a connection's, or a cursor factory) -> its registered or guarded subclass.
 _FACTORIES: dict[type, type] = {}
 #: Inodes this process holds SQLite's SHARED lock on, and how many holders share it.
 _READ_LOCKS: dict[Identity, int] = {}
@@ -91,7 +166,9 @@ _DEFERRED_CLOSES: dict[Identity, list[int]] = {}
 _PENDING_BYTE = 0x40000000
 _SHARED_FIRST = _PENDING_BYTE + 2
 _SHARED_SIZE = 510
-#: Union of open store and sidecar inodes; None when a store opened, closed or gained a sidecar.
+#: Store lock files this process holds a descriptor on (``_store_lock``): live even with no connection open.
+_LOCK_FILES: set[Identity] = set()
+#: Union of open store, sidecar and lock-file inodes; None when any of them changed.
 _LIVE_CACHE: set[Identity] | None = None
 #: Releases of connections the garbage collector finalized. A finalizer runs on whatever thread
 #: triggered the collection, possibly inside a loop over ``_OPEN`` that already holds FD_LOCK
@@ -137,7 +214,7 @@ def _live_identities() -> set[Identity]:
         if store.paths - store.shm_recorded:
             _record_sidecars(identity, store)
     if _LIVE_CACHE is None:
-        _LIVE_CACHE = set(_OPEN).union(*(store.sidecars for store in _OPEN.values()))
+        _LIVE_CACHE = set(_OPEN).union(_LOCK_FILES, *(store.sidecars for store in _OPEN.values()))
     return _LIVE_CACHE
 
 
@@ -149,7 +226,6 @@ def _release(identity: Identity, done: list[bool]) -> None:
 
 def _apply_release(identity: Identity, done: list[bool]) -> None:
     """Drop one connection's count (once: close and finalizer share *done*). Caller holds FD_LOCK."""
-    global _LIVE_CACHE
     if done[0]:
         return
     done[0] = True
@@ -160,19 +236,34 @@ def _apply_release(identity: Identity, done: list[bool]) -> None:
     if store.open_connections > 0:
         return
     del _OPEN[identity]
+    _close_unparked()
+
+
+def _close_unparked() -> None:
+    global _LIVE_CACHE
     _LIVE_CACHE = None
     live = _live_identities()
     for parked in [p for p in _PARKED if p[0] not in live]:
         _PARKED.remove(parked)
-        os.close(parked[1])  # no connection holds a lock on this inode any more
+        os.close(parked[1])  # nothing in this process holds a lock on this inode any more
+
+
+def track_lock_file(identity: Identity, *, open_: bool) -> None:
+    """A store lock file's descriptor opened (it is live from now on) or closed; the caller holds :data:`FD_LOCK`
+    (or is a just-forked child)."""
+    (_LOCK_FILES.add if open_ else _LOCK_FILES.discard)(identity)
+    _close_unparked()
 
 
 def _tracked_factory(connection_cls: type) -> type:
-    """A subclass of the driver's ``Connection`` whose ``close()`` releases its registry count."""
+    """A subclass of the driver's ``Connection`` whose ``close()`` releases its registry count. A SQLite one's
+    methods, and its cursors', refuse in a forked child (B71-133), so a pre-fork bound method or cursor does too."""
     cached = _FACTORIES.get(connection_cls)
     if cached is None:
 
         def close(self: Any) -> None:
+            if getattr(self, "_trw_pid", _PID) != _PID:
+                return  # the child's fork handler released it; the driver's close could wait forever here
             # Released only once the driver has closed: a rejected close (another
             # thread under check_same_thread) leaves the connection and its locks live.
             getattr(connection_cls, "close")(self)  # noqa: B009 - the driver class is typed as a bare type
@@ -180,13 +271,33 @@ def _tracked_factory(connection_cls: type) -> type:
             if release is not None:
                 release()
 
-        cached = type(f"Registered{connection_cls.__name__}", (connection_cls,), {"close": close})
+        def cursor(self: Any, factory: Any = None) -> Any:
+            _refuse_inherited(self)
+            guarded = _guarded_cursor_class(factory or sqlite3.Cursor)  # a caller's factory is guarded too
+            return getattr(connection_cls, "cursor")(self, guarded)  # noqa: B009
+
+        def through_cursor(name: str) -> Any:  # the driver's execute* would make a cursor of its own
+            return lambda self, *args: getattr(self.cursor(), name)(*args)
+
+        namespace: dict[str, Any] = {"close": close}
+        if issubclass(connection_cls, sqlite3.Connection):
+            namespace["cursor"] = cursor
+            namespace.update({name: through_cursor(name) for name in ("execute", "executemany", "executescript")})
+            for name in ("commit", "rollback", "backup", "blobopen", "deserialize", "__exit__"):
+                if hasattr(connection_cls, name):
+                    namespace[name] = _guarded(getattr(connection_cls, name))
+        cached = type(f"Registered{connection_cls.__name__}", (connection_cls,), namespace)
         _FACTORIES[connection_cls] = cached
     return cached
 
 
-def connect_registered(db_path: Path | str, dbapi: Any, *args: Any, **kwargs: Any) -> Any:
+def connect_registered(db_path: Path | str, dbapi: Any, *args: Any, store_lock: bool = True, **kwargs: Any) -> Any:
     """``dbapi.connect(*args, **kwargs)``, counted as open on *db_path*'s inode until closed.
+
+    The connection also holds the store's ``OPEN`` op (B71-00) until it closes, so no
+    other process can replace the store under it. ``store_lock=False`` is for files
+    that are not stores (backup targets, scratch copies); each such call is listed
+    in ``test_direct_sqlite_connect_census.py``.
 
     Waits while a reader leases that inode. Refuses (closing it) a connection
     whose store it cannot identify: the path missing, or naming a different
@@ -196,8 +307,54 @@ def connect_registered(db_path: Path | str, dbapi: Any, *args: Any, **kwargs: An
     would leave an entry nothing closes -- on Linux, where a freed inode number is
     reused at once, that stale entry would then refuse an unrelated file.
     """
+    from trw_memory import _store_lock  # imports this module
+
+    target = str(args[0]) if args else ""
+    read_only = bool(kwargs.get("uri")) and ("mode=ro" in target or "immutable=1" in target)
+    hold = _store_lock.acquire(db_path, "open", read_only=read_only) if store_lock else None
+    try:
+        conn, identity = _connect_counted(Path(db_path), dbapi, args, kwargs)
+    except BaseException:
+        _store_lock.release(hold)
+        raise
+    if identity is None:  # a test double: no descriptor, so no lock to keep
+        _store_lock.release(hold)
+        return conn
+    done = [False]
+    # A connection another thread could be inside at a fork is never closed by the child (B71-133).
+    confined_to = threading.get_ident() if kwargs.get("check_same_thread", True) and len(args) < 5 else None
+
+    def release() -> None:
+        _release(identity, done)  # FD_LOCK first, then the store hold: never both at once
+        _store_lock.release(hold)
+
+    conn._trw_release = release
+    conn._trw_pid = _PID
+    weakref.finalize(conn, _finalize, identity, done, hold)
+    with _locked():
+        _CONNECTIONS[conn] = (Path(db_path), identity, done, confined_to)
+    if hold is not None:
+        try:
+            _store_lock.check_one_name(hold.db)  # a hard link made between the lock and the connect
+        except StorageError:
+            conn.close()
+            raise
+    return conn
+
+
+def _finalize(identity: Identity, done: list[bool], hold: Any) -> None:
+    """A collected connection's release: queued, never applied here (see :data:`_FINALIZED`)."""
+    from trw_memory import _store_lock
+
+    _FINALIZED.append((identity, done))
+    _store_lock.release_soon(hold)
+
+
+def _connect_counted(
+    path: Path, dbapi: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> tuple[Any, Identity | None]:
+    """The connect, counted against its inode; the identity is None for a test double (not counted)."""
     global _LIVE_CACHE
-    path = Path(db_path)
     # A caller's own factory is tracked too, by subclassing it: no connection escapes.
     candidate = kwargs.pop("factory", None) or getattr(dbapi, "Connection", None)
     connection_cls = candidate if isinstance(candidate, type) else None
@@ -225,7 +382,7 @@ def connect_registered(db_path: Path | str, dbapi: Any, *args: Any, **kwargs: An
                 if not is_real_connection:
                     # Not a real driver connection (a test double): it holds no file descriptor,
                     # so no lock to protect -- and it could never report its close.
-                    return conn
+                    return conn, None
                 identity = current_identity(path)
             if before is None and identity is not None and _live_leases(identity):
                 # The path was absent at the check and now names a leased file (e.g. a
@@ -247,10 +404,7 @@ def connect_registered(db_path: Path | str, dbapi: Any, *args: Any, **kwargs: An
         store.open_connections += 1
         _LIVE_CACHE = None
         _record_sidecars(identity, store)
-        done = [False]
-        conn._trw_release = lambda: _release(identity, done)
-        weakref.finalize(conn, _FINALIZED.append, (identity, done))
-        return conn
+        return conn, identity
 
 
 def note_store_sidecars(db_path: Path | str) -> None:
@@ -291,7 +445,7 @@ def is_known_live(dir_fd: int, name: str) -> bool:
     with _locked():
         if len(_PARKED) >= MAX_PARKED:
             return True
-        if not _OPEN:
+        if not (_OPEN or _LOCK_FILES):
             return False
         identity = current_identity(name, dir_fd=dir_fd)
         return identity is not None and identity in _live_identities()
@@ -307,7 +461,7 @@ def admit_reader_fd(fd: int) -> bool:
     st = os.fstat(fd)
     identity = (st.st_dev, st.st_ino)
     with _locked():
-        if _OPEN and identity in _live_identities():
+        if (_OPEN or _LOCK_FILES) and identity in _live_identities():
             _PARKED.append((identity, fd))
             return False
         _LEASES.setdefault(identity, set()).add(fd)

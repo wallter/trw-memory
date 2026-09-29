@@ -55,6 +55,7 @@ class RemoteResultDict(MemoryResultDict, total=False):
     valid_from: str | None
     invalid_from: str | None
     invalidated_by: str | None
+    type: str
 
 
 class StoreResultDict(TypedDict):

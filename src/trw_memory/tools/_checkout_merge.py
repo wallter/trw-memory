@@ -22,7 +22,8 @@ from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.curate import NamespaceStores, merge_namespace
 from trw_memory.namespaces.validation import DEFAULT_NAMESPACE
-from trw_memory.storage._connection import untrusted_store
+from trw_memory.security._runtime_canary import classify_canary
+from trw_memory.storage._connection import UNTRUSTED_LENGTH_LIMIT, untrusted_store
 from trw_memory.storage._stale_handle import ensure_connection_fresh
 from trw_memory.storage._untrusted_store import verify_untrusted_store
 from trw_memory.storage.interface import EntryCursor
@@ -45,6 +46,8 @@ class _Refused(Exception):
 
 
 def _invalid(why: object) -> dict[str, object]:
+    if "too big" in str(why):  # SQLITE_TOOBIG under the untrusted-copy cap: a supported limit, not damage (B80-70)
+        why = f"an entry is over {UNTRUSTED_LENGTH_LIMIT >> 20} MiB, the supported size limit per row or value for an import"
     return {"error": f"not a project store trw-memory can import: {why}", "status": "invalid"}
 
 
@@ -108,6 +111,8 @@ class _Plan(NamedTuple):
     other_space: list[str]
     #: Each colliding id, with a digest of what the namespace held for it when compared.
     collisions: dict[str, str]
+    #: The copy's own system canaries (``classify_canary``): left behind, since the destination seeds its own.
+    canaries: list[str]
 
 
 def plan_import(
@@ -150,6 +155,7 @@ def _read_and_compare(
     other_space: list[str] = []
     collisions: dict[str, str] = {}
     conflicts: list[str] = []
+    canaries: dict[str, str] = {}
     listed = 0
     cursor: EntryCursor | None = None
     while page := source.list_entries(namespace=DEFAULT_NAMESPACE, limit=_READ_PAGE, after=cursor):
@@ -157,6 +163,9 @@ def _read_and_compare(
             raise sqlite3.OperationalError("interrupted")
         cursor = EntryCursor.from_entry(page[-1])
         listed += len(page)
+        canaries.update((entry.id, verdict) for entry in page if (verdict := classify_canary(entry)))
+        if not (page := [entry for entry in page if entry.id not in canaries]):
+            continue
         ids = [entry.id for entry in page]
         not_carried: set[str] = set()
         if source.supports_vectors():
@@ -165,7 +174,8 @@ def _read_and_compare(
             wrong = {i for i, r in records.items() if len(r.embedding) != dim}
             not_carried = wrong | {i for i, e in stored.items() if len(e) != dim}
             other_space += sorted(not_carried)
-        held = {entry.id: kept for entry in page if (kept := destination.get(entry.id, namespace=namespace))}
+        present = destination.existing_ids(ids, namespace=namespace)  # one read per page, not per row (B71-13)
+        held = {i: kept for i in ids if i in present and (kept := destination.get(i, namespace=namespace))}
         if not held:
             continue
         try:  # an unread vector is not an absent one
@@ -185,13 +195,21 @@ def _read_and_compare(
                 collisions[entry.id] = _digest(kept, ours.get(entry.id))
     if listed != source.count(namespace=DEFAULT_NAMESPACE):  # a row it cannot list back cannot be compared
         return {"error": "could not list every row of the project store to compare", "status": "conflict"}
+    # A canary's identity carrying user data is refused by id, like a conflict: never dropped silently.
+    if tampered := sorted(i for i, verdict in canaries.items() if verdict != "canary"):
+        return {
+            "error": f"{tampered} carry a pinned canary's identity with user data",
+            "status": "conflict",
+            "conflicts": tampered,
+        }
     if conflicts:
         return {
             "error": f"{namespace} already holds different content for {sorted(conflicts)}",
             "status": "conflict",
             "conflicts": sorted(conflicts),
         }
-    return _Plan(edges, other_space, collisions)
+    edges = {edge for edge in edges if edge[0] not in canaries and edge[1] not in canaries}  # their delete drops them
+    return _Plan(edges, other_space, collisions, sorted(canaries))
 
 
 def _digest(held: MemoryEntry, vector: object) -> str:
@@ -225,6 +243,8 @@ def write_import(
                             raise _Refused(
                                 {"error": f"{namespace} changed while the import compared it: retry", "status": "busy"}
                             )
+                        for canary in plan.canaries:
+                            source.delete(canary, namespace=DEFAULT_NAMESPACE)
                         result = merge_namespace(
                             NamespaceStores(source=source, destination=destination), DEFAULT_NAMESPACE, namespace
                         )

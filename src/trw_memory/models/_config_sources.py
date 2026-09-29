@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
-import warnings
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -17,45 +18,6 @@ from ruamel.yaml.error import YAMLError
 from trw_memory.exceptions import ConfigError
 
 __all__ = ["_TRWConfigYamlSource"]
-
-
-# Temporary input tombstones only; remove at the next breaking API release.
-_RETIRED_HYPE_DEFAULTS = {
-    "hype_enabled": False,
-    "hype_questions_per_entry": 3,
-    "hype_min_question_chars": 8,
-}
-
-
-def _check_retired_hype_settings(raw: dict[str, object], *, source: str, textual: bool = False) -> None:
-    """Check each source before precedence/filtering can hide retired activation."""
-    for key, value in raw.items():
-        if not isinstance(key, str):
-            continue
-        name = key.lower().removeprefix("memory_")
-        if name not in _RETIRED_HYPE_DEFAULTS:
-            continue
-        default = _RETIRED_HYPE_DEFAULTS[name]
-        if textual:
-            neutral = isinstance(value, str) and (
-                value.lower() in {"false", "0"} if default is False else value == str(default)
-            )
-        else:
-            neutral = type(value) is type(default) and value == default
-        if not neutral:
-            raise ConfigError(f"{key} in {source}: HyPE is retired; remove this setting")
-        warnings.warn(
-            f"{key} in {source}: HyPE is retired; remove this neutral legacy setting",
-            UserWarning,
-            stacklevel=3,
-        )
-
-
-def _check_retired_hype_environment(dotenv_source: PydanticBaseSettingsSource) -> None:
-    """Validate raw sources before ignore-empty/precedence discards evidence."""
-    _check_retired_hype_settings(dict(os.environ), source="environment", textual=True)
-    for path in _dotenv_files(dotenv_source):
-        _check_retired_hype_settings(_dotenv_raw(dotenv_source, path), source=f"dotenv {path}", textual=True)
 
 
 # F5 (2026-09-24, trw-memory 4.0.0 security fix): 'local_only' used to be
@@ -88,10 +50,10 @@ def _check_retired_local_only_environment(dotenv_source: PydanticBaseSettingsSou
         _check_retired_local_only_settings(_dotenv_raw(dotenv_source, path), source=f"dotenv {path}")
 
 
-# Removed settings, mapped to (PRD, what replaced them). Unlike HyPE's retirement
-# this never raises (operator decision): any legacy value, neutral or not, logs
-# one structured warning per (setting, source) per process, because
-# ``extra="ignore"`` would otherwise drop it in silence.
+# Removed settings, mapped to (PRD, what replaced them). These never raise
+# (operator decision): any legacy value logs one structured warning per
+# (setting, source) per process, because ``extra="ignore"`` would otherwise
+# drop it in silence.
 _RERANK_REPLACEMENT = (
     "reranking always runs; the confidence floor is adaptive_rerank_floor(limit): "
     "score >= -8.0, top max(5, ceil(limit * 0.5)) rows always kept"
@@ -118,10 +80,17 @@ _RETIRED_SETTINGS: dict[str, tuple[str, str]] = {
             "use full-disk encryption (FileVault, BitLocker or LUKS)",
         ),
     ),
+    **dict.fromkeys(
+        ("hype_enabled", "hype_questions_per_entry", "hype_min_question_chars"),
+        ("PRD-CORE-272", "none; HyPE question generation was retired"),
+    ),
     "q_learning_rate": (
         "PRD-CORE-293",
         "none; nothing has read it since the Q-learning reward loop was removed in trw-memory 3.0.0",
     ),
+    "rbac_mode": ("PRD-QUAL-145", "none; RBAC is decided by rbac_enabled alone, which is all it ever read"),
+    "quarantine_ttl_seconds": ("PRD-QUAL-145", "none; quarantined entries never expired by it, nothing read it"),
+    "sync_namespace": ("PRD-QUAL-145", "none; sync uses each entry's own namespace, nothing read it"),
 }
 _warned_retired_settings: set[tuple[str, str]] = set()
 _logger = structlog.get_logger(__name__)
@@ -167,15 +136,31 @@ def _warn_retired_environment(dotenv_source: PydanticBaseSettingsSource) -> None
         _warn_retired_settings(_dotenv_raw(dotenv_source, path), source=f"dotenv {path}")
 
 
-def _read_trw_config_yaml() -> dict[str, object]:
-    """The current project's `.trw/config.yaml`, over the machine file's platform contact switch.
+def _not_projects() -> set[Path]:
+    """Directories whose ``.trw`` is never a project: HOME's is the machine tier, a temp root's a stray."""
+    roots = {Path(tempfile.gettempdir()), Path("/tmp")}  # noqa: S108 -- a directory to skip, never written
+    with contextlib.suppress(RuntimeError):  # no resolvable home: nothing to skip there
+        roots.add(Path.home())
+    return {root.resolve() for root in roots}
 
-    trw-mcp resolves ``platform_contact_enabled`` from ``~/.trw/config.yaml`` and then the project file
-    (``TRW_PLATFORM_CONTACT_ENABLED`` above both), so the machine-wide switch stops sync here too (rc11).
+
+def _project_trw_dir() -> Path | None:
+    """The `.trw` config loading reads: the nearest one at or above the cwd, never an env-named one.
+
+    HOME's ``.trw`` (the machine tier) and a temp root's are skipped, so a run under either never
+    adopts them as a project. ``MemoryConfig`` records the result (``source_trw_dir``), so a
+    default store and every policy the config carries (RBAC, sync, the contact switch) come from
+    this one directory, from the project root or any subdirectory of it.
     """
-    machine = _read_yaml_file(Path.home() / ".trw" / "config.yaml")
-    key = "platform_contact_enabled"
-    return {**({key: machine[key]} if key in machine else {}), **_read_yaml_file(Path.cwd() / ".trw" / "config.yaml")}
+    cwd = Path.cwd().resolve()
+    skipped = _not_projects()
+    return next((d / ".trw" for d in (cwd, *cwd.parents) if d not in skipped and (d / ".trw").is_dir()), None)
+
+
+def _read_trw_config_yaml() -> dict[str, object]:
+    """The current project's `.trw/config.yaml` (the platform contact switch is read live elsewhere)."""
+    trw_dir = _project_trw_dir()
+    return _read_yaml_file(trw_dir / "config.yaml") if trw_dir is not None else {}
 
 
 def _read_yaml_file(config_path: Path) -> dict[str, object]:
@@ -206,7 +191,6 @@ def _first_truthy_item(values: object) -> object | None:
 
 
 def _map_trw_config_yaml_to_memory_settings(raw: dict[str, object]) -> dict[str, Any]:
-    _check_retired_hype_settings(raw, source=".trw/config.yaml")
     _check_retired_local_only_settings(raw, source=".trw/config.yaml")
     _warn_retired_settings(raw, source=".trw/config.yaml")
     mapped: dict[str, Any] = {}
@@ -220,8 +204,6 @@ def _map_trw_config_yaml_to_memory_settings(raw: dict[str, object]) -> dict[str,
         mapped["sync_enabled"] = sync_enabled
     for target, aliases in (
         ("sync_min_importance", ("sync_min_importance",)),
-        ("sync_namespace", ("sync_namespace",)),
-        ("platform_contact_enabled", ("platform_contact_enabled",)),
         ("platform_api_key", ("platform_api_key",)),
         (
             "embedding_trust_remote_code",
@@ -238,7 +220,6 @@ def _map_trw_config_yaml_to_memory_settings(raw: dict[str, object]) -> dict[str,
         ("cold_purge_max_score", ("cold_purge_max_score",)),
         ("encryption_enabled", ("encryption_enabled", "memory_encryption_enabled")),
         ("rbac_enabled", ("rbac_enabled", "memory_rbac_enabled")),
-        ("rbac_mode", ("rbac_mode", "memory_rbac_mode")),
         ("namespace_roles", ("namespace_roles", "memory_namespace_roles")),
         ("memory_recovery_policy", ("memory_recovery_policy", "recovery_policy")),
         ("memory_corrupt_backup_keep", ("memory_corrupt_backup_keep", "corrupt_backup_keep")),
@@ -269,6 +250,7 @@ def _map_trw_config_yaml_to_memory_settings(raw: dict[str, object]) -> dict[str,
             "memory_daemon_startup_timeout_seconds",
             ("memory_daemon_startup_timeout_seconds", "daemon_startup_timeout_seconds"),
         ),
+        ("memory_daemon_autostart", ("memory_daemon_autostart", "daemon_autostart")),
     ):
         if (value := _first_non_none(raw, *aliases)) is not None:
             mapped[target] = value

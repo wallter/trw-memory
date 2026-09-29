@@ -16,6 +16,7 @@ from trw_memory.models.memory import (
     Anchor,
     Assertion,
     Confidence,
+    EvidenceLevel,
     MemoryEntry,
     MemoryStatus,
     MemoryType,
@@ -132,6 +133,7 @@ def row_to_entry(row: tuple[object, ...], *, reference_time: datetime | None = N
         recall_count_raw,
         verification_status_raw,
         verification_checked_at_raw,
+        evidence_level_raw,
     ) = row
 
     # Deserialise assertions from JSON (PRD-CORE-086).
@@ -162,7 +164,22 @@ def row_to_entry(row: tuple[object, ...], *, reference_time: datetime | None = N
     except ValueError:
         metadata.setdefault("legacy_confidence", confidence_value)
         canonical_confidence = Confidence.UNVERIFIED
+    # PRD-CORE-312-FR01/NFR02: a pre-migration row has no column value (NULL /
+    # "") and reads back as UNKNOWN, never as a silently-promoted "verified".
+    evidence_level_value = str(evidence_level_raw or "").strip()
+    try:
+        canonical_evidence_level = (
+            EvidenceLevel(evidence_level_value) if evidence_level_value else EvidenceLevel.UNKNOWN
+        )
+    except ValueError:
+        metadata.setdefault("legacy_evidence_level", evidence_level_value)
+        canonical_evidence_level = EvidenceLevel.UNKNOWN
 
+    # PRD-CORE-312: this is the RAW row. Every served read (``SQLiteBackend.get``/
+    # ``update`` and the ``_resilient_fetch`` query/list materializers) applies
+    # ``served_view()``; internal storage-layer reuse of
+    # this function (e.g. an existing-vs-new comparison before a write) must
+    # see the true persisted state, never a presentation-layer demotion.
     return MemoryEntry(
         id=str(id_),
         content=str(content),
@@ -220,6 +237,7 @@ def row_to_entry(row: tuple[object, ...], *, reference_time: datetime | None = N
         # (no adverse verdict) rather than raising and quarantining the row.
         verification_status=parse_verification_status(verification_status_raw),
         verification_checked_at=str(verification_checked_at_raw) if verification_checked_at_raw else "",
+        evidence_level=canonical_evidence_level,
     )
 
 
@@ -281,4 +299,5 @@ def entry_to_row(entry: MemoryEntry) -> tuple[object, ...]:
         entry.recall_count,
         entry.verification_status,
         entry.verification_checked_at or "",
+        entry.evidence_level,
     )

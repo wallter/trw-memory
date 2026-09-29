@@ -21,6 +21,7 @@ import pytest
 
 pytest.importorskip("sqlite_vec")
 
+from tests._optional_extras import vec_unavailable
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
@@ -30,7 +31,7 @@ _DIM = 4
 def _backend(tmp_path: Path) -> SQLiteBackend:
     backend = SQLiteBackend(tmp_path / "vec_ns.db", dim=_DIM)
     if not backend.vec_available:
-        pytest.skip("sqlite-vec virtual table unavailable")
+        vec_unavailable("sqlite-vec virtual table unavailable")
     return backend
 
 

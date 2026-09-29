@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import stat
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from trw_memory.daemon import DaemonPaths
+from trw_memory.daemon import _spawn as spawn_module
 from trw_memory.daemon import client as client_module
 from trw_memory.daemon.client import DaemonClient
 from trw_memory.exceptions import DaemonUnreachableError
@@ -42,12 +44,11 @@ def spawned(monkeypatch: pytest.MonkeyPatch) -> list[object]:
         processes.append(process)
         return process
 
-    monkeypatch.setattr(client_module, "_DAEMON_ARGV", _STALLS)
+    monkeypatch.setattr(spawn_module, "_DAEMON_ARGV", _STALLS)
     monkeypatch.setattr(client_module, "start_daemon_detached", record)
     yield processes
     for process in processes:
-        process.kill()  # type: ignore[attr-defined]
-        process.wait()  # type: ignore[attr-defined]
+        process.stop()  # type: ignore[attr-defined]
 
 
 def _client(paths: DaemonPaths) -> DaemonClient:
@@ -61,7 +62,7 @@ def test_a_start_that_never_publishes_is_stopped_before_the_client_gives_up(
         _client(paths)._attach()
 
     [process] = spawned
-    assert process.poll() is not None, "the stalled daemon outlived the client that started it"  # type: ignore[attr-defined]
+    assert not process.running(), "the stalled daemon outlived the client that started it"  # type: ignore[attr-defined]
 
 
 def test_repeated_attempts_do_not_accumulate_stalled_daemons(paths: DaemonPaths, spawned: list[object]) -> None:
@@ -71,7 +72,7 @@ def test_repeated_attempts_do_not_accumulate_stalled_daemons(paths: DaemonPaths,
             client._attach()
 
     assert len(spawned) == 3
-    assert [process.poll() is not None for process in spawned] == [True, True, True]  # type: ignore[attr-defined]
+    assert [process.running() for process in spawned] == [False, False, False]  # type: ignore[attr-defined]
 
 
 def test_the_stalled_start_says_why_in_a_private_log(paths: DaemonPaths, spawned: list[object]) -> None:
@@ -102,31 +103,26 @@ def test_a_stub_that_spawned_nothing_still_fails_closed(paths: DaemonPaths, monk
 
 
 def test_the_daemon_argv_is_the_module_entry_point() -> None:
-    assert (sys.executable, *client_module._DAEMON_ARGV) == (sys.executable, "-m", "trw_memory.server", "serve", "http")
+    assert (sys.executable, *spawn_module._DAEMON_ARGV) == (sys.executable, "-m", "trw_memory.server", "serve", "http")
 
 
-def test_the_daemon_never_gets_a_pipe_nobody_drains(paths: DaemonPaths, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_daemon_never_gets_a_pipe_nobody_drains(
+    paths: DaemonPaths, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """7.0 freeze: the daemon logs from its event loop, so a full undrained pipe would stall every request.
 
     Measured on Linux (SQLite 3.46): 60 KB of per-open warnings before the first
-    refused call's traceback, past a 64 KiB pipe buffer.
+    refused call's traceback, past a 64 KiB pipe buffer. So the daemon writes far
+    past a pipe buffer on both streams and must still run to its next line.
     """
-    import subprocess
+    done = tmp_path / "wrote-past-a-pipe-buffer"
+    program = f"import sys; sys.stdout.write('x' * 200_000); sys.stderr.write('y' * 200_000); open({str(done)!r}, 'w')"
+    monkeypatch.setattr(spawn_module, "_DAEMON_ARGV", ("-c", program))
 
-    seen: dict[str, object] = {}
+    spawned = spawn_module.start_daemon_detached(paths)
+    deadline = time.monotonic() + 30
+    while not done.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    spawned.stop()
 
-    class _Recorded:
-        pid = 0
-
-        def __init__(self, _argv: list[str], **kwargs: object) -> None:
-            seen.update(kwargs)
-
-        def wait(self) -> int:
-            return 0
-
-    monkeypatch.setattr(client_module.subprocess, "Popen", _Recorded)
-
-    client_module.start_daemon_detached(paths)
-
-    assert subprocess.PIPE not in (seen["stdin"], seen["stdout"], seen["stderr"])
-    assert seen["stdout"] == subprocess.DEVNULL
+    assert done.exists(), "the daemon blocked writing to a stream nobody drains"

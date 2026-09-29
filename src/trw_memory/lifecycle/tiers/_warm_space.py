@@ -20,6 +20,7 @@ running again: rows already in the active space are skipped.
 
 from __future__ import annotations
 
+import heapq
 import sqlite3
 import threading
 from typing import TYPE_CHECKING, NamedTuple
@@ -77,13 +78,25 @@ class WarmSnapshot(NamedTuple):
 
 
 def warm_page(store: WarmTierStore, space: EmbeddingSpace, after: str | None, limit: int) -> list[WarmSnapshot]:
-    """The next *limit* sidecar rows by id after *after*, each with its text and stored vector."""
-    entries = store._warm_sidecar_entries_by_id()
-    ids = sorted(entry_id for entry_id in entries if after is None or entry_id > after)[:limit]
-    backend = store._get_warm_backend(dim=space.dimensions)
+    """The next *limit* sidecar rows by id after *after*, each with its text and stored vector.
+
+    The page's ids come off the cached parse before any payload is copied, and only its payloads are
+    copied, since this runs under the process-wide tier lock once per re-embed page (B71-84). The id scan
+    still reads the whole cached parse; bounding that needs an indexed lookup.
+    """
+    rows = store._warm_rows()
+    ids = heapq.nsmallest(
+        limit, {i for _, rec in rows if (i := str(rec.get("id", ""))) and (after is None or i > after)}
+    )
+    entries = store._entries_by_id(rows, set(ids))
+    backend = store._get_warm_backend(dim=space.dimensions, create=False)
     vectored = backend is not None and backend.supports_vectors()
     records = backend.get_vector_records(ids, namespace=WARM_TIER_NAMESPACE) if backend and vectored else {}
-    return [WarmSnapshot(entry_id, _entry_text(entries[entry_id]), records.get(entry_id)) for entry_id in ids]
+    return [
+        WarmSnapshot(entry_id, _entry_text(entries[entry_id]), records.get(entry_id))
+        for entry_id in ids
+        if entry_id in entries
+    ]
 
 
 def commit_warm_page(
@@ -97,7 +110,7 @@ def commit_warm_page(
     backend = store._get_warm_backend(dim=space.dimensions)
     if backend is None or not snapshot:
         return 0
-    entries = store._warm_sidecar_entries_by_id()
+    entries = store._entries_by_id(store._warm_rows(), {item.entry_id for item in snapshot})
     written = 0
     with backend.transaction():
         now = backend.get_vector_records([item.entry_id for item in snapshot], namespace=WARM_TIER_NAMESPACE)

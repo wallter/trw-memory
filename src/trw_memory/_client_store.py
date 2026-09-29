@@ -25,11 +25,12 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal
 
 from trw_memory._client_backend import client_logger as _client_logger
+from trw_memory._client_lifecycle import publish_entry, schedule_background_task, should_attempt_remote_publish
 from trw_memory.embeddings.provenance import generation_provenance_kwargs
 from trw_memory.exceptions import MemoryNotFoundError, SchemaValidationError, StorageError
 from trw_memory.graph import schedule_graph_update
 from trw_memory.lifecycle.tiers._runtime import embedding_has_consumer, remember_entry_in_tiers
-from trw_memory.models.entry_factory import new_entry, revise_entry
+from trw_memory.models.entry_factory import new_entry, new_memory_id, revise_entry
 from trw_memory.models.memory import Assertion, MemoryEntry
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.security.poisoning import validate_store_inputs
@@ -39,7 +40,6 @@ from trw_memory.security.runtime import (
     prepare_entry_for_store,
     store_quarantined_entry,
 )
-from trw_memory.storage._shared import _BOOKKEEPING_FIELDS
 
 if TYPE_CHECKING:
     from trw_memory.client import MemoryClient, StoreResultDict
@@ -58,17 +58,6 @@ def _existing_entry_for_namespace(backend: StorageBackend, entry_id: str, namesp
     if existing.namespace != namespace:
         raise MemoryNotFoundError(f"Memory entry {entry_id!r} not found in namespace {namespace!r}")
     return existing
-
-
-def _revision(entry: MemoryEntry | None) -> dict[str, object] | None:
-    """Everything a store must not overwrite unseen: the row less the counters a recall bumps."""
-    return None if entry is None else entry.model_dump(exclude=set(_BOOKKEEPING_FIELDS))
-
-
-def _make_id() -> str:
-    from trw_memory.client import _make_id as _impl
-
-    return _impl()
 
 
 def _build_store_entry(
@@ -158,7 +147,13 @@ async def store_impl(
     """
     try:
         validate_store_inputs(
-            content=content, detail=detail, tags=tags, metadata=metadata, importance=importance, assertions=assertions
+            content=content,
+            detail=detail,
+            tags=tags,
+            metadata=metadata,
+            importance=importance,
+            assertions=assertions,
+            entry_id=entry_id,
         )
     except SchemaValidationError as exc:
         append_audit_event(
@@ -173,7 +168,7 @@ async def store_impl(
     client._require_permission(Permission.WRITE, "store")
     client._maybe_start_retry_drain()
 
-    memory_id = entry_id or _make_id()
+    memory_id = entry_id or new_memory_id()
     async with client._lock:
         backend = client._get_backend()
         existing = (
@@ -289,8 +284,8 @@ async def store_impl(
         tag_count=len(tags or []),
         importance=importance,
     )
-    if client._should_attempt_remote_publish(entry):
-        client._schedule_background_task(client._publish_entry(entry))
+    if should_attempt_remote_publish(client, entry):
+        schedule_background_task(client, publish_entry(client, entry))
     store_result: StoreResultDict = {
         "memory_id": memory_id,
         "namespace": client._namespace,

@@ -1,9 +1,11 @@
-"""End-to-end matrix for the PRD-CORE-181-FR06 ``memory_model_v2_importance_type`` cutover.
+"""SQLite delta matrix for the PRD-CORE-181-FR06 ``memory_model_v2_importance_type`` cutover.
 
-Covers the SQLite schema gate, atomic active/cold YAML rewrite, ambiguity
-blocking with a path/row classification report, backup/restore, idempotency,
-the first-party remote protocol boundary, and a source census proving the
-external ``impact`` vocabulary is contained to the versioned mapper + migration.
+Covers the SQLite schema gate and its ambiguity/invalid-type blocking with a
+path/row classification report, the first-party remote protocol boundary, and
+a source census proving the external ``impact`` vocabulary is contained to the
+versioned mapper + migration. (The one-time YAML + backup-API orchestrator
+this delta shipped alongside had no upgrade-path caller and was removed in the
+trw-memory deletion wave — see UPGRADE-NOTES-8.0.0.md.)
 
 Every fixture uses ``tmp_path`` databases — no real store is touched.
 """
@@ -19,12 +21,8 @@ import pytest
 import trw_memory
 from trw_memory.storage._memory_model_v2 import (
     ClassificationEntry,
-    CutoverReceipt,
     MigrationBlocked,
-    _snapshot_backup,
     migrate_sqlite_importance_type,
-    restore_from_backup,
-    run_memory_model_v2_cutover,
 )
 from trw_memory.storage._schema import (
     CREATE_MEMORIES,
@@ -32,7 +30,6 @@ from trw_memory.storage._schema import (
     SchemaDowngradeError,
     ensure_schema,
 )
-from trw_memory.storage.persistence import read_yaml, write_yaml
 
 _TS = "2026-01-01T00:00:00+00:00"
 _SRC_ROOT = Path(trw_memory.__file__).parent
@@ -168,107 +165,8 @@ def test_invalid_type_blocks_with_report_and_version_still_1(tmp_path: Path) -> 
 
 
 # ---------------------------------------------------------------------------
-# Active + cold YAML rewrite
-# ---------------------------------------------------------------------------
-
-
-def test_impact_only_active_and_cold_yaml_rewritten_atomically(tmp_path: Path) -> None:
-    """Active + cold YAML with an 'impact' key are atomically rewritten to 'importance'."""
-    db = tmp_path / "memory.db"
-    _make_v1_db(db, [("L-1", "c", 0.5, "pattern", _TS, _TS)])
-    active = tmp_path / "active"
-    cold = tmp_path / "cold"
-    active.mkdir()
-    cold.mkdir()
-    write_yaml(active / "A-1.yaml", {"id": "A-1", "summary": "a", "impact": 0.6})
-    write_yaml(cold / "C-1.yaml", {"id": "C-1", "summary": "c", "impact": 0.3, "type": "incident"})
-
-    receipt = run_memory_model_v2_cutover(db, active_dir=active, cold_dir=cold, backup_dir=tmp_path / "bak")
-
-    assert isinstance(receipt, CutoverReceipt)
-    assert receipt.migrated is True
-    assert receipt.schema_version == SCHEMA_VERSION
-    assert receipt.active_yaml_rewritten == 1
-    assert receipt.cold_yaml_rewritten == 1
-
-    a = read_yaml(active / "A-1.yaml")
-    assert a["importance"] == 0.6
-    assert "impact" not in a
-    assert a["type"] == "pattern"  # missing type defaulted
-
-    c = read_yaml(cold / "C-1.yaml")
-    assert c["importance"] == 0.3
-    assert "impact" not in c
-    assert c["type"] == "incident"  # valid type preserved
-
-
-def test_missing_type_in_yaml_becomes_pattern(tmp_path: Path) -> None:
-    db = tmp_path / "memory.db"
-    _make_v1_db(db, [("L-1", "c", 0.5, "pattern", _TS, _TS)])
-    active = tmp_path / "active"
-    active.mkdir()
-    write_yaml(active / "A-1.yaml", {"id": "A-1", "summary": "a", "importance": 0.6})
-
-    receipt = run_memory_model_v2_cutover(db, active_dir=active, backup_dir=tmp_path / "bak")
-    assert receipt.migrated is True
-    assert read_yaml(active / "A-1.yaml")["type"] == "pattern"
-
-
-def test_invalid_type_in_yaml_blocks_no_partial_writes(tmp_path: Path) -> None:
-    """An invalid YAML type blocks the whole cutover; nothing is written, version stays 1."""
-    db = tmp_path / "memory.db"
-    _make_v1_db(db, [("L-1", "c", 0.5, "pattern", _TS, _TS)])
-    active = tmp_path / "active"
-    active.mkdir()
-    good = {"id": "A-good", "summary": "g", "impact": 0.6}
-    bad = {"id": "A-bad", "summary": "b", "impact": 0.6, "type": "bogus"}
-    write_yaml(active / "A-good.yaml", good)
-    write_yaml(active / "A-bad.yaml", bad)
-    good_before = read_yaml(active / "A-good.yaml")
-
-    receipt = run_memory_model_v2_cutover(db, active_dir=active, backup_dir=tmp_path / "bak")
-
-    assert receipt.migrated is False
-    assert any(e.kind == "active_yaml" and "invalid type" in e.reason for e in receipt.report)
-    # No YAML written: the good file still carries its legacy 'impact' key.
-    assert read_yaml(active / "A-good.yaml") == good_before
-    conn = sqlite3.connect(str(db))
-    try:
-        assert _user_version(conn) == 1
-    finally:
-        conn.close()
-
-
-# ---------------------------------------------------------------------------
 # Conflict / ambiguity blocking
 # ---------------------------------------------------------------------------
-
-
-def test_conflicting_yaml_impact_importance_blocks_no_partial_writes(tmp_path: Path) -> None:
-    """A YAML file with disagreeing impact/importance blocks with no partial writes."""
-    db = tmp_path / "memory.db"
-    _make_v1_db(db, [("L-1", "c", 0.5, "pattern", _TS, _TS)])
-    active = tmp_path / "active"
-    active.mkdir()
-    good = {"id": "A-good", "summary": "g", "impact": 0.6}
-    conflict = {"id": "A-x", "summary": "x", "impact": 0.6, "importance": 0.9}
-    write_yaml(active / "A-good.yaml", good)
-    write_yaml(active / "A-x.yaml", conflict)
-    good_before = read_yaml(active / "A-good.yaml")
-    conflict_before = read_yaml(active / "A-x.yaml")
-
-    receipt = run_memory_model_v2_cutover(db, active_dir=active, backup_dir=tmp_path / "bak")
-
-    assert receipt.migrated is False
-    assert any("conflicting" in e.reason for e in receipt.report)
-    # Both YAML files unchanged (staged-then-discarded).
-    assert read_yaml(active / "A-good.yaml") == good_before
-    assert read_yaml(active / "A-x.yaml") == conflict_before
-    conn = sqlite3.connect(str(db))
-    try:
-        assert _user_version(conn) == 1
-    finally:
-        conn.close()
 
 
 def test_conflicting_sqlite_impact_importance_blocks_no_partial_writes(tmp_path: Path) -> None:
@@ -284,83 +182,14 @@ def test_conflicting_sqlite_impact_importance_blocks_no_partial_writes(tmp_path:
     )
     conn.execute("PRAGMA user_version = 1")
     conn.commit()
+
+    with pytest.raises(MigrationBlocked) as blocked:
+        ensure_schema(conn)
+
+    assert any(e.kind == "sqlite_row" and "conflicting" in e.reason for e in blocked.value.report)
+    assert _user_version(conn) == 1
+    assert conn.execute("SELECT importance, impact FROM memories WHERE id='L-c'").fetchone() == (0.9, 0.2)
     conn.close()
-
-    receipt = run_memory_model_v2_cutover(db, backup_dir=tmp_path / "bak")
-
-    assert receipt.migrated is False
-    assert any(e.kind == "sqlite_row" and "conflicting" in e.reason for e in receipt.report)
-    verify = sqlite3.connect(str(db))
-    try:
-        assert _user_version(verify) == 1
-        assert verify.execute("SELECT importance, impact FROM memories WHERE id='L-c'").fetchone() == (0.9, 0.2)
-    finally:
-        verify.close()
-
-
-# ---------------------------------------------------------------------------
-# Backup / restore
-# ---------------------------------------------------------------------------
-
-
-def test_interrupted_orchestrator_backup_restores(tmp_path: Path) -> None:
-    """The backup-API snapshot restores the pre-migration state after an interruption."""
-    db = tmp_path / "memory.db"
-    _make_v1_db(db, [("L-1", "original", 0.5, "pattern", _TS, _TS)])
-    backup_dir = tmp_path / "bak"
-    backup_dir.mkdir()
-    backup_path = backup_dir / "memory.db.v1-backup"
-
-    conn = sqlite3.connect(str(db))
-    _snapshot_backup(conn, backup_path)
-    # Simulate an interruption that leaves the live db partially mutated.
-    conn.execute("UPDATE memories SET content='corrupted', importance=0.99 WHERE id='L-1'")
-    conn.commit()
-    conn.close()
-    assert backup_path.exists()
-
-    restore_from_backup(db, backup_path)
-
-    verify = sqlite3.connect(str(db))
-    try:
-        assert verify.execute("SELECT content, importance FROM memories WHERE id='L-1'").fetchone() == ("original", 0.5)
-    finally:
-        verify.close()
-
-
-def test_restore_missing_backup_raises(tmp_path: Path) -> None:
-    from trw_memory.exceptions import StorageError
-
-    with pytest.raises(StorageError):
-        restore_from_backup(tmp_path / "memory.db", tmp_path / "nope.v1-backup")
-
-
-# ---------------------------------------------------------------------------
-# Idempotency
-# ---------------------------------------------------------------------------
-
-
-def test_already_v2_cutover_is_idempotent(tmp_path: Path) -> None:
-    """Re-running the cutover on an already-migrated store converges to the same state."""
-    db = tmp_path / "memory.db"
-    _make_v1_db(db, [("L-1", "c", 0.5, "pattern", _TS, _TS)])
-    active = tmp_path / "active"
-    active.mkdir()
-    write_yaml(active / "A-1.yaml", {"id": "A-1", "summary": "a", "impact": 0.6})
-
-    first = run_memory_model_v2_cutover(db, active_dir=active, backup_dir=tmp_path / "bak")
-    assert first.migrated is True
-    after_first = read_yaml(active / "A-1.yaml")
-
-    second = run_memory_model_v2_cutover(db, active_dir=active, backup_dir=tmp_path / "bak")
-    assert second.migrated is True
-    assert second.schema_version == SCHEMA_VERSION
-    assert read_yaml(active / "A-1.yaml") == after_first  # stable end state
-    conn = sqlite3.connect(str(db))
-    try:
-        assert _user_version(conn) == SCHEMA_VERSION
-    finally:
-        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -569,21 +398,3 @@ def test_classification_entry_is_typed() -> None:
     entry = ClassificationEntry(kind="sqlite_row", ref="L-1", reason="invalid type 'x'")
     assert entry.kind == "sqlite_row"
     assert entry.ref == "L-1"
-
-
-def test_cutover_backup_is_mandatory_by_default(tmp_path) -> None:
-    """FR06 gap fix: omitting backup_dir must still snapshot before migration
-    — the default lands under <db parent>/backups/pre-v2-cutover/."""
-    from trw_memory.storage import _memory_model_v2 as m2
-
-    db = tmp_path / "memory.db"
-    _make_v1_db(db, [])
-
-    receipt = m2.run_memory_model_v2_cutover(db)
-    assert receipt.migrated is True
-    assert receipt.backup_path is not None
-    default_backup = tmp_path / "backups" / "pre-v2-cutover" / "memory.db.v1-backup"
-    assert default_backup.is_file()
-    check = m2.sqlite3.connect(f"file:{default_backup}?mode=ro", uri=True)
-    # The snapshot is the PRE-migration state (v1), not the migrated result.
-    assert check.execute("PRAGMA user_version").fetchone()[0] == 1

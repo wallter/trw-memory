@@ -29,6 +29,13 @@ logger = structlog.get_logger(__name__)
 
 _GRAPH_SCORE_DISCOUNT: float = 0.5
 
+#: B71-28 (PRD-CORE-307 FR07): recall's graph expansion was the one public
+#: ``graph_query`` entry point with no node cap — the tool-facing paths
+#: (recall_support.py, _recall_helpers.py) all pass GRAPH_RELATED_MAX(1000).
+#: This mirrors that cap so a dense root can't make the BFS underneath
+#: MemoryClient.recall() do unbounded work.
+_MAX_GRAPH_EXPAND_NODES: int = 1000
+
 
 def graph_expand_candidates(
     client: MemoryClient,
@@ -73,7 +80,9 @@ def graph_expand_candidates(
     namespace = client._namespace
 
     try:
-        nodes = graph_query(conn, root_ids, depth=depth, namespace=namespace)
+        nodes = graph_query(
+            conn, root_ids, depth=depth, namespace=namespace, max_nodes=_MAX_GRAPH_EXPAND_NODES, active_only=True
+        )
     except Exception:  # pragma: no cover -- sqlite / value errors
         logger.debug("graph_expand_error", exc_info=True)
         return results

@@ -8,6 +8,7 @@ Original entries are archived after consolidation.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import TypeVar
@@ -41,6 +42,8 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.entry_factory import local_node_id_for, new_entry
 from trw_memory.models.memory import MemoryEntry, MemoryStatus, ProtectionTier
 from trw_memory.retrieval.dense import cosine_similarity
+from trw_memory.storage._connection import outside_lane_deadline
+from trw_memory.storage._shared import revision_of
 from trw_memory.storage.interface import StorageBackend
 
 # Compatibility re-export: consumers import ``_redact_paths`` from this facade.
@@ -57,10 +60,14 @@ logger = structlog.get_logger(__name__)
 T = TypeVar("T")
 
 #: The most rows one consolidation cycle reads, embeds and clusters. ``consolidation_max_per_cycle``
-#: (the daemon's config, or a caller's policy on ``memory_maintain``) can only lower it. The whole
-#: cycle runs on the daemon's serialized write lane, so this bounds how long it can hold the lane
-#: (about 0.2 s warm at 50 rows, measured 2026-09-25; a first model load adds seconds, once).
+#: (the daemon's config, or a caller's policy on ``memory_maintain``) can only lower it. On the daemon
+#: the read, embed and cluster run off the write lane; each cluster's writes are one lane job (B71-89).
 CONSOLIDATION_ROWS_MAX = 50
+
+#: What one cluster's write step (:func:`_write_cluster`) reports, besides a failure's message.
+_WRITTEN, _SKIPPED = "written", "skipped"
+#: One cluster's write step, run on *storage* by the caller's lane (``consolidate_cycle(lane=...)``).
+ClusterWrite = Callable[[StorageBackend], str]
 
 
 def complete_linkage_cluster(
@@ -259,6 +266,7 @@ def _create_consolidated_entry(
     storage: StorageBackend,
     embedder: EmbeddingProvider | None = None,
     namespace: str = "default",
+    embedding: list[float] | None = None,
 ) -> MemoryEntry:
     """Create a new consolidated memory entry from a cluster.
 
@@ -326,17 +334,10 @@ def _create_consolidated_entry(
         },
     )
 
-    # Compute the embedding before opening the write transaction — pure CPU work
-    # with no DB state, so a failure here must leave nothing written. The only
-    # sinks for a consolidated entry's vector are the backend vector store and
-    # graph similarity (which reads candidate vectors back from that store), so
-    # both collapse to ``supports_vectors``; skip the embed when it is False.
-    embedding: list[float] | None = None
-    if embedder is not None and embedder.available() and storage.supports_vectors():
-        try:
-            embedding = embedder.embed(f"{entry.content} {entry.detail}")
-        except Exception as exc:
-            raise StorageError(f"failed to compute embedding for {entry.id!r}; entry was not written") from exc
+    # Computed before the write transaction (pure CPU: a failure writes nothing), unless the caller
+    # already computed it off the daemon's write lane (B71-89).
+    if embedding is None:
+        embedding = _entry_vector(embedder, storage, repr(entry.id), f"{entry.content} {entry.detail}")
     # S1-parity fix: commit the row + its vector in ONE transaction so a crash
     # between the two writes can no longer leave a row with no vector, and a
     # vector failure rolls the row back automatically. This matches
@@ -375,6 +376,62 @@ def _create_consolidated_entry(
     return entry
 
 
+def _entry_vector(
+    embedder: EmbeddingProvider | None, storage: StorageBackend, label: str, text: str
+) -> list[float] | None:
+    """*text*'s vector, or ``None`` when nothing would store it (no embedder, or no vector store:
+    graph similarity reads vectors back from that store too)."""
+    if embedder is None or not embedder.available() or not storage.supports_vectors():
+        return None
+    try:
+        return embedder.embed(text)
+    except Exception as exc:
+        raise StorageError(f"failed to compute embedding for {label}; entry was not written") from exc
+
+
+def _write_cluster(
+    cluster: list[MemoryEntry],
+    chosen: dict[str, str],
+    vector: list[float] | None,
+    embedder: EmbeddingProvider | None,
+    namespace: str,
+    storage: StorageBackend,
+) -> str:
+    """Consolidate *cluster* on *storage*, as one job: re-read its rows and skip it when any changed
+    since it was clustered (B71-89: the cluster was read off the lane, compared by ``revision_of`` --
+    PRD-CORE-308's content digest, not the old ``(status, consolidated_into, updated_at)`` tuple a
+    content change holding ``updated_at`` constant slipped past unnoticed, B71-135 d); else create
+    the consolidated entry and archive the rows, rolled back on failure. Returns ``_WRITTEN``,
+    ``_SKIPPED`` or the failure."""
+    cluster_ids = [e.id for e in cluster]
+    fresh = [storage.get(e.id, namespace=e.namespace) for e in cluster]
+    current = [now for now, then in zip(fresh, cluster, strict=True) if now and revision_of(now) == revision_of(then)]
+    if len(current) < len(cluster):
+        logger.info("consolidation_cluster_changed", cluster_ids=cluster_ids)
+        return _SKIPPED
+    new_entry: MemoryEntry | None = None
+    try:
+        new_entry = _create_consolidated_entry(
+            current, chosen["summary"], chosen["detail"], storage, embedder, namespace, embedding=vector
+        )
+        # FR04: archive the originals and close their validity windows at the consolidated entry's
+        # valid_from (gap-free; OQ3 consolidation instant).
+        _archive_originals(current, new_entry.id, storage, invalid_from=new_entry.valid_from)
+    except Exception as exc:  # broad catch: per-cluster error boundary
+        if new_entry is not None:
+            try:
+                with outside_lane_deadline():  # a half-applied cluster is undone whatever the job's clock says
+                    _rollback_consolidation(current, new_entry, storage)
+            except Exception as rollback_exc:
+                logger.exception("consolidation_rollback_failed", cluster_ids=cluster_ids, consolidated_id=new_entry.id)
+                raise StorageError(
+                    f"consolidation rollback failed for cluster {cluster_ids}: {rollback_exc}"
+                ) from rollback_exc
+        logger.exception("consolidation_cluster_failed", cluster_ids=cluster_ids, error=str(exc))
+        return f"cluster {cluster_ids}: {exc}"
+    return _WRITTEN
+
+
 # ---------------------------------------------------------------------------
 # FR04 — Original Entry Archival
 # ---------------------------------------------------------------------------
@@ -388,6 +445,7 @@ def consolidate_cycle(
     dry_run: bool = False,
     namespace: str | None = None,
     config: MemoryConfig | None = None,
+    lane: Callable[[ClusterWrite], str] | None = None,
 ) -> dict[str, object]:
     """Run one consolidation cycle across all active memory entries.
 
@@ -405,6 +463,8 @@ def consolidate_cycle(
         dry_run: If True, skip writes and return cluster preview.
         namespace: If provided, restrict consolidation to this namespace.
         config: MemoryConfig with consolidation thresholds.
+        lane: Runs one cluster's write step on a backend of its own (the daemon's write lane);
+            ``None`` runs it on *storage*. Everything else reads *storage*.
 
     Returns:
         Dict with consolidation results including cluster count and
@@ -487,65 +547,28 @@ def consolidate_cycle(
         }
 
     ns = namespace or "default"
-    consolidated_count = 0
-    errors: list[str] = []
-
+    write: Callable[[ClusterWrite], str] = lane or (lambda step: step(storage))
+    outcomes: list[str] = []
     for cluster in clusters:
-        cluster_ids = [e.id for e in cluster]
-        new_entry: MemoryEntry | None = None
+        # FR02/FR05: longest-entry selection (the LLM summarization hook point); its vector is computed
+        # here, off the daemon's write lane, and only the cluster's writes take the lane (B71-89).
+        chosen = _summarize_cluster_fallback(cluster)
         try:
-            # FR02/FR05: Cluster summarization (longest-entry selection)
-            # Future: LLM summarization hook point — see consolidation design docs
-            fallback = _summarize_cluster_fallback(cluster)
-            content = fallback["summary"]
-            detail = fallback["detail"]
-
-            # FR03: Create consolidated entry
-            new_entry = _create_consolidated_entry(
-                cluster,
-                content,
-                detail,
-                storage,
-                embedder=embedder,
-                namespace=ns,
-            )
-            consolidated_id = new_entry.id
-
-            # FR04: Archive originals + close their validity windows at the
-            # consolidated entry's valid_from (gap-free; OQ3 consolidation instant).
-            _archive_originals(
-                cluster,
-                consolidated_id,
-                storage,
-                invalid_from=new_entry.valid_from,
-            )
-            consolidated_count += 1
-
-        except Exception as exc:  # broad catch: per-cluster error boundary
-            if new_entry is not None:
-                try:
-                    _rollback_consolidation(cluster, new_entry, storage)
-                except Exception as rollback_exc:
-                    logger.exception(
-                        "consolidation_rollback_failed",
-                        cluster_ids=cluster_ids,
-                        consolidated_id=new_entry.id,
-                    )
-                    raise StorageError(
-                        f"consolidation rollback failed for cluster {cluster_ids}: {rollback_exc}"
-                    ) from rollback_exc
-            logger.exception(
-                "consolidation_cluster_failed",
-                cluster_ids=cluster_ids,
-                error=str(exc),
-            )
-            errors.append(f"cluster {cluster_ids}: {exc}")
+            vector = _entry_vector(embedder, storage, "a consolidated entry", f"{chosen['summary']} {chosen['detail']}")
+        except StorageError as exc:
+            outcomes.append(f"cluster {[e.id for e in cluster]}: {exc}")
+            continue
+        outcomes.append(write(functools.partial(_write_cluster, cluster, chosen, vector, embedder, ns)))
+    consolidated_count = outcomes.count(_WRITTEN)
+    errors = [outcome for outcome in outcomes if outcome not in (_WRITTEN, _SKIPPED)]
 
     result: dict[str, object] = {
         "status": "completed",
         "clusters_found": len(clusters),
         "consolidated_count": consolidated_count,
     }
+    if skipped := outcomes.count(_SKIPPED):
+        result["clusters_skipped"] = skipped
     if errors:
         result["errors"] = errors
 

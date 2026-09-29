@@ -15,7 +15,7 @@ import pytest
 
 from trw_memory.exceptions import AuthorizationError, StorageError
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import Anchor, Confidence, MemoryType, ProtectionTier
+from trw_memory.models.memory import Anchor, Confidence, EvidenceLevel, MemoryType, ProtectionTier
 from trw_memory.security.audit import AuditLog
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools.store import memory_store_impl
@@ -47,6 +47,7 @@ class TestTypedLearningFields:
             type=MemoryType.INCIDENT,
             nudge_line="watch the write path",
             confidence=Confidence.VERIFIED,
+            evidence_level=EvidenceLevel.VERIFIED,
             task_type="coding",
             domain=["memory"],
             phase_origin="implement",
@@ -94,6 +95,7 @@ class TestTypedLearningFields:
             evidence=["tests/test_store_delegated_surface.py"],
             type=MemoryType.INCIDENT,
             confidence=Confidence.VERIFIED,
+            evidence_level=EvidenceLevel.VERIFIED,
             protection_tier=ProtectionTier.PROTECTED,
             task_type="coding",
         )

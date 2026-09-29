@@ -32,15 +32,19 @@ parent ``runtime`` module to break the import cycle.
 from __future__ import annotations
 
 import threading
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, Literal
 
 from trw_memory.exceptions import CanaryTamperError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.validation import DEFAULT_NAMESPACE
 from trw_memory.security.canary import _CANARY_FIXTURES, PINNED_HASHES, _sha
+from trw_memory.security.poisoning import RESERVED_SYSTEM_METADATA_KEYS
+from trw_memory.security.provenance import INTAKE_METADATA_KEYS
 from trw_memory.security.startup import resolve_security_path
 from trw_memory.security.telemetry_emit import build_security_traceability, emit_security_event
+from trw_memory.storage._shared import _BOOKKEEPING_FIELDS
 from trw_memory.storage.interface import StorageBackend
 
 #: Canaries are seeded into the store's unnamed namespace. Under schema 5 a row
@@ -67,6 +71,31 @@ def _trace_context(*, session_id: str | None = None) -> tuple[str, str | None]:
     return result
 
 
+def _emit_canary_event(
+    config: MemoryConfig,
+    trace_session: str,
+    event_name: str,
+    live_path: str,
+    requirement_ids: tuple[str, ...] = ("FR-007", "NFR-010", "NFR-011"),
+    **fields: object,
+) -> None:
+    """Emit one ``canary`` security event: *fields* between its name and its traceability block."""
+    session_id, run_id = _trace_context(session_id=trace_session)
+    emit_security_event(
+        config,
+        emitter="canary",
+        session_id=session_id,
+        run_id=run_id,
+        payload={
+            "event_name": event_name,
+            **fields,
+            "traceability": build_security_traceability(
+                live_path=f"security.runtime.{live_path}", requirement_ids=list(requirement_ids)
+            ),
+        },
+    )
+
+
 def _backend_identity(backend: StorageBackend) -> str:
     """Stable identity string for the backend's data store."""
     db_path = getattr(backend, "_db_path", None)
@@ -83,25 +112,51 @@ def _state_key(config: MemoryConfig, backend: StorageBackend) -> str:
     return f"{quarantine_path}::{_backend_identity(backend)}"
 
 
-def _store_pinned_canary(
-    backend: StorageBackend,
-    *,
-    canary_id: str,
-    content: str,
-    expected_hash: str,
-) -> None:
+#: What may differ from the seeded row and still be the store's canary: the store's own bookkeeping
+#: (a recalled canary's counters), the namespace the row sits in, the clock it was seeded at, and
+#: (in :func:`_compared`) the system metadata keys: the reserved ones 4.0.0's import intake stripped and
+#: the ones every intake writes (a canary that went through an import carries them).
+_SYSTEM_METADATA = INTAKE_METADATA_KEYS.union(RESERVED_SYSTEM_METADATA_KEYS)
+_NOT_COMPARED = {*_BOOKKEEPING_FIELDS, "namespace", "created_at", "updated_at", "valid_from"}
+
+
+def _seeded_canary(canary_id: str) -> MemoryEntry:
+    """The pinned canary *canary_id* exactly as :func:`_store_pinned_canary` writes it."""
+    metadata = {"system_canary": "true", "provenance_content_hash": PINNED_HASHES[canary_id]}
+    content = dict(_CANARY_FIXTURES)[canary_id]
+    return MemoryEntry(id=canary_id, content=content, namespace=CANARY_NAMESPACE, metadata=metadata)
+
+
+def classify_canary(row: Mapping[str, object] | MemoryEntry) -> Literal["canary", "user-data"] | None:
+    """The one predicate every import path skips a source store's system canary by (PRD-CORE-309).
+
+    ``None``: not a pinned identity (the id and its content's hash), so an ordinary row, whatever its
+    ``system_canary`` flag says. ``"canary"``: every other field is what :func:`_seeded_canary` writes,
+    apart from ``_NOT_COMPARED``; skip it, the destination seeds its own. ``"user-data"``: a pinned
+    identity carrying anything else (fail-closed), which the caller rejects rather than drop.
+    """
+    entry_id, content = (row.get("id"), row.get("content")) if isinstance(row, Mapping) else (row.id, row.content)
+    expected = PINNED_HASHES.get(str(entry_id))
+    if expected is None or expected != _sha(str(content or "")):
+        return None
+    if isinstance(row, Mapping) and not set(row) <= set(MemoryEntry.model_fields):
+        return "user-data"
+    try:
+        entry = row if isinstance(row, MemoryEntry) else MemoryEntry.model_validate(row)
+    except (TypeError, ValueError):  # a row MemoryEntry cannot hold is not the seeded one (sol r2 P2)
+        return "user-data"
+    return "canary" if _compared(entry) == _compared(_seeded_canary(entry.id)) else "user-data"
+
+
+def _compared(entry: MemoryEntry) -> dict[str, Any]:
+    shape = entry.model_dump(exclude=_NOT_COMPARED)
+    shape["metadata"] = {k: v for k, v in entry.metadata.items() if k not in _SYSTEM_METADATA}
+    return shape
+
+
+def _store_pinned_canary(backend: StorageBackend, canary_id: str) -> None:
     """Store one trusted canary with its security metadata invariant."""
-    backend.store(
-        MemoryEntry(
-            id=canary_id,
-            content=content,
-            namespace=CANARY_NAMESPACE,
-            metadata={
-                "system_canary": "true",
-                "provenance_content_hash": expected_hash,
-            },
-        )
-    )
+    backend.store(_seeded_canary(canary_id))
 
 
 def initialize_canaries(config: MemoryConfig, *, backend: StorageBackend) -> None:
@@ -114,33 +169,23 @@ def _initialize_canaries_locked(config: MemoryConfig, *, backend: StorageBackend
     if CANARY_STATE.get(state_key, {}).get("seeded"):
         return
     seeded = 0
-    fixture_map = dict(_CANARY_FIXTURES)
-    for canary_id, expected_hash in list(PINNED_HASHES.items())[: config.canary_injection_rate]:
+    for canary_id in list(PINNED_HASHES)[: config.canary_injection_rate]:
         if backend.get(canary_id, namespace=CANARY_NAMESPACE) is not None:
             seeded += 1
             continue
-        content = fixture_map[canary_id]
-        _store_pinned_canary(backend, canary_id=canary_id, content=content, expected_hash=expected_hash)
+        _store_pinned_canary(backend, canary_id)
         seeded += 1
     # Update in place rather than replacing: a concurrent probe may already have
     # recorded a tamper failure against this key, and a fresh dict would drop it.
     state = CANARY_STATE.setdefault(state_key, {"seeded": False, "recall_count": 0, "failed": False})
     state["seeded"] = True
-    telemetry_session_id, telemetry_run_id = _trace_context(session_id="canary-bootstrap")
-    emit_security_event(
+    _emit_canary_event(
         config,
-        emitter="canary",
-        session_id=telemetry_session_id,
-        run_id=telemetry_run_id,
-        payload={
-            "event_name": "canary_seeded",
-            "seeded_count": seeded,
-            "canary_injection_rate": config.canary_injection_rate,
-            "traceability": build_security_traceability(
-                live_path="security.runtime.initialize_canaries",
-                requirement_ids=["FR-007", "NFR-010", "NFR-011"],
-            ),
-        },
+        "canary-bootstrap",
+        "canary_seeded",
+        "initialize_canaries",
+        seeded_count=seeded,
+        canary_injection_rate=config.canary_injection_rate,
     )
 
 
@@ -172,41 +217,26 @@ def _probe_canaries_locked(config: MemoryConfig, *, backend: StorageBackend) -> 
             # content via this path; the recovery is audit-logged via ``canary_reseeded``.
             # Drift (content present but tampered) below remains the genuine poisoning signal.
             content = fixture_map.get(canary_id)
-            telemetry_session_id, telemetry_run_id = _trace_context(session_id="canary-probe")
             if content is None:
                 # No fixture to restore from — fall back to the tamper signal.
                 state["failed"] = True
-                emit_security_event(
+                _emit_canary_event(
                     config,
-                    emitter="canary",
-                    session_id=telemetry_session_id,
-                    run_id=telemetry_run_id,
-                    payload={
-                        "event_name": "canary_missing",
-                        "canary_id": canary_id,
-                        "fail_mode": config.canary_fail_mode,
-                        "traceability": build_security_traceability(
-                            live_path="security.runtime.probe_canaries",
-                            requirement_ids=["FR-007", "NFR-010", "NFR-011"],
-                        ),
-                    },
+                    "canary-probe",
+                    "canary_missing",
+                    "probe_canaries",
+                    canary_id=canary_id,
+                    fail_mode=config.canary_fail_mode,
                 )
                 raise CanaryTamperError(f"missing canary {canary_id}")
-            _store_pinned_canary(backend, canary_id=canary_id, content=content, expected_hash=expected_hash)
-            emit_security_event(
+            _store_pinned_canary(backend, canary_id)
+            _emit_canary_event(
                 config,
-                emitter="canary",
-                session_id=telemetry_session_id,
-                run_id=telemetry_run_id,
-                payload={
-                    "event_name": "canary_reseeded",
-                    "canary_id": canary_id,
-                    "fail_mode": config.canary_fail_mode,
-                    "traceability": build_security_traceability(
-                        live_path="security.runtime.probe_canaries",
-                        requirement_ids=["FR-007", "NFR-010", "NFR-011"],
-                    ),
-                },
+                "canary-probe",
+                "canary_reseeded",
+                "probe_canaries",
+                canary_id=canary_id,
+                fail_mode=config.canary_fail_mode,
             )
             continue
         current_hash = _sha(entry.content)
@@ -218,23 +248,16 @@ def _probe_canaries_locked(config: MemoryConfig, *, backend: StorageBackend) -> 
             state["failed"] = True
             entry.metadata["quarantined"] = "true"
             backend.store(entry)
-            telemetry_session_id, telemetry_run_id = _trace_context(session_id="canary-probe")
-            emit_security_event(
+            _emit_canary_event(
                 config,
-                emitter="canary",
-                session_id=telemetry_session_id,
-                run_id=telemetry_run_id,
-                payload={
-                    "event_name": "canary_hash_drift",
-                    "canary_id": canary_id,
-                    "expected_hash": expected_hash,
-                    "observed_hash": current_hash,
-                    "fail_mode": config.canary_fail_mode,
-                    "traceability": build_security_traceability(
-                        live_path="security.runtime.probe_canaries",
-                        requirement_ids=["FR-007", "FR-009", "NFR-010", "NFR-011"],
-                    ),
-                },
+                "canary-probe",
+                "canary_hash_drift",
+                "probe_canaries",
+                ("FR-007", "FR-009", "NFR-010", "NFR-011"),
+                canary_id=canary_id,
+                expected_hash=expected_hash,
+                observed_hash=current_hash,
+                fail_mode=config.canary_fail_mode,
             )
             if config.canary_fail_mode == "halt":
                 raise CanaryTamperError(f"canary drift detected for {canary_id}")
@@ -269,19 +292,7 @@ def should_halt_recalls(config: MemoryConfig, *, backend: StorageBackend) -> boo
     if _has_canary_drift(config, backend=backend):
         return True
     state["failed"] = False
-    telemetry_session_id, telemetry_run_id = _trace_context(session_id="canary-recovered")
-    emit_security_event(
-        config,
-        emitter="canary",
-        session_id=telemetry_session_id,
-        run_id=telemetry_run_id,
-        payload={
-            "event_name": "canary_recovered",
-            "fail_mode": config.canary_fail_mode,
-            "traceability": build_security_traceability(
-                live_path="security.runtime.should_halt_recalls",
-                requirement_ids=["FR-007", "NFR-010", "NFR-011"],
-            ),
-        },
+    _emit_canary_event(
+        config, "canary-recovered", "canary_recovered", "should_halt_recalls", fail_mode=config.canary_fail_mode
     )
     return False

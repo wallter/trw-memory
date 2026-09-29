@@ -20,6 +20,9 @@ def test_memory_config_defaults() -> None:
     cfg = MemoryConfig()
     assert cfg.storage_backend == "sqlite"
     assert cfg.storage_path == ".memory"
+    # The DEFAULT, not a caller's choice: resolve_storage_root anchors it beside the .trw the
+    # config loaded from (tests/test_storage_root_anchor.py covers the resolution).
+    assert "storage_path" not in cfg.model_fields_set
     assert cfg.sqlite_db_name == "memory.db"
     assert cfg.embedding_dim == 384
     assert cfg.bm25_candidates == 50
@@ -32,7 +35,6 @@ def test_memory_config_defaults() -> None:
     assert cfg.decay_half_life_days == 14.0
     assert cfg.consolidation_enabled is True
     assert cfg.consolidation_max_per_cycle == 50
-    assert cfg.rbac_mode == "local"
 
 
 def test_memory_config_consolidation_min_cluster_requires_two() -> None:
@@ -68,7 +70,6 @@ def test_memory_config_reads_trw_config_yaml(tmp_path: Path, monkeypatch: pytest
             "platform_urls:",
             "  - https://platform.example.com",
             'platform_api_key: "yaml-key"',
-            "sync_namespace: org:test",
         ],
     )
     monkeypatch.chdir(tmp_path)
@@ -78,7 +79,6 @@ def test_memory_config_reads_trw_config_yaml(tmp_path: Path, monkeypatch: pytest
     assert cfg.sync_enabled is True
     assert cfg.platform_url == "https://platform.example.com"
     assert cfg.platform_api_key == "yaml-key"
-    assert cfg.sync_namespace == "org:test"
 
 
 def test_memory_config_sync_from_sharing_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -163,7 +163,6 @@ def test_memory_config_reads_security_fields_from_trw_config_yaml(
         tmp_path,
         [
             "memory_rbac_enabled: true",
-            "memory_rbac_mode: remote",
             "memory_namespace_roles:",
             "  project:default: reader",
         ],
@@ -173,19 +172,16 @@ def test_memory_config_reads_security_fields_from_trw_config_yaml(
     cfg = MemoryConfig()
 
     assert cfg.rbac_enabled is True
-    assert cfg.rbac_mode == "remote"
     assert cfg.namespace_roles == {"project:default": "reader"}
 
 
 def test_memory_config_accepts_memory_prefixed_init_fields() -> None:
     cfg = MemoryConfig(
         memory_rbac_enabled=True,
-        memory_rbac_mode="remote",
         memory_namespace_roles={"project:default": "reader"},
     )
 
     assert cfg.rbac_enabled is True
-    assert cfg.rbac_mode == "remote"
     assert cfg.namespace_roles == {"project:default": "reader"}
 
 
@@ -246,6 +242,7 @@ def fresh_rerank_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
         "lifecycle_use_fsrs",
         "key_rotation_backup",
         "q_learning_rate",
+        "hype_enabled",
         "local_only",
     ):
         for spelling in (name, f"memory_{name}"):
@@ -381,25 +378,28 @@ def test_encryption_key_settings_are_retired_with_a_warning(
 
 @pytest.mark.usefixtures("fresh_rerank_warnings")
 @pytest.mark.parametrize("source", ["yaml", "environment"])
-def test_q_learning_rate_is_retired_with_a_warning(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
+@pytest.mark.parametrize(
+    ("name", "value", "prd"), [("q_learning_rate", "0.2", "PRD-CORE-293"), ("hype_enabled", "true", "PRD-CORE-272")]
+)
+def test_unread_setting_is_retired_with_a_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, name: str, value: str, prd: str
 ) -> None:
-    """q_learning_rate had no reader after PRD-CORE-293; a leftover value must say so, not vanish."""
+    """A setting with no reader left (q_learning_rate, HyPE's) must say so when set, not vanish or raise."""
     from structlog.testing import capture_logs
 
     monkeypatch.chdir(tmp_path)
     if source == "environment":
-        monkeypatch.setenv("MEMORY_Q_LEARNING_RATE", "0.2")
+        monkeypatch.setenv(f"MEMORY_{name.upper()}", value)
     else:
-        _write_trw_config(tmp_path, ["q_learning_rate: 0.2"])
+        _write_trw_config(tmp_path, [f"{name}: {value}"])
     with capture_logs() as logs:
         cfg = MemoryConfig()
     warned = _rerank_warnings(logs)
     assert len(warned) == 1, warned
-    assert str(warned[0]["setting"]).lower().removeprefix("memory_") == "q_learning_rate"
-    assert warned[0]["prd"] == "PRD-CORE-293"
-    assert "q_learning_rate" not in MemoryConfig.model_fields
-    assert not hasattr(cfg, "q_learning_rate")
+    assert str(warned[0]["setting"]).lower().removeprefix("memory_") == name
+    assert warned[0]["prd"] == prd
+    assert name not in MemoryConfig.model_fields
+    assert not hasattr(cfg, name)
 
 
 @pytest.mark.usefixtures("fresh_rerank_warnings")
@@ -428,3 +428,35 @@ def test_a_leftover_local_only_refuses_instead_of_silently_syncing(monkeypatch: 
     monkeypatch.setenv("MEMORY_PLATFORM_URL", "https://platform.example.com")
     with pytest.raises(ConfigError, match="local_only"):
         MemoryConfig()
+
+
+#: Removed in PRD-QUAL-145 wave 3 with no reader behind them; a 7.0.1 config that still sets one
+#: was dropped silently (the release-verify upgrade review), unlike every other retired setting.
+_RETIRED_WAVE3 = {"rbac_mode": "remote", "quarantine_ttl_seconds": "3600", "sync_namespace": "team"}
+
+
+@pytest.mark.usefixtures("fresh_rerank_warnings")
+@pytest.mark.parametrize("name", sorted(_RETIRED_WAVE3))
+@pytest.mark.parametrize("source", ["environment", "yaml"])
+def test_wave3_retired_keys_warn_instead_of_vanishing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, source: str
+) -> None:
+    from structlog.testing import capture_logs
+
+    from trw_memory.models.config import MemoryConfig
+
+    monkeypatch.chdir(tmp_path)
+    for spelling in (name, f"memory_{name}"):
+        monkeypatch.delenv(spelling.upper(), raising=False)
+    if source == "environment":
+        monkeypatch.setenv(f"MEMORY_{name.upper()}", _RETIRED_WAVE3[name])
+    else:
+        (tmp_path / ".trw").mkdir()
+        (tmp_path / ".trw" / "config.yaml").write_text(f"{name}: {_RETIRED_WAVE3[name]}\n", encoding="utf-8")
+
+    with capture_logs() as logs:
+        MemoryConfig()
+
+    warned = [e for e in _rerank_warnings(logs) if str(e["setting"]).lower().removeprefix("memory_") == name]
+    assert len(warned) == 1, logs
+    assert warned[0]["prd"] == "PRD-QUAL-145"

@@ -20,14 +20,13 @@ from pathlib import Path
 import pytest
 
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
-from trw_memory.storage import _stale_handle
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 
 def _run_integrity_check(backend: SQLiteBackend) -> bool:
-    """Mirror the removed ``SQLiteBackend._run_integrity_check``: a fresh-connection-wrapped quick_check."""
+    """A fresh-connection-wrapped ``PRAGMA quick_check``: ``True`` when the DB is healthy."""
     with backend._fresh_connection():
-        return _stale_handle.run_integrity_check(backend)
+        return [tuple(row) for row in backend._conn.execute("PRAGMA quick_check").fetchall()] == [("ok",)]
 
 
 # PRD-CORE-139: timestamped backup filename pattern.

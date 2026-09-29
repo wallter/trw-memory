@@ -23,7 +23,9 @@ Each helper takes a ``backend`` argument exposing the instance state
 
 The ``memory_tags``/``memory_graph_edges`` sidecar-index maintenance
 (``_replace_tag_postings``, ``purge_tag_postings_for``, ``purge_edges_for``,
-``purge_orphan_edges``) moved to the sibling ``_crud_index_ops.py``, and the
+``purge_orphan_edges``) moved to the sibling ``_crud_index_ops.py`` -- as did
+the PRD-CORE-330 ``memories_fts`` row helpers (``_fts_row``,
+``_fts_delete_row``, ``_fts_insert_row``; PRD-CORE-332 S1) -- and the
 bulk ``increment_session_counts``
 moved to the sibling ``_crud_counters.py`` — both split out (PRD-CORE-291
 slice 3) when this module crossed the effective-LOC ceiling. Both are
@@ -38,19 +40,27 @@ from __future__ import annotations
 import contextlib
 import json
 import sqlite3
+from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import structlog
 
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.security._evidence_invariant import refuse_new_violation, violates_evidence_invariant
 from trw_memory.storage._change_feed import note_delete
 from trw_memory.storage._crud_counters import increment_session_counts
 from trw_memory.storage._crud_index_ops import (
-    _replace_tag_postings,
+    _delete_keyed,
+    _fts_delete_row,
+    _fts_insert_row,
+    _fts_row,
+    _replace_postings,
     purge_edges_for,
+    purge_fts_rows_for,
     purge_orphan_edges,
+    purge_postings_for,
     purge_tag_postings_for,
 )
 from trw_memory.storage._row_mapper import entry_to_row, row_to_entry
@@ -63,16 +73,20 @@ from trw_memory.storage._shared import (
     validate_update_fields,
 )
 from trw_memory.storage._sql_utils import iter_bind_chunks
-from trw_memory.storage._utf8_validator import validate_entry_utf8, validate_utf8_fields
+from trw_memory.storage._utf8_validator import validate_entry_for_write, validate_utf8_fields
+from trw_memory.storage._vector_ops import purge_vectors_for
 from trw_memory.sync.delta import DeltaTracker
 
 __all__ = [
     "delete",
+    "delete_many",
+    "existing_ids",
     "get",
     "increment_recall_access",
     "increment_session_counts",
     "purge_edges_for",
     "purge_orphan_edges",
+    "purge_postings_for",
     "purge_tag_postings_for",
     "store",
     "store_many",
@@ -107,20 +121,32 @@ def _normalise_status_value(value: object) -> str | None:
     return None
 
 
-def _fts_row(entry: MemoryEntry) -> tuple[str, str, str, str, str]:
-    """Return the ``memories_fts`` row tuple for *entry* (namespace-qualified)."""
-    tags_json = json.dumps(entry.tags) if isinstance(entry.tags, list) else (entry.tags or "[]")
-    return (entry.id, entry.namespace, entry.content, entry.detail or "", tags_json)
-
-
 def store(
     backend: SQLiteBackend,
     insert_columns_sql: str,
     columns: tuple[str, ...],
     entry: MemoryEntry,
+    *,
+    select_columns_sql: str = "",
 ) -> None:
-    """INSERT OR REPLACE the entry into the memories table."""
-    validate_entry_utf8(entry)
+    """INSERT OR REPLACE the entry into the memories table.
+
+    PRD-CORE-312: refuses a write that INTRODUCES the verified-evidence
+    invariant violation ``_evidence_invariant`` describes, comparing against
+    whatever row this one would replace (``INSERT OR REPLACE`` may be a
+    revision, not a genuine create) -- so a legacy violation already sitting
+    in storage is never retroactively blocked, only a NEW one. Every SQLite
+    entry-producing path (store, consolidation merge, sync pull, namespace
+    move) funnels through this function, ``store_many`` or ``update``, which
+    enforce the same rule.
+    ``select_columns_sql`` defaults to "" only for the few internal
+    call sites (recovery salvage) that intentionally bypass business-rule
+    validation; every production caller supplies it.
+    """
+    validate_entry_for_write(entry)
+    # The replaced row is read (raw) only for a violating entry: a conforming write costs no SELECT.
+    if select_columns_sql and violates_evidence_invariant(entry):
+        refuse_new_violation(get(backend, select_columns_sql, entry.id, entry.namespace), entry)
 
     entry.sync_seq = (entry.sync_seq or 0) + 1
     entry.sync_hash = DeltaTracker.compute_sync_hash(entry)
@@ -136,15 +162,12 @@ def store(
                 # avoid stale rows when store() is called as INSERT OR REPLACE.
                 # PRD-CORE-245 FR02: the delete is namespace-qualified, or
                 # storing (nsA, X) would destroy the FTS row of (nsB, X).
-                backend._conn.execute(
-                    "DELETE FROM memories_fts WHERE id = ? AND namespace = ?",
-                    (entry.id, entry.namespace),
-                )
-                backend._conn.execute(
-                    "INSERT INTO memories_fts(id, namespace, content, detail, tags) VALUES (?, ?, ?, ?, ?)",
-                    _fts_row(entry),
-                )
-            _replace_tag_postings(backend, entry.namespace, entry.id, entry.tags)
+                # PRD-CORE-330: the delete resolves the row's rowid through
+                # memories_fts_rowid (indexed point lookup) and removes it by
+                # rowid -- never the old `WHERE id = ? AND namespace = ?` scan.
+                _fts_delete_row(backend, entry.namespace, entry.id)
+                _fts_insert_row(backend, entry.namespace, entry.id, _fts_row(entry))
+            _replace_postings(backend, entry.namespace, entry.id, tags=entry.tags, anchors=entry.anchors)
             # S9 fix: suppress the commit when inside a ``transaction()`` block
             # so a store() batched with other writes commits exactly once at
             # the outermost COMMIT — matching update()/increment_recall_access.
@@ -163,6 +186,8 @@ def store_many(
     insert_columns_sql: str,
     columns: tuple[str, ...],
     entries: list[MemoryEntry],
+    *,
+    select_columns_sql: str = "",
 ) -> int:
     """Bulk-insert a list of entries in one SQLite transaction using executemany.
 
@@ -177,7 +202,9 @@ def store_many(
         return 0
 
     for entry in entries:
-        validate_entry_utf8(entry)
+        validate_entry_for_write(entry)
+        if select_columns_sql and violates_evidence_invariant(entry):  # PRD-CORE-312, as in store()
+            refuse_new_violation(get(backend, select_columns_sql, entry.id, entry.namespace), entry)
 
     placeholders = ", ".join(["?"] * len(columns))
     sql = f"INSERT OR REPLACE INTO memories ({insert_columns_sql}) VALUES ({placeholders})"  # noqa: S608
@@ -211,16 +238,26 @@ def store_many(
             backend._conn.executemany(sql, rows)
             fts_batch = getattr(backend, "_fts_available", False)
             if fts_batch:
+                # PRD-CORE-330: purge_fts_rows_for now resolves rowids through
+                # memories_fts_rowid (indexed lookup) and deletes by rowid --
+                # not the old `id IN (...)` full-index-per-chunk scan. Insert
+                # one row at a time (not executemany) so `cursor.lastrowid`
+                # can be captured and recorded in the map.
+                for namespace in {entry.namespace for entry in final_entries}:
+                    purge_fts_rows_for(backend, namespace, [e.id for e in final_entries if e.namespace == namespace])
+                new_rowids: list[tuple[str, str, int]] = []
+                for e in final_entries:
+                    cursor = backend._conn.execute(
+                        "INSERT INTO memories_fts(id, namespace, content, detail, tags) VALUES (?, ?, ?, ?, ?)",
+                        _fts_row(e),
+                    )
+                    new_rowids.append((e.namespace, e.id, cursor.lastrowid))
                 backend._conn.executemany(
-                    "DELETE FROM memories_fts WHERE id = ? AND namespace = ?",
-                    [(entry.id, entry.namespace) for entry in final_entries],
-                )
-                backend._conn.executemany(
-                    "INSERT INTO memories_fts(id, namespace, content, detail, tags) VALUES (?, ?, ?, ?, ?)",
-                    [_fts_row(e) for e in final_entries],
+                    "INSERT OR REPLACE INTO memories_fts_rowid(namespace, id, fts_rowid) VALUES (?, ?, ?)",
+                    new_rowids,
                 )
             for entry in final_entries:
-                _replace_tag_postings(backend, entry.namespace, entry.id, entry.tags)
+                _replace_postings(backend, entry.namespace, entry.id, tags=entry.tags, anchors=entry.anchors)
             # Merge FTS5 index segments after bulk load to prevent fragmentation.
             # Only worthwhile for large batches — optimize() walks the whole index,
             # so the merge cost only pays off when many segments were just appended.
@@ -324,11 +361,16 @@ def update(
         utf8_fields["id"] = entry_id
         validate_utf8_fields(utf8_fields)
 
+        updated_entry = existing.model_copy(deep=True)
+        for key, val in field_dict.items():
+            setattr(updated_entry, key, val)
+        # PRD-CORE-312: refuse only a NEW verified-evidence violation this update
+        # would introduce -- unconditionally, so caller-supplied sync fields
+        # cannot skip it; see ``store()``'s docstring and ``_evidence_invariant``.
+        refuse_new_violation(existing, updated_entry)
+
         # Mark dirty for sync pipeline (PRD-INFRA-051)
         if not {"sync_seq", "sync_hash", "last_synced_at"} & field_dict.keys():
-            updated_entry = existing.model_copy(deep=True)
-            for key, val in field_dict.items():
-                setattr(updated_entry, key, val)
             next_sync_seq = (existing.sync_seq or 0) + 1
             field_dict["sync_seq"] = next_sync_seq
             updated_entry.sync_seq = next_sync_seq
@@ -364,16 +406,21 @@ def update(
             # Q-values, sync metadata and status do not change indexed text.
             # Avoid rewriting the inverted indexes for these hot-path updates.
             if {"content", "detail", "tags"} & fields.keys() and getattr(backend, "_fts_available", False):
-                backend._conn.execute(
-                    "DELETE FROM memories_fts WHERE id = ? AND namespace = ?",
-                    (entry_id, namespace),
+                # PRD-CORE-330: rowid-keyed delete via memories_fts_rowid, not
+                # the old full-scan `WHERE id = ? AND namespace = ?`.
+                _fts_delete_row(backend, namespace, entry_id)
+                _fts_insert_row(
+                    backend, namespace, entry_id, (entry_id, namespace, _fts_content, _fts_detail, _fts_tags)
                 )
-                backend._conn.execute(
-                    "INSERT INTO memories_fts(id, namespace, content, detail, tags) VALUES (?, ?, ?, ?, ?)",
-                    (entry_id, namespace, _fts_content, _fts_detail, _fts_tags),
-                )
-            if "tags" in fields:
-                _replace_tag_postings(backend, namespace, entry_id, json.loads(_fts_tags) if _fts_tags else [])
+            # ``None`` leaves an index alone: only the postings of a field this update names move.
+            tags = (json.loads(_fts_tags) if _fts_tags else []) if "tags" in fields else None
+            raw = fields.get("anchors")  # a JSON string (the column form) is decoded like the column is
+            anchors = (
+                cast("list[object]", (json.loads(raw) if isinstance(raw, str) and raw else raw) or [])
+                if "anchors" in fields
+                else None
+            )
+            _replace_postings(backend, namespace, entry_id, tags=tags, anchors=anchors)
             if backend._skip_commit_depth == 0:
                 backend._conn.commit()
         return get(backend, select_columns_sql, entry_id, namespace)
@@ -448,13 +495,15 @@ def delete(backend: SQLiteBackend, entry_id: str, namespace: str) -> bool:
             if deleted and backend._vec_available:
                 backend._delete_vector(entry_id, namespace)
             if deleted and getattr(backend, "_fts_available", False):
-                backend._conn.execute("DELETE FROM memories_fts WHERE id = ? AND namespace = ?", (entry_id, namespace))
+                # PRD-CORE-330: rowid-keyed delete via memories_fts_rowid, not
+                # the old full-scan `WHERE id = ? AND namespace = ?`.
+                _fts_delete_row(backend, namespace, entry_id)
             # Remove knowledge-graph edges and tag postings that reference the
             # deleted entry (see purge_edges_for — one source of truth shared
             # with delete_by_namespace's bulk cleanup).
             if deleted:
                 purge_edges_for(backend, (entry_id,), namespace)
-                purge_tag_postings_for(backend, namespace, (entry_id,))
+                purge_postings_for(backend, namespace, (entry_id,))
             # Defer the commit inside a ``transaction()`` block so the row +
             # vector deletes batch into the caller's outermost COMMIT rather
             # than prematurely committing their open transaction.
@@ -477,3 +526,39 @@ def delete(backend: SQLiteBackend, entry_id: str, namespace: str) -> bool:
             f"Failed to delete entry {entry_id}: {exc}",
             path=str(backend._db_path),
         ) from exc
+
+
+def existing_ids(backend: SQLiteBackend, entry_ids: Sequence[str], namespace: str) -> set[str]:
+    """Which of *entry_ids* *namespace* holds: one ``IN`` read per bind chunk, no row hydrated."""
+    held: set[str] = set()
+    try:
+        with backend._lock:
+            for chunk in iter_bind_chunks(list(entry_ids), reserved_bindings=1):
+                placeholders = ",".join("?" for _ in chunk)
+                sql = f"SELECT id FROM memories WHERE namespace = ? AND id IN ({placeholders})"  # noqa: S608
+                held.update(str(row[0]) for row in backend._conn.execute(sql, (namespace, *chunk)))
+    except sqlite3.Error as exc:
+        raise StorageError(f"Failed to read entry ids: {exc}", path=str(backend._db_path)) from exc
+    return held
+
+
+def delete_many(backend: SQLiteBackend, entry_ids: Sequence[str], namespace: str) -> int:
+    """:func:`delete` for many ids, every sidecar purged per bind chunk (PRD-CORE-309 B71-13).
+
+    Only rows that exist are deleted, and only their sidecars are purged -- exactly the per-row loop's
+    effect. CONTRACT: the caller owns the transaction (``SQLiteBackend.delete_many`` opens one).
+    """
+    gone = sorted(existing_ids(backend, entry_ids, namespace))
+    if not gone:
+        return 0
+    with backend._lock:
+        _delete_keyed(backend, "memories", "id", namespace, gone)
+        note_delete(backend)
+        if backend._vec_available:
+            purge_vectors_for(backend._conn, namespace, gone)
+        if getattr(backend, "_fts_available", False):
+            purge_fts_rows_for(backend, namespace, gone)
+        purge_edges_for(backend, gone, namespace)
+        purge_postings_for(backend, namespace, gone)
+    logger.debug("memory_batch_deleted", count=len(gone))
+    return len(gone)

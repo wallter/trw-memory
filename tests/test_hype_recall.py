@@ -26,9 +26,3 @@ def test_legacy_siblings_never_consume_canonical_candidate_limit(observe):
     assert [entry.id for entry in result] == ["P#hype0"]
     if observe:
         assert dict(batches[0]) == pytest.approx({"P": 0.0, "P#hype0": 0.8})
-
-
-@pytest.mark.parametrize("value", [True, None, 0, "false"])
-def test_collapse_activation_rejects_even_empty_input(value):
-    with pytest.raises(TypeError, match="retired"):
-        hybrid_search("q", [], scope=DEFAULT_SCOPE, collapse_hype=value)

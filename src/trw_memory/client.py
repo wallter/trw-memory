@@ -20,9 +20,7 @@ from trw_memory._client_recall_hybrid import try_hybrid_recall as _native_try_hy
 from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocation
 
 import asyncio
-import warnings
 import threading
-import uuid
 from collections.abc import Callable, Coroutine, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -55,10 +53,6 @@ from trw_memory.sync.remote import (
 from trw_memory.sync.retry_queue import RetryQueue
 from trw_memory.sync.subscriber import SSESubscriber as SSESubscriber  # noqa: F401 — test-patched
 
-# Org-shared recall alias seam extracted to _client_org_shared_aliases.py
-# (PRD-DIST-246 effective-LOC ratchet). MemoryClient mixes it in so the
-# `self._X` / `MemoryClient._X` monkeypatch seam resolves via the MRO.
-from trw_memory._client_org_shared_aliases import OrgSharedAliasMixin
 from trw_memory._client_operations import ClientOperationsMixin
 from trw_memory._client_context import ClientContextMixin
 
@@ -95,19 +89,6 @@ from trw_memory._client_bulk_store import (
 from trw_memory._client_conversation import ConversationMessage as ConversationMessage
 
 
-def _make_id() -> str:
-    """Generate a unique memory ID with ``M-`` prefix and 16 hex characters.
-
-    Uses 16 hex characters (64 bits of entropy) from a UUID4 to minimise
-    collision probability.  At 10k entries the birthday-paradox collision
-    chance is ~2.7e-12 (vs ~1.2e-5 with the previous 8-char / 32-bit scheme).
-
-    Returns:
-        A string matching ``M-[0-9a-f]{16}``, e.g. ``"M-a1b2c3d4e5f6a7b8"``.
-    """
-    return f"M-{uuid.uuid4().hex[:16]}"
-
-
 # TypedDict shapes + agent protocols extracted to _client_models.py
 # (PRD-DIST-246 batch 113). Re-exports preserve the public API.
 from trw_memory._client_models import (  # noqa: E402
@@ -118,19 +99,6 @@ from trw_memory._client_models import (  # noqa: E402
     RemoteResultDict as RemoteResultDict,
     StoreResultDict as StoreResultDict,
     _ToolFn as _ToolFn,
-)
-
-
-# Distilled-tiering helpers + entry-to-result extracted to
-# _client_distilled_tiering.py (PRD-DIST-246 batch 109). Re-export
-# preserves the public API surface (`apply_distilled_tiering` is part of
-# the documented client.py exports). ``get_distilled_recall_weight`` and
-# ``is_distilled_result`` have no consumer through this facade (nothing in
-# src imports them from here) -- import them from `_client_distilled_tiering`
-# directly if a new one needs them.
-from trw_memory._client_distilled_tiering import (  # noqa: E402
-    DEFAULT_DISTILLED_RECALL_WEIGHT as DEFAULT_DISTILLED_RECALL_WEIGHT,
-    apply_distilled_tiering as apply_distilled_tiering,
 )
 
 
@@ -158,10 +126,7 @@ def _create_local_backend(
     return create_backend_from_config(config, namespace, db_path_override=db_path_override)
 
 
-_RETIRED_UNSET = object()
-
-
-class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixin):
+class MemoryClient(ClientContextMixin, ClientOperationsMixin):
     """High-level async client for the trw-memory system.
 
     Args:
@@ -207,7 +172,6 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
         timeout: float = 5.0,
         *,
         db_path: Path | str | None = None,
-        question_generator: object = _RETIRED_UNSET,
     ) -> None:
         """Initialise a MemoryClient with namespace isolation and mode selection.
 
@@ -232,10 +196,6 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
         store at ``<trw_dir>/memory/memory.db`` under ``namespace="default"``.
 
         """
-        if question_generator is not _RETIRED_UNSET:
-            if question_generator is not None:
-                raise TypeError("question_generator: HyPE is retired; remove this argument")
-            warnings.warn("question_generator: HyPE is retired; remove this argument", UserWarning, stacklevel=2)
         from trw_memory._client_lifecycle import init_client as _impl
 
         _impl(self, namespace, mode=mode, timeout=timeout, db_path=db_path)
@@ -409,7 +369,7 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
         as_of: datetime | None = None,
         include_superseded: bool = False,
         include_graph_expansion: bool = False,
-        query_expansion: object = _RETIRED_UNSET,
+        types: list[str] | None = None,
     ) -> list[MemoryResultDict]:
         """Search memories by keyword query using hybrid retrieval.
 
@@ -418,13 +378,9 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
         pipeline is unavailable. Both paths apply tag filtering, min_score
         thresholds, limit capping, and optional token-budget fitting.
         Implementation lives in ``_client_recall.recall_impl`` (PRD-DIST-246
-        batch 105).
+        batch 105). *types* keeps only those ``MemoryType`` values (PRD-CORE-334).
 
         """
-        if query_expansion is not _RETIRED_UNSET:
-            if query_expansion is not None and not (isinstance(query_expansion, str) and not query_expansion.strip()):
-                raise TypeError("query_expansion: HyDE is retired; remove this argument")
-            warnings.warn("query_expansion: HyDE is retired; remove this argument", UserWarning, stacklevel=2)
         from trw_memory._client_recall import recall_impl as _recall_impl
 
         return await _recall_impl(
@@ -447,6 +403,7 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
             as_of=as_of,
             include_superseded=include_superseded,
             include_graph_expansion=include_graph_expansion,
+            types=types,
         )
 
     def _get_embedder(self) -> EmbeddingProvider | None:
@@ -468,6 +425,7 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
                 lambda: get_local_embedder(
                     model_name=self._config.embedding_model,
                     dim=self._config.embedding_dim,
+                    enabled=self._config.embeddings_enabled,
                 ),
                 surface="sdk",
             )
@@ -493,26 +451,6 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin, OrgSharedAliasMixi
         from trw_memory._client_recall import record_recall_access_impl as _impl
 
         await _impl(self, results)
-
-    # ---- Remote publish aliases (PRD-DIST-246 batch 111) -------------------
-
-    def _should_attempt_remote_publish(self, entry: MemoryEntry) -> bool:
-        from trw_memory._client_lifecycle import should_attempt_remote_publish as _impl
-
-        return _impl(self, entry)
-
-    def _schedule_background_task(self, coro: Coroutine[object, object, None]) -> None:
-        from trw_memory._client_lifecycle import schedule_background_task as _impl
-
-        _impl(self, coro)
-
-    async def _publish_entry(self, entry: MemoryEntry) -> None:
-        from trw_memory._client_lifecycle import publish_entry as _impl
-
-        await _impl(self, entry)
-
-    # Org-shared helper aliases (PRD-DIST-246 batch 107) moved to the
-    # ``OrgSharedAliasMixin`` base (`_client_org_shared_aliases.py`).
 
     # Search, deletion, and security-review methods live in ``ClientOperationsMixin``.
 

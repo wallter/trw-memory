@@ -7,10 +7,21 @@ serialisation logic used by both :mod:`sqlite_backend` and
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from typing import cast
 
-from trw_memory.models.memory import Anchor, Assertion, Confidence, MemoryStatus, MemoryType, ProtectionTier
+from trw_memory.models.memory import (
+    Anchor,
+    Assertion,
+    Confidence,
+    EvidenceLevel,
+    MemoryEntry,
+    MemoryStatus,
+    MemoryType,
+    ProtectionTier,
+)
 
 # ---------------------------------------------------------------------------
 # Field definitions
@@ -37,6 +48,17 @@ _BOOKKEEPING_FIELDS: frozenset[str] = frozenset(
         "sync_seq",
     }
 )
+
+
+def revision_of(entry: MemoryEntry | None) -> str | None:
+    """The token a revision-conditional write compares (PRD-CORE-308): a hash of the row
+    less the counters a recall bumps, so only a content change moves it. It survives the
+    daemon's JSON wire unchanged, so a client can take it from a row it read over HTTP."""
+    if entry is None:
+        return None
+    body = entry.model_dump(mode="json", exclude=set(_BOOKKEEPING_FIELDS))
+    return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+
 
 #: Upper bound for the monotonic recall/session/access counters. These only
 #: ever increment (one per recall/session), so an adversary replaying access
@@ -99,6 +121,7 @@ ENTRY_COLUMNS: tuple[str, ...] = (
     "recall_count",
     "verification_status",
     "verification_checked_at",
+    "evidence_level",
 )
 
 #: Fields that must never be changed via ``update()``.
@@ -127,11 +150,12 @@ DICT_FIELDS: frozenset[str] = frozenset({"metadata", "vector_clock"})
 #: cannot persist and permanently quarantine the row on the next deserialize
 #: (row_to_entry raises ValueError on an unknown enum member). The constructor is
 #: called only as a validation gate — the original ``.value`` string is stored.
-ENUM_STRING_FIELDS: dict[str, type[MemoryStatus | Confidence | ProtectionTier | MemoryType]] = {
+ENUM_STRING_FIELDS: dict[str, type[MemoryStatus | Confidence | ProtectionTier | MemoryType | EvidenceLevel]] = {
     "status": MemoryStatus,
     "confidence": Confidence,
     "protection_tier": ProtectionTier,
     "type": MemoryType,
+    "evidence_level": EvidenceLevel,
 }
 
 #: Values accepted for the ``verification_status`` column (PRD-CORE-231-FR02,
@@ -195,6 +219,8 @@ def serialize_update_value(key: str, val: object) -> list[object] | dict[str, st
         return [a.model_dump(mode="json") if isinstance(a, Anchor) else a for a in val]
     if key in LIST_FIELDS and isinstance(val, list):
         return [str(v) for v in val]
+    if key in LIST_FIELDS and val == "":  # an empty string clears a list field like [] (CORE-332-F3)
+        return []
     if key in DICT_FIELDS and isinstance(val, dict):
         return {str(k): str(v) for k, v in val.items()}
     if isinstance(val, datetime):

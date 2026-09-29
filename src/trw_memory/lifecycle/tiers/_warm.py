@@ -8,16 +8,13 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
-from collections.abc import Iterator
-from contextlib import closing
+from collections.abc import Collection, Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import structlog
 
-from trw_memory._live_stores import connect_registered
-from trw_memory.exceptions import StorageError
+from trw_memory.lifecycle.tiers._warm_discovery import discovery_rows, entry_item
 from trw_memory.lifecycle.tiers._warm_sidecar_cache import (
     ParsedSidecar,
     SidecarCache,
@@ -26,12 +23,13 @@ from trw_memory.lifecycle.tiers._warm_sidecar_cache import (
     parse_sidecar,
     sidecar_key,
 )
-from trw_memory.lifecycle.tiers._warm_space import admit_warm_hits, admit_warm_vectors
+from trw_memory.lifecycle.tiers._warm_space import admit_warm_hits
 from trw_memory.namespaces.validation import DEFAULT_NAMESPACE
 from trw_memory.storage.persistence import lock_for_rmw
 
 if TYPE_CHECKING:
     from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
+    from trw_memory.lifecycle.tiers._manager_search import WindowRank
     from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 logger = structlog.get_logger(__name__)
@@ -62,11 +60,13 @@ class WarmTierStore:
         # the next read to re-parse the file (see _warm_sidecar_cache).
         self._sidecar_cache = SidecarCache()
 
-    def _get_warm_backend(self, dim: int | None = None) -> SQLiteBackend | None:
+    def _get_warm_backend(self, dim: int | None = None, *, create: bool = True) -> SQLiteBackend | None:
         """Lazy-init and cache a SQLiteBackend for warm tier operations.
 
         Args:
             dim: Embedding dimension (required for vector ops, None for metadata-only).
+            create: ``False`` on a read path: return ``None`` when ``warm.db`` does not exist yet
+                instead of creating it (and its directory) as a side effect.
 
         Returns:
             Cached SQLiteBackend instance, or None if import fails.
@@ -88,21 +88,28 @@ class WarmTierStore:
             self._warm_backend_dim = None
 
         if self._warm_backend is None:
-            db_path = self._warm_db_path()
+            db_path = self._warm_db_path(create=create)
+            if not create and not db_path.is_file():
+                return None  # a read never creates the warm tier
             self._warm_backend = _SQLiteBackend(db_path, dim=effective_dim)
             self._warm_backend_dim = effective_dim
 
         return self._warm_backend
 
-    def _warm_db_path(self) -> Path:
-        """Resolve path to warm.db."""
+    def _warm_db_path(self, *, create: bool = True) -> Path:
+        """Resolve path to warm.db; ``create=False`` names it without making its directory."""
         mem_dir = self._base_dir / "memory"
-        mem_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if create:
+            mem_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         return mem_dir / "warm.db"
 
     def _warm_sidecar_path(self) -> Path:
         """Path to the warm tier keyword-search sidecar (JSONL)."""
         return self._warm_db_path().with_suffix(".jsonl")
+
+    def _warm_sidecar_read_path(self) -> Path:
+        """The sidecar's path for a READ: names it without creating the directory."""
+        return self._warm_db_path(create=False).with_suffix(".jsonl")
 
     def _iter_sidecar_records(self, sidecar: Path) -> Iterator[tuple[int, dict[str, object]]]:
         """Yield ``(line_number, record)`` for each well-formed row in the sidecar.
@@ -151,7 +158,7 @@ class WarmTierStore:
 
     def get_embedding(self, entry_id: str) -> list[float] | None:
         """Return the stored warm-tier embedding for *entry_id*, if present."""
-        backend = self._get_warm_backend()
+        backend = self._get_warm_backend(create=False)
         if backend is None:
             return None
         return backend.get_stored_embeddings([entry_id]).get(entry_id)
@@ -300,7 +307,7 @@ class WarmTierStore:
         backend_present = False
         vector_removed = False
         try:
-            backend = self._get_warm_backend()
+            backend = self._get_warm_backend(create=False)
             if backend is not None:
                 backend_present = True
                 backend.delete(entry_id, namespace=WARM_TIER_NAMESPACE)
@@ -314,7 +321,7 @@ class WarmTierStore:
         vector_still_present = False
         if backend_present:
             try:
-                backend = self._get_warm_backend()
+                backend = self._get_warm_backend(create=False)
                 if backend is not None:
                     vector_exists = getattr(backend, "vector_exists", None)
                     vector_still_present = (
@@ -332,8 +339,10 @@ class WarmTierStore:
 
     def purge_sidecar_entry(self, entry_id: str) -> bool:
         """Remove an entry from the warm sidecar without touching vector state."""
-        sidecar = self._warm_sidecar_path()
+        sidecar = self._warm_sidecar_read_path()
         sidecar_removed = False
+        if not sidecar.exists():
+            return False  # nothing to purge, and taking the lock would create the directory
         # Same advisory lock as _warm_sidecar_upsert: purge is also a
         # read-modify-write on the sidecar, so it must serialize against
         # concurrent upserts or one side's write is lost.
@@ -352,24 +361,35 @@ class WarmTierStore:
         self,
         query_embedding: list[float] | None,
         *,
+        query_tokens: Sequence[str] = (),
+        limit: int | None = None,
         covered_ids: frozenset[str] = frozenset(),
         namespace: str | None = None,
         query_space: EmbeddingSpace | None = None,
+        rank: WindowRank | None = None,
     ) -> list[dict[str, object]]:
-        """Read full sidecars and uncapped vectors without a writable backend.
+        """Uncovered warm rows for tier discovery, read without a writable backend.
 
         SQLite mode=ro may create WAL coordination sidefiles; records, schema,
         archive contents and lifecycle access metadata are never written here.
 
-        Every sidecar row is returned except those named in *covered_ids*: rows
-        the caller already ranked from the primary store, which tier discovery
-        would drop anyway. They are neither copied nor vector-scored, so a recall
-        whose hybrid pool held the whole namespace pays per UNCOVERED row, not
-        per sidecar row (a full copy was ~12 ms at 5,000 rows, ~60 ms at
-        20,000). A covered row is still checked to belong to *namespace* when
-        one is given (``NamespaceScopeError`` otherwise), as discovery checks
-        every row it receives. Only vectors recorded in *query_space* are
-        scored (``_space_gate``); ``None`` scores none.
+        Rows named in *covered_ids* (the caller's primary pool) are never copied
+        or scored; a covered row is still checked to belong to *namespace* when
+        one is given (``NamespaceScopeError`` otherwise). Only vectors recorded in
+        *query_space* are scored (``_space_gate``); ``None`` scores none. A scored
+        row carries ``_tier_relevance = 1 - d^2/2``.
+
+        With a *limit* M and a *rank* (PRD-CORE-318 FR02b) the vectored rows come
+        from a sqlite-vec KNN window, not a decode of every vector. The window
+        starts at M and widens until its M-th best rank score (``rank.score``)
+        beats the most any row past it could score (``rank.ceiling``), so the
+        rows it leaves out cannot reach recall's top M. A row outside that window with an in-space vector is not
+        returned; any other row (no vector, another space, a window proof that
+        failed) is returned when its snapshot matches a query token, and when
+        fewer than M rows are hinted or matched every such row is returned, so
+        a stale snapshot is never excluded where FR02 could have kept it. Rows
+        keep sidecar order. ``limit=None`` (or no *rank*) returns every uncovered row, scoring
+        every in-space vector (the FR02 scan).
         """
         sidecar = self._base_dir / "memory" / "warm.jsonl"
         if not sidecar.exists():
@@ -379,43 +399,16 @@ class WarmTierStore:
             from trw_memory.security.namespace_scope import NamespaceScopeError
 
             raise NamespaceScopeError("tier snapshot outside authorized namespace")
-        entries = self._entries_by_id(parsed.rows_except(covered_ids))
-        db_path = sidecar.with_suffix(".db")
-        scored_ids = list(entries)
-        if query_embedding is None or not scored_ids or not db_path.exists():
-            return list(entries.values())
-        try:
-            import sqlite_vec
-
-            # connect_registered refuses (StorageError) a store swapped during the open
-            # (PRD-SEC-016); that degrades to "vectors unavailable" like every other
-            # failure here -- this is a ranking enhancement, not a data path.
-            with closing(
-                connect_registered(db_path, sqlite3, f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
-            ) as conn:
-                conn.enable_load_extension(True)
-                sqlite_vec.load(conn)
-                conn.enable_load_extension(False)
-                # Warm vectors have one fixed namespace; reject corrupted foreign rows
-                # before the existing ID-based bulk decoder sees them.
-                foreign = conn.execute(
-                    "SELECT 1 FROM vec_index WHERE namespace != ? LIMIT 1", (WARM_TIER_NAMESPACE,)
-                ).fetchone()
-                if foreign:
-                    from trw_memory.security.namespace_scope import NamespaceScopeError
-
-                    raise NamespaceScopeError("warm vector index contains foreign namespace")
-                vectors = admit_warm_vectors(conn, scored_ids, query_space)
-            for entry_id, vector in vectors.items():
-                if len(vector) != len(query_embedding):
-                    continue
-                distance_squared = sum((a - b) ** 2 for a, b in zip(vector, query_embedding, strict=True))
-                entries[entry_id]["_tier_relevance"] = 1.0 - distance_squared / 2.0
-        except StorageError:
-            logger.warning("warm_tier_db_identity_changed_during_open", path=str(db_path))
-        except (ImportError, sqlite3.Error, OSError, AttributeError):
-            logger.debug("warm_tier_discovery_vectors_unavailable", exc_info=True)
-        return list(entries.values())
+        return discovery_rows(
+            parsed,
+            sidecar.with_suffix(".db"),
+            query_embedding,
+            query_tokens=query_tokens,
+            limit=limit,
+            covered_ids=covered_ids,
+            query_space=query_space,
+            rank=rank,
+        )
 
     def warm_search(
         self,
@@ -446,7 +439,7 @@ class WarmTierStore:
         sidecar_entries = self._warm_sidecar_entries_by_id()
         if query_embedding is not None:
             try:
-                backend = self._get_warm_backend(dim=len(query_embedding))
+                backend = self._get_warm_backend(dim=len(query_embedding), create=False)
                 if backend is not None:
                     raw = admit_warm_hits(backend, backend.search_vectors(query_embedding, top_k=top_k), query_space)
                     if raw:
@@ -481,7 +474,7 @@ class WarmTierStore:
 
     def _warm_keyword_search(self, query_tokens: list[str], top_k: int) -> list[dict[str, object]]:
         """Search the warm sidecar JSONL for keyword matches."""
-        sidecar = self._warm_sidecar_path()
+        sidecar = self._warm_sidecar_read_path()
         if not sidecar.exists() or not query_tokens:
             return []
 
@@ -513,34 +506,24 @@ class WarmTierStore:
 
     def _warm_sidecar_entries_by_id(self) -> dict[str, dict[str, object]]:
         """Hydrate the full entry payloads stored alongside the warm index."""
-        sidecar = self._warm_sidecar_path()
+        sidecar = self._warm_sidecar_read_path()
         if not sidecar.exists():
             return {}
         return self._entries_by_id(self._current_parse(sidecar).rows)
 
+    def _warm_rows(self) -> SidecarRows:
+        """The cached parse of the warm sidecar's rows, with no payload copied (B71-84)."""
+        sidecar = self._warm_sidecar_read_path()
+        return self._current_parse(sidecar).rows if sidecar.exists() else []
+
     @staticmethod
-    def _entries_by_id(rows: SidecarRows) -> dict[str, dict[str, object]]:
-        """Entry payloads (fresh copies, safe to annotate) of *rows*, keyed by id."""
+    def _entries_by_id(rows: SidecarRows, only: Collection[str] | None = None) -> dict[str, dict[str, object]]:
+        """Entry payloads (fresh copies, safe to annotate) of *rows*, keyed by id; just *only*'s when given."""
         entries: dict[str, dict[str, object]] = {}
         for _line_number, rec in rows:
             entry_id = str(rec.get("id", ""))
-            if not entry_id:
-                continue
-
-            payload = rec.get("entry")
-            if isinstance(payload, dict):
-                item = dict(payload)
-            else:
-                raw_tags = rec.get("tags", [])
-                tags = [str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else []
-                item = {
-                    "id": entry_id,
-                    "content": str(rec.get("summary", "")),
-                    "tags": tags,
-                }
-
-            item.setdefault("id", entry_id)
-            entries[entry_id] = item
+            if entry_id and (only is None or entry_id in only):
+                entries[entry_id] = entry_item(entry_id, rec)
         return entries
 
     def close(self) -> None:

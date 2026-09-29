@@ -2,16 +2,18 @@
 
 Belongs to the ``sqlite_backend.py`` facade (via ``_vector_ops.py``'s
 re-export) — moved out of ``_vector_ops.py`` (PRD-CORE-291 slice 3) when that
-module crossed the effective-LOC ceiling. Both helpers read
+module crossed the effective-LOC ceiling. These helpers read
 ``vec_index.provenance_json`` (never write it) and classify or verify it with
 :class:`~trw_memory.embeddings.provenance.VectorProvenance`:
 
 - ``vector_space_census`` — count a namespace's stored vectors by the
   embedding space their provenance CLAIMS (no re-hash against the blob).
+- ``vectors_proven_in_space`` — the dense gate's question of the same claims:
+  is every vector in one space, and how many rows hold one.
 - ``get_vector_records`` — read scoped vector bytes and proof together,
   re-hashing the blob to invalidate a claim that disagrees with its bytes.
 
-``_vector_ops.py`` re-exports both (imported there) so every existing
+``_vector_ops.py`` re-exports them (imported there) so every existing
 ``from trw_memory.storage._vector_ops import get_vector_records`` call site
 keeps working.
 """
@@ -32,6 +34,27 @@ from trw_memory.storage._sql_utils import iter_bind_chunks
 logger = structlog.get_logger(__name__)
 
 
+#: One row per claimed space: its key, how many existing rows hold a vector in it, and ONE sample
+#: provenance record to rebuild the :class:`EmbeddingSpace` from. The JOIN on the ``memories``
+#: key keeps an orphan vector (its row deleted while sqlite-vec was unavailable) out of every count.
+_CENSUS_SQL = """SELECT v.space_key, COUNT(DISTINCT v.entry_id), (SELECT s.provenance_json FROM vec_index s
+    WHERE s.namespace = v.namespace AND s.space_key = v.space_key LIMIT 1)
+FROM vec_index v CROSS JOIN memories m ON m.namespace = v.namespace AND m.id = v.entry_id
+WHERE v.namespace = ? GROUP BY v.space_key"""
+
+#: NULL when any existing row's vector claims another space or none, else how many existing rows hold a
+#: vector in the space. Each EXISTS is one range seek on ``idx_vec_index_space`` (CROSS JOIN pins that
+#: order: SQLite otherwise walks every ``memories`` row), so a stale namespace answers at the first hit.
+_PROOF_SQL = """SELECT CASE WHEN EXISTS (SELECT 1 FROM vec_index v CROSS JOIN memories m
+    ON m.namespace = v.namespace AND m.id = v.entry_id WHERE v.namespace = ?1 AND v.space_key IS NULL)
+OR EXISTS (SELECT 1 FROM vec_index v CROSS JOIN memories m
+    ON m.namespace = v.namespace AND m.id = v.entry_id WHERE v.namespace = ?1 AND v.space_key < ?2)
+OR EXISTS (SELECT 1 FROM vec_index v CROSS JOIN memories m
+    ON m.namespace = v.namespace AND m.id = v.entry_id WHERE v.namespace = ?1 AND v.space_key > ?2)
+THEN NULL ELSE (SELECT COUNT(DISTINCT v.entry_id) FROM vec_index v CROSS JOIN memories m
+    ON m.namespace = v.namespace AND m.id = v.entry_id WHERE v.namespace = ?1 AND v.space_key = ?2) END"""
+
+
 def vector_space_census(
     conn: Any,
     lock: _thread.LockType | _thread.RLock,
@@ -44,13 +67,16 @@ def vector_space_census(
     Only vectors of existing ``memories`` rows count, and each row once per space (C12 rc4): an orphan
     vector, or a second vector of one row, must not stand in for a row that has none.
 
-    Reads only ``vec_index.provenance_json`` -- no vector blob is loaded -- and
-    classifies each row with :meth:`VectorProvenance.from_json`, so a NULL,
-    malformed or wrongly-shaped record counts under ``None`` (unknown space),
-    never as any real space. Keys compare the FULL :class:`EmbeddingSpace`
-    identity. This is the provenance CLAIM: unlike :func:`get_vector_records`
-    it does not re-hash blobs against ``vector_sha256``, so a claim that
-    disagrees with its bytes is counted under the claimed space.
+    One ``GROUP BY`` over ``vec_index.space_key`` (schema 9), which the one writer
+    (``upsert_vector``) and the v9 backfill derive through
+    :meth:`VectorProvenance.from_json`, so a NULL, malformed or wrongly-shaped
+    record counts under ``None`` (unknown space), never as any real space. Keys
+    compare the FULL :class:`EmbeddingSpace` identity; each group's space is rebuilt
+    from one sample record, and a group whose sample does not reproduce its key
+    counts under ``None``. No vector blob is read. This is the provenance CLAIM:
+    unlike :func:`get_vector_records` it does not re-hash blobs against
+    ``vector_sha256``, so a claim that disagrees with its bytes is counted under
+    the claimed space.
 
     ``None`` means the census could not be taken (sqlite-vec unavailable or a
     SQL error): callers must not read it as "no stale vectors".
@@ -61,21 +87,36 @@ def vector_space_census(
         return None
     try:
         with lock:
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(vec_index)").fetchall()}
-            proof_column = "v.provenance_json" if "provenance_json" in columns else "NULL"
-            rows = conn.execute(
-                f"SELECT v.entry_id, {proof_column} FROM vec_index v "  # noqa: S608 -- fixed local SQL fragment only
-                "JOIN memories m ON m.namespace = v.namespace AND m.id = v.entry_id WHERE v.namespace = ?",
-                (namespace,),
-            ).fetchall()
+            groups = conn.execute(_CENSUS_SQL, (namespace,)).fetchall()
     except sqlite3.Error:  # trw-fail-silent-allow: None is the typed "no census" signal; logged at warning
         logger.warning("vector_space_census_error", exc_info=True)
         return None
-    census: dict[EmbeddingSpace | None, set[str]] = {}
-    for entry_id, raw in rows:
-        proof = VectorProvenance.from_json(raw)
-        census.setdefault(proof.space if proof is not None else None, set()).add(entry_id)
-    return {space: len(ids) for space, ids in census.items()}
+    census: dict[EmbeddingSpace | None, int] = {}
+    for key, count, sample in groups:
+        proof = VectorProvenance.from_json(sample) if key is not None else None
+        space = proof.space if proof is not None and proof.space.key == key else None
+        census[space] = census.get(space, 0) + int(count)
+    return census
+
+
+def vectors_proven_in_space(
+    conn: Any, lock: _thread.LockType | _thread.RLock, vec_available: bool, namespace: str, key: str
+) -> int | None:
+    """How many of *namespace*'s rows hold a vector, when EVERY existing row's vector claims the space keyed *key*.
+
+    ``None`` when any vector of an existing row claims another space or none, or
+    no answer could be read (sqlite-vec unavailable, a SQL error). Orphan vectors
+    are ignored, as the census ignores them.
+    """
+    if not vec_available:
+        return None
+    try:
+        with lock:
+            proven = conn.execute(_PROOF_SQL, (namespace, key)).fetchone()[0]
+    except sqlite3.Error:  # trw-fail-silent-allow: None is the typed "nothing proven" signal; logged at warning
+        logger.warning("vectors_proven_in_space_error", exc_info=True)
+        return None
+    return None if proven is None else int(proven)
 
 
 def get_vector_records(

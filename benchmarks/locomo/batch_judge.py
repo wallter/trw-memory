@@ -52,6 +52,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# PRD-SEC-021 FR07: reviewed false positive (docs/sprint-mcp8/security/aikido-2026-09-26/README.md
+# C5, V03/V04 disposition) — this is a commit-time constant host, never influenced by
+# request-time input, in a dev-only benchmark excluded from the built wheel. It is out of
+# scope for the trw-mcp FR06 urlopen census: that census covers trw-mcp/src/trw_mcp only.
 API = "https://openrouter.ai/api/v1"
 ROOT = Path.home() / ".cache" / "trw-bench"
 LEDGER = ROOT / "ledger.jsonl"

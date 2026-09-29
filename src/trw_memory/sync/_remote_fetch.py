@@ -28,7 +28,7 @@ from trw_memory.sync._remote_common import (
     build_platform_headers,
     decode_learning_api_v1_result,
     encode_learning_api_v1_search,
-    is_valid_platform_url,
+    platform_contact_blocked,
 )
 
 logger = structlog.get_logger(__name__)
@@ -151,11 +151,8 @@ def fetch_shared_memories(
         "nothing was asked", "the platform did not answer" or "everything was
         refused".
     """
-    if not cfg.sync_enabled or not cfg.platform_url:
-        return SharedFetchResult([], "disabled", 0, 0)
-    if not is_valid_platform_url(cfg.platform_url):
-        logger.warning("memory_fetch_invalid_platform_url")
-        return SharedFetchResult([], "invalid_config", 0, 0)
+    if blocked := platform_contact_blocked(cfg, "memory_fetch"):
+        return SharedFetchResult([], blocked, 0, 0)
 
     request_payload: dict[str, object] = encode_learning_api_v1_search(
         query=mask_query_credentials(query), limit=limit, min_importance=cfg.sync_min_importance

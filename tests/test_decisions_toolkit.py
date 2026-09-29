@@ -380,6 +380,86 @@ def test_batch_items_chunks_and_records_chunk_provenance() -> None:
     assert len(judge.calls) == 3 and sorted(set(result.chunk_of.values())) == [0, 1, 2]
 
 
+def test_batch_items_scales_chunk_size_down_by_question_count() -> None:
+    """jev-1.13-20260917 calibration defect: chunk_size bounds items, but the calibration it is
+    fitted to (2026-09-19, 28 items) asked ONE question per item. A caller asking several
+    questions per item (a mixed noul/score/choice screen, the common shape, and the one the
+    calibration incident hit with a 'score' question among them) silently multiplies the wire
+    questions a request carries to chunk_size * len(questions) -- well past the volume that
+    default was ever measured against. With one question per item, chunk_size=100 sends
+    everything in a single call, unaffected (backward compatible); with 3 questions per item, the
+    same chunk_size must now split so no call carries more than chunk_size wire questions total.
+    """
+    single_question_judge = _FakeJudge()
+    Toolkit(single_question_judge).batch_items(
+        {f"i{n}": {} for n in range(21)}, {"q": noul("?", true="y", false="n")}, chunk_size=100
+    )
+    assert len(single_question_judge.calls) == 1
+    assert len(single_question_judge.calls[0][1]) == 21
+
+    three_question_judge = _FakeJudge()
+    keys = [f"i{n}" for n in range(60)]
+    result = Toolkit(three_question_judge).batch_items(
+        {k: {} for k in keys},
+        {
+            "feasible": noul("Feasible?", true="yes", false="no"),
+            "value": score("Value", ["low", "mid", "high"]),
+            "blocking": noul("Blocking?", true="yes", false="no"),
+        },
+        chunk_size=100,
+    )
+    max_questions_per_call = max(len(q) for _, q in three_question_judge.calls)
+    assert len(three_question_judge.calls) > 1
+    assert max_questions_per_call <= 100
+    assert result.status == "complete" and set(result.per_item) == set(keys)
+
+
+def test_batch_items_splits_the_motivating_21x3_operator_case() -> None:
+    """The exact operator shape (jev-1.13-20260917): 21 items, 3 questions each (a noul, a
+    score, and a second noul) -- the request that regressed under the previous
+    chunk_size-bounds-items-only logic, because 21 * 3 = 63 stayed under the default
+    chunk_size=100 and so was never split. It must now be split into wire requests that each
+    stay within the calibrated per-call question volume, not sent as one 63-question call.
+    """
+    from trw_memory.decisions._results import CALIBRATED_MAX_WIRE_QUESTIONS
+
+    judge = _FakeJudge()
+    keys = [f"finding{n}" for n in range(21)]
+    result = Toolkit(judge).batch_items(
+        {k: {"text": k} for k in keys},
+        {
+            "feasible": noul("Feasible?", true="yes", false="no"),
+            "value": score("Value", ["low", "mid", "high"]),
+            "blocking": noul("Blocking?", true="yes", false="no"),
+        },
+    )
+    max_questions_per_call = max(len(q) for _, q in judge.calls)
+    assert len(judge.calls) > 1, "the motivating 21x3 batch must now be split across calls"
+    assert max_questions_per_call <= CALIBRATED_MAX_WIRE_QUESTIONS
+    assert result.status == "complete" and set(result.per_item) == set(keys)
+    for key in keys:
+        assert result.per_item[key].noul("feasible") is not None
+        assert result.per_item[key].score("value") is not None
+        assert result.per_item[key].noul("blocking") is not None
+
+
+def test_batch_items_rejects_a_single_items_question_set_over_the_calibrated_cap() -> None:
+    """If one item's own question set alone exceeds the calibrated wire-question volume, dividing
+    chunk_size by len(questions) cannot rescue it (it floors at one item per call, still
+    oversized): refuse up front with a clear, actionable error instead of silently sending an
+    unmeasured request shape.
+    """
+    from trw_memory.decisions._results import CALIBRATED_MAX_WIRE_QUESTIONS
+
+    judge = _FakeJudge()
+    too_many = {
+        f"q{n}": noul(f"Question {n}?", true="yes", false="no") for n in range(CALIBRATED_MAX_WIRE_QUESTIONS + 1)
+    }
+    with pytest.raises(InvalidRequest, match="exceeds the calibrated"):
+        Toolkit(judge).batch_items({"only-item": {}}, too_many)
+    assert judge.calls == [], "an over-cap question set must be refused before any wire call"
+
+
 def test_rank_rejects_criteria_missing_true_and_false() -> None:
     with pytest.raises(InvalidCriteria):
         Toolkit(_FakeJudge()).rank({"a": {}}, instructions="?", criteria={"maybe": "x"})

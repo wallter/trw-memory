@@ -27,10 +27,12 @@ from typing import Final
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools.tool import ToolResult
 from mcp import types as mt
+from starlette.requests import ClientDisconnect
 from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from trw_memory._sweep import MAX_TOKEN_CHARS
+from trw_memory.models.memory import MAX_TEXT_FIELD_CHARS
 from trw_memory.tools.checkout_import import IMPORT_MAX_IDS
 from trw_memory.tools.recall_support import SURFACED_MAX
 from trw_memory.tools.similar import MAX_SIMILAR_TEXT_CHARS
@@ -41,8 +43,9 @@ __all__ = ["ARGUMENTS", "OVERRIDES", "ArgumentBounds", "bound", "call_with_body_
 #: A name or path: a namespace (itself capped at 128), an entry id, an actor, a file path (PATH_MAX).
 NAME: Final = 4_096
 #: A text a tool stores, encodes or matches. ``max_entry_chars`` is capped to this, similar refuses
-#: past 8,000 characters and recall cuts its query to 1,000.
-TEXT: Final = 64 * 1024
+#: past 8,000 characters and recall cuts its query to 1,000. Same value the local store/update path
+#: refuses past (PRD-CORE-331 FR07 / B71-94) -- imported, not restated, so the two cannot drift.
+TEXT: Final = MAX_TEXT_FIELD_CHARS
 #: The items of a list or the fields of an object: the largest page any daemon tool serves.
 ITEMS: Final = 1_000
 #: The whole request, counted as the walk goes: every value, and every character of every string.
@@ -54,10 +57,10 @@ MAX_BODY_BYTES: Final = 16 * 1024 * 1024
 
 _NAMES: tuple[str, ...] = ("namespace", "source", "destination", "memory_id", "learning_id", "entry_id")
 _NAMES += ("remote_id", "actor", "status", "sort_by", "decision", "source_identity", "session_id", "expires")
-_NAMES += ("source_path", "project_root")
+_NAMES += ("source_path", "project_root", "if_revision", "file")
 _ITEMS: tuple[str, ...] = ("ids", "results", "tags", "edge_types", "evidence", "assertions", "include_namespaces")
 _ITEMS += ("include_source_kinds", "exclude_source_kinds", "after", "metadata", "learning", "entry", "patch")
-_ITEMS += ("consolidation", "settings")
+_ITEMS += ("consolidation", "settings", "types")
 
 #: The bound of an argument by its name, in every tool that takes it.
 ARGUMENTS: Final[dict[str, int]] = {
@@ -73,6 +76,7 @@ OVERRIDES: Final[dict[str, dict[str, int]]] = {
     "memory_record_surfaced": {"ids": SURFACED_MAX},
     "memory_sync_mark_synced": {"acks": MAX_SYNC_DIRTY_PAGE},
     "memory_similar": {"text": MAX_SIMILAR_TEXT_CHARS},
+    "memory_drain": {"admin_key": 128},  # a 64-hex drain key; anything longer is not one
 }
 
 
@@ -86,21 +90,66 @@ async def call_with_body_cap(app: ASGIApp, scope: Scope, receive: Receive, send:
 
     A declared ``content-length`` past it is answered 413 before any of the body is read (or the
     token checked). An undeclared (chunked) body is counted as the app reads it, after its own
-    checks, and ends as a client disconnect at the cap.
+    checks, and is cut with an ``http.disconnect`` at the cap. Starlette's body reader
+    (``Request.stream()``) raises that as ``ClientDisconnect``; FastMCP's own request handler
+    catches it and answers with ITS OWN plain 500, never re-raising, so we cannot simply catch
+    the exception here -- by the time it would reach us it has already been turned into a sent
+    response. Instead ``watching_send`` intercepts *app*'s outgoing ``http.response.start``: if
+    the cut was ours (``over_cap``) and *app* has not yet sent a byte of its own response, we
+    swap that 500 for a 413 naming the limit before anything reaches the real transport. If *app*
+    had already started responding before the cap tripped, headers are already committed and no
+    new status can be sent -- we let that response finish as-is (``started``). A handler that
+    (unlike FastMCP's) leaves ``ClientDisconnect`` unhandled is still covered by the ``except``
+    below, for the same two cases.
     """
     declared = dict(scope.get("headers") or ()).get(b"content-length", b"")
     if declared.isdigit() and (len(declared) > 9 or int(declared) > MAX_BODY_BYTES):  # no huge int() before auth
         await PlainTextResponse(f"request body over {MAX_BODY_BYTES} bytes", status_code=413)(scope, receive, send)
         return
     seen = 0
+    over_cap = False
+    started = False
+    rewritten = False
+    rewritten_body_sent = False
 
     async def capped() -> Message:
-        nonlocal seen
+        nonlocal seen, over_cap
         message = await receive()
         seen += len(message.get("body", b""))
-        return message if seen <= MAX_BODY_BYTES else {"type": "http.disconnect"}
+        if seen <= MAX_BODY_BYTES:
+            return message
+        over_cap = True
+        return {"type": "http.disconnect"}
 
-    await app(scope, capped, send)
+    async def watching_send(message: Message) -> None:
+        nonlocal started, rewritten, rewritten_body_sent
+        kind = message.get("type")
+        if kind == "http.response.start":
+            if over_cap and not started:
+                rewritten = True
+                await send(
+                    {"type": "http.response.start", "status": 413, "headers": [(b"content-type", b"text/plain")]}
+                )
+            else:
+                await send(message)
+            started = True
+            return
+        if kind == "http.response.body" and rewritten:
+            if not rewritten_body_sent:
+                rewritten_body_sent = True
+                body = f"request body over {MAX_BODY_BYTES} bytes".encode()
+                await send({"type": "http.response.body", "body": body, "more_body": False})
+            return
+        await send(message)
+
+    try:
+        await app(scope, capped, watching_send)
+    except ClientDisconnect:
+        if not over_cap:
+            raise  # a real client disconnect, not ours to reinterpret
+        if started:
+            return  # headers already sent; too late for a new status, just close
+        await PlainTextResponse(f"request body over {MAX_BODY_BYTES} bytes", status_code=413)(scope, receive, send)
 
 
 def _oversized(tool: str, arguments: dict[str, object]) -> tuple[str, int] | None:

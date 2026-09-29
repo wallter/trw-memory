@@ -16,7 +16,6 @@ Graceful degradation matrix:
 from __future__ import annotations
 
 import math
-import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -30,11 +29,11 @@ from trw_memory.retrieval.dense import dense_search
 from trw_memory.retrieval.fusion import blend_recency, combmax_fuse, rrf_fuse
 from trw_memory.retrieval.lexical import lexical_relevance, tokenize_query
 from trw_memory.retrieval.recency import recency_rank
+from trw_memory.retrieval.source_policy import weight_distilled
 from trw_memory.retrieval.validity_prior import apply_validity_prior
 from trw_memory.security.namespace_scope import NamespaceScope, NamespaceScopeError
 
 logger = structlog.get_logger(__name__)
-_RETIRED_UNSET = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,11 +54,19 @@ class ScoredCandidate:
 
     The basis is uniform per call, never per candidate, so a consumer never
     compares two scales inside one result.
+
+    ``distilled_weighted`` is True on a ``git_distilled`` row whose ``score`` was
+    multiplied by the call's ``distilled_weight`` (PRD-CORE-336 FR01).
+    ``preweight_rank`` is the row's index in the order BEFORE that weighting; it
+    is set only when the weighting step ran, so a consumer that scores by
+    position can keep non-distilled rows on their unweighted positions (NFR01).
     """
 
     entry: MemoryEntry
     score: float
     basis: str
+    distilled_weighted: bool = False
+    preweight_rank: int | None = None
 
 
 def hybrid_search(
@@ -115,9 +122,10 @@ def hybrid_search_scored(
     rerank_query: str | None = None,
     rerank_min_score: float | None = None,
     rerank_min_keep: int = 5,
-    collapse_hype: object = _RETIRED_UNSET,
+    rerank_passage_chars: int = 2048,
     dense_observer: Callable[[tuple[tuple[str, float], ...]], None] | None = None,
     bridge_hop: bool = False,
+    distilled_weight: float | None = None,
 ) -> list[ScoredCandidate]:
     """Hybrid BM25 + vector search with configurable rank fusion.
 
@@ -224,12 +232,21 @@ def hybrid_search_scored(
             cross-encoder.  Re-ranking all candidates is expensive; limiting
             to the top-50 captures the quality gain at reasonable latency.
             Ignored when ``rerank=False``.
+        rerank_passage_chars: Characters of each candidate's text the
+            cross-encoder reads (``MemoryConfig.recall_rerank_passage_chars``);
+            inference cost grows with it. Ignored when ``rerank=False``.
         bridge_hop: When ``True`` and the cross-encoder scored the pool, run
             the LLM-free entity-bridge second hop
             (:func:`~trw_memory.retrieval.bridge.extend_with_bridge`): rare
             terms of the top re-ranked rows retrieve further tail candidates,
             which the cross-encoder scores against the same query. Default
             ``False``; ``MemoryClient.recall`` turns it on with re-ranking.
+        distilled_weight: PRD-CORE-336 FR01, the one scoring point for
+            distilled lessons. ``None`` or ``1.0`` is a no-op. Otherwise, after
+            fusion and any rerank and before the ``top_k`` cut, each
+            ``git_distilled`` row's score on the call's basis is multiplied by
+            it and the list is stably re-sorted; every other row keeps its score
+            and its order relative to the other non-distilled rows.
 
     Returns:
         Up to *top_k* :class:`ScoredCandidate` objects ordered by descending
@@ -237,10 +254,6 @@ def hybrid_search_scored(
         score when a post-fusion pass reordered the list; ``basis`` says which,
         uniformly for the whole call.
     """
-    if collapse_hype is not _RETIRED_UNSET:
-        if collapse_hype is not False:
-            raise TypeError("collapse_hype: HyPE is retired; remove this argument")
-        warnings.warn("collapse_hype: HyPE is retired; remove this argument", UserWarning, stacklevel=2)
     if not entries:
         return []
 
@@ -401,7 +414,9 @@ def hybrid_search_scored(
         rerank_input = fused_entries[:rerank_candidates]
         tail = fused_entries[rerank_candidates:]
         pre_rerank_order = [entry.id for entry in rerank_input]
-        scored = cross_encode_scores(effective_rerank_query, rerank_input, model_name=rerank_model)
+        scored = cross_encode_scores(
+            effective_rerank_query, rerank_input, model_name=rerank_model, passage_chars=rerank_passage_chars
+        )
         # Entity-bridge second hop: salient terms of the best first-hop rows
         # pull further candidates out of the un-reranked tail, scored against
         # the same query so the cross-encoder still decides where they land.
@@ -414,7 +429,9 @@ def hybrid_search_scored(
                 scored,
                 tail,
                 entries,
-                score=lambda fresh: cross_encode_scores(effective_rerank_query, fresh, model_name=rerank_model),
+                score=lambda fresh: cross_encode_scores(
+                    effective_rerank_query, fresh, model_name=rerank_model, passage_chars=rerank_passage_chars
+                ),
             )
         if scored is None:
             pass  # cross-encoder unavailable: keep fusion order and every candidate
@@ -436,20 +453,30 @@ def hybrid_search_scored(
             or len(fused_entries) != len(pre_rerank_order) + len(tail)
         )
 
-    ranked_entries: list[MemoryEntry] = fused_entries[:top_k]
     # PRD-CORE-278 FR01: report the score that explains the order actually
     # returned, and say which basis it is on.
-    if prior_reordered or reranked:
+    if distilled_weight is not None and distilled_weight != 1.0:
+        basis = "position" if prior_reordered or reranked else "fused"
+        pre_weight = [
+            1.0 / (1 + rank) if basis == "position" else float(fused_scores.get(entry.id, 0.0))
+            for rank, entry in enumerate(fused_entries)
+        ]
+        preweight_rank = {entry.id: rank for rank, entry in enumerate(fused_entries)}
+        results = [
+            ScoredCandidate(entry, score, basis, distilled_weighted=weighted, preweight_rank=preweight_rank[entry.id])
+            for entry, score, weighted in weight_distilled(fused_entries, pre_weight, distilled_weight)[:top_k]
+        ]
+    elif prior_reordered or reranked:
         results = [
             # Not rounded: at a deep top_k, rounding collapses adjacent
             # positions onto one value and hands the ordering back to utility.
             ScoredCandidate(entry=entry, score=1.0 / (1 + rank), basis="position")
-            for rank, entry in enumerate(ranked_entries)
+            for rank, entry in enumerate(fused_entries[:top_k])
         ]
     else:
         results = [
             ScoredCandidate(entry=entry, score=float(fused_scores.get(entry.id, 0.0)), basis="fused")
-            for entry in ranked_entries
+            for entry in fused_entries[:top_k]
         ]
 
     logger.debug(

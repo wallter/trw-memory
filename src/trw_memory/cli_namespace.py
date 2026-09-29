@@ -82,6 +82,8 @@ async def handle_namespace(args: argparse.Namespace, *, client: DaemonClient | N
             result = await daemon.namespace_diagnose(args.namespace)
         else:
             result = await daemon.namespace_move(action, args.source, args.destination)
+            while isinstance(result, dict) and result.get("complete") is False:  # each call moves a budget's worth
+                result = await daemon.namespace_move(action, args.source, args.destination)
     except DaemonError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

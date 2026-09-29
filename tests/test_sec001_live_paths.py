@@ -6,8 +6,10 @@ import pytest
 
 from trw_memory.client import MemoryClient
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import MemoryEntry
+from trw_memory.models.memory import MAX_TEXT_FIELD_CHARS, MemoryEntry
+from trw_memory.security.provenance import TRUST_FLAGS
 from trw_memory.security.startup import resolve_security_path, verify_defaults
+from trw_memory.security.trust_scorer import _DEFAULT_SIZE_CEILING
 
 
 @pytest.fixture()
@@ -33,16 +35,27 @@ def secure_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClie
 
 
 async def test_store_quarantine_review_and_audit_live_path(secure_client: MemoryClient) -> None:
+    # The size heuristic scores the whole scannable text (content + detail + ...),
+    # while each of content/detail is capped at MAX_TEXT_FIELD_CHARS (64 KiB,
+    # PRD-CORE-331 FR07). Split the oversized payload across both fields so it
+    # stays a *valid* store that trips the >100_000 size anomaly, instead of a
+    # single 200k content field the store now refuses before scoring.
+    field_chars = MAX_TEXT_FIELD_CHARS - 1
+    assert 2 * field_chars > _DEFAULT_SIZE_CEILING
     stored = await secure_client.store(
-        "benign oversized note " + ("x" * 200000),
+        "benign oversized note " + ("x" * (field_chars - 22)),
+        detail="y" * field_chars,
         source_identity="sec-audit-agent",
         session_id="sess-1",
     )
 
     assert stored["status"] == "quarantined"
+    assert stored["anomaly_dimension"] == "trust_score"
 
     quarantined = await secure_client.search(status="quarantined")
     assert [entry["memory_id"] for entry in quarantined] == [stored["memory_id"]]
+    # Quarantined for the size anomaly, not for some other trust signal.
+    assert quarantined[0]["metadata"][TRUST_FLAGS].startswith("size_anomaly:")
 
     assert await secure_client.recall("benign oversized", limit=10) == []
 

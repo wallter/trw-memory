@@ -1137,7 +1137,9 @@ class TestCallerTextIsCappedFirst:
             assertions=[Assertion(type=AssertionType.GLOB_EXISTS, target=self.LONG_TARGET)],
         ).model_dump(mode="json")
         with SQLiteBackend(tmp_path / "memory.db") as backend:
-            result = memory_sync_apply_impl("project:probe-00000000", pulled, backend=backend, config=MemoryConfig())
+            result = memory_sync_apply_impl(
+                "project:probe-00000000", pulled, backend=backend, config=MemoryConfig(), if_revision=None
+            )
             assert result["status"] == "invalid"
             assert backend.get("T-long", namespace="project:probe-00000000") is None
 

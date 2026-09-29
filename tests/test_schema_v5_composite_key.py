@@ -81,9 +81,11 @@ EXPECTED_MEMORIES_COLUMNS = [
     "recall_count",
     "verification_status",
     "verification_checked_at",
+    "evidence_level",
 ]
 
 EXPECTED_TABLES = [
+    "anchor_postings",
     "memories",
     "memories_fts",
     "memory_graph_edges",
@@ -123,12 +125,21 @@ def test_schema_5_is_registered_exactly_once() -> None:
     assignment, no error. This asserts against the imported module AND the
     source text, because only the second catches a duplicate assignment.
     """
-    # Schema 6 adds vector provenance, schema 7 retires wiki_refs (W10), and
-    # schema 8 adds the quarantine_reviews namespace column (Q3, security
-    # review); the historical v5 migration must still be registered exactly
-    # once and retain its composite-key behavior.
-    assert SCHEMA_VERSION == 8
-    assert sorted(schema_module._MIGRATIONS) == [2, 3, 4, 5, 6, 7, 8]
+    # Schema 6 adds vector provenance, schema 7 retires wiki_refs (W10), schema
+    # 8 adds the quarantine_reviews namespace column (Q3, security review),
+    # schema 9 adds vec_index.space_key (B71-83), schema 10 adds
+    # memories_fts_rowid (PRD-CORE-330), schema 11 adds the source_identity
+    # index (PRD-CORE-331 FR06, B71-102), schema 12 adds anchor_postings
+    # (PRD-CORE-332 FR02), and schema 13 adds
+    # evidence_level (PRD-CORE-312-FR01); the historical v5 migration must
+    # still be registered exactly once and retain its composite-key behavior.
+    # Asserted against the live constant, not a literal, so a renumber at
+    # merge time (versions are assigned then) does not break this test.
+    migrations = schema_module._MIGRATIONS
+    assert max(migrations) == SCHEMA_VERSION
+    assert set(range(2, 13)) <= set(migrations)
+    evidence_versions = [v for v, fn in migrations.items() if fn is schema_module._migrate_v13_evidence_level]
+    assert len(evidence_versions) == 1 and 12 < evidence_versions[0] <= SCHEMA_VERSION
 
     source = Path(schema_module.__file__).read_text()
     assignments = re.findall(r"^_MIGRATIONS\[5\]\s*=", source, flags=re.MULTILINE)

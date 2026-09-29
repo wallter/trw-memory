@@ -16,6 +16,36 @@ from pathlib import Path
 import structlog
 
 from trw_memory.storage._schema_backup import _main_database_path, snapshot_before_migration
+from trw_memory.storage._schema_migrations import (
+    CREATE_IDX_SOURCE_IDENTITY as CREATE_IDX_SOURCE_IDENTITY,
+)
+from trw_memory.storage._schema_migrations import (
+    CREATE_IDX_VEC_SPACE as CREATE_IDX_VEC_SPACE,
+)
+from trw_memory.storage._schema_migrations import (
+    CREATE_MEMORIES_FTS_ROWID as CREATE_MEMORIES_FTS_ROWID,
+)
+from trw_memory.storage._schema_migrations import (
+    _migrate_v6_vector_provenance as _migrate_v6_vector_provenance,
+)
+from trw_memory.storage._schema_migrations import (
+    _migrate_v7_retire_wiki_refs as _migrate_v7_retire_wiki_refs,
+)
+from trw_memory.storage._schema_migrations import (
+    _migrate_v8_quarantine_review_namespace as _migrate_v8_quarantine_review_namespace,
+)
+from trw_memory.storage._schema_migrations import (
+    _migrate_v9_vector_space_key as _migrate_v9_vector_space_key,
+)
+from trw_memory.storage._schema_migrations import (
+    _migrate_v10_fts_rowid_map as _migrate_v10_fts_rowid_map,
+)
+from trw_memory.storage._schema_migrations import (
+    _migrate_v11_source_identity_index as _migrate_v11_source_identity_index,
+)
+from trw_memory.storage._schema_migrations import (
+    _migrate_v13_evidence_level as _migrate_v13_evidence_level,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -48,10 +78,10 @@ logger = structlog.get_logger(__name__)
 # forward-only migration.
 #
 # ``SCHEMA_VERSION`` == 4 is PRD-CORE-231-FR02's additive ``verification_status``
-# column. IMPORTANT: adding a column to ``_migrate_cols`` alone is NOT enough for
+# column. IMPORTANT: adding a column to ``MIGRATE_COLS`` alone is NOT enough for
 # an already-stamped database — ``ensure_schema`` short-circuits on
 # ``user_version == SCHEMA_VERSION`` and never re-runs the backfill storm. Every
-# new column therefore needs BOTH the ``_migrate_cols`` entry (fresh/legacy
+# new column therefore needs BOTH the ``MIGRATE_COLS`` entry (fresh/legacy
 # bootstrap) AND a registered ``_MIGRATIONS`` delta plus this bump.
 #
 # ``SCHEMA_VERSION`` == 5 is PRD-CORE-245: namespace becomes a containment
@@ -79,17 +109,39 @@ logger = structlog.get_logger(__name__)
 # for id ``x`` made every OTHER namespace's own ``x`` permanently
 # "already_resolved" and leaked the first namespace's reviewer identity to the
 # second. See ``_migrate_v8_quarantine_review_namespace``.
-SCHEMA_VERSION = 8
-
-#: The highest schema version whose delta DROPS or RENAMES rather than adding.
-#: ``ensure_schema`` snapshots the store before migrating a database below this
-#: and not above it, so an additive delta does not pay for a whole-file copy.
-#: Schema 8 is additive (ALTER ADD COLUMN + an UPDATE backfill, no DROP/RENAME)
-#: but still moves this bound up to 8: the quarantine DB is exactly the store a
-#: security reviewer may need to recover the pre-migration reviewer/decision
-#: history from, so it gets the same protect-before-rewrite snapshot as the
-#: v7 wiki_refs drop rather than a bare, unprotected ALTER.
-_LAST_DESTRUCTIVE_SCHEMA_VERSION = 8
+# ``SCHEMA_VERSION`` == 9 (B71-83) adds ``vec_index.space_key``, a digest of the
+# space each vector's provenance claims, indexed, so the space census and the
+# dense-recall gate are one indexed SQL read. Additive, but snapshotted like every bump; see
+# ``_migrate_v9_vector_space_key``.
+# ``SCHEMA_VERSION`` == 10 (PRD-CORE-330) adds ``memories_fts_rowid``, a
+# ``(namespace, id) -> fts_rowid`` mapping table. Every per-row store()/
+# update()/delete() previously removed its ``memories_fts`` row with
+# ``DELETE FROM memories_fts WHERE id = ? AND namespace = ?`` -- ``id`` and
+# ``namespace`` are UNINDEXED fts5 columns, so that statement scans the whole
+# FTS index every time (worker-1's CORE-309 S3 profiling; learning L-7L9A).
+# ``memories.rowid`` itself was rejected as the key: ``store()`` uses
+# ``INSERT OR REPLACE``, whose conflict resolution deletes-then-reinserts the
+# conflicting row, so ``memories.rowid`` is not stable across an overwriting
+# store() call. The mapping table's own ``(namespace, id)`` primary key is an
+# indexed point lookup (same shape as ``memories``'s PK), so resolving
+# ``fts_rowid`` costs a B-tree lookup, not a table scan, and
+# ``DELETE FROM memories_fts WHERE rowid = ?`` is fts5's native indexed
+# operation. Additive (new table only); see ``_migrate_v10_fts_rowid_map``.
+# ``SCHEMA_VERSION`` == 11 (PRD-CORE-331 FR06, B71-102) adds
+# ``idx_memories_namespace_source_identity``, a plain composite index over
+# ``memories(namespace, source_identity)``. ``ids_by_source`` (daemon dedup)
+# filters on exactly that pair; without the index it scans every row in the
+# namespace. Additive (new index only, ``IF NOT EXISTS``); see
+# ``_migrate_v11_source_identity_index``.
+# ``SCHEMA_VERSION`` == 12 (PRD-CORE-332 FR02) adds ``anchor_postings``, the
+# ``(namespace, file, entry_id)`` inverted index over ``memories.anchors``, and
+# backfills it from the column; see ``_anchor_index``. Schema versions are assigned at merge
+# time (swarm lead, 2026-09-26).
+# ``SCHEMA_VERSION`` == 13 (PRD-CORE-312-FR01) adds the additive
+# ``evidence_level`` column (already in ``MIGRATE_COLS`` for a fresh/legacy
+# bootstrap); see ``_migrate_v13_evidence_level`` for why an ALREADY-stamped
+# database also needs the explicit delta + this bump.
+SCHEMA_VERSION = 13
 
 
 class SchemaDowngradeError(RuntimeError):
@@ -170,6 +222,7 @@ CREATE TABLE IF NOT EXISTS memories (
     recall_count      INTEGER DEFAULT 0,
     verification_status TEXT DEFAULT NULL,
     verification_checked_at TEXT DEFAULT '',
+    evidence_level    TEXT DEFAULT 'unknown',
     PRIMARY KEY (namespace, id)
 )
 """
@@ -211,6 +264,7 @@ MEMORIES_INDEXES: tuple[str, ...] = (
     CREATE_IDX_NS_IMPORTANCE,
     CREATE_IDX_NS_STATUS,
     CREATE_IDX_NS_STATUS_IMP,
+    CREATE_IDX_SOURCE_IDENTITY,
     CREATE_IDX_STATUS_UPDATED,
     CREATE_IDX_SYNC_SEQ,
 )
@@ -271,6 +325,7 @@ CREATE TABLE IF NOT EXISTS vec_index (
     entry_id  TEXT NOT NULL,
     namespace TEXT NOT NULL DEFAULT 'default',
     provenance_json TEXT DEFAULT NULL,
+    space_key TEXT DEFAULT NULL,
     UNIQUE (namespace, entry_id)
 )
 """
@@ -295,6 +350,73 @@ CREATE_IDX_MEMORY_TAGS_ENTRY = "CREATE INDEX IF NOT EXISTS idx_memory_tags_entry
 # ---------------------------------------------------------------------------
 # Schema bootstrap + migrations
 # ---------------------------------------------------------------------------
+
+
+# Columns ``_bootstrap_and_backfill`` adds to a legacy ``memories`` table, each with the DEFAULT a
+# row that predates it reads as (``_probe`` reads a legacy store with the same defaults).
+# Migration: add new columns for sync + graph (Sprint 37)
+MIGRATE_COLS: list[tuple[str, str]] = [
+    ("metadata", "TEXT DEFAULT '{}'"),
+    ("vector_clock", "TEXT DEFAULT '{}'"),
+    ("remote_id", "TEXT"),
+    ("published_to_platform", "INTEGER DEFAULT 0"),
+    ("pending_delete", "INTEGER DEFAULT 0"),
+    ("cross_validated", "INTEGER DEFAULT 0"),
+    ("outcome_history", "TEXT DEFAULT '[]'"),
+    ("assertions", "TEXT DEFAULT '[]'"),
+    # PRD-CORE-099 provenance columns:
+    ("client_profile", "TEXT DEFAULT ''"),
+    ("model_id", "TEXT DEFAULT ''"),
+]
+# Migration: add PRD-CORE-110 typed entry fields
+MIGRATE_COLS += [
+    ("session_count", "INTEGER DEFAULT 0"),
+    ("type", "TEXT DEFAULT 'pattern'"),
+    ("nudge_line", "TEXT DEFAULT ''"),
+    ("expires_at", "TEXT DEFAULT ''"),
+    ("confidence", "TEXT DEFAULT 'unverified'"),
+    ("task_type", "TEXT DEFAULT ''"),
+    ("domain", "TEXT DEFAULT '[]'"),
+    ("phase_origin", "TEXT DEFAULT ''"),
+    ("phase_affinity", "TEXT DEFAULT '[]'"),
+    ("team_origin", "TEXT DEFAULT ''"),
+    ("protection_tier", "TEXT DEFAULT 'normal'"),
+]
+# Migration: add PRD-CORE-111 anchor fields; PRD-INFRA-051 sync pipeline delta
+# tracking; PRD-CORE-132 recall counter (PRD-CORE-293 retired the
+# helpful/unhelpful counters: fresh stores omit them, old stores keep them).
+MIGRATE_COLS += [
+    ("anchors", "TEXT DEFAULT '[]'"),
+    ("anchor_validity", "REAL DEFAULT NULL"),
+    ("sync_hash", "TEXT DEFAULT ''"),
+    ("sync_seq", "INTEGER DEFAULT 0"),
+    ("last_synced_at", "TEXT"),
+    ("recall_count", "INTEGER DEFAULT 0"),
+]
+# Migration: add PRD-CORE-194 bi-temporal validity fields. Additive-only,
+# nullable; absent valid_from = open validity (back-filled to created_at
+# on read by the row mapper / model validator, never by a rewrite). No
+# destructive ALTER, zero existing rows mutated on read (NFR01).
+MIGRATE_COLS += [
+    ("valid_from", "TEXT"),
+    ("invalid_from", "TEXT"),
+    ("invalidated_by", "TEXT"),
+]
+# Migration: add PRD-CORE-231-FR02 persisted verification verdict.
+# Additive-only, nullable; a pre-migration row reads back as
+# ``verification_status=None`` (no adverse verdict recorded).
+# PRD-CORE-244-FR03 adds the companion ``verification_checked_at`` stamp;
+# "" means no verification pass has ever examined this entry.
+MIGRATE_COLS += [
+    ("verification_status", "TEXT DEFAULT NULL"),
+    ("verification_checked_at", "TEXT DEFAULT ''"),
+]
+# Migration: add PRD-CORE-312-FR01 evidence-level tag. Additive-only,
+# defaulted; a pre-migration row reads back as ``evidence_level="unknown"``
+# (NFR02), never as a silently-promoted "verified". See SCHEMA_VERSION 13.
+MIGRATE_COLS += [
+    ("evidence_level", "TEXT DEFAULT 'unknown'"),
+]
 
 
 def _bootstrap_and_backfill(cursor: sqlite3.Cursor) -> None:
@@ -337,71 +459,7 @@ def _bootstrap_and_backfill(cursor: sqlite3.Cursor) -> None:
     cursor.execute(CREATE_IDX_MN_STATUS)
     cursor.execute(CREATE_IDX_MEMORY_TAGS_ENTRY)
 
-    # Migration: add new columns for sync + graph (Sprint 37)
-    _migrate_cols = [
-        ("metadata", "TEXT DEFAULT '{}'"),
-        ("vector_clock", "TEXT DEFAULT '{}'"),
-        ("remote_id", "TEXT"),
-        ("published_to_platform", "INTEGER DEFAULT 0"),
-        ("pending_delete", "INTEGER DEFAULT 0"),
-        ("cross_validated", "INTEGER DEFAULT 0"),
-        ("outcome_history", "TEXT DEFAULT '[]'"),
-        ("assertions", "TEXT DEFAULT '[]'"),
-    ]
-    # Migration: add provenance columns (PRD-CORE-099)
-    _migrate_cols += [
-        ("client_profile", "TEXT DEFAULT ''"),
-        ("model_id", "TEXT DEFAULT ''"),
-    ]
-    # Migration: add PRD-CORE-110 typed entry fields
-    _migrate_cols += [
-        ("session_count", "INTEGER DEFAULT 0"),
-        ("type", "TEXT DEFAULT 'pattern'"),
-        ("nudge_line", "TEXT DEFAULT ''"),
-        ("expires_at", "TEXT DEFAULT ''"),
-        ("confidence", "TEXT DEFAULT 'unverified'"),
-        ("task_type", "TEXT DEFAULT ''"),
-        ("domain", "TEXT DEFAULT '[]'"),
-        ("phase_origin", "TEXT DEFAULT ''"),
-        ("phase_affinity", "TEXT DEFAULT '[]'"),
-        ("team_origin", "TEXT DEFAULT ''"),
-        ("protection_tier", "TEXT DEFAULT 'normal'"),
-    ]
-    # Migration: add PRD-CORE-111 anchor fields
-    _migrate_cols += [
-        ("anchors", "TEXT DEFAULT '[]'"),
-        ("anchor_validity", "REAL DEFAULT NULL"),
-    ]
-    # Migration: add PRD-INFRA-051 sync pipeline delta tracking
-    _migrate_cols += [
-        ("sync_hash", "TEXT DEFAULT ''"),
-        ("sync_seq", "INTEGER DEFAULT 0"),
-        ("last_synced_at", "TEXT"),
-    ]
-    # Migration: add PRD-CORE-132 recall counter. PRD-CORE-293 retired the
-    # helpful/unhelpful counters: fresh stores omit them, old stores keep them.
-    _migrate_cols += [
-        ("recall_count", "INTEGER DEFAULT 0"),
-    ]
-    # Migration: add PRD-CORE-194 bi-temporal validity fields. Additive-only,
-    # nullable; absent valid_from = open validity (back-filled to created_at
-    # on read by the row mapper / model validator, never by a rewrite). No
-    # destructive ALTER, zero existing rows mutated on read (NFR01).
-    _migrate_cols += [
-        ("valid_from", "TEXT"),
-        ("invalid_from", "TEXT"),
-        ("invalidated_by", "TEXT"),
-    ]
-    # Migration: add PRD-CORE-231-FR02 persisted verification verdict.
-    # Additive-only, nullable; a pre-migration row reads back as
-    # ``verification_status=None`` (no adverse verdict recorded).
-    # PRD-CORE-244-FR03 adds the companion ``verification_checked_at`` stamp;
-    # "" means no verification pass has ever examined this entry.
-    _migrate_cols += [
-        ("verification_status", "TEXT DEFAULT NULL"),
-        ("verification_checked_at", "TEXT DEFAULT ''"),
-    ]
-    for col_name, col_def in _migrate_cols:
+    for col_name, col_def in MIGRATE_COLS:
         with contextlib.suppress(sqlite3.OperationalError):
             cursor.execute(f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}")
 
@@ -540,13 +598,16 @@ def _guard_downgrade(current: int) -> None:
     """
     if current <= SCHEMA_VERSION:
         return
+    loaded_from = Path(__file__).resolve().parents[1]
     raise SchemaDowngradeError(
         f"this store is at schema {current}; this trw-memory build only "
         f"understands schema {SCHEMA_VERSION}. A newer build has already "
         "migrated the file. Restart this process (for an MCP client, "
         "restart the MCP server or run /mcp to reconnect) so it loads the "
-        "newer trw-memory, or upgrade trw-memory. Refusing to open the "
-        "store to avoid silent mis-reads."
+        "newer trw-memory, or upgrade trw-memory. If a restart reproduces this, "
+        f"the trw-memory on disk is itself older: this process loaded it from {loaded_from}; "
+        "upgrade that install, or update the checkout an editable install points at. "
+        "Refusing to open the store to avoid silent mis-reads."
     )
 
 
@@ -665,15 +726,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         # ``_schema_backup._open_snapshot_source``) and why exactly one is
         # written per migration rather than one per racing opener.
         #
-        # Gated on the DESTRUCTIVE deltas specifically. A snapshot copies the
-        # whole database (2.1 s for 186 MB), which is the right price to pay
-        # once for a rebuild-and-rename and the wrong price to pay on every
-        # future additive ALTER. Raise this bound when a later delta is
-        # destructive too.
-        needs_snapshot = current < _LAST_DESTRUCTIVE_SCHEMA_VERSION
-        backup_path = (
-            snapshot_before_migration(conn, from_version=current, to_version=SCHEMA_VERSION) if needs_snapshot else None
-        )
+        # Every version bump of a populated store is snapshotted, not only the
+        # destructive ones: any bump makes the store unreadable to the build
+        # before it (``SchemaDowngradeError``), so rolling back to that build
+        # (4.0.1 is schema 8) needs the pre-migration copy (PRD-CORE-306 S3).
+        backup_path = snapshot_before_migration(conn, from_version=current, to_version=SCHEMA_VERSION)
 
         # The whole storm — bootstrap, every registered delta, and the version
         # stamp — is ONE transaction, so an interruption leaves user_version at
@@ -708,6 +765,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 # Register the PRD-CORE-181 FR06 v2 delta. Imported here (module bottom) rather
 # than at the top so :mod:`_memory_model_v2` can lazily import ``ensure_schema``
 # / ``SCHEMA_VERSION`` from this module without a circular import at load time.
+from trw_memory.storage._anchor_index import migrate_v12_anchor_postings  # noqa: E402
 from trw_memory.storage._memory_model_v2 import (  # noqa: E402
     migrate_sqlite_importance_type as _migrate_v2_memory_model,
 )
@@ -719,95 +777,14 @@ _MIGRATIONS[2] = _migrate_v2_memory_model
 _MIGRATIONS[3] = _migrate_v3_legacy_enums
 _MIGRATIONS[4] = _migrate_v4_verification_status
 _MIGRATIONS[5] = _migrate_v5_namespace_boundary
-
-
-def _migrate_v6_vector_provenance(cursor: sqlite3.Cursor) -> None:
-    """Add proof storage without inventing provenance for existing vectors."""
-    columns = {row[1] for row in cursor.execute("PRAGMA table_info(vec_index)").fetchall()}
-    if columns and "provenance_json" not in columns:
-        cursor.execute("ALTER TABLE vec_index ADD COLUMN provenance_json TEXT DEFAULT NULL")
-
-
 _MIGRATIONS[6] = _migrate_v6_vector_provenance
-
-
-def _migrate_v7_retire_wiki_refs(cursor: sqlite3.Cursor) -> None:
-    """Drop the retired ``wiki_refs`` sidecar table and its indexes (W10, trw-memory 4.0.0).
-
-    ``trw_memory.wiki`` (the ``memory_wiki_lint`` tool, the ``wiki-lint`` CLI
-    verb, and the ``query_wiki_*_refs`` backend methods) was removed with no
-    replacement. This delta only drops the sidecar edge index it maintained;
-    an entry's own ``metadata`` column — where a wiki payload actually lived —
-    is untouched by a bare ``DROP TABLE`` and stays readable. Idempotent: a
-    fresh database that never created ``wiki_refs`` (see
-    ``_bootstrap_and_backfill``, which stopped creating it at this version)
-    hits ``IF EXISTS`` no-ops on both statements.
-    """
-    cursor.execute("DROP INDEX IF EXISTS idx_wiki_refs_source")
-    cursor.execute("DROP INDEX IF EXISTS idx_wiki_refs_target")
-    cursor.execute("DROP TABLE IF EXISTS wiki_refs")
-
-
 _MIGRATIONS[7] = _migrate_v7_retire_wiki_refs
-
-
-def _migrate_v8_quarantine_review_namespace(cursor: sqlite3.Cursor) -> None:
-    """Add ``namespace`` to a pre-existing ``quarantine_reviews`` table (Q3).
-
-    ``quarantine_reviews`` is created lazily, outside this module's DDL, by
-    ``security._runtime_quarantine.append_review_log``/``get_status_history`` —
-    so most databases (anything that never quarantined anything) simply do not
-    have the table, and this is a no-op for them; a database created by the
-    fixed code already gets the column from the updated ``CREATE TABLE IF NOT
-    EXISTS`` those functions issue.
-
-    For a database that DOES carry the pre-fix table: add the column (additive,
-    idempotent — a duplicate-column ``OperationalError`` is suppressed like
-    every other ALTER in this file), then best-effort backfill it from
-    ``memories`` in the SAME database file (the quarantine DB's own store of
-    still-quarantined rows) by matching on id.
-
-    A row is backfilled ONLY when both hold:
-      1. exactly one namespace currently names this id in ``memories`` here, and
-      2. this id was quarantined (a ``"quarantined"`` review-log row) exactly
-         ONCE, ever, in this database.
-
-    (2) closes an adversarial-review counter-example to a naive "match on
-    current `memories`" backfill: if namespace A's row for id ``x`` was
-    approved (and so deleted from this quarantine DB) and namespace B *later*
-    quarantined its OWN, unrelated ``x``, condition (1) alone would match
-    uniquely to B — mislabelling A's historical reviewer and decision as B's,
-    reproducing the exact cross-namespace leak this migration exists to close.
-    Two review-log rows for the same id is exactly that signal, so such an id
-    is left at ``''`` (unknown) rather than guessed, even where (1) holds.
-    """
-    tables = {
-        str(row[0])
-        for row in cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'quarantine_reviews'"
-        ).fetchall()
-    }
-    if "quarantine_reviews" not in tables:
-        return
-    columns = {str(row[1]) for row in cursor.execute("PRAGMA table_info(quarantine_reviews)").fetchall()}
-    if "namespace" not in columns:
-        with contextlib.suppress(sqlite3.OperationalError):
-            cursor.execute("ALTER TABLE quarantine_reviews ADD COLUMN namespace TEXT NOT NULL DEFAULT ''")
-    cursor.execute(
-        """
-        UPDATE quarantine_reviews
-        SET namespace = (SELECT namespace FROM memories WHERE memories.id = quarantine_reviews.learning_id)
-        WHERE (namespace IS NULL OR namespace = '')
-          AND (SELECT COUNT(*) FROM memories WHERE memories.id = quarantine_reviews.learning_id) = 1
-          AND (
-                SELECT COUNT(*) FROM quarantine_reviews r2
-                WHERE r2.learning_id = quarantine_reviews.learning_id AND r2.decision = 'quarantined'
-              ) = 1
-        """
-    )
-
-
 _MIGRATIONS[8] = _migrate_v8_quarantine_review_namespace
+_MIGRATIONS[9] = _migrate_v9_vector_space_key
+_MIGRATIONS[10] = _migrate_v10_fts_rowid_map
+_MIGRATIONS[11] = _migrate_v11_source_identity_index
+_MIGRATIONS[12] = migrate_v12_anchor_postings
+_MIGRATIONS[13] = _migrate_v13_evidence_level
 
 
 CREATE_MEMORIES_FTS = """
@@ -828,18 +805,36 @@ def ensure_fts_table(conn: sqlite3.Connection) -> bool:
     Returns True when FTS5 is available and the table is ready.
     Safe to call multiple times (idempotent). On first call, bulk-imports
     all existing memories rows so legacy entries are searchable immediately.
+
+    Also ensures ``memories_fts_rowid`` (PRD-CORE-330) has a mapping row for
+    every ``memories_fts`` row. ``ensure_schema``'s schema-10 delta creates
+    the (possibly empty) mapping table but cannot backfill it there, because
+    on a fresh database ``memories_fts`` does not exist yet at that point in
+    bootstrap. The anti-join backfill below runs on every open (idempotent,
+    cheap once caught up: zero missing rows means the ``NOT EXISTS`` subquery
+    matches nothing to insert) so both a brand-new store and a pre-existing
+    one converge to a fully-mapped table without a separate migration path.
     """
     try:
         conn.execute(CREATE_MEMORIES_FTS)
+        conn.execute(CREATE_MEMORIES_FTS_ROWID)
         row = conn.execute("SELECT COUNT(*) FROM memories_fts").fetchone()
         if row is not None and int(row[0]) == 0:
             conn.execute(
                 "INSERT INTO memories_fts(id, namespace, content, detail, tags) "
                 "SELECT id, namespace, content, COALESCE(detail, ''), COALESCE(tags, '[]') FROM memories"
             )
+        conn.execute(
+            "INSERT INTO memories_fts_rowid(namespace, id, fts_rowid) "
+            "SELECT f.namespace, f.id, f.rowid FROM memories_fts f "
+            "WHERE NOT EXISTS ("
+            "  SELECT 1 FROM memories_fts_rowid m"
+            "  WHERE m.namespace = f.namespace AND m.id = f.id"
+            ")"
+        )
         conn.commit()
         return True
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError:  # trw-fail-silent-allow: pre-existing fail-open for FTS5 unavailable on old SQLite builds (unchanged by PRD-CORE-330; the handler's line moved when the memories_fts_rowid backfill was added above it)
         return False
 
 
@@ -853,4 +848,5 @@ def ensure_vec_table(conn: sqlite3.Connection, dim: int) -> None:
     conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(embedding float[{dim}])")
     # Companion table to map rowid <-> entry_id
     conn.execute(CREATE_VEC_INDEX)
+    conn.execute(CREATE_IDX_VEC_SPACE)
     conn.commit()

@@ -9,12 +9,14 @@ from collections import deque
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
 from time import time
 
 import structlog
 
+from trw_memory._project_anchor import resolve_state_path
 from trw_memory.exceptions import RateLimitError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.namespaces.validation import DEFAULT_NAMESPACE
@@ -32,7 +34,26 @@ from trw_memory.storage.persistence import lock_for_rmw, read_yaml, write_yaml
 # ``bounded`` claim in ``security_maintenance_status`` provably true.
 _AUDIT_MAINTENANCE_CACHE_MAX = 256
 _AUDIT_MAINTENANCE_CACHE: set[str] = set()
-_AUDIT_MAINTENANCE_QUEUE: deque[str] = deque(maxlen=128)
+
+
+@dataclass(frozen=True)
+class _QueuedMaintenance:
+    """One config's audit log, queued while ``security_maintenance_inline`` was ``False``.
+
+    Carries what :func:`_drain_security_maintenance_key` needs directly (not the
+    ``MemoryConfig`` that enqueued it, which may be long gone by drain time).
+    """
+
+    audit_log_path: str
+    retention_days: int
+    fsync: bool
+
+    @property
+    def cache_key(self) -> str:
+        return f"{self.audit_log_path}:{self.retention_days}"
+
+
+_AUDIT_MAINTENANCE_QUEUE: deque[_QueuedMaintenance] = deque(maxlen=128)
 _AUDIT_MAINTENANCE_LOCK = threading.RLock()
 _MAX_LIVE_RATE_LIMIT_SESSIONS = 10_000
 logger = structlog.get_logger(__name__)
@@ -40,7 +61,7 @@ logger = structlog.get_logger(__name__)
 
 def get_audit_log(config: MemoryConfig) -> AuditLog:
     """Return the configured audit log."""
-    return AuditLog(Path(config.audit_log_path), fsync=config.fsync_on_append)
+    return AuditLog(resolve_state_path(config, "audit_log_path"), fsync=config.fsync_on_append)
 
 
 def append_audit_event(
@@ -102,34 +123,62 @@ def enforce_write_rate_limit(
     actor: str,
     namespace: str,
     entry_id: str,
-) -> None:
-    """Apply the rolling write-rate limit; once per session inside ``single_write_operation``."""
+) -> float | None:
+    """Apply the rolling write-rate limit; once per session inside ``single_write_operation``.
+
+    Returns the charged slot's receipt for :func:`refund_write_slot`, or ``None`` when
+    nothing refundable was charged (no session, limiter off, or a batch's shared slot).
+    """
     if not session_id or config.max_memory_writes_per_minute <= 0:
-        return
-
-    # Hash a caller-controlled long ID instead of truncating it. Truncation made
-    # distinct IDs sharing the first 256 characters collide into one bucket.
-    if len(session_id) > 256:
-        session_id = "sha256:" + hashlib.sha256(session_id.encode()).hexdigest()
-
+        return None
+    session_id = _session_key(session_id)
     operation = _WRITE_OPERATION.get()
     if operation is not None and session_id in operation:
         prior = operation[session_id]
         if prior is not None:
             raise RateLimitError(str(prior), retry_after=prior.retry_after)
-        return
+        return None
     try:
-        _charge_write_slot(config, session_id)
+        receipt = _charge_write_slot(config, session_id)
     except RateLimitError as exc:
         if operation is not None:
             operation[session_id] = exc
         raise
     if operation is not None:
         operation[session_id] = None
+        return None
+    return receipt
 
 
-def _charge_write_slot(config: MemoryConfig, session_id: str) -> None:
-    state_path = Path(config.rate_limit_state_path)
+def _session_key(session_id: str) -> str:
+    # Hash a caller-controlled long ID instead of truncating it. Truncation made
+    # distinct IDs sharing the first 256 characters collide into one bucket.
+    return "sha256:" + hashlib.sha256(session_id.encode()).hexdigest() if len(session_id) > 256 else session_id
+
+
+def refund_write_slot(config: MemoryConfig, *, session_id: str | None, receipt: float | None) -> None:
+    """Return the slot a write charged when that write then stored nothing (B71-81).
+
+    A ``memory_store`` refused as ``conflict`` is charged by the intake pipeline before
+    its revision check, so without a refund repeated collisions on one id would delay
+    the caller's retry. Only the stamp *receipt* names is removed, and only while it is
+    still in the window: a charge that already expired frees nothing, so a stalled
+    write can never refund a newer request's slot. Two equal stamps are interchangeable.
+    """
+    if not session_id or receipt is None:
+        return
+    key, state_path = _session_key(session_id), resolve_state_path(config, "rate_limit_state_path")
+    with lock_for_rmw(state_path):
+        state: dict[str, object] = read_yaml(state_path) if state_path.exists() else {}
+        sessions = state.get("sessions")
+        stamps = sessions.get(key) if isinstance(sessions, dict) else None
+        if isinstance(stamps, list) and receipt in stamps:
+            stamps.remove(receipt)
+            write_yaml(state_path, state)
+
+
+def _charge_write_slot(config: MemoryConfig, session_id: str) -> float:
+    state_path = resolve_state_path(config, "rate_limit_state_path")
     now = time()
     with lock_for_rmw(state_path):
         raw_state: dict[str, object] = read_yaml(state_path) if state_path.exists() else {}
@@ -167,6 +216,7 @@ def _charge_write_slot(config: MemoryConfig, session_id: str) -> None:
         sessions[session_id] = recent
         sessions = {key: value for key, value in sessions.items() if value}
         write_yaml(state_path, {"sessions": sessions})
+    return now
 
 
 # PII policy helpers extracted to _runtime_pii.py (PRD-DIST-245 batch 99).
@@ -179,25 +229,28 @@ from trw_memory.security._runtime_pii import (
 
 def ensure_security_maintenance(config: MemoryConfig) -> None:
     """Run or enqueue once-per-process audit retention maintenance for a config path."""
-    cache_key = f"{config.audit_log_path}:{config.audit_retention_days}"
+    audit_log_path = str(resolve_state_path(config, "audit_log_path"))
+    cache_key = f"{audit_log_path}:{config.audit_retention_days}"
     with _AUDIT_MAINTENANCE_LOCK:
         if cache_key in _AUDIT_MAINTENANCE_CACHE:
             return
         if not config.security_maintenance_inline:
-            if cache_key not in _AUDIT_MAINTENANCE_QUEUE:
-                _AUDIT_MAINTENANCE_QUEUE.append(cache_key)
-                logger.debug("security_maintenance_enqueued", audit_log_path=config.audit_log_path)
+            if not any(queued.cache_key == cache_key for queued in _AUDIT_MAINTENANCE_QUEUE):
+                _AUDIT_MAINTENANCE_QUEUE.append(
+                    _QueuedMaintenance(audit_log_path, config.audit_retention_days, config.fsync_on_append)
+                )
+                logger.debug("security_maintenance_enqueued", audit_log_path=audit_log_path)
             return
-        _drain_security_maintenance_key(config, cache_key)
+        _compact_and_mark(audit_log_path, config.audit_retention_days, config.fsync_on_append, cache_key)
 
 
-def _drain_security_maintenance_key(config: MemoryConfig, cache_key: str) -> None:
-    """Drain one maintenance item outside scoring/write-lock paths.
+def _compact_and_mark(audit_log_path: str, retention_days: int, fsync: bool, cache_key: str) -> None:
+    """Compact one audit log and mark *cache_key* processed.
 
-    Caller holds ``_AUDIT_MAINTENANCE_LOCK`` (``ensure_security_maintenance``
-    does), so the bounded-set eviction below is race-free.
+    Caller holds ``_AUDIT_MAINTENANCE_LOCK`` (both callers do), so the
+    bounded-set eviction below is race-free.
     """
-    get_audit_log(config).compact(config.audit_retention_days)
+    AuditLog(Path(audit_log_path), fsync=fsync).compact(retention_days)
     # Clear-on-overflow eviction keeps the dedup set bounded. Re-running an
     # idempotent compaction for an evicted key is the only cost.
     if len(_AUDIT_MAINTENANCE_CACHE) >= _AUDIT_MAINTENANCE_CACHE_MAX:
@@ -208,6 +261,27 @@ def _drain_security_maintenance_key(config: MemoryConfig, cache_key: str) -> Non
         )
         _AUDIT_MAINTENANCE_CACHE.clear()
     _AUDIT_MAINTENANCE_CACHE.add(cache_key)
+
+
+def drain_security_maintenance() -> dict[str, object]:
+    """Compact every audit log queued while ``security_maintenance_inline`` was ``False`` (B71-97).
+
+    Nothing else drains this queue: with the switch off, ``ensure_security_maintenance`` only
+    enqueues, so an operator running that way accumulated queued keys that fell off the
+    bounded deque (maxlen 128) and were never compacted once the queue filled. Call this from a
+    maintenance sweep (``memory_maintain``); it is idempotent and safe to call with an empty
+    queue.
+
+    Returns:
+        ``{"drained": int}`` -- the number of distinct audit logs compacted this call.
+    """
+    with _AUDIT_MAINTENANCE_LOCK:
+        pending = list(_AUDIT_MAINTENANCE_QUEUE)
+        _AUDIT_MAINTENANCE_QUEUE.clear()
+    for item in pending:
+        with _AUDIT_MAINTENANCE_LOCK:
+            _compact_and_mark(item.audit_log_path, item.retention_days, item.fsync, item.cache_key)
+    return {"drained": len(pending)}
 
 
 def security_maintenance_status() -> dict[str, object]:
@@ -302,10 +376,5 @@ from trw_memory.security._runtime_canary import (
 from trw_memory.security._runtime_pipeline import (
     PreparedStoreEntry as PreparedStoreEntry,
     prepare_entry_for_store as prepare_entry_for_store,
-    _actor_for_entry as _actor_for_entry,
-    _apply_provenance_hash as _apply_provenance_hash,
-    _apply_sec001_intake as _apply_sec001_intake,
-    _rejection_reason as _rejection_reason,
-    _resolve_provenance_session_id as _resolve_provenance_session_id,
     _resolve_security_trace_context as _resolve_security_trace_context,
 )

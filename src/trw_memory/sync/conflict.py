@@ -105,7 +105,7 @@ def resolve_conflict(
     outcome = f"conflict_merged:local={local.id}:remote={remote.id}:timestamp={now}"
 
     # Use local as the base, update with merged values
-    merged = local.model_copy(
+    return local.model_copy(
         update={
             "detail": merged_detail,
             "tags": merged_tags,
@@ -116,5 +116,3 @@ def resolve_conflict(
             "updated_at": datetime.now(timezone.utc),
         },
     )
-
-    return merged

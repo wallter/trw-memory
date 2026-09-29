@@ -5,19 +5,23 @@ from __future__ import annotations
 import atexit
 import threading
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import cast, overload
 
 import structlog
+from pydantic import ValidationError
 from typing_extensions import TypedDict
 
 from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
+from trw_memory.exceptions import SchemaValidationError, StorageError
 from trw_memory.integrations._backend import create_backend_from_config
+from trw_memory.lifecycle.tiers._legacy_warm_migration import tier_root_dir
 from trw_memory.lifecycle.tiers._manager import TierManager
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocation
+from trw_memory.security._evidence_invariant import served_view
 from trw_memory.security.namespace_scope import NamespaceScopeError
 from trw_memory.storage.interface import StorageBackend
 
@@ -42,8 +46,20 @@ _TIER_MANAGER_CACHE_LOCK = threading.RLock()
 
 
 def namespace_storage_dir(config: MemoryConfig, namespace: str) -> Path:
-    """Resolve the on-disk directory that owns a namespace's tier files."""
-    return Path(config.storage_path).resolve() / namespace.replace(":", "_")
+    """Resolve the on-disk directory that owns a namespace's tier files.
+
+    ALWAYS per-namespace, even under a set ``memory_single_store_path``: the
+    canonical SQLite backend is safe to share across namespaces because every
+    row is keyed on ``(namespace, id)`` (PRD-CORE-245 FR01), but
+    :class:`~trw_memory.lifecycle.tiers._warm.WarmTierStore` is NOT -- its
+    module docstring is explicit that its rows are never partitioned by
+    namespace (it upserts vectors under the constant
+    :data:`~trw_memory.lifecycle.tiers._warm.WARM_TIER_NAMESPACE`). Collapsing
+    two namespaces onto one tier directory would share one ``warm.db`` between
+    them and reintroduce, at the tier layer, exactly the cross-namespace
+    leak the single store's row-keying was designed to avoid.
+    """
+    return tier_root_dir(config) / namespace.replace(":", "_")
 
 
 def supports_tier_runtime(backend: object) -> bool:
@@ -91,11 +107,12 @@ def embedding_has_consumer(config: MemoryConfig, backend: StorageBackend) -> boo
 
 def get_tier_manager(config: MemoryConfig, namespace: str) -> TierManager:
     """Return the process-local TierManager for a namespace."""
-    key = (str(Path(config.storage_path).resolve()), config.storage_backend, namespace)
+    base_dir = namespace_storage_dir(config, namespace)
+    key = (str(base_dir), config.storage_backend, namespace)
     with _TIER_MANAGER_CACHE_LOCK:
         manager = _TIER_MANAGER_CACHE.get(key)
         if manager is None:
-            manager = TierManager(base_dir=namespace_storage_dir(config, namespace), config=config, namespace=namespace)
+            manager = TierManager(base_dir=base_dir, config=config, namespace=namespace)
             _TIER_MANAGER_CACHE[key] = manager
             # Evict the least-recently-used managers if we're over the cap,
             # closing each one first so its SQLite connection is released.
@@ -254,6 +271,26 @@ def remove_entry_from_tiers(config: MemoryConfig, namespace: str, entry_id: str)
             logger.warning("tier_cold_remove_failed", namespace=namespace, entry_id=entry_id, exc_info=True)
 
 
+def resolve_canonical(
+    backend: StorageBackend, namespace: str
+) -> Callable[[list[str]], Mapping[str, MemoryEntry | None]]:
+    """Tier discovery's canonical lookup: one ``get_many``, plus an id-only check of what it omitted.
+
+    An omitted id the store still holds was withheld by the read layer (a quarantined
+    row, PRD-CORE-333) and maps to ``None``, so discovery drops it rather than falling
+    back to its tier snapshot. An id the store does not hold is absent from the
+    result: a cold-archive or primary-less warm row, which keeps its snapshot.
+    """
+
+    def resolve(entry_ids: list[str]) -> Mapping[str, MemoryEntry | None]:
+        found: dict[str, MemoryEntry | None] = dict(backend.get_many(entry_ids, namespace=namespace))
+        omitted = [entry_id for entry_id in entry_ids if entry_id not in found]
+        withheld = backend.existing_ids(omitted, namespace=namespace) if omitted else set()
+        return {**found, **dict.fromkeys(withheld)}
+
+    return resolve
+
+
 @overload
 def tier_candidates(
     config: MemoryConfig,
@@ -321,7 +358,7 @@ def tier_candidates(
             tags=tags,
             top_k=max(limit * 2, config.hot_max_entries),
             invocation=invocation,
-            resolve_entry=lambda entry_id: backend.get(entry_id, namespace=namespace),
+            resolve_entries=resolve_canonical(backend, namespace),
             covered_ids=covered_ids,
             **_restoration_callbacks(config, namespace, backend),
         )
@@ -342,10 +379,19 @@ class _RestorationCallbacks(TypedDict):
 
 def _restoration_callbacks(config: MemoryConfig, namespace: str, backend: StorageBackend) -> _RestorationCallbacks:
     def _restore_entry(entry_data: dict[str, object]) -> None:
-        entry = MemoryEntry.model_validate(entry_data)
-        if entry.namespace != namespace:
-            raise NamespaceScopeError("cold restoration outside authorized namespace")
-        backend.store(entry)
+        try:
+            # PRD-CORE-312: a legacy snapshot (verified, no evidence_level) restores as every read serves it.
+            entry = served_view(MemoryEntry.model_validate(entry_data))
+            if entry.namespace != namespace:
+                raise NamespaceScopeError("cold restoration outside authorized namespace")
+            backend.store(entry)
+        except (
+            ValidationError,
+            SchemaValidationError,
+        ) as exc:  # skipped via cold_promote's StorageError path; archive kept
+            reason = getattr(exc, "reason", "") or "invalid_entry"
+            logger.warning("cold_promote_legacy_entry_skipped", entry_id=str(entry_data.get("id", "")), reason=reason)
+            raise StorageError(f"cold entry cannot be restored: {reason}") from exc
 
     def _delete_restored_entry(entry_id: str) -> bool | None:
         return backend.delete(entry_id, namespace=namespace)

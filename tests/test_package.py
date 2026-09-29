@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from ruamel.yaml import YAML
 
 try:
@@ -14,13 +15,13 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility path
     import tomli as tomllib
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT_PATH = PACKAGE_ROOT / "pyproject.toml"
 UV_LOCK_PATH = PACKAGE_ROOT / "uv.lock"
-REQUIREMENTS_LOCK_PATH = PACKAGE_ROOT / "requirements.lock"
-MEMORY_CI_PATH = REPO_ROOT / ".github" / "workflows" / "memory-ci.yml"
-MEMORY_CD_PATH = REPO_ROOT / ".github" / "workflows" / "memory-cd.yml"
+# Live, package-scoped workflows (the monorepo-root memory-ci.yml / memory-cd.yml
+# these paths used to point at were deleted 2026-09-06; these are their replacements).
+MEMORY_CI_PATH = PACKAGE_ROOT / ".github" / "workflows" / "ci.yml"
+MEMORY_RELEASE_PATH = PACKAGE_ROOT / ".github" / "workflows" / "release.yml"
 
 
 def _load_pyproject() -> dict[str, object]:
@@ -33,34 +34,6 @@ def _load_workflow(path: Path) -> dict[str, object]:
     loaded = yaml.load(path.read_text(encoding="utf-8"))
     assert isinstance(loaded, dict)
     return loaded
-
-
-def _workflows_enabled() -> bool:
-    """Return True when the memory CI/CD YAML is actually active.
-
-    The repo intentionally keeps GitHub Actions commented-out (see the
-    header comment in each `.github/workflows/*.yml`). When that's the
-    case, `_load_workflow` returns `None` and the workflow-surface
-    assertions below would all fail. Skip them until the workflows are
-    explicitly enabled by the maintainer.
-    """
-    yaml = YAML(typ="safe")
-    try:
-        return isinstance(yaml.load(MEMORY_CI_PATH.read_text(encoding="utf-8")), dict)
-    except Exception:
-        return False
-
-
-import pytest  # noqa: E402  (placed here so the skip decorator can reference it)
-
-_WORKFLOW_DISABLED_REASON = (
-    "GitHub Actions workflows are commented out by repo policy; "
-    "workflow-surface assertions are skipped until they are re-enabled."
-)
-skip_if_workflows_disabled = pytest.mark.skipif(
-    not _workflows_enabled(),
-    reason=_WORKFLOW_DISABLED_REASON,
-)
 
 
 def _find_step(job: dict[str, object], name: str) -> dict[str, object]:
@@ -154,10 +127,17 @@ def test_all_exports_complete() -> None:
         "RateLimitError",
         "SchemaValidationError",
         "StorageError",
+        "StoreBusyError",
+        "StoreOp",
         "ToolAlreadyRegisteredError",
+        "UnsafeWriteError",
+        "UnsupportedStorageError",
         "__version__",
+        "append_beneath",
         "namespace_to_path",
+        "store_access",
         "validate_namespace",
+        "write_beneath",
     }
     assert set(trw_memory.__all__) == expected
 
@@ -233,8 +213,11 @@ def test_pyproject_declares_current_package_contract() -> None:
     }
     assert project["name"] == "trw-memory"
     assert project["license"] == "BUSL-1.1"
-    assert project["requires-python"] == ">=3.10"
-    assert "Programming Language :: Python :: 3.10" in classifiers
+    # PRD-INFRA-200 FR04: the manifest floor catches up to what the code already
+    # enforces (code_index _require_runtime fails closed below 3.11), and 3.10
+    # reaches end of life 2026-10.
+    assert project["requires-python"] == ">=3.11"
+    assert "Programming Language :: Python :: 3.10" not in classifiers
     assert "Programming Language :: Python :: 3.11" in classifiers
     assert "Programming Language :: Python :: 3.12" in classifiers
     assert "Programming Language :: Python :: 3.13" in classifiers
@@ -294,14 +277,14 @@ def test_pyproject_declares_current_optional_extras_and_scripts() -> None:
     assert scripts["trw-memory-server"] == "trw_memory.server:main"
 
 
-def test_pyproject_mypy_config_is_strict_python_310() -> None:
+def test_pyproject_mypy_config_is_strict_python_311() -> None:
     """The package keeps strict mypy settings aligned to the minimum Python version."""
     pyproject = _load_pyproject()
     mypy = pyproject["tool"]["mypy"]
     assert isinstance(mypy, dict)
 
     assert mypy["strict"] is True
-    assert mypy["python_version"] == "3.10"
+    assert mypy["python_version"] == "3.11"
     assert mypy["plugins"] == ["pydantic.mypy"]
 
 
@@ -337,99 +320,59 @@ def test_pyproject_coverage_omits_server_module() -> None:
     assert "*/server.py" in omit
 
 
-@skip_if_workflows_disabled
-def test_memory_ci_workflow_covers_package_and_workflow_changes() -> None:
-    """CI runs for trw-memory changes and for workflow edits that change the contract."""
-    workflow = _load_workflow(MEMORY_CI_PATH)
-    on_config = workflow["on"]
-    assert isinstance(on_config, dict)
-    push = on_config["push"]
-    pull_request = on_config["pull_request"]
-    assert isinstance(push, dict)
-    assert isinstance(pull_request, dict)
-
-    assert workflow["name"] == "memory-ci"
-    assert push["branches"] == ["main"]
-    assert push["paths"] == ["trw-memory/**", ".github/workflows/memory-ci.yml", ".github/workflows/memory-cd.yml"]
-    assert pull_request["paths"] == [
-        "trw-memory/**",
-        ".github/workflows/memory-ci.yml",
-        ".github/workflows/memory-cd.yml",
-    ]
+# The monorepo-root memory-ci.yml / memory-cd.yml these tests used to read were
+# deleted 2026-09-06; the live, package-scoped replacements are ci.yml and
+# release.yml below (retargeted 2026-09-26 against their real content -- two
+# of the five original assertions described jobs (`compat`, a push-path-filtered
+# trigger) that no longer exist in any form and were dropped rather than
+# retargeted onto something they don't mean).
 
 
-@skip_if_workflows_disabled
 def test_memory_ci_test_job_uploads_coverage_artifacts() -> None:
-    """The matrix test job emits both terminal and XML coverage for each Python version."""
+    """The full-suite test job emits XML coverage and enforces both coverage gates."""
     workflow = _load_workflow(MEMORY_CI_PATH)
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
     test_job = jobs["test"]
     assert isinstance(test_job, dict)
-    matrix = test_job["strategy"]["matrix"]
-    assert isinstance(matrix, dict)
-    coverage_step = _find_step(test_job, "Run tests with coverage")
+    coverage_step = _find_step(test_job, "Test with coverage")
     upload_step = _find_step(test_job, "Upload coverage XML")
-    security_step = _find_step(test_job, "Run INFRA-020 security coverage gate")
+    coverage_gate_step = _find_step(test_job, "Coverage gate (85%, lines + branches)")
+    security_step = _find_step(test_job, "INFRA-020 security coverage gate (88%, lines + branches)")
 
-    assert matrix["python-version"] == ["3.10", "3.11", "3.12", "3.13"]
-    assert coverage_step["run"].count("--cov-report") == 2
     assert "--cov-report=xml:coverage.xml" in coverage_step["run"]
-    assert "--cov-fail-under=85" in coverage_step["run"]
-    assert upload_step["uses"] == "actions/upload-artifact@v4"
+    assert "--cov-branch" in coverage_step["run"]
+    # PRD-SEC-020: every action is pinned to a full commit SHA, never a mutable tag.
+    assert re.fullmatch(r"actions/upload-artifact@[0-9a-f]{40}", upload_step["uses"])
     assert upload_step["if"] == "always()"
-    assert upload_step["with"]["name"] == "coverage-${{ matrix.python-version }}"
-    assert upload_step["with"]["path"] == "trw-memory/coverage.xml"
-    assert "--cov-branch" in security_step["run"]
-    assert "--cov-fail-under=90" in security_step["run"]
+    assert upload_step["with"]["name"] == "coverage-xml"
+    assert upload_step["with"]["path"] == "coverage.xml"
+    assert "--fail-under=85" in coverage_gate_step["run"]
+    assert "--include='*/trw_memory/security/*'" in security_step["run"]
+    assert "--fail-under=88" in security_step["run"]
 
 
-@skip_if_workflows_disabled
-def test_memory_ci_compat_job_checks_core_and_sqlite_vec_paths() -> None:
-    """Compat covers core-only imports, optional extras, and sqlite-vec loading."""
+def test_memory_ci_test_job_runs_mypy_strict() -> None:
+    """The test job still type-checks the package with strict mypy before testing."""
     workflow = _load_workflow(MEMORY_CI_PATH)
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
-    compat_job = jobs["compat"]
-    assert isinstance(compat_job, dict)
+    test_job = jobs["test"]
+    assert isinstance(test_job, dict)
 
-    install_core_step = _find_step(compat_job, "Install core package only")
-    verify_core_step = _find_step(compat_job, "Verify core import without optional deps")
-    verify_missing_step = _find_step(compat_job, "Verify optional imports fail gracefully")
-    install_all_step = _find_step(compat_job, "Install optional compatibility extras")
-    sqlite_vec_step = _find_step(compat_job, "Verify sqlite-vec runtime compatibility")
-    imports_step = _find_step(compat_job, "Verify representative optional imports")
+    typecheck_step = _find_step(test_job, "Type check")
 
-    assert install_core_step["run"] == "pip install -e ."
-    assert "Core exports OK" in verify_core_step["run"]
-    assert "ImportError" in verify_missing_step["run"]
-    assert install_all_step["run"] == 'pip install -e ".[all]"'
-    assert "sqlite_vec.load(conn)" in sqlite_vec_step["run"]
-    assert "SKIPPED: sqlite-vec requires SQLite >= 3.35.0" in sqlite_vec_step["run"]
-    for module_name in ("anthropic", "sentence_transformers", "sqlite_vec"):
-        assert module_name in imports_step["run"]
-
-
-@skip_if_workflows_disabled
-def test_memory_ci_typecheck_job_uses_python_310_and_mypy_strict() -> None:
-    """Typecheck is pinned to the minimum supported runtime with strict mypy."""
-    workflow = _load_workflow(MEMORY_CI_PATH)
-    jobs = workflow["jobs"]
-    assert isinstance(jobs, dict)
-    typecheck_job = jobs["typecheck"]
-    assert isinstance(typecheck_job, dict)
-
-    setup_step = _find_step(typecheck_job, "Set up Python 3.10")
-    typecheck_step = _find_step(typecheck_job, "Run mypy --strict")
-
-    assert setup_step["with"]["python-version"] == "3.10"
     assert typecheck_step["run"] == "mypy --strict src/trw_memory/"
 
 
-@skip_if_workflows_disabled
-def test_memory_cd_workflow_matches_current_release_contract() -> None:
-    """The release workflow builds, signs, publishes, and updates the changelog."""
-    workflow = _load_workflow(MEMORY_CD_PATH)
+def test_memory_release_workflow_matches_current_publish_contract() -> None:
+    """The release workflow builds, smoke-tests, then publishes; the full suite runs alongside.
+
+    PRD-INFRA-188 Amendment 02 (release.yml comment): publish gates on build + smoke-test,
+    and the Linux full-suite proof is the local release-check receipt `cut` enforces for
+    this exact tree, so ``full-suite`` is asserted to exist but is not in ``publish.needs``.
+    """
+    workflow = _load_workflow(MEMORY_RELEASE_PATH)
     on_config = workflow["on"]
     assert isinstance(on_config, dict)
     push = on_config["push"]
@@ -438,39 +381,38 @@ def test_memory_cd_workflow_matches_current_release_contract() -> None:
     assert isinstance(jobs, dict)
 
     build_job = jobs["build"]
-    sign_job = jobs["sign"]
-    publish_job = jobs["publish-codeartifact"]
-    changelog_job = jobs["changelog"]
+    smoke_test_job = jobs["smoke-test"]
+    full_suite_job = jobs["full-suite"]
+    publish_job = jobs["publish"]
     assert isinstance(build_job, dict)
-    assert isinstance(sign_job, dict)
+    assert isinstance(smoke_test_job, dict)
+    assert isinstance(full_suite_job, dict)
     assert isinstance(publish_job, dict)
-    assert isinstance(changelog_job, dict)
 
-    assert workflow["name"] == "memory-cd"
-    assert push["tags"] == ["trw-memory-v*"]
-    assert workflow["permissions"] == {"contents": "write", "id-token": "write"}
+    assert push["tags"] == ["v*"]
+    # PRD-SEC-020: least privilege; only the publish job may mint an OIDC token.
+    assert workflow["permissions"] == {"contents": "read"}
 
-    assert _find_step(build_job, "Build wheel and sdist")["run"] == "python -m build"
-    assert "find dist" in _find_step(build_job, "Verify build artifacts exist")["run"]
-    assert "sha256sum dist/*" in _find_step(build_job, "Compute checksums")["run"]
-    assert _find_step(sign_job, "Download build artifacts")["with"]["path"] == "dist/"
-    assert "Install sigstore" not in {step.get("name") for step in sign_job["steps"]}
-    assert _find_step(sign_job, "Sign artifacts")["uses"] == "sigstore/gh-action-sigstore-python@v3"
-    assert _find_step(publish_job, "Download build artifacts")["with"]["path"] == "trw-memory/dist/"
-    assert "Missing required secret(s):" in _find_step(publish_job, "Validate required publishing secrets")["run"]
-    assert _find_step(publish_job, "Configure AWS credentials")["uses"] == "aws-actions/configure-aws-credentials@v4"
-    assert "twine upload dist/*.whl dist/*.tar.gz" in _find_step(publish_job, "Publish to CodeArtifact")["run"]
-    changelog_run = _find_step(changelog_job, "Generate changelog")["run"]
-    commit_run = _find_step(changelog_job, "Commit changelog")["run"]
-    assert "CHANGELOG.md" in changelog_run
-    assert '"Features"' in changelog_run
-    assert '"Bug Fixes"' in changelog_run
-    assert '"Other"' in changelog_run
-    assert '"Uncategorized"' in changelog_run
-    assert "TODO" not in changelog_run
-    assert "git add CHANGELOG.md" in commit_run
-    assert "git push origin HEAD:main" in commit_run
-    assert "github-actions[bot]" in commit_run
+    assert _find_step(build_job, "Build package")["run"] == "python -m build"
+    assert smoke_test_job["needs"] == "build"
+    assert full_suite_job["uses"] == "./.github/workflows/ci.yml"
+    assert full_suite_job["with"] == {"suite": "full"}
+    # PRD-INFRA-198-FR01: publish also waits for the signed-tag attestation check.
+    assert publish_job["needs"] == ["verify-attestation", "build", "smoke-test"]
+    verify_job = jobs["verify-attestation"]
+    assert isinstance(verify_job, dict)
+    # The check is bound to the commit this run builds, not to what the tag name resolves to later.
+    verify_run = str(_find_step(verify_job, "Verify the release attestation")["run"])
+    assert 'verify_release_tag.py "${GITHUB_REF_NAME}" --commit "${GITHUB_SHA}"' in verify_run
+    assert '[ "${head}" != "${GITHUB_SHA}" ]' in verify_run
+    for job in (verify_job, build_job):
+        assert job["steps"][0]["with"]["ref"] == "${{ github.sha }}"
+    assert publish_job["environment"] == "pypi"
+    assert publish_job["permissions"] == {"id-token": "write"}
+    publish_step = next(
+        step for step in publish_job["steps"] if step.get("uses", "").startswith("pypa/gh-action-pypi-publish")
+    )
+    assert re.fullmatch(r"pypa/gh-action-pypi-publish@[0-9a-f]{40}", publish_step["uses"])
 
 
 def test_package_version_is_semver_like() -> None:
@@ -503,16 +445,6 @@ def _dependency_names(dependencies: list[str]) -> set[str]:
     return {re.split(r"[<>=!~;\\[]", dep, maxsplit=1)[0].strip().lower().replace("_", "-") for dep in dependencies}
 
 
-def _requirements_lock_package_version(name: str) -> str:
-    match = re.search(
-        rf"^{re.escape(name)}==([^\s]+)$",
-        REQUIREMENTS_LOCK_PATH.read_text(encoding="utf-8"),
-        re.MULTILINE,
-    )
-    assert match is not None, f"{name!r} not found in requirements.lock"
-    return match.group(1)
-
-
 def test_uv_lock_version_matches_pyproject() -> None:
     """The trw-memory package version in uv.lock tracks pyproject.toml.
 
@@ -541,58 +473,96 @@ def test_pyproject_declares_core_runtime_direct_dependencies() -> None:
     assert "typing-extensions" in _dependency_names(dependencies)
 
 
-# ``requirements.lock`` is a monorepo build artifact; it is NOT shipped in the
-# standalone public mirror (github.com/wallter/trw-memory). Guard the lock-pin
-# tests so they enforce in the monorepo but skip cleanly in the mirror CI.
-skip_if_requirements_lock_absent = pytest.mark.skipif(
-    not REQUIREMENTS_LOCK_PATH.exists(),
-    reason="requirements.lock is a monorepo build artifact, absent in the standalone mirror",
-)
+# ``requirements.lock`` is a monorepo build artifact that is untracked and never
+# generated by any gate, so the ``skip_if_requirements_lock_absent``-decorated
+# tests that used to read it never ran. Enforce the same security intent
+# against pyproject.toml instead, which always exists.
+def _dependency_lower_bound(dependencies: list[str], name: str) -> tuple[int, ...] | None:
+    """Return the ``>=`` lower bound pinned for ``name`` in a PEP 508 dependency list, or ``None``."""
+    normalized = name.strip().lower().replace("_", "-")
+    for dep in dependencies:
+        dep_name = re.split(r"[<>=!~;\[]", dep, maxsplit=1)[0].strip().lower().replace("_", "-")
+        if dep_name != normalized:
+            continue
+        match = re.search(r">=\s*([0-9][0-9.]*)", dep)
+        return _version_tuple(match.group(1)) if match else None
+    return None
 
 
-@skip_if_requirements_lock_absent
-def test_requirements_lock_fastmcp_pin_is_patched() -> None:
-    """requirements.lock must not pin vulnerable FastMCP releases."""
-    assert _version_tuple(_requirements_lock_package_version("fastmcp")) >= (3, 2, 0)
+def test_pyproject_fastmcp_pin_is_patched() -> None:
+    """pyproject.toml must not allow a vulnerable FastMCP floor."""
+    pyproject = _load_pyproject()
+    dependencies = pyproject["project"]["dependencies"]
+    assert isinstance(dependencies, list)
+
+    floor = _dependency_lower_bound(dependencies, "fastmcp")
+    assert floor is not None, "fastmcp has no declared >= lower bound in pyproject.toml"
+    assert floor >= (3, 2, 0)
 
 
-@skip_if_requirements_lock_absent
-def test_requirements_lock_security_pin_floors_are_patched() -> None:
-    """Known-audited requirements.lock pins stay above patched floors."""
+def test_pyproject_security_pin_floors_are_patched() -> None:
+    """pyproject.toml's own dependency floors stay above known-patched advisories.
+
+    Only packages trw-memory pins DIRECTLY (runtime or dev) are checked here.
+    B71-127: CI installs `.[dev]` unconstrained, and every published
+    `pip install trw-memory` does too, so a floor that lives ONLY in uv.lock
+    (a package trw-memory never names directly) protects the locked dev venv
+    and nothing else. authlib/idna/pygments/pyjwt/python-dotenv used to be
+    exactly that (checked only by test_uv_lock_transitive_security_pins_are_patched,
+    below); they are declared directly in pyproject.toml now, so they belong here.
+    """
+    pyproject = _load_pyproject()
+    project = pyproject["project"]
+    dependencies = project["dependencies"]
+    dev_dependencies = project["optional-dependencies"]["dev"]
+    assert isinstance(dependencies, list)
+    assert isinstance(dev_dependencies, list)
+    all_dependencies = [*dependencies, *dev_dependencies]
+
     floors = {
-        "Authlib": (1, 6, 12),
+        "authlib": (1, 6, 12),
         "cryptography": (48, 0, 1),
         "idna": (3, 15),
-        "Pygments": (2, 20, 0),
-        "PyJWT": (2, 13, 0),
         "pydantic-settings": (2, 14, 2),
+        "pygments": (2, 20, 0),
+        "pyjwt": (2, 13, 0),
         "pytest": (9, 0, 3),
         "python-dotenv": (1, 2, 2),
         "python-multipart": (0, 0, 27),
         "starlette": (1, 0, 1),
     }
     for package, floor in floors.items():
-        assert _version_tuple(_requirements_lock_package_version(package)) >= floor
+        actual = _dependency_lower_bound(all_dependencies, package)
+        assert actual is not None, (
+            f"{package!r} has no declared >= lower bound in pyproject.toml "
+            "(B71-127: a lock-only floor doesn't protect CI's `.[dev]` install or a published install)"
+        )
+        assert actual >= floor, f"{package!r} floor {actual} is below the patched floor {floor}"
 
 
-@skip_if_requirements_lock_absent
-def test_requirements_lock_has_no_stale_self_pin() -> None:
-    """requirements.lock must not pin trw-memory to a frozen git commit.
+# B71-127: authlib/idna/pygments/pyjwt/python-dotenv used to be checked ONLY here,
+# against uv.lock — a floor that binds the locked dev venv and nothing else (not CI's
+# unconstrained `.[dev]` install, not a published `pip install trw-memory`). They are
+# now declared directly in pyproject.toml (see the "dependencies" list) and covered by
+# test_pyproject_security_pin_floors_are_patched above, which binds every install; a
+# separate lock-only test for them would just duplicate that coverage with a weaker
+# guarantee, so it was removed rather than kept as a second, redundant check.
 
-    A `-e git+...trw-framework.git@<sha>#egg=trw_memory` self-pin drifts the
-    moment main advances past <sha>; the editable self-reference is normalised
-    to a path install (`-e .`) so it never goes stale.
+
+def test_pyproject_has_no_self_dependency() -> None:
+    """trw-memory's own runtime dependencies must not list itself.
+
+    Mirrors the intent of the old requirements.lock check, which guarded a
+    frozen `-e git+...trw-framework.git@<sha>#egg=trw_memory` self-pin that
+    drifts the moment main advances past <sha>. pyproject.toml has no
+    equivalent lock-drift risk, but a runtime self-dependency would still be a
+    packaging error.
     """
-    text = REQUIREMENTS_LOCK_PATH.read_text(encoding="utf-8")
+    pyproject = _load_pyproject()
+    dependencies = pyproject["project"]["dependencies"]
+    assert isinstance(dependencies, list)
 
-    stale_self_pin = re.compile(
-        r"^-e\s+git\+.*trw-framework\.git@[0-9a-f]{7,40}.*egg=trw_memory",
-        re.MULTILINE,
-    )
-    assert not stale_self_pin.search(text), (
-        "requirements.lock pins trw-memory to a frozen git commit; "
-        "use an editable path reference (`-e .`) instead so it does not drift."
-    )
+    assert "trw-memory" not in _dependency_names(dependencies)
 
 
 def test_retired_hypothetical_generation_exports_and_benchmark_absent():

@@ -30,7 +30,9 @@ Extracted as PRD-DIST-245 Phase 3 batch 100.
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import datetime, timezone
+from pathlib import Path
 
 import structlog
 
@@ -45,9 +47,10 @@ from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.validation import DEFAULT_NAMESPACE
 from trw_memory.security._runtime_pii import apply_runtime_pii_policy
 from trw_memory.security.poisoning import validate_entry_payload
+from trw_memory.security.quarantine_ledger import LedgerIdentity, ledger_for_config
 from trw_memory.security.rbac import transport_grant
 from trw_memory.security.startup import resolve_security_path
-from trw_memory.storage.interface import StorageBackend
+from trw_memory.storage.interface import StorageBackend, is_transactional
 from trw_memory.storage.persistence import lock_for_rmw
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
@@ -73,10 +76,19 @@ def open_quarantine_backend(config: MemoryConfig) -> SQLiteBackend:
     )
 
 
+def _quarantine_lock(config: MemoryConfig) -> AbstractContextManager[Path]:
+    """The one lock intake, delete and review of the quarantine store share (B71-91).
+
+    A review reads a row, then deletes (approve) or re-stores (reject) it. An intake
+    or forget of the same id landing in between was deleted, overwritten or undone.
+    """
+    return lock_for_rmw(resolve_security_path(config, "quarantine_db_path", create_parent=True))
+
+
 def store_quarantined_entry(config: MemoryConfig, entry: MemoryEntry) -> None:
     """Persist a quarantined entry in the SEC-001 quarantine SQLite store."""
     try:
-        with open_quarantine_backend(config) as backend:
+        with _quarantine_lock(config), open_quarantine_backend(config) as backend:
             backend.store(
                 entry.model_copy(
                     update={
@@ -89,6 +101,12 @@ def store_quarantined_entry(config: MemoryConfig, entry: MemoryEntry) -> None:
                 )
             )
             append_review_log(config, entry.id, "quarantined", reviewer_id="system", namespace=entry.namespace)
+            # PRD-CORE-333 FR01: the decision also enters the append-only ledger the
+            # backend read layer filters on, so this content is never served from an
+            # active store either -- however it later gets there.
+            ledger_for_config(config).append(
+                LedgerIdentity.of(entry), "quarantined", actor="system", reason="held at store intake"
+            )
     except OSError as exc:
         raise QuarantineUnreachableError(f"quarantine DB unavailable: {exc}") from exc
 
@@ -145,7 +163,7 @@ def delete_quarantined_entries(
     """Delete matching quarantined entries and return the count removed."""
     _ensure_maintenance(config)
     deleted = 0
-    with open_quarantine_backend(config) as backend:
+    with _quarantine_lock(config), open_quarantine_backend(config) as backend:
         if memory_id is not None:
             # Closure re-audit #1 + #6: the quarantine DB is a single SQLite
             # store keyed on config (NOT per-namespace), so an unqualified
@@ -239,8 +257,7 @@ def review_quarantined_entry(
 ) -> dict[str, str]:
     if decision not in {"approve", "reject"}:
         raise ValueError("decision must be approve or reject")
-    review_state_path = resolve_security_path(config, "quarantine_db_path", create_parent=True)
-    with lock_for_rmw(review_state_path):
+    with _quarantine_lock(config):
         return _review_quarantined_entry_locked(
             config,
             active_backend=active_backend,
@@ -318,11 +335,13 @@ def _review_quarantined_entry_locked(
                     }
                 }
             )
-            if getattr(type(active_backend), "transaction", None) is StorageBackend.transaction:
+            if not is_transactional(active_backend):
                 # No atomic check-and-insert here (YAML): an approval could overwrite a racing write.
                 return {"learning_id": learning_id, "status": "unsupported_backend"}
             with active_backend.transaction() as txn:
-                conflict = txn.get(learning_id, namespace=effective_namespace) is not None
+                # An identity probe, not ``get``: the ledger hides an active row sharing this
+                # identity, and reading it as absent let the store overwrite it (review r1 P0-1).
+                conflict = txn.holds_id(learning_id, namespace=effective_namespace)
                 if not conflict:
                     txn.store(approved)
             if conflict:
@@ -332,6 +351,9 @@ def _review_quarantined_entry_locked(
                 return {"learning_id": learning_id, "status": "conflict"}
             quarantine_backend.delete(learning_id, namespace=effective_namespace)
             append_review_log(config, learning_id, "active", reviewer_id=reviewer_id, namespace=effective_namespace)
+            ledger_for_config(config).append(
+                LedgerIdentity.of(entry), "approved", actor=reviewer_id, reason="review approve"
+            )
             return {"learning_id": learning_id, "status": "approved"}
         rejected = entry.model_copy(
             update={
@@ -346,5 +368,8 @@ def _review_quarantined_entry_locked(
         quarantine_backend.store(rejected)
         append_review_log(
             config, learning_id, "obsolete_poisoned", reviewer_id=reviewer_id, namespace=effective_namespace
+        )
+        ledger_for_config(config).append(
+            LedgerIdentity.of(entry), "rejected", actor=reviewer_id, reason="review reject"
         )
         return {"learning_id": learning_id, "status": "rejected"}

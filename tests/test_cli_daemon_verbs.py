@@ -6,7 +6,7 @@ another project's rows, with the SQLite connection factories patched to raise.
 Each verb presents only the checkout grant and defaults to the checkout's pin,
 not the identity of the directory it now sits in; naming the other project is
 refused in one line; and the verbs that still write a store directly --
-``import``, ``reembed`` and ``restore`` -- and ``snapshot create``, which copies
+``import``, ``reembed`` and ``restore`` (by the store lock) -- and ``snapshot create``, which copies
 every namespace in the file, refuse while the daemon serves.
 """
 
@@ -80,12 +80,14 @@ def test_the_cli_verbs_reach_only_the_checkout_grant_over_the_daemon(
         direct_writers = (
             ["import", "rows.json"],
             ["reembed"],
-            ["restore", "--from-cold", "--db", str(paths.store)],
             ["snapshot", "create", "--db", str(paths.store)],
         )
         for verb in direct_writers:
             assert main(verb) == 1
             assert f"pid {proc.pid}" in capsys.readouterr().err
+        # restore takes the store's EXCLUSIVE op (PRD-CORE-306), which the daemon's SERVE hold refuses
+        assert main(["restore", "--from-cold", "--db", str(paths.store)]) == 1
+        assert "in use by another process" in capsys.readouterr().err
         assert not [path for path in tmp_path.rglob("*") if "snapshot" in path.name], "a refused snapshot wrote a file"
     finally:
         proc.kill()

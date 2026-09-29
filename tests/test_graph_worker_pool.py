@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import threading
 import warnings
 from collections.abc import Iterator
 from pathlib import Path
@@ -252,3 +253,191 @@ def test_forked_child_builds_its_own_worker_and_never_touches_the_parents(tmp_pa
         graph.wait_for_graph_updates(timeout=10.0, owner=owner)
         assert parent_worker.thread.is_alive()
         assert parent_worker.backend is parent_backend
+
+
+def test_a_forked_childs_graph_pool_runs_jobs_for_an_owner_the_parent_abandoned(tmp_path: Path) -> None:
+    """B71-133 (d): the child's pool reset cleared the workers but kept the parent's abandonment marks
+    (PRD-CORE-331 FR08), so the child's first jobs for that owner were silently skipped."""
+    graph_pool = pool._GraphWorkerPool()
+    config = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
+    owner, running, release, ran = object(), threading.Event(), threading.Event(), threading.Event()
+
+    def blocked() -> None:
+        running.set()
+        release.wait(10)
+
+    try:
+        assert graph_pool.submit(config, "default", owner, "busy", blocked)
+        assert graph_pool.submit(config, "default", owner, "queued", lambda: None)
+        assert running.wait(10)
+        assert graph_pool.abandon_owner(owner) == 1  # the parent gives up on this owner's queued job; one is running
+
+        graph_pool._pid = -1  # what the child sees: another pid, so the fork reset runs
+        graph_pool.after_fork_in_child()
+        assert graph_pool.submit(config, "default", owner, "child", ran.set)
+        assert ran.wait(10), "the child's own job for the owner was skipped by the parent's abandonment mark"
+    finally:
+        release.set()
+        for inherited in graph_pool._abandoned:  # this test's "parent" worker: stop it too
+            inherited.queue.put(pool._STOP)
+            inherited.thread.join(10)
+        graph_pool.stop_all(10)
+
+
+def _pause_at_start_decision(
+    graph_pool: pool._GraphWorkerPool, reached: threading.Event, resume: threading.Event
+) -> None:
+    """Pause the worker at the last point before it commits to running a job.
+
+    With the fix, the mark check and the start are one locked transition
+    (``start_unless_abandoned``), so the only window is before it. Before the fix
+    (``is_abandoned`` then ``job.run()``), the window was after the check returned False.
+    """
+    decide = getattr(graph_pool, "start_unless_abandoned", None)
+    if decide is not None:
+
+        def paused_start(owner: object) -> bool:
+            reached.set()
+            assert resume.wait(10)
+            return bool(decide(owner))
+
+        graph_pool.start_unless_abandoned = paused_start  # type: ignore[method-assign]
+        return
+    check = graph_pool.is_abandoned  # type: ignore[attr-defined]  # pre-fix API
+
+    def paused_check(owner: object) -> bool:
+        abandoned = bool(check(owner))
+        reached.set()
+        assert resume.wait(10)
+        return abandoned
+
+    graph_pool.is_abandoned = paused_check  # type: ignore[attr-defined]
+
+
+def test_an_abandon_that_lands_during_the_start_decision_means_the_job_never_runs(tmp_path: Path) -> None:
+    """PRD-CORE-331 FR08 sol r2: an abandon between the worker's mark check and ``job.run()`` let the job start.
+
+    The interleave is forced: the worker pauses at its start decision, the owner is
+    abandoned, the worker resumes. The job must be skipped, and the abandon must
+    report none of the owner's jobs as running.
+    """
+    graph_pool = pool._GraphWorkerPool()
+    config = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
+    owner, reached, resume, ran = object(), threading.Event(), threading.Event(), threading.Event()
+    _pause_at_start_decision(graph_pool, reached, resume)
+    try:
+        assert graph_pool.submit(config, "default", owner, "raced", ran.set)
+        assert reached.wait(10)
+        running = graph_pool.abandon_owner(owner)
+        resume.set()
+        graph.wait_for_graph_updates(timeout=10.0, owner=owner)
+        assert not ran.is_set(), "job.run started after abandon_owner returned"
+        assert running == 0
+        with graph_pool._lock:  # the mark self-clears once nothing is pending or running
+            assert owner not in graph_pool._abandoned_owners
+            assert owner not in graph_pool._owner_pending
+            assert owner not in graph_pool._owner_running
+    finally:
+        resume.set()
+        graph_pool.stop_all(10)
+
+
+def test_an_abandon_between_the_start_and_the_callable_counts_the_job_and_lets_it_run(tmp_path: Path) -> None:
+    """PRD-CORE-331 FR08 r2 (sol r1 P2): the window after the locked start, before ``job.run()`` is entered.
+
+    The job is already committed to run there, so the abandon must count it (1),
+    and it then runs: no job enters its callable that the abandon did not count.
+    """
+    graph_pool = pool._GraphWorkerPool()
+    config = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
+    owner, reached, resume, ran = object(), threading.Event(), threading.Event(), threading.Event()
+    decide = graph_pool.start_unless_abandoned
+
+    def paused_after_start(owner_: object) -> bool:
+        started = decide(owner_)
+        reached.set()
+        assert resume.wait(10)
+        return started
+
+    graph_pool.start_unless_abandoned = paused_after_start  # type: ignore[method-assign]
+    try:
+        assert graph_pool.submit(config, "default", owner, "committed", ran.set)
+        assert reached.wait(10)
+        assert graph_pool.abandon_owner(owner) == 1, "a job committed to run must be in the abandon's count"
+        resume.set()
+        graph.wait_for_graph_updates(timeout=10.0, owner=owner)
+        assert ran.is_set()
+        with graph_pool._lock:
+            assert owner not in graph_pool._abandoned_owners
+            assert owner not in graph_pool._owner_running
+    finally:
+        resume.set()
+        graph_pool.stop_all(10)
+
+
+def test_an_abandon_after_the_start_counts_the_job_as_running_and_lets_it_finish(tmp_path: Path) -> None:
+    """The other side of the one transition: a job already started is reported running and finishes."""
+    graph_pool = pool._GraphWorkerPool()
+    config = MemoryConfig(storage_backend="sqlite", storage_path=str(tmp_path))
+    owner, started, release, finished = object(), threading.Event(), threading.Event(), threading.Event()
+
+    def blocked() -> None:
+        started.set()
+        assert release.wait(10)
+        finished.set()
+
+    try:
+        assert graph_pool.submit(config, "default", owner, "running", blocked)
+        assert started.wait(10)
+        assert graph_pool.abandon_owner(owner) == 1
+        with graph_pool._lock:  # marked while it runs
+            assert owner in graph_pool._abandoned_owners
+        release.set()
+        graph.wait_for_graph_updates(timeout=10.0, owner=owner)
+        assert finished.is_set()
+        with graph_pool._lock:
+            assert owner not in graph_pool._abandoned_owners
+            assert owner not in graph_pool._owner_running
+    finally:
+        release.set()
+        graph_pool.stop_all(10)
+
+
+def test_interpreter_exit_lets_an_in_flight_job_finish_and_close_its_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A job still running at exit (close() stopped waiting for it, PRD-CORE-331 FR08) finishes and
+    closes its backend, so SQLite checkpoints memory.db-wal instead of leaving it behind.
+
+    Fails on the former 1 s exit join: a 1.5 s job -- an ordinary enrichment on a loaded host -- was
+    killed with its daemon thread and its connection never closed (a 2.2 MB memory.db-wal survived).
+    """
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def slow(entry: MemoryEntry, config: MemoryConfig, embedding: list[float] | None) -> None:
+        with graph._worker_backend(config, entry.namespace) as backend:
+            backend.store(entry)  # the worker's own connection has written, so it holds the WAL open
+            started.set()
+            release.wait(30.0)
+        finished.set()
+
+    monkeypatch.setattr(graph, "_run_scheduled_graph_update", slow)
+    config = _config(tmp_path / "store")
+    assert graph.schedule_graph_update(make_entry(entry_id="M-slow"), object(), config=config)  # type: ignore[arg-type]
+    assert started.wait(5.0)
+    # The job ends 1.5 s after exit starts joining -- measured from the join, not from the job's
+    # start, so the former 1.0 s join fails however slowly the host reached this line.
+    timer = threading.Timer(1.5, release.set)
+    timer.start()
+    try:
+        pool._stop_workers_at_exit()
+        # Read BEFORE the cleanup below releases a still-blocked job, which could then finish on its own.
+        finished_by_exit, live_after_exit = finished.is_set(), _live(pool._POOL)
+        wal_after_exit = _db_path(config).with_name(config.sqlite_db_name + "-wal").exists()
+    finally:
+        timer.cancel()
+        release.set()
+
+    assert finished_by_exit
+    assert live_after_exit == 0
+    assert not wal_after_exit

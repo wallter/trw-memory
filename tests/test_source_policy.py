@@ -424,3 +424,36 @@ def test_resolved_admission_and_weighted_apply_agree(options: dict[str, Any]) ->
     assert all(row["score"] in (1.0, 2.0, 3.0) for row in rows)  # inputs unchanged
     if options == {}:
         assert [row["memory_id"] for row in applied] == ["unknown", "tie", "git", "episode"]
+
+
+# --- PRD-CORE-336 FR01 / NFR01: non-distilled rows are untouched by the distilled weight ---
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rerank", ["off", "on"])
+async def test_non_distilled_rows_byte_identical_under_distilled_weighting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rerank: str
+) -> None:
+    """Without distilled rows both routes return the pre-change golden byte for byte.
+
+    With them, the 0.75 default moves only distilled rows: non-distilled rows keep
+    their golden order and their exact golden score on both routes. The library
+    scores non-distilled rows at their PRE-weight position (CORE-336-KI1).
+    """
+    from tests import _source_weighting_support as support
+
+    support.stub_cross_encoder(monkeypatch, None if rerank == "off" else support.reverse_id_rerank)
+    bare = support.make_client(tmp_path / "bare", monkeypatch)
+    support.seed(bare, support.NON_DISTILLED_ROWS)
+    assert support.canonical(await support.library_recall(bare)) == support.GOLDENS[f"library/{rerank}/without"]
+    assert support.canonical(support.daemon_recall(bare)) == support.GOLDENS[f"daemon/{rerank}/without"]
+
+    mixed = support.make_client(tmp_path / "mixed", monkeypatch)
+    support.seed(mixed, support.NON_DISTILLED_ROWS + support.DISTILLED_ROWS)
+    daemon_rows = support.daemon_recall(mixed)["memories"]
+    daemon_view = [(support.row_id(row), repr(float(row["score"]))) for row in daemon_rows]
+    assert daemon_view == support.expected_daemon_weighted(support.GOLDENS[f"daemon/{rerank}/with/preweight"], 0.75)
+    assert support.non_distilled_view(daemon_rows) == support.golden_view(f"daemon/{rerank}/with/view")
+
+    library_rows = await support.library_recall(mixed)
+    assert support.non_distilled_view(library_rows) == support.golden_view(f"library/{rerank}/with/view")

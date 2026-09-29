@@ -7,11 +7,12 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import cast
 
+from trw_memory.storage._anchor_index import replace_anchor_postings
 from trw_memory.storage._schema import ensure_schema
 
 
 def _make_conn() -> sqlite3.Connection:
-    """Create an in-memory SQLite connection with the full schema."""
+    """Create an in-memory SQLite connection with the full schema (including ``anchor_postings``)."""
     conn = sqlite3.connect(":memory:")
     ensure_schema(conn)
     return conn
@@ -25,14 +26,16 @@ def _insert_memory_row(
     importance: float = 0.5,
     anchors_json: str = "[]",
     outcome_history_json: str = "[]",
+    namespace: str = "default",
 ) -> None:
-    """Insert a minimal memory row for typed-edge tests."""
+    """Insert a minimal memory row for typed-edge tests, posting its anchors to ``anchor_postings``."""
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         "INSERT INTO memories (id, content, created_at, updated_at, importance, anchors, outcome_history) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (entry_id, content, now, now, importance, anchors_json, outcome_history_json),
     )
+    replace_anchor_postings(conn, namespace, entry_id, json.loads(anchors_json) if anchors_json else [])
     conn.commit()
 
 

@@ -20,10 +20,34 @@ class StorageError(MemoryError):
     """Raised when a storage operation fails (read, write, lock)."""
 
 
+class StoreBusyError(StorageError):
+    """A store operation could not take its lock: another holder is using the store (PRD-CORE-306).
+
+    Nothing was changed; ``path`` is the store, and the message names the refused op and the fix.
+    """
+
+
+class UnsupportedStorageError(StorageError):
+    """The store cannot be locked here: its lock file is unusable, or its filesystem has no advisory locks."""
+
+
 class UntrustedDirectoryError(StorageError):
     """A directory is a symlink, or group/world-writable and owned by someone
     else -- refused before a secret-bearing read or write touches it
     (PRD-SEC-016)."""
+
+
+class UnsafeWriteError(UntrustedDirectoryError):
+    """A write beneath a root was refused rather than risk following a symlink (PRD-CORE-337).
+
+    ``path`` is the component that was refused; ``reason`` is one machine-greppable token
+    (``symlink_component``, ``symlink_leaf``, ...; the full list is in :mod:`trw_memory.safe_fs`).
+    It is not an ``OSError``, so a broad ``except OSError`` cannot swallow a refusal.
+    """
+
+    def __init__(self, message: str, *, path: str = "", reason: str = "") -> None:
+        super().__init__(message, path=path)
+        self.reason = reason
 
 
 class ConfigError(MemoryError):
@@ -50,6 +74,11 @@ def refuse_encryption_at_rest(config: object) -> None:
     """
     if getattr(config, "encryption_enabled", False):
         raise EncryptionAtRestUnsupportedError(ENCRYPTION_AT_REST_UNSUPPORTED)
+
+
+class StorageRootUnresolvableError(ConfigError):
+    """The DEFAULT ``storage_path`` has no project to anchor to (no ``TRW_DIR``, ``TRW_PROJECT_ROOT``
+    or ``.trw`` at or above the cwd); refused before anything is written. Pass an explicit path."""
 
 
 class UnsupportedPlatformError(ConfigError):
@@ -279,6 +308,16 @@ class DaemonVersionMismatchError(DaemonUnreachableError):
     The package floor governs what is installed, not a daemon already running or
     started from another environment; a tool signature changes across majors, so
     the pairing is refused before any call rather than at the first mismatched one.
+    """
+
+
+class DaemonProtocolError(DaemonUnreachableError):
+    """Raised when the daemon's reply to a direct read is not a well-formed answer (PRD-CORE-333 S3b).
+
+    A non-JSON body, a JSON-RPC envelope with the wrong id or neither ``result`` nor
+    ``error``, or a result whose ``structuredContent`` is not an object: nothing usable
+    was read, so it fails closed as an unreachable store does. Not retried: the same
+    daemon would answer the same way.
     """
 
 

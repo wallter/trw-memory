@@ -282,14 +282,11 @@ def find_active_by_content(
 
 def count(backend: SQLiteBackend, namespace: str | None = None) -> int:
     """Return the number of stored entries."""
+    sql = "SELECT COUNT(*) FROM memories" + ("" if namespace is None else " WHERE namespace = ?")  # noqa: S608
+    params = () if namespace is None else (namespace,)
     try:
         with backend._lock:
-            if namespace is not None:
-                row = backend._conn.execute(
-                    "SELECT COUNT(*) FROM memories WHERE namespace = ?", (namespace,)
-                ).fetchone()
-            else:
-                row = backend._conn.execute("SELECT COUNT(*) FROM memories").fetchone()
+            row = backend._conn.execute(sql, params).fetchone()
         return int(row[0]) if row else 0
     except sqlite3.Error as exc:
         raise StorageError(
@@ -382,6 +379,35 @@ def list_entries(
     return results
 
 
+def list_entries_by_id(
+    backend: SQLiteBackend,
+    select_columns_sql: str,
+    *,
+    namespace: str,
+    after_id: str | None,
+    through_id: str | None,
+    limit: int,
+) -> list[MemoryEntry]:
+    """*namespace*'s entries in id order, strictly after *after_id* and up to *through_id* (``None``: no
+    ceiling), from the ``(namespace, id)`` key. A sweep passes the backend's ``last_entry_id`` from when it
+    began, so rows inserted behind it cannot extend it without end.
+
+    An id never changes, so no write can move a row across this keyset: a sweep that must visit every
+    row once pages here, not by ``updated_at``, which an edit moves above a cursor (B71-86).
+    """
+    if limit <= 0:
+        return []
+    where_sql = "namespace = ? AND id > ?" + ("" if through_id is None else " AND id <= ?")
+    params: list[object] = [namespace, after_id or "", *(() if through_id is None else (through_id,))]
+    sql = f"SELECT {select_columns_sql} FROM memories WHERE {where_sql} ORDER BY id LIMIT ?"  # noqa: S608
+    fetch_query = backend._fetch_query(where_sql=where_sql, params=list(params), order_by="id", limit=limit)
+    try:
+        with backend._lock:
+            return _execute_resilient(backend, sql, [*params, limit], fetch_query=fetch_query)
+    except (sqlite3.Error, ValueError, KeyError) as exc:
+        raise StorageError(f"Failed to list entries: {exc}", path=str(backend._db_path)) from exc
+
+
 def list_namespaces(backend: SQLiteBackend, required_namespaces: list[str] | None = None) -> list[str]:
     """Return distinct namespaces that have stored entries.
 
@@ -445,6 +471,11 @@ def delete_by_namespace(backend: SQLiteBackend, namespace: str) -> int:
                     "(SELECT 1 FROM memories m WHERE m.id = memories_fts.id "
                     "AND m.namespace = memories_fts.namespace)"
                 )
+                # PRD-CORE-330: keep memories_fts_rowid in step with the ghost
+                # rows just removed above, or its (namespace, id) rows for this
+                # namespace go stale (harmless -- store()'s own delete-then-
+                # insert self-heals lazily -- but they leak until then).
+                backend._conn.execute("DELETE FROM memories_fts_rowid WHERE namespace = ?", (namespace,))
             if backend._skip_commit_depth == 0:
                 backend._conn.commit()
         logger.debug("namespace_deleted", namespace=namespace, entries_deleted=deleted)

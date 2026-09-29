@@ -32,6 +32,7 @@ from pathlib import Path
 
 import structlog
 
+from trw_memory._project_anchor import resolve_state_path
 from trw_memory.exceptions import StorageError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -122,6 +123,10 @@ def score_anomaly(
     return anomaly, view.stats
 
 
+def _stats_path(config: MemoryConfig) -> Path:
+    return resolve_state_path(config, "quarantine_path").parent / "anomaly_stats.yaml"
+
+
 def write_anomaly_stats(config: MemoryConfig, stats: AnomalyStats) -> None:
     """Persist *stats* now, or defer them when this file was written moments ago.
 
@@ -133,7 +138,7 @@ def write_anomaly_stats(config: MemoryConfig, stats: AnomalyStats) -> None:
     process's writer never sees a torn file; the last rename wins.
     """
     global _ATEXIT_REGISTERED
-    path = Path(config.quarantine_path).parent / "anomaly_stats.yaml"
+    path = _stats_path(config)
     with _STATS_LOCK:
         if path not in _STATS_FILES and len(_STATS_FILES) >= _MAX_TRACKED_STATS_FILES:
             for idle in [known for known, tracked in _STATS_FILES.items() if tracked.pending is None]:
@@ -153,7 +158,7 @@ def write_anomaly_stats(config: MemoryConfig, stats: AnomalyStats) -> None:
 
 def flush_anomaly_stats(config: MemoryConfig | None = None) -> None:
     """Write pending anomaly stats: *config*'s file, or every file when ``None``."""
-    only = None if config is None else Path(config.quarantine_path).parent / "anomaly_stats.yaml"
+    only = None if config is None else _stats_path(config)
     with _STATS_LOCK:
         for path, state in _STATS_FILES.items():
             if state.pending is None or (only is not None and path != only):

@@ -6,9 +6,13 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import make_entry
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+pytestmark = pytest.mark.e2e
 
 
 class TestSQLiteBackend:

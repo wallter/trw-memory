@@ -1,6 +1,6 @@
 """Conflict detection + co-anchored edges for the graph layer.
 
-Belongs to the ``graph.py`` facade. Re-exported there for back-compat.
+Belongs to the ``graph.py`` facade, which re-exports its public names.
 
 3 helpers covering the conflict-edge subsystem:
 
@@ -12,9 +12,6 @@ Belongs to the ``graph.py`` facade. Re-exported there for back-compat.
   ``conflicts_with`` pairs in a result list (equal-importance pairs
   kept).
 
-Looks up ``_upsert_edge`` via the parent ``graph`` module so test
-monkeypatches still propagate.
-
 Extracted as PRD-DIST-245 Phase 2 batch 97.
 """
 
@@ -22,9 +19,13 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from contextlib import nullcontext
 from datetime import datetime, timezone
 
 import structlog
+
+from trw_memory._graph_primitives import _upsert_edge
+from trw_memory.storage._anchor_index import normalize_anchor_file
 
 logger = structlog.get_logger(__name__)
 
@@ -45,26 +46,34 @@ def create_co_anchored_edges(
     ``namespace`` scopes the candidate scan AND the edge it writes: without it
     the anchor-file join spans every namespace in the file and mints edges
     between rows that were never meant to see each other (PRD-CORE-245 FR02).
-    """
-    from trw_memory import graph as g
 
+    Candidates come from the ``anchor_postings`` index (PRD-CORE-332), not a
+    ``json_each(memories.anchors)`` scan, so *anchor_files* is normalized
+    through :func:`normalize_anchor_file` first -- the same key the index
+    stores. An absolute or ``..``-bearing anchor has no posting (it is never a
+    valid repo-relative anchor, and the distill writer only emits
+    repo-relative ones) and so yields no edge; that is a deliberate narrowing,
+    not a regression.
+    """
     now = datetime.now(timezone.utc).isoformat()
     created = 0
-    unique_anchor_files = list(dict.fromkeys(anchor_files))
+    unique_anchor_files = list(
+        dict.fromkeys(key for f in anchor_files if (key := normalize_anchor_file(f)) is not None)
+    )
     if min_shared_anchors < 1:
         raise ValueError("min_shared_anchors must be at least 1")
     if len(unique_anchor_files) < min_shared_anchors:
         return 0
 
-    with g._optional_lock(lock):
+    with lock or nullcontext():
         if min_shared_anchors > 1:
             placeholders = ", ".join("?" for _ in unique_anchor_files)
             query = (
-                "SELECT m.id, GROUP_CONCAT(DISTINCT json_extract(je.value, '$.file')) "  # noqa: S608 -- only '?' placeholders are interpolated
-                "FROM memories m, json_each(m.anchors) je "
-                f"WHERE json_extract(je.value, '$.file') IN ({placeholders}) "
-                "AND m.namespace = ? AND m.id != ? GROUP BY m.id "
-                "HAVING COUNT(DISTINCT json_extract(je.value, '$.file')) >= ? "
+                "SELECT entry_id, GROUP_CONCAT(DISTINCT file) "  # noqa: S608 -- only '?' placeholders are interpolated
+                "FROM anchor_postings "
+                f"WHERE file IN ({placeholders}) "
+                "AND namespace = ? AND entry_id != ? GROUP BY entry_id "
+                "HAVING COUNT(DISTINCT file) >= ? "
                 "LIMIT ?"
             )
             rows = conn.execute(
@@ -72,7 +81,7 @@ def create_co_anchored_edges(
                 (*unique_anchor_files, namespace, entry_id, min_shared_anchors, max_per_file),
             ).fetchall()
             for other_id, shared_csv in rows:
-                created += g._upsert_edge(
+                created += _upsert_edge(
                     conn,
                     entry_id,
                     other_id,
@@ -85,21 +94,22 @@ def create_co_anchored_edges(
         else:
             for anchor_file in unique_anchor_files:
                 rows = conn.execute(
-                    "SELECT DISTINCT m.id FROM memories m, json_each(m.anchors) je "
-                    "WHERE json_extract(je.value, '$.file') = ? "
-                    "AND m.namespace = ? AND m.id != ? "
+                    "SELECT DISTINCT entry_id FROM anchor_postings "
+                    "WHERE file = ? AND namespace = ? AND entry_id != ? "
                     "LIMIT ?",
                     (anchor_file, namespace, entry_id, max_per_file),
                 ).fetchall()
 
                 for (other_id,) in rows:
                     meta = {"anchor_file": anchor_file}
-                    created += g._upsert_edge(
+                    created += _upsert_edge(
                         conn, entry_id, other_id, "co_anchored", 0.8, now, namespace=namespace, metadata=meta
                     )
 
-        if created:
-            conn.commit()
+        # Commit even when nothing was written: a canary-refused INSERT still
+        # opened a write transaction, and leaving it open holds the file's
+        # write lock until some later commit on this connection.
+        conn.commit()
     logger.debug("co_anchored_edges_created", entry_id=entry_id, count=created)
     return created
 

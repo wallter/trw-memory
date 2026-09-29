@@ -21,8 +21,8 @@ logger = structlog.get_logger(__name__)
 
 
 @contextmanager
-def transaction(backend: SQLiteBackend) -> Iterator[SQLiteBackend]:
-    """Batch writes into one BEGIN IMMEDIATE / COMMIT.
+def transaction(backend: SQLiteBackend, *, begin: str = "BEGIN IMMEDIATE") -> Iterator[SQLiteBackend]:
+    """Batch writes into one BEGIN IMMEDIATE / COMMIT (``begin="BEGIN"``: one deferred read snapshot).
 
     Re-entrant by depth — only the outermost ``transaction()`` issues
     BEGIN/COMMIT; inner exceptions propagate; outermost issues ROLLBACK.
@@ -42,7 +42,7 @@ def transaction(backend: SQLiteBackend) -> Iterator[SQLiteBackend]:
         # transaction without passing through this depth tracker. Adopt that
         # transaction instead of issuing a nested BEGIN.
         if is_outer and not backend._conn.in_transaction:
-            backend._conn.execute("BEGIN IMMEDIATE")
+            backend._conn.execute(begin)
         backend._skip_commit_depth += 1
         try:
             yield backend

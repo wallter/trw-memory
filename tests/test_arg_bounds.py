@@ -32,6 +32,7 @@ Three groups of tests:
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -334,6 +335,19 @@ async def test_top_level_string_over_name_bound_is_refused() -> None:
     _assert_argument_too_large(data, "memory_id", limit)
 
 
+async def test_anchored_file_over_name_bound_never_reaches_the_impl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PRD-CORE-332 FR04: ``memory_anchored``'s ``file`` takes the ``NAME`` bound."""
+    calls: list[object] = []
+    monkeypatch.setattr(recall_support, "memory_anchored_impl", lambda *a, **k: calls.append(a) or {})
+    limit = ab.bound("memory_anchored", "file")
+    assert limit == ab.NAME
+
+    data = await _call("memory_anchored", namespace=NS, file="x" * (limit + 1), limit=10)
+
+    _assert_argument_too_large(data, "file", limit)
+    assert calls == [], "memory_anchored_impl ran despite an over-bound file argument"
+
+
 async def _drive(
     app: Any, messages: list[dict[str, Any]], *, method: str = "POST", length: int | None = None
 ) -> list[dict[str, Any]]:
@@ -427,3 +441,120 @@ async def test_a_malformed_or_huge_declared_length_never_raises(monkeypatch: pyt
         scope = {"type": "http", "method": "POST", "path": "/mcp", "headers": [(b"content-length", header)]}
         await _IdleTracker(_Recorder())(scope, receive, send)
         assert sent[0]["status"] == status, header[:10]
+
+
+# ---------------------------------------------------------------------------
+# 4. PRD-CORE-331 FR05 (B71-98): the SERVED entrypoint -- ``_build_app`` wrapped
+#    in ``_IdleTracker`` exactly as ``_serve.py``'s ``serve()`` wires it -- answers
+#    413 for a chunked body that passes MAX_BODY_BYTES while streaming, instead of
+#    letting Starlette's unhandled ``ClientDisconnect`` surface as a 500.
+# ---------------------------------------------------------------------------
+
+
+def _served_app() -> Any:
+    """``_build_app`` wrapped in ``_IdleTracker``, matching ``_serve.py``'s real wiring.
+
+    Returns ``(inner, wrapped, paths)``: *inner* is the plain Starlette app (its
+    ``router.lifespan_context`` starts the streamable-HTTP session manager, the same
+    way the real ``uvicorn.Server`` lifespan does), *wrapped* is what a client sends
+    requests through.
+    """
+    from trw_memory.daemon import DaemonPaths
+    from trw_memory.daemon._serve import _build_app, _IdleTracker
+
+    paths = DaemonPaths.resolve()
+    inner = _build_app(paths)
+    return inner, _IdleTracker(inner), paths
+
+
+async def test_an_over_cap_chunked_body_answers_413_through_the_served_app(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Before the fix this ends as a 500 (an unhandled ``starlette.requests.ClientDisconnect``
+    from Starlette's body-reading ``Request.stream()`` once ``call_with_body_cap`` answers the
+    read with ``http.disconnect``). After the fix it is a controlled 413 naming the limit.
+    """
+    import httpx
+
+    from trw_memory.daemon import mint_grant
+    from trw_memory.daemon._version_gate import VERSION_HEADER
+    from trw_memory.daemon.client import _package_version
+
+    monkeypatch.setenv("TRW_USER_DIR", str(tmp_path / "userhome"))
+    monkeypatch.setattr(ab, "MAX_BODY_BYTES", 64)
+    inner, app, paths = _served_app()
+    secret = mint_grant(paths, [NS])
+
+    async def over_cap() -> Any:
+        for _ in range(20):
+            yield b"x" * 16  # 320 bytes total, undeclared length, past the 64-byte cap
+
+    async with inner.router.lifespan_context(inner):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://daemon") as client:
+            response = await client.post(
+                "/mcp",
+                content=over_cap(),
+                headers={
+                    "authorization": f"Bearer {secret}",
+                    VERSION_HEADER: _package_version(),
+                    "accept": "application/json, text/event-stream",
+                    "content-type": "application/json",
+                },
+            )
+
+    assert "content-length" not in {k.lower() for k in response.request.headers}, "must exercise the chunked path"
+    assert response.status_code == 413, response.text
+    assert str(ab.MAX_BODY_BYTES) in response.text
+
+
+async def test_a_normal_size_request_still_works_through_the_served_app(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """A same-sized-cap wrapping must not regress the ordinary MCP round trip: a VALID
+    ``initialize`` (the same handshake ``fastmcp.Client``/``StreamableHttpTransport`` send --
+    ``protocolVersion``, ``capabilities``, ``clientInfo``) gets HTTP 200 and a JSON-RPC
+    ``result`` carrying the request's own id, not an ``error`` (auth failure, schema
+    validation, or a JSON-RPC-level error would all satisfy a bare "not 413/500" check).
+    """
+    import httpx
+    from mcp.types import LATEST_PROTOCOL_VERSION
+
+    from trw_memory.daemon import mint_grant
+    from trw_memory.daemon._version_gate import VERSION_HEADER
+    from trw_memory.daemon.client import _package_version
+
+    monkeypatch.setenv("TRW_USER_DIR", str(tmp_path / "userhome"))
+    inner, app, paths = _served_app()
+    secret = mint_grant(paths, [NS])
+    request_id = "normal-size-request"
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": LATEST_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "trw-memory-test-client", "version": "0.0.0"},
+            },
+        }
+    ).encode()
+
+    async with inner.router.lifespan_context(inner):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://daemon") as client:
+            response = await client.post(
+                "/mcp",
+                content=body,
+                headers={
+                    "authorization": f"Bearer {secret}",
+                    VERSION_HEADER: _package_version(),
+                    "accept": "application/json, text/event-stream",
+                    "content-type": "application/json",
+                },
+            )
+
+    assert response.status_code == 200, response.text
+    payload = json.loads(response.text)
+    assert payload.get("id") == request_id, payload
+    assert "result" in payload, payload  # not "error": a real initialize result, not a refusal
+    assert "protocolVersion" in payload["result"], payload

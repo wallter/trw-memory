@@ -9,7 +9,7 @@ Covers:
 
 from __future__ import annotations
 
-from trw_memory.models.memory import Confidence, MemoryEntry, MemoryType, ProtectionTier
+from trw_memory.models.memory import Confidence, EvidenceLevel, MemoryEntry, MemoryType, ProtectionTier
 from trw_memory.storage._row_mapper import entry_to_row, row_to_entry
 from trw_memory.storage._shared import ENTRY_COLUMNS
 
@@ -37,6 +37,11 @@ def test_round_trip_typed_entry() -> None:
         content="incident test",
         type=MemoryType.INCIDENT,
         confidence=Confidence.VERIFIED,
+        # PRD-CORE-312: a verified entry with no evidence_level is served as
+        # unverified (the invariant); this test is about type/protection_tier
+        # round-tripping, so give it a valid evidence_level to keep confidence
+        # observable through the round trip.
+        evidence_level=EvidenceLevel.VERIFIED,
         protection_tier=ProtectionTier.NORMAL,
     )
     row = _entry_to_full_row(entry)

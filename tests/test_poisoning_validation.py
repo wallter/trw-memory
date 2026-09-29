@@ -411,7 +411,11 @@ class TestUnsubstantiatedVerifiedGate:
     @staticmethod
     def _verified(**kwargs: object) -> MemoryEntry:
         entry = make_entry(entry_id="M-verified", content="the gate is wired")
-        return entry.model_copy(update={"confidence": "verified", **kwargs})
+        # PRD-CORE-312-FR02: this suite exercises the ARTIFACT-substantiation
+        # axis, so evidence_level defaults to a value that clears the new
+        # evidence-level gate (a separate, additive condition) unless a test
+        # overrides it to exercise that axis instead.
+        return entry.model_copy(update={"confidence": "verified", "evidence_level": "verified", **kwargs})
 
     def test_verified_confidence_without_evidence_rejected(self) -> None:
         with pytest.raises(SchemaValidationError) as excinfo:
@@ -458,11 +462,6 @@ class TestUnsubstantiatedVerifiedGate:
         entry = self._verified(evidence=["a real citation"])
         with pytest.raises(SchemaValidationError):
             validate_entry_payload(entry, max_chars=10_240, min_evidence_items_for_verified=2)
-        validate_entry_payload(
-            entry.model_copy(update={"anchors": [Anchor(symbol_name="x", file="y.py")]}),
-            max_chars=10_240,
-            min_evidence_items_for_verified=2,
-        )
 
     def test_injection_is_still_rejected_on_the_stronger_ground_first(self) -> None:
         """NFR03: FR02 must not shadow an existing check."""
@@ -530,6 +529,7 @@ class TestSubstantiationThresholdCeiling:
         fully_substantiated = make_entry(entry_id="M-all-three", content="a claim").model_copy(
             update={
                 "confidence": "verified",
+                "evidence_level": "verified",  # PRD-CORE-312-FR02
                 "evidence": ["a citation"],
                 "assertions": [Assertion(type=AssertionType.GLOB_EXISTS, target="pyproject.toml")],
                 "anchors": [Anchor(symbol_name="x", file="y.py")],

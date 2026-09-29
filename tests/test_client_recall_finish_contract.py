@@ -55,7 +55,9 @@ async def test_shared_finish_accounts_only_security_accepted_results(
         events.append("org")
         return [LocalCandidate(MemoryEntry(id="org", content=query), raw_score=0.6, source="org")]
 
-    async def shared(query: str, rows: list[MemoryResultDict], *_: object, **kwargs: object) -> list[MemoryResultDict]:
+    async def shared(
+        _client: MemoryClient, query: str, rows: list[MemoryResultDict], *_: object, **kwargs: object
+    ) -> list[MemoryResultDict]:
         events.append("shared")
         return [*rows, dict(entry_to_result(MemoryEntry(id="shared", content=query), score=0.5), source="shared")]
 
@@ -75,7 +77,7 @@ async def test_shared_finish_accounts_only_security_accepted_results(
         assert [(r["memory_id"], r["content"]) for r in rows] == [("durable", "masked")]
 
     monkeypatch.setattr("trw_memory._client_recall_helpers.collect_org_candidates", org)
-    monkeypatch.setattr(client, "_merge_shared_results", shared)
+    monkeypatch.setattr("trw_memory._client_recall.merge_shared_results", shared)
     monkeypatch.setattr(client, "_apply_recall_security", secure)
     monkeypatch.setattr(client, "_record_recall_access", access)
     monkeypatch.setattr("trw_memory._client_recall_helpers.remember_selected_candidates", remember)

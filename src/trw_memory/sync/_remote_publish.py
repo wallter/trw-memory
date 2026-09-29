@@ -21,7 +21,7 @@ from trw_memory.sync._remote_common import (
     RetryDrainResult,
     build_platform_headers,
     encode_learning_api_v1,
-    is_valid_platform_url,
+    platform_contact_blocked,
 )
 from trw_memory.sync.retry_queue import RetryQueue
 
@@ -65,8 +65,8 @@ def _publish_payload_result(
     *,
     entry_id: str = "",
 ) -> PublishResult:
-    if not is_valid_platform_url(cfg.platform_url):
-        logger.warning("memory_publish_invalid_platform_url", entry_id=entry_id)
+    # Asked again at the one POST site, so every retry-drain send sees the switch as it is now.
+    if platform_contact_blocked(cfg, "memory_publish"):
         return {"success": False, "remote_id": None, "retryable": False}
 
     try:
@@ -94,12 +94,7 @@ def publish_memory_result(
     *,
     project_root: str = "",
 ) -> PublishResult:
-    if not cfg.sync_enabled or not cfg.platform_url:
-        return {"success": False, "remote_id": None, "retryable": False}
-    if not is_valid_platform_url(cfg.platform_url):
-        logger.warning("memory_publish_invalid_platform_url", entry_id=entry.id)
-        return {"success": False, "remote_id": None, "retryable": False}
-    if entry.importance < cfg.sync_min_importance:
+    if platform_contact_blocked(cfg, "memory_publish") or entry.importance < cfg.sync_min_importance:
         return {"success": False, "remote_id": None, "retryable": False}
 
     payload = _anonymize_entry(entry, project_root)
@@ -111,25 +106,17 @@ def drain_retry_queue(queue: RetryQueue, cfg: MemoryConfig) -> RetryDrainResult:
     return result
 
 
+#: A published retry record: its entry id, the ``(sync_seq, sync_hash)`` it was queued at (``None`` for a record
+#: queued before revisions were recorded) and the platform's remote id, when it returned one.
+DrainedPublish = tuple[str, tuple[int, str] | None, str | None]
+
+
 def _drain_retry_queue_with_ids(
     queue: RetryQueue,
     cfg: MemoryConfig,
-) -> tuple[RetryDrainResult, list[str]]:
-    if not cfg.sync_enabled or not cfg.platform_url:
-        return {
-            "drained": 0,
-            "failed": 0,
-            "skipped": queue.depth(),
-            "remote_ids": {},
-        }, []
-    if not is_valid_platform_url(cfg.platform_url):
-        logger.warning("memory_retry_drain_invalid_platform_url")
-        return {
-            "drained": 0,
-            "failed": 0,
-            "skipped": queue.depth(),
-            "remote_ids": {},
-        }, []
+) -> tuple[RetryDrainResult, list[DrainedPublish]]:
+    if platform_contact_blocked(cfg, "memory_retry_drain"):
+        return {"drained": 0, "failed": 0, "skipped": queue.depth(), "remote_ids": {}}, []
 
     published_remote_ids: list[str | None] = []
 
@@ -143,25 +130,22 @@ def _drain_retry_queue_with_ids(
             published_remote_ids.append(result["remote_id"])
         return result["success"]
 
-    drain_result, published_entry_ids = queue._drain_with_ids(publish_payload)
-    remote_ids = {
-        entry_id: remote_id
-        for entry_id, remote_id in zip(published_entry_ids, published_remote_ids, strict=True)
-        if remote_id is not None
-    }
+    drain_result, drained = queue._drain_with_ids(publish_payload)
+    # One entry per published RECORD: the same entry queued twice at two revisions acks each on its own.
+    published = [
+        (entry_id, revision, remote_id)
+        for (entry_id, revision), remote_id in zip(drained, published_remote_ids, strict=True)
+    ]
     return {
         "drained": drain_result["drained"],
         "failed": drain_result["failed"],
         "skipped": drain_result["skipped"],
-        "remote_ids": remote_ids,
-    }, published_entry_ids
+        "remote_ids": {entry_id: remote_id for entry_id, _, remote_id in published if remote_id is not None},
+    }, published
 
 
 def retire_remote_memory(remote_id: str, cfg: MemoryConfig) -> bool:
-    if not cfg.sync_enabled or not cfg.platform_url or not remote_id:
-        return True
-    if not is_valid_platform_url(cfg.platform_url):
-        logger.warning("memory_retire_invalid_platform_url", remote_id=remote_id)
+    if not remote_id or platform_contact_blocked(cfg, "memory_retire"):
         return True
 
     try:

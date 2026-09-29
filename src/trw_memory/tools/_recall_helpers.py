@@ -211,6 +211,7 @@ def _graph_related(
         )
     except (sqlite3.Error, ValueError, KeyError):
         logger.debug("graph_related_error", exc_info=True)
+        # trw-fail-silent-allow: graph-query failure already logged above.
         return [], False
     # Breadth is bounded before any row is read: one root can have thousands of neighbours.
     return hydrate_active(nodes[:GRAPH_RELATED_MAX], backend, namespace), len(nodes) > GRAPH_RELATED_MAX

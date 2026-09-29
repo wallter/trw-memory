@@ -10,7 +10,7 @@ import contextlib
 
 import structlog
 
-from trw_memory.daemon._offload import run_serialized
+from trw_memory.daemon._lane import INTERACTIVE, run_on_lane
 from trw_memory.exceptions import AuthorizationError, StorageError
 from trw_memory.lifecycle.tiers._runtime import remove_entry_from_tiers, supports_tier_runtime
 from trw_memory.models.config import MemoryConfig
@@ -157,7 +157,7 @@ def memory_forget_impl(
         return {"deleted": deleted_count, "status": status}
 
     # --- Bulk delete via search query ---
-    assert query is not None  # noqa: S101 — mypy narrowing guard; query is not None here: the memory_id branch above returns before reaching this line, and the early-return guard ensures at least one of memory_id/query is set
+    assert query is not None  # noqa: S101  # trw:intentional query is not None: the memory_id branch above returns before this line
     try:
         matches = backend.search(
             query,
@@ -228,6 +228,6 @@ def register_forget_tool(mcp: McpServer) -> None:
             with create_backend_from_config(cfg := MemoryConfig(), namespace) as backend:
                 return memory_forget_impl(memory_id, query, namespace, backend=backend, config=cfg, actor=actor)
 
-        return await run_serialized(forget)
+        return await run_on_lane(INTERACTIVE, namespace, forget)
 
     mcp.tool()(memory_forget)

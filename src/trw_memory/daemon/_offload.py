@@ -49,7 +49,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = structlog.get_logger(__name__)
 
-__all__ = ["OFFLOAD_MAX_WORKERS", "run_offloaded", "run_serialized", "shutdown_offload_pool"]
+__all__ = ["OFFLOAD_MAX_WORKERS", "refuse_offload_submissions", "run_offloaded", "shutdown_offload_pool"]
 
 T = TypeVar("T")
 
@@ -68,9 +68,17 @@ OFFLOAD_MAX_WORKERS = 4
 OFFLOAD_SHUTDOWN_GRACE_SECONDS = 5.0
 
 _EXECUTOR_LOCK = threading.Lock()
-#: By worker count: the shared pool, and the one-thread lane of :func:`run_serialized`.
+#: By worker count: the shared pool, and the one-thread write lane (``daemon._lane``, which
+#: dispatches through this same helper at ``workers=1``).
 _EXECUTORS: dict[int, ThreadPoolExecutor] = {}
 _EXECUTOR_PID: int | None = None
+#: One-way (PRD-CORE-331 B71-135 e, audit finding F5's other half): set only by
+#: :func:`refuse_offload_submissions` (real daemon shutdown), never by
+#: :func:`shutdown_offload_pool` (also the per-test pool reset -- see its docstring). Without this,
+#: a consolidation body still running when shutdown starts (off-lane read/embed/cluster) could
+#: finish after the pool drained and submit its next call -- either its own ``run_offloaded`` or,
+#: via the lane's ``_dispatch()``, a cluster write -- which would silently recreate a pool here.
+_closed = False
 
 
 def _executor(workers: int = OFFLOAD_MAX_WORKERS) -> ThreadPoolExecutor:
@@ -78,9 +86,16 @@ def _executor(workers: int = OFFLOAD_MAX_WORKERS) -> ThreadPoolExecutor:
 
     Recreated after a fork: a child inherits the parent's executor object, but
     not the parent's worker threads, so submitting to it would hang forever.
+
+    Raises:
+        RuntimeError: After :func:`refuse_offload_submissions` -- the daemon has shut down and no
+            call (bare ``run_offloaded`` or a lane job dispatched through this same helper) may
+            recreate the pool.
     """
     global _EXECUTOR_PID
     with _EXECUTOR_LOCK:
+        if _closed:
+            raise RuntimeError("offload pool closed: the daemon has shut down and refuses new work")
         if os.getpid() != _EXECUTOR_PID:
             _EXECUTORS.clear()
             _EXECUTOR_PID = os.getpid()
@@ -89,6 +104,21 @@ def _executor(workers: int = OFFLOAD_MAX_WORKERS) -> ThreadPoolExecutor:
                 max_workers=workers, thread_name_prefix=f"trw-memory-tool-{workers}"
             )
         return _EXECUTORS[workers]
+
+
+def refuse_offload_submissions() -> None:
+    """One-way: every later :func:`_executor` call (a bare ``run_offloaded`` or the write lane's
+    own dispatch, ``daemon._lane._dispatch`` -> ``_executor(1)``) raises instead of lazily
+    recreating a pool.
+
+    Call this only from the real daemon shutdown path (``_serve.py``), before
+    :func:`shutdown_offload_pool` drains the pool -- closing the door first removes the window
+    where an already-running body finishes after the drain and would otherwise land on a pool
+    silently recreated here.
+    """
+    global _closed
+    with _EXECUTOR_LOCK:
+        _closed = True
 
 
 def shutdown_offload_pool(*, timeout: float = OFFLOAD_SHUTDOWN_GRACE_SECONDS) -> bool:
@@ -108,6 +138,9 @@ def shutdown_offload_pool(*, timeout: float = OFFLOAD_SHUTDOWN_GRACE_SECONDS) ->
         work still running (the caller continues either way).
     """
     global _EXECUTOR_PID
+    from trw_memory.daemon._lane import cancel_queued
+
+    cancel_queued()  # the write lane's queue is its own, not the executor's
     with _EXECUTOR_LOCK:
         executors, _EXECUTOR_PID = list(_EXECUTORS.values()), None
         _EXECUTORS.clear()
@@ -140,22 +173,5 @@ async def run_offloaded(fn: Callable[..., T], /, *args: object, **kwargs: object
     Returns:
         Whatever *fn* returns; exceptions propagate unchanged.
     """
-    return await _submit(_executor(), fn, *args, **kwargs)
-
-
-async def _submit(executor: ThreadPoolExecutor, fn: Callable[..., T], /, *args: object, **kwargs: object) -> T:
     call = functools.partial(contextvars.copy_context().run, fn, *args, **kwargs)
-    return await asyncio.get_running_loop().run_in_executor(executor, call)
-
-
-async def run_serialized(fn: Callable[..., T], /, *args: object, **kwargs: object) -> T:
-    """:func:`run_offloaded`, but on a one-thread lane of its own, so these bodies run one at a time (C12 rc4).
-
-    Every body that changes or removes an existing learning row runs here -- forget, update and
-    correction, consolidate, maintain, rename and merge, review, import -- so none interleaves with
-    another: a rename's emptiness check and its move, a consolidation's cluster and its archival
-    against a forget (rc7: the rollback re-stored a forgotten row). A cancelled caller cannot free
-    the lane: its body finishes first. Bodies that only add rows, vectors or edges, or only read
-    (store, recall, similar, vectors, reembed, graph backfill), keep ``run_offloaded``.
-    """
-    return await _submit(_executor(1), fn, *args, **kwargs)
+    return await asyncio.get_running_loop().run_in_executor(_executor(), call)

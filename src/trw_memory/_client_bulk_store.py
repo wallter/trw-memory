@@ -28,11 +28,13 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import structlog
 
-from trw_memory._client_store import _build_store_entry, _existing_entry_for_namespace, _make_id
+from trw_memory._client_lifecycle import publish_entry, schedule_background_task, should_attempt_remote_publish
+from trw_memory._client_store import _build_store_entry, _existing_entry_for_namespace
 from trw_memory.embeddings.provenance import generation_provenance_kwargs
 from trw_memory.exceptions import MemoryNotFoundError, SchemaValidationError, SecurityDependencyError, StorageError
 from trw_memory.graph import schedule_graph_update_many
 from trw_memory.lifecycle.tiers._runtime import embedding_has_consumer, remember_entry_in_tiers
+from trw_memory.models.entry_factory import new_memory_id
 from trw_memory.models.memory import Assertion, MemoryEntry
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.security._runtime_anomaly import shared_anomaly_reference
@@ -150,6 +152,7 @@ async def bulk_store_impl(
                 metadata=req.metadata,
                 importance=req.importance,
                 assertions=req.assertions,
+                entry_id=req.entry_id,
             )
             prepared.append((req, None))
         except SchemaValidationError as exc:
@@ -177,7 +180,7 @@ async def bulk_store_impl(
                     )
                     continue
 
-                memory_id = req.entry_id or _make_id()
+                memory_id = req.entry_id or new_memory_id()
                 try:
                     existing = (
                         _existing_entry_for_namespace(backend, memory_id, client._namespace)
@@ -269,7 +272,7 @@ async def bulk_store_impl(
         try:
             for j, (orig_i, entry) in enumerate(zip(accepted_indices, accepted_entries, strict=False)):
                 decision = decisions[orig_i]
-                assert decision is not None  # noqa: S101
+                assert decision is not None  # noqa: S101  # trw:intentional narrowed by the preceding decision-not-None check
                 embedding = embeddings[j] if j < len(embeddings) else None
                 proof = (
                     generation_provenance_kwargs(embedder, f"{entry.content} {entry.detail}", embedding)
@@ -319,8 +322,8 @@ async def bulk_store_impl(
                     status="updated" if decision.op == "update" else "stored",
                 )
 
-                if not skip_remote_publish and client._should_attempt_remote_publish(entry):
-                    client._schedule_background_task(client._publish_entry(entry))
+                if not skip_remote_publish and should_attempt_remote_publish(client, entry):
+                    schedule_background_task(client, publish_entry(client, entry))
         finally:
             # Also for the rows persisted before a mid-batch StorageError.
             if graph_items:

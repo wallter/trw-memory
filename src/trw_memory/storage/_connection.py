@@ -25,6 +25,9 @@ Extracted as PRD-DIST-245 Phase 1 batch 82.
 from __future__ import annotations
 
 import contextlib
+import contextvars
+import functools
+import math
 import os
 import sqlite3
 import threading
@@ -35,7 +38,7 @@ from typing import Any, Literal
 
 import structlog
 
-from trw_memory._live_stores import connect_registered, note_store_sidecars
+from trw_memory._live_stores import _SIDECAR_SUFFIXES, connect_registered, note_store_sidecars
 
 logger = structlog.get_logger(__name__)
 
@@ -113,6 +116,20 @@ def _file_backed(db_path: Path) -> bool:
     return name != ":memory:" and not name.startswith("file::memory:")
 
 
+def clear_journal_sidecars(db_path: Path) -> None:
+    """Best-effort unlink of *db_path*'s ``-wal``/``-shm``/``-journal`` sidecars.
+
+    Shared by ``restore_from_snapshot`` and ``recover_db``: both replace or
+    rebuild the base file at ``db_path`` and must not let a stale sidecar from
+    the prior file be applied on top of it. Never derives a sidecar name by
+    string-replacing ``.db`` — SQLite appends these suffixes to the whole
+    filename, so that would corrupt names like ``store.sqlite``.
+    """
+    for suffix in _SIDECAR_SUFFIXES:
+        with contextlib.suppress(OSError):
+            Path(f"{db_path}{suffix}").unlink(missing_ok=True)
+
+
 def connect(
     db_path: Path,
     *,
@@ -120,8 +137,15 @@ def connect(
     timeout: float,
     check_same_thread: bool,
     cached_statements: int | None = None,
+    read_only: bool = False,
 ) -> Any:
     """Base sqlite connection with WAL/synchronous defaults.
+
+    ``read_only`` opens ``mode=ro`` by URI, and ``immutable=1`` too while no ``-wal`` sits beside the
+    store: ``mode=ro`` alone still creates ``-wal``/``-shm`` beside a WAL database at rest.
+    It takes no store lock: that would create the lock file beside a file the caller only reads (a
+    checkout's), and fail in a read-only directory. The identity check still runs; a read-only caller
+    re-stats the file after an immutable read instead (``_probe``).
 
     A file-backed open goes through :func:`connect_registered`, which also runs
     PRD-SEC-016's identity check: the store's inode is pinned before the
@@ -130,18 +154,22 @@ def connect(
     SQLite's own C-level ``open()`` stays the residual PRD-SEC-016 records for
     G4 (same user or root, who can already open the store file directly).
     """
-    kwargs: dict[str, object] = {
+    kwargs: dict[str, Any] = {
         "timeout": timeout,
         "check_same_thread": check_same_thread,
     }
     if cached_statements is not None:
         kwargs["cached_statements"] = cached_statements
+    target = str(db_path)
+    if read_only:
+        at_rest = not Path(f"{db_path}-wal").exists()
+        target, kwargs["uri"] = f"{db_path.resolve().as_uri()}?mode=ro{'&immutable=1' if at_rest else ''}", True
     # Registered under the fd lock: nothing may open this inode by descriptor once a
     # connection can hold its locks (C15, see _live_stores).
     conn = (
-        connect_registered(db_path, dbapi, str(db_path), **kwargs)
+        connect_registered(db_path, dbapi, target, store_lock=not read_only, **kwargs)
         if _file_backed(db_path)
-        else dbapi.connect(str(db_path), **kwargs)
+        else dbapi.connect(target, **kwargs)
     )
     # Use the caller-provided ``dbapi`` for the Row factory so the type
     # matches the cursor. With the pysqlite3 shim live, ``dbapi`` is
@@ -150,11 +178,36 @@ def connect(
     # factory would raise ``TypeError: Row() argument 1 must be
     # sqlite3.Cursor, not pysqlite3.dbapi2.Cursor`` (or vice versa).
     conn.row_factory = getattr(dbapi, "Row", sqlite3.Row)
-    if (deadline := untrusted_deadline(db_path)) is not None:
-        conn.set_progress_handler(lambda: int(time.monotonic() > deadline), 10_000)
-        # Before any statement runs. 3.11+: the import refuses Python 3.10 before any open.
-        conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, UNTRUSTED_LENGTH_LIMIT)  # type: ignore[attr-defined]
+    deadline = untrusted_deadline(db_path)
+    if deadline is not None or LANE_DEADLINE.get() is not None:
+        conn.set_progress_handler(functools.partial(_past_deadline, deadline), 10_000)
+    if deadline is not None:
+        conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, UNTRUSTED_LENGTH_LIMIT)  # before any statement runs
     return conn
+
+
+#: The monotonic time past which a statement run by the daemon lane job in this context is interrupted
+#: (PRD-CORE-307, set by ``daemon._lane``). Read when the statement runs, so a connection a lane job
+#: opened never interrupts work done outside one.
+LANE_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar("trw_memory_lane_deadline", default=None)
+
+
+@contextlib.contextmanager
+def outside_lane_deadline() -> Iterator[None]:
+    """Run work a lane job must finish once it starts (a store's open, a compensating rollback) past its deadline.
+
+    The deadline moves to infinity rather than away, so a connection opened here still gets the handler and
+    enforces the job's deadline once the block ends (sol r3)."""
+    token = LANE_DEADLINE.set(None if LANE_DEADLINE.get() is None else math.inf)
+    try:
+        yield
+    finally:
+        LANE_DEADLINE.reset(token)
+
+
+def _past_deadline(untrusted: float | None) -> int:
+    now, lane = time.monotonic(), LANE_DEADLINE.get()
+    return int((untrusted is not None and now > untrusted) or (lane is not None and now > lane))
 
 
 #: Store files a caller is reading that trw-memory did not write (an import's private copy), by real
@@ -238,7 +291,8 @@ def open_and_configure(
     corrupt store fails on every open. The trade-off, in one sentence: a store
     corrupted in place after this process verified it is not caught by a
     ``check_once`` open, including the recall's access-count update, until the
-    next default open, the stale-handle probe, or the opt-in background checker.
+    next default open, the stale-handle probe, or the opt-in background checker. A daemon lane job's store
+    (PRD-CORE-307) opens ``check_once`` too (``SQLiteBackend``).
 
     Retries once on quick_check failure to handle transient WAL contention
     (e.g., MCP server mid-checkpoint while trw-maintain opens the DB).

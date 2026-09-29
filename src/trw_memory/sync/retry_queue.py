@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from trw_memory.storage.persistence import lock_for_rmw
 
@@ -35,6 +35,12 @@ class QueueRecord(TypedDict):
     queued_at: str
     retry_count: int
     last_error: str | None
+    #: ``[sync_seq, sync_hash]`` of the row when it was queued (B71-77); absent on records queued earlier.
+    revision: NotRequired[list[object]]
+
+
+#: A drained record: its entry id and the ``(sync_seq, sync_hash)`` it was queued at, when recorded.
+Drained = tuple[str, tuple[int, str] | None]
 
 
 class RetryQueue:
@@ -48,8 +54,11 @@ class RetryQueue:
         self._drain_lock_path = queue_path.with_name(f"{queue_path.name}.drain")
         self._lock = threading.Lock()
 
-    def enqueue(self, entry_id: str, payload: dict[str, object]) -> bool:
+    def enqueue(self, entry_id: str, payload: dict[str, object], *, revision: tuple[int, str] | None = None) -> bool:
         """Append a failed publish to the retry queue.
+
+        *revision* is the row's ``(sync_seq, sync_hash)`` when the payload was taken, so a later drain can ack
+        the row synced only while it is still that revision (B71-77).
 
         Returns ``False`` if the queue is at capacity (500 entries).
         """
@@ -70,6 +79,8 @@ class RetryQueue:
                 "retry_count": 0,
                 "last_error": None,
             }
+            if revision is not None:
+                record["revision"] = [revision[0], revision[1]]
             queued_bytes = sum(self._serialized_size(entry) for entry in entries)
             record_bytes = self._serialized_size(record)
             if queued_bytes + record_bytes > MAX_QUEUE_BYTES:
@@ -100,15 +111,15 @@ class RetryQueue:
     def _drain_with_ids(
         self,
         publish_fn: Callable[[dict[str, object]], bool],
-    ) -> tuple[dict[str, int], list[str]]:
-        """Drain queued records and return canonical IDs for successful records."""
+    ) -> tuple[dict[str, int], list[Drained]]:
+        """Drain queued records and return each published record's entry id and queued revision."""
         with lock_for_rmw(self._drain_lock_path):
             return self._drain_serialized(publish_fn)
 
     def _drain_serialized(
         self,
         publish_fn: Callable[[dict[str, object]], bool],
-    ) -> tuple[dict[str, int], list[str]]:
+    ) -> tuple[dict[str, int], list[Drained]]:
         """Process one drain while the cross-instance drain lock is held."""
         # Collect work under lock, then release before sleeping/publishing so
         # enqueue/depth/snapshot are not starved for up to ~30s per drain cycle.
@@ -123,7 +134,7 @@ class RetryQueue:
         drained = 0
         failed = 0
         skipped = 0
-        drained_entry_ids: list[str] = []
+        drained_records: list[Drained] = []
 
         for record in entries:
             if record["retry_count"] >= MAX_RETRIES:
@@ -157,7 +168,7 @@ class RetryQueue:
 
             if success:
                 drained += 1
-                drained_entry_ids.append(record["entry_id"])
+                drained_records.append((record["entry_id"], _queued_revision(record)))
             else:
                 record["retry_count"] += 1
                 record["last_error"] = "publish returned False"
@@ -173,7 +184,7 @@ class RetryQueue:
             processed_keys = {self._record_key(r) for r in entries}
             new_arrivals = [r for r in self._read_all() if self._record_key(r) not in processed_keys]
             self._write_all(remaining + new_arrivals)
-        return {"drained": drained, "failed": failed, "skipped": skipped}, drained_entry_ids
+        return {"drained": drained, "failed": failed, "skipped": skipped}, drained_records
 
     def clear(self) -> None:
         """Clear the entire retry queue."""
@@ -274,13 +285,18 @@ class RetryQueue:
             self._log_dropped_record(line_number, "SchemaMismatch")
             return None
 
-        return QueueRecord(
+        record = QueueRecord(
             entry_id=entry_id,
             payload=payload,
             queued_at=queued_at,
             retry_count=retry_count,
             last_error=last_error,
         )
+        revision = raw.get("revision")
+        if isinstance(revision, list) and len(revision) == 2:
+            # Carried only when well formed; a malformed one reads as absent and the drain never stamps.
+            record["revision"] = list(revision)
+        return record
 
     def _log_dropped_record(self, line_number: int, error_class: str) -> None:
         """Emit the corrupt-row drop event with structural locators only.
@@ -326,3 +342,11 @@ class RetryQueue:
     def _serialized_size(entry: QueueRecord) -> int:
         """Return the encoded JSONL byte size for one record."""
         return len((json.dumps(entry) + "\n").encode("utf-8"))
+
+
+def _queued_revision(record: QueueRecord) -> tuple[int, str] | None:
+    """The ``(sync_seq, sync_hash)`` a record was queued at, or ``None`` when it carries none or a malformed one."""
+    raw = record.get("revision")
+    if isinstance(raw, list) and len(raw) == 2 and isinstance(raw[0], int) and isinstance(raw[1], str):
+        return raw[0], raw[1]
+    return None

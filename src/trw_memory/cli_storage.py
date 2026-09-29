@@ -10,11 +10,15 @@ from pathlib import Path
 from typing import Any
 
 from trw_memory._live_stores import connect_registered
+from trw_memory._project_anchor import resolve_storage_root
+from trw_memory._store_lock import store_access
 from trw_memory.cli_json_input import JsonInputError, load_json_document, read_source_text
+from trw_memory.exceptions import StoreBusyError
 from trw_memory.models._assertion_cap import OVERLONG, overlong
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.validation import validate_namespace
+from trw_memory.security.provenance import IMPORTED_PROVENANCE
 from trw_memory.storage.interface import StorageBackend
 
 
@@ -32,7 +36,7 @@ def resolve_base_and_db(args: argparse.Namespace, *, config_cls: type[MemoryConf
     namespace = validate_namespace(args.namespace)
     if getattr(args, "db", None):
         return (db_path := Path(args.db).resolve()).parent, db_path
-    base_dir = (Path(config.storage_path) / namespace.replace(":", "_")).resolve()
+    base_dir = (resolve_storage_root(config) / namespace.replace(":", "_")).resolve()
     return base_dir, base_dir / config.sqlite_db_name
 
 
@@ -85,15 +89,6 @@ def _is_own_export(row: dict[str, Any]) -> bool:
     return isinstance(row.get("id"), str) and "created_at" in row and "vector_clock" in row
 
 
-def _is_system_canary(row: dict[str, Any]) -> bool:
-    """The source store's own FR-007 canary row: an own-export row flagged ``system_canary`` whose id and
-    content are a pinned canary's. Any other row carrying the flag is imported (the gate strips the flag)."""
-    from trw_memory.security.canary import PINNED_HASHES, _sha
-
-    flagged = isinstance(meta := row.get("metadata"), dict) and meta.get("system_canary") == "true"
-    return flagged and _is_own_export(row) and PINNED_HASHES.get(row["id"]) == _sha(str(row.get("content", "")))
-
-
 def _rebuild_own_export(row: dict[str, Any], namespace: str) -> MemoryEntry:
     """Rebuild an exported entry whole. The file's provenance is kept as data, never as trust.
 
@@ -108,7 +103,7 @@ def _rebuild_own_export(row: dict[str, Any], namespace: str) -> MemoryEntry:
     # prefixed key it does not write would otherwise survive as unearned trust.
     metadata = {k: v for k, v in entry.metadata.items() if k not in original}
     if original:
-        metadata["imported_provenance"] = json.dumps(original, sort_keys=True)
+        metadata[IMPORTED_PROVENANCE] = json.dumps(original, sort_keys=True)
     return entry.model_copy(update={"namespace": namespace, "metadata": metadata})
 
 
@@ -146,6 +141,7 @@ def handle_import(
     """
     from trw_memory.cli_client import refused_beside_daemon
     from trw_memory.exceptions import PIIBlockError, PoisoningError, RateLimitError, SchemaValidationError
+    from trw_memory.security._runtime_canary import classify_canary
     from trw_memory.security.write_gate import guarded_store
 
     if refused_beside_daemon("import"):
@@ -174,8 +170,11 @@ def handle_import(
         for index, entry_data in enumerate(data):
             if not isinstance(entry_data, dict):
                 continue
-            if _is_system_canary(entry_data):
-                canaries += 1  # the source store's FR-007 canary row: the destination plants its own
+            if canary := classify_canary(entry_data):  # a flagged ordinary row is imported (the gate strips the flag)
+                if canary == "canary":
+                    canaries += 1  # the source store's FR-007 canary row: the destination plants its own
+                else:
+                    _report_rejection(rejected_rows, index, entry_data, "a pinned canary's identity with user data")
                 continue
 
             if args.merge:
@@ -241,7 +240,6 @@ def handle_restore(
     *,
     config_cls: type[MemoryConfig],
 ) -> int:
-    from trw_memory.cli_client import refused_beside_daemon
     from trw_memory.storage._cold_rebuild import rebuild_from_cold
     from trw_memory.storage._schema import ensure_schema
     from trw_memory.storage._snapshot import (
@@ -252,8 +250,6 @@ def handle_restore(
         snapshots_base_dir,
     )
 
-    if refused_beside_daemon("restore"):
-        return 1
     base_dir, db_path = resolve_base_and_db(args, config_cls=config_cls)
     if getattr(args, "from_snapshot", None) is not None:
         target = str(args.from_snapshot).strip()
@@ -276,7 +272,7 @@ def handle_restore(
             snapshot = snapshot_match
         try:
             restore_from_snapshot(base_dir, snapshot, db_path)
-        except SnapshotError as exc:
+        except (SnapshotError, StoreBusyError) as exc:  # a store in use (the daemon serves it) is refused, untouched
             print(f"Snapshot restore failed: {exc}", file=sys.stderr)
             return 1
         print(f"Restored {db_path} from {snapshot}")
@@ -288,15 +284,46 @@ def handle_restore(
     cold_base = base_dir / "memory" / "cold"
     total_yaml = sum(1 for _ in cold_base.rglob("*.yaml")) if cold_base.exists() else 0
 
-    conn = connect_registered(db_path, sqlite3, str(db_path))
     try:
-        ensure_schema(conn)
-        rebuilt = rebuild_from_cold(base_dir, conn)
-    finally:
-        conn.close()
+        with store_access(db_path, "restore"):
+            conn = connect_registered(db_path, sqlite3, str(db_path))
+            try:
+                ensure_schema(conn)
+                rebuilt = rebuild_from_cold(base_dir, conn)
+            finally:
+                conn.close()
+    except StoreBusyError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
     print(f"Rebuilt {rebuilt} entries from cold tier ({max(total_yaml - rebuilt, 0)} skipped)")
     return 0
+
+
+def handle_backup(
+    args: argparse.Namespace,
+    *,
+    config_cls: type[MemoryConfig],
+) -> int:
+    from trw_memory.cli_client import refused_beside_daemon
+    from trw_memory.storage._backup_archive import create_backup_archive
+
+    base_dir, db_path = resolve_base_and_db(args, config_cls=config_cls)
+    action = args.backup_action
+    if action == "create":
+        # A backup archive copies every namespace in the file, so it is an operator action
+        # with the daemon stopped — mirrors handle_snapshot's create action exactly.
+        if refused_beside_daemon("backup create"):
+            return 1
+        if not db_path.exists():
+            print(f"Source DB does not exist: {db_path}", file=sys.stderr)
+            return 1
+        archive = create_backup_archive(base_dir, db_path)
+        print(f"Created backup archive: {archive.path}")
+        return 0
+
+    print(f"Unknown backup action: {action}", file=sys.stderr)
+    return 1
 
 
 def handle_snapshot(

@@ -12,9 +12,10 @@ Contract:
   too. Rows with no vector at all are encoded as well.
 - **Idempotent**: a row whose vector already carries the active space is left
   untouched; a second run reports ``reembedded == 0``.
-- **Resumable, bounded memory**: keyset pages of ``batch_size`` rows; each page
-  commits on its own, so an interrupted run loses at most one page of work and
-  picks up where it stopped when run again.
+- **Resumable, bounded memory**: pages of ``batch_size`` rows keyed by entry id,
+  which no edit changes, so a row updated mid-run cannot move past the cursor
+  (B71-86); each page commits on its own, so an interrupted run loses at most
+  one page of work and picks up where it stopped when run again.
 - **Bounded per daemon call**: the shared daemon's ``memory_reembed`` does one
   pass of at most ``REEMBED_CALL_ROWS`` rows or ``REEMBED_CALL_SECONDS`` and
   returns a ``cursor`` to call again with (rc9 sweep B2); the SDK, alone in its
@@ -44,7 +45,6 @@ from trw_memory.embeddings._space_gate import active_embedding_space, vector_in_
 from trw_memory.embeddings.provenance import generation_provenance_kwargs
 from trw_memory.exceptions import EmbeddingUnavailableError, ModelNotCachedError, StorageError
 from trw_memory.security.rbac import Permission
-from trw_memory.storage.interface import EntryCursor
 
 if TYPE_CHECKING:
     from trw_memory.client import MemoryClient
@@ -72,6 +72,10 @@ DEFAULT_REEMBED_BATCH_SIZE = 64
 # and embeds every stale text in a single embed_batch() call, so an unbounded value
 # (e.g. INT_MAX) is a single-caller memory/CPU exhaustion of the whole daemon.
 MAX_REEMBED_BATCH = 1000
+
+#: Cursor phases. Renamed when the row phase moved to id paging (B71-86): a cursor issued before it
+#: meant ``[phase, updated_at, id]``, and read as ``[phase, id, last_id]`` it would skip rows silently.
+_ROWS, _WARM = "rows-by-id", "warm-by-id"
 
 #: What one shared-daemon ``memory_reembed`` call may spend before it hands back a cursor.
 REEMBED_CALL_ROWS = 512
@@ -142,33 +146,35 @@ def reembed_rows(
         raise EmbeddingUnavailableError("the embedder does not report an embedding space; refusing to re-embed")
     if not backend.supports_vectors():
         raise StorageError("this backend stores no vectors (sqlite-vec unavailable); nothing can be re-embedded")
-    phase, updated_at, entry_id = decode_token(cursor, 3) if cursor is not None else ("rows", "", "")
-    if phase not in ("rows", "warm"):
-        raise ValueError("malformed cursor")
+    phase, entry_id, ceiling = decode_token(cursor, 3) if cursor is not None else (_ROWS, "", "")
+    if phase not in (_ROWS, _WARM):  # includes a pre-id-paging cursor (phase "rows"/"warm"): start the run again
+        raise ValueError("malformed cursor, or one from before trw-memory paged by id: start the re-embed again")
     rows, seconds = (REEMBED_CALL_ROWS, REEMBED_CALL_SECONDS) if bounded else (sys.maxsize, math.inf)
     counts = dict.fromkeys(
         ("examined", "reembedded", "already_current", "skipped", "warm_examined", "warm_reembedded"), 0
     )
     token: str | None = None
-    if phase == "rows":
-        after = EntryCursor(updated_at, entry_id) if entry_id else None
+    if phase == _ROWS and (ceiling := ceiling or backend.last_entry_id(namespace=namespace) or ""):
+        # The run ends at the highest id when it began: a row stored since then is left to the next run.
         resume = sweep(
-            lambda key, limit: backend.list_entries(namespace=namespace, limit=limit, after=key),
-            EntryCursor.from_entry,
+            lambda key, limit: backend.list_entries_by_id(
+                namespace=namespace, after_id=key, through_id=ceiling, limit=limit
+            ),
+            lambda entry: entry.id,
             lambda page, _deadline: _reembed_page(backend, embedder, space, namespace, page, counts),
-            after=after,
+            after=entry_id or None,
             page=batch_size,
             rows=rows,
             seconds=seconds,
         )
         if resume is not None:
-            token = encode_token(["rows", resume.updated_at, resume.entry_id])
+            token = encode_token([_ROWS, resume, ceiling])
         elif bounded:
-            token = encode_token(["warm", "", ""])
+            token = encode_token([_WARM, "", ""])
     if token is None:
-        warm_after = entry_id if phase == "warm" and entry_id else None
+        warm_after = entry_id if phase == _WARM and entry_id else None
         resume_id = _reembed_warm(config, namespace, embedder, space, warm_after, batch_size, rows, seconds, counts)
-        token = None if resume_id is None else encode_token(["warm", "", resume_id])
+        token = None if resume_id is None else encode_token([_WARM, resume_id, ""])
     result: ReembedResultDict = {
         "namespace": namespace,
         "embedding_model": config.embedding_model,

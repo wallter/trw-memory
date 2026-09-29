@@ -14,7 +14,7 @@ from dataclasses import asdict
 
 from trw_memory.exceptions import ConfigError
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import MemoryStatus
+from trw_memory.models.memory import MemoryStatus, MemoryType
 from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.security.rbac import Permission, require_namespace_permission
 from trw_memory.storage.interface import EntryCursor, StorageBackend
@@ -33,22 +33,27 @@ def memory_list_page_impl(
     config: MemoryConfig | None = None,
     status: str | None = None,
     tags: list[str] | None = None,
+    types: list[str] | None = None,
 ) -> dict[str, object]:
     """Return ``{"status": "ok", "entries": [...], "next": cursor | None}``; ``next`` resumes after the page.
 
-    Entries are ``MemoryEntry`` JSON. *status* and *tags* (every tag must be
-    present) filter inside the query, so the page limit applies after them.
+    Entries are ``MemoryEntry`` JSON. *status*, *tags* (every tag must be
+    present) and *types* (PRD-CORE-334) filter inside the query, so the page limit applies after them.
     """
     try:
         validate_namespace(namespace)
         wanted = MemoryStatus(status) if status is not None else None
+        kinds = {MemoryType(kind).value for kind in types or ()}
     except (ConfigError, ValueError) as exc:
         return {"error": str(exc), "status": "invalid"}
     require_namespace_permission(config or MemoryConfig(), namespace, Permission.READ, "list")
     if not 1 <= limit <= LIST_PAGE_MAX:
         return {"error": f"limit must be in [1, {LIST_PAGE_MAX}]", "status": "invalid"}
     cursor = EntryCursor(updated_at=after["updated_at"], entry_id=after["entry_id"]) if after else None
-    entries = backend.list_entries(namespace=namespace, status=wanted, tags=tags or None, limit=limit, after=cursor)
+    keep = (lambda entry: entry.type in kinds) if kinds else None
+    entries = backend.list_entries(
+        namespace=namespace, status=wanted, tags=tags or None, limit=limit, after=cursor, entry_filter=keep
+    )
     resume = asdict(EntryCursor.from_entry(entries[-1])) if len(entries) == limit else None
     return {"status": "ok", "entries": [entry.model_dump(mode="json") for entry in entries], "next": resume}
 
@@ -63,13 +68,16 @@ def register_list_page_tool(mcp: McpServer) -> None:
         after: dict[str, str] | None = None,
         status: str | None = None,
         tags: list[str] | None = None,
+        types: list[str] | None = None,
     ) -> dict[str, object]:
-        """One page of *namespace*'s rows, newest first, optionally filtered by status and tags."""
+        """One page of *namespace*'s rows, newest first, optionally filtered by status, tags and types."""
         return await serve_namespace(
             namespace,
             Permission.READ,
             "list",
-            lambda b, c: memory_list_page_impl(namespace, limit, after, backend=b, config=c, status=status, tags=tags),
+            lambda b, c: memory_list_page_impl(
+                namespace, limit, after, backend=b, config=c, status=status, tags=tags, types=types
+            ),
         )
 
     mcp.tool()(memory_list_page)

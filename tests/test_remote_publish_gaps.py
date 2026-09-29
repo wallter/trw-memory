@@ -112,10 +112,10 @@ class TestDrainRetryQueue:
         cfg = _cfg_sync_enabled()
         q = self._mock_queue()
 
-        def fake_drain(fn: object) -> tuple[dict[str, int], list[str]]:
+        def fake_drain(fn: object) -> tuple[dict[str, int], list[tuple[str, tuple[int, str] | None]]]:
             assert callable(fn)
             fn({"source_learning_id": "M-payload"})  # type: ignore[operator]
-            return {"drained": 1, "failed": 0, "skipped": 0}, ["M-1"]
+            return {"drained": 1, "failed": 0, "skipped": 0}, [("M-1", None)]
 
         q._drain_with_ids.side_effect = fake_drain
         mock_resp = _mock_response(status=201, json_body={"id": "REMOTE-1"})
@@ -181,12 +181,12 @@ class TestDrainRetryQueueClosure:
         # Use a queue mock that actually invokes the callback with a payload
         captured_fn: list[object] = []
 
-        def fake_drain(fn: object) -> tuple[dict[str, int], list[str]]:
+        def fake_drain(fn: object) -> tuple[dict[str, int], list[tuple[str, tuple[int, str] | None]]]:
             captured_fn.append(fn)
             assert callable(fn)
             payload = {"source_learning_id": "M-closure"}
             fn(payload)  # type: ignore[operator]
-            return {"drained": 1, "failed": 0, "skipped": 0}, ["M-canonical"]
+            return {"drained": 1, "failed": 0, "skipped": 0}, [("M-canonical", None)]
 
         q = MagicMock()
         q.depth.return_value = 0

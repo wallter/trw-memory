@@ -34,7 +34,7 @@ monkeypatch seam (``enforce_write_rate_limit`` reads the ``time`` global of the
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Callable
@@ -53,7 +53,7 @@ from trw_memory.security.poisoning import (
     strip_reserved_metadata as _strip,
     validate_entry_payload,
 )
-from trw_memory.security.provenance import build_entry_provenance
+from trw_memory.security.provenance import TRUST_FLAGS, TRUST_SCORE, build_entry_provenance
 from trw_memory.security.startup import _discover_anchor, resolve_security_path, verify_defaults
 from trw_memory.security.telemetry_emit import build_security_traceability, emit_security_event
 from trw_memory.security.trust_scorer import score_intake
@@ -89,6 +89,7 @@ class PreparedStoreEntry:
     quarantined: bool = False
     anomaly_dimension: str = ""
     anomaly_z_score: float = 0.0
+    rate_receipt: float | None = None  # the charged slot, refunded if the write then stores nothing
 
 
 @dataclass
@@ -105,6 +106,7 @@ class _StoreContext:
     pii_matches: tuple[PIIMatch, ...] = ()
     anomaly: tuple[str, float] | None = None
     anomaly_stats: AnomalyStats | None = None
+    rate_receipt: float | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -176,8 +178,8 @@ def _apply_sec001_intake(
             raise ScorerUnavailableError(f"trust scorer unavailable: {exc}") from exc
         updated_metadata = {
             **entry.metadata,
-            "trust_score": f"{trust_result.score:.4f}",
-            "trust_flags": "|".join(trust_result.reasons),
+            TRUST_SCORE: f"{trust_result.score:.4f}",
+            TRUST_FLAGS: "|".join(trust_result.reasons),
         }
         entry = entry.model_copy(update={"metadata": updated_metadata})
         would_be_decision = next(
@@ -303,7 +305,7 @@ _PRE_QUARANTINE_STAGES: list[Callable[[_StoreContext], None]] = [
 
 
 def _stage_rate_limit(ctx: _StoreContext) -> None:
-    _rt().enforce_write_rate_limit(
+    ctx.rate_receipt = _rt().enforce_write_rate_limit(
         ctx.config,
         session_id=ctx.session_id,
         actor=ctx.actor,
@@ -378,6 +380,7 @@ def _finalize_anomaly_decision(ctx: _StoreContext) -> PreparedStoreEntry:
     # store; on a security intake path the guard must fail closed for real.
     if ctx.anomaly_stats is None:
         raise ScorerUnavailableError("anomaly_stats missing after the anomaly-scoring stage")
+    _write_anomaly_stats(config, ctx.anomaly_stats)  # the stats write runs only on success
     if ctx.anomaly is None or not config.poisoning_detection_enabled:
         # trw-memory-10: emit an AUDIT event for the sub-baseline condition so a
         # namespace with < MIN_ANOMALY_BASELINE clean entries (detector silently
@@ -499,9 +502,5 @@ def prepare_entry_for_store(
         )
         raise
 
-    # See _finalize_anomaly_decision: fail closed rather than assert, so the
-    # guard survives `python -O`.
-    if ctx.anomaly_stats is None:
-        raise ScorerUnavailableError("anomaly_stats missing after the anomaly-scoring stage")
-    _write_anomaly_stats(config, ctx.anomaly_stats)
-    return _finalize_anomaly_decision(ctx)
+    # _finalize_anomaly_decision fails closed on missing stats, then writes them.
+    return replace(_finalize_anomaly_decision(ctx), rate_receipt=ctx.rate_receipt)

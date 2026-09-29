@@ -1,5 +1,8 @@
 """PRD-INFRA-196-FR07: trw-memory's suite gains the same session-end daemon sweep
 trw-mcp and the root scripts suite already had (this package lacked it entirely).
+
+Both suites now run one sweep, ``trw_memory.testing.daemon_reaper.sweep_session_daemons``,
+which also fails the session when a daemon survives it.
 """
 
 from __future__ import annotations
@@ -10,6 +13,8 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from trw_memory.testing.daemon_reaper import SessionSweep
 
 pytestmark = pytest.mark.integration
 
@@ -22,8 +27,11 @@ def test_pytest_sessionfinish_fails_the_session_when_the_sweep_reaped_a_pid(monk
 
         class config:
             _tmp_path_factory = type("F", (), {"getbasetemp": staticmethod(lambda: Path("/tmp/x"))})()
+            stash = pytest.Stash()
 
-    monkeypatch.setattr(conftest_mod, "reap_daemons_under", lambda *_a, **_k: [12345])
+    monkeypatch.setattr(
+        conftest_mod, "sweep_session_daemons", lambda basetemp, _owner: SessionSweep(basetemp, [12345], [])
+    )
     monkeypatch.setattr(conftest_mod, "_timing_sessionfinish", lambda *_a, **_k: None)
     session = _FakeSession()
 
@@ -40,14 +48,39 @@ def test_pytest_sessionfinish_leaves_a_clean_session_unchanged(monkeypatch: pyte
 
         class config:
             _tmp_path_factory = type("F", (), {"getbasetemp": staticmethod(lambda: Path("/tmp/x"))})()
+            stash = pytest.Stash()
 
-    monkeypatch.setattr(conftest_mod, "reap_daemons_under", lambda *_a, **_k: [])
+    monkeypatch.setattr(conftest_mod, "sweep_session_daemons", lambda basetemp, _owner: SessionSweep(basetemp, [], []))
     monkeypatch.setattr(conftest_mod, "_timing_sessionfinish", lambda *_a, **_k: None)
     session = _FakeSession()
 
     conftest_mod.pytest_sessionfinish(session, 0)  # type: ignore[arg-type]
 
     assert session.exitstatus == 0
+
+
+def test_pytest_sessionfinish_fails_the_session_when_a_daemon_survives_the_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The survivor guard: nothing leaked by this sweep's count, but a daemon is still alive after it."""
+    import tests.conftest as conftest_mod
+
+    class _FakeSession:
+        exitstatus = 0
+
+        class config:
+            _tmp_path_factory = type("F", (), {"getbasetemp": staticmethod(lambda: Path("/tmp/x"))})()
+            stash = pytest.Stash()
+
+    monkeypatch.setattr(
+        conftest_mod, "sweep_session_daemons", lambda basetemp, _owner: SessionSweep(basetemp, [], [4242])
+    )
+    monkeypatch.setattr(conftest_mod, "_timing_sessionfinish", lambda *_a, **_k: None)
+    session = _FakeSession()
+
+    conftest_mod.pytest_sessionfinish(session, 0)  # type: ignore[arg-type]
+
+    assert session.exitstatus == 1
 
 
 _PLANTED_LEAK_TEST = """

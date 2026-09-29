@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._optional_extras import vec_unavailable
 from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.interface import StorageBackend
@@ -38,7 +39,7 @@ def backend(tmp_path: Path):  # type: ignore[no-untyped-def]
     store = SQLiteBackend(tmp_path / "census.db", dim=3)
     if not store.supports_vectors():
         store.close()
-        pytest.skip("sqlite-vec did not load")
+        vec_unavailable("sqlite-vec did not load")
     yield store
     store.close()
 
@@ -50,7 +51,10 @@ def test_counts_by_full_space_identity_with_unknown_under_none(backend: SQLiteBa
     _put(backend, "a-enc", SPACE_A_OTHER_ENCODING)
     _put(backend, "legacy", None)
     _put(backend, "malformed", SPACE_A)
-    backend._conn.execute("UPDATE vec_index SET provenance_json = '{not json' WHERE entry_id = 'malformed'")
+    # As the writer and the v9 backfill record a malformed claim: no space key.
+    backend._conn.execute(
+        "UPDATE vec_index SET provenance_json = '{not json', space_key = NULL WHERE entry_id = 'malformed'"
+    )
     backend._conn.commit()
 
     assert backend.vector_space_census(namespace="default") == {

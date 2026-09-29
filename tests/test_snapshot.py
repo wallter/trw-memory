@@ -514,3 +514,47 @@ def test_handle_restore_explicit_filename_still_works(tmp_path: Path, capsys: py
     assert rc == 0
     assert "2026-04-13.db" in capsys.readouterr().out
     assert _row_count(src) == 3
+
+
+# ---------------------------------------------------------------------------
+# PRD-QUAL-149-FR02: the VACUUM INTO destination is bound, never in SQL text
+# ---------------------------------------------------------------------------
+
+
+class _RecordingConnection:
+    """Delegates to a real connection and records every ``execute`` call."""
+
+    def __init__(self, conn: sqlite3.Connection, calls: list[tuple[str, Sequence[object]]]) -> None:
+        self._conn = conn
+        self._calls = calls
+
+    def execute(self, sql: str, params: Sequence[object] = ()) -> sqlite3.Cursor:
+        self._calls.append((sql, params))
+        return self._conn.execute(sql, params)
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+def test_vacuum_into_binds_a_quoted_destination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The destination (here containing a single quote) reaches SQLite only as a
+    bound parameter, and the snapshot still round-trips."""
+    import trw_memory.storage._snapshot as snap_mod
+
+    calls: list[tuple[str, Sequence[object]]] = []
+    real_connect = snap_mod.connect_registered
+
+    def _recording_connect(*args: object, **kwargs: object) -> _RecordingConnection:
+        return _RecordingConnection(real_connect(*args, **kwargs), calls)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(snap_mod, "connect_registered", _recording_connect)
+    src = tmp_path / "memory.db"
+    _make_db(src, rows=4)
+    dest = tmp_path / "it's snapshots" / "memory-2026-09-26.db"
+
+    create_snapshot(src, dest)
+
+    vacuum = [(sql, params) for sql, params in calls if "VACUUM" in sql]
+    assert vacuum == [("VACUUM INTO ?", (str(dest) + ".tmp",))]
+    assert all("it's" not in sql and "it''s" not in sql for sql, _ in calls)
+    assert _row_count(dest) == 4

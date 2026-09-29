@@ -244,6 +244,7 @@ class TestRegisterConsolidateTool:
             dry_run=True,
             config=ANY,
             namespace_backend_factory=ANY,
+            lane=ANY,  # PRD-CORE-307: each cluster's writes run on the daemon's write lane
         )
 
     async def test_registered_wildcard_does_not_open_unused_default_backend(self) -> None:

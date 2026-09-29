@@ -14,6 +14,7 @@ adoption cases the version gate must handle:
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -276,6 +277,25 @@ def test_newer_db_raises_downgrade_error() -> None:
         ensure_schema(conn)
 
 
+def test_downgrade_error_names_the_loaded_build_so_a_stale_install_is_diagnosable() -> None:
+    """A restart reloads the same code from disk; the message must say WHICH build is old.
+
+    2026-09-26: every MCP server hit this after a store migrated to schema 13, and /mcp did
+    not help because the editable install pointed at a checkout still on the older commit.
+    """
+    import trw_memory
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+
+    with pytest.raises(SchemaDowngradeError) as caught:
+        ensure_schema(conn)
+
+    message = str(caught.value)
+    assert str(Path(trw_memory.__file__).resolve().parent) in message
+    assert "If a restart reproduces this" in message
+
+
 def test_downgrade_error_raised_before_any_ddl() -> None:
     """The downgrade guard fails loud BEFORE creating tables — no partial writes."""
     conn = sqlite3.connect(":memory:")
@@ -395,3 +415,120 @@ def test_prd_core_181_fr06() -> None:
     )
 
     _census()
+
+
+# ---------------------------------------------------------------------------
+# PRD-CORE-332 FR02: anchor_postings arrives at v12 with a backfill from the column
+# ---------------------------------------------------------------------------
+
+
+def _v11_store_with_anchor_rows(anchor_values: dict[str, str | None]) -> sqlite3.Connection:
+    """A store at schema 11 (the last version before FR02)
+    whose ``memories`` rows carry the given raw ``anchors`` column text."""
+    conn = sqlite3.connect(":memory:")
+    _full_memories_at_version(conn, 1)
+    ensure_schema(conn)
+    conn.execute("DROP TABLE IF EXISTS anchor_postings")
+    conn.execute("PRAGMA user_version = 11")
+    for entry_id, anchors in anchor_values.items():
+        conn.execute(
+            "INSERT INTO memories (id, namespace, content, importance, type, created_at, updated_at, anchors) "
+            "VALUES (?, 'project:x', 'c', 0.5, 'pattern', '2026-01-01T00:00:00', '2026-01-01T00:00:00', ?)",
+            (entry_id, anchors),
+        )
+    conn.commit()
+    return conn
+
+
+def _anchor_posting_rows(conn: sqlite3.Connection) -> set[tuple[str, str, str]]:
+    rows = conn.execute("SELECT namespace, file, entry_id FROM anchor_postings").fetchall()
+    return {(str(r[0]), str(r[1]), str(r[2])) for r in rows}
+
+
+def test_v12_migration_backfills_anchor_index() -> None:
+    """Three anchored rows (one duplicate file, one ``./`` form) + one malformed row open at v12
+    with exactly the normalized postings, ``malformed_skipped=1``, and the backfill never re-runs."""
+    import structlog
+
+    from trw_memory.storage._anchor_index import migrate_v12_anchor_postings
+    from trw_memory.storage._schema import _MIGRATIONS
+
+    assert SCHEMA_VERSION >= 12  # v12 is this delta; later deltas may follow
+    assert _MIGRATIONS[12] is migrate_v12_anchor_postings
+    conn = _v11_store_with_anchor_rows(
+        {
+            "L-dup": '[{"file": "pkg/a.py", "symbol_name": "f"}, {"file": "pkg/a.py", "symbol_name": "g"}]',
+            "L-dot": '[{"file": "./pkg/b.py", "symbol_name": "f"}]',
+            "L-two": '[{"file": "pkg/c.py", "symbol_name": "f"}, {"file": "pkg//a.py", "symbol_name": "h"}]',
+            "L-bad": "not json at all",
+            "L-none": "[]",
+        }
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        ensure_schema(conn)
+
+    assert _user_version(conn) == SCHEMA_VERSION
+    assert _anchor_posting_rows(conn) == {
+        ("project:x", "pkg/a.py", "L-dup"),
+        ("project:x", "pkg/b.py", "L-dot"),
+        ("project:x", "pkg/c.py", "L-two"),
+        ("project:x", "pkg/a.py", "L-two"),
+    }
+    backfilled = [e for e in logs if e["event"] == "anchor_postings_backfilled"]
+    assert len(backfilled) == 1
+    assert (backfilled[0]["rows_scanned"], backfilled[0]["postings_written"], backfilled[0]["malformed_skipped"]) == (
+        5,
+        4,
+        1,
+    )
+
+    # Re-opening is gated by user_version: no second backfill, so a posting removed now stays removed.
+    conn.execute("DELETE FROM anchor_postings WHERE entry_id = 'L-dot'")
+    conn.commit()
+    with structlog.testing.capture_logs() as reopen_logs:
+        ensure_schema(conn)
+    assert not [e for e in reopen_logs if e["event"] == "anchor_postings_backfilled"]
+    assert ("project:x", "pkg/b.py", "L-dot") not in _anchor_posting_rows(conn)
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "not json at all",
+        '{"file": "pkg/a.py"}',
+        '["pkg/a.py"]',
+        '[{"file": "pkg/a.py"}, 3]',
+        "null",
+        '"pkg/a.py"',
+    ],
+)
+def test_malformed_anchors_row_is_skipped_and_counted(malformed: str) -> None:
+    """A row whose anchors are not a JSON list of objects gets no posting, is counted, and never raises."""
+    import structlog
+
+    conn = _v11_store_with_anchor_rows({"L-bad": malformed, "L-good": '[{"file": "ok.py", "symbol_name": "f"}]'})
+
+    with structlog.testing.capture_logs() as logs:
+        ensure_schema(conn)
+
+    assert _user_version(conn) == SCHEMA_VERSION
+    assert _anchor_posting_rows(conn) == {("project:x", "ok.py", "L-good")}
+    backfilled = next(e for e in logs if e["event"] == "anchor_postings_backfilled")
+    assert backfilled["malformed_skipped"] == 1
+
+
+def test_null_or_fileless_anchors_are_not_malformed() -> None:
+    """NULL/empty anchors and objects without a usable ``file`` post nothing and are not counted malformed."""
+    import structlog
+
+    conn = _v11_store_with_anchor_rows(
+        {"L-null": None, "L-empty": "", "L-nofile": '[{"symbol_name": "f"}, {"file": 7}, {"file": "/abs.py"}]'}
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        ensure_schema(conn)
+
+    assert _anchor_posting_rows(conn) == set()
+    backfilled = next(e for e in logs if e["event"] == "anchor_postings_backfilled")
+    assert (backfilled["rows_scanned"], backfilled["malformed_skipped"]) == (3, 0)

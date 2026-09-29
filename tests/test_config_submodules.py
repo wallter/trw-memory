@@ -14,7 +14,7 @@ exist.
 from __future__ import annotations
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from trw_memory.models._config_daemon import _DaemonConfigMixin
 from trw_memory.models._config_lifecycle import _LifecycleConfigMixin
@@ -30,19 +30,19 @@ from trw_memory.models.config import MemoryConfig
 # picks up every annotated Field with its constraints.
 # ---------------------------------------------------------------------------
 class _LifecycleModel(_LifecycleConfigMixin, BaseModel):
-    pass
+    model_config = ConfigDict(populate_by_name=True)  # as MemoryConfig
 
 
 class _RetrievalModel(_RetrievalConfigMixin, BaseModel):
-    pass
+    model_config = ConfigDict(populate_by_name=True)  # as MemoryConfig
 
 
 class _SecurityModel(_SecurityConfigMixin, BaseModel):
-    pass
+    model_config = ConfigDict(populate_by_name=True)  # as MemoryConfig
 
 
 class _StorageModel(_StorageConfigMixin, BaseModel):
-    pass
+    model_config = ConfigDict(populate_by_name=True)  # as MemoryConfig
 
 
 class _DaemonModel(_DaemonConfigMixin, BaseModel):
@@ -252,7 +252,6 @@ class TestSecurityConfig:
         # int budgets are ints, not None
         assert isinstance(cfg.max_entry_chars, int)
         assert cfg.max_entry_chars == 10_240
-        assert isinstance(cfg.quarantine_ttl_seconds, int)
         # sync is opt-in OFF
         assert cfg.sync_enabled is False
 
@@ -272,6 +271,28 @@ class TestSecurityConfig:
         which is exactly why they stayed green while the control was dead.
         """
         assert "anomaly_bypass_source_prefixes" not in _SecurityModel.model_fields
+
+    def test_retired_quarantine_ttl_field_is_gone(self) -> None:
+        """``quarantine_ttl_seconds`` was removed 2026-09-26 (PRD-QUAL-145 wave 3).
+
+        ``security/_runtime_quarantine.py`` never ran a TTL sweep --
+        ``delete_quarantined_entries`` only deletes rows a caller names
+        explicitly, and no lane job called it unattended. The field described
+        itself as a "Retention window for quarantine rows" while enforcing no
+        retention: the same wiring-defect P12 shape as
+        ``anomaly_bypass_source_prefixes`` above, flagged unresolved by the
+        2026-09-12 configuration review.
+        """
+        assert "quarantine_ttl_seconds" not in _SecurityModel.model_fields
+
+    def test_retired_sync_namespace_field_is_gone(self) -> None:
+        """``sync_namespace`` was removed 2026-09-26 (PRD-QUAL-145 wave 3).
+
+        PRD-CORE-047 declared it additive, but nothing in ``sync/`` ever read
+        it -- every sync path takes its namespace from the caller/entry, not
+        this config value.
+        """
+        assert "sync_namespace" not in _SecurityModel.model_fields
 
     def test_z_threshold_must_be_positive(self) -> None:
         with pytest.raises(ValidationError):
@@ -314,12 +335,6 @@ class TestSecurityConfig:
         with pytest.raises(ValidationError):
             _SecurityModel(max_entry_chars=0)
 
-    def test_quarantine_ttl_allows_zero_but_not_negative(self) -> None:
-        # ge=0 — zero TTL is a valid "no retention" setting
-        assert _SecurityModel(quarantine_ttl_seconds=0).quarantine_ttl_seconds == 0
-        with pytest.raises(ValidationError):
-            _SecurityModel(quarantine_ttl_seconds=-1)
-
     def test_write_rate_limit_allows_zero(self) -> None:
         # ge=0 — 0 means "no writes" / fully throttled, still valid
         assert _SecurityModel(max_memory_writes_per_minute=0).max_memory_writes_per_minute == 0
@@ -354,9 +369,12 @@ class TestSecurityConfig:
         with pytest.raises(ValidationError):
             _SecurityModel(sync_min_importance=1.5)
 
-    def test_recovery_policy_accepts_legacy_alias(self) -> None:
-        cfg = _SecurityModel.model_validate({"recovery_policy": "empty_ok"})
-        assert cfg.memory_recovery_policy == "empty_ok"
+    def test_recovery_policy_reads_only_its_memory_name(self) -> None:
+        # The bare "recovery_policy" alias is gone: it was also the bare RECOVERY_POLICY env var (ENV-DOUBLE-PREFIX).
+        assert (
+            _SecurityModel.model_validate({"memory_recovery_policy": "empty_ok"}).memory_recovery_policy == "empty_ok"
+        )
+        assert _SecurityModel.model_validate({"recovery_policy": "empty_ok"}).memory_recovery_policy == "strict"
 
 
 # ===========================================================================
@@ -370,7 +388,6 @@ class TestStorageConfig:
         assert cfg.sqlite_db_name == "memory.db"
         assert isinstance(cfg.embedding_dim, int)
         assert cfg.embedding_dim == 384
-        assert cfg.rbac_mode == "local"
         assert cfg.default_role == "admin"
         assert cfg.encryption_enabled is False
 
@@ -384,9 +401,12 @@ class TestStorageConfig:
         with pytest.raises(ValidationError):
             _StorageModel(storage_backend="postgres")
 
-    def test_unknown_rbac_mode_rejected(self) -> None:
-        with pytest.raises(ValidationError):
-            _StorageModel(rbac_mode="cluster")
+    def test_retired_rbac_mode_field_is_gone(self) -> None:
+        """``rbac_mode`` was removed 2026-09-26 (PRD-QUAL-145 wave 3, DEFECT-LEDGER
+        UF-030): no enforcement path ever read it -- ``require_namespace_permission``
+        (security/rbac.py) gates only on ``rbac_enabled``.
+        """
+        assert "rbac_mode" not in _StorageModel.model_fields
 
     def test_unknown_default_role_rejected(self) -> None:
         with pytest.raises(ValidationError):
@@ -395,11 +415,9 @@ class TestStorageConfig:
     def test_valid_enum_members_accepted(self) -> None:
         cfg = _StorageModel(
             storage_backend="yaml",
-            rbac_mode="remote",
             default_role="reader",
         )
         assert cfg.storage_backend == "yaml"
-        assert cfg.rbac_mode == "remote"
         assert cfg.default_role == "reader"
 
     def test_namespace_roles_default_isolation(self) -> None:

@@ -67,19 +67,24 @@ def search_fts_method(
 
     if not self._fts_available:
         return []
-    with self._fresh_connection():
-        return search_fts(
-            self,
-            _SELECT_COLUMNS_SQL,
-            query=query,
-            top_k=top_k,
-            status=status,
-            min_importance=min_importance,
-            namespace=namespace,
-            tags=tags,
-            temporal_selection=temporal_selection,
-            entry_filter=entry_filter,
-        )
+
+    def read(predicate: Callable[[MemoryEntry], bool] | None) -> list[MemoryEntry]:
+        with self._fresh_connection():
+            return search_fts(
+                self,
+                _SELECT_COLUMNS_SQL,
+                query=query,
+                top_k=top_k,
+                status=status,
+                min_importance=min_importance,
+                namespace=namespace,
+                tags=tags,
+                temporal_selection=temporal_selection,
+                entry_filter=predicate,
+            )
+
+    # PRD-CORE-333 FR02: quarantined identities are dropped before *top_k*.
+    return self._quarantine_limited(read, entry_filter, top_k)
 
 
 def search_fts(

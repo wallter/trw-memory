@@ -110,9 +110,17 @@ class TestConfigureLogging:
         assert logging.getLogger().handlers
 
     def test_version_bind_exception_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import importlib.metadata as meta
-
-        monkeypatch.setattr(meta, "version", lambda _: (_ for _ in ()).throw(Exception("no ver")))
+        # B71-111 moved __version__ resolution to trw_memory._version import time (reading the
+        # source pyproject.toml, cached once). By the time this test runs, trw_memory.__init__
+        # has already imported it, so patching importlib.metadata.version no longer reaches
+        # configure_logging()'s `from trw_memory._version import __version__` — that's a plain
+        # attribute lookup on an already-resolved string, not a fresh call. The only exception
+        # this try/except can still observe is bind_contextvars itself failing, so simulate that.
+        monkeypatch.setattr(
+            structlog.contextvars,
+            "bind_contextvars",
+            Mock(side_effect=Exception("no ver")),
+        )
         debug = Mock()
         monkeypatch.setattr(logging.getLogger("trw_memory._logging"), "debug", debug)
         configure_logging()

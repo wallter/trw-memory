@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._optional_extras import vec_unavailable
 from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
 from trw_memory.storage._schema import SCHEMA_VERSION, _migrate_v6_vector_provenance, ensure_schema
 from trw_memory.storage._vector_ops import get_vector_records
@@ -27,7 +28,7 @@ def backend(tmp_path: Path):
     backend = SQLiteBackend(tmp_path / "memory.db", dim=2)
     if not backend.vec_available:
         backend.close()
-        pytest.skip("sqlite-vec virtual table unavailable")
+        vec_unavailable("sqlite-vec virtual table unavailable")
     yield backend
     backend.close()
 

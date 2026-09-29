@@ -12,13 +12,16 @@ verification pass (PRD-CORE-294 FR07(b)) is the same
 Two truths the response and the tool description must carry, because getting
 them wrong would be worse than not having the tool:
 
-**Scope differs per pass.** Consolidation is namespace-scoped. The importance
-decay pass and the WAL checkpoint act on the whole STORE -- and on the daemon,
-one store holds every namespace. Calling this for five namespaces therefore
-runs one namespace's consolidation five times and the store-wide passes five
-times too. Over the daemon the decay pass narrows to the token's granted
-namespaces (PRD-CORE-298 FR02); the WAL checkpoint is a file operation that
-reads and changes no row.
+**Scope differs per pass.** Consolidation and decay are namespace-scoped; the
+WAL checkpoint acts on the whole STORE -- and on the daemon, one store holds
+every namespace. Calling this for five namespaces therefore runs one
+namespace's consolidation and decay five times and the store-wide checkpoint
+five times too. The decay pass narrows to *this call's* namespace, intersected
+with the token's grant when one applies (PRD-CORE-298 FR02, narrowed from the
+whole grant by PRD-CORE-307 FR05 so each namespace's maintain advances its own
+resumable cursor rather than every namespace racing over the same store-wide
+one -- breaking; see UPGRADE-NOTES-8.0.0.md). The WAL checkpoint is a file
+operation that reads and changes no row.
 
 **A returned value is not a success.** ``memory_consolidate_impl`` reports an
 error by returning ``{"status": "error"}`` and ``checkpoint_wal`` reports one as
@@ -48,14 +51,17 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.security.rbac import Permission, transport_grant, transport_root
 from trw_memory.storage.persistence import lock_for_rmw
 from trw_memory.tools._types import McpServer
-from trw_memory.tools.entry import refused_namespace
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from collections.abc import Callable
+
+    from trw_memory.lifecycle.consolidation import ClusterWrite
+    from trw_memory.models.memory import MemoryEntry
     from trw_memory.storage.interface import StorageBackend
 
 logger = structlog.get_logger(__name__)
 
-__all__ = ["GRAPH_BACKFILL_PAGE_MAX", "MAINTENANCE_STATE_FILE", "memory_maintain_impl", "register_maintain_tool"]
+__all__ = ["GRAPH_BACKFILL_PAGE_MAX", "MAINTENANCE_STATE_FILE", "register_maintain_tool"]
 
 #: The most rows one ``memory_graph_backfill`` call reads (trw-mcp's list page).
 GRAPH_BACKFILL_PAGE_MAX = 10_000
@@ -125,10 +131,13 @@ def _record_stamp(
     passes: dict[str, object] | None = None,
     sweep: dict[str, object] | None = None,
     sweep_key: str = "",
+    decay_next: list[str] | None = None,
+    decay_ran: bool = False,
 ) -> dict[str, object]:
     """Write the attempt (and, on full success, the completion) under a lock, with the unfinished
     verification *sweep* under *sweep_key* to resume (``None`` once it finished). Without *attempted_at* (a
-    ``memory_verify``) only the sweep is written."""
+    ``memory_verify``) only the sweep is written. *decay_ran* (PRD-CORE-307 FR05) records *decay_next*,
+    the decay pass's persisted keyset cursor (``None`` when it wrapped to the start)."""
     path = _state_path(backend)
     if path is None:
         return {}
@@ -141,13 +150,17 @@ def _record_stamp(
             record["last_attempted_at"], record["last_passes"] = attempted_at, passes
         if succeeded:
             record["last_maintained_at"] = attempted_at
+        if decay_ran:
+            record["decay_next"] = decay_next
         found = record.pop("verify_sweeps", None)
         sweeps = {key: value for key, value in (found if isinstance(found, dict) else {}).items() if key != sweep_key}
         if sweep is not None:
             sweeps[sweep_key] = {**sweep, "at": _now()}
         # The newest few unfinished sweeps are kept (one per root and settings); an abandoned one ages out.
+        # The one just written sorts newest whatever the clock says (B71-92).
         if kept := sorted(
-            sweeps.items(), key=lambda item: str(item[1].get("at", "")) if isinstance(item[1], dict) else ""
+            sweeps.items(),
+            key=lambda item: (item[0] == sweep_key, str(item[1].get("at", "")) if isinstance(item[1], dict) else ""),
         ):
             record["verify_sweeps"] = dict(kept[-VERIFY_SWEEPS_KEPT:])
         state[namespace] = record
@@ -155,29 +168,48 @@ def _record_stamp(
     return record
 
 
-def _run_decay(backend: StorageBackend) -> dict[str, object]:
-    """Run the store-wide importance decay pass, or say why it was skipped."""
+def _run_decay(backend: StorageBackend, namespace: str, config: MemoryConfig | None = None) -> dict[str, object]:
+    """Run the importance decay pass over *namespace* (intersected with the token's grant, if any),
+    resuming its persisted keyset cursor and advancing it after this pass (PRD-CORE-307 FR05), or say
+    why the pass was skipped. *config* supplies ``decay_cutoff_days``/``decay_batch_size``
+    (PRD-CORE-331 FR10 B71-135h); ``None`` falls back to ``MemoryConfig()`` defaults (90d, 1000 rows)."""
     from trw_memory.graph import memory_decay_pass
 
     conn = getattr(backend, "_conn", None)
     if conn is None:
         return {"status": _SKIPPED, "reason": "backend_not_sqlite"}
+    cfg = config or MemoryConfig()
     lock = getattr(backend, "_lock", None)
     granted = transport_grant()
+    scope = {namespace} if granted is None else {namespace} & set(granted)
+    raw_cursor = _namespace_stamp(backend, namespace).get("decay_next")
+    cursor = (str(raw_cursor[0]), str(raw_cursor[1])) if isinstance(raw_cursor, list) and len(raw_cursor) == 2 else None
     try:
-        result = memory_decay_pass(conn, lock=lock, namespaces=granted)
+        result = memory_decay_pass(
+            conn, cfg.decay_cutoff_days, cfg.decay_batch_size, lock=lock, namespaces=scope, cursor=cursor
+        )
     except (sqlite3.Error, ValueError) as exc:
         logger.warning("maintenance_decay_failed", error=str(exc))
         return {"status": _ERROR, "reason": type(exc).__name__}
-    return {"status": _OK, "scope": "store" if granted is None else "grant", **result}
+    next_cursor = result.get("next")
+    _record_stamp(
+        backend,
+        namespace,
+        attempted_at=None,
+        decay_next=next_cursor if isinstance(next_cursor, list) else None,
+        decay_ran=True,
+    )
+    return {"status": _OK, "scope": "namespace", **result}
 
 
-def _run_consolidation(namespace: str, backend: StorageBackend, config: MemoryConfig) -> dict[str, object]:
-    """Run one consolidation cycle for *namespace*."""
+def _run_consolidation(
+    namespace: str, backend: StorageBackend, config: MemoryConfig, lane: Callable[[ClusterWrite], str] | None = None
+) -> dict[str, object]:
+    """Run one consolidation cycle for *namespace* (each cluster's writes on *lane*, if given)."""
     from trw_memory.tools.consolidate import memory_consolidate_impl
 
     try:
-        result = memory_consolidate_impl(namespace, backend=backend, config=config)
+        result = memory_consolidate_impl(namespace, backend=backend, config=config, lane=lane)
     except Exception as exc:  # justified: one failing pass must not abort the others
         logger.warning("maintenance_consolidation_failed", namespace=namespace, error=str(exc))
         return {"status": _ERROR, "reason": type(exc).__name__}
@@ -192,9 +224,57 @@ def _run_consolidation(namespace: str, backend: StorageBackend, config: MemoryCo
         "scope": "namespace",
         "clusters_found": result.get("clusters_found", 0),
         "entries_consolidated": result.get("entries_consolidated", 0),
+        **({"clusters_skipped": result["clusters_skipped"]} if "clusters_skipped" in result else {}),
         **({"errors": errors} if errors else {}),
         **({"reason": str(result.get("error", reported) or "cluster_errors")} if failed else {}),
     }
+
+
+def _run_security_maintenance() -> dict[str, object]:
+    """Drain audit logs queued while ``security_maintenance_inline`` was ``False`` (B71-97: this
+    queue previously had no drainer, so its bounded deque silently dropped compaction work once
+    full)."""
+    from trw_memory.security.runtime import drain_security_maintenance
+
+    try:
+        result = drain_security_maintenance()
+    except Exception as exc:  # justified: one failing pass must not abort the others
+        logger.warning("maintenance_security_drain_failed", error=str(exc))
+        return {"status": _ERROR, "reason": type(exc).__name__}
+    return {"status": _OK, "scope": "store", **result}
+
+
+def _graph_backfill_lane_write(
+    namespace: str,
+) -> Callable[[MemoryEntry, list[float] | None, MemoryConfig | None], dict[str, object]]:
+    """CORE-331 FR04: ``memory_graph_backfill`` serves off the write lane (``exclusive=False``), so its
+    per-row edge write raced a forget/update/another writer touching the same row -- the off-lane
+    writer census this closes. Each row's write goes through the lane instead, re-read fresh first
+    so a row that changed since the page was listed is skipped (content-hashed, PRD-CORE-308's
+    ``revision_of``) rather than overwritten from stale data."""
+    from trw_memory import graph
+    from trw_memory._client_store import _existing_entry_for_namespace
+    from trw_memory.storage._shared import revision_of
+    from trw_memory.tools.entry import lane_step
+
+    def write(entry: MemoryEntry, embedding: list[float] | None, config: MemoryConfig | None) -> dict[str, object]:
+        expected = revision_of(entry)
+
+        def step(fresh_backend: StorageBackend) -> dict[str, object]:
+            if revision_of(_existing_entry_for_namespace(fresh_backend, entry.id, namespace)) != expected:
+                return {"status": "stale"}
+            return {
+                "status": "ok",
+                "built": graph.update_entry_graph(entry, fresh_backend, embedding=embedding, config=config),
+            }
+
+        try:
+            result = lane_step(namespace, "graph_backfill", step).result()
+        except Exception as exc:  # justified: one row's failure must not abort the page
+            return {"status": "error", "reason": type(exc).__name__}
+        return result if isinstance(result, dict) else {"status": "error", "reason": "refused"}
+
+    return write
 
 
 def _run_checkpoint(backend: StorageBackend) -> dict[str, object]:
@@ -312,42 +392,6 @@ def maintain_config(consolidation: dict[str, object] | None) -> MemoryConfig | d
     return cfg
 
 
-def memory_maintain_impl(
-    namespace: str,
-    *,
-    backend: StorageBackend,
-    config: MemoryConfig | None = None,
-    verify_seconds: float | None = None,
-) -> dict[str, object]:
-    """Run decay, consolidation, verification and a WAL checkpoint; record the attempt.
-
-    Args:
-        namespace: Namespace to consolidate and to stamp.
-        backend: Storage backend for the store being maintained.
-        config: Optional config; constructed when omitted.
-        verify_seconds: Stop the verification sweep after about this long (``None``: the whole
-            sweep). It resumes where the namespace's last maintenance of this store and root left
-            it unfinished.
-
-    Returns:
-        ``{"namespace", "passes", "last_attempted_at", "last_maintained_at",
-        "previous_maintained_at", "status"}``. ``status`` is ``"ok"`` only when
-        every pass reported success. ``passes["verification"]`` carries ``complete``
-        and, while it is ``false``, ``next``: where the next call resumes.
-    """
-    from trw_memory.tools import _maintain_sweep as sweep
-
-    cfg = config or MemoryConfig()
-    if refused := refused_namespace(namespace, Permission.WRITE, "maintain", cfg):
-        return refused
-    run = sweep.begin(namespace, backend, cfg)
-    run.passes["decay"] = _run_decay(backend)
-    run.passes["consolidation"] = _run_consolidation(namespace, backend, cfg)
-    sweep.verify_slice(run, backend, verify_seconds)
-    run.passes["wal_checkpoint"] = _run_checkpoint(backend)
-    return sweep.finish(run, backend)
-
-
 def register_maintain_tool(mcp: McpServer) -> None:
     """Register memory_maintain with a FastMCP server instance.
 
@@ -368,8 +412,9 @@ def register_maintain_tool(mcp: McpServer) -> None:
         the write-ahead log. Run it on a schedule (hourly or nightly), not per
         request.
 
-        Scope is NOT uniform. Consolidation applies to *namespace*. The decay
-        pass and the WAL checkpoint apply to the whole store, which on the
+        Scope is NOT uniform. Consolidation applies to *namespace*, and so does
+        decay (intersected with the token's grant, resuming its own persisted
+        cursor); the WAL checkpoint applies to the whole store, which on the
         loopback daemon is every namespace. Verification re-checks the
         namespace's stored assertions against MEMORY_PROJECT_ROOT; without a
         root it is skipped and verdicts stay unknown.
@@ -430,7 +475,13 @@ def register_maintain_tool(mcp: McpServer) -> None:
             lambda backend, config: {
                 "status": _OK,
                 **backfill_graph_page(
-                    backend, namespace, after=cursor, limit=limit, deadline_seconds=deadline_seconds, config=config
+                    backend,
+                    namespace,
+                    after=cursor,
+                    limit=limit,
+                    deadline_seconds=deadline_seconds,
+                    config=config,
+                    write=_graph_backfill_lane_write(namespace),
                 ),
             },
             exclusive=False,

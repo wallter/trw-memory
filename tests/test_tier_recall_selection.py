@@ -53,7 +53,7 @@ def discover(manager, backend, invocation=None, **kwargs):
     return manager.search(
         ["needle"],
         invocation=invocation or policy(),
-        resolve_entry=lambda id: backend.get(id, namespace="default"),
+        resolve_entries=lambda ids: backend.get_many(ids, namespace="default"),
         top_k=1,
         **kwargs,
     )
@@ -256,7 +256,10 @@ def test_legacy_missing_namespace_can_resolve_authorized_canonical(tiers):
     backend.store(value)
     invocation = RecallInvocation(SourcePolicy.resolve(), TemporalSelection(), "project:one")
     rows = manager.search(
-        ["needle"], invocation=invocation, top_k=1, resolve_entry=lambda id: backend.get(id, namespace="project:one")
+        ["needle"],
+        invocation=invocation,
+        top_k=1,
+        resolve_entries=lambda ids: backend.get_many(ids, namespace="project:one"),
     )
     assert rows[0].entry.namespace == "project:one"
 
@@ -336,7 +339,9 @@ def test_discovery_passes_captured_reference_to_composite_scoring(tiers, monkeyp
 
     monkeypatch.setattr(_manager_search, "compute_importance_score", score)
     assert discover(manager, backend, invocation)
-    assert references == [invocation.temporal.reference_time]
+    # The snapshot ranking pass and the canonical scoring pass both use the captured reference.
+    assert references
+    assert set(references) == {invocation.temporal.reference_time}
 
 
 @pytest.fixture

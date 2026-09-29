@@ -254,7 +254,7 @@ def test_memory_store_impl_uses_configured_embedder_settings() -> None:
     with patch("trw_memory.tools.store.get_local_embedder", return_value=None) as embedder_mock:
         result = memory_store_impl("stored through tool", "project:default", backend=backend, config=config)
 
-    embedder_mock.assert_called_once_with(model_name="custom-model", dim=768)
+    embedder_mock.assert_called_once_with(model_name="custom-model", dim=768, enabled=True)
     assert result["status"] == "stored"
 
 
@@ -305,7 +305,7 @@ def test_memory_recall_impl_uses_configured_embedder_settings() -> None:
     ):
         result = memory_recall_impl("pydantic", "project:default", backend=backend, config=config)
 
-    embedder_mock.assert_called_once_with(model_name="custom-model", dim=768)
+    embedder_mock.assert_called_once_with(model_name="custom-model", dim=768, enabled=True)
     assert result["memories"][0]["content"] == "pydantic"
 
 
@@ -427,7 +427,7 @@ def test_client_get_embedder_uses_configured_settings(
         if backend is not None:
             backend.close()
 
-    embedder_mock.assert_called_once_with(model_name="custom-model", dim=768)
+    embedder_mock.assert_called_once_with(model_name="custom-model", dim=768, enabled=True)
     assert result is None
 
 
@@ -455,6 +455,7 @@ def test_client_get_embedder_reuses_provider_for_client_lifetime(
     embedder_mock.assert_called_once_with(
         model_name=client._config.embedding_model,
         dim=client._config.embedding_dim,
+        enabled=True,
     )
 
 
@@ -617,6 +618,9 @@ class TestHybridRecallLatencyTelemetry:
         assert event["namespace_size"] == 0
         assert event["returned_count"] == 0
         assert event["hybrid_search_ms"] == 0.0
+        # No candidates: the caps are never scaled, and top_k is the unscaled limit x multiplier.
+        assert event["effective_bm25_candidates"] == event["effective_vector_candidates"] == 0
+        assert event["effective_top_k"] == 10 * client._config.recall_top_k_multiplier
         assert cast("float", event["list_entries_ms"]) >= 0.0
         assert cast("float", event["total_ms"]) >= 0.0
 

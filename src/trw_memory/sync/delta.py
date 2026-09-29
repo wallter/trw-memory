@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.security._evidence_invariant import served_view
 
 if TYPE_CHECKING:
     from trw_memory.models.config import MemoryConfig
@@ -103,7 +104,8 @@ class DeltaTracker:
                     rows = conn.execute(sql, params).fetchall()
             else:
                 rows = conn.execute(sql, params).fetchall()
-            return [row_to_entry(tuple(r)) for r in rows]
+            # PRD-CORE-312: dirty rows are served (pushed, returned by the daemon), so demote.
+            return [served_view(row_to_entry(tuple(r))) for r in rows]
         # Fallback: hydrate a complete snapshot before filtering. Filtering
         # after a fixed limit can permanently hide an older dirty row behind
         # newer synced rows. Recount after each read so concurrent inserts that
@@ -145,11 +147,11 @@ class DeltaTracker:
         A backend without a real transaction (only the interface's no-op) raises
         ``TypeError`` rather than performing a compare-and-mark that is not atomic.
         """
-        from trw_memory.storage.interface import StorageBackend
+        from trw_memory.storage.interface import is_transactional
 
         now = datetime.now(tz=timezone.utc)
         count = 0
-        if expected_seq is not None and type(backend).transaction is StorageBackend.transaction:
+        if expected_seq is not None and not is_transactional(backend):
             raise TypeError(
                 f"a conditional sync ack needs a transactional backend; {type(backend).__name__} has no transaction"
             )
@@ -171,14 +173,34 @@ def ack_publish(backend: StorageBackend, entry: MemoryEntry, **fields: object) -
     """Record a publish of *entry*'s snapshot: *fields* always, ``last_synced_at`` only while the row is
     still the published revision (``sync_seq`` and ``sync_hash``), so an edit made since stays dirty for the next
     push (C12 rc7)."""
+    return ack_revision(backend, entry.id, entry.namespace, (entry.sync_seq, entry.sync_hash), **fields)
+
+
+def ack_revision(
+    backend: StorageBackend,
+    entry_id: str,
+    namespace: str,
+    revision: tuple[int, str] | None,
+    **fields: object,
+) -> bool:
+    """Write *fields* to the row, and stamp ``last_synced_at`` only while it is still *revision*.
+
+    *revision* is the ``(sync_seq, sync_hash)`` the published snapshot was taken at; ``None`` (a retry record
+    queued before revisions were recorded) never stamps, so the row stays dirty and is pushed again rather
+    than marked synced over an edit it never carried (B71-77). The compare and the write share one
+    transaction; a backend without a real one (the YAML store) never stamps either, as ``mark_synced``
+    refuses a conditional ack there. Returns whether the row was stamped.
+    """
+    from trw_memory.storage.interface import is_transactional
+
     with backend.transaction():
-        if (current := backend.get(entry.id, namespace=entry.namespace)) is None:
+        if (current := backend.get(entry_id, namespace=namespace)) is None:
             return False
         # The hash too: store() numbers a revision from the writer's copy, so two contents can share a seq.
-        clean = (current.sync_seq, current.sync_hash) == (entry.sync_seq, entry.sync_hash)
+        clean = revision is not None and is_transactional(backend) and (current.sync_seq, current.sync_hash) == revision
         backend.update(
-            entry.id,
-            namespace=entry.namespace,
+            entry_id,
+            namespace=namespace,
             **fields,
             **({"last_synced_at": datetime.now(tz=timezone.utc)} if clean else {}),
         )
@@ -198,7 +220,7 @@ def find_synced_entry(backend: StorageBackend, namespace: str, remote_id: str, i
         marks = ", ".join("?" for _ in ids) or "NULL"
         sql = f"SELECT * FROM memories WHERE namespace = ? AND (remote_id = ? OR id IN ({marks})) LIMIT 1"  # noqa: S608
         row = conn.execute(sql, (namespace, remote_id, *ids)).fetchone()
-        return row_to_entry(tuple(row)) if row is not None else None
+        return served_view(row_to_entry(tuple(row))) if row is not None else None
     for candidate in backend.list_entries(namespace=namespace, limit=max(backend.count(namespace=namespace), 1)):
         if candidate.remote_id == remote_id or candidate.id in ids:
             return candidate
@@ -206,16 +228,24 @@ def find_synced_entry(backend: StorageBackend, namespace: str, remote_id: str, i
 
 
 def apply_synced_entry(
-    backend: StorageBackend, config: MemoryConfig, entry: MemoryEntry, *, synced: bool = True
+    backend: StorageBackend, config: MemoryConfig, entry: MemoryEntry, *, if_revision: str | None, synced: bool = True
 ) -> tuple[str, str]:
     """Write a merged pulled row through the write gate and leave it synced, or dirty when *synced* is false.
 
-    Returns ``("stored" | "quarantined" | "blocked", reason)``. A security refusal is a judged
-    decision, not a store failure (PRD-FIX-138-FR01), so it is reported rather than raised.
+    The write is conditional (PRD-CORE-308, B71-90): *if_revision* is the ``revision_of`` the row
+    the caller merged from, ``None`` when it found none. A row that moved since (a local edit, a
+    row created meanwhile) answers ``conflict`` and nothing is written; the caller re-reads.
+    Returns ``("stored" | "quarantined" | "blocked" | "conflict" | "invalid", reason)``. A
+    security refusal is a judged decision, not a store failure (PRD-FIX-138-FR01), so it is
+    reported rather than raised.
     """
     from trw_memory.exceptions import PIIBlockError, PoisoningError
     from trw_memory.security.runtime import prepare_entry_for_store, store_quarantined_entry
+    from trw_memory.storage._shared import revision_of
+    from trw_memory.storage.interface import is_transactional
 
+    if not is_transactional(backend):  # the compare and the write must share one lock
+        return "invalid", f"a conditional sync apply needs a transactional backend, not {type(backend).__name__}"
     try:
         decision = prepare_entry_for_store(entry, backend=backend, config=config, session_id=None)
     except (PoisoningError, PIIBlockError) as exc:
@@ -225,6 +255,8 @@ def apply_synced_entry(
         return "quarantined", ""
     # One commit: an edit that lands between the write and its ack must not be marked clean (C12 rc7).
     with backend.transaction():
+        if revision_of(backend.get(entry.id, namespace=entry.namespace)) != if_revision:
+            return "conflict", f"{entry.id} changed since it was read; nothing was written, re-read and retry"
         backend.store(decision.entry)
         if synced:
             DeltaTracker.mark_synced([entry.id], backend, namespace=entry.namespace)

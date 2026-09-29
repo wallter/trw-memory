@@ -18,6 +18,7 @@ import pytest
 from trw_memory.decisions import toolkit_from_env
 from trw_memory.decisions._judge import DecisionState
 from trw_memory.decisions._models import DecisionFailure, DecisionResult
+from trw_memory.testing.daemon_reaper import daemon_env_passthrough
 
 _SRC = str(Path(__file__).resolve().parents[1] / "src")
 
@@ -36,7 +37,7 @@ def test_disabled_path_never_imports_jev_http_or_httpx() -> None:
     result = subprocess.run(
         [sys.executable, "-c", script],
         cwd=str(Path(__file__).resolve().parents[1]),
-        env={"PATH": "/usr/bin:/bin", "PYTHONPATH": _SRC},
+        env={"PATH": "/usr/bin:/bin", "PYTHONPATH": _SRC, **daemon_env_passthrough()},
         capture_output=True,
         text=True,
         timeout=30,

@@ -13,6 +13,7 @@ no-ops.
 from __future__ import annotations
 
 import contextlib
+import functools
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator, Sequence
@@ -24,6 +25,7 @@ import structlog
 
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.security._evidence_invariant import served_view
 from trw_memory.storage._fts_query import search_fts_method as _query_ops_search_fts
 from trw_memory.storage._shared import (
     ENTRY_COLUMNS,
@@ -47,8 +49,28 @@ from trw_memory.storage._permissions import prepare_db_file_mode as _prepare_db_
 
 if TYPE_CHECKING:
     from trw_memory.retrieval.temporal_selection import TemporalSelection
+    from trw_memory.security.quarantine_ledger import QuarantineLedger
 
 logger = structlog.get_logger(__name__)
+
+
+@functools.cache
+def _warn_wal_reset_unsafe_once(sqlite_version: str, driver: str) -> None:
+    """Emit ``sqlite_wal_reset_unsafe`` once per (version, driver) per process.
+
+    B71-11: every ``SQLiteBackend`` construction on an unsafe engine used to
+    log this warning, which floods a long-lived daemon that reopens stores
+    repeatedly (121 lines in one daemon test run). ``lru_cache`` makes the
+    call itself the memo — the second call with the same arguments is a
+    cache hit and never reaches the ``logger.warning`` below.
+    """
+    logger.warning(
+        "sqlite_wal_reset_unsafe",
+        sqlite_version=sqlite_version,
+        driver=driver,
+        detail=WAL_RESET_UNSAFE_REMEDY,
+    )
+
 
 __all__ = [
     "CheckpointMode",
@@ -74,7 +96,6 @@ _VALID_UPDATE_COLUMNS: frozenset[str] = (frozenset(_COLUMNS) - IMMUTABLE_FIELDS)
 # _corrupt_backup.py (PRD-DIST-245 Phase 1 batch 81). Re-exports preserve
 # the public API surface.
 from trw_memory.storage._corrupt_backup import (
-    _LEGACY_CORRUPT_NAMES as _LEGACY_CORRUPT_NAMES,
     _TIMESTAMPED_BACKUP_RE as _TIMESTAMPED_BACKUP_RE,
     prune_corrupt_backups as _prune_corrupt_backups_impl,
     rotate_corrupt_backup as _rotate_corrupt_backup_impl,
@@ -83,6 +104,10 @@ from trw_memory.storage._corrupt_backup import (
 
 # Connection-management helpers extracted to _connection.py (PRD-DIST-245
 # batch 82). Re-exports preserve the public API surface.
+from trw_memory.storage._connection import (
+    LANE_DEADLINE,
+    outside_lane_deadline,
+)
 from trw_memory.storage._connection import (
     check_integrity as _connection_check_integrity,
     connect as _connection_connect,
@@ -115,13 +140,18 @@ from trw_memory.storage._query_ops import (
     count as _query_ops_count,
     find_active_by_content as _query_ops_find_active_by_content,
     list_entries as _query_ops_list_entries,
+    list_entries_by_id as _query_ops_list_entries_by_id,
     list_namespaces as _query_ops_list_namespaces,
     search as _query_ops_search,
 )
 
+from trw_memory.storage._batch_reads import get_many as _batch_get_many
+
 # CRUD ops extracted to _crud_ops.py (PRD-DIST-245 batch 87).
 from trw_memory.storage._crud_ops import (
     delete as _crud_ops_delete,
+    delete_many as _crud_ops_delete_many,
+    existing_ids as _crud_ops_existing_ids,
     get as _crud_ops_get,
     increment_recall_access as _crud_ops_increment_recall_access,
     increment_session_counts as _crud_ops_increment_session_counts,
@@ -174,11 +204,14 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         recovery_inline_max_bytes: int = 64 * 1024 * 1024,
         integrity_check_interval_minutes: int = 0,
         check_integrity_once: bool = False,
+        quarantine_ledger: QuarantineLedger | None = None,
     ) -> None:
         self._db_path = db_path
+        self._quarantine_ledger = quarantine_ledger
         #: PRD-CORE-298 FR05: skip quick_check when this process already verified
-        #: the file. Only the daemon's recall path asks; see ``open_and_configure``.
-        self._check_integrity_once = check_integrity_once
+        #: the file. The daemon's recall path asks, and so does every daemon write-lane job, which
+        #: opens its store per job (PRD-CORE-307); see ``open_and_configure``.
+        self._check_integrity_once = check_integrity_once or LANE_DEADLINE.get() is not None
         self._dim = dim
         # Re-entrant because transaction() holds this lock for its full body;
         # delegated operations re-acquire it on the same thread. Other threads
@@ -202,16 +235,18 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         self.reconnect_count: int = 0
         self.recovery_preflight: Any = None
 
-        # Connection open + auto-recovery (PRD-DIST-245 batch 88)
-        self._conn, self.integrity_warning, self.recovered = _init_open_connection_with_recovery(
-            self,
-            db_path,
-            dbapi=self._dbapi,
-            recovery_policy=self._recovery_policy,
-            corrupt_backup_keep=self._corrupt_backup_keep,
-            rebuild_from_cold=self._rebuild_from_cold,
-            recovery_inline_max_bytes=recovery_inline_max_bytes,
-        )
+        # Connection open + auto-recovery (PRD-DIST-245 batch 88). The open (integrity check, recovery,
+        # migrations) is the store's cost, not a lane job's work, so it runs outside the job's deadline.
+        with outside_lane_deadline():
+            self._conn, self.integrity_warning, self.recovered = _init_open_connection_with_recovery(
+                self,
+                db_path,
+                dbapi=self._dbapi,
+                recovery_policy=self._recovery_policy,
+                corrupt_backup_keep=self._corrupt_backup_keep,
+                rebuild_from_cold=self._rebuild_from_cold,
+                recovery_inline_max_bytes=recovery_inline_max_bytes,
+            )
 
         # PRD-QUAL-110-FR02: the on-disk SQLite store is secret-bearing
         # (learning content, provenance) — chmod it 0600, mirroring the
@@ -233,12 +268,7 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         driver_version = str(getattr(self._dbapi, "sqlite_version", ""))
         self.wal_reset_safe: bool = _driver.wal_reset_safe_version(driver_version)
         if not self.wal_reset_safe:
-            logger.warning(
-                "sqlite_wal_reset_unsafe",
-                sqlite_version=driver_version,
-                driver=getattr(self._dbapi, "__name__", _driver.backend()),
-                detail=WAL_RESET_UNSAFE_REMEDY,
-            )
+            _warn_wal_reset_unsafe_once(driver_version, getattr(self._dbapi, "__name__", _driver.backend()))
 
         # P3 — stale-handle detector (belt + suspenders: inode + sentinel).
         self._stale_detector = StaleHandleDetector(db_path)
@@ -422,34 +452,67 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         """INSERT OR REPLACE the entry into the memories table."""
         try:
             with self.transaction():
-                _crud_ops_store(self, _INSERT_COLUMNS_SQL, _COLUMNS, entry)
+                _crud_ops_store(self, _INSERT_COLUMNS_SQL, _COLUMNS, entry, select_columns_sql=_SELECT_COLUMNS_SQL)
         except self._dbapi.Error as exc:
             raise StorageError(f"Failed to store entry {entry.id}: {exc}", path=str(self._db_path)) from exc
 
     def store_many(self, entries: list[MemoryEntry]) -> int:
         """Bulk-insert entries in a single transaction using executemany.
 
-        Does not schedule graph updates; use it for imports where that side
-        effect is acceptable to defer. Returns the number of entries stored.
+        The same effects as :meth:`store` per entry -- row, sync bookkeeping, FTS row and tag
+        postings -- plus an FTS ``optimize`` merge for 100+ entries. Neither method writes graph
+        edges. Returns the number of entries stored.
         """
         with self._fresh_connection():
-            return _crud_ops_store_many(self, _INSERT_COLUMNS_SQL, _COLUMNS, entries)
+            return _crud_ops_store_many(
+                self, _INSERT_COLUMNS_SQL, _COLUMNS, entries, select_columns_sql=_SELECT_COLUMNS_SQL
+            )
 
-    def get(self, entry_id: str, *, namespace: str) -> MemoryEntry | None:
-        """Retrieve the ``(namespace, entry_id)``-identified entry (PRD-CORE-245 FR03)."""
+    def existing_ids(self, entry_ids: Sequence[str], *, namespace: str) -> set[str]:
+        """Which of *entry_ids* *namespace* holds, one ``IN`` read per bind chunk."""
         with self._fresh_connection():
-            return _crud_ops_get(self, _SELECT_COLUMNS_SQL, entry_id, namespace)
+            return _crud_ops_existing_ids(self, entry_ids, namespace)
 
-    def update(self, entry_id: str, *, namespace: str, **fields: object) -> MemoryEntry | None:
-        """Apply a partial update to the ``(namespace, entry_id)``-identified entry."""
+    def delete_many(self, entry_ids: Sequence[str], *, namespace: str) -> int:
+        """Remove *namespace*'s rows among *entry_ids* and their sidecars in one transaction."""
         try:
             with self.transaction():
+                return _crud_ops_delete_many(self, entry_ids, namespace)
+        except self._dbapi.Error as exc:
+            raise StorageError(f"Failed to delete {len(entry_ids)} entries: {exc}", path=str(self._db_path)) from exc
+
+    def get(self, entry_id: str, *, namespace: str) -> MemoryEntry | None:
+        """Retrieve the ``(namespace, entry_id)``-identified entry (PRD-CORE-245 FR03).
+
+        PRD-CORE-312: a row already violating the verified-evidence invariant
+        (grandfathered before it existed) is served demoted -- see
+        ``_evidence_invariant.served_view``. Storage itself is never rewritten.
+        """
+        with self._fresh_connection():
+            entry = _crud_ops_get(self, _SELECT_COLUMNS_SQL, entry_id, namespace)
+        return self._quarantine_admits(served_view(entry)) if entry is not None else None
+
+    def get_many(self, entry_ids: Sequence[str], *, namespace: str) -> dict[str, MemoryEntry]:
+        """The ``(namespace, id)``-identified entries among *entry_ids*, one ``IN`` read per bind chunk."""
+        with self._fresh_connection():
+            return self._quarantine_withhold(_batch_get_many(self, _SELECT_COLUMNS_SQL, entry_ids, namespace))
+
+    def update(self, entry_id: str, *, namespace: str, **fields: object) -> MemoryEntry | None:
+        """Apply a partial update to the ``(namespace, entry_id)``-identified entry.
+
+        A row the quarantine ledger blocks reads as absent here exactly as in :meth:`get`:
+        it is neither rewritten nor returned (PRD-CORE-333 FR02).
+        """
+        try:
+            with self.transaction():
+                if self._quarantine_ledger is not None and self.get(entry_id, namespace=namespace) is None:
+                    return None
                 updated = _crud_ops_update(
                     self, _SELECT_COLUMNS_SQL, _VALID_UPDATE_COLUMNS, entry_id, namespace, **fields
                 )
         except self._dbapi.Error as exc:
             raise StorageError(f"Failed to update entry {entry_id}: {exc}", path=str(self._db_path)) from exc
-        return updated
+        return self._quarantine_admits(served_view(updated)) if updated is not None else None
 
     def increment_session_counts(
         self, entry_ids: list[str], *, namespace: str, updated_at: datetime | None = None
@@ -510,20 +573,24 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         top_k; omitted preserves raw storage visibility. Retained rows are
         bounded, but selection may scan all matching records.
         """
-        with self._fresh_connection():
-            return _query_ops_search(
-                self,
-                _SELECT_COLUMNS_SQL,
-                query=query,
-                keyword_tokens=keyword_tokens,
-                top_k=top_k,
-                tags=tags,
-                status=status,
-                min_importance=min_importance,
-                namespace=namespace,
-                temporal_selection=temporal_selection,
-                entry_filter=entry_filter,
-            )
+
+        def read(predicate: Callable[[MemoryEntry], bool] | None) -> list[MemoryEntry]:
+            with self._fresh_connection():
+                return _query_ops_search(
+                    self,
+                    _SELECT_COLUMNS_SQL,
+                    query=query,
+                    keyword_tokens=keyword_tokens,
+                    top_k=top_k,
+                    tags=tags,
+                    status=status,
+                    min_importance=min_importance,
+                    namespace=namespace,
+                    temporal_selection=temporal_selection,
+                    entry_filter=predicate,
+                )
+
+        return self._quarantine_limited(read, entry_filter, top_k)
 
     @property
     def fts_available(self) -> bool:
@@ -545,7 +612,8 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         Read-only; namespace-scoped. Returns None when no exact duplicate exists.
         """
         with self._fresh_connection():
-            return _query_ops_find_active_by_content(self, content, detail, namespace=namespace)
+            found = _query_ops_find_active_by_content(self, content, detail, namespace=namespace)
+        return self._quarantine_visible_id(found, namespace)
 
     def count(self, namespace: str | None = None) -> int:
         """Return the number of stored entries."""
@@ -572,16 +640,22 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         into assertion-or-anchor eligibility and namespace/id keyset ordering;
         ``after`` advances that traversal without depending on mutable timestamps.
         """
-        with self._fresh_connection():
-            return _query_ops_entries_with_assertions(
-                self,
-                _SELECT_COLUMNS_SQL,
-                status=status,
-                namespace=namespace,
-                limit=limit,
-                include_anchors=include_anchors,
-                after=after,
-            )
+
+        def fetch(cursor: tuple[str, str] | None, size: int) -> list[MemoryEntry]:
+            with self._fresh_connection():
+                return _query_ops_entries_with_assertions(
+                    self,
+                    _SELECT_COLUMNS_SQL,
+                    status=status,
+                    namespace=namespace,
+                    limit=size,
+                    include_anchors=include_anchors,
+                    after=cursor,
+                )
+
+        if not include_anchors:  # no keyset order to resume from: re-read larger until the page fills
+            return self._quarantine_regrown(lambda size: fetch(after, size), limit)
+        return self._quarantine_keyset(fetch, lambda entry: (entry.namespace, entry.id), after, limit)
 
     def list_entries(
         self,
@@ -609,20 +683,43 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         *after* resumes from a previous page's keyset position, which is the
         only correct way to page over rows the caller is deleting or skipping.
         """
-        with self._fresh_connection():
-            return _query_ops_list_entries(
-                self,
-                _SELECT_COLUMNS_SQL,
-                status=status,
-                namespace=namespace,
-                min_importance=min_importance,
-                limit=limit,
-                exclude_superseded=exclude_superseded,
-                tags=tags,
-                after=after,
-                temporal_selection=temporal_selection,
-                entry_filter=entry_filter,
-            )
+
+        def read(predicate: Callable[[MemoryEntry], bool] | None) -> list[MemoryEntry]:
+            with self._fresh_connection():
+                return _query_ops_list_entries(
+                    self,
+                    _SELECT_COLUMNS_SQL,
+                    status=status,
+                    namespace=namespace,
+                    min_importance=min_importance,
+                    limit=limit,
+                    exclude_superseded=exclude_superseded,
+                    tags=tags,
+                    after=after,
+                    temporal_selection=temporal_selection,
+                    entry_filter=predicate,
+                )
+
+        return self._quarantine_limited(read, entry_filter, limit)
+
+    def list_entries_by_id(
+        self, *, namespace: str, after_id: str | None = None, through_id: str | None = None, limit: int = 100
+    ) -> list[MemoryEntry]:
+        """*namespace*'s entries in id order after *after_id*, up to *through_id*: a keyset no write moves."""
+
+        def fetch(after: str | None, size: int) -> list[MemoryEntry]:
+            with self._fresh_connection():
+                return _query_ops_list_entries_by_id(
+                    self, _SELECT_COLUMNS_SQL, namespace=namespace, after_id=after, through_id=through_id, limit=size
+                )
+
+        return self._quarantine_keyset(fetch, lambda entry: entry.id, after_id, limit)
+
+    def last_entry_id(self, *, namespace: str) -> str | None:
+        """The highest id in *namespace*, or ``None`` if it is empty: the end of a :meth:`list_entries_by_id` sweep."""
+        with self._fresh_connection(), self._lock:
+            row = self._conn.execute("SELECT MAX(id) FROM memories WHERE namespace = ?", (namespace,)).fetchone()
+        return row[0] if row else None
 
     def list_namespaces(self, required_namespaces: list[str] | None = None) -> list[str]:
         """Return distinct namespaces that have stored entries.

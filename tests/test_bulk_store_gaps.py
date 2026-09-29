@@ -66,6 +66,19 @@ class TestBulkStoreSchemaValidationRejection:
         rejected_item = next(it for it in summary.items if it.status == "rejected")
         assert "content" in rejected_item.skipped_reason
 
+    async def test_an_overlong_entry_id_rejects_that_item_and_stores_the_rest(
+        self, isolated_client: MemoryClient
+    ) -> None:
+        """B71-85 sol r1: the id bound is checked with the other inputs, before any row is persisted."""
+        from trw_memory.models.memory import MAX_ENTRY_ID_CHARS
+
+        first = BulkStoreRequest(content="first", detail="ok", entry_id="M-first")
+        overlong = BulkStoreRequest(content="overlong", detail="ok", entry_id="M" * (MAX_ENTRY_ID_CHARS + 1))
+        last = BulkStoreRequest(content="last", detail="ok", entry_id="M-last")
+        summary = await isolated_client.bulk_store([first, overlong, last])
+        assert [item.status for item in summary.items] == ["stored", "rejected", "stored"]
+        assert summary.items[1].skipped_reason == "schema_invalid:id"
+
 
 # ---------------------------------------------------------------------------
 # line 194: update path (existing entry)
@@ -258,13 +271,13 @@ class TestBulkStorePerItemAudit:
 
 class TestBulkStoreRemotePublish:
     async def test_remote_publish_scheduled_when_not_skipped(self, isolated_client: MemoryClient) -> None:
-        """skip_remote_publish=False + _should_attempt_remote_publish=True → scheduled (line 319)."""
-        # The scheduler takes ownership of the coroutine created by _publish_entry.
+        """skip_remote_publish=False + should_attempt_remote_publish=True → scheduled."""
+        # The scheduler takes ownership of the coroutine created by publish_entry.
         # This test replaces the scheduler, so its stand-in must release that
         # coroutine rather than leaving it for a later garbage-collection cycle.
-        mock_schedule = MagicMock(side_effect=lambda coro: coro.close())
-        with patch.object(isolated_client, "_should_attempt_remote_publish", return_value=True):
-            with patch.object(isolated_client, "_schedule_background_task", new=mock_schedule):
+        mock_schedule = MagicMock(side_effect=lambda _client, coro: coro.close())
+        with patch("trw_memory._client_bulk_store.should_attempt_remote_publish", return_value=True):
+            with patch("trw_memory._client_bulk_store.schedule_background_task", new=mock_schedule):
                 summary = await bulk_store_impl(
                     isolated_client,
                     [BulkStoreRequest(content="remote pub", detail="d")],

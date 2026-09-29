@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from trw_memory.graph import VALID_EDGE_TYPES, _upsert_edge
+from trw_memory._graph_primitives import _upsert_edge
+from trw_memory.graph import VALID_EDGE_TYPES
 
 from ._test_graph_typed_edges_support import _count_edges, _get_edge_metadata, _make_conn
 

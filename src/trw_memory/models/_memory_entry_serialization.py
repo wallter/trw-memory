@@ -60,6 +60,9 @@ def memory_entry_to_dict(entry: MemoryEntry, *, fields: set[str] | None = None) 
         "nudge_line": entry.nudge_line,
         "expires": entry.expires,
         "confidence": entry.confidence.value if hasattr(entry.confidence, "value") else entry.confidence,
+        "evidence_level": entry.evidence_level.value
+        if hasattr(entry.evidence_level, "value")
+        else entry.evidence_level,
         "task_type": entry.task_type,
         "domain": list(entry.domain),
         "phase_origin": entry.phase_origin,

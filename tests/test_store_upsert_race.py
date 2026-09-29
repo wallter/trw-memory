@@ -79,3 +79,32 @@ def test_a_recall_bump_landing_mid_store_does_not_refuse_it(
     row = backend.get("M-1", namespace=_NS)
     assert row is not None
     assert row.content == "second"
+
+
+def test_conflicting_stores_charge_no_rate_limit_slot(
+    backend: SQLiteBackend, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B71-81: a store refused as ``conflict`` wrote nothing, so it must not spend a write slot."""
+    cfg = MemoryConfig(
+        storage_path=str(tmp_path / "mem"),
+        rate_limit_state_path=str(tmp_path / "rl.yaml"),
+        max_memory_writes_per_minute=2,
+    )
+
+    def store(content: str) -> dict[str, object]:
+        return memory_store_impl(content, _NS, backend=backend, config=cfg, entry_id="M-1", session_id="s")
+
+    assert store("first")["status"] == "stored"  # slot 1 of 2
+    prepare = store_module.prepare_entry_for_store
+    edits = iter(range(10))
+
+    def racing(*args: object, **kwargs: object) -> object:
+        backend.update("M-1", namespace=_NS, content=f"edit {next(edits)}")
+        return prepare(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(store_module, "prepare_entry_for_store", racing)
+    assert [store("stale")["status"] for _ in range(3)] == ["conflict"] * 3
+    monkeypatch.setattr(store_module, "prepare_entry_for_store", prepare)
+
+    assert store("second")["status"] == "updated"  # slot 2 of 2: the conflicts spent none
+    assert store("third")["status"] == "rate_limited"  # the limiter itself still binds

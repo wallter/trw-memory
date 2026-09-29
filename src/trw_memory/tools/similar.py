@@ -42,17 +42,24 @@ MAX_SIMILAR_TEXT_CHARS = 8_000
 def _knn(
     backend: StorageBackend, vector: list[float], space: EmbeddingSpace, namespace: str, top_k: int
 ) -> list[tuple[str, float, bool]] | None:
-    """``(id, similarity, active)`` for a trustworthy window, else ``None`` (decide exhaustively)."""
-    window = comparable_neighbours(backend, vector, space, namespace=namespace, top_k=top_k, surface="memory_similar")
-    if not window:  # None: incomplete; []: empty, which 6.1.0 also scanned (a vectorless namespace)
-        return None
-    hits: list[tuple[str, float, bool]] = []
-    for entry_id, distance in window:
-        entry = backend.get(entry_id, namespace=namespace)
-        if entry is not None:
-            # Unit-normalised vectors: distance² = 2 * (1 - cosine_similarity).
-            hits.append((entry_id, 1.0 - (distance * distance) / 2.0, entry.status == MemoryStatus.ACTIVE))
-    return hits
+    """``(id, similarity, active)`` for a trustworthy window, else ``None`` (decide exhaustively).
+
+    Window, vector records, census, count and rows are read in one snapshot (B71-60), so a
+    concurrent write cannot leave the census disagreeing with the window it vouches for.
+    """
+    with backend.read_snapshot():
+        window = comparable_neighbours(
+            backend, vector, space, namespace=namespace, top_k=top_k, surface="memory_similar"
+        )
+        if not window:  # None: incomplete; []: empty, which 6.1.0 also scanned (a vectorless namespace)
+            return None
+        hits: list[tuple[str, float, bool]] = []
+        for entry_id, distance in window:
+            entry = backend.get(entry_id, namespace=namespace)
+            if entry is not None:
+                # Unit-normalised vectors: distance² = 2 * (1 - cosine_similarity).
+                hits.append((entry_id, 1.0 - (distance * distance) / 2.0, entry.status == MemoryStatus.ACTIVE))
+        return hits
 
 
 def _exhaustive(

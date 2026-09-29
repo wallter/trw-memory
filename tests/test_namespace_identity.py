@@ -236,8 +236,10 @@ def test_xdg_base_no_longer_nests_a_trw_directory() -> None:
     assert config.quarantine_db_path == "/tmp/xdgtest/trw/security/quarantine.db"
 
 
-def test_daemon_config_fields_are_typed_and_bounded() -> None:
+def test_daemon_config_fields_are_typed_and_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     """FR03's three tunables exist with the documented bounds; no bind-host field."""
+    # The test session caps daemon idle life at 60 s through the environment (conftest); the default is 1800.
+    monkeypatch.delenv("MEMORY_DAEMON_IDLE_SHUTDOWN_SECONDS", raising=False)
     config = MemoryConfig()
 
     assert config.memory_daemon_port == 0
@@ -293,14 +295,15 @@ def test_daemon_env_aliases_are_read_without_the_env_prefix(
     assert getattr(MemoryConfig(), field) == expected
 
 
-def test_the_prefixed_daemon_env_names_do_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The negative half: the name the prefix rule predicts is NOT read.
+def test_the_unprefixed_daemon_env_names_do_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The negative half: a bare env name without the ``MEMORY_`` prefix is NOT read.
 
-    Without this, the test above would still pass if pydantic-settings accepted
-    both spellings, and the pin would prove nothing about which one is real.
+    Until ENV-DOUBLE-PREFIX the aliases also listed the bare field name, so ``DAEMON_PORT`` (any process's
+    generic variable) reconfigured the memory daemon. Without this pin, the test above would still pass if
+    the bare spelling came back.
     """
-    monkeypatch.setenv("MEMORY_MEMORY_SINGLE_STORE_PATH", "/tmp/wrong/memory.db")
-    monkeypatch.setenv("MEMORY_MEMORY_DAEMON_PORT", "5555")
+    monkeypatch.setenv("SINGLE_STORE_PATH", "/tmp/wrong/memory.db")
+    monkeypatch.setenv("DAEMON_PORT", "5555")
 
     config = MemoryConfig()
 

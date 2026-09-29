@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from trw_memory._client_backend import client_logger as _client_logger
 from trw_memory.embeddings._similarity_calibration import calibrated_threshold
 from trw_memory.embeddings.interface import EmbeddingProvider
+from trw_memory.models._type_coercion import coerce_memory_type_lenient
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.dense import cosine_similarity
 from trw_memory.sync._remote_admission import admit_remote_results, store_gate
@@ -177,6 +178,11 @@ def shared_result_to_result(result: dict[str, object]) -> RemoteResultDict:
         shared_result["metadata"] = {str(key): str(value) for key, value in raw_metadata.items()}
     if isinstance(decoded.get("expires"), str):
         shared_result["expires"] = cast("str", decoded["expires"])
+    # PRD-CORE-334: a type filter keeps only typed shared rows. Only a memory type is one: an SSE
+    # payload's "type" is its event name ("learning_published").
+    kind, not_a_type = coerce_memory_type_lenient(decoded.get("type"))
+    if "type" in decoded and not_a_type is None:
+        shared_result["type"] = kind.value
     # Preserve presence separately from null: missing windows are not a claim
     # of open validity, and publication created_at is not valid_from.
     validity_fields: tuple[Literal["valid_from", "invalid_from", "invalidated_by"], ...] = (

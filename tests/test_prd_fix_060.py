@@ -151,13 +151,14 @@ class TestFR02EntryToDict:
             "session_count",
             "verification_status",
             "verification_checked_at",
+            "evidence_level",
         }
         assert set(result.keys()) == expected_keys
         # PRD-CORE-244-FR08 dropped three unproduced attribution fields,
         # PRD-CORE-244-FR03 added verification_checked_at (schema-5 rebuild),
         # and PRD-CORE-293 removed q_value/q_observations/helpful_count/
         # unhelpful_count (Q-learning/feedback fields, never populated).
-        assert len(result) == 50
+        assert len(result) == 51
 
         # Verify types of serialized values
         assert result["id"] == "M-TEST-001"
@@ -355,6 +356,7 @@ class TestFR05BooleanConversion:
             0,  # recall_count (PRD-CORE-132)
             None,  # verification_status (PRD-CORE-231-FR02)
             "",  # verification_checked_at (PRD-CORE-244-FR03)
+            "unknown",  # evidence_level (PRD-CORE-312-FR01)
         )
 
         entry = row_to_entry(row)
@@ -418,6 +420,7 @@ class TestFR05BooleanConversion:
             0,  # recall_count (PRD-CORE-132)
             None,  # verification_status (PRD-CORE-231-FR02)
             "",  # verification_checked_at (PRD-CORE-244-FR03)
+            "unknown",  # evidence_level (PRD-CORE-312-FR01)
         )
 
         entry = row_to_entry(row)

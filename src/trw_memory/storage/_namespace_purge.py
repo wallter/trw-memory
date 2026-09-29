@@ -7,7 +7,7 @@ grandfathered effective-LOC ceiling — the facade is a delegator, and this was
 the one method on it still carrying a body.
 
 The invariant it protects (S8): the entry-row DELETE, the graph-edge purge,
-the ``memory_tags`` purge and the vector purge are ONE transaction, so a crash
+the ``memory_tags``/``anchor_postings`` purge and the vector purge are ONE transaction, so a crash
 can never leave a sidecar row pointing at an entry that is gone.
 """
 
@@ -30,7 +30,7 @@ def delete_namespace(backend: SQLiteBackend, namespace: str) -> int:
     from trw_memory.storage._crud_ops import (
         purge_edges_for,
         purge_orphan_edges,
-        purge_tag_postings_for,
+        purge_postings_for,
     )
     from trw_memory.storage._query_ops import delete_by_namespace as _delete_rows
     from trw_memory.storage._vector_ops import purge_vectors_for
@@ -59,7 +59,7 @@ def delete_namespace(backend: SQLiteBackend, namespace: str) -> int:
             # naming a row this delete removed.
             purge_edges_for(backend, entry_ids, namespace)
             purge_orphan_edges(backend)
-            purge_tag_postings_for(backend, namespace, entry_ids)
+            purge_postings_for(backend, namespace, entry_ids)
             if backend._vec_available:
                 purge_vectors_for(backend._conn, namespace, entry_ids)
     return deleted

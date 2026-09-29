@@ -5,7 +5,7 @@ LOCOMO pipeline **unmodified** against two backends behind one local REST shim:
 
 | backend | what it is |
 |---|---|
-| `mem0` | the in-process `mem0ai` SDK (`Memory.from_config`), Ollama for fact extraction, local on-disk Qdrant |
+| `mem0` | the in-process `mem0ai` SDK (`Memory.from_config`), local on-disk Qdrant, and an LLM for fact extraction — Ollama by default (the local smoke path below), overridable via `MEM0_EXTRACT_MODEL` (`phases.sh`'s hosted-judge run sets it to `openai/gpt-5-mini`, mem0 2.0.20's own default) |
 | `trw`  | `trw_memory.MemoryClient`, one `project:` namespace per benchmark user, `store_conversation` ingestion |
 
 Same dataset parsing, same one-turn-per-request chunking, same answerer prompt,
@@ -20,9 +20,21 @@ extraction, storage, retrieval.
 | `bootstrap.sh` | clones `memory-benchmarks` at a pinned commit, applies `upstream-llm_client.patch`, fetches `locomo10.json` |
 | `upstream-llm_client.patch` | the one upstream change: `LLM_EXTRA_BODY` env is merged into every chat call so Ollama reasoning models can be told `reasoning_effort=none` |
 | `server.py` | the mem0-OSS-compatible shim (`POST /memories`, `POST /search`, `DELETE /memories`) over either backend |
-| `run.sh` | starts the shim, runs `python -m benchmarks.locomo.run` against it with Ollama as answerer + judge |
+| `run.sh` | starts the shim, runs `python -m benchmarks.locomo.run` against it with Ollama as answerer + judge (the local, no-spend smoke path below) |
 | `retrieval_eval.py` | **LLM-free inner loop**: ingests turns into trw-memory and scores evidence hit@k / recall@k / MRR against LOCOMO's per-question evidence ids |
 | `component_eval.py` | offline ranker comparison on an ingested store (bm25 / dense / rrf / combmax / stemming / cross-encoder) |
+| `phases.sh` | orchestrates the **hosted-judge run** below: predict (both backends), verify, judge, compare, over a paid OpenRouter judge |
+| `batch_judge.py` | judges a predicted run with a hosted model (`--model openai/gpt-4o-mini` reproduces the headline numbers) |
+| `compare.py` | pairs two judged runs question-by-question: Wilson 95% CIs, exact McNemar, a conversation-cluster bootstrap, a pre-registered decision rule |
+| `jev_calibration.py`, `jev_audit.py` | calibrate/audit trw-jev as a second, stricter judge against the harness judge's per-item verdicts |
+| `watch.py` | heartbeat/guard process `phases.sh`'s paid commands refuse to run without |
+
+## Two separate runs — do not conflate their numbers
+
+This directory produces two different LOCOMO results, and they are not comparable to each other:
+
+1. **Local smoke path (`run.sh`, documented above): matched embedder, local Ollama judge, conversation 0 only** (152 questions). No dollar spend; trw-memory's own ingest takes about 75 s, but mem0's local extraction calls over the same conversation take on the order of an hour and a half (see [Results](#results) below). The two systems are statistically tied at this sample size.
+2. **Hosted-judge headline (`phases.sh` + `batch_judge.py`): the "88.9% vs 84.1%, all 1,540 questions" figure quoted in the [main README](../../README.md#more-right-answers-than-mem0-on-locomo).** Method: mem0's evaluation harness (commit `4b61c5d`, pinned), both systems answered from their top 10 memories, judged by **`openai/gpt-4o-mini`** over OpenRouter — not the local Ollama judge above. **trw-memory 2.0.0** (embedder `bge-small-en-v1.5`) vs self-hosted **mem0ai 2.0.20** (embedder `all-MiniLM-L6-v2`, extraction `openai/gpt-5-mini`); the embedders and extraction model differ from the "same embedding model" framing at the top of this file, which describes only the local smoke path. Reproduce it with this directory's `phases.sh preflight`, `predict-trw`, `predict-mem0`, `judge` and `compare` commands (see `phases.sh`'s own header for exact arguments); `judge` is where the model is chosen (`openai/gpt-4o-mini` reproduces the headline judge), and `compare` defaults to `--expected 1540`. The per-question predictions and judgments are a local, uncommitted cache (`~/.cache/trw-bench/memory-benchmarks/results/locomo/`), not a repo artifact. Two qualifiers on the headline: it is a **top-10** result (the retrieval lead is smaller at top-50), and mem0 ran on a non-default embedder — its shipped default is `text-embedding-3-small` — though `openai/gpt-5-mini` extraction is mem0 2.0.20's own default, not a substitution.
 
 ## Running
 

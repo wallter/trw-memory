@@ -29,7 +29,7 @@ class _RetrievalConfigMixin(BaseModel):
         default=0.7,
         ge=0.0,
         le=1.0,
-        validation_alias=AliasChoices("rrf_importance_alpha", "memory_rrf_importance_alpha"),
+        validation_alias=AliasChoices("memory_rrf_importance_alpha"),
         description=(
             "R-FUSION-001: blend weight on the (normalised) RRF position score "
             "vs. the entry's importance in hybrid_search. final = alpha * "
@@ -57,7 +57,7 @@ class _RetrievalConfigMixin(BaseModel):
         default=None,
         ge=0.0,
         le=1.0,
-        validation_alias=AliasChoices("recall_confidence_filter", "memory_recall_confidence_filter"),
+        validation_alias=AliasChoices("memory_recall_confidence_filter"),
         description=(
             "Opt-in recall-time confidence floor. When set, records with "
             "metadata['confidence'] < value are suppressed from "
@@ -71,7 +71,7 @@ class _RetrievalConfigMixin(BaseModel):
     )
     recall_filter_historical_only: bool = Field(
         default=False,
-        validation_alias=AliasChoices("recall_filter_historical_only", "memory_recall_filter_historical_only"),
+        validation_alias=AliasChoices("memory_recall_filter_historical_only"),
         description=(
             "Opt-in suppression of records softened to a historical-only "
             "currentness status. When True, records with "
@@ -88,7 +88,7 @@ class _RetrievalConfigMixin(BaseModel):
         default=3,
         ge=1,
         le=50,
-        validation_alias=AliasChoices("recall_top_k_multiplier", "memory_recall_top_k_multiplier"),
+        validation_alias=AliasChoices("memory_recall_top_k_multiplier"),
         description=(
             "Depth multiplier for the hybrid_search candidate pool returned "
             "by _try_hybrid_recall. Effective top_k = limit * "
@@ -104,7 +104,7 @@ class _RetrievalConfigMixin(BaseModel):
     )
     recall_preserve_hybrid_order: bool = Field(
         default=True,
-        validation_alias=AliasChoices("recall_preserve_hybrid_order", "memory_recall_preserve_hybrid_order"),
+        validation_alias=AliasChoices("memory_recall_preserve_hybrid_order"),
         description=(
             "When True and the local hybrid pool is non-empty, "
             "preserve hybrid priority over tier-only utility within each final "
@@ -120,7 +120,7 @@ class _RetrievalConfigMixin(BaseModel):
         default=0.0,
         ge=0.0,
         le=1.0,
-        validation_alias=AliasChoices("recall_recency_weight", "memory_recall_recency_weight"),
+        validation_alias=AliasChoices("memory_recall_recency_weight"),
         description=(
             "When > 0, blend valid_from recency decay into the BM25+dense fused "
             "relevance score. Targets the temporal discrimination band "
@@ -131,7 +131,7 @@ class _RetrievalConfigMixin(BaseModel):
     recall_recency_halflife_days: float = Field(
         default=14.0,
         gt=0.0,
-        validation_alias=AliasChoices("recall_recency_halflife_days", "memory_recall_recency_halflife_days"),
+        validation_alias=AliasChoices("memory_recall_recency_halflife_days"),
         description=(
             "Half-life in days for the recency decay function. An entry this many "
             "days old receives score 0.5 relative to a brand-new entry. Default 14 "
@@ -142,7 +142,7 @@ class _RetrievalConfigMixin(BaseModel):
     # Fusion algorithm — expose combmax as an alternative to default RRF
     recall_fusion_mode: str = Field(
         default="rrf",
-        validation_alias=AliasChoices("recall_fusion_mode", "memory_recall_fusion_mode"),
+        validation_alias=AliasChoices("memory_recall_fusion_mode"),
         description=(
             "Fusion algorithm for hybrid_search. 'rrf' (default) = Reciprocal Rank "
             "Fusion (sum of reciprocal ranks). 'combmax' = CombMAX (max reciprocal "
@@ -154,19 +154,21 @@ class _RetrievalConfigMixin(BaseModel):
     # Entity-bridge second hop after cross-encoder rerank (retrieval/bridge.py)
     recall_bridge_hop: bool = Field(
         default=True,
-        validation_alias=AliasChoices("recall_bridge_hop", "memory_recall_bridge_hop"),
+        validation_alias=AliasChoices("memory_recall_bridge_hop"),
         description=(
             "When True (and rerank ran), recall takes rare terms from the top reranked "
             "rows, runs one more BM25 search with them, and lets the cross-encoder score "
             "up to 30 extra rows. LOCOMO: hit@10 85.1% -> 85.6% (p=0.022), multi-hop "
-            "recall@10 49.9% -> 51.3% (p=0.020); LongMemEval unchanged. Costs about "
-            "30-80 ms per recall. Set MEMORY_RECALL_BRIDGE_HOP=false to disable."
+            "recall@10 49.9% -> 51.3% (p=0.020); LongMemEval unchanged. Costs 30-80 ms per "
+            "recall on short benchmark passages, but about 1 s on the real TRW store at a "
+            "2048-char passage cap. "
+            "Set MEMORY_RECALL_BRIDGE_HOP=false to disable."
         ),
     )
     # Validity age decay — break ties by valid_from recency in the eligibility pass
     recall_validity_age_decay: bool = Field(
         default=True,
-        validation_alias=AliasChoices("recall_validity_age_decay", "memory_recall_validity_age_decay"),
+        validation_alias=AliasChoices("memory_recall_validity_age_decay"),
         description=(
             "When True, apply tie-only valid_from recency inside the validity prior "
             "pass so a newer record floats above an older one only when their fused "
@@ -181,7 +183,7 @@ class _RetrievalConfigMixin(BaseModel):
     # recall_rerank_min_keep (a leftover value logs one warning and is ignored).
     recall_rerank_model: str = Field(
         default="cross-encoder/ms-marco-MiniLM-L-6-v2",
-        validation_alias=AliasChoices("recall_rerank_model", "memory_recall_rerank_model"),
+        validation_alias=AliasChoices("memory_recall_rerank_model"),
         description=(
             "HuggingFace model id for cross-encoder re-ranking. Default is the 66M-param ms-marco passage re-ranker."
         ),
@@ -189,15 +191,28 @@ class _RetrievalConfigMixin(BaseModel):
     recall_rerank_candidates: int = Field(
         default=50,
         gt=0,
-        validation_alias=AliasChoices("recall_rerank_candidates", "memory_recall_rerank_candidates"),
+        validation_alias=AliasChoices("memory_recall_rerank_candidates"),
         description=(
             "Number of top-fusion candidates to pass to the cross-encoder. "
             "Limiting to top-50 captures the quality gain at reasonable latency."
         ),
     )
+    recall_rerank_passage_chars: int = Field(
+        default=2048,
+        gt=0,
+        validation_alias=AliasChoices("memory_recall_rerank_passage_chars"),
+        description=(
+            "Characters of each candidate's text (content, detail, tags) the cross-encoder reads. "
+            "Inference cost grows with passage length: on the real TRW store 50 pairs took 2.29 s "
+            "at 2048 and 0.92 s at 512 on CPU. "
+            "Default 2048, the cut recall has always used. Lowering it trades rerank quality for "
+            "latency: a shorter cap can miss relevance deep in a long detail, and quality below 2048 "
+            "has not been benchmarked."
+        ),
+    )
     recall_auto_temporal: bool = Field(
         default=True,
-        validation_alias=AliasChoices("recall_auto_temporal", "memory_recall_auto_temporal"),
+        validation_alias=AliasChoices("memory_recall_auto_temporal"),
         description=(
             "When True (default), queries containing temporal language (e.g. "
             "'recent', 'last week', 'latest') automatically receive a "
@@ -208,7 +223,7 @@ class _RetrievalConfigMixin(BaseModel):
     )
     recall_strip_temporal_prefix: bool = Field(
         default=True,
-        validation_alias=AliasChoices("recall_strip_temporal_prefix", "memory_recall_strip_temporal_prefix"),
+        validation_alias=AliasChoices("memory_recall_strip_temporal_prefix"),
         description=(
             "When True (default) and the query is classified as temporal, "
             "strip common boilerplate prefixes ('latest guidance on X' → 'X') "
@@ -233,7 +248,7 @@ class _RetrievalConfigMixin(BaseModel):
         default=2,
         ge=1,
         le=10,
-        validation_alias=AliasChoices("graph_tag_min_shared_tags", "memory_graph_tag_min_shared_tags"),
+        validation_alias=AliasChoices("memory_graph_tag_min_shared_tags"),
         description=(
             "PRD-CORE-245 FR07: how many tags two entries must share before the "
             "derived tag relation links them. Two is the predicate the deleted "
@@ -246,7 +261,7 @@ class _RetrievalConfigMixin(BaseModel):
         default=500,
         ge=1,
         le=100_000,
-        validation_alias=AliasChoices("graph_tag_max_tag_postings", "memory_graph_tag_max_tag_postings"),
+        validation_alias=AliasChoices("memory_graph_tag_max_tag_postings"),
         description=(
             "PRD-CORE-245 FR07: a tag with more postings than this is treated as "
             "noise and excluded from the derivation. Measured on the reference "
@@ -260,7 +275,7 @@ class _RetrievalConfigMixin(BaseModel):
         default=25,
         ge=1,
         le=200,
-        validation_alias=AliasChoices("graph_tag_derive_top_k", "memory_graph_tag_derive_top_k"),
+        validation_alias=AliasChoices("memory_graph_tag_derive_top_k"),
         description=(
             "PRD-CORE-245 FR07: maximum derived tag neighbours returned for one "
             "root. Unbounded derivation returns a mean 573.3 neighbours per root "

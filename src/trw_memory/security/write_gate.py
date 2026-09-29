@@ -34,6 +34,7 @@ import structlog
 from trw_memory.exceptions import MemoryQuarantinedError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.security.quarantine_ledger import LedgerIdentity, LedgerRow, ledger_for_config
 from trw_memory.security.runtime import (
     PreparedStoreEntry,
     append_audit_event,
@@ -44,7 +45,7 @@ from trw_memory.security.runtime import (
 if TYPE_CHECKING:
     from trw_memory.storage.interface import StorageBackend
 
-__all__ = ["GuardedStoreResult", "guarded_store", "guarded_store_or_raise"]
+__all__ = ["GuardedStoreResult", "guarded_store", "guarded_store_or_raise", "ledger_latest_decision"]
 
 logger = structlog.get_logger(__name__)
 
@@ -169,6 +170,17 @@ def guarded_store_or_raise(
             anomaly_dimension=result.anomaly_dimension,
         )
     return result
+
+
+def ledger_latest_decision(
+    candidate: MemoryEntry | LedgerIdentity, *, config: MemoryConfig | None = None
+) -> LedgerRow | None:
+    """The latest quarantine-ledger row for *candidate*'s identity set (PRD-CORE-333 FR01).
+
+    Exact identity-set match only (NFR02): the namespace-qualified id, a source
+    learning id, or the content hash. ``None`` when no row names any of them.
+    """
+    return ledger_for_config(config or MemoryConfig()).latest_decision(candidate)
 
 
 def _store_and_audit(

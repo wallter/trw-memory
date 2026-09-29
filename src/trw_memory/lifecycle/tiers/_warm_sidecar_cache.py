@@ -31,10 +31,15 @@ from __future__ import annotations
 import json
 import threading
 from collections import Counter
+from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import cast
 
 import structlog
+
+from trw_memory.lifecycle._utils import days_since_access
+from trw_memory.retrieval.source_policy import classify_source_family
 
 logger = structlog.get_logger(__name__)
 
@@ -73,6 +78,49 @@ def _row_namespace(rec: dict[str, object]) -> str | None:
     return namespace if isinstance(namespace, str) else None
 
 
+#: Far-future reference for reading a row's access date through the scorer's own resolver.
+_FAR = date(9999, 12, 31)
+
+
+@dataclass(frozen=True)
+class ScoreMaxima:
+    """Upper bounds, over every live row of one sidecar version, of the non-relevance score inputs.
+
+    Kept per version (PRD-CORE-318 FR02b, review r2) so the KNN stop rule's ceiling is O(1)
+    per recall. A superseded row's values are never retracted, so each field only rises
+    within a version: a looser bound, never an unsound one.
+    """
+
+    importance: float = 0.0
+    newest_access: date | None = None
+    families: frozenset[str] = frozenset()
+
+    def including(self, rec: dict[str, object]) -> ScoreMaxima:
+        entry = rec.get("entry")
+        data = entry if isinstance(entry, dict) else rec
+        tags = data.get("tags")
+        if tags is not None and not isinstance(tags, list):
+            # The one input the source classifier cannot read (review r2 P1): skipped, never fatal.
+            # Exact for a covered row, which discovery never reads; an uncovered malformed row has no
+            # snapshot score to bound (discovery orders it on its canonical row).
+            logger.warning("warm_tier_maxima_malformed_row_skipped", entry_id=str(rec.get("id", "")), field="tags")
+            return self
+        try:
+            importance = float(str(data.get("importance", 0.5)))
+        except ValueError:  # trw-fail-silent-allow: an unreadable importance bounds at the scorer's maximum
+            importance = 1.0
+        # The date the scorer would read (last access, else creation); a row it would give its
+        # 30-day fallback resolves near _FAR, i.e. "accessed now", which only loosens the bound.
+        access = date.fromordinal(_FAR.toordinal() - days_since_access(data, _FAR))
+        newest = access if self.newest_access is None else max(self.newest_access, access)
+        family = classify_source_family(data)
+        return ScoreMaxima(
+            max(self.importance, importance),
+            newest,
+            self.families if family in self.families else self.families | {family},
+        )
+
+
 def access_only_change(old: dict[str, object], new: dict[str, object]) -> bool:
     """Return whether *new* differs from *old* in access bookkeeping only (or not at all)."""
     return _without_access_fields(old) == _without_access_fields(new)
@@ -98,6 +146,17 @@ class ParsedSidecar:
         self._namespaces: Counter[str] = Counter(
             ns for _line, rec in index.values() if (ns := _row_namespace(rec)) is not None
         )
+        self._maxima: ScoreMaxima | None = None  # computed on first use, then kept current by extend()
+
+    def maxima(self) -> ScoreMaxima:
+        """This version's :class:`ScoreMaxima`: one pass over the rows the first time, O(1) after."""
+        with self._lock:
+            if self._maxima is None:
+                maxima = ScoreMaxima()
+                for _line, rec in self._index.values():
+                    maxima = maxima.including(rec)
+                self._maxima = maxima
+            return self._maxima
 
     @property
     def rows(self) -> SidecarRows:
@@ -161,6 +220,8 @@ class ParsedSidecar:
                 self._index[key] = (line_number, rec)
                 if (new_ns := _row_namespace(rec)) is not None:
                     self._namespaces[new_ns] += 1
+                if self._maxima is not None:
+                    self._maxima = self._maxima.including(rec)
             self.next_line += len(rows)
             self.torn_tail = False
 

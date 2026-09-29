@@ -1,16 +1,33 @@
-"""Source-aware recall policy helpers for multi-source retrieval."""
+"""Source-aware recall policy helpers for multi-source retrieval.
+
+Also the one home of the distilled-lesson weight (PRD-CORE-336 FR01):
+``weight_distilled`` is the single step that multiplies ``git_distilled`` rows,
+called by ``hybrid_search_scored`` for the library and daemon routes alike, and
+``SourcePolicy.resolve`` is the only reader of its env override (FR03).
+"""
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+import math
+import os
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import cast
+from typing import TYPE_CHECKING, cast
+
+import structlog
 
 from trw_memory.retrieval.validity_prior import expiry_has_passed
 
+if TYPE_CHECKING:
+    from trw_memory.models.memory import MemoryEntry
+
+logger = structlog.get_logger(__name__)
+
 SourceFamily = str
+#: Operator override for the ``git_distilled`` weight, validated to [0, 1].
+DISTILLED_WEIGHT_ENV = "TRW_MEMORY_DISTILLED_RECALL_WEIGHT"
 _TRANSIENT_SOURCE_FAMILIES = frozenset({"lifecycle", "episodic"})
 
 DEFAULT_SOURCE_WEIGHTS: dict[SourceFamily, float] = {
@@ -51,6 +68,41 @@ def classify_source_family(result: Mapping[str, object]) -> SourceFamily:
         if tag == "change_bulletin":
             return "lifecycle"
     return "unknown"
+
+
+def distilled_weight_from_env() -> float | None:
+    """The env override, or ``None`` when unset or invalid (logged; the default then applies)."""
+    raw = os.environ.get(DISTILLED_WEIGHT_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        weight = float(raw)
+    except ValueError:  # trw-fail-silent-allow: a bad operator override is logged; the default applies
+        logger.warning("distilled_recall_weight_invalid", raw=raw)
+        return None
+    if not (math.isfinite(weight) and 0.0 <= weight <= 1.0):
+        logger.warning("distilled_recall_weight_out_of_range", raw=raw)
+        return None
+    return weight
+
+
+def weight_distilled(
+    entries: Sequence[MemoryEntry], scores: Sequence[float], weight: float
+) -> list[tuple[MemoryEntry, float, bool]]:
+    """Multiply ONLY ``git_distilled`` rows' scores by *weight*, then stably re-sort.
+
+    Returns ``(entry, score, weighted)`` triples by descending score; ties keep
+    the input order, and every other row keeps its score, so non-distilled rows
+    never change order relative to each other. Inputs are not mutated.
+    """
+    weighted: list[tuple[MemoryEntry, float, bool]] = []
+    for entry, score in zip(entries, scores, strict=True):
+        if classify_source_family({"metadata": entry.metadata, "tags": entry.tags}) == "git_distilled":
+            weighted.append((entry, score * weight, True))
+        else:
+            weighted.append((entry, score, False))
+    weighted.sort(key=lambda row: row[1], reverse=True)
+    return weighted
 
 
 def resolve_expiry(result: Mapping[str, object]) -> str:
@@ -105,6 +157,10 @@ class SourcePolicy:
             weights.update(source_weights)
         if distilled_weight is not None:
             weights["git_distilled"] = distilled_weight
+        elif "git_distilled" not in (source_weights or {}):
+            env_weight = distilled_weight_from_env()
+            if env_weight is not None:
+                weights["git_distilled"] = env_weight
         return cls(
             include_distilled=include_distilled,
             include_kinds=frozenset(include_source_kinds or ()),
@@ -133,21 +189,30 @@ class SourcePolicy:
             return False
         return not self.weights.get(family, 1.0) <= 0.0
 
-    def rank_key(self, result: Mapping[str, object]) -> tuple[int, float]:
-        """Ascending containment and weighted-score key for an admitted raw result."""
+    def rank_key(self, result: Mapping[str, object], *, pipeline_weighted: bool = False) -> tuple[int, float]:
+        """Ascending containment and weighted-score key for an admitted raw result.
+
+        *pipeline_weighted* marks a row the pipeline already ranked through
+        ``weight_distilled``: its ``git_distilled`` weight is in its order, so it
+        is not applied a second time here (PRD-CORE-336 FR01).
+        """
         family = classify_source_family(result)
         bucket = 0
         if family in _TRANSIENT_SOURCE_FAMILIES and family not in self.explicit_weight_overrides:
             bucket = 2
         elif str(result.get("source", "")) in {"org", "shared"}:
             bucket = 1
-        return bucket, -float(cast("float", result.get("score", 0.0))) * self.weights.get(family, 1.0)
+        weight = 1.0 if pipeline_weighted and family == "git_distilled" else self.weights.get(family, 1.0)
+        return bucket, -float(cast("float", result.get("score", 0.0))) * weight
 
 
 __all__ = [
     "DEFAULT_SOURCE_WEIGHTS",
+    "DISTILLED_WEIGHT_ENV",
     "SourcePolicy",
     "classify_source_family",
+    "distilled_weight_from_env",
     "is_expired_result",
     "resolve_expiry",
+    "weight_distilled",
 ]

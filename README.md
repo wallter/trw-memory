@@ -4,13 +4,13 @@
 
 trw-memory gives your AI agents long-term memory that runs locally. Memories live in a SQLite file on your machine, recall combines keyword ranking, local vector search and a re-ranker, and storing a conversation calls no LLM by default. On all 1,540 LOCOMO questions, trw-memory 2.0.0 answered 88.9% correctly against 84.1% for mem0 OSS 2.0.20, a statistically significant lead ([benchmarks](#benchmarks)). Use it from Python, the command line, or any MCP client. It is the memory engine behind [TRW Framework](https://trwframework.com)'s MCP server, trw-mcp, and works on its own.
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://python.org)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-orange.svg)](https://trwframework.com/license)
 [![Docs](https://img.shields.io/badge/docs-trwframework.com-blue)](https://trwframework.com/docs)
 
 > **Status:** alpha, source-available under BSL 1.1. The public API may change in future releases; test an upgrade before you roll it out.
 
-**[What's new](#whats-new-in-4x)** · **[Quick start](#install-and-quick-start)** · **[Benchmarks](#benchmarks)** · **[How it works](#how-it-works)** · **[MCP server](#mcp-memory-server)** · **[Network and security](#telemetry-and-network-behavior)** · **[Upgrading](#upgrading)** · **[FAQ](#faq)**
+**[What's new](#whats-new-in-5x)** · **[Quick start](#install-and-quick-start)** · **[Benchmarks](#benchmarks)** · **[How it works](#how-it-works)** · **[MCP server](#mcp-memory-server)** · **[Network and security](#telemetry-and-network-behavior)** · **[Upgrading](#upgrading)** · **[FAQ](#faq)**
 
 ## Why trw-memory
 
@@ -34,7 +34,7 @@ pip install "trw-memory[all]"
 
 Without the `[embeddings]` extra (included in `[all]`) nothing produces vectors, so recall is keyword-only. Fetch the embedding model (`BAAI/bge-small-en-v1.5`, about 130 MB) and the re-ranker once with `trw-mcp models fetch` or `trw_memory.embeddings.fetch_models()`; runtime loads never download (see [Telemetry and network behavior](#telemetry-and-network-behavior)).
 
-**Supported platforms:** macOS arm64/x86_64 and Linux with glibc (x86_64, aarch64). CPython 3.11 through 3.14. 3.10 also works, but `memory_import_checkout` (the checkout-store import behind `trw-mcp memory migrate`) needs 3.11 or later. On Windows, use WSL2, which works as Linux. Native Windows is not supported in 4.0, because the store's file-safety checks need POSIX.
+**Supported platforms:** macOS arm64/x86_64 and Linux with glibc (x86_64, aarch64). CPython <!-- inv:python_min_trw_memory -->3.11<!-- /inv --> through <!-- inv:python_max_trw_memory -->3.14<!-- /inv -->. `memory_import_checkout` (the checkout-store import behind `trw-mcp memory migrate`) imports entries of up to 16 MiB each, per row and per value (a larger one refuses the import, naming the limit). On Windows, use WSL2, which works as Linux. Native Windows is not supported, because the store's file-safety checks need POSIX.
 
 ### Python SDK
 
@@ -109,13 +109,26 @@ trw-memory status
 trw-memory reembed --namespace project:my-app    # re-encode vectors after a model change
 trw-memory restore --from-cold                   # or --from-snapshot latest
 trw-memory snapshot create --tier daily          # also: snapshot list, snapshot rotate
+trw-memory backup create                         # local gzip archive + sha256 sidecar (off-machine leg: trw-mcp backup)
 ```
 
-`store`, `recall`, `search`, `forget`, `consolidate`, `export` and `status` run over the [loopback daemon](#loopback-daemon-serve-http). They start one if none is running and present this checkout's grant, which `trw-mcp memory token` mints; without a grant, or for a namespace outside it, the command prints the remedy and exits 1. `--namespace` defaults to the checkout's pinned `project_namespace` (pass `--namespace default` for the old default). `import`, `reembed`, `restore` and `snapshot create` open the store file directly, so they refuse while a daemon runs.
+`store`, `recall`, `search`, `forget`, `consolidate`, `export` and `status` run over the [loopback daemon](#loopback-daemon-serve-http). They start one if none is running and present this checkout's grant, which `trw-mcp memory token` mints; without a grant, or for a namespace outside it, the command prints the remedy and exits 1. `--namespace` defaults to the checkout's pinned `project_namespace` (pass `--namespace default` for the old default). `import`, `reembed`, `restore`, `snapshot create` and `backup create` open the store file directly, so they refuse while a daemon runs.
 
 trw-memory itself has no command that mints a grant; `trw-mcp memory token` is the one that does. On a standalone install, use the Python SDK or `trw-memory-server` for everyday reads and writes.
 
 `export` covers one namespace and holds it in memory; it is not a streaming backup and does not include stored vectors. Export from an unchanged store: pagination is not a snapshot across concurrent writes. Use the `snapshot` commands for database backups. `import` keeps export-format rows whole, re-screens every row through the write gate, writes rejected rows to `<file>.rejected.jsonl`, and exits 1 when any row is rejected.
+
+#### Off-machine restore drill (PRD-CORE-311)
+
+`trw-memory backup create` gzips a fresh snapshot to `<store>/memory/backups/<timestamp>-<random>.db.gz` plus a `.sha256` sidecar; it never touches the network. Getting that archive off-machine and back is `trw-mcp`'s job:
+
+```bash
+trw-mcp backup create --db /path/to/memory.db          # local archive; also uploads it when backup_remote_enabled is true
+trw-mcp backup restore --from latest --db /path/to/memory.db     # newest remote backup: list -> presigned GET -> restore
+trw-mcp backup restore --from /path/to/backup.db.gz --db /path/to/memory.db   # offline drill: zero network calls
+```
+
+`backup restore` verifies the sidecar's sha256 against the decompressed bytes before touching the target store — a mismatch refuses and leaves the existing store untouched — then delegates to the same `restore_from_snapshot` atomic-replace path `restore --from-snapshot` uses, so it refuses beside a running daemon identically. Run the drill periodically: create a backup, wipe (or point at a scratch) store, restore it, then open a fresh client and recall a known learning by content — a `PRAGMA integrity_check` alone does not prove the restore worked.
 
 ### Low-level backend access
 
@@ -129,19 +142,18 @@ backend.store(entry)
 results = backend.search("query", top_k=10, namespace="default")
 ```
 
-## What's new in 4.x
+## What's new in 5.x
+<!-- whats-new: 5.0.0 -->
 
-<!-- whats-new: 4.0.1 -->
+- **A daemon that survives its own death.** A crash or reboot leaves a record that reads as dead, so clients restart cleanly. `probe_endpoint` pings without starting one; `MEMORY_DAEMON_AUTOSTART=false` fails closed.
+- **Fair, bounded daemon work.** Every write job is scheduled by budget, class and tenant, the decay pass resumes from a persisted cursor, and namespace rename and merge move in batches.
+- **Your store stays where your project is.** A default store lives beside the project's `.trw` and refuses to write into an arbitrary working directory. An explicit `storage_path` works as before.
+- **Safe writes into a checkout.** `trw_memory.safe_fs` writes and appends beneath a directory without ever following a symlink, and refuses with a typed error.
+- **Lessons indexed by the files they're about.** Schema 12 adds an anchor index, so file-anchored recall and co-anchored graph edges read an index instead of scanning.
+- **Safer migrations.** Every schema upgrade takes a pre-migration backup, and a forged non-loopback daemon discovery record is rejected.
+- **Faster, tighter imports and reads.** A 20k-row checkout import takes about 5 s instead of about 50 s, and `graph_query` bounds the SQL work a dense root can force.
 
-- **4.0.1: results you can trust at a glance.** `memory_verify` reports `error` or `skipped` when a sweep could not finish cleanly, and `trw-memory import` leaves an export's system canary rows out.
-- **No corrupted or lost writes.** A store shared by two processes keeps its SQLite locks, and a new store's first writes are kept. Both affected 2.x and 3.x.
-- **Recall works on a default install.** rank-bm25 is a base dependency, so the entity-bridge hop no longer crashes and default installs get the BM25 lane.
-- **A crashed daemon no longer strands clients.** A zombie daemon reads as dead, its starter reaps it, and models run on CPU on macOS, avoiding a Metal crash.
-- **Text in, never vectors.** The daemon embeds and dedups itself, and no vector leaves your machine.
-- **One download path.** `fetch_models()` gets the models, the embedding model at a pinned revision, and runtime loads are cache-only. `local_only` is retired.
-- **Re-embed in place, faster calls.** `memory_reembed` re-encodes stale vectors, a 4.x daemon refuses a 3.x client by name, and `keep_session=True` makes each call one HTTP request.
-
-4.0.0 is a breaking release: read the [CHANGELOG](https://github.com/wallter/trw-memory/blob/main/CHANGELOG.md) before upgrading, and upgrade trw-mcp to 7.0.0 with it.
+5.0.0 is a breaking release (custom `StorageBackend`s must add `get_many`; Python <!-- inv:python_min_trw_memory -->3.11<!-- /inv -->+): read the [CHANGELOG](https://github.com/wallter/trw-memory/blob/main/CHANGELOG.md) before upgrading, and upgrade trw-mcp to 8.0.0 with it.
 
 ## Benchmarks
 
@@ -194,10 +206,6 @@ These operations used to slow down sharply as the store grew, or as more project
 ### Hybrid retrieval vs a single ranker
 
 On 889 queries over real engineering learnings, fusing BM25 and vectors had the highest scores: Recall@10 0.938 against 0.914 for vectors alone and 0.869 for BM25 alone (point estimates; significance not assessed). On 175 near-duplicate "rediscoveries", hybrid recall would have surfaced the earlier record 94.3% of the time against 72.0% for keyword search alone, with non-overlapping 95% confidence intervals. Measured on trw-memory 0.9.12.
-
-### Memory lets agents finish work they otherwise cannot
-
-On a controlled benchmark where each task needs a fact from an earlier session, agents with memory solved 58 of 58 tasks and agents without it solved 0 of 50 (paired McNemar p = 3.6×10⁻¹⁵ over 49 matched pairs), and the result replicated on a second model family.
 
 ## How it works
 
@@ -288,7 +296,7 @@ Graph, sync, namespace-administration and import tools are also registered; `REG
 
 `trw-memory-server serve http` runs one process per operating-system user, serving the same MCP tools over `streamable-http` on 127.0.0.1, authenticated by per-checkout namespace grants. The port is ephemeral and published in a 0600 `daemon.json` beside the store, so clients discover it instead of hardcoding it. The daemon keeps every namespace in one store, by default `~/.trw/memory/memory.db` (`$XDG_DATA_HOME/trw/memory/` or `$TRW_USER_DIR/memory/` when set). A memory client that finds no daemon starts one, and an idle daemon exits.
 
-**Trust boundary: a token reaches only its grant.** `trw-mcp memory token` mints a token for the calling checkout's project namespace plus `user:local`. Without `--namespace` it grants the pinned `project_namespace` only when that pin matches the namespace derived from the checkout's location; for a moved checkout, name it with `--namespace`. The daemon keeps only the token's sha256 digest, in the 0600 `daemon-grants.json`; the raw token lives in that checkout's `.trw/runtime/memory-token`. Every namespaced call is checked against the grant before RBAC, so a request for any other namespace is refused even with RBAC off. A leftover Slice A `daemon-token` (one all-namespace bearer) makes the daemon refuse to start; `trw-mcp memory token --migrate` deletes it.
+**Trust boundary: a token reaches only its grant.** `trw-mcp memory token` mints a token for the calling checkout's project namespace plus `user:local`. Without `--namespace` it grants the pinned `project_namespace` only when that pin matches the namespace derived from the checkout's location; for a moved checkout, name it with `--namespace`. The daemon keeps only the token's sha256 digest, in the 0600 `daemon-grants.json`; the raw token lives in that checkout's `.trw/runtime/memory-token`. Every namespaced call is checked against the grant before RBAC, so a request for any other namespace is refused even with RBAC off. A leftover Slice A `daemon-token` (one all-namespace bearer) makes the daemon refuse to start; `trw-mcp memory token --migrate` deletes it. These grants and the `0600`/`0700` file modes stop one checkout from accidentally reading another's namespace on the same machine; they are not a security boundary against another process running as the same OS user, which can read the token file and the store like any of its own files.
 
 **Security settings are daemon-wide.** RBAC, the recall filter, canary, poisoning, trust-scoring and provenance settings come from the environment the daemon starts from.
 
@@ -372,11 +380,19 @@ From then on nothing leaves the machine: model loads are cache-only, and there i
 
 ## Upgrading
 
+### Upgrading from 4.x
+
+1. **Upgrade both packages together.** trw-memory 5.0.0 ships with trw-mcp 8.0.0, and trw-mcp 8.0.0 requires trw-memory 5.0.0 or later: `pip install -U "trw-memory>=5,<6" "trw-mcp>=8,<9"`. Python <!-- inv:python_min_trw_memory -->3.11<!-- /inv --> or newer is required.
+2. **Stop the old memory daemon (manual in 8.0.0).** The running 4.x daemon keeps serving after the upgrade. Until it stops, a memory call is refused with `daemon_version_mismatch ... The user should stop the old daemon (process <pid>) ... Agents must not stop or remove it themselves; report this to the user.`, and the refusal reads and writes no memory. `trw-mcp doctor` names the pid too. Stop that process (after checking it is `python -m trw_memory.server`), or delete `~/.trw/memory/daemon.json` if the pid now belongs to something else. The next memory call starts a 5.0.0 daemon.
+3. **Let the store migrate.** On first open the store moves to schema v13. A store that already holds entries is backed up automatically, once, before the migration runs; an empty store has nothing to back up. A build older than 5.0.0 then refuses to open a v13 store.
+
+Every breaking change, including the new `StorageBackend.get_many` abstract method and the default store's move beside the project's `.trw`, is in the [CHANGELOG](https://github.com/wallter/trw-memory/blob/main/CHANGELOG.md).
+
 ### Upgrading from 3.x
 
 If you use trw-memory through trw-mcp, upgrade both together (trw-mcp 7.0.0 needs trw-memory 4.x) and follow the [trw-mcp README](https://github.com/wallter/trw-mcp#upgrading). For a standalone install:
 
-1. **Remove `local_only` first.** 4.0.0 refuses to start while it is set, in any source and at any value (a `ConfigError` naming the key). It used to force `sync_enabled: false` and `rbac_mode: local`, so where sharing must stay off, set `sync_enabled: false` explicitly and check `rbac_mode`.
+1. **Remove `local_only` first.** 4.0.0 refuses to start while it is set, in any source and at any value (a `ConfigError` naming the key). It used to force `sync_enabled: false` and a since-removed `rbac_mode: local` (no enforcement path ever read `rbac_mode`; `rbac_enabled` is the real switch), so where sharing must stay off, set `sync_enabled: false` explicitly.
 2. **Install:** `pip install -U "trw-memory[embeddings]==4.0.0"`. rank-bm25 is now a base dependency: drop `bm25` from any extras list (`[all]` is now `[embeddings]`).
 3. **Restart the daemon**, if one runs. A 4.x daemon refuses a 3.x client with `daemon_version_mismatch`, and a 4.x client refuses a 3.x daemon. The 4.0.0 daemon also refuses to start when its store directory, or any ancestor, is owned by a user other than you or root, or is group- or world-writable without the sticky bit.
 4. **Fetch the models:** `trw_memory.embeddings.fetch_models()` (or `trw-mcp models fetch`). Runtime loads are cache-only: without the model the SDK and the daemon fall back to keyword search, and only `MemoryClient.reembed()` raises `ModelNotCachedError` (renamed from `LocalOnlyViolationError`).
@@ -402,7 +418,7 @@ async with MemoryClient(namespace="default") as client:
 
 ### Older releases
 
-- **0.18.0 retired HyPE question generation and HyDE query expansion.** Delete imports of `QuestionGenerator` and `NoOpQuestionGenerator`; remove the `question_generator`, `query_expansion` and `collapse_hype` arguments and the `hype_*` settings. Neutral legacy values still only warn in 3.x; a later breaking release will remove them. Recall ignores the old derived question vectors (it requires canonical membership), and update and forget remove a parent's derived siblings. Nothing is purged at startup; the optional cleanup below is for a disposable snapshot.
+- **0.18.0 retired HyPE question generation and HyDE query expansion.** Delete imports of `QuestionGenerator` and `NoOpQuestionGenerator`; remove the `question_generator`, `query_expansion` and `collapse_hype` arguments and the `hype_*` settings. In 3.x and 4.x a neutral legacy value only warned; from the next major the arguments are gone (passing one is a `TypeError`) and a leftover `hype_*` setting logs one `retired_setting_ignored` warning and is ignored. Recall ignores the old derived question vectors (it requires canonical membership), and update and forget remove a parent's derived siblings. Nothing is purged at startup; the optional cleanup below is for a disposable snapshot.
 - **0.18.0 also removed** the `[langchain]`, `[llamaindex]`, `[crewai]` and `[all-integrations]` extras and their adapter modules.
 - **0.9.5** fixed concurrent-writer races; stores shared by concurrent agents need at least that version.
 
@@ -445,7 +461,7 @@ Cleanup is idempotent, and an interruption rolls the transaction back. Rolling t
 
 ### Supported interpreters
 
-`trw-memory` is tested on CPython 3.10 through 3.14. One property of the interpreter matters beyond the version: its bundled SQLite. WAL space is only reclaimed on SQLite >= 3.51.3 (or the 3.44.6 / 3.50.7 backports). Below that, `storage/_wal_checkpoint.py` coerces resetting checkpoints to `PASSIVE`, which is safe but lets the `-wal` file grow without shrinking. Check yours with `python -c "import sqlite3; print(sqlite3.sqlite_version)"`; on macOS, Homebrew's current Python ships a qualifying build, and `trw-mcp doctor` names the qualifying interpreters it finds. The 3.1.0 fix for I/O errors during the integrity check reads `sqlite_errorcode`, so it needs Python 3.11+.
+`trw-memory` declares support for CPython <!-- inv:python_min_trw_memory -->3.11<!-- /inv --> through <!-- inv:python_max_trw_memory -->3.14<!-- /inv -->; its CI runs the suite on 3.12 and the maintainers' local gates run on 3.14. One property of the interpreter matters beyond the version: its bundled SQLite. WAL space is only reclaimed on SQLite >= 3.51.3 (or the 3.44.6 / 3.50.7 backports). Below that, `storage/_wal_checkpoint.py` coerces resetting checkpoints to `PASSIVE`, which is safe but lets the `-wal` file grow without shrinking. Check yours with `python -c "import sqlite3; print(sqlite3.sqlite_version)"`; on macOS, Homebrew's current Python ships a qualifying build, and `trw-mcp doctor` names the qualifying interpreters it finds. The 3.1.0 fix for I/O errors during the integrity check reads `sqlite_errorcode`, so it needs Python <!-- inv:python_min_trw_memory -->3.11<!-- /inv -->+.
 
 The SQLite engine is selected at import by `storage/_dbapi.py`, which ranks the interpreter's SQLite against an installed `pysqlite3` on (carries the fix, version) and never replaces a newer engine with an older wheel. The optional `[sqlite-fix]` extra pulls `pysqlite3-binary` on x86_64 Linux only. No published wheel currently bundles a qualifying SQLite, so it is an engine override, not a fix.
 
@@ -513,10 +529,6 @@ Not always on a very large namespace. Recall ranks the most recently updated row
 ### Where is my data stored?
 
 The Python SDK uses `.memory/` under the current directory by default (`MEMORY_STORAGE_PATH` overrides it). The loopback daemon, which the CLI and trw-mcp use, keeps every namespace in one file, by default `~/.trw/memory/memory.db`. Nothing leaves the machine unless you enable remote sync or the decision judge (see [Telemetry and network behavior](#telemetry-and-network-behavior)).
-
-### Does memory help agents get work done?
-
-On tasks that need a fact from an earlier session, agents with memory solved 58 of 58 and agents without it solved 0 of 50. See [Memory lets agents finish work they otherwise cannot](#memory-lets-agents-finish-work-they-otherwise-cannot).
 
 ### What license is it under?
 

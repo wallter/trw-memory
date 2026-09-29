@@ -134,6 +134,47 @@ class TestSecurityMaintenanceQueue:
         security_runtime._AUDIT_MAINTENANCE_CACHE.clear()
         security_runtime._AUDIT_MAINTENANCE_QUEUE.clear()
 
+    def test_drain_compacts_every_queued_audit_log(self, tmp_path: Path) -> None:
+        # B71-97: with security_maintenance_inline=False, ensure_security_maintenance only
+        # enqueued a cache_key -- nothing ever drained the queue, so a queued log's stale
+        # records were never compacted (they just sat there until the bounded deque, maxlen
+        # 128, silently dropped the key on overflow). drain_security_maintenance is the drain.
+        security_runtime._AUDIT_MAINTENANCE_CACHE.clear()
+        security_runtime._AUDIT_MAINTENANCE_QUEUE.clear()
+        log_path = tmp_path / "audit.jsonl"
+        log = AuditLog(log_path)
+        for index in range(2):
+            log.append("store", entry_id=f"M-{index}")
+        lines = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+        stale_ts = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+        for line in lines:
+            line["ts"] = stale_ts
+        log_path.write_text("\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
+
+        cfg = MemoryConfig(
+            audit_log_path=str(log_path),
+            audit_retention_days=365,
+            security_maintenance_inline=False,
+        )
+        security_runtime.ensure_security_maintenance(cfg)
+        # Queued, not yet compacted: the stale records are still on disk.
+        assert len(AuditLog(log_path).read_all()) == 2
+        assert security_runtime.security_maintenance_status()["queued"] == 1
+
+        result = security_runtime.drain_security_maintenance()
+
+        assert result["drained"] == 1
+        assert security_runtime.security_maintenance_status()["queued"] == 0
+        assert AuditLog(log_path).read_all() == []
+
+        security_runtime._AUDIT_MAINTENANCE_CACHE.clear()
+
+    def test_drain_is_a_noop_on_an_empty_queue(self) -> None:
+        security_runtime._AUDIT_MAINTENANCE_CACHE.clear()
+        security_runtime._AUDIT_MAINTENANCE_QUEUE.clear()
+
+        assert security_runtime.drain_security_maintenance() == {"drained": 0}
+
 
 class TestAuditLogVerify:
     def test_verify_chain_missing_file_returns_empty_valid_result(self, tmp_path: Path) -> None:

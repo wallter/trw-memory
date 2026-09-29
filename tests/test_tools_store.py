@@ -5,6 +5,7 @@ from typing import cast
 
 import pytest
 
+from tests._optional_extras import vec_unavailable
 from trw_memory.exceptions import AuthorizationError
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
@@ -49,7 +50,7 @@ class TestMemoryStoreImpl:
 
     def test_store_quarantines_anomalous_entries(self, tmp_path: Path) -> None:
         # poisoning_detection_mode defaults to "observe" (the documented SEC-001
-        # rollout default — security/CLAUDE.md forbids changing the package
+        # rollout default — security/AGENTS.md forbids changing the package
         # default). Quarantine only fires under explicit enforce-mode, so this
         # behavioral test must opt into it.
         cfg = MemoryConfig(
@@ -310,7 +311,7 @@ class TestMemoryStoreImpl:
         backend = SQLiteBackend(tmp_path / "store.db")
         if not backend._vec_available:
             backend.close()
-            pytest.skip("sqlite-vec extension not available")
+            vec_unavailable("sqlite-vec extension not available")
 
         class _StubEmbedder:
             def embed(self, text: str) -> list[float]:

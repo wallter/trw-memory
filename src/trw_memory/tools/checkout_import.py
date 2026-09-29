@@ -17,15 +17,11 @@ holds of the migrated ids, which the caller checks before it cuts over.
 
 from __future__ import annotations
 
-import asyncio
 import concurrent.futures
 import contextlib
 import functools
 import os
 import secrets
-import shutil
-import sqlite3
-import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -34,6 +30,7 @@ from typing import BinaryIO, NamedTuple
 from trw_memory._dir_trust import NOFOLLOW_SUPPORTED, create_private_file_fd
 from trw_memory._inode_pin import Identity, current_identity, pinned_identity
 from trw_memory._live_stores import close_reader_fd, sqlite_read_lock
+from trw_memory._tree_removal import remove_tree
 from trw_memory.daemon._paths import IMPORT_TMP_SUBDIR, DaemonPaths, _harden_dir
 from trw_memory.exceptions import UntrustedDirectoryError
 from trw_memory.models.config import MemoryConfig
@@ -81,7 +78,8 @@ def memory_import_checkout_impl(
 ) -> dict[str, object]:
     """``{"status": "ok", "moved", "skipped", "held": {"rows", "vectors", "edges"}}`` -- held among *ids* --
     plus ``vectors_not_carried``: the ids whose vectors are from another embedding space (dimension), which
-    the namespace cannot hold; their rows moved, and ``memory_reembed`` rebuilds the vectors.
+    the namespace cannot hold; their rows moved, and ``memory_reembed`` rebuilds the vectors. ``canaries_skipped``
+    counts the copy's system canaries left behind; a canary's identity with user data is refused by id.
 
     Everything that reads the copy runs on the caller's thread: its schema check and open, the read of
     every row and the compare with the namespace. Only the write goes through *lane* (the daemon's
@@ -92,8 +90,6 @@ def memory_import_checkout_impl(
         return {"error": f"no project store at {source_path}", "status": "invalid"}
     if not isinstance(backend, SQLiteBackend):
         return {"error": "memory_import_checkout needs a SQLite store to compare vectors", "status": "invalid"}
-    if not hasattr(sqlite3.Connection, "setlimit"):  # Python 3.10: no SQLITE_LIMIT_LENGTH cap on the copy
-        return {"error": "memory_import_checkout needs Python 3.11 or later", "status": "unsupported_runtime"}
     path = Path(source_path)
     try:
         plan = plan_import(path, backend, namespace, deadline_seconds)
@@ -107,11 +103,13 @@ def memory_import_checkout_impl(
         return written
     wanted = set(ids)  # each id once
     held = {
-        "rows": sum(1 for entry_id in wanted if backend.get(entry_id, namespace=namespace) is not None),
+        "rows": len(backend.existing_ids(sorted(wanted), namespace=namespace)),
         "vectors": len(backend.existing_vector_ids(namespace=namespace) & wanted) if backend.supports_vectors() else 0,
         "edges": sum(1 for edge in backend.graph_edges(namespace) if edge.source_id in wanted),
     }
-    carried = {"vectors_not_carried": plan.other_space} if plan.other_space else {}  # another embedding space
+    carried: dict[str, object] = {"vectors_not_carried": plan.other_space} if plan.other_space else {}
+    if plan.canaries:  # the copy's system canaries, left behind: the namespace's store seeds its own
+        carried["canaries_skipped"] = len(plan.canaries)
     return {"status": "ok", "moved": written["moved"], "skipped": written["skipped"], "held": held, **carried}
 
 
@@ -282,7 +280,7 @@ def _private_checkout_copy(root: str, source_path: str, operation: str) -> _Priv
         if dest_fd != -1:
             os.close(dest_fd)
         if work_dir is not None and not copied_ok:  # a failed copy never outlives its refusal (C12)
-            shutil.rmtree(work_dir, ignore_errors=True)
+            remove_tree(work_dir, purpose="failed private import copy")
         if dir_fd != -1:
             os.close(dir_fd)
         if fd != -1:
@@ -318,7 +316,7 @@ def register_checkout_import_tools(mcp: McpServer) -> None:
 
         # Off the loop and off the write lane: the copy, its checks, its reads and the compare are the
         # untrusted work, and they cost this caller's time alone (rc9).
-        lane = _serialized_lane(namespace, asyncio.get_running_loop())
+        lane = _serialized_lane(namespace)
         return await run_offloaded(_import_checkout, namespace, source_path, ids, lane)
 
     def _import_checkout(namespace: str, source_path: str, ids: list[str], lane: Lane) -> dict[str, object]:
@@ -379,7 +377,7 @@ def register_checkout_import_tools(mcp: McpServer) -> None:
             copied.pin.close()
             # The copy's own directory, never the shared IMPORT_TMP_SUBDIR: everything opening the
             # copy wrote beside it goes too (C12-R). The SQLite handles closed inside the impl.
-            shutil.rmtree(Path(copied.path).parent, ignore_errors=True)
+            remove_tree(Path(copied.path).parent, purpose="used private import copy")
 
     mcp.tool()(memory_import_checkout)
 
@@ -388,40 +386,21 @@ def register_checkout_import_tools(mcp: McpServer) -> None:
 IMPORT_QUEUE_SECONDS = 30.0
 
 
-def _serialized_lane(
-    namespace: str, loop: asyncio.AbstractEventLoop, *, queue_seconds: float = IMPORT_QUEUE_SECONDS
-) -> Lane:
+def _serialized_lane(namespace: str, *, queue_seconds: float = IMPORT_QUEUE_SECONDS) -> Lane:
     """Only the write takes the one lane every learning-row writer shares (C12 rc7), and waits for it at
-    most *queue_seconds*. Past that, a step the lane has not started is abandoned: it writes nothing when
-    the lane reaches it, and the caller answers ``busy``. A step already started is waited for (its own
-    deadline bounds it), so the caller never answers, or removes the copy, while its write still runs."""
-    from trw_memory.daemon._offload import run_serialized
+    most *queue_seconds*. Past that, a step the lane has not started is cancelled: it writes nothing, and
+    the caller answers ``busy``. A step already started is waited for (its own deadline bounds it), so the
+    caller never answers, or removes the copy, while its write still runs."""
+    from trw_memory.daemon._lane import IMPORT, submit
 
     def lane(step: Callable[[SQLiteBackend], dict[str, object]]) -> dict[str, object]:
-        busy: dict[str, object] = {
-            "error": f"the write lane stayed busy past {queue_seconds:g}s: retry",
-            "status": "busy",
-        }
-        phase = ["queued"]
-        claim = threading.Lock()
-
-        def started(backend: SQLiteBackend) -> dict[str, object]:
-            with claim:
-                if phase[0] == "abandoned":
-                    return busy
-                phase[0] = "running"
-            return step(backend)
-
-        write = functools.partial(in_namespace, namespace, Permission.WRITE, "import_checkout", _on(started))
-        future = asyncio.run_coroutine_threadsafe(run_serialized(write), loop)
+        write = submit(IMPORT, namespace, in_namespace, namespace, Permission.WRITE, "import_checkout", _on(step))
         try:
-            return future.result(timeout=queue_seconds)
+            return write.result(timeout=queue_seconds)
         except concurrent.futures.TimeoutError:
-            with claim:
-                if phase[0] == "queued":
-                    phase[0] = "abandoned"
-                    return busy
-            return future.result()
+            if write.cancel():
+                return {"error": f"the write lane stayed busy past {queue_seconds:g}s: retry", "status": "busy"}
+            return write.result()
 
     return lane
 

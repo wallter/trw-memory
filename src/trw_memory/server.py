@@ -72,13 +72,16 @@ REGISTERED_TOOL_NAMES: tuple[str, ...] = (
     "memory_sync_apply",
     "memory_admit_shared",
     "memory_vectors",
+    "memory_anchored",
     "memory_similar",
     "memory_verify",
     "memory_import_checkout",
+    "memory_drain",
 )
 
 
 def _register_tools() -> None:
+    from trw_memory.daemon._drain import register_drain_tool
     from trw_memory.tools.audit import register_audit_tool
     from trw_memory.tools.checkout_import import register_checkout_import_tools
     from trw_memory.tools.consolidate import register_consolidate_tool
@@ -119,6 +122,7 @@ def _register_tools() -> None:
     register_reembed_tool(mcp)
     register_search_tool(mcp)
     register_status_tool(mcp)
+    register_drain_tool(mcp)
 
 
 _register_tools()

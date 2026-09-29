@@ -50,6 +50,7 @@ from trw_memory.decisions._models import (
 from trw_memory.decisions._policy import Policy, reliability
 from trw_memory.decisions._redaction import default_redactor, redact_state, unique_key
 from trw_memory.decisions._results import (
+    CALIBRATED_MAX_WIRE_QUESTIONS,
     DEAD_BAND,
     MAX_CHOICE_OPTIONS,
     MIN_MARGIN,
@@ -67,6 +68,7 @@ from trw_memory.decisions._results import (
 )
 
 __all__ = [
+    "CALIBRATED_MAX_WIRE_QUESTIONS",
     "DEAD_BAND",
     "MAX_CHOICE_OPTIONS",
     "MIN_MARGIN",
@@ -249,6 +251,19 @@ class Toolkit:
         ``_context``. Cost: the embedded schema repeats each item's text once per question, so
         N items × Q questions sends the item text Q times — budget against the ~56.8k-token
         request ceiling.
+
+        ``chunk_size`` bounds ITEMS per request, but the calibration it is fitted to (2026-09-19,
+        28 items) asked ONE question per item. This call divides it by ``len(questions)`` before
+        splitting, so a multi-question screen still sends at most
+        :data:`~trw_memory.decisions._results.CALIBRATED_MAX_WIRE_QUESTIONS` total wire questions
+        per call, whichever of that or ``chunk_size`` is smaller — never
+        ``min(chunk_size, cap) * len(questions)`` (jev-1.13-20260917 calibration defect: a
+        21-item x 3-question call, one question ``score``, sent 63 wire questions in a single
+        request under the previous ``chunk_size``-only bound and came back with near-zero
+        confidence on most items and a critical item's score split 0.36/0.59 across levels).
+        A question set that alone exceeds the cap (one item, more questions than the calibrated
+        volume allows) is refused with :class:`InvalidRequest` rather than silently sent oversized
+        — split it into smaller question sets and call ``batch_items`` once per split.
         """
         if schema not in ("embedded", "keyed"):
             raise InvalidRequest(f"schema must be 'embedded' or 'keyed', got {schema!r}")
@@ -259,9 +274,32 @@ class Toolkit:
         self._typed_questions(questions)  # a shape error is the caller's, before any item request is built
         keys = list(items)
         qids = list(questions)
+        if len(qids) > CALIBRATED_MAX_WIRE_QUESTIONS:
+            # Even a single item alone would carry more than the calibrated volume in one call;
+            # dividing chunk_size by len(qids) cannot fix this (it floors at 1 item/call, still
+            # oversized). Refuse rather than silently send an unmeasured request shape.
+            raise InvalidRequest(
+                f"{len(qids)} questions per item exceeds the calibrated "
+                f"{CALIBRATED_MAX_WIRE_QUESTIONS}-wire-question volume (jev-1.13-20260917); "
+                "split into smaller question sets and call batch_items once per split"
+            )
         per_item: dict[str, AskResult] = {}
         chunk_of: dict[str, int] = {}
-        pending = [keys[start : start + chunk_size] for start in range(0, len(keys), chunk_size)]
+        # ``chunk_size`` was calibrated (2026-09-19, 28 items) against ONE question per item; it
+        # bounds ITEMS, not the wire questions a request actually carries. A caller with several
+        # questions per item (a mixed noul/score/choice screen, the common shape) silently sends
+        # chunk_size * len(qids) questions in one call -- 3x-plus the volume the calibration ever
+        # measured. A 21-item x 3-question call (63 questions, one of them "score") crossed that
+        # unmeasured territory and came back with near-zero confidence on most items and a
+        # critical item's "score" split 0.36/0.59 across adjacent levels -- degradation from
+        # request size, not a wiring defect (each item's text is already isolated in its own
+        # question, per schema="embedded"). Scale the item batch down by the question count so
+        # the TOTAL per-call question volume stays inside the calibrated envelope -- capped at
+        # CALIBRATED_MAX_WIRE_QUESTIONS even when the caller passes a larger chunk_size, since
+        # chunk_size alone (its historical, item-count meaning) was never the calibrated bound.
+        wire_question_cap = min(chunk_size, CALIBRATED_MAX_WIRE_QUESTIONS)
+        effective_chunk_size = max(1, wire_question_cap // max(1, len(qids)))
+        pending = [keys[start : start + effective_chunk_size] for start in range(0, len(keys), effective_chunk_size)]
         while pending:
             batch = pending.pop(0)
             state, wire, lookup = self._item_request(batch, items, questions, qids, schema, context)

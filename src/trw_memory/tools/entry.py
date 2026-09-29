@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 import structlog
 
@@ -23,6 +23,9 @@ from trw_memory.namespaces.validation import validate_namespace
 from trw_memory.security.rbac import Permission, require_namespace_permission, transport_root
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools._types import McpServer
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    import concurrent.futures
 
 logger = structlog.get_logger(__name__)
 
@@ -269,13 +272,25 @@ async def serve_namespace(
 
     Each body reads SQLite, and some load the embedding model or read checkout files; on the event
     loop, one caller's slow body stalled every other tenant's request. *exclusive* keeps the bodies
-    that loop ran one at a time mutually exclusive (see ``run_serialized``); ``False`` is for those
+    that loop ran one at a time mutually exclusive (on ``daemon._lane``); ``False`` is for those
     that already ran on the pool.
     """
-    from trw_memory.daemon._offload import run_offloaded, run_serialized
+    from trw_memory.daemon._lane import INTERACTIVE, run_on_lane
+    from trw_memory.daemon._offload import run_offloaded
 
-    submit = run_serialized if exclusive else run_offloaded
-    return await submit(in_namespace, namespace, permission, operation, run)
+    if exclusive:
+        return await run_on_lane(INTERACTIVE, namespace, in_namespace, namespace, permission, operation, run)
+    return await run_offloaded(in_namespace, namespace, permission, operation, run)
+
+
+def lane_step(
+    namespace: str, operation: str, step: Callable[[StorageBackend], _Result]
+) -> concurrent.futures.Future[_Result | dict[str, object]]:
+    """*step* as one background job on the daemon's write lane, on a backend of its own, with *namespace*
+    authorized for WRITE again (a revoked grant's refusal is the job's result)."""
+    from trw_memory.daemon._lane import MAINTENANCE, submit
+
+    return submit(MAINTENANCE, namespace, in_namespace, namespace, Permission.WRITE, operation, lambda b, _c: step(b))
 
 
 def _scoped_entry(

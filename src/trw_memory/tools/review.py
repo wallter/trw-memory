@@ -10,7 +10,7 @@ from __future__ import annotations
 import getpass
 from typing import Literal
 
-from trw_memory.daemon._offload import run_serialized
+from trw_memory.daemon._lane import INTERACTIVE, run_on_lane
 from trw_memory.exceptions import AuthorizationError, ConfigError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -81,7 +81,9 @@ def register_review_tool(mcp: McpServer) -> None:
         The review is recorded under the caller's authenticated identity.
         """
 
-        return await run_serialized(
+        return await run_on_lane(
+            INTERACTIVE,
+            namespace,
             memory_review_impl,
             learning_id,
             decision=decision,
@@ -176,4 +178,4 @@ def register_quarantine_list_tool(mcp: McpServer) -> None:
     ) -> dict[str, object]:
         """List quarantined rows awaiting review, scoped to permitted namespaces."""
 
-        return await run_serialized(memory_quarantine_list_impl, namespace, limit=limit)
+        return await run_on_lane(INTERACTIVE, namespace, memory_quarantine_list_impl, namespace, limit=limit)

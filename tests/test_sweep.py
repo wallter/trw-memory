@@ -7,7 +7,7 @@ from collections.abc import Sequence
 
 import pytest
 
-from trw_memory._sweep import MAX_TOKEN_CHARS, decode_token, encode_token, sweep
+from trw_memory._sweep import MAX_KEY_PART_CHARS, MAX_TOKEN_CHARS, MAX_TOKEN_PARTS, decode_token, encode_token, sweep
 
 pytestmark = pytest.mark.unit
 
@@ -103,3 +103,17 @@ def test_encode_refuses_what_decode_would_refuse() -> None:
         encode_token(["x" * MAX_TOKEN_CHARS])
     with pytest.raises(ValueError):
         encode_token([1, "a"])  # type: ignore[list-item]
+
+
+def test_the_longest_key_round_trips_with_every_character_escaped() -> None:
+    """B71-85: any key encode_token accepts decodes back, even when JSON escapes every character six-fold."""
+    key = ["\x01" * MAX_KEY_PART_CHARS] * MAX_TOKEN_PARTS
+    token = encode_token(key)
+    assert len(token) <= MAX_TOKEN_CHARS
+    assert decode_token(token, MAX_TOKEN_PARTS) == key
+    astral = ["\U0001f600" * MAX_KEY_PART_CHARS] * MAX_TOKEN_PARTS  # non-BMP: two \u escapes each under ASCII JSON
+    assert decode_token(encode_token(astral), MAX_TOKEN_PARTS) == astral
+    with pytest.raises(ValueError, match="at most"):
+        encode_token(["x" * (MAX_KEY_PART_CHARS + 1)])
+    with pytest.raises(ValueError, match="at most"):
+        encode_token(["x"] * (MAX_TOKEN_PARTS + 1))

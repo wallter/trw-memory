@@ -16,7 +16,9 @@ import pytest
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.sqlite_backend import SQLiteBackend
-from trw_memory.tools.maintain import MAINTENANCE_STATE_FILE, memory_maintain_impl
+from trw_memory.tools.maintain import MAINTENANCE_STATE_FILE
+
+from ._maintain_sync import run_maintain_sync
 
 
 @pytest.fixture
@@ -44,16 +46,17 @@ def test_maintain_runs_the_three_passes_and_records_the_stamp(backend, tmp_path)
     """FR08: decay, consolidation and checkpoint run; the stamp is written."""
     backend.store(_stale_entry("old-1", "project:default"))
 
-    result = memory_maintain_impl("project:default", backend=backend)
+    result = run_maintain_sync("project:default", backend=backend)
 
     assert result["status"] == "ok", result
     passes = result["passes"]
-    assert set(passes) == {"decay", "consolidation", "verification", "wal_checkpoint"}
+    assert set(passes) == {"decay", "consolidation", "verification", "security_maintenance", "wal_checkpoint"}
     assert (passes["verification"]["status"], passes["verification"]["reason"]) == ("skipped", "no project_root")
     assert passes["decay"]["status"] == "ok", passes["decay"]
-    assert passes["decay"]["scope"] == "store"
+    assert passes["decay"]["scope"] == "namespace"
     assert passes["decay"]["processed"] == 1
     assert passes["consolidation"]["scope"] == "namespace"
+    assert passes["security_maintenance"]["status"] == "ok"
     assert passes["wal_checkpoint"]["status"] == "ok"
 
     # The decay pass really lowered the importance of the unused entry.
@@ -66,10 +69,38 @@ def test_maintain_runs_the_three_passes_and_records_the_stamp(backend, tmp_path)
     assert result["previous_maintained_at"] == ""
 
 
+def test_the_decay_cursor_persists_across_two_memory_maintain_calls(backend, tmp_path):
+    """PRD-CORE-307 FR05: the second call resumes the first call's cursor rather than
+    re-scanning from the start, and the stamp file is where that cursor lives.
+
+    1,001 eligible rows, the decay pass's default 1,000-row window: the first call decays
+    exactly 1,000 and stamps a non-null cursor; the second decays only the row the first
+    call did not reach, proving it resumed rather than restarted.
+    """
+    from tests._test_graph_support import _insert_memory_row
+
+    old_date = "2020-01-01T00:00:00+00:00"
+    for idx in range(1_001):
+        _insert_memory_row(
+            backend._conn, f"old-{idx:05d}", namespace="project:default", last_accessed_at=old_date, importance=0.8
+        )
+
+    first = run_maintain_sync("project:default", backend=backend)
+    assert first["passes"]["decay"]["processed"] == 1_000
+    state = json.loads((tmp_path / MAINTENANCE_STATE_FILE).read_text())
+    first_next = state["project:default"]["decay_next"]
+    assert first_next is not None, "1,001 rows do not fit in one window: the cursor must not have wrapped"
+
+    second = run_maintain_sync("project:default", backend=backend)
+    assert second["passes"]["decay"]["processed"] == 1, "the cursor resumed past the 1,000 already-decayed rows"
+    state = json.loads((tmp_path / MAINTENANCE_STATE_FILE).read_text())
+    assert state["project:default"]["decay_next"] is None, "the second call reached the end and wrapped"
+
+
 def test_a_second_call_reads_the_first_stamp_back(backend):
     """FR08: the recorded time is what the next caller sees as previous."""
-    first = memory_maintain_impl("project:default", backend=backend)
-    second = memory_maintain_impl("project:default", backend=backend)
+    first = run_maintain_sync("project:default", backend=backend)
+    second = run_maintain_sync("project:default", backend=backend)
 
     assert second["previous_maintained_at"] == first["last_maintained_at"]
     assert second["last_maintained_at"] >= first["last_maintained_at"]
@@ -83,7 +114,7 @@ def test_decay_keys_on_namespace_when_one_id_spans_namespaces(backend):
     fresh.last_accessed_at = datetime.now(timezone.utc)
     backend.store(fresh)
 
-    result = memory_maintain_impl("project:default", backend=backend)
+    result = run_maintain_sync("project:default", backend=backend)
 
     assert result["passes"]["decay"]["status"] == "ok"
     assert result["passes"]["decay"]["processed"] == 1
@@ -91,6 +122,47 @@ def test_decay_keys_on_namespace_when_one_id_spans_namespaces(backend):
     # The row that did not qualify keeps its importance.
     assert backend.get("shared", namespace="project:other").importance == pytest.approx(0.8)
     assert result["status"] == "ok"
+
+
+def test_decay_honours_the_configured_cutoff_days(backend):
+    """PRD-CORE-331 FR10 B71-135(h): ``_run_decay`` reads ``cutoff_days`` from the config it is
+    given rather than the pass's own hardcoded 90-day default. An entry unused for 30 days does
+    not qualify under the default, but does under a config that narrows the cutoff to 10 days.
+
+    Fails on 79e84147d (the archive base): ``_run_decay`` calls ``memory_decay_pass(conn, lock=lock,
+    namespaces=scope, cursor=cursor)`` with no ``cutoff_days`` kwarg at all, so the pass always
+    uses its own 90-day literal default regardless of what a caller configures.
+    """
+    entry = _stale_entry("recent-ish", "project:default")
+    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
+    entry.last_accessed_at = thirty_days_ago
+    backend.store(entry)
+
+    default_result = run_maintain_sync("project:default", backend=backend, config=MemoryConfig())
+    assert default_result["passes"]["decay"]["processed"] == 0, "30 days ago does not qualify under a 90-day cutoff"
+    assert backend.get("recent-ish", namespace="project:default").importance == pytest.approx(0.8)
+
+    narrow_cfg = MemoryConfig(decay_cutoff_days=10)
+    narrow_result = run_maintain_sync("project:default", backend=backend, config=narrow_cfg)
+    assert narrow_result["passes"]["decay"]["processed"] == 1, "30 days ago DOES qualify under a 10-day cutoff"
+    assert backend.get("recent-ish", namespace="project:default").importance < 0.8
+
+
+def test_decay_honours_the_configured_batch_size(backend):
+    """PRD-CORE-331 FR10 B71-135(h): ``_run_decay`` reads ``batch_size`` from its config too, not
+    the pass's own hardcoded 1000-row default.
+
+    Fails on 79e84147d for the same reason as the cutoff_days test above: no ``batch_size`` kwarg
+    is passed through, so a config value narrower than 1000 has no effect on one pass.
+    """
+    for idx in range(5):
+        backend.store(_stale_entry(f"old-{idx}", "project:default"))
+
+    narrow_cfg = MemoryConfig(decay_batch_size=2)
+    result = run_maintain_sync("project:default", backend=backend, config=narrow_cfg)
+
+    assert result["passes"]["decay"]["processed"] == 2, "a batch_size=2 config caps one pass at 2 rows"
+    assert result["passes"]["decay"]["more"] is True
 
 
 def test_a_consolidation_with_cluster_errors_is_not_reported_as_success(backend, monkeypatch):
@@ -112,7 +184,7 @@ def test_a_consolidation_with_cluster_errors_is_not_reported_as_success(backend,
     assert outcome["status"] == "error", outcome
     assert outcome["errors"]
 
-    result = memory_maintain_impl("project:default", backend=backend)
+    result = run_maintain_sync("project:default", backend=backend)
     assert result["status"] == "error"
     assert result["last_maintained_at"] == ""
 
@@ -127,7 +199,7 @@ def test_maintain_reports_a_failed_pass_without_aborting_the_rest(backend, monke
         lambda _backend: {"status": "error", "reason": "busy", "scope": "store"},
     )
 
-    result = memory_maintain_impl("project:default", backend=backend)
+    result = run_maintain_sync("project:default", backend=backend)
 
     assert result["status"] == "error"
     assert result["passes"]["decay"]["status"] in {"ok", "skipped"}
@@ -151,7 +223,7 @@ def test_a_busy_checkpoint_is_not_reported_as_success(backend, monkeypatch):
 
 def test_invalid_namespace_is_reported_not_raised(backend):
     """A bad namespace is a caller error with a readable status."""
-    result = memory_maintain_impl("not a namespace!", backend=backend)
+    result = run_maintain_sync("not a namespace!", backend=backend)
     assert result["status"] == "invalid"
     assert "error" in result
 
@@ -182,13 +254,13 @@ def test_a_corrupt_stamp_file_is_refused_not_overwritten(backend, tmp_path):
     """
     from trw_memory.exceptions import StorageError
 
-    memory_maintain_impl("project:default", backend=backend)
+    run_maintain_sync("project:default", backend=backend)
     state_file = tmp_path / MAINTENANCE_STATE_FILE
     before = state_file.read_text()
     state_file.write_text("{not json")
 
     with pytest.raises(StorageError, match="cannot be read"):
-        memory_maintain_impl("project:default", backend=backend)
+        run_maintain_sync("project:default", backend=backend)
 
     assert state_file.read_text() == "{not json", "the corrupt file was overwritten"
     assert "project:default" in before
@@ -202,7 +274,7 @@ def _registered_maintain(backend, monkeypatch):
 
     seen: list[MemoryConfig] = []
 
-    def _consolidation(_namespace, _backend, config):
+    def _consolidation(_namespace, _backend, config, lane=None):
         seen.append(config)
         return {"status": "ok"}
 
@@ -222,6 +294,46 @@ def _registered_maintain(backend, monkeypatch):
 
     maintain_mod.register_maintain_tool(_Server())  # type: ignore[arg-type]
     return tools["memory_maintain"], seen
+
+
+def test_a_team_namespaces_consolidation_stays_one_lane_job(backend, monkeypatch):
+    """PRD-CORE-307 sol r1 P1: consolidation moved to the pool, but a team promotion writes throughout
+    (it ignores the per-cluster lane), so off the lane it raced a serialized correction and reverted it."""
+    import asyncio
+    import threading
+
+    from trw_memory.tools import maintain as maintain_mod
+
+    maintain, _ = _registered_maintain(backend, monkeypatch)
+    ran: dict[str, tuple[str, object]] = {}
+
+    def _consolidation(namespace, _backend, _config, lane=None):
+        ran[namespace] = (threading.current_thread().name, lane)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(maintain_mod, "_run_consolidation", _consolidation)
+    for namespace in ("team:alpha", "project:default"):
+        asyncio.run(maintain(namespace=namespace))
+
+    team_thread, team_lane = ran["team:alpha"]
+    project_thread, project_lane = ran["project:default"]
+    assert team_thread.startswith("trw-memory-tool-1_") and team_lane is None, ran
+    assert not project_thread.startswith("trw-memory-tool-1_") and project_lane is not None, ran
+
+
+def test_skipped_clusters_reach_both_replies(backend, monkeypatch):
+    """PRD-CORE-307 sol r1 P2: the cycle's clusters_skipped was dropped by the tool's and maintain's replies."""
+    from trw_memory.tools import consolidate as tool_mod
+    from trw_memory.tools import maintain as maintain_mod
+
+    cycle = {"status": "completed", "clusters_found": 2, "consolidated_count": 1, "clusters_skipped": 1}
+    monkeypatch.setattr(tool_mod, "consolidate_cycle", lambda *_args, **_kwargs: dict(cycle))
+    monkeypatch.setattr(tool_mod, "keyword_only_on_refusal", lambda *_args, **_kwargs: (None, None))
+
+    reply = tool_mod.memory_consolidate_impl("project:default", backend=backend, config=MemoryConfig())
+    passed = maintain_mod._run_consolidation("project:default", backend, MemoryConfig())
+
+    assert reply["clusters_skipped"] == 1 and passed["clusters_skipped"] == 1, (reply, passed)
 
 
 def test_the_callers_consolidation_policy_governs_the_pass(backend, monkeypatch):
@@ -289,7 +401,7 @@ def test_a_symlinked_project_root_still_scores_its_anchors(backend, tmp_path):
     """Release-verify F4: the configured root is resolved once, so a symlinked checkout path scores 1.0, not 0.0."""
     link = _anchored_checkout(tmp_path, backend)
 
-    result = memory_maintain_impl("project:default", backend=backend, config=MemoryConfig(project_root=str(link)))
+    result = run_maintain_sync("project:default", backend=backend, config=MemoryConfig(project_root=str(link)))
 
     assert result["passes"]["verification"]["status"] == "ok", result["passes"]["verification"]
     assert backend.get("anchored-1", namespace="project:default").anchor_validity == 1.0
@@ -334,7 +446,7 @@ def test_a_granted_root_swapped_for_a_symlink_after_the_grant_is_not_walked(back
     swap.symlink_to(outside if swapped == "root" else outside.parent, target_is_directory=True)
     monkeypatch.setattr(maintain, "transport_root", lambda: (True, str(granted)))
 
-    result = memory_maintain_impl("project:default", backend=backend, config=MemoryConfig(project_root=str(granted)))
+    result = run_maintain_sync("project:default", backend=backend, config=MemoryConfig(project_root=str(granted)))
 
     verification = result["passes"]["verification"]
     assert (verification["status"], verification["reason"]) == ("error", "project_root_unwalkable"), verification
@@ -350,7 +462,7 @@ def _anchored_rows(tmp_path, backend, count, monkeypatch):
     from trw_memory.models.memory import Anchor
     from trw_memory.tools import maintain as maintain_mod
 
-    monkeypatch.setattr(maintain_mod, "_run_consolidation", lambda *_args: {"status": "ok"})
+    monkeypatch.setattr(maintain_mod, "_run_consolidation", lambda *_args, **_kwargs: {"status": "ok"})
     checkout = tmp_path.resolve() / "checkout"
     checkout.mkdir()
     (checkout / "mod.py").write_text("def present_symbol():\n    return 1\n")
@@ -386,7 +498,7 @@ def test_an_unfinished_sweep_resumes_where_the_stamp_left_it(backend, tmp_path, 
     seen = _checked_ids(monkeypatch)
 
     replies = [
-        memory_maintain_impl("project:default", backend=backend, config=config, verify_seconds=0.0) for _ in range(3)
+        run_maintain_sync("project:default", backend=backend, config=config, verify_seconds=0.0) for _ in range(3)
     ]
 
     assert seen == ["row-0", "row-1", "row-2"]
@@ -435,7 +547,7 @@ def test_another_callers_serialized_write_runs_between_maintain_slices(backend, 
     import asyncio
     import threading
 
-    from trw_memory.daemon._offload import run_serialized
+    from trw_memory.daemon._lane import INTERACTIVE, run_on_lane
 
     monkeypatch.setenv("MEMORY_PROJECT_ROOT", str(_anchored_rows(tmp_path, backend, 3, monkeypatch)))
     monkeypatch.setattr("trw_memory.tools._maintain_sweep.SLICE_SECONDS", 0.0, raising=False)
@@ -451,7 +563,7 @@ def test_another_callers_serialized_write_runs_between_maintain_slices(backend, 
     async def scenario():
         sweep = asyncio.create_task(maintain(namespace="project:default"))
         assert await asyncio.to_thread(started.wait, 10)
-        write = asyncio.create_task(run_serialized(lambda: len(seen)))
+        write = asyncio.create_task(run_on_lane(INTERACTIVE, "project:other", lambda: len(seen)))
         await asyncio.sleep(0)  # the write is on the lane's queue, behind the running slice
         queued.set()
         return await write, await sweep
@@ -470,7 +582,7 @@ def test_another_callers_serialized_write_runs_between_memory_verify_slices(back
     import threading
     from contextlib import nullcontext
 
-    from trw_memory.daemon._offload import run_serialized
+    from trw_memory.daemon._lane import INTERACTIVE, run_on_lane
     from trw_memory.tools import verify as verify_mod
 
     checkout = _anchored_rows(tmp_path, backend, 3, monkeypatch)
@@ -496,7 +608,7 @@ def test_another_callers_serialized_write_runs_between_memory_verify_slices(back
     async def scenario():
         sweep = asyncio.create_task(tools["memory_verify"](namespace="project:default", project_root=str(checkout)))
         assert await asyncio.to_thread(started.wait, 10)
-        write = asyncio.create_task(run_serialized(lambda: len(seen)))
+        write = asyncio.create_task(run_on_lane(INTERACTIVE, "project:other", lambda: len(seen)))
         await asyncio.sleep(0)
         queued.set()
         return await write, await sweep
@@ -527,7 +639,7 @@ def test_a_failure_in_an_earlier_call_of_a_sweep_keeps_the_sweep_from_counting_a
     monkeypatch.setattr(verification_pass, "run_verification_pass", failing_first_row)
 
     replies = [
-        memory_maintain_impl("project:default", backend=backend, config=config, verify_seconds=0.0) for _ in range(3)
+        run_maintain_sync("project:default", backend=backend, config=config, verify_seconds=0.0) for _ in range(3)
     ]
 
     verifications = [r["passes"]["verification"] for r in replies]
@@ -548,7 +660,7 @@ def test_a_stamped_position_from_another_namespace_or_store_starts_the_sweep_ove
     """rc9 sol P1: a cursor is only resumed on the store it was stamped for, inside its namespace."""
     config = MemoryConfig(project_root=str(_anchored_rows(tmp_path, backend, 3, monkeypatch)))
     seen = _checked_ids(monkeypatch)
-    memory_maintain_impl("project:default", backend=backend, config=config, verify_seconds=0.0)
+    run_maintain_sync("project:default", backend=backend, config=config, verify_seconds=0.0)
     path = tmp_path / MAINTENANCE_STATE_FILE
     state = json.loads(path.read_text())
     (sweep,) = state["project:default"]["verify_sweeps"].values()
@@ -558,7 +670,7 @@ def test_a_stamped_position_from_another_namespace_or_store_starts_the_sweep_ove
         sweep["store"] = [0, 0]
     path.write_text(json.dumps(state))
 
-    memory_maintain_impl("project:default", backend=backend, config=config, verify_seconds=0.0)
+    run_maintain_sync("project:default", backend=backend, config=config, verify_seconds=0.0)
 
     assert seen == ["row-0", "row-0"]
 
@@ -648,7 +760,7 @@ def test_another_callers_serialized_write_runs_between_maintain_passes(backend, 
     import asyncio
     import threading
 
-    from trw_memory.daemon._offload import run_serialized
+    from trw_memory.daemon._lane import INTERACTIVE, run_on_lane
     from trw_memory.tools import maintain as maintain_mod
 
     monkeypatch.setenv("MEMORY_PROJECT_ROOT", str(_anchored_rows(tmp_path, backend, 3, monkeypatch)))
@@ -656,7 +768,7 @@ def test_another_callers_serialized_write_runs_between_maintain_passes(backend, 
     maintain, _ = _registered_maintain(backend, monkeypatch)
     started, queued = threading.Event(), threading.Event()
 
-    def held_consolidation(*_args):
+    def held_consolidation(*_args, **_kwargs):
         started.set()
         assert queued.wait(10)
         return {"status": "ok"}
@@ -666,7 +778,7 @@ def test_another_callers_serialized_write_runs_between_maintain_passes(backend, 
     async def scenario():
         sweep = asyncio.create_task(maintain(namespace="project:default"))
         assert await asyncio.to_thread(started.wait, 10)
-        write = asyncio.create_task(run_serialized(lambda: len(seen)))
+        write = asyncio.create_task(run_on_lane(INTERACTIVE, "project:other", lambda: len(seen)))
         await asyncio.sleep(0)
         queued.set()
         return await write, await sweep
@@ -684,7 +796,7 @@ def test_a_maintain_cancelled_mid_job_leaves_the_namespace_free(backend, tmp_pat
     import asyncio
     import threading
 
-    from trw_memory.daemon._offload import run_serialized
+    from trw_memory.daemon._lane import INTERACTIVE, run_on_lane
     from trw_memory.tools import maintain as maintain_mod
 
     monkeypatch.setenv("MEMORY_PROJECT_ROOT", str(_anchored_rows(tmp_path, backend, 3, monkeypatch)))
@@ -713,7 +825,7 @@ def test_a_maintain_cancelled_mid_job_leaves_the_namespace_free(backend, tmp_pat
         cancelled.cancel()
         await asyncio.gather(cancelled, return_exceptions=True)
         release.set()
-        await run_serialized(lambda: None)  # the orphaned job has finished
+        await run_on_lane(INTERACTIVE, "project:other", lambda: None)  # the orphaned job has finished
         return await maintain(namespace="project:default")
 
     reply = asyncio.run(scenario())
@@ -888,6 +1000,25 @@ def test_a_namespace_keeps_only_its_newest_unfinished_sweeps(backend, tmp_path, 
     assert kept == [each["assertion_stale_threshold_days"] for each in settings][-VERIFY_SWEEPS_KEPT:]
 
 
+def test_the_sweep_being_stamped_survives_a_backward_clock_step(backend, monkeypatch):
+    """B71-92: eviction ordered by wall-clock ``at``, so after the clock stepped back the sweep just
+    stamped sorted oldest among VERIFY_SWEEPS_KEPT others and was evicted at once."""
+    from trw_memory.tools import maintain as maintain_mod
+
+    for index in range(maintain_mod.VERIFY_SWEEPS_KEPT):
+        monkeypatch.setattr(maintain_mod, "_now", lambda: "2099-01-01T00:00:00+00:00")
+        maintain_mod._record_stamp(
+            backend, "project:default", attempted_at=None, sweep={"next": []}, sweep_key=f"k{index}"
+        )
+    monkeypatch.setattr(maintain_mod, "_now", lambda: "2026-01-01T00:00:00+00:00")  # the clock stepped back
+
+    record = maintain_mod._record_stamp(
+        backend, "project:default", attempted_at=None, sweep={"next": []}, sweep_key="new"
+    )
+
+    assert "new" in record["verify_sweeps"] and len(record["verify_sweeps"]) == maintain_mod.VERIFY_SWEEPS_KEPT
+
+
 def test_a_verify_whose_sweep_failed_answers_error_with_its_counts(backend, tmp_path, monkeypatch):
     """B71-109: a sweep with an entry that could not be checked was answered ``status: ok``; it now says
     ``error`` with the reason, and keeps its counts."""
@@ -920,3 +1051,14 @@ def test_a_verify_without_a_project_root_answers_skipped(backend, monkeypatch):
 
     assert (reply["status"], reply["reason"]) == ("skipped", "no project_root"), reply
     assert "summary" in reply
+
+
+def test_decay_cutoff_days_is_bounded_so_the_cutoff_date_cannot_overflow():
+    """A cutoff far past any real disuse window is refused at config time, not as an OverflowError mid-pass (sol r1)."""
+    import pydantic
+
+    from trw_memory.models.config import MemoryConfig
+
+    assert MemoryConfig(decay_cutoff_days=36500).decay_cutoff_days == 36500
+    with pytest.raises(pydantic.ValidationError):
+        MemoryConfig(decay_cutoff_days=1_000_000)

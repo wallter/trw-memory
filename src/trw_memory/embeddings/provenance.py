@@ -58,6 +58,11 @@ class EmbeddingSpace:
         if type(self.dimensions) is not int or self.dimensions < 1:
             raise ValueError("dimensions must be a positive integer")
 
+    @property
+    def key(self) -> str:
+        """Digest of the full identity (never ``model_id``): ``vec_index.space_key``, stable across builds."""
+        return hashlib.sha256(json.dumps([self.artifact_sha256, self.encoding, self.dimensions]).encode()).hexdigest()
+
 
 @dataclass(frozen=True)
 class VectorProvenance:

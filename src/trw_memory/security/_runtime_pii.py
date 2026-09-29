@@ -33,6 +33,7 @@ from trw_memory.exceptions import PIIBlockError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.pii import PIIMatch, PIIType, detect_pii
+from trw_memory.security.provenance import PII_TYPES
 
 logger = structlog.get_logger(__name__)
 
@@ -189,7 +190,7 @@ def apply_runtime_pii_policy(
         for assertion, matches in zip(entry.assertions, assertion_matches_by_index, strict=True)
     ]
     metadata = dict(entry.metadata)
-    metadata["pii_types"] = ",".join(sorted({match.pii_type for match in all_matches}))
+    metadata[PII_TYPES] = ",".join(sorted({match.pii_type for match in all_matches}))
     if any(match.pii_type == PIIType.HIGH_ENTROPY for match in all_matches):
         metadata["contains_high_entropy_token"] = "true"  # noqa: S105 — flag value, not a credential
     return (
@@ -219,9 +220,22 @@ def replace_pii(text: str, matches: list[PIIMatch]) -> str:
     custom = [match for match in matches if match.pii_type in REDACTED_PII_TYPES]
     if not custom:
         return text
+    # Splicing each match's own (start, end) against progressively-shifted text is only
+    # safe when spans are disjoint. Two overlapping or adjacent matches spliced separately
+    # let the earlier (lower-start) match's ``end`` point into text a later splice already
+    # shifted, garbling the output and potentially leaving PII characters unmasked. Merge
+    # overlapping/adjacent spans into one region per splice instead.
+    ordered = sorted(custom, key=lambda item: item.start)
+    merged: list[tuple[int, int]] = []
+    for match in ordered:
+        if merged and match.start <= merged[-1][1]:
+            start, end = merged[-1]
+            merged[-1] = (start, max(end, match.end))
+        else:
+            merged.append((match.start, match.end))
     result = text
-    for match in sorted(custom, key=lambda item: item.start, reverse=True):
-        result = result[: match.start] + CUSTOM_PII_MARKER + result[match.end :]
+    for start, end in sorted(merged, reverse=True):
+        result = result[:start] + CUSTOM_PII_MARKER + result[end:]
     return result
 
 

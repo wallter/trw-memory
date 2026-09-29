@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._optional_extras import vec_unavailable
 from tests._timing import assert_budget
 from tests.conftest import make_entry
 from trw_memory._graph_primitives import _upsert_edge
@@ -53,6 +54,7 @@ def test_the_health_block_counts_one_namespace_without_canaries(tmp_path: Path) 
         "has_relations": True,
         "embedded": embedded,
         "max_recall_count": 4,
+        "types": {"pattern": 3},
     }
 
 
@@ -75,7 +77,7 @@ def test_an_unreadable_vector_index_is_an_error_not_zero_vectors(tmp_path: Path)
     store = SQLiteBackend(tmp_path / "memory.db", dim=4)
     try:
         if not store.supports_vectors():
-            pytest.skip("sqlite-vec is not loadable here, so there is no vector index to break")
+            vec_unavailable("sqlite-vec is not loadable here, so there is no vector index to break")
         store.store(make_entry(entry_id="L-1", namespace=_NS))
         with store._lock:
             store._conn.execute("DROP TABLE vec_index")

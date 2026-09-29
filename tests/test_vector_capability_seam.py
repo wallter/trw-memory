@@ -10,6 +10,7 @@ embedding cost only to discard it through a no-op ``upsert_vector``.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,9 @@ class _MinimalBackend(StorageBackend):
 
     def get(self, entry_id: str, *, namespace: str = "default") -> MemoryEntry | None:  # pragma: no cover
         return None
+
+    def get_many(self, entry_ids: Sequence[str], *, namespace: str) -> dict[str, MemoryEntry]:  # pragma: no cover
+        return {}
 
     def update(self, entry_id: str, **fields: object) -> MemoryEntry | None:  # pragma: no cover
         return None

@@ -17,7 +17,8 @@ Four behaviours, one per FR08 clause:
    request was sent is retried only for a tool that lands the same way twice:
    a read, ``memory_update``, or ``memory_store`` carrying the ``entry_id`` the
    client mints before the first attempt. Any other write whose response is
-   lost fails at once, saying it may have been applied.
+   lost fails at once, saying it may have been applied. A draining daemon's
+   marked 503 counts as never sent: the retry waits for the successor.
 2. **The checkout's grant** -- the client presents the token it is given
    (PRD-CORE-298 FR02); it never mints one and never holds a store-wide
    bearer. An untrusted ``daemon.json`` raises
@@ -33,32 +34,32 @@ Four behaviours, one per FR08 clause:
 
 from __future__ import annotations
 
-import contextlib
+import asyncio
 import functools
 import inspect
-import os
-import subprocess
-import sys
-import threading
 import time
-from collections.abc import Callable, Iterator
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as package_version
+from collections.abc import Callable
 from typing import Any, Literal
 from uuid import uuid4
 
-import httpx
 import structlog
-from fastmcp import Client
-from fastmcp.client.transports import StreamableHttpTransport
-from fastmcp.exceptions import ToolError
 
-from trw_memory.daemon._discovery import DaemonInfo, DiscoveryInvalid, read_live_discovery
+from trw_memory.daemon import _direct
+from trw_memory.daemon._discovery import (
+    AGENT_MUST_NOT_STOP,
+    DaemonInfo,
+    DiscoveryInvalid,
+    read_live_discovery,
+)
 from trw_memory.daemon._held_session import HeldSessions
-from trw_memory.daemon._paths import DaemonPaths, open_private_log
-from trw_memory.daemon._version_gate import VERSION_HEADER
+from trw_memory.daemon._paths import DaemonPaths
+from trw_memory.daemon._session import is_unauthorized, never_sent, open_session
+from trw_memory.daemon._spawn import SpawnedDaemon, start_daemon_detached
+from trw_memory.daemon._upgrade import replace_older_daemon, withdrawn
+from trw_memory.daemon._versions import majors_differ
 from trw_memory.exceptions import (
     DaemonAuthError,
+    DaemonProtocolError,
     DaemonRecordInvalidError,
     DaemonUnreachableError,
     DaemonVersionMismatchError,
@@ -66,7 +67,7 @@ from trw_memory.exceptions import (
 from trw_memory.models.config import MemoryConfig
 from trw_memory.user_paths import require_supported_platform
 
-__all__ = ["DAEMON_START_COMMAND", "DaemonClient", "start_daemon_detached"]
+__all__ = ["DAEMON_START_COMMAND", "DaemonClient", "probe_endpoint", "start_daemon_detached"]
 
 logger = structlog.get_logger(__name__)
 
@@ -76,17 +77,10 @@ DAEMON_START_COMMAND = "trw-memory-server serve http"
 
 
 def _package_version() -> str:
-    """This installation's trw-memory version, or ``"unknown"`` in a source tree without metadata."""
-    try:
-        return package_version("trw-memory")
-    except PackageNotFoundError:  # pragma: no cover - only in a source tree without metadata
-        return "unknown"
+    """This trw-memory's own version: its source when run from one, not a stale editable dist-info (B71-111)."""
+    from trw_memory._version import __version__
 
-
-def _major(version: str) -> int | None:
-    """The leading integer of *version*, or ``None`` when it has none (``"unknown"``)."""
-    head = version.split(".", 1)[0]
-    return int(head) if head.isdigit() else None
+    return __version__
 
 
 #: Total attempts per call: the first, plus exactly one retry (FR08 clause 1).
@@ -95,22 +89,14 @@ _MAX_ATTEMPTS = 2
 #: How often the auto-start wait re-reads the discovery file.
 _DISCOVERY_POLL_SECONDS = 0.05
 
-#: The auto-started daemon's argv after the interpreter: the module entry point,
-#: so auto-start does not depend on the console script being on ``PATH``.
-_DAEMON_ARGV = ("-m", "trw_memory.server", "serve", "http")
-
-#: How long a daemon that never published gets to exit on SIGTERM before SIGKILL.
-_STOP_GRACE_SECONDS = 2.0
-
-#: HTTP status the daemon returns for a missing or wrong bearer token.
-_UNAUTHORIZED_STATUS = 401
-
 #: Tools a retry may repeat after the request was sent: a second run lands the
-#: same way as the first (``memory_sync_apply`` rewrites the same id, synced). ``memory_store`` qualifies because ``call_tool``
+#: same way as the first. ``memory_store`` qualifies because ``call_tool``
 #: fixes its ``entry_id`` before the first attempt, so a replay updates the row
 #: the lost attempt wrote instead of adding a second one. ``memory_update`` (a
 #: correction) sets values, ``tags_add`` dedups and a closed prior is skipped, so a
-#: replay leaves the row as the first run did; only its audit event repeats.
+#: replay leaves the row as the first run did; only its audit event repeats. A
+#: conditional one (``if_revision``; ``memory_sync_apply`` always is) replays as
+#: ``conflict``: its caller re-reads.
 #: ``memory_reembed`` skips rows already in the active space.
 _REPLAYABLE_TOOLS = frozenset(
     {
@@ -133,35 +119,10 @@ _REPLAYABLE_TOOLS = frozenset(
         "memory_sync_mark_synced",
         "memory_update",
         "memory_vectors",
+        "memory_anchored",
         "memory_similar",
     }
 )
-
-
-def start_daemon_detached(paths: DaemonPaths) -> subprocess.Popen[bytes]:
-    """Spawn a daemon in its own session, detached from this process, and return it.
-
-    Its stderr goes to :attr:`DaemonPaths.start_log`, emptied on each start, so a
-    start that stalls or crashes before publishing leaves a reason behind. The
-    daemon installs no log handlers, so stderr carries warnings and tracebacks only.
-    """
-    logger.info("daemon_auto_start", discovery=str(paths.discovery))
-    log = open_private_log(paths.start_log)
-    try:
-        spawned = subprocess.Popen(  # noqa: S603 -- fixed argv: this interpreter and a module constant
-            [sys.executable, *_DAEMON_ARGV],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=log,
-            start_new_session=True,
-        )
-    finally:
-        os.close(log)
-    # This process stays the daemon's parent, so it must reap it: unreaped, a daemon
-    # that crashed stayed a zombie for the life of this process (2026-09-25). A thread,
-    # not a double fork: forking a multi-threaded process is unsafe on macOS.
-    threading.Thread(target=spawned.wait, name=f"trw-memory-daemon-reaper-{spawned.pid}", daemon=True).start()
-    return spawned
 
 
 def _stop_unpublished(spawned: object) -> bool:
@@ -171,46 +132,38 @@ def _stop_unpublished(spawned: object) -> bool:
     means it lives until someone kills it, and the next call spawns another beside
     it. A stub that spawned nothing (tests pass ``lambda _paths: None``) is not a process.
     """
-    if not isinstance(spawned, subprocess.Popen) or spawned.poll() is not None:
+    if not isinstance(spawned, SpawnedDaemon) or not spawned.stop():
         return False
-    spawned.terminate()
-    try:
-        spawned.wait(timeout=_STOP_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        with contextlib.suppress(ProcessLookupError):  # it exited between the check and the kill
-            spawned.kill()
-        spawned.wait()
     logger.warning("daemon_auto_start_stopped", pid=spawned.pid)
     return True
 
 
-def _chain(exc: BaseException) -> Iterator[BaseException]:
-    """*exc*, its causes and contexts, and the members of any exception group among them."""
-    seen: set[int] = set()
-    pending = [exc]
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        yield current
-        pending.extend(e for e in (current.__cause__, current.__context__) if e is not None)
-        members = getattr(current, "exceptions", None)  # an exception group; Python 3.10 has no builtin
-        if isinstance(members, tuple):
-            pending.extend(member for member in members if isinstance(member, BaseException))
+async def probe_endpoint(info: DaemonInfo, token: str | None, timeout: float) -> Literal["answered", "grant_refused"]:
+    """Send one MCP ping to *info*'s endpoint, never starting a daemon (PRD-CORE-310 FR05).
+
+    ``"grant_refused"`` still proves the endpoint serves: it authenticated the request and said no.
+
+    Raises:
+        DaemonUnreachableError: Nothing answered within *timeout* seconds.
+    """
+
+    async def _ping() -> None:
+        async with open_session(info, token, _package_version(), timeout=timeout, init_timeout=timeout) as client:
+            await client.ping()
+
+    try:
+        await asyncio.wait_for(_ping(), timeout)
+    except Exception as exc:  # classified here: a 401 is an answer, anything else is none
+        if is_unauthorized(exc):
+            return "grant_refused"
+        raise DaemonUnreachableError(f"{info.url} did not answer a ping ({type(exc).__name__})") from exc
+    return "answered"
 
 
-def _is_unauthorized(exc: BaseException) -> bool:
-    """Whether *exc* (or a cause in its chain) is a 401 rejection."""
-    return any(
-        getattr(getattr(current, "response", None), "status_code", None) == _UNAUTHORIZED_STATUS
-        for current in _chain(exc)
-    )
-
-
-def _never_sent(exc: BaseException) -> bool:
-    """Whether *exc* failed while connecting, so the daemon never saw the request."""
-    return any(isinstance(current, (httpx.ConnectError, httpx.ConnectTimeout)) for current in _chain(exc))
+#: Optional arguments added after 8.0's first daemon shipped, sent only when set: a daemon started before the
+#: upgrade refuses an unknown argument, so an unset one must not reach it (an unfiltered call keeps working),
+#: while a set one is refused explicitly rather than silently ignored (PRD-CORE-334 review r1).
+_OMIT_WHEN_UNSET: frozenset[str] = frozenset({"types"})
 
 
 def _forward(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -238,6 +191,9 @@ def _forward(fn: Callable[..., Any]) -> Callable[..., Any]:
         payload = dict(defaults)
         payload.update(zip(names, args, strict=False))
         payload.update(kwargs)
+        for late in _OMIT_WHEN_UNSET:
+            if late in payload and payload[late] is None:
+                del payload[late]
         return await self.call_tool(tool, payload)
 
     return wrapper
@@ -292,16 +248,19 @@ class DaemonClient:
             f"Inspect the file and remove it if no daemon is running, then retry."
         )
 
-    def _compatible(self, info: DaemonInfo) -> DaemonInfo:
-        """*info*, unless it serves another major version than this client's (PRD-CORE-302 C7)."""
-        mine = _major(_package_version())
-        theirs = _major(info.version)
-        if mine is None or theirs is None or mine == theirs:
+    def _compatible(self, info: DaemonInfo, why: str = "") -> DaemonInfo:
+        """*info*, unless it serves another major version than this client's (PRD-CORE-302 C7).
+
+        *why* names the reason the client did not replace it itself (DAEMON-AUTO-RESTART-ON-UPGRADE).
+        """
+        if not majors_differ(info.version, _package_version()):
             return info
+        not_replaced = f" The client did not replace it automatically: {why}." if why else ""
         raise DaemonVersionMismatchError(
             f"daemon_version_mismatch: the trw-memory daemon (pid {info.pid}) serves {info.version}, but this client "
-            f"is {_package_version()}; their tool signatures differ. No memory was read or written. Stop process "
-            f"{info.pid} and retry: the next call starts a daemon from this installation."
+            f"is {_package_version()}; their tool signatures differ. No memory was read or written.{not_replaced} "
+            f"The user should stop the old daemon (process {info.pid}); restarting the MCP client alone leaves it "
+            f"running. The next call then starts a daemon from this installation. {AGENT_MUST_NOT_STOP}"
         )
 
     def _attach(self) -> DaemonInfo:
@@ -312,10 +271,18 @@ class DaemonClient:
         second endpoint over a daemon that may still be serving.
         """
         result = read_live_discovery(self._paths)
+        if isinstance(result, DaemonInfo) and majors_differ(result.version, _package_version()):
+            pinned = self._instance is not None  # a pinned client refuses before any restart action
+            why = replace_older_daemon(
+                result, self._paths, self._config, self._token, pinned=pinned, mine=_package_version()
+            )
+            result = self._compatible(result, why) if why else read_live_discovery(self._paths)
         if isinstance(result, DaemonInfo):
             return self._compatible(result)
         if isinstance(result, DiscoveryInvalid):
             raise self._refuse_invalid(result)
+        if not self._config.memory_daemon_autostart:  # PRD-CORE-310 FR04: the one spawn site honours it
+            raise self._unreachable(f"{result.reason}, and auto-start is off (MEMORY_DAEMON_AUTOSTART=false)")
         spawned = start_daemon_detached(self._paths)
         deadline = time.monotonic() + self._config.memory_daemon_startup_timeout_seconds
         while time.monotonic() < deadline:
@@ -341,27 +308,24 @@ class DaemonClient:
         await self._sessions.retire()
 
     async def _call_once(self, info: DaemonInfo, name: str, arguments: dict[str, Any]) -> Any:
+        if name in _direct.DIRECT_TOOLS:
+            return await _direct.post_tool(info, self._token, _package_version(), name, arguments)
         if self._keep_session and not self._sessions.retired:
             held = await self._sessions.acquire(
-                (info.url, info.pid, info.started_at), lambda: Client(self._transport(info))
+                (info.url, info.pid, info.started_at), lambda: open_session(info, self._token, _package_version())
             )
             try:
                 return (await held.client.call_tool(name, arguments)).data
-            except ToolError:
-                raise  # the daemon answered: the session is fine
-            except Exception:
-                # A transport failure: the retry must not reuse this session. Released, not
-                # closed: another call may still be using it, and closes it when it returns.
-                await self._sessions.release(held)
+            except Exception as exc:
+                if not _direct.answered(exc):  # the daemon answering leaves the session fine
+                    # A transport failure: the retry must not reuse this session. Released, not
+                    # closed: another call may still be using it, and closes it when it returns.
+                    await self._sessions.release(held)
                 raise
             finally:
                 await self._sessions.done_with(held)
-        async with Client(self._transport(info)) as client:
+        async with open_session(info, self._token, _package_version()) as client:
             return (await client.call_tool(name, arguments)).data
-
-    def _transport(self, info: DaemonInfo) -> StreamableHttpTransport:
-        """*info*'s endpoint with this checkout's grant and this client's version (W45)."""
-        return StreamableHttpTransport(url=info.url, auth=self._token, headers={VERSION_HEADER: _package_version()})
 
     async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
         """Call a daemon-served tool, or fail closed.
@@ -387,6 +351,7 @@ class DaemonClient:
         if name == "memory_store" and not arguments.get("entry_id"):
             arguments["entry_id"] = "M-" + uuid4().hex[:16]
         last_error: BaseException | None = None
+        holder = ""
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             # Re-resolve on the retry. NFR02 requires that a daemon killed
             # mid-request results in either a restarted daemon serving the retry
@@ -402,13 +367,14 @@ class DaemonClient:
                 )
             try:
                 return await self._call_once(info, name, arguments)
-            except ToolError:
-                # The daemon answered: the tool itself refused (a namespace outside
-                # the grant, invalid input). Retrying cannot change that answer, and
-                # reporting it as "unreachable" would hide the refusal's reason.
-                raise
             except Exception as exc:  # transport failures are classified immediately below
-                if _is_unauthorized(exc):
+                if _direct.answered(exc) or isinstance(exc, DaemonProtocolError):
+                    # The daemon answered: the tool itself refused (a namespace outside
+                    # the grant, invalid input), or a direct read's reply was malformed.
+                    # Retrying cannot change that answer, and a retry's "unreachable"
+                    # would hide the reason.
+                    raise
+                if is_unauthorized(exc):
                     logger.warning("daemon_token_rejected_by_server", tool=name)
                     raise DaemonAuthError(
                         "the trw-memory daemon rejected this checkout's grant; nothing was re-minted. "
@@ -422,13 +388,35 @@ class DaemonClient:
                     max_attempts=_MAX_ATTEMPTS,
                     error=type(exc).__name__,
                 )
-                if name not in _REPLAYABLE_TOOLS and not _never_sent(exc):
+                if name not in _REPLAYABLE_TOOLS and not never_sent(exc):
                     raise DaemonUnreachableError(
                         f"the connection to the trw-memory daemon failed after {name} was sent "
                         f"({type(exc).__name__}), so it may have been applied. It was not retried: "
                         f"check its effect before running it again."
                     ) from exc
-        raise self._unreachable(type(last_error).__name__ if last_error else "unknown error") from last_error
+                # A client pinned to one daemon (``instance``) cannot use a successor, so it does not wait for one.
+                refused = never_sent(exc) and attempt < _MAX_ATTEMPTS and self._instance is None
+                if refused and not await self._await_withdrawal(info):
+                    remedy = info.stop_remedy(self._paths.discovery)
+                    holder = f"; daemon {info.pid} holds the record but refuses {info.url}: {remedy}"
+        reason = type(last_error).__name__ if last_error else "unknown error"
+        raise self._unreachable(reason + holder) from last_error
+
+    async def _await_withdrawal(self, refused: DaemonInfo) -> bool:
+        """Wait until the record that refused a connection is withdrawn, replaced or dead; whether it was.
+
+        A daemon draining after its idle window closes its socket before it withdraws
+        its record, so a retry at once dials the same closed port. Waiting, bounded by
+        the startup deadline, lets the retry attach to whatever serves next, a
+        successor started under the claim lock included (PRD-CORE-310 FR02).
+        """
+        deadline = time.monotonic() + self._config.memory_daemon_startup_timeout_seconds
+        while time.monotonic() < deadline:
+            if withdrawn(self._paths, refused):
+                return True
+            await asyncio.sleep(_DISCOVERY_POLL_SECONDS)
+        logger.warning("daemon_record_still_refusing", pid=refused.pid, url=refused.url)
+        return False
 
     # Below this line, every method is a typed stub whose ``...`` body never
     # runs: ``_forward`` (FR04) replaces each one, by name, right after the
@@ -461,6 +449,9 @@ class DaemonClient:
 
     async def vectors(self, namespace: str, ids: list[str]) -> Any:
         """Active-space vectors of *ids* in *namespace*, with that space and its collapse threshold, or fail closed."""
+
+    async def anchored(self, namespace: str, file: str, limit: int, status: str | None = None) -> Any:
+        """*namespace*'s rows anchored to the repo-relative *file* in ``memory_recall``'s row shape, or fail closed."""
 
     async def verify(self, namespace: str, project_root: str | None, settings: dict[str, object] | None = None) -> Any:
         """Run the maintain-verify sweep over *namespace* against *project_root*, or fail closed."""
@@ -506,8 +497,9 @@ class DaemonClient:
         *,
         status: str | None = None,
         tags: list[str] | None = None,
+        types: list[str] | None = None,
     ) -> Any:
-        """One keyset page of *namespace*'s rows as ``MemoryEntry`` JSON, or fail closed."""
+        """One keyset page of *namespace*'s rows as ``MemoryEntry`` JSON, or fail closed. *types* is sent only when set."""
 
     async def status(self, namespace: str) -> Any:
         """Count *namespace*'s rows through the daemon, or fail closed."""
@@ -521,8 +513,10 @@ class DaemonClient:
     async def sync_find(self, namespace: str, remote_id: str, ids: list[str]) -> Any:
         """The row in *namespace* a pulled learning maps to, or fail closed."""
 
-    async def sync_apply(self, namespace: str, entry: dict[str, Any], *, synced: bool = True) -> Any:
-        """Write a merged pulled row into *namespace* through the write gate, or fail closed."""
+    async def sync_apply(
+        self, namespace: str, entry: dict[str, Any], *, if_revision: str | None, synced: bool = True
+    ) -> Any:
+        """Write a merged pulled row into *namespace* over the revision it was read at, or fail closed."""
 
     async def search(self, namespace: str, **kwargs: Any) -> Any:
         """Filter one namespace's entries through the daemon, or fail closed."""
@@ -553,6 +547,7 @@ _FORWARDED_METHODS = (
     "update",
     "admit_shared",
     "vectors",
+    "anchored",
     "verify",
     "assertion_health",
     "graph_related",

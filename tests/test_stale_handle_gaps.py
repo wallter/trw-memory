@@ -9,11 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from trw_memory.exceptions import StaleConnectionError
-from trw_memory.storage._stale_handle import (
-    handle_integrity_regression,
-    reconnect,
-    run_integrity_check,
-)
+from trw_memory.storage._stale_handle import handle_integrity_regression, reconnect
 
 
 class TestHandleIntegrityRegression:
@@ -82,12 +78,3 @@ class TestReconnectPath:
         candidate.close.assert_called_once()
         old_conn.close.assert_not_called()
         backend._stale_detector.reset.assert_not_called()
-
-
-class TestRunIntegrityCheck:
-    def test_database_error_returns_false(self) -> None:
-        """sqlite3.DatabaseError in execute → return False (lines 99-100)."""
-        backend = MagicMock()
-        backend._conn.execute.side_effect = sqlite3.DatabaseError("corrupt")
-        result = run_integrity_check(backend)
-        assert result is False

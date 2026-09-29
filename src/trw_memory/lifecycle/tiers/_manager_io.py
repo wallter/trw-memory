@@ -24,6 +24,8 @@ def open_canonical_backend(
     config: MemoryConfig,
 ) -> StorageBackend:
     """Open the canonical backend used for cold-tier promotion and sweep."""
+    from trw_memory.integrations._backend import quarantine_ledger_for
+
     refuse_encryption_at_rest(config)
     db_path = base_dir / config.sqlite_db_name
     if config.storage_backend == "sqlite" and db_path.exists():
@@ -36,11 +38,12 @@ def open_canonical_backend(
             corrupt_backup_keep=config.memory_corrupt_backup_keep,
             rebuild_from_cold=config.memory_recovery_rebuild_from_cold,
             recovery_inline_max_bytes=config.memory_recovery_inline_max_bytes,
+            quarantine_ledger=quarantine_ledger_for(config),
         )
 
     from trw_memory.storage.yaml_backend import YAMLBackend
 
-    return YAMLBackend(entries_dir)
+    return YAMLBackend(entries_dir, quarantine_ledger=quarantine_ledger_for(config))
 
 
 def load_warm_entries(

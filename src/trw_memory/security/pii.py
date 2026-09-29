@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+from collections.abc import Iterator
 from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -113,10 +114,51 @@ _PROVIDER_SECRET_PATTERN = (
 # Regex patterns for each PII type
 # ---------------------------------------------------------------------------
 
+_EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+# The same pattern, allowed to START only where a local-part run starts. A plain
+# ``finditer`` retries every position inside a long local-part run that has no
+# ``@`` and rescans the rest of the run each time: quadratic, 0.85-4.3 s on one
+# 64 KiB field. A match that could start inside a run could also start at the
+# run's first character (the prefix is local-part characters too, and the ``@``
+# and domain are unchanged), so run starts find every leftmost match. See
+# ``_email_matches`` for the one position this guard cannot see.
+_EMAIL_AT_RUN_START = re.compile(r"(?<![a-zA-Z0-9._%+-])" + _EMAIL_PATTERN.pattern)
+
+
+def _email_matches(text: str) -> Iterator[re.Match[str]]:
+    """Exactly ``_EMAIL_PATTERN.finditer(text)``, in linear time.
+
+    After a match, ``finditer`` resumes at its end, which may sit INSIDE a
+    local-part run (``a@b.com.x@c.org`` resumes at ``.x@c.org``). The run-start
+    guard would reject that position, so it is tried first with an anchored
+    match; if it fails, no later position of that run can match either.
+    """
+    pos = 0
+    while (m := _EMAIL_PATTERN.match(text, pos) or _EMAIL_AT_RUN_START.search(text, pos)) is not None:
+        yield m
+        pos = m.end()
+
+
+def _mask_emails(text: str) -> str:
+    """``_EMAIL_PATTERN.sub("<email>", text)`` in linear time: the one email masker every egress path uses.
+
+    ``strip_pii`` and ``mask_query_credentials`` each carried their own copy of the pattern and called
+    ``re.sub``, which has the quadratic behaviour ``_email_matches`` removes (5.9 s on one 64 KiB field).
+    """
+    parts: list[str] = []
+    last = 0
+    for match in _email_matches(text):
+        parts.append(text[last : match.start()])
+        parts.append("<email>")
+        last = match.end()
+    parts.append(text[last:])
+    return "".join(parts)
+
+
 _PII_PATTERNS: list[tuple[PIIType, re.Pattern[str], float]] = [
     (
         PIIType.EMAIL,
-        re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"),
+        _EMAIL_PATTERN,
         0.95,
     ),
     (
@@ -375,7 +417,7 @@ def mask_query_credentials(text: str) -> str:
     :func:`strip_pii` treatment — the asymmetry is intentional, because a published
     learning is durable and a query is not.
     """
-    text = re.sub(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", "<email>", text)
+    text = _mask_emails(text)
     text = re.sub(_SECRET_PREFIX_PATTERN, "<api_key>", text, flags=re.IGNORECASE)
     return re.sub(_PROVIDER_SECRET_PATTERN, "<api_key>", text)
 
@@ -480,7 +522,9 @@ def detect_pii(
 
     # Regex-based detection
     for pii_type, pattern, confidence in _PII_PATTERNS:
-        for m in pattern.finditer(text):
+        # Identity dispatch: another entry with the same source would be the same
+        # cached object and take the (equivalent) linear path too.
+        for m in _email_matches(text) if pattern is _EMAIL_PATTERN else pattern.finditer(text):
             if pii_type == PIIType.IP_ADDRESS and _is_version_context(text, m.start()):
                 # Suppress a version string masquerading as an IPv4 address so
                 # we never false-positive-redact (closure re-audit #3).
@@ -608,11 +652,7 @@ def strip_pii(text: str) -> str:
     used to mask, now that the store path no longer mutates anything.
     """
     # Email addresses
-    text = re.sub(
-        r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
-        "<email>",
-        text,
-    )
+    text = _mask_emails(text)
     # API key / token patterns (prefix followed by 20+ alphanumeric chars).
     # Shares _SECRET_PREFIX_PATTERN with _PII_PATTERNS so the ``secret`` prefix
     # (and any future addition) stays in sync — the 2026-06-17 audit found this

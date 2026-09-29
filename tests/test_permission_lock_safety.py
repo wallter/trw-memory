@@ -422,7 +422,9 @@ def test_a_connect_whose_file_changes_underneath_is_refused(tmp_path: Path) -> N
     assert set(_OPEN) == before
 
 
-def test_connections_through_two_hard_link_names_protect_both(tmp_path: Path) -> None:
+def test_a_second_hard_link_name_is_refused_and_readers_of_either_name_too(tmp_path: Path) -> None:
+    """A store with two names would get two lock files (PRD-CORE-306 P1), so the second name's connect is refused."""
+    from trw_memory.exceptions import UnsupportedStorageError
     from trw_memory.storage.sqlite_backend import SQLiteBackend
     from trw_memory.tools.entry import open_checkout_file_fd
 
@@ -434,8 +436,12 @@ def test_connections_through_two_hard_link_names_protect_both(tmp_path: Path) ->
     SQLiteBackend(first).close()
     second = store_dir / "alias.db"
     os.link(first, second)
-    a, b = SQLiteBackend(first), SQLiteBackend(second)
-    b._conn.execute("BEGIN IMMEDIATE")
+    with pytest.raises(UnsupportedStorageError, match="more than one name"):
+        SQLiteBackend(second)
+    os.unlink(second)
+    a = SQLiteBackend(first)
+    os.link(first, second)
+    a._conn.execute("BEGIN IMMEDIATE")
     try:
         for name in ("memory.db", "alias.db", *(n for n in os.listdir(store_dir) if n.endswith(("-wal", "-shm")))):
             os.link(store_dir / name, checkout / f"{name}.bin")
@@ -445,9 +451,8 @@ def test_connections_through_two_hard_link_names_protect_both(tmp_path: Path) ->
             assert isinstance(refused, dict), name
         assert _other_process_can_write(first) is False
     finally:
-        b._conn.execute("ROLLBACK")
+        a._conn.execute("ROLLBACK")
         a.close()
-        b.close()
 
 
 def test_store_creation_never_opens_an_existing_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -510,7 +515,8 @@ def test_a_sidecar_appearing_beside_a_new_name_is_caught_at_admission(tmp_path: 
     holder = SQLiteBackend(first)
     alias = tmp_path / "alias.db"
     os.link(first, alias)
-    second = connect_registered(alias, sqlite3, str(alias))  # registered; its open sequence not yet run
+    # registered; its open sequence not yet run. Unlocked: the store lock refuses a second name outright.
+    second = connect_registered(alias, sqlite3, str(alias), store_lock=False)
     try:
         late_shm = Path(f"{alias}-shm")
         late_shm.write_bytes(b"")  # the new name's sidecar appears mid-open
@@ -644,7 +650,7 @@ def test_a_first_connect_to_a_name_that_appears_as_a_leased_file_waits(tmp_path:
             return sqlite3.connect(*args, **kwargs)  # type: ignore[arg-type]
 
     def connect_late() -> None:
-        connect_registered(late, _LinkingDriver, str(late)).close()
+        connect_registered(late, _LinkingDriver, str(late), store_lock=False).close()  # the lease, not the alias
         connected.set()
 
     worker = threading.Thread(target=connect_late)

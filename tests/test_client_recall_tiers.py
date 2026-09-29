@@ -97,7 +97,7 @@ class TestRecall:
         write_yaml(cold_file, payload)
 
         fake_backend = _FakeWarmBackend()
-        client._tier_manager._warm_store._get_warm_backend = lambda dim=None: fake_backend  # type: ignore[assignment,return-value]
+        client._tier_manager._warm_store._get_warm_backend = lambda dim=None, **_kw: fake_backend  # type: ignore[assignment,return-value]
         with patch.object(client, "_get_embedder", return_value=None):
             results = await client.recall("keyword promoted", limit=5)
 

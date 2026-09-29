@@ -24,7 +24,9 @@ SYNCED_SOURCE = "team_sync"
 
 
 def namespace_health(backend: SQLiteBackend, namespace: str, config: MemoryConfig) -> dict[str, object]:
-    """``{entries, synced, edges, has_relations, embedded, max_recall_count}`` for *namespace*.
+    """``{entries, synced, edges, has_relations, embedded, max_recall_count, types}`` for *namespace*.
+
+    ``types`` counts rows per type exactly (PRD-CORE-334 FR04).
 
     Canary rows count toward none of them. ``embedded`` is ``None`` when the store
     keeps no vectors, which a caller reports as not measured, never as zero; a read
@@ -40,6 +42,11 @@ def namespace_health(backend: SQLiteBackend, namespace: str, config: MemoryConfi
             "WHERE m.namespace = ? AND json_extract(m.metadata, '$.system_canary') IS NOT 'true'",
             (SYNCED_SOURCE, namespace),
         ).fetchone()
+        types = conn.execute(
+            "SELECT COALESCE(NULLIF(m.type, ''), 'pattern') AS kind, COUNT(*) FROM memories m WHERE m.namespace = ? "
+            "AND json_extract(m.metadata, '$.system_canary') IS NOT 'true' GROUP BY kind",
+            (namespace,),
+        ).fetchall()
         edges = conn.execute("SELECT COUNT(*) FROM memory_graph_edges WHERE namespace = ?", (namespace,)).fetchone()[0]
         has_relations = edges > 0 or _derives_a_relation(conn, namespace, config)
         # Counted in SQL, and a read error propagates: an unreadable index is not zero vectors.
@@ -59,6 +66,7 @@ def namespace_health(backend: SQLiteBackend, namespace: str, config: MemoryConfi
         "has_relations": has_relations,
         "embedded": None if embedded is None else int(embedded),
         "max_recall_count": int(max_recall),
+        "types": {str(kind): int(count) for kind, count in types},
     }
 
 

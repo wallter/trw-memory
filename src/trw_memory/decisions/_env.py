@@ -74,7 +74,11 @@ def _inspect_base_url(base_url: str) -> tuple[bool, str, str]:
         parsed = urlsplit(base_url)
         host = (parsed.hostname or "").lower()
         port = parsed.port
-    except ValueError:
+    except ValueError as exc:
+        # Never log `base_url` or the exception text: it is process-env configuration that may carry
+        # userinfo/credentials, and urlsplit's messages quote URL fragments (a non-numeric port, for one).
+        logger.debug("jev_base_url_malformed", error_type=type(exc).__name__)
+        # trw-fail-silent-allow: malformed-URL failure now logged above (without echoing the URL); allowed=False is the documented fail-closed abstain.
         return False, "", ""
     allowed = parsed.scheme == "https" and host in _ALLOWED_BASE_URL_HOSTS and port in (None, 443)
     return allowed, host, parsed.scheme

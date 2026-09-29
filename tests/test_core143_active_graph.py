@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any, cast
 
 from trw_memory._client_recall_graph import filter_conflicting_results
-from trw_memory.graph import _upsert_edge, update_entry_graph
+from trw_memory._graph_primitives import _upsert_edge
+from trw_memory.graph import update_entry_graph
 from trw_memory.models.memory import Anchor, MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 

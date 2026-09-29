@@ -306,7 +306,7 @@ def upsert_vector(
     emb_bytes = struct.pack(f"{dim}f", *embedding)
     if provenance is not None and not provenance.matches_vector(embedding):
         raise ValueError("vector provenance does not match the vector being stored")
-    proof_json = provenance.to_json() if provenance is not None else None
+    proof = (provenance.to_json(), provenance.space.key) if provenance is not None else (None, None)
     try:
         with lock:
             # Optional vector failures can be swallowed while an outer canonical
@@ -321,7 +321,7 @@ def upsert_vector(
                     "SELECT rowid FROM vec_index WHERE namespace = ? AND entry_id = ?", (namespace, entry_id)
                 ).fetchone()
                 rowid: int = row[0]
-                conn.execute("UPDATE vec_index SET provenance_json = ? WHERE rowid = ?", (proof_json, rowid))
+                conn.execute("UPDATE vec_index SET provenance_json = ?, space_key = ? WHERE rowid = ?", (*proof, rowid))
                 conn.execute("DELETE FROM vec_memories WHERE rowid = ?", (rowid,))
                 conn.execute(
                     "INSERT INTO vec_memories(rowid, embedding) VALUES(?, ?)",

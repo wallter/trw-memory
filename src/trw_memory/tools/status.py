@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import structlog
 
-from trw_memory.daemon._offload import run_serialized
+from trw_memory.daemon._lane import INTERACTIVE, run_on_lane
 from trw_memory.exceptions import AuthorizationError, ConfigError
 from trw_memory.integrations._backend import discover_namespace_backends
 from trw_memory.models.config import MemoryConfig, daemon_wide_security
@@ -265,4 +265,4 @@ def register_status_tool(mcp: McpServer) -> None:
             with create_backend_from_config(cfg, namespace or "default") as backend:
                 return memory_status_impl(namespace, backend=backend, config=cfg)
 
-        return await run_serialized(status)
+        return await run_on_lane(INTERACTIVE, namespace or "", status)

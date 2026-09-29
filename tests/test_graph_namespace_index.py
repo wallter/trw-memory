@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 import trw_memory
+from tests._optional_extras import vec_unavailable
 from trw_memory import _graph_namespace_index as nsindex
 from trw_memory import graph
 from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
@@ -29,6 +30,7 @@ from trw_memory.integrations._backend import create_backend_from_config, resolve
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.testing.daemon_reaper import daemon_env_passthrough
 
 pytest.importorskip("sqlite_vec")
 pytest.importorskip("numpy")
@@ -106,7 +108,12 @@ def _other_process(cfg: MemoryConfig, body: str) -> None:
         + "".join(f"    {line}\n" for line in body.strip().splitlines())
     )
     src = str(Path(trw_memory.__file__).resolve().parents[1])
-    subprocess.run([sys.executable, "-c", script], check=True, env={"PYTHONPATH": src, "PATH": ""}, timeout=120)
+    subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        env={"PYTHONPATH": src, "PATH": "", **daemon_env_passthrough()},
+        timeout=120,
+    )
 
 
 class TestWholeNamespaceEdges:
@@ -352,7 +359,7 @@ class TestBackendsWithoutAnIndex:
 
         backend = SQLiteBackend(Path(":memory:"), dim=DIM)
         if not backend.supports_vectors():
-            pytest.skip("sqlite-vec did not load for the in-memory store")
+            vec_unavailable("sqlite-vec did not load for the in-memory store")
         _write(backend, "M-a", E0)
         assert _write(backend, "M-b", E0) == 2
         assert len(nsindex.NAMESPACE_INDEX) == 1
@@ -396,7 +403,7 @@ def test_a_store_collected_inside_the_cache_guard_does_not_deadlock(monkeypatch:
     cache = nsindex.NamespaceIndexCache()
     backend = SQLiteBackend(Path(":memory:"), dim=DIM)
     if not backend.supports_vectors():
-        pytest.skip("sqlite-vec did not load for the in-memory store")
+        vec_unavailable("sqlite-vec did not load for the in-memory store")
     _put(backend, "M-a", E0)
     indexed = nsindex.namespace_candidates(backend, NS, cache=cache)
     assert indexed is not None

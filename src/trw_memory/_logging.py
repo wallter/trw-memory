@@ -127,10 +127,7 @@ def configure_logging(
         env_level = os.environ.get("TRW_LOG_LEVEL") or os.environ.get("LOG_LEVEL")
         level = getattr(logging, env_level.upper(), logging.INFO) if env_level else _verbosity_to_level(verbosity)
 
-    if json_output is None:
-        use_json = not sys.stderr.isatty()
-    else:
-        use_json = json_output
+    use_json = not sys.stderr.isatty() if json_output is None else json_output
 
     processors: list[structlog.types.Processor] = [
         structlog.contextvars.merge_contextvars,
@@ -167,10 +164,8 @@ def configure_logging(
 
     # Bind service version to all log records for incident triage
     try:
-        from importlib.metadata import version as _get_version
+        from trw_memory._version import __version__
 
-        structlog.contextvars.bind_contextvars(
-            service_version=_get_version("trw-memory"),
-        )
+        structlog.contextvars.bind_contextvars(service_version=__version__)
     except Exception:  # justified: best-effort — version binding is non-critical
         logging.getLogger(__name__).debug("service_version_binding_failed", exc_info=True)

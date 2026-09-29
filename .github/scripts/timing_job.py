@@ -21,9 +21,10 @@ import os
 import platform
 import subprocess
 import sys
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
+
+import defusedxml.ElementTree as ET
 
 MARKER = "requires_local_timing"
 
@@ -47,7 +48,7 @@ def summarize(junit: Path, raw: Path, *, revision: str, returncode: int) -> dict
     if not junit.is_file():
         result["status"] = "setup_error"
         return result
-    suites = ET.parse(junit).getroot()  # noqa: S314 - pytest's own junit file, written a line above
+    suites = ET.parse(junit).getroot()
     suite = suites if suites.tag == "testsuite" else suites.find("testsuite")
     if suite is None:
         result["status"] = "setup_error"

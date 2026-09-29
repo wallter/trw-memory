@@ -14,13 +14,17 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 
 if TYPE_CHECKING:
     from trw_memory.embeddings.provenance import EmbeddingSpace, StoredVector, VectorProvenance
     from trw_memory.retrieval.temporal_selection import TemporalSelection
+    from trw_memory.security.quarantine_ledger import LedgerView, QuarantineLedger
+
+
+K = TypeVar("K")
 
 
 class GraphEdge(NamedTuple):
@@ -85,6 +89,124 @@ class StorageBackend(ABC):
     threads without external synchronisation.
     """
 
+    #: PRD-CORE-333 FR02: the quarantine ledger this backend's reads are filtered
+    #: against. Every method that returns entry content calls :meth:`filter_quarantined`
+    #: (or composes :meth:`_quarantine_entry_filter` into its own ``entry_filter``), so a
+    #: row whose identity the ledger blocks never leaves storage -- whoever reads it and
+    #: however it got there. ``None`` (a backend built without a ledger: the quarantine
+    #: store itself, raw copies) and the empty ledger both filter nothing.
+    _quarantine_ledger: QuarantineLedger | None = None
+
+    def _quarantine_view(self) -> LedgerView | None:
+        """The ledger as this read call sees it, or ``None`` when it blocks nothing."""
+        ledger = self._quarantine_ledger
+        if ledger is None:
+            return None
+        view = ledger.view()
+        return view or None
+
+    def filter_quarantined(self, entries: list[MemoryEntry]) -> list[MemoryEntry]:
+        """*entries* minus every row the quarantine ledger currently blocks."""
+        view = self._quarantine_view()
+        return entries if view is None else view.filter(entries)
+
+    def _quarantine_withhold(self, found: dict[str, MemoryEntry]) -> dict[str, MemoryEntry]:
+        """A ``get_many`` result minus every row the ledger blocks (*found* itself when it blocks nothing)."""
+        view = self._quarantine_view()
+        return found if view is None else {key: entry for key, entry in found.items() if not view.blocks(entry)}
+
+    def _quarantine_visible_id(self, entry_id: str | None, namespace: str) -> str | None:
+        """*entry_id* when :meth:`get` would serve it; a dedup lookup cannot point at a hidden row."""
+        if entry_id is None or self._quarantine_ledger is None:
+            return entry_id
+        return entry_id if self.get(entry_id, namespace=namespace) is not None else None
+
+    def holds_id(self, entry_id: str, *, namespace: str) -> bool:
+        """Whether ``(namespace, entry_id)`` holds a row, WHATEVER the quarantine ledger says.
+
+        An identity probe for a write that must not land on an existing row (review r1
+        P0-1): :meth:`get` reads a ledger-blocked row as absent, so a check through it lets
+        an INSERT OR REPLACE overwrite that row. It returns no content, so it leaks none.
+        A filtering backend overrides it with a raw lookup; this default is exact only
+        while nothing is filtered, and refuses otherwise.
+        """
+        if self._quarantine_view() is not None:
+            raise NotImplementedError(f"{type(self).__name__} filters reads and has no unfiltered identity probe")
+        return self.get(entry_id, namespace=namespace) is not None
+
+    def _quarantine_admits(self, entry: MemoryEntry | None) -> MemoryEntry | None:
+        """:meth:`filter_quarantined` for one optional entry."""
+        view = self._quarantine_view()
+        return None if entry is None or (view is not None and view.blocks(entry)) else entry
+
+    def _quarantine_entry_filter(
+        self, entry_filter: Callable[[MemoryEntry], bool] | None
+    ) -> Callable[[MemoryEntry], bool] | None:
+        """*entry_filter* extended with the quarantine check, applied before a read's limit.
+
+        Returns *entry_filter* itself while the ledger is empty, so an unquarantined
+        store reads exactly as it did before the filter existed.
+        """
+        view = self._quarantine_view()
+        return entry_filter if view is None else view.entry_filter(entry_filter)
+
+    def _quarantine_limited(
+        self,
+        read: Callable[[Callable[[MemoryEntry], bool] | None], list[MemoryEntry]],
+        entry_filter: Callable[[MemoryEntry], bool] | None,
+        limit: int,
+    ) -> list[MemoryEntry]:
+        """Run a limited read with blocked rows dropped BEFORE the limit, as cheaply as possible.
+
+        *read* takes the ``entry_filter`` to run with. A caller predicate already takes the
+        predicate path, so the check joins it. Otherwise the plain (fast) read runs first
+        and is post-filtered; only when that dropped a row from a full page -- so rows past
+        the limit may be owed -- is the read repeated on the predicate path.
+        """
+        view = self._quarantine_view()
+        if view is None:
+            return read(entry_filter)
+        if entry_filter is None:
+            raw = read(None)
+            kept = view.filter(raw)
+            if len(kept) == len(raw) or len(raw) < limit:
+                return kept
+        return read(view.entry_filter(entry_filter))
+
+    def _quarantine_regrown(self, read: Callable[[int], list[MemoryEntry]], limit: int) -> list[MemoryEntry]:
+        """*limit* visible rows of a limited read with no keyset to resume from: re-read, larger, until filled.
+
+        Each re-read asks for as many more rows as the last one lost, so it ends once the
+        page is full or the source is exhausted (review r1 P2: filtering after the LIMIT
+        returned short pages).
+        """
+        size = limit
+        while True:
+            raw = read(size)
+            kept = self.filter_quarantined(raw)
+            if len(kept) >= limit or len(raw) < size:
+                return kept[:limit]
+            size += len(raw) - len(kept)
+
+    def _quarantine_keyset(
+        self,
+        fetch: Callable[[K | None, int], list[MemoryEntry]],
+        key: Callable[[MemoryEntry], K],
+        after: K | None,
+        limit: int,
+    ) -> list[MemoryEntry]:
+        """One filtered page of a keyset sweep: never short unless the source is exhausted.
+
+        Keyset sweeps read a short page as the end of the source (``_sweep.sweep``), so a
+        page thinned by the filter is refilled from past its last raw row instead of
+        returned short.
+        """
+        page = list(self.filter_quarantined(raw := fetch(after, limit)))
+        while len(raw) == limit and len(page) < limit:
+            raw = fetch(key(raw[-1]), limit)
+            page.extend(self.filter_quarantined(raw))
+        return page[:limit]
+
     @abstractmethod
     def store(self, entry: MemoryEntry) -> None:
         """Persist a new entry (or replace an existing one with the same id).
@@ -112,6 +234,22 @@ class StorageBackend(ABC):
 
         Returns:
             The :class:`MemoryEntry`, or ``None`` if not found.
+
+        Raises:
+            StorageError: If the read fails.
+        """
+        ...
+
+    @abstractmethod
+    def get_many(self, entry_ids: Sequence[str], *, namespace: str) -> dict[str, MemoryEntry]:
+        """The entries :meth:`get` would return for *entry_ids*, keyed by id, in one read where possible.
+
+        PRD-CORE-318 FR02: recall-time tier discovery resolves its kept rows with this
+        instead of one :meth:`get` per row. It is a read method on this ABC, so every
+        backend implements it and a census enumerating the ABC's read methods (the
+        PRD-CORE-333 backend-read quarantine filter) covers it by construction. An id
+        that is absent, foreign to *namespace*, or quarantined by the backend's read path
+        is simply missing from the result.
 
         Raises:
             StorageError: If the read fails.
@@ -372,6 +510,14 @@ class StorageBackend(ABC):
         """
         yield self
 
+    @contextlib.contextmanager
+    def read_snapshot(self) -> Iterator[StorageBackend]:
+        """Read-only: the body's reads see one consistent state (B71-60); the default reads live.
+
+        Hold it only across reads, never across encoding or other slow work.
+        """
+        yield self
+
     def checkpoint_wal(self, mode: str = "PASSIVE") -> Mapping[str, object]:
         """Checkpoint a write-ahead log, if the backend keeps one.
 
@@ -430,6 +576,27 @@ class StorageBackend(ABC):
         )
         return [entry.id for entry in found]
 
+    def anchored_to(self, namespace: str, file: str, *, status: MemoryStatus | None, limit: int) -> list[MemoryEntry]:
+        """Up to *limit* rows of *namespace* whose anchors name *file*, best first (PRD-CORE-332 FR03).
+
+        *file* is keyed by ``normalize_anchor_file``; a value it refuses matches
+        nothing. Ordered ``importance DESC, updated_at DESC, id ASC``; *limit* is
+        capped at ``MAX_RECALL_LIMIT``; *status* ``None`` means any status. This
+        default scans the namespace; SQLite answers from its ``anchor_postings`` index.
+        """
+        from trw_memory.retrieval.recall_policy import MAX_RECALL_LIMIT
+        from trw_memory.storage._anchor_index import anchor_files, normalize_anchor_file
+
+        key = normalize_anchor_file(file)
+        if key is None or limit <= 0:
+            return []
+        found = self.list_entries(
+            status=status, namespace=namespace, limit=1_000_000, entry_filter=lambda e: key in anchor_files(e.anchors)
+        )
+        found.sort(key=lambda entry: entry.id)
+        found.sort(key=lambda entry: (entry.importance, entry.updated_at), reverse=True)
+        return found[: min(limit, MAX_RECALL_LIMIT)]
+
     def add_graph_edges(self, namespace: str, edges: Sequence[GraphEdge]) -> None:
         """File *edges* under *namespace*, keeping any already there.
 
@@ -474,6 +641,19 @@ class StorageBackend(ABC):
             persist and query vectors; ``False`` when they no-op.
         """
         return False
+
+    def list_entries_by_id(
+        self, *, namespace: str, after_id: str | None = None, through_id: str | None = None, limit: int = 100
+    ) -> list[MemoryEntry]:
+        """*namespace*'s entries in id order, strictly after *after_id*: an optional capability of the
+        vector backends, for sweeps that must visit every row once while other writers edit them (an
+        edit moves a row in the ``updated_at`` order, never in this one; B71-86). *through_id* caps the
+        sweep, so rows inserted behind it cannot extend it forever."""
+        raise NotImplementedError(f"{type(self).__name__} cannot list entries by id")
+
+    def last_entry_id(self, *, namespace: str) -> str | None:
+        """The highest id in *namespace* (``None`` if empty): where a :meth:`list_entries_by_id` sweep ends."""
+        raise NotImplementedError(f"{type(self).__name__} cannot list entries by id")
 
     def upsert_vector(  # noqa: B027 -- optional vector capability default
         self, entry_id: str, embedding: list[float], *, namespace: str, provenance: VectorProvenance | None = None
@@ -584,6 +764,15 @@ class StorageBackend(ABC):
         """
         return None
 
+    def vectors_proven_in_space(self, *, namespace: str, space: EmbeddingSpace) -> int | None:
+        """How many of *namespace*'s rows hold a vector, when EVERY existing row's vector claims *space*.
+
+        ``None``: some vector claims another space or none, or this backend cannot
+        tell -- never "proven". The dense gate's question of the census, answered
+        without counting every space.
+        """
+        return None
+
     def recent_vector_records(self, *, namespace: str, limit: int) -> dict[str, StoredVector]:
         """Vectors of the *limit* most recently updated ACTIVE entries of *namespace*.
 
@@ -619,6 +808,14 @@ class StorageBackend(ABC):
         for entry in entries:
             self.store(entry)
         return len(entries)
+
+    def existing_ids(self, entry_ids: Sequence[str], *, namespace: str) -> set[str]:
+        """Which of *entry_ids* *namespace* holds. The default reads each; batch backends override."""
+        return {entry_id for entry_id in entry_ids if self.get(entry_id, namespace=namespace) is not None}
+
+    def delete_many(self, entry_ids: Sequence[str], *, namespace: str) -> int:
+        """:meth:`delete` each of *entry_ids* in *namespace*; return how many existed. Batch backends override."""
+        return sum(self.delete(entry_id, namespace=namespace) for entry_id in entry_ids)
 
     def search_fts(
         self,
@@ -665,3 +862,12 @@ class StorageBackend(ABC):
         exc_tb: object,
     ) -> None:
         self.close()
+
+
+def is_transactional(backend: object) -> bool:
+    """Whether *backend* overrides the no-op :meth:`StorageBackend.transaction`.
+
+    Only then is a read-check-write inside ``transaction()`` atomic; a caller whose
+    correctness rests on that (a conditional write, a checked move) refuses otherwise.
+    """
+    return getattr(type(backend), "transaction", None) is not StorageBackend.transaction

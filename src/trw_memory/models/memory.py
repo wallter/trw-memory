@@ -9,9 +9,27 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Literal
+from typing import Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+
+_StrEnumT = TypeVar("_StrEnumT", bound=Enum)
+
+
+def _coerce_str_enum(field: str, v: object, enum_cls: type[_StrEnumT], default: _StrEnumT) -> _StrEnumT:
+    """Shared body of every ``str, Enum`` field's before-validator: empty->*default*, else coerce or raise."""
+    if isinstance(v, enum_cls):
+        return v
+    if isinstance(v, str):
+        if not v:
+            return default
+        try:
+            return enum_cls(v)
+        except ValueError as err:
+            valid = ", ".join(member.value for member in enum_cls)
+            raise ValueError(f"{field} must be one of {valid}") from err
+    raise ValueError(f"{field} must be a string or {enum_cls.__name__} enum, got {type(v).__name__}")
+
 
 __all__ = [
     "Anchor",
@@ -19,6 +37,7 @@ __all__ = [
     "AssertionResult",
     "AssertionType",
     "Confidence",
+    "EvidenceLevel",
     "MemoryEntry",
     "MemoryIndex",
     "MemoryStatus",
@@ -62,6 +81,7 @@ class MemoryType(str, Enum):
     CONVENTION = "convention"
     HYPOTHESIS = "hypothesis"
     WORKAROUND = "workaround"
+    DECISION = "decision"  # PRD-CORE-334 FR01
 
 
 # PRD-CORE-110: Confidence levels for memory validation
@@ -73,6 +93,18 @@ class Confidence(str, Enum):
     MEDIUM = "medium"
     HIGH = "high"
     VERIFIED = "verified"
+
+
+# PRD-CORE-312-FR01: the author's own claim about HOW a fact was obtained --
+# distinct from ``Confidence`` (the post-hoc computed trust verdict). Defaults
+# to UNKNOWN: an untagged conclusion must never be silently promoted.
+class EvidenceLevel(str, Enum):
+    """Author-claimed evidence level for a memory entry (PRD-CORE-312 FR01)."""
+
+    OBSERVED = "observed"
+    VERIFIED = "verified"
+    INFERRED = "inferred"
+    UNKNOWN = "unknown"
 
 
 # PRD-CORE-110: Protection tiers for memory entries
@@ -225,6 +257,16 @@ class Anchor(BaseModel):
         return v[:200]
 
 
+#: The longest entry id a store accepts (checked at write time, not on read, so a row stored before the
+#: bound still loads). A re-embed cursor carries an id, so this also sizes the cursor token (B71-85).
+MAX_ENTRY_ID_CHARS = 4_096
+
+#: The longest ``content``/``detail`` a local store or update accepts, equal to the daemon's per-field
+#: TEXT bound (``daemon/_arg_bounds.py::TEXT``) -- one shared constant so the two limits cannot drift
+#: (PRD-CORE-331 FR07 / B71-94). The daemon imports this value rather than restating 64 * 1024.
+MAX_TEXT_FIELD_CHARS = 64 * 1024
+
+
 class MemoryEntry(BaseModel):
     """Individual memory entry stored in the memory system.
 
@@ -356,49 +398,23 @@ class MemoryEntry(BaseModel):
     @field_validator("type", mode="before")
     @classmethod
     def _coerce_type(cls, v: object) -> MemoryType:
-        """Coerce string values to MemoryType enum."""
-        if isinstance(v, str):
-            if not v:  # Empty string -> default (backward compat)
-                return MemoryType.PATTERN
-            try:
-                return MemoryType(v)
-            except ValueError as err:
-                raise ValueError(f"type must be one of {', '.join([t.value for t in MemoryType])}") from err
-        if isinstance(v, MemoryType):
-            return v
-        raise ValueError(f"type must be a string or MemoryType enum, got {type(v).__name__}")
+        return _coerce_str_enum("type", v, MemoryType, MemoryType.PATTERN)
 
     @field_validator("confidence", mode="before")
     @classmethod
     def _coerce_confidence(cls, v: object) -> Confidence:
-        """Coerce string values to Confidence enum."""
-        if isinstance(v, str):
-            if not v:  # Empty string -> default (backward compat)
-                return Confidence.UNVERIFIED
-            try:
-                return Confidence(v)
-            except ValueError as err:
-                raise ValueError(f"confidence must be one of {', '.join([c.value for c in Confidence])}") from err
-        if isinstance(v, Confidence):
-            return v
-        raise ValueError(f"confidence must be a string or Confidence enum, got {type(v).__name__}")
+        return _coerce_str_enum("confidence", v, Confidence, Confidence.UNVERIFIED)
+
+    @field_validator("evidence_level", mode="before")
+    @classmethod
+    def _coerce_evidence_level(cls, v: object) -> EvidenceLevel:
+        """PRD-CORE-312-FR01."""
+        return _coerce_str_enum("evidence_level", v, EvidenceLevel, EvidenceLevel.UNKNOWN)
 
     @field_validator("protection_tier", mode="before")
     @classmethod
     def _coerce_protection_tier(cls, v: object) -> ProtectionTier:
-        """Coerce string values to ProtectionTier enum."""
-        if isinstance(v, str):
-            if not v:  # Empty string -> default (backward compat)
-                return ProtectionTier.NORMAL
-            try:
-                return ProtectionTier(v)
-            except ValueError as err:
-                raise ValueError(
-                    f"protection_tier must be one of {', '.join([p.value for p in ProtectionTier])}"
-                ) from err
-        if isinstance(v, ProtectionTier):
-            return v
-        raise ValueError(f"protection_tier must be a string or ProtectionTier enum, got {type(v).__name__}")
+        return _coerce_str_enum("protection_tier", v, ProtectionTier, ProtectionTier.NORMAL)
 
     @field_validator("domain")
     @classmethod
@@ -454,6 +470,8 @@ class MemoryEntry(BaseModel):
     nudge_line: str = Field(default="", description="Nudge text for summary (max 80 chars)")
     expires: str = Field(default="", description="Expiration date/condition")
     confidence: Confidence = Field(default=Confidence.UNVERIFIED, description="Validation confidence")
+    # PRD-CORE-312-FR01: additive; a pre-migration row reads as UNKNOWN (NFR02).
+    evidence_level: EvidenceLevel = Field(default=EvidenceLevel.UNKNOWN, description="Author-claimed evidence level")
     task_type: str = Field(default="", description="Task type identifier")
     domain: list[str] = Field(default_factory=list, description="Domain tags (max 20)")
     phase_origin: str = Field(default="", description="Origin phase")

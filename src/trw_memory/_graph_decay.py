@@ -1,6 +1,6 @@
 """Importance boost / decay helpers for the graph layer.
 
-Belongs to the ``graph.py`` facade. Re-exported there for back-compat.
+Belongs to the ``graph.py`` facade, which re-exports its public names.
 
 3 helpers covering the importance-modulation pipeline:
 
@@ -11,7 +11,14 @@ Belongs to the ``graph.py`` facade. Re-exported there for back-compat.
   0.0 + record in outcome_history.
 - ``memory_decay_pass`` — batch decay sweep for entries unused for
   cutoff_days (default 90). Direct SQL for batch performance. Wired to
-  production by PRD-CORE-244 FR09 as a deferred-delivery step.
+  production by PRD-CORE-244 FR09 as a deferred-delivery step. Advances a
+  persisted keyset ``cursor`` over the table's ``(namespace, id)`` primary
+  key so a repeated pass reaches every eligible row before any repeats
+  (PRD-CORE-307 FR05): each pass examines the next *batch_size* rows after
+  the cursor, in primary-key order, whether or not they qualify -- so one
+  pass's cost is bounded by rows examined, not rows qualifying, and the
+  primary key's own index (present on every store) makes that scan a seek,
+  not a full table scan (NFR03), with no new index required.
 
 Plus 2 module constants: ``IMPORTANCE_BOOST`` and ``DECAY_DELTA``.
 
@@ -20,10 +27,10 @@ Extracted as PRD-DIST-245 Phase 2 batch 94.
 
 from __future__ import annotations
 
-import contextlib
 import sqlite3
 import threading
 from collections.abc import Collection
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Final
 
@@ -35,13 +42,6 @@ logger = structlog.get_logger(__name__)
 
 IMPORTANCE_BOOST = 0.05
 DECAY_DELTA = 0.1
-
-
-def _optional_lock_safe(lock: threading.Lock | None) -> contextlib.AbstractContextManager[bool]:
-    """Look up _optional_lock via the parent graph module."""
-    from trw_memory import graph as _graph_module
-
-    return _graph_module._optional_lock(lock)
 
 
 def apply_importance_boost(
@@ -98,8 +98,6 @@ def apply_importance_decay(
 #: nothing about whether anyone has used it since, and gating decay on it made
 #: importance a one-directional ratchet.
 _DECAY_PREDICATE: Final = "COALESCE(last_accessed_at, created_at) < ?"
-#: The most qualifying rows one pass counts; past it ``remaining`` is a lower bound (``remaining_capped``).
-DECAY_COUNT_MAX: Final = 10_000
 
 
 def memory_decay_pass(
@@ -109,18 +107,29 @@ def memory_decay_pass(
     *,
     lock: threading.Lock | None = None,
     namespaces: Collection[str] | None = None,
-) -> dict[str, int]:
+    cursor: tuple[str, str] | None = None,
+) -> dict[str, object]:
     """Lower the importance of memories unused for *cutoff_days*.
 
     *namespaces* narrows the pass to those namespaces (a daemon token's grant,
-    PRD-CORE-298 FR02); ``None`` decays the whole store.
+    PRD-CORE-298 FR02); ``None`` decays the whole store. *cursor* resumes the
+    keyset scan after a ``(namespace, id)`` pair a prior pass returned as
+    ``"next"``; ``None`` starts (or wraps to) the beginning.
 
     The caller owns the connection and the lock. ``cutoff_days`` and
-    ``batch_size`` are supplied by the production caller from typed config
-    (``TRWConfig.memory_decay_cutoff_days`` / ``memory_decay_batch_size``); the
-    literal defaults here exist only so a direct library caller has a sane one.
+    ``batch_size`` are supplied by the production caller (``tools.maintain._run_decay``)
+    from ``MemoryConfig.decay_cutoff_days`` / ``decay_batch_size``
+    (PRD-CORE-331 FR10 B71-135h); the literal defaults here exist only so a
+    direct library caller has a sane one.
 
-    Returns ``{"processed": int, "remaining": int, "total_decayed": int}``.
+    Returns ``{"processed": int, "total_decayed": int, "next": [namespace, id]
+    | None, "more": bool}``. ``"next"`` is the last row this pass examined --
+    not the last it decayed -- so a later pass resumes scanning forward even
+    through a run of ineligible rows; ``None`` means this pass reached the end
+    of the table (the next pass starts over). ``"more"`` is ``True`` exactly
+    when ``"next"`` is not ``None`` -- a cheap continuation signal that costs
+    nothing beyond the window this pass already read, unlike the O(namespace)
+    ``COUNT(*)`` a "remaining" count required (PRD-CORE-331 FR10).
     """
     if batch_size <= 0:
         msg = "batch_size must be positive"
@@ -129,9 +138,10 @@ def memory_decay_pass(
     effective_batch_size = min(batch_size, 1000)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=cutoff_days)).isoformat()
     scope = sorted(namespaces) if namespaces is not None else []
+    scope_predicate = f" AND namespace IN ({', '.join('?' * len(scope)) or 'NULL'})" if namespaces is not None else ""
+    seek_predicate = " AND (namespace, id) > (?, ?)" if cursor is not None else ""
+    seek_params: tuple[str, ...] = cursor if cursor is not None else ()
     predicate = _DECAY_PREDICATE
-    if namespaces is not None:
-        predicate += f" AND namespace IN ({', '.join('?' * len(scope)) or 'NULL'})"
 
     # Acquire the lock BEFORE both SELECT statements so concurrent backend
     # writes that hold the same lock cannot interleave on the shared connection
@@ -140,28 +150,26 @@ def memory_decay_pass(
     # not thread-safe for concurrent use without external serialisation.
     decayed = 0
     batch_now = datetime.now(timezone.utc).isoformat()
-    with _optional_lock_safe(lock):
-        rows = conn.execute(
-            # S608 justified: _DECAY_PREDICATE is a module-level Final literal,
-            # never caller input. It is interpolated rather than duplicated
-            # because the SELECT and the COUNT must select the SAME set — a
-            # drift between them would report a "remaining" computed over
-            # different rows than "processed", the class of silent miscount FR09
-            # exists to remove.
-            f"SELECT namespace, id, importance FROM memories WHERE {predicate} LIMIT ?",  # noqa: S608
-            (cutoff, *scope, effective_batch_size),
+    with lock or nullcontext():
+        # A window of the NEXT effective_batch_size rows in primary-key order,
+        # eligible or not (PRD-CORE-307 FR05): bounding by rows EXAMINED, not
+        # rows qualifying, is what lets the cursor advance past a long run of
+        # fresh rows instead of re-scanning them full-scan every pass forever.
+        # The primary key's own index makes this a seek (NFR03) -- see EXPLAIN
+        # QUERY PLAN coverage in tests/test_graph_decay.py.
+        window = conn.execute(
+            # S608 justified: predicate/scope_predicate/seek_predicate are built
+            # from a module-level Final literal and a caller-controlled *count*
+            # of placeholders only, never caller-controlled SQL text.
+            f"SELECT namespace, id, importance, ({predicate}) AS eligible FROM memories "  # noqa: S608
+            f"WHERE 1=1{seek_predicate}{scope_predicate} ORDER BY namespace, id LIMIT ?",
+            (cutoff, *seek_params, *scope, effective_batch_size),
         ).fetchall()
 
-        # Counted only up to DECAY_COUNT_MAX (+1 says "more"): an uncapped COUNT scanned every qualifying
-        # row on the daemon's serialized lane before a 1,000-row batch (rc9).
-        total = conn.execute(
-            f"SELECT COUNT(*) FROM (SELECT 1 FROM memories WHERE {predicate} LIMIT ?)",  # noqa: S608
-            (cutoff, *scope, DECAY_COUNT_MAX + 1),
-        ).fetchone()
-        total_qualifying = min(total[0] if total else 0, DECAY_COUNT_MAX)
-        capped = bool(total) and total[0] > DECAY_COUNT_MAX
         try:
-            for namespace, entry_id, raw_importance in rows:
+            for namespace, entry_id, raw_importance, eligible in window:
+                if not eligible:
+                    continue
                 new_value = max(round(float(raw_importance) - DECAY_DELTA, 4), 0.0)
                 outcome = (
                     f"importance_decay:delta=-{DECAY_DELTA:.2f}:"
@@ -180,9 +188,12 @@ def memory_decay_pass(
             logger.exception("memory_decay_pass_failed")
             raise
 
+    reached_end = len(window) < effective_batch_size
+    next_cursor = None if reached_end or not window else (window[-1][0], window[-1][1])
+
     return {
         "processed": decayed,
-        "remaining": max(total_qualifying - decayed, 0),
         "total_decayed": decayed,
-        **({"remaining_capped": True} if capped else {}),
+        "next": list(next_cursor) if next_cursor is not None else None,
+        "more": next_cursor is not None,
     }

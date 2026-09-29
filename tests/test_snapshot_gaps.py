@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -112,7 +114,7 @@ class TestLatestSnapshotParsedNone:
 
 class TestRestoreFromSnapshotOsError:
     def test_oserror_during_copy_raises_snapshot_error(self, tmp_path: Path) -> None:
-        """OSError from shutil.copy2 → SnapshotError (lines 371-372)."""
+        """OSError from the staged copy → SnapshotError."""
         from trw_memory.storage._snapshot import SnapshotError, snapshots_base_dir
 
         base_dir = tmp_path / "snapshots"
@@ -122,7 +124,7 @@ class TestRestoreFromSnapshotOsError:
         snapshot.write_bytes(b"fake snapshot data")
         db_path = tmp_path / "memory.db"
 
-        with patch("trw_memory.storage._snapshot.shutil.copy2", side_effect=OSError("no space")):
+        with patch("trw_memory.storage._snapshot.shutil.copyfileobj", side_effect=OSError("no space")):
             with pytest.raises(SnapshotError, match="snapshot restore failed"):
                 restore_from_snapshot(base_dir, snapshot, db_path)
 
@@ -196,11 +198,11 @@ def test_restore_preserves_database_until_staged_copy_succeeds(tmp_path, monkeyp
         path.write_bytes(b"prior sidecar")
     unrelated = tmp_path / "memory.db.unrelated.tmp"
     unrelated.write_bytes(b"not owned by restore")
-    files_before = set(tmp_path.iterdir())
+    files_before = set(tmp_path.iterdir()) | {tmp_path / "memory.db.oplock"}  # the store's permanent lock file
     failure = OSError("injected disk failure")
 
     def partial_copy(src, dst):
-        Path(dst).write_bytes(Path(src).read_bytes()[:32])
+        dst.write(src.read(32))
         raise failure
 
     def failed_replace(self, target):
@@ -210,7 +212,7 @@ def test_restore_preserves_database_until_staged_copy_succeeds(tmp_path, monkeyp
         raise failure
 
     if failure_stage == "partial_copy":
-        monkeypatch.setattr("trw_memory.storage._snapshot.shutil.copy2", partial_copy)
+        monkeypatch.setattr("trw_memory.storage._snapshot.shutil.copyfileobj", partial_copy)
     elif failure_stage == "replace":
         monkeypatch.setattr(Path, "replace", failed_replace)
     if failure_stage:
@@ -218,8 +220,11 @@ def test_restore_preserves_database_until_staged_copy_succeeds(tmp_path, monkeyp
             restore_from_snapshot(tmp_path, snapshot, db_path)
         assert caught.value.__cause__ is failure
         assert db_path.read_bytes() == before
-        assert all(path.read_bytes() == b"prior sidecar" for path in sidecars)
-        assert set(tmp_path.iterdir()) == files_before
+        if failure_stage == "partial_copy":
+            assert all(path.read_bytes() == b"prior sidecar" for path in sidecars)
+            assert set(tmp_path.iterdir()) == files_before
+        else:  # the replace follows the old store's checkpoint, which folded its WAL in (here: discarded a bogus one)
+            assert set(tmp_path.iterdir()) == files_before - set(sidecars)
     else:
         restore_from_snapshot(tmp_path, snapshot, db_path)
         assert db_path.read_bytes() == source
@@ -232,3 +237,31 @@ def test_restore_preserves_database_until_staged_copy_succeeds(tmp_path, monkeyp
         path.unlink(missing_ok=True)
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT value FROM evidence").fetchone() == ("original" if failure_stage else "restored",)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFOs only")
+def test_restore_refuses_a_fifo_snapshot_without_blocking(tmp_path):
+    """A FIFO in the snapshots dir is refused at once; opening it blocked with the exclusive restore lock held (sol r1)."""
+    from trw_memory.storage._snapshot import SnapshotError
+
+    snapshot = snapshots_base_dir(tmp_path) / "daily" / "pipe.db"
+    snapshot.parent.mkdir(parents=True)
+    os.mkfifo(snapshot)
+    outcome: list[BaseException | None] = []
+
+    def restore() -> None:
+        try:
+            restore_from_snapshot(tmp_path, snapshot, tmp_path / "memory.db")
+            outcome.append(None)
+        except BaseException as exc:  # handed to the asserting thread
+            outcome.append(exc)
+
+    worker = threading.Thread(target=restore, daemon=True)
+    worker.start()
+    worker.join(10)
+    if worker.is_alive():  # release the blocked open so the thread ends, then fail
+        os.close(os.open(snapshot, os.O_WRONLY | os.O_NONBLOCK))
+        worker.join(10)
+        pytest.fail("restore blocked opening a FIFO snapshot")
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], SnapshotError)

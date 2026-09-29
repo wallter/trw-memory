@@ -137,3 +137,62 @@ def test_the_tool_refuses_an_unbounded_page_or_a_malformed_cursor(arguments: dic
     answer = asyncio.run(tools["memory_graph_backfill"](namespace="default", **arguments))  # type: ignore[operator]
 
     assert answer["status"] == "invalid", answer
+
+
+# --- CORE-331 FR04: the off-lane writer census's site fix -----------------------------------------
+
+
+def test_a_stale_write_outcome_is_skipped_not_counted_as_processed(backend: SQLiteBackend) -> None:
+    """A write callable answering 'stale' (the row changed since the page was listed) counts as
+    skipped, like a canary -- never as processed or edges_built, and no exception escapes the page."""
+
+    def write(entry: MemoryEntry, _embedding: object, _config: object) -> dict[str, object]:
+        return {"status": "stale"} if entry.id == "L-bf-2" else {"status": "ok", "built": {"consolidation": 1}}
+
+    page = backfill_graph_page(backend, "default", after=None, limit=10, write=write)
+
+    assert (page["processed"], page["skipped"], page["edges_built"], page["complete"]) == (2, 1, 2, True)
+
+
+def test_an_error_write_outcome_is_counted_failed_and_the_page_continues(backend: SQLiteBackend) -> None:
+    """A write callable answering anything other than ok/stale (or raising) is a failure, passed like
+    any other poison row: it does not stop the rest of the page."""
+
+    def write(entry: MemoryEntry, _embedding: object, _config: object) -> dict[str, object]:
+        if entry.id == "L-bf-2":
+            raise RuntimeError("lane submission exploded")
+        return {"status": "ok", "built": {"consolidation": 1}}
+
+    page = backfill_graph_page(backend, "default", after=None, limit=10, write=write)
+
+    assert (page["processed"], page["failed"], page["edges_built"], page["complete"]) == (2, 1, 2, True)
+
+
+def test_the_served_backfill_re_reads_on_the_lane_and_skips_a_row_changed_since_the_page_was_listed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CORE-331 FR04: memory_graph_backfill serves off the write lane (exclusive=False); a row
+    updated between the page's listing and its edge write must not have that write land on stale
+    data. _graph_backfill_lane_write re-reads the row on the lane before writing; a changed row
+    (content-hashed, not just updated_at) comes back 'stale', not written."""
+    from trw_memory.integrations._backend import create_backend_from_config
+    from trw_memory.models.config import MemoryConfig
+    from trw_memory.tools import maintain
+
+    monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path))
+    monkeypatch.delenv("MEMORY_SINGLE_STORE_PATH", raising=False)
+    config = MemoryConfig()
+    namespace = "default"
+
+    with create_backend_from_config(config, namespace) as setup_backend:
+        setup_backend.store(MemoryEntry(id="L-race", content="original content"))
+        stale_snapshot = setup_backend.get("L-race", namespace=namespace)
+        setup_backend.update("L-race", namespace=namespace, content="changed after the page was listed")
+
+    write = maintain._graph_backfill_lane_write(namespace)
+    outcome = write(stale_snapshot, None, config)
+
+    assert outcome == {"status": "stale"}
+    with create_backend_from_config(config, namespace) as check_backend:
+        edges = check_backend._conn.execute("SELECT COUNT(*) FROM memory_graph_edges").fetchone()[0]
+    assert edges == 0  # nothing was written from the stale snapshot

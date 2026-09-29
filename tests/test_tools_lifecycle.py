@@ -370,6 +370,7 @@ class TestMemoryConsolidateImpl:
         mock_get_local_embedder.assert_called_once_with(
             model_name=cfg.embedding_model,
             dim=cfg.embedding_dim,
+            enabled=True,
         )
 
 

@@ -56,6 +56,10 @@ _DEFAULT_FEEDBACK_DECAY_MIN_FACTOR = 0.5
 #: overrides it with ``TRWConfig.scoring_default_days_unused``.
 _DEFAULT_FALLBACK_DAYS = 30
 
+#: Demotion targets of :func:`enforce_tier_distribution`: the top of the high and medium tiers.
+_TIER_HIGH_CEILING = 0.89
+_TIER_MEDIUM_CEILING = 0.69
+
 
 def _parse_expires(raw: str) -> date | None:
     """Parse an ``expires`` field to a date, or ``None`` when it never expires.
@@ -409,7 +413,7 @@ def enforce_tier_distribution(
     if critical and len(critical) / total > effective_critical_cap:
         critical_sorted = sorted(critical, key=lambda x: x[1])
         victim_id, victim_score = critical_sorted[0]
-        new_score = round(min(0.89, max(0.7, victim_score - 0.1)), 4)
+        new_score = round(min(_TIER_HIGH_CEILING, max(0.7, victim_score - 0.1)), 4)
         demotions.append((victim_id, new_score))
         logger.info(
             "tier_demotion",
@@ -433,7 +437,7 @@ def enforce_tier_distribution(
         )
         if high_sorted:
             victim_id, victim_score = high_sorted[0]
-            new_score = round(min(0.69, max(0.4, victim_score - 0.1)), 4)
+            new_score = round(min(_TIER_MEDIUM_CEILING, max(0.4, victim_score - 0.1)), 4)
             demotions.append((victim_id, new_score))
             logger.info(
                 "tier_demotion",

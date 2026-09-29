@@ -122,6 +122,11 @@ class DaemonPaths:
         return self.user_memory_dir / _START_LOG_NAME
 
     @property
+    def drain_key(self) -> Path:
+        """The 0600 daemon-management key ``memory_drain`` requires, rewritten on each start."""
+        return self.user_memory_dir / "drain.key"
+
+    @property
     def lock(self) -> Path:
         """The advisory single-instance lock file itself."""
         return self.user_memory_dir / f"{_LOCK_ANCHOR_NAME}.lock"

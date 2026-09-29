@@ -136,8 +136,7 @@ async def test_public_shared_window_finishing_preserves_unknown_and_defers_close
         )
 
     monkeypatch.setattr(
-        client,
-        "_merge_shared_results",
+        "trw_memory._client_recall.merge_shared_results",
         AsyncMock(
             return_value=[
                 row("closed", 1.0, valid_from="2020-01-01T00:00:00Z", invalid_from="2024-01-01T00:00:00Z"),

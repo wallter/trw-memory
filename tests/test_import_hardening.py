@@ -5,7 +5,7 @@ is removed in favour of ``untrusted_store``/``untrusted_deadline`` (a per-path r
 see, not a copied contextvar), ``memory_import_checkout_impl`` gains an optional ``lane`` seam that
 runs the untrusted phases before the destination-owning step, and the registered tool moves those
 untrusted phases onto :func:`trw_memory.daemon._offload.run_offloaded` while only the lane step keeps
-:func:`trw_memory.daemon._offload.run_serialized`. ``IMPORT_MAX_IDS`` no longer gates inside the impl:
+:func:`trw_memory.daemon._lane.run_on_lane`. ``IMPORT_MAX_IDS`` no longer gates inside the impl:
 the served tool's ``ids`` argument is bounded by ``daemon._arg_bounds.ArgumentBounds`` before the tool
 body runs at all (``tests/test_arg_bounds.py`` covers that contract directly). Every test here is
 expected to fail to import or to fail its assertions against the pre-contract code; each docstring
@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 from fastmcp import Client
 
+from tests._optional_extras import vec_unavailable
 from tests.test_tools_checkout_import import _DIM, _NS, _identical_copy, _project_store, _row
 from trw_memory.server import mcp
 from trw_memory.storage._connection import UNTRUSTED_LENGTH_LIMIT, connect, untrusted_deadline, untrusted_store
@@ -44,7 +45,7 @@ from trw_memory.tools.checkout_import import (
 def user_store(tmp_path: Path) -> SQLiteBackend:
     store = SQLiteBackend(tmp_path / "user.db", dim=_DIM)
     if not store.vec_available:
-        pytest.skip("sqlite-vec unavailable")
+        vec_unavailable("sqlite-vec unavailable")
     yield store
     store.close()
 
@@ -324,21 +325,24 @@ def test_the_served_tool_offloads_the_untrusted_phases_and_serializes_only_the_l
     from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
     from mcp.server.auth.provider import AccessToken
 
+    import trw_memory.daemon._lane as lane_mod
     import trw_memory.daemon._offload as offload_mod
 
-    real_offloaded, real_serialized = offload_mod.run_offloaded, offload_mod.run_serialized
+    real_offloaded, real_serialized = offload_mod.run_offloaded, lane_mod.submit
     calls: list[tuple[str, str]] = []
 
     async def _spy_offloaded(fn: Callable[..., object], /, *a: object, **kw: object) -> object:
         calls.append(("offloaded", getattr(fn, "func", fn).__name__))
         return await real_offloaded(fn, *a, **kw)
 
-    async def _spy_serialized(fn: Callable[..., object], /, *a: object, **kw: object) -> object:
+    def _spy_serialized(
+        budget: lane_mod.LaneBudget, tenant: str, fn: Callable[..., object], /, *a: object, **kw: object
+    ) -> object:
         calls.append(("serialized", getattr(fn, "func", fn).__name__))
-        return await real_serialized(fn, *a, **kw)
+        return real_serialized(budget, tenant, fn, *a, **kw)
 
     monkeypatch.setattr(offload_mod, "run_offloaded", _spy_offloaded)
-    monkeypatch.setattr(offload_mod, "run_serialized", _spy_serialized)
+    monkeypatch.setattr(lane_mod, "submit", _spy_serialized)
 
     copy_thread_names: list[str] = []
     real_copy = checkout_import._private_checkout_copy
@@ -421,15 +425,15 @@ def test_a_write_the_lane_reaches_after_the_queue_budget_writes_nothing_and_answ
 ) -> None:
     """sol rc9 round 2: the caller waited for the write lane with no bound, and the write's own deadline
     starts only once the lane runs it. Past the queue budget the step must not run at all."""
-    from trw_memory.daemon._offload import run_serialized
+    from trw_memory.daemon._lane import INTERACTIVE, run_on_lane
 
     monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "dest-storage"))
     monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
     ran: list[object] = []
 
     async def scenario() -> dict[str, object]:
-        lane = checkout_import._serialized_lane(_NS, asyncio.get_running_loop(), queue_seconds=0.2)
-        blocker = asyncio.ensure_future(run_serialized(time.sleep, 0.6))  # holds the one-thread lane
+        lane = checkout_import._serialized_lane(_NS, queue_seconds=0.2)
+        blocker = asyncio.ensure_future(run_on_lane(INTERACTIVE, "other", time.sleep, 0.6))  # holds the one-thread lane
         await asyncio.sleep(0.05)
         answer = await asyncio.to_thread(lane, lambda backend: ran.append(backend) or {"status": "ok"})
         await blocker
@@ -455,7 +459,7 @@ def test_a_write_already_running_at_the_queue_budget_is_waited_for_not_abandoned
         return {"status": "ok", "moved": 1, "skipped": 0}
 
     async def scenario() -> dict[str, object]:
-        lane = checkout_import._serialized_lane(_NS, asyncio.get_running_loop(), queue_seconds=0.1)
+        lane = checkout_import._serialized_lane(_NS, queue_seconds=0.1)
         return await asyncio.to_thread(lane, slow_write)
 
     answer = asyncio.run(scenario())

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -13,8 +13,10 @@ import structlog
 from trw_memory.embeddings.provenance import EmbeddingSpace, StoredVector, VectorProvenance
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.storage._anchor_index import anchored_entries
 from trw_memory.storage._change_feed import change_token, entries_changed_since
 from trw_memory.storage._crud_index_ops import insert_edges, read_edges
+from trw_memory.storage._transaction import transaction as _transaction_impl
 from trw_memory.storage._vector_ops import (
     delete_hype_siblings,
     delete_vector,
@@ -28,6 +30,7 @@ from trw_memory.storage._vector_ops import (
     vector_exists,
     vector_space_census,
 )
+from trw_memory.storage._vector_provenance_reads import vectors_proven_in_space
 from trw_memory.storage._wal_checkpoint import CheckpointResult
 from trw_memory.storage.interface import GraphEdge, NamespaceChangeToken
 
@@ -54,6 +57,12 @@ class SQLiteCheckpointVectorMixin:
 
     def transaction(self) -> contextlib.AbstractContextManager[Any]:
         raise NotImplementedError
+
+    @contextlib.contextmanager
+    def read_snapshot(self) -> Iterator[Any]:
+        """One deferred ``BEGIN``: the body's reads, sqlite-vec KNN included, share one WAL snapshot (B71-60)."""
+        with self._fresh_connection(), _transaction_impl(cast("SQLiteBackend", self), begin="BEGIN") as txn:
+            yield txn
 
     def checkpoint_wal(self, mode: str = "TRUNCATE") -> CheckpointResult:
         """Checkpoint the owning connection under the backend lock; fail open.
@@ -104,6 +113,11 @@ class SQLiteCheckpointVectorMixin:
             query = "SELECT id FROM memories WHERE namespace = ? AND source_identity = ? LIMIT ?"
             return [str(row[0]) for row in self._conn.execute(query, (namespace, source_identity, limit))]
 
+    def anchored_to(self, namespace: str, file: str, *, status: MemoryStatus | None, limit: int) -> list[MemoryEntry]:
+        backend = cast("SQLiteBackend", self)
+        with self._fresh_connection():
+            return backend.filter_quarantined(anchored_entries(backend, namespace, file, status=status, limit=limit))
+
     def add_graph_edges(self, namespace: str, edges: Sequence[GraphEdge]) -> None:
         with self._fresh_connection(), self._lock:
             insert_edges(cast("SQLiteBackend", self), namespace, edges)
@@ -123,6 +137,12 @@ class SQLiteCheckpointVectorMixin:
                 namespace=namespace,
                 skip_commit=self._skip_commit_depth != 0,
             )
+
+    def holds_id(self, entry_id: str, *, namespace: str) -> bool:
+        """Whether ``(namespace, entry_id)`` holds a row, ledger or not: ids only (``StorageBackend.holds_id``)."""
+        with self._fresh_connection(), self._lock:
+            row = self._conn.execute("SELECT 1 FROM memories WHERE namespace = ? AND id = ?", (namespace, entry_id))
+            return bool(row.fetchone() is not None)
 
     def vector_exists(self, entry_id: str, *, namespace: str) -> bool:
         with self._fresh_connection():
@@ -193,6 +213,10 @@ class SQLiteCheckpointVectorMixin:
         with self._fresh_connection():
             return vector_space_census(self._conn, self._lock, vec_available=self._vec_available, namespace=namespace)
 
+    def vectors_proven_in_space(self, *, namespace: str, space: EmbeddingSpace) -> int | None:
+        with self._fresh_connection():
+            return vectors_proven_in_space(self._conn, self._lock, self._vec_available, namespace, space.key)
+
     def recent_vector_records(self, *, namespace: str, limit: int) -> dict[str, StoredVector]:
         """``StorageBackend.recent_vector_records`` selecting ids only (same order as ``list_entries``)."""
         if not self._vec_available or limit <= 0:
@@ -233,4 +257,6 @@ class SQLiteCheckpointVectorMixin:
         self, namespace: str, token: NamespaceChangeToken, *, limit: int
     ) -> list[MemoryEntry] | None:
         """``StorageBackend.entries_changed_since`` over the rowid and updated_at indexes."""
-        return entries_changed_since(cast("SQLiteBackend", self), namespace, token, limit=limit)
+        backend = cast("SQLiteBackend", self)
+        changed = entries_changed_since(backend, namespace, token, limit=limit)
+        return None if changed is None else backend.filter_quarantined(changed)

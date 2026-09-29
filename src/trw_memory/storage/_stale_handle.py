@@ -3,7 +3,7 @@
 Belongs to the ``sqlite_backend.py`` facade. Re-exported there for
 back-compat — class methods become 1-line delegators.
 
-4 helpers covering the connection-resilience boundary:
+3 helpers covering the connection-resilience boundary:
 
 - ``handle_integrity_regression`` — IntegrityScheduler callback;
   flips ``integrity_warning`` on the backend.
@@ -11,7 +11,6 @@ back-compat — class methods become 1-line delegators.
   ``backend._conn`` and increments ``backend.reconnect_count``.
 - ``ensure_connection_fresh`` — best-effort stale probe; calls
   ``reconnect`` when ``backend._stale_detector.is_stale()``.
-- ``run_integrity_check`` — PRAGMA quick_check probe.
 
 Extracted as PRD-DIST-245 Phase 1 batch 89.
 """
@@ -19,7 +18,6 @@ Extracted as PRD-DIST-245 Phase 1 batch 89.
 from __future__ import annotations
 
 import contextlib
-import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
@@ -114,12 +112,3 @@ def fresh_connection(backend: SQLiteBackend) -> Iterator[None]:
         if backend._skip_commit_depth == 0:
             ensure_connection_fresh(backend)
         yield
-
-
-def run_integrity_check(backend: SQLiteBackend) -> bool:
-    """Run PRAGMA quick_check; return True when the DB is healthy."""
-    try:
-        rows = backend._conn.execute("PRAGMA quick_check").fetchall()
-        return len(rows) == 1 and rows[0][0] == "ok"
-    except sqlite3.DatabaseError:
-        return False

@@ -34,6 +34,7 @@ def get_local_embedder(
     *,
     model_name: str | None = None,
     dim: int | None = None,
+    enabled: bool = True,
 ) -> EmbeddingProvider | None:
     """Return an available local embedding provider, or ``None`` on failure.
 
@@ -45,6 +46,8 @@ def get_local_embedder(
     is never cached, and a provider that could not load is not cached either,
     so a later call retries.
     """
+    if not enabled:  # MemoryConfig.embeddings_enabled off: never touch the model (keyword-only)
+        return None
     key = (model_name or DEFAULT_EMBEDDING_MODEL, dim or _DEFAULT_DIM)
 
     def _build() -> EmbeddingProvider | None:

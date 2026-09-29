@@ -17,14 +17,17 @@ consistent single file even while another process is writing. A plain ``cp`` of
 ``memory.db`` without its ``-wal`` is exactly the silently-truncated backup this
 module exists to avoid.
 
-Snapshots are never pruned. A schema migration happens a handful of times in a
-store's life, and a rotation count would be a tunable whose wrong value silently
-discards the only copy of a user's memory; deleting one is an operator decision.
+Every version bump is snapshotted, since a bumped store is one the previous
+build refuses: rolling back to it needs this copy (PRD-CORE-306 S3). The newest
+:data:`KEEP_SNAPSHOTS` per store are kept; older ones are removed only after a
+new one is written, so the copy of the store as the last build left it is never
+the one removed.
 """
 
 from __future__ import annotations
 
 import contextlib
+import glob
 import sqlite3
 import time
 from collections.abc import Callable
@@ -42,6 +45,13 @@ __all__ = ["SchemaBackupError", "snapshot_before_migration"]
 
 #: Directory (relative to the database file) that holds pre-migration snapshots.
 BACKUP_DIR_NAME = "backups"
+#: Pre-migration snapshots kept per store; the oldest beyond it are removed once a new one is written.
+KEEP_SNAPSHOTS = 3
+
+#: Bytes one ``backup`` step copies between two deadline checks: what ``pages=4096`` copied at
+#: SQLite's default 4 KiB page, and ``UNTRUSTED_LENGTH_LIMIT``, the largest single value any other
+#: step of an untrusted open may build. A fixed page count is 256 MiB at a 64 KiB page (B71-88).
+_BACKUP_STEP_BYTES = 16 * 1024 * 1024
 
 
 class SchemaBackupError(RuntimeError):
@@ -215,12 +225,16 @@ def snapshot_before_migration(
         # holds a file descriptor on the half-written snapshot. ``closing``
         # makes the close explicit on every path, success and failure alike.
         with (
-            contextlib.closing(connect_registered(destination, sqlite3, destination)) as target,
+            contextlib.closing(connect_registered(destination, sqlite3, destination, store_lock=False)) as target,
             contextlib.closing(_open_snapshot_source(db_path)) as source,
         ):
             # A store trw-memory did not write, open under a deadline (``untrusted_store``): the progress
-            # handler never runs inside backup(), so the copy checks it between steps (rc8, B71-74).
-            source.backup(target, pages=4096, progress=_stop_past_deadline_of(db_path))
+            # handler never runs inside backup(), so the copy checks it between steps of at most
+            # _BACKUP_STEP_BYTES (rc8, B71-74, B71-88).
+            page_size = int(source.execute("PRAGMA page_size").fetchone()[0])
+            source.backup(
+                target, pages=max(1, _BACKUP_STEP_BYTES // page_size), progress=_stop_past_deadline_of(db_path)
+            )
             target.commit()
         harden_db_file_mode(destination)
     except (sqlite3.Error, OSError) as exc:
@@ -229,6 +243,14 @@ def snapshot_before_migration(
             f"refusing to migrate schema {from_version} -> {to_version} without one"
         ) from exc
 
+    try:
+        older = sorted(
+            backup_dir.glob(f"{glob.escape(db_path.name)}.pre-schema-*"), key=lambda path: path.stat().st_mtime
+        )
+        for stale in older[:-KEEP_SNAPSHOTS]:
+            stale.unlink()
+    except OSError as exc:  # the new snapshot is written: an old one left behind costs only space
+        logger.warning("schema_migration_snapshot_prune_failed", backups=str(backup_dir), error=str(exc))
     logger.info(
         "schema_migration_snapshot_written",
         database=str(db_path),

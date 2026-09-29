@@ -6,6 +6,7 @@ import threading
 from unittest.mock import MagicMock, patch
 
 from trw_memory import graph
+from trw_memory._graph_threads import GRAPH_THREADS
 from trw_memory.models.config import MemoryConfig
 
 from .conftest import make_entry
@@ -19,4 +20,4 @@ def test_schedule_failure_does_not_retain_unstarted_thread() -> None:
     ):
         assert graph.schedule_graph_update(entry, MagicMock()) is False
 
-    assert all(thread.name != "trw-memory-graph-M-schedule" for thread in graph._BACKGROUND_GRAPH_THREADS)
+    assert all(thread.name != "trw-memory-graph-M-schedule" for thread in GRAPH_THREADS._threads)

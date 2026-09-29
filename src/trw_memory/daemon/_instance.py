@@ -27,18 +27,20 @@ evidence: it carries the pid that liveness is checked against.
 from __future__ import annotations
 
 import os
-import shutil
 import socket
 from dataclasses import dataclass
 
 import structlog
 
+from trw_memory._tree_removal import remove_tree
 from trw_memory.daemon._discovery import (
     DaemonInfo,
     DiscoveryInvalid,
+    offers_drain,
     read_discovery_result,
     write_discovery,
 )
+from trw_memory.daemon._drain_key import create_drain_key
 from trw_memory.daemon._loopback import bind_loopback_socket, endpoint_url
 from trw_memory.daemon._paths import IMPORT_TMP_SUBDIR, DaemonPaths
 from trw_memory.exceptions import DaemonAlreadyRunningError, DaemonRecordInvalidError
@@ -57,15 +59,17 @@ class InstanceClaim:
     paths: DaemonPaths
     sock: socket.socket
     info: DaemonInfo
+    drain_key: str | None = None
 
 
-def claim_single_instance(paths: DaemonPaths, *, port: int, version: str) -> InstanceClaim:
+def claim_single_instance(paths: DaemonPaths, *, port: int, version: str, drain_key: bool = False) -> InstanceClaim:
     """Claim sole ownership of the store's daemon slot and bind its socket.
 
     Args:
         paths: Resolved daemon file locations.
         port: TCP port to bind, or 0 for an operating-system assignment.
         version: trw-memory version string to advertise.
+        drain_key: write the daemon-management key (:mod:`._drain_key`) under the lock, and advertise ``drain``.
 
     Returns:
         The claim, holding the listening socket and the written record.
@@ -105,15 +109,16 @@ def claim_single_instance(paths: DaemonPaths, *, port: int, version: str) -> Ins
         for work in () if import_tmp.is_symlink() else import_tmp.glob("*"):  # never delete through a link
             owner = work.name.split("-")[0]
             if not (owner.isdecimal() and _pid_is_live(int(owner), work)):
-                shutil.rmtree(work, ignore_errors=True)
+                remove_tree(work, purpose="orphan import copy sweep")
 
         sock = bind_loopback_socket(port)
         try:
-            info = write_discovery(paths, url=endpoint_url(sock), version=version)
+            key = create_drain_key(paths) if drain_key and offers_drain() else None
+            info = write_discovery(paths, url=endpoint_url(sock), version=version, drain_key=key is not None)
         except BaseException:
             sock.close()
             raise
-    return InstanceClaim(paths=paths, sock=sock, info=info)
+    return InstanceClaim(paths=paths, sock=sock, info=info, drain_key=key)
 
 
 def release_single_instance(paths: DaemonPaths, *, claimed: DaemonInfo | None = None) -> None:

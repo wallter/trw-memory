@@ -8,6 +8,17 @@ from __future__ import annotations
 import argparse
 
 
+def _add_namespace(parser: argparse.ArgumentParser, *, default: str | None = None) -> None:
+    """``--namespace``, worded for whichever default a subcommand uses."""
+    help_text = "Namespace" if default is not None else "Namespace (default: this checkout's pinned namespace)"
+    parser.add_argument("--namespace", default=default, help=help_text)
+
+
+def _add_format(parser: argparse.ArgumentParser, choices: list[str], *, default: str = "table") -> None:
+    """``--format``, stored as ``fmt`` (argparse would otherwise clash with the builtin)."""
+    parser.add_argument("--format", dest="fmt", choices=choices, default=default, help="Output format")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser with all subcommands."""
     parser = argparse.ArgumentParser(
@@ -44,51 +55,45 @@ def build_parser() -> argparse.ArgumentParser:
     p_store.add_argument("--detail", default="", help="Extended explanation")
     p_store.add_argument("--tags", action="append", default=[], help="Categorization tags (repeatable)")
     p_store.add_argument("--importance", type=float, default=0.5, help="Importance score 0.0-1.0")
-    p_store.add_argument("--namespace", default=None, help="Namespace (default: this checkout's pinned namespace)")
+    _add_namespace(p_store)
 
     # --- recall ---
     p_recall = subparsers.add_parser("recall", help="Search by keyword")
     p_recall.add_argument("query", help="Free-text search query")
     p_recall.add_argument("--limit", type=int, default=10, help="Max results")
     p_recall.add_argument("--tags", action="append", default=[], help="Filter tags (repeatable)")
-    p_recall.add_argument("--namespace", default=None, help="Namespace (default: this checkout's pinned namespace)")
-    p_recall.add_argument(
-        "--format", dest="fmt", choices=["table", "json", "compact"], default="table", help="Output format"
-    )
+    _add_namespace(p_recall)
+    _add_format(p_recall, ["table", "json", "compact"])
 
     # --- search ---
     p_search = subparsers.add_parser("search", help="Filter-based search")
     p_search.add_argument("--tags", action="append", default=[], help="Filter tags (repeatable)")
     p_search.add_argument("--status", default=None, help="Filter by status (active, obsolete, ...)")
     p_search.add_argument("--limit", type=int, default=50, help="Max results")
-    p_search.add_argument("--namespace", default=None, help="Namespace (default: this checkout's pinned namespace)")
-    p_search.add_argument(
-        "--format", dest="fmt", choices=["table", "json", "compact"], default="table", help="Output format"
-    )
+    _add_namespace(p_search)
+    _add_format(p_search, ["table", "json", "compact"])
 
     # --- consolidate ---
     p_consolidate = subparsers.add_parser("consolidate", help="Trigger consolidation")
-    p_consolidate.add_argument(
-        "--namespace", default=None, help="Namespace (default: this checkout's pinned namespace)"
-    )
+    _add_namespace(p_consolidate)
     p_consolidate.add_argument("--dry-run", action="store_true", help="Preview without writing")
 
     # --- export ---
     p_export = subparsers.add_parser("export", help="Export entries to file")
     p_export.add_argument("--format", dest="fmt", choices=["json", "yaml"], default="json", help="Export format")
     p_export.add_argument("--output", default=None, help="Output file path (default: stdout)")
-    p_export.add_argument("--namespace", default=None, help="Namespace (default: this checkout's pinned namespace)")
+    _add_namespace(p_export)
 
     # --- import ---
     p_import = subparsers.add_parser("import", help="Import entries from file")
     p_import.add_argument("path", help="Input file path")
-    p_import.add_argument("--namespace", default="default", help="Namespace")
+    _add_namespace(p_import, default="default")
     p_import.add_argument("--merge", action="store_true", help="Skip existing IDs")
 
     # --- status ---
     p_status = subparsers.add_parser("status", help="Show memory system status")
-    p_status.add_argument("--namespace", default=None, help="Namespace (default: this checkout's pinned namespace)")
-    p_status.add_argument("--format", dest="fmt", choices=["table", "json"], default="table", help="Output format")
+    _add_namespace(p_status)
+    _add_format(p_status, ["table", "json"])
 
     # --- reembed ---
     p_reembed = subparsers.add_parser(
@@ -99,14 +104,14 @@ def build_parser() -> argparse.ArgumentParser:
             "until they are re-encoded. Idempotent and resumable; never downloads a model."
         ),
     )
-    p_reembed.add_argument("--namespace", default="default", help="Namespace")
+    _add_namespace(p_reembed, default="default")
     p_reembed.add_argument("--batch-size", type=int, default=64, help="Rows encoded and committed per batch")
-    p_reembed.add_argument("--format", dest="fmt", choices=["table", "json"], default="table", help="Output format")
+    _add_format(p_reembed, ["table", "json"])
 
     # --- forget ---
     p_forget = subparsers.add_parser("forget", help="Delete a memory entry")
     p_forget.add_argument("memory_id", help="ID of the entry to delete")
-    p_forget.add_argument("--namespace", default=None, help="Namespace (default: this checkout's pinned namespace)")
+    _add_namespace(p_forget)
 
     # --- restore (PRD-CORE-140 + PRD-INFRA-065) ---
     p_restore = subparsers.add_parser(
@@ -132,7 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
             "2026-04-13.db / 2026-W15.db (PRD-INFRA-065)"
         ),
     )
-    p_restore.add_argument("--namespace", default="default", help="Namespace")
+    _add_namespace(p_restore, default="default")
     p_restore.add_argument(
         "--db",
         default=None,
@@ -153,7 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="daily",
         help="Snapshot tier to write (default: daily)",
     )
-    p_snap_create.add_argument("--namespace", default="default", help="Namespace")
+    _add_namespace(p_snap_create, default="default")
     p_snap_create.add_argument("--db", default=None, help="Optional DB path override")
     p_snap_create.add_argument(
         "--force",
@@ -162,19 +167,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     p_snap_list = snap_subs.add_parser("list", help="List available snapshots")
-    p_snap_list.add_argument("--namespace", default="default", help="Namespace")
+    _add_namespace(p_snap_list, default="default")
     p_snap_list.add_argument("--db", default=None, help="Optional DB path override")
-    p_snap_list.add_argument(
-        "--format",
-        dest="fmt",
-        choices=["table", "json"],
-        default="table",
-        help="Output format",
-    )
+    _add_format(p_snap_list, ["table", "json"])
 
     p_snap_rotate = snap_subs.add_parser("rotate", help="Prune snapshots to budget")
-    p_snap_rotate.add_argument("--namespace", default="default", help="Namespace")
+    _add_namespace(p_snap_rotate, default="default")
     p_snap_rotate.add_argument("--db", default=None, help="Optional DB path override")
+
+    # --- backup (PRD-CORE-311 FR02) ---
+    p_backup = subparsers.add_parser(
+        "backup",
+        help="Manage off-machine-ready gzip backup archives",
+    )
+    backup_subs = p_backup.add_subparsers(dest="backup_action", required=True)
+
+    p_backup_create = backup_subs.add_parser("create", help="Create a new backup archive")
+    _add_namespace(p_backup_create, default="default")
+    p_backup_create.add_argument("--db", default=None, help="Optional DB path override")
 
     # --- namespace (PRD-CORE-253 FR05) ---
     p_namespace = subparsers.add_parser(

@@ -1,0 +1,16 @@
+# PRD-SEC-019 FR08: uv package-ecosystem entry (dependency-version currency only).
+# PRD-SEC-020 FR04/FR05 later appends a github-actions entry below this one, in a
+# separate commit, without restructuring this single top-level `updates:` list.
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+  # PRD-SEC-020 FR04/FR05: Actions supply-chain hardening owns this entry; it only
+  # bumps pinned SHAs on the mirror's workflows and does not touch the uv entry above.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

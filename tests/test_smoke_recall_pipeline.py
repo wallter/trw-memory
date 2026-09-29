@@ -22,6 +22,9 @@ from trw_memory.retrieval.token_budget import estimate_entry_tokens, estimate_to
 # ---------------------------------------------------------------------------
 
 
+pytestmark = pytest.mark.smoke
+
+
 @pytest.fixture()
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClient:
     """Isolated MemoryClient backed by SQLite in tmp_path."""

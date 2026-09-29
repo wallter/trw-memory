@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -260,6 +261,44 @@ class TestFtsTableMigration:
         # Should be exactly 1, not 2 (no double-insert)
         assert count == 1
 
+    def test_fts_rebuild_checks_deadline_between_chunks(self, tmp_path: Path) -> None:
+        """The rebuild's one INSERT ... SELECT stops mid-table at a deadline and leaves nothing (B71-87).
+
+        An untrusted store's connection carries a progress handler (``_connection.connect``). SQLite
+        calls it between rows of the statement, so the rebuild is already chunked at one row: it stops
+        past the deadline by at most one row's tokenize (bounded by ``UNTRUSTED_LENGTH_LIMIT``), and the
+        interrupt rolls the whole statement back, so no half-indexed table is ever committed.
+        """
+        import sqlite3
+
+        from trw_memory.storage._schema import ensure_schema
+
+        conn = sqlite3.connect(str(tmp_path / "rebuild.db"))
+        ensure_schema(conn)
+        assert ensure_fts_table(conn) is True  # empty: the rebuild on the next call has every row to do
+        rows = [(f"L{i}", "term " * 50, "", "[]", "2024-01-01", "2024-01-01") for i in range(5000)]
+        conn.executemany(
+            "INSERT INTO memories (id, content, detail, tags, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)", rows
+        )
+        conn.commit()
+        calls = 0
+
+        def past_deadline_after_three_checks() -> int:
+            nonlocal calls
+            calls += 1
+            return int(calls > 3)
+
+        conn.set_progress_handler(past_deadline_after_three_checks, 1000)
+        assert ensure_fts_table(conn) is False
+        assert calls == 4  # interrupted on the first check past the deadline, not at the statement's end
+        conn.set_progress_handler(None, 0)
+        assert not conn.in_transaction
+        assert conn.execute("SELECT COUNT(*) FROM memories_fts").fetchone()[0] == 0  # none, not a part
+
+        assert ensure_fts_table(conn) is True  # the next open, in time, indexes every row
+        assert conn.execute("SELECT COUNT(*) FROM memories_fts").fetchone()[0] == len(rows)
+        conn.close()
+
 
 # ---------------------------------------------------------------------------
 # Special character handling
@@ -382,8 +421,16 @@ def _build_fts_scale_corpus(tmp_path: Path) -> tuple[SQLiteBackend, list[MemoryE
     return db, entries
 
 
+@pytest.fixture(scope="module")
+def _fts_scale_corpus(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[SQLiteBackend, list[MemoryEntry]]]:
+    """One read-only 10K corpus shared by the scale guard and its _budget twin."""
+    db, entries = _build_fts_scale_corpus(tmp_path_factory.mktemp("fts10k"))
+    yield db, entries
+    db.close()
+
+
 class TestFtsScaleGuard:
-    def test_fts_faster_than_like_at_10k(self, tmp_path: Path) -> None:
+    def test_fts_faster_than_like_at_10k(self, _fts_scale_corpus: tuple[SQLiteBackend, list[MemoryEntry]]) -> None:
         """FTS5 finds the expected row at 10K scale.
 
         The FTS-vs-LIKE throughput comparison is a host-resource measurement,
@@ -391,18 +438,20 @@ class TestFtsScaleGuard:
         (``requires_local_timing``, skipped on CI). This test keeps the
         deterministic correctness assertion gating.
         """
-        db, entries = _build_fts_scale_corpus(tmp_path)
+        db, entries = _fts_scale_corpus
 
         # A broken/disabled FTS path returning [] must not win by doing no work.
         results = db.search_fts("unique_rare_42", top_k=25)
         assert any(entry.id == entries[42].id for entry in results)
 
     @pytest.mark.requires_local_timing
-    def test_fts_faster_than_like_at_10k_budget(self, tmp_path: Path) -> None:
+    def test_fts_faster_than_like_at_10k_budget(
+        self, _fts_scale_corpus: tuple[SQLiteBackend, list[MemoryEntry]]
+    ) -> None:
         """FTS5 should be measurably faster than LIKE at 10K entries for rare terms."""
         import time
 
-        db, _entries = _build_fts_scale_corpus(tmp_path)
+        db, _entries = _fts_scale_corpus
 
         runs = 20
         rare = "unique_rare_42"

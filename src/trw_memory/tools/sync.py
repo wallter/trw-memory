@@ -11,7 +11,9 @@ from __future__ import annotations
 
 from pydantic import ValidationError
 
+from trw_memory.exceptions import SchemaValidationError
 from trw_memory.models._assertion_cap import OVERLONG, overlong
+from trw_memory.models._type_coercion import coerce_memory_type_lenient
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.rbac import Permission
@@ -71,14 +73,20 @@ def memory_sync_apply_impl(
     *,
     backend: StorageBackend,
     config: MemoryConfig,
+    if_revision: str | None,
     synced: bool = True,
 ) -> dict[str, object]:
-    """Write a merged pulled row into *namespace*: ``stored``, ``quarantined`` or ``blocked``.
+    """Write a merged pulled row into *namespace*: ``stored``, ``quarantined``, ``blocked`` or ``conflict``.
 
+    *if_revision* is the ``revision_of`` the row ``memory_sync_find`` returned (``None``: none);
+    a row that moved since is a ``conflict`` and nothing is written (PRD-CORE-308).
     ``synced=False`` leaves the row dirty: a merge holding local content the server lacks.
     """
     if refused := refused_namespace(namespace, Permission.WRITE, "sync_apply", config):
         return refused
+    kind, type_raw = coerce_memory_type_lenient(entry.get("type"))  # PRD-CORE-334 FR05: a newer client's type
+    if type_raw is not None and isinstance(meta := entry.get("metadata") or {}, dict):
+        entry = {**entry, "type": kind.value, "metadata": {**meta, "type_raw": type_raw}}
     try:
         row = MemoryEntry.model_validate(entry)
     except ValidationError as exc:
@@ -87,7 +95,10 @@ def memory_sync_apply_impl(
         return {"error": f"entry namespace {row.namespace!r} is not {namespace!r}", "status": "invalid"}
     if any(map(overlong, row.assertions)):  # a pulled row is a write like any other (rc6 C12)
         return {"error": OVERLONG, "status": "invalid"}
-    status, reason = apply_synced_entry(backend, config, row, synced=synced)
+    try:
+        status, reason = apply_synced_entry(backend, config, row, if_revision=if_revision, synced=synced)
+    except SchemaValidationError as exc:  # the write gate's refusal (an overlong id, non-UTF-8 text) is a verdict
+        return {"error": str(exc), "status": "invalid"}
     return {"status": status, "reason": reason}
 
 
@@ -121,13 +132,18 @@ def register_sync_tools(mcp: McpServer) -> None:
             lambda b, c: memory_sync_find_impl(namespace, remote_id, ids, backend=b, config=c),
         )
 
-    async def memory_sync_apply(namespace: str, entry: dict[str, object], synced: bool = True) -> dict[str, object]:
-        """Write a merged pulled row into *namespace* through the write gate; ``synced=False`` leaves it dirty."""
+    async def memory_sync_apply(
+        namespace: str, entry: dict[str, object], if_revision: str | None, synced: bool = True
+    ) -> dict[str, object]:
+        """Write a merged pulled row into *namespace* through the write gate, only over *if_revision*
+        (the ``revision_of`` the row read, ``None`` for none; else ``conflict``); ``synced=False`` leaves it dirty."""
         return await serve_namespace(
             namespace,
             Permission.WRITE,
             "sync_apply",
-            lambda b, c: memory_sync_apply_impl(namespace, entry, backend=b, config=c, synced=synced),
+            lambda b, c: memory_sync_apply_impl(
+                namespace, entry, backend=b, config=c, if_revision=if_revision, synced=synced
+            ),
         )
 
     for tool in (memory_sync_dirty_page, memory_sync_mark_synced, memory_sync_find, memory_sync_apply):

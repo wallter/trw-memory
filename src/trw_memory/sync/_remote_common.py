@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlparse
 
 import structlog
 from typing_extensions import TypedDict
+
+from trw_memory.platform_contact import platform_contact_enabled
+
+if TYPE_CHECKING:
+    from trw_memory.models.config import MemoryConfig
 
 logger = structlog.get_logger(__name__)
 
@@ -108,6 +114,31 @@ class SnapshotHashPayload(TypedDict):
     installation_id: str
 
 
+Blocked = Literal["disabled", "invalid_config"]
+
+
+def platform_contact_blocked(cfg: MemoryConfig, op: str, *, live: bool = True) -> Blocked | None:
+    """Why this call may not contact the platform now, or ``None`` when it may. Every sender asks first.
+
+    ``disabled``: learning sync is off, there is no platform URL, the in-process config says no contact,
+    or (``live``) the platform contact switch of the config's own project is off at this moment (read
+    at call time, B71-106), or the config has no project to read it from.
+    ``invalid_config``: the URL is not https. ``live=False`` is for starting the subscriber, whose loop
+    asks the live switch before every connection, so turning contact back on resumes it.
+    """
+    # The switch is read from the .trw whose config.yaml enabled sync (DECISION 1), never re-found;
+    # a config with no governing project has no switch to read, so it fails closed.
+    governing = cfg.project_root or (cfg.source_trw_dir and cfg.source_trw_dir.parent)
+    if not (cfg.sync_enabled and cfg.platform_url and cfg.platform_contact_enabled) or (
+        live and not (governing and platform_contact_enabled(governing))
+    ):
+        return "disabled"
+    if not is_valid_platform_url(cfg.platform_url):
+        logger.warning("platform_url_invalid", op=op)
+        return "invalid_config"
+    return None
+
+
 def is_valid_platform_url(platform_url: str) -> bool:
     if not platform_url.strip():
         return False
@@ -118,10 +149,9 @@ def is_valid_platform_url(platform_url: str) -> bool:
 
 
 #: The official platform host. Always trusted over https, regardless of what
-#: a project's tracked config claims ``platform_url`` is. Mirrors
-#: trw_mcp.state._platform_trust.DEFAULT_TRUSTED_PLATFORM_HOST (trw-memory
-#: cannot import trw-mcp, so this is a small, deliberately duplicated copy of
-#: the same trust boundary, not a shared import).
+#: a project's tracked config claims ``platform_url`` is. This trust boundary
+#: (the host allowlist and ``bearer_allowed_for``) is the only copy: trw-mcp's
+#: ``state._platform_trust.platform_auth_headers`` imports it.
 DEFAULT_TRUSTED_PLATFORM_HOST = "api.trwframework.com"
 
 #: Loopback hosts may receive the bearer over plain http — dev only.
@@ -176,8 +206,8 @@ def trusted_platform_hosts() -> frozenset[str]:
 def bearer_allowed_for(url: str) -> bool:
     """Return True iff the platform bearer API key may be attached to *url*.
 
-    Same policy as trw-mcp's ``state._platform_trust.bearer_allowed_for``:
-    https to a trusted host, or http to a loopback dev host. A project's
+    https to a trusted host, or http to a loopback dev host (trw-mcp's
+    ``platform_auth_headers`` uses this same function). A project's
     tracked ``MemoryConfig.platform_url`` can point anywhere it likes
     (self-hosted deployments stay possible); it just never causes that host
     to receive the credential.

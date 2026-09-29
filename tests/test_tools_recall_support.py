@@ -9,10 +9,16 @@ import pytest
 
 from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import MemoryEntry
+from trw_memory.models.memory import Anchor, MemoryEntry, MemoryStatus
+from trw_memory.retrieval.recall_policy import MAX_RECALL_LIMIT
 from trw_memory.security._runtime_quarantine import list_quarantined_entries
 from trw_memory.storage.sqlite_backend import SQLiteBackend
-from trw_memory.tools.recall_support import RECALL_DUP_THRESHOLD, memory_admit_shared_impl, memory_vectors_impl
+from trw_memory.tools.recall_support import (
+    RECALL_DUP_THRESHOLD,
+    memory_admit_shared_impl,
+    memory_anchored_impl,
+    memory_vectors_impl,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -126,3 +132,93 @@ def test_the_collapse_threshold_is_calibrated_to_the_loaded_model(
     answer = memory_vectors_impl([], "default", backend=backend, config=MemoryConfig())
 
     assert float(answer["dup_threshold"]) > RECALL_DUP_THRESHOLD  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# PRD-CORE-332 FR04 (S2): memory_anchored, the daemon read over the anchor index
+# ---------------------------------------------------------------------------
+
+
+def _anchored_row(
+    backend: SQLiteBackend, entry_id: str, file: str, namespace: str = "default", **fields: object
+) -> MemoryEntry:
+    entry = MemoryEntry(id=entry_id, content=f"lesson {entry_id}", namespace=namespace, **fields)
+    entry.anchors = [Anchor(file=file, symbol_name="sym")]
+    backend.store(entry)
+    return entry
+
+
+def test_memory_anchored_returns_anchored_rows(backend: SQLiteBackend) -> None:
+    kept = _anchored_row(backend, "L-kept", "httpx/_client.py", importance=0.9)
+    _anchored_row(backend, "L-low", "./httpx/_client.py", importance=0.2)
+    _anchored_row(backend, "L-elsewhere", "httpx/other.py")
+    _anchored_row(backend, "L-other-ns", "httpx/_client.py", namespace="project:other")
+
+    answer = memory_anchored_impl("default", "httpx/_client.py", 10, None, backend=backend)
+
+    assert answer["status"] == "ok"
+    rows = answer["memories"]
+    assert isinstance(rows, list)
+    assert [row["id"] for row in rows] == ["L-kept", "L-low"]
+    assert rows[0] == backend.get("L-kept", namespace="default").model_dump(mode="json")  # memory_recall's row shape
+    assert MemoryEntry.model_validate(rows[0]).anchors == kept.anchors
+
+
+def test_memory_anchored_filters_by_status(backend: SQLiteBackend) -> None:
+    _anchored_row(backend, "L-live", "a.py")
+    _anchored_row(backend, "L-gone", "a.py", status=MemoryStatus.OBSOLETE)
+
+    answer = memory_anchored_impl("default", "a.py", 10, "active", backend=backend)
+
+    assert [row["id"] for row in answer["memories"]] == ["L-live"]  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize(
+    ("limit", "status"),
+    [(0, None), (MAX_RECALL_LIMIT + 1, None), (10, "not-a-status")],
+)
+def test_memory_anchored_refuses_a_bad_limit_or_status(backend: SQLiteBackend, limit: int, status: str | None) -> None:
+    _anchored_row(backend, "L-1", "a.py")
+
+    answer = memory_anchored_impl("default", "a.py", limit, status, backend=backend)
+
+    assert answer["status"] == "invalid"
+    assert "memories" not in answer
+
+
+def test_memory_anchored_unnormalizable_file_is_an_empty_page(backend: SQLiteBackend) -> None:
+    _anchored_row(backend, "L-1", "a.py")
+
+    assert memory_anchored_impl("default", "/abs/a.py", 10, None, backend=backend) == {"status": "ok", "memories": []}
+
+
+async def test_memory_anchored_is_registered_replayable_and_bounded() -> None:
+    from trw_memory import server
+    from trw_memory.daemon import _arg_bounds, client
+
+    served = {tool.name for tool in await server.mcp.list_tools()}
+
+    assert "memory_anchored" in served
+    assert "memory_anchored" in server.REGISTERED_TOOL_NAMES
+    assert "memory_anchored" in client._REPLAYABLE_TOOLS
+    assert _arg_bounds.bound("memory_anchored", "file") == _arg_bounds.NAME
+
+
+async def test_daemon_client_anchored_forwards_to_memory_anchored() -> None:
+    from trw_memory.daemon.client import DaemonClient
+
+    calls: list[tuple[str, dict[str, object] | None]] = []
+
+    class _Recording(DaemonClient):
+        async def call_tool(self, name: str, arguments: dict[str, object] | None = None) -> object:
+            calls.append((name, arguments))
+            return {"status": "ok", "memories": []}
+
+    client = _Recording.__new__(_Recording)
+    await client.anchored(namespace="ns", file="a/b.py", limit=10, status="active")
+    await client.anchored("ns", "a/b.py", 5)
+
+    assert calls == [
+        ("memory_anchored", {"namespace": "ns", "file": "a/b.py", "limit": 10, "status": "active"}),
+        ("memory_anchored", {"namespace": "ns", "file": "a/b.py", "limit": 5, "status": None}),
+    ]

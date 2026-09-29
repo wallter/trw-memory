@@ -15,7 +15,9 @@ from tests._timing import assert_budget
 # keeps the deterministic assertion (and the write/provenance/security branch
 # coverage these heavy-write tests provide for the INFRA-020 90% gate) gating
 # on every runner including CI; ``test_rebuild_throughput_10k_files_budget``
-# carries the wall-clock SLO and is skipped on CI runners (PRD-QUAL-141).
+# carries the wall-clock SLO and is skipped on CI runners (PRD-QUAL-141). Both
+# read one module-scoped timed rebuild (_rebuilt_10k), so a run that
+# executes both on one worker pays for the 10k files once.
 from trw_memory.models.config import MemoryConfig
 from trw_memory.storage._cold_rebuild import _normalize_ts, rebuild_from_cold
 from trw_memory.storage.sqlite_backend import _resolve_cold_rebuild_base
@@ -142,34 +144,34 @@ def test_hydrator_covers_all_entry_columns() -> None:
     )
 
 
-@pytest.mark.slow
-def test_rebuild_throughput_10k_files(tmp_path: Path) -> None:
-    """NFR01: rebuild processes all 10,000 cold YAML files (gating; write/provenance/security coverage)."""
-    _write_10k_cold_files(tmp_path)
+@pytest.fixture(scope="module")
+def _rebuilt_10k(tmp_path_factory: pytest.TempPathFactory) -> tuple[int, float]:
+    """One timed 10k-file rebuild shared by the gating test and its _budget twin: (rebuilt, seconds)."""
+    root = tmp_path_factory.mktemp("rebuild10k")
+    _write_10k_cold_files(root)
 
-    conn = _open_fresh_db(tmp_path / "memory.db")
+    conn = _open_fresh_db(root / "memory.db")
     try:
-        rebuilt = rebuild_from_cold(tmp_path, conn)
+        started = time.monotonic()
+        rebuilt = rebuild_from_cold(root, conn)
+        elapsed = time.monotonic() - started
     finally:
         conn.close()
+    return rebuilt, elapsed
 
+
+@pytest.mark.slow
+def test_rebuild_throughput_10k_files(_rebuilt_10k: tuple[int, float]) -> None:
+    """NFR01: rebuild processes all 10,000 cold YAML files (gating; write/provenance/security coverage)."""
+    rebuilt, _elapsed = _rebuilt_10k
     assert rebuilt == 10_000, f"expected 10,000 rebuilt, got {rebuilt}"
 
 
 @pytest.mark.slow
 @pytest.mark.requires_local_timing
-def test_rebuild_throughput_10k_files_budget(tmp_path: Path) -> None:
+def test_rebuild_throughput_10k_files_budget(_rebuilt_10k: tuple[int, float]) -> None:
     """NFR01: rebuild must process 10,000 cold YAML files in under 30 seconds."""
-    _write_10k_cold_files(tmp_path)
-
-    conn = _open_fresh_db(tmp_path / "memory.db")
-    try:
-        started = time.monotonic()
-        rebuild_from_cold(tmp_path, conn)
-        elapsed = time.monotonic() - started
-    finally:
-        conn.close()
-
+    _rebuilt, elapsed = _rebuilt_10k
     assert_budget("rebuild_10k_files", elapsed, 30.0, "s")
 
 

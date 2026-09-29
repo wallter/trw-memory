@@ -54,6 +54,7 @@ from trw_memory._version import __version__
 _configure_library_logging()
 
 if TYPE_CHECKING:
+    from trw_memory._store_lock import StoreOp, store_access
     from trw_memory.client import MemoryClient
     from trw_memory.exceptions import (
         AuthorizationError,
@@ -69,13 +70,17 @@ if TYPE_CHECKING:
         RateLimitError,
         SchemaValidationError,
         StorageError,
+        StoreBusyError,
         ToolAlreadyRegisteredError,
+        UnsafeWriteError,
+        UnsupportedStorageError,
     )
     from trw_memory.models.config import MemoryConfig
     from trw_memory.models.events import MemoryEvent, MemoryEventType
     from trw_memory.models.memory import MemoryEntry, MemoryIndex, MemoryStatus
     from trw_memory.namespaces.path_mapping import namespace_to_path
     from trw_memory.namespaces.validation import validate_namespace
+    from trw_memory.safe_fs import append_beneath, write_beneath
 
 _EXCEPTIONS = (
     "AuthorizationError",
@@ -91,7 +96,10 @@ _EXCEPTIONS = (
     "RateLimitError",
     "SchemaValidationError",
     "StorageError",
+    "StoreBusyError",
     "ToolAlreadyRegisteredError",
+    "UnsafeWriteError",
+    "UnsupportedStorageError",
 )
 
 _LAZY: dict[str, tuple[str, str]] = {
@@ -103,7 +111,11 @@ _LAZY: dict[str, tuple[str, str]] = {
     "MemoryEntry": ("trw_memory.models.memory", "MemoryEntry"),
     "MemoryIndex": ("trw_memory.models.memory", "MemoryIndex"),
     "MemoryStatus": ("trw_memory.models.memory", "MemoryStatus"),
+    "StoreOp": ("trw_memory._store_lock", "StoreOp"),
+    "append_beneath": ("trw_memory.safe_fs", "append_beneath"),
+    "write_beneath": ("trw_memory.safe_fs", "write_beneath"),
     "namespace_to_path": ("trw_memory.namespaces.path_mapping", "namespace_to_path"),
+    "store_access": ("trw_memory._store_lock", "store_access"),
     "validate_namespace": ("trw_memory.namespaces.validation", "validate_namespace"),
 }
 
@@ -116,9 +128,13 @@ __all__ = [
     "MemoryEventType",
     "MemoryIndex",
     "MemoryStatus",
+    "StoreOp",
     "__version__",
+    "append_beneath",
     "namespace_to_path",
+    "store_access",
     "validate_namespace",
+    "write_beneath",
 ]
 
 

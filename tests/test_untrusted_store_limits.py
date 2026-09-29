@@ -18,10 +18,10 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
+from tests._optional_extras import vec_unavailable
 from tests.conftest import make_entry
 from trw_memory._graph_primitives import _upsert_edge
 from trw_memory.exceptions import StorageError
@@ -31,7 +31,6 @@ from trw_memory.storage._stale_handle import ensure_connection_fresh
 from trw_memory.storage._stale_handle_detector import sentinel_path
 from trw_memory.storage._untrusted_store import verify_untrusted_store
 from trw_memory.storage.sqlite_backend import SQLiteBackend
-from trw_memory.tools import _checkout_merge, checkout_import
 from trw_memory.tools.checkout_import import memory_import_checkout_impl
 
 #: 64 MiB, four times the cap: small enough to build on the old code, which let it through.
@@ -124,7 +123,7 @@ def test_trw_memory_own_schema_is_admitted_and_its_vectors_read_under_the_cap(tm
         backend = SQLiteBackend(own, dim=384, check_integrity_once=True)
         try:
             if not backend.vec_available:
-                pytest.skip("sqlite-vec unavailable")
+                vec_unavailable("sqlite-vec unavailable")
             chunk = backend._conn.execute("SELECT vectors FROM vec_memories_vector_chunks00").fetchone()[0]
             return set(backend.existing_vector_ids(namespace="default")), len(chunk)
         finally:
@@ -140,19 +139,42 @@ def user_store(tmp_path: Path) -> Iterator[SQLiteBackend]:
     store.close()
 
 
-def test_without_sqlite_length_limits_the_import_is_refused_as_unsupported_runtime(
-    tmp_path: Path, user_store: SQLiteBackend, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Python 3.10's ``sqlite3.Connection`` has no ``setlimit``: the copy is never opened there."""
+def test_oversize_refusal_names_the_supported_limit(tmp_path: Path, user_store: SQLiteBackend) -> None:
+    """A value over the untrusted-copy cap is refused as the documented 16 MiB limit, not a raw SQLite error (B80-70)."""
     source = tmp_path / "project.db"
-    _own_store(source, dim=4)
-    opened: list[object] = []
-    monkeypatch.setattr(_checkout_merge, "verify_untrusted_store", lambda *args: opened.append(args))
-    monkeypatch.setattr(checkout_import, "sqlite3", SimpleNamespace(Connection=type("Connection", (), {})))
+    store = SQLiteBackend(source, dim=4)
+    try:  # a store trw-memory wrote holds any size; only the import's copy is capped
+        store.store(
+            make_entry(
+                entry_id="L-1", namespace="default", content="row L-1", detail="x" * (UNTRUSTED_LENGTH_LIMIT + 1)
+            )
+        )
+    finally:
+        store.close()
+
     outcome = memory_import_checkout_impl("project:acme-1a2b3c4d", str(source), ["L-1"], backend=user_store)
-    assert outcome["status"] == "unsupported_runtime"
-    assert "3.11" in str(outcome["error"])
-    assert opened == []
+
+    assert outcome["status"] == "invalid"
+    assert "16 MiB, the supported size limit per row or value" in str(outcome["error"])
+    assert "too big" not in str(outcome["error"])
+
+
+def test_a_row_over_the_limit_in_two_smaller_fields_names_the_limit_too(
+    tmp_path: Path, user_store: SQLiteBackend
+) -> None:
+    """SQLite caps an encoded row as well as one value: two 9 MiB fields trip it too (sol r1 P2)."""
+    source = tmp_path / "project.db"
+    store = SQLiteBackend(source, dim=4)
+    nine = "x" * (9 << 20)
+    try:
+        store.store(make_entry(entry_id="L-1", namespace="default", content=f"row {nine}", detail=nine))
+    finally:
+        store.close()
+
+    outcome = memory_import_checkout_impl("project:acme-1a2b3c4d", str(source), ["L-1"], backend=user_store)
+
+    assert outcome["status"] == "invalid"
+    assert "16 MiB, the supported size limit per row or value" in str(outcome["error"])
 
 
 @pytest.mark.parametrize(

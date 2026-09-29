@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.e2e
+
 
 class TestSecurity:
     """Section 7 of E2E plan: PII detection and audit."""

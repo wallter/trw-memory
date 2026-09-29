@@ -73,7 +73,7 @@ class TestMemoryRecallImpl:
             write_yaml(cold_file, payload)
 
             fake_backend = _FakeWarmBackend()
-            manager._warm_store._get_warm_backend = lambda dim=None: fake_backend  # type: ignore[assignment,return-value]
+            manager._warm_store._get_warm_backend = lambda dim=None, **_kw: fake_backend  # type: ignore[assignment,return-value]
             result = memory_recall_impl(
                 "keyword promoted",
                 "project:default",

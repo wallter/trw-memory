@@ -14,12 +14,13 @@ import httpx
 import structlog
 
 from trw_memory.models.config import MemoryConfig
-from trw_memory.sync._remote_common import build_platform_headers
-from trw_memory.sync.remote import is_valid_platform_url
+from trw_memory.sync._remote_common import build_platform_headers, platform_contact_blocked
 
 logger = structlog.get_logger(__name__)
 
 RECONNECT_DELAY = 5.0  # seconds
+#: How often an open stream rechecks the platform contact switch (B71-106).
+SWITCH_POLL = 5.0  # seconds
 
 
 class SSESubscriber:
@@ -44,44 +45,50 @@ class SSESubscriber:
         self._pending_event_type: str | None = None
         self._active_client: httpx.Client | None = None
         self._active_response: httpx.Response | None = None
+        self._watcher: threading.Thread | None = None
 
     def start(self) -> None:
         """Start the SSE subscription in a daemon thread."""
-        if not self._cfg.sync_enabled or not self._cfg.platform_url:
+        if platform_contact_blocked(self._cfg, "sse_subscriber", live=False):
             return
-        if not is_valid_platform_url(self._cfg.platform_url):
-            logger.warning("sse_subscriber_invalid_platform_url")
-            return
-
-        self._thread = threading.Thread(
-            target=self._listen_loop,
-            name="sse-subscriber",
-            daemon=True,
-        )
+        self._thread = threading.Thread(target=self._listen_loop, name="sse-subscriber", daemon=True)
+        self._watcher = threading.Thread(target=self._watch_switch, name="sse-contact-watch", daemon=True)
         self._thread.start()
+        self._watcher.start()
         logger.debug("sse_subscriber_started")
 
     def stop(self) -> None:
         """Signal the subscriber to stop."""
         self._stop_event.set()
+        self._close_active()
+        for thread in (self._thread, self._watcher):
+            if thread and thread.is_alive():
+                thread.join(timeout=2.0)
+        logger.debug("sse_subscriber_stopped")
+
+    def _close_active(self) -> None:
         with self._connection_lock:
-            active_response = self._active_response
-            active_client = self._active_client
-            self._active_response = None
-            self._active_client = None
+            active_response, active_client = self._active_response, self._active_client
+            self._active_response = self._active_client = None
         if active_response is not None:
             active_response.close()
         if active_client is not None:
             active_client.close()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
-        logger.debug("sse_subscriber_stopped")
+
+    def _watch_switch(self) -> None:
+        """Close an open stream once platform contact is switched off; the listen loop then waits (B71-106)."""
+        while not self._stop_event.wait(timeout=SWITCH_POLL):
+            if platform_contact_blocked(self._cfg, "sse_subscriber"):
+                self._close_active()
 
     def _listen_loop(self) -> None:
         """Main event loop -- connects, reads SSE, reconnects on failure."""
         url = f"{self._cfg.platform_url.rstrip('/')}/v1/learnings/stream"
 
         while not self._stop_event.is_set():
+            if platform_contact_blocked(self._cfg, "sse_subscriber"):  # every connect and reconnect asks
+                self._stop_event.wait(timeout=RECONNECT_DELAY)
+                continue
             try:
                 # build_platform_headers is the ONE function that may build
                 # this header (see trw_memory.sync._remote_common); it drops
@@ -92,22 +99,27 @@ class SSESubscriber:
                 if self._last_event_id:
                     headers["Last-Event-ID"] = self._last_event_id
 
-                with httpx.Client(timeout=None) as client, client.stream("GET", url, headers=headers) as response:  # noqa: S113 — timeout=None is intentional: SSE long-poll connection must stay open indefinitely until a message arrives
-                    with self._connection_lock:
-                        self._active_client = client
-                        self._active_response = response
-                    try:
-                        for line in response.iter_lines():
+                client = httpx.Client(timeout=None)  # noqa: S113 — timeout=None is intentional: SSE long-poll connection must stay open indefinitely until a message arrives
+                # Registered BEFORE connecting, so stop() or the watcher can close a stalled handshake.
+                with self._connection_lock:
+                    if self._stop_event.is_set():  # stop() already ran: nothing may connect now
+                        client.close()
+                        return
+                    self._active_client = client
+                try:
+                    with client, client.stream("GET", url, headers=headers) as response:
+                        with self._connection_lock:
+                            self._active_response = response
+                        # The switch may have turned off during the handshake: ask again before reading.
+                        lines = () if platform_contact_blocked(self._cfg, "sse_subscriber") else response.iter_lines()
+                        for line in lines:
                             if self._stop_event.is_set():
                                 return
                             self._process_line(line)
-                    finally:
-                        with self._connection_lock:
-                            if self._active_response is response:
-                                self._active_response = None
-                            if self._active_client is client:
-                                self._active_client = None
-            except (httpx.HTTPError, OSError):
+                finally:
+                    with self._connection_lock:
+                        self._active_response = self._active_client = None
+            except (httpx.HTTPError, httpx.StreamError, OSError):  # StreamError: closed by stop() or the watcher
                 logger.debug("sse_connection_error", exc_info=True)
 
             if not self._stop_event.is_set():

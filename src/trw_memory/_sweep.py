@@ -17,14 +17,21 @@ import time
 from collections.abc import Callable, Sequence
 from typing import TypeVar
 
+from trw_memory.models.memory import MAX_ENTRY_ID_CHARS
+
 __all__ = ["decode_token", "encode_token", "sweep"]
 
 T = TypeVar("T")
 K = TypeVar("K")
 
-#: A cursor token is caller-supplied on the way back in: bound what gets parsed. Entry ids carry
-#: no length cap of their own, so this leaves room for any sane one.
-MAX_TOKEN_CHARS = 4096
+#: The parts a cursor key may have, and the longest each may be: an entry id, the longest key part a
+#: store holds (B71-85: a 4,096-character token cap refused a key the store had just accepted).
+MAX_TOKEN_PARTS = 3
+MAX_KEY_PART_CHARS = MAX_ENTRY_ID_CHARS
+#: A cursor token is caller-supplied on the way back in: bound what gets parsed. Room for the longest
+#: key with every character JSON-escaped (at most six characters each: a control character; the rest
+#: is written as itself) plus quotes, commas and brackets, so any key encode_token accepts fits.
+MAX_TOKEN_CHARS = 2 + MAX_TOKEN_PARTS * (6 * MAX_KEY_PART_CHARS + 3)
 
 
 def sweep(
@@ -73,10 +80,9 @@ def encode_token(parts: Sequence[str]) -> str:
     """An opaque cursor token for a key made of strings; ``ValueError`` if :func:`decode_token` would refuse it."""
     if not all(isinstance(part, str) for part in parts):
         raise ValueError("a cursor key is made of strings")
-    token = json.dumps(list(parts), separators=(",", ":"))
-    if len(token) > MAX_TOKEN_CHARS:
-        raise ValueError(f"cursor longer than {MAX_TOKEN_CHARS} characters")
-    return token
+    if len(parts) > MAX_TOKEN_PARTS or any(len(part) > MAX_KEY_PART_CHARS for part in parts):
+        raise ValueError(f"a cursor key is at most {MAX_TOKEN_PARTS} parts of {MAX_KEY_PART_CHARS} characters")
+    return json.dumps(list(parts), separators=(",", ":"), ensure_ascii=False)  # one char per non-BMP char
 
 
 def decode_token(token: str, arity: int) -> list[str]:

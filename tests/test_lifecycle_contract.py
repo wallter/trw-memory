@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import tempfile
 from collections.abc import Iterator
-from typing import cast
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -98,11 +98,93 @@ def test_invalid_patch_is_refused_and_nothing_is_written(
 
 
 def test_unsubstantiated_verified_promotion_is_refused(store: tuple[StorageBackend, MemoryConfig]) -> None:
-    result = _update(store, "L-1", confidence="verified")
+    # PRD-CORE-312-FR02: evidence_level="verified" isolates this test to the
+    # ARTIFACT-substantiation axis; the evidence-level axis has its own test below.
+    result = _update(store, "L-1", confidence="verified", evidence_level="verified")
 
     assert result["status"] == "invalid"
     assert result["reason"] == "unsubstantiated_verified"
     assert _get(store, "L-1").confidence == "unverified"
+
+
+def _seed_legacy_violation(backend: StorageBackend) -> None:
+    """Simulate a pre-FR01 row: ``confidence='verified'`` with no evidence_level ever
+    recorded, written by a release before the invariant existed. No CURRENT write path
+    can create this state (that is the point of the invariant), so the only honest way
+    to seed it in a test is the same way a real legacy row got there: underneath the
+    invariant, via a raw column write.
+    """
+    sqlite_backend = cast("Any", backend)
+    with sqlite_backend._lock:
+        sqlite_backend._conn.execute(
+            "UPDATE memories SET confidence = 'verified' WHERE namespace = ? AND id = ?",
+            (NAMESPACE, "L-1"),
+        )
+        sqlite_backend._conn.commit()
+
+
+_SUBSTANTIATING_ASSERTION = {"type": "glob_exists", "target": "pyproject.toml"}
+
+
+def test_unverified_evidence_level_promotion_is_refused(store: tuple[StorageBackend, MemoryConfig]) -> None:
+    """PRD-CORE-312-FR02: a promotion to 'verified' also needs Observed/Verified evidence."""
+    result = _update(
+        store,
+        "L-1",
+        confidence="verified",
+        evidence_level="inferred",
+        assertions=[_SUBSTANTIATING_ASSERTION],
+    )
+
+    assert result["status"] == "invalid"
+    assert result["reason"] == "verified_requires_observed_or_verified_evidence"
+    assert _get(store, "L-1").confidence == "unverified"
+
+
+def test_evidence_only_downgrade_on_an_already_verified_row_is_refused(
+    store: tuple[StorageBackend, MemoryConfig],
+) -> None:
+    """PRD-CORE-312-FR02 round-1 review: an update that never names ``confidence``
+    must still be judged when the ROW is already 'verified' -- an evidence-only
+    edit that drops evidence_level to 'inferred' on a verified row is the same
+    poisoning shape as promoting straight to verified+inferred. Redesigned (round
+    3) as a data invariant in ``_crud_ops.update()``: a NEW violation (this row was
+    NOT already violating) is refused regardless of which named field introduced it.
+    """
+    backend, _cfg = store
+    result = _update(
+        store,
+        "L-1",
+        confidence="verified",
+        evidence_level="verified",
+        assertions=[_SUBSTANTIATING_ASSERTION],
+    )
+    assert result["status"] == "updated"
+    assert _get(store, "L-1").confidence == "verified"
+
+    result = _update(store, "L-1", evidence_level="inferred")
+
+    assert result["status"] == "invalid"
+    assert result["reason"] == "verified_requires_observed_or_verified_evidence"
+    assert _get(store, "L-1").evidence_level == "verified", "the refused downgrade must not have landed"
+
+
+def test_legacy_verified_row_can_still_be_retired(store: tuple[StorageBackend, MemoryConfig]) -> None:
+    """PRD-CORE-312-FR02 round-2 review: a patch touching neither ``confidence``
+    nor ``evidence_level`` must not be refused merely for carrying a PRE-EXISTING
+    (legacy) violation forward unchanged -- else a legacy 'verified' row (no
+    evidence_level ever recorded -> UNKNOWN) could never be retired
+    (``status=obsolete``) or edited again, which would also silently defeat FR04's
+    own auto-retraction (``apply_correction`` with only ``status`` set).
+    """
+    backend, _cfg = store
+    _seed_legacy_violation(backend)
+    assert _get(store, "L-1").confidence == "unverified", "read-time demotion serves the legacy violation as unverified"
+
+    result = _update(store, "L-1", status="obsolete")
+
+    assert result["status"] == "updated"
+    assert _get(store, "L-1").status == "obsolete"
 
 
 def test_supersedes_closes_the_prior_validity_window(store: tuple[StorageBackend, MemoryConfig]) -> None:
@@ -209,9 +291,9 @@ def test_a_failed_correction_leaves_a_prior_in_another_store_open(store: tuple[S
     new_entry = _get(store, "L-new")
     with tempfile.TemporaryDirectory() as other_dir:
         other_cfg = MemoryConfig(storage_backend="sqlite", storage_path=other_dir)
-        with create_backend_from_config(other_cfg, "user") as other:
-            other.store(MemoryEntry(id="L-prior", content="the old way", namespace="user"))
-            prior = other.get("L-prior", namespace="user")
+        with create_backend_from_config(other_cfg, "user:other") as other:
+            other.store(MemoryEntry(id="L-prior", content="the old way", namespace="user:other"))
+            prior = other.get("L-prior", namespace="user:other")
 
             with (
                 patch.object(backend, "update", side_effect=RuntimeError("disk full")),
@@ -224,7 +306,7 @@ def test_a_failed_correction_leaves_a_prior_in_another_store_open(store: tuple[S
                     prior=(Store(other, other_cfg), prior),
                 )
 
-            reread = other.get("L-prior", namespace="user")
+            reread = other.get("L-prior", namespace="user:other")
             assert reread is not None
             assert reread.invalid_from is None
 
@@ -319,3 +401,53 @@ def test_a_non_text_correction_keeps_the_vector_and_loads_no_model(
     assert _update(vec_store, "L-1", impact=0.9)["status"] == "updated"
 
     assert list(backend.get_vector_records(["L-1"], namespace=NAMESPACE)["L-1"].embedding) == [1.0, 0.0, 0.0]
+
+
+def test_a_stale_if_revision_is_a_conflict_that_writes_nothing(store: tuple[StorageBackend, MemoryConfig]) -> None:
+    """PRD-CORE-308: a patch computed from a row that changed since is refused, not applied over it."""
+    from trw_memory.lifecycle.correction import revision_of
+
+    stale = revision_of(_get(store, "L-1"))
+    assert _update(store, "L-1", tags_add=["landed-first"])["status"] == "updated"
+    before = _get(store, "L-1").model_dump()
+
+    result = _update(store, "L-1", detail="computed from the stale row", if_revision=stale)
+
+    assert result["status"] == "conflict"
+    assert _get(store, "L-1").model_dump() == before
+    current = revision_of(_get(store, "L-1"))
+    assert _update(store, "L-1", detail="computed from the current row", if_revision=current)["status"] == "updated"
+    assert _get(store, "L-1").detail == "computed from the current row"
+
+
+def test_a_revision_ignores_recall_counters_and_survives_the_json_wire(
+    store: tuple[StorageBackend, MemoryConfig],
+) -> None:
+    """The daemon hands rows over as JSON; the client's revision must equal the one the server compares."""
+    import json
+
+    from trw_memory.lifecycle.correction import revision_of
+
+    entry = _get(store, "L-1")
+    wired = MemoryEntry.model_validate_json(json.dumps(entry.model_dump(mode="json")))
+    assert revision_of(wired) == revision_of(entry)
+    assert revision_of(entry.model_copy(update={"access_count": 9, "recall_count": 4})) == revision_of(entry)
+    assert revision_of(entry.model_copy(update={"detail": "edited"})) != revision_of(entry)
+
+
+def test_if_revision_on_a_backend_without_transactions_is_refused(tmp_path: object) -> None:
+    """YAML's transaction() is the no-op default: the compare and the write could not be atomic."""
+    from trw_memory.lifecycle.correction import Store, apply_correction, revision_of
+
+    cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path))
+    with create_backend_from_config(cfg, NAMESPACE) as backend:
+        backend.store(MemoryEntry(id="L-y", content="yaml row", detail="kept", namespace=NAMESPACE))
+        entry = backend.get("L-y", namespace=NAMESPACE)
+        assert entry is not None
+
+        result = apply_correction(Store(backend, cfg), entry, LearningPatch(detail="x", if_revision=revision_of(entry)))
+
+        assert result["status"] == "invalid"
+        assert "transactional" in result["error"]
+        reread = backend.get("L-y", namespace=NAMESPACE)
+        assert reread is not None and reread.detail == "kept"

@@ -12,7 +12,7 @@ Trade-offs vs :class:`~trw_memory.storage.sqlite_backend.SQLiteBackend`:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime, timezone
 from heapq import nlargest
 from pathlib import Path
@@ -22,6 +22,7 @@ import structlog
 
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
+from trw_memory.security._evidence_invariant import refuse_new_violation, served_view, violates_evidence_invariant
 from trw_memory.storage._shared import (
     _BOOKKEEPING_FIELDS,
     ENTRY_COLUMNS,
@@ -29,6 +30,7 @@ from trw_memory.storage._shared import (
     serialize_update_value,
     validate_update_fields,
 )
+from trw_memory.storage._utf8_validator import validate_entry_for_write
 from trw_memory.storage._yaml_row_mapper import (
     ParsedRow,
 )
@@ -44,6 +46,7 @@ from trw_memory.sync.delta import DeltaTracker
 
 if TYPE_CHECKING:
     from trw_memory.retrieval.temporal_selection import TemporalSelection
+    from trw_memory.security.quarantine_ledger import QuarantineLedger
 
 logger = structlog.get_logger(__name__)
 
@@ -87,8 +90,9 @@ class YAMLBackend(StorageBackend):
             Created automatically if it does not exist.
     """
 
-    def __init__(self, entries_dir: Path) -> None:
+    def __init__(self, entries_dir: Path, *, quarantine_ledger: QuarantineLedger | None = None) -> None:
         self._dir = entries_dir
+        self._quarantine_ledger = quarantine_ledger
         self._dir.mkdir(parents=True, exist_ok=True)
         logger.debug("yaml_backend_init", entries_dir=str(entries_dir))
 
@@ -117,7 +121,8 @@ class YAMLBackend(StorageBackend):
         for yaml_file in self._dir.glob("*.yaml"):
             try:
                 data = read_yaml(yaml_file)
-                yield _read_row(yaml_file, data).entry
+                # PRD-CORE-312: search/list read through here, so serve demoted.
+                yield served_view(_read_row(yaml_file, data).entry)
             except (
                 OSError,
                 StorageError,
@@ -143,6 +148,10 @@ class YAMLBackend(StorageBackend):
         Raises:
             StorageError: If the write fails.
         """
+        validate_entry_for_write(entry)
+        if violates_evidence_invariant(entry):  # PRD-CORE-312: same (namespace, id) rule as SQLite
+            existing = self._locate_unscoped(entry.id)
+            refuse_new_violation(existing if existing and existing.namespace == entry.namespace else None, entry)
         # Auto dirty-mark for sync pipeline (PRD-INFRA-051)
         entry.sync_seq = (entry.sync_seq or 0) + 1
         entry.sync_hash = DeltaTracker.compute_sync_hash(entry)
@@ -170,8 +179,22 @@ class YAMLBackend(StorageBackend):
         Raises:
             StorageError: If the file exists but cannot be parsed.
         """
+        return self._quarantine_admits(self._locate_scoped(entry_id, namespace))
+
+    def _locate_scoped(self, entry_id: str, namespace: str) -> MemoryEntry | None:
+        """``{id}.yaml`` when *namespace* owns it, unfiltered: the raw row :meth:`get` filters."""
         entry = self._locate_unscoped(entry_id)
-        return entry if entry is not None and entry.namespace == namespace else None
+        return served_view(entry) if entry is not None and entry.namespace == namespace else None
+
+    def holds_id(self, entry_id: str, *, namespace: str) -> bool:
+        """Whether *namespace* owns ``{id}.yaml``, ledger or not (:meth:`StorageBackend.holds_id`)."""
+        return self._locate_scoped(entry_id, namespace) is not None
+
+    def get_many(self, entry_ids: Sequence[str], *, namespace: str) -> dict[str, MemoryEntry]:
+        """:meth:`get` per id: one file per entry, so there is no cheaper batch, and every
+        row goes through the same read (and any filter it applies)."""
+        found = (self.get(entry_id, namespace=namespace) for entry_id in dict.fromkeys(entry_ids))
+        return {entry.id: entry for entry in found if entry is not None}
 
     def _locate_unscoped(self, entry_id: str) -> MemoryEntry | None:
         """Read ``{id}.yaml`` without applying the namespace predicate."""
@@ -207,6 +230,8 @@ class YAMLBackend(StorageBackend):
         path = self._path(entry_id)
         if not path.exists():
             return None
+        if self._quarantine_ledger is not None and self._quarantine_admits(self._locate_unscoped(entry_id)) is None:
+            return None  # a blocked row reads as absent, as in get (PRD-CORE-333 FR02)
 
         with lock_for_rmw(path):
             try:
@@ -245,8 +270,10 @@ class YAMLBackend(StorageBackend):
                     path=str(path),
                 )
             entry = row.entry
+            existing = entry.model_copy(deep=True)
             for key, val in field_dict.items():
                 setattr(entry, key, val)
+            refuse_new_violation(existing, entry)  # PRD-CORE-312, before anything is written
 
             if not {"sync_seq", "sync_hash", "last_synced_at"} & field_dict.keys():
                 entry.sync_seq = (entry.sync_seq or 0) + 1
@@ -259,7 +286,7 @@ class YAMLBackend(StorageBackend):
             write_yaml(path, data)
 
         try:
-            return _read_row(path, data).entry
+            return self._quarantine_admits(served_view(_read_row(path, data).entry))
         except (ValueError, KeyError, TypeError) as exc:
             raise StorageError(
                 f"Failed to deserialise updated entry {entry_id}: {exc}",
@@ -282,7 +309,8 @@ class YAMLBackend(StorageBackend):
         Raises:
             StorageError: If deletion fails for a reason other than not-found.
         """
-        if self.get(entry_id, namespace=namespace) is None:
+        # Unfiltered: forgetting a row the quarantine ledger hides must still remove it.
+        if self._locate_scoped(entry_id, namespace) is None:
             return False
         path = self._path(entry_id)
         if not path.exists():
@@ -329,10 +357,9 @@ class YAMLBackend(StorageBackend):
         """
         if top_k <= 0:
             return []
+        entry_filter = self._quarantine_entry_filter(entry_filter)
         needle = query.lower()
-        status_val: str | None = None
-        if status is not None:
-            status_val = status.value
+        status_val = status.value if status is not None else None
 
         def matches() -> Iterator[MemoryEntry]:
             for entry in (
@@ -436,9 +463,8 @@ class YAMLBackend(StorageBackend):
             raise ValueError("Temporal selection cannot resume with a raw-order cursor")
         if limit <= 0:
             return []
-        status_val: str | None = None
-        if status is not None:
-            status_val = status.value
+        entry_filter = self._quarantine_entry_filter(entry_filter)
+        status_val = status.value if status is not None else None
         required_tags = set(tags) if tags else None
 
         def matches() -> Iterator[MemoryEntry]:

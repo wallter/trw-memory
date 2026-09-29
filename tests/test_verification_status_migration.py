@@ -58,7 +58,7 @@ def test_pre_migration_rows_read_as_none(tmp_path: Path) -> None:
     conn.execute("ALTER TABLE memories DROP COLUMN verification_status")
     # Roll user_version back to the pre-FR02 schema so ``ensure_schema`` does
     # not short-circuit on its fast path (the reason the column needs a
-    # registered _MIGRATIONS delta, not just a _migrate_cols entry).
+    # registered _MIGRATIONS delta, not just a MIGRATE_COLS entry).
     conn.execute("PRAGMA user_version = 3")
     conn.commit()
     assert "verification_status" not in _column_names(conn)

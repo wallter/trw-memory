@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import structlog
 
-from trw_memory.daemon._offload import run_serialized
+from trw_memory.daemon._lane import INTERACTIVE, run_on_lane
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.security.rbac import Permission
@@ -191,6 +191,6 @@ def register_search_tool(mcp: McpServer) -> None:
                     actor=actor,
                 )
 
-        return await run_serialized(search)
+        return await run_on_lane(INTERACTIVE, namespace, search)
 
     mcp.tool()(memory_search)

@@ -64,12 +64,13 @@ def test_migration_idempotent() -> None:
 
 
 def test_entry_columns_count_matches_schema() -> None:
-    """ENTRY_COLUMNS must contain exactly 50 entries.
+    """ENTRY_COLUMNS must contain exactly 51 entries.
 
-    50 = 54 prior columns - 4 removed Q-learning/feedback fields (q_value,
-    q_observations, helpful_count, unhelpful_count) removed by PRD-CORE-293.
+    51 = 54 prior columns - 4 removed Q-learning/feedback fields (q_value,
+    q_observations, helpful_count, unhelpful_count) removed by PRD-CORE-293,
+    + 1 ``evidence_level`` added by PRD-CORE-312-FR01.
     """
-    assert len(ENTRY_COLUMNS) == 50, f"Expected 50, got {len(ENTRY_COLUMNS)}: {ENTRY_COLUMNS}"
+    assert len(ENTRY_COLUMNS) == 51, f"Expected 51, got {len(ENTRY_COLUMNS)}: {ENTRY_COLUMNS}"
 
 
 def test_entry_columns_contains_new_fields() -> None:

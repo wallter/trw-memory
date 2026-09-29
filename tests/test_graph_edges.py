@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-from trw_memory.graph import (
-    _safe_cosine_similarity,
-    create_consolidation_edges,
-    create_similarity_edges,
-)
+from trw_memory.graph import create_consolidation_edges, create_similarity_edges
 
 from ._test_graph_support import (
     _V1,
@@ -112,23 +108,6 @@ class TestCreateConsolidationEdges:
         assert count == 0
 
 
-class TestCosineSimilarity:
-    def test_identical_vectors(self) -> None:
-        assert abs(_safe_cosine_similarity([1.0, 0.0], [1.0, 0.0]) - 1.0) < 0.001
-
-    def test_orthogonal_vectors(self) -> None:
-        assert abs(_safe_cosine_similarity([1.0, 0.0], [0.0, 1.0])) < 0.001
-
-    def test_empty_vectors(self) -> None:
-        assert _safe_cosine_similarity([], []) == 0.0
-
-    def test_mismatched_lengths(self) -> None:
-        assert _safe_cosine_similarity([1.0], [1.0, 0.0]) == 0.0
-
-    def test_zero_vector(self) -> None:
-        assert _safe_cosine_similarity([0.0, 0.0], [1.0, 0.0]) == 0.0
-
-
 class TestCreateSimilarityEdgesEdgeCases:
     def test_create_similarity_edges_skip_self(self) -> None:
         conn = _make_conn()
@@ -138,13 +117,3 @@ class TestCreateSimilarityEdgesEdgeCases:
         count = create_similarity_edges(entry, conn, embedding=_V1, candidate_embeddings=candidates)
         assert count == 0
         assert _count_edges(conn) == 0
-
-
-class TestSafeCosineSimilarityEdgeCases:
-    def test_safe_cosine_similarity_dimension_mismatch(self) -> None:
-        result = _safe_cosine_similarity([1.0, 0.0], [1.0, 0.0, 0.0])
-        assert result == 0.0
-
-    def test_safe_cosine_similarity_zero_vectors(self) -> None:
-        result = _safe_cosine_similarity([0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
-        assert result == 0.0

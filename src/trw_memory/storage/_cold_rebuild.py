@@ -38,6 +38,8 @@ from sqlite3 import Connection
 import structlog
 
 from trw_memory.exceptions import StorageError
+from trw_memory.storage._anchor_index import rebuild_anchor_postings
+from trw_memory.storage._schema_v5 import rebuild_memory_tags_postings
 from trw_memory.storage._shared import DICT_FIELDS, ENTRY_COLUMNS, LIST_FIELDS
 from trw_memory.storage.persistence import read_yaml
 
@@ -149,24 +151,16 @@ def _coerce_ts(value: object) -> str | None:
     return str(value)
 
 
-def _dumps_list(value: object) -> str:
-    """Serialise a list-typed YAML field as a JSON array string.
+def _dumps_typed(value: object, expected_type: type[list[object]] | type[dict[str, object]]) -> str:
+    """Serialise a list- or dict-typed YAML field as a JSON string.
 
-    Treats ``None`` as ``[]``. Non-list inputs propagate the
-    :class:`TypeError` from :func:`json.dumps` so callers can record the
-    offending field.
+    Treats ``None`` as an empty instance of *expected_type*. Any other
+    mismatched-type input raises :class:`TypeError` so callers can record
+    the offending field.
     """
-    payload = value if value is not None else []
-    if not isinstance(payload, list):
-        raise TypeError(f"expected list, got {type(payload).__name__}")
-    return json.dumps(payload)
-
-
-def _dumps_dict(value: object) -> str:
-    """Serialise a dict-typed YAML field as a JSON object string."""
-    payload = value if value is not None else {}
-    if not isinstance(payload, dict):
-        raise TypeError(f"expected dict, got {type(payload).__name__}")
+    payload = value if value is not None else expected_type()
+    if not isinstance(payload, expected_type):
+        raise TypeError(f"expected {expected_type.__name__}, got {type(payload).__name__}")
     return json.dumps(payload)
 
 
@@ -209,13 +203,15 @@ def _hydrate_yaml(y: dict[str, object]) -> tuple[object, ...] | None:
 
     # PRD-CORE-181 FR06: cold YAML is canonical ``importance`` after the
     # memory_model_v2 cutover rewrites the archive. ``importance`` is primary and
-    # wins whenever present (no ambiguous guessing). But the YAML cutover
-    # (run_memory_model_v2_cutover) is a manual maintenance-window op with no
-    # automatic caller, while recover_db(rebuild_from_cold=True) auto-invokes this
-    # path on a corrupt DB — so pre-cutover archives still keyed only on legacy
-    # ``impact`` MUST NOT silently recover as 0.5 (silent data loss on the DR
-    # path). Fall back to ``impact`` ONLY when ``importance`` is entirely absent
-    # (unambiguous legacy entry). release-verify 2026-07-17 P0.
+    # wins whenever present (no ambiguous guessing). But the one-time YAML cutover
+    # was a manual maintenance-window op with no automatic caller (removed in the
+    # trw-memory deletion wave; the still-live SQLite delta this file's cutover
+    # comment used to describe is migrate_sqlite_importance_type), while
+    # recover_db(rebuild_from_cold=True) auto-invokes this path on a corrupt DB —
+    # so pre-cutover archives still keyed only on legacy ``impact`` MUST NOT
+    # silently recover as 0.5 (silent data loss on the DR path). Fall back to
+    # ``impact`` ONLY when ``importance`` is entirely absent (unambiguous legacy
+    # entry). release-verify 2026-07-17 P0.
     importance_raw = y.get("importance", y.get("impact", 0.5))
     try:
         importance = float(importance_raw)  # type: ignore[arg-type]
@@ -245,14 +241,14 @@ def _hydrate_yaml(y: dict[str, object]) -> tuple[object, ...] | None:
     serialised_lists: dict[str, str] = {}
     for field in _LIST_FIELDS:
         try:
-            serialised_lists[field] = _dumps_list(y.get(field))
+            serialised_lists[field] = _dumps_typed(y.get(field), list)
         except (TypeError, ValueError) as exc:
             raise _HydrationError(field) from exc
 
     serialised_dicts: dict[str, str] = {}
     for field in _DICT_FIELDS:
         try:
-            serialised_dicts[field] = _dumps_dict(y.get(field))
+            serialised_dicts[field] = _dumps_typed(y.get(field), dict)
         except (TypeError, ValueError) as exc:
             raise _HydrationError(field) from exc
 
@@ -433,6 +429,11 @@ def rebuild_from_cold(base_dir: Path, new_conn: Connection) -> int:
                     reason="duplicate_id",
                 )
 
+        # The raw INSERT bypasses the write path, so re-derive the anchor and tag indexes before
+        # committing (PRD-CORE-332 FR01, F2). With no row inserted the indexes already match the rows.
+        if rebuilt:
+            rebuild_anchor_postings(new_conn, trigger="cold_rebuild")
+            rebuild_memory_tags_postings(cursor, trigger="cold_rebuild")
         new_conn.commit()
     except Exception:
         # NFR01: rollback on unhandled exception.

@@ -1,8 +1,10 @@
-"""Write-time UTF-8 validation for SQLite text columns.
+"""Write-time validation of a memory entry: UTF-8-safe text columns and a bounded id.
 
 Prevents lone surrogates and other non-encodable Python str values from
 reaching the database, where they would cause deterministic read failures
-(sqlite3.OperationalError: Could not decode to UTF-8 column ...).
+(sqlite3.OperationalError: Could not decode to UTF-8 column ...), and ids longer
+than :data:`~trw_memory.models.memory.MAX_ENTRY_ID_CHARS`, which a resumable
+sweep's cursor could not carry (B71-85).
 
 Usage::
 
@@ -14,7 +16,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from trw_memory.exceptions import Utf8ValidationError
+from trw_memory.exceptions import SchemaValidationError, Utf8ValidationError
+from trw_memory.models.memory import MAX_ENTRY_ID_CHARS, MAX_TEXT_FIELD_CHARS
 
 if TYPE_CHECKING:
     from trw_memory.models.memory import MemoryEntry
@@ -85,6 +88,36 @@ def validate_utf8_fields(row_dict: dict[str, object]) -> None:
         )
 
 
-def validate_entry_utf8(entry: MemoryEntry) -> None:
-    """Validate the bare TEXT fields persisted from a memory entry."""
+def validate_entry_for_write(entry: MemoryEntry) -> None:
+    """Refuse an entry whose id is past :data:`MAX_ENTRY_ID_CHARS` or whose TEXT fields are not UTF-8-safe."""
+    if len(entry.id) > MAX_ENTRY_ID_CHARS:
+        raise SchemaValidationError(
+            f"Write rejected: entry id is {len(entry.id)} characters, over {MAX_ENTRY_ID_CHARS}",
+            failed_fields=["id"],
+            reason="entry_id_too_long",
+        )
     validate_utf8_fields({column: getattr(entry, attribute) for column, attribute in _ENTRY_TEXT_FIELDS})
+
+
+def overlong_text_field(value: str) -> bool:
+    """True when *value* is past :data:`MAX_TEXT_FIELD_CHARS`, the daemon's per-field TEXT bound.
+
+    PRD-CORE-331 FR07 / B71-94: the local store and update paths refuse a ``content``/``detail`` this
+    long instead of truncating it, matching the daemon's ``_arg_bounds.py::TEXT`` limit exactly.
+    """
+    return len(value) > MAX_TEXT_FIELD_CHARS
+
+
+def refuse_overlong_text_fields(**fields: str | None) -> None:
+    """Raise :class:`SchemaValidationError` naming every keyword field past :data:`MAX_TEXT_FIELD_CHARS`.
+
+    A ``None`` value means the caller did not name that field (an update's unpatched fields); it is
+    skipped rather than refused.
+    """
+    failed = [name for name, value in fields.items() if isinstance(value, str) and overlong_text_field(value)]
+    if failed:
+        raise SchemaValidationError(
+            f"field(s) exceed {MAX_TEXT_FIELD_CHARS} characters: {failed!r}",
+            failed_fields=failed,
+            reason="text_field_too_long",
+        )

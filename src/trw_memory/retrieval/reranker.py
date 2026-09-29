@@ -43,7 +43,8 @@ logger = structlog.get_logger(__name__)
 
 _DEFAULT_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 # ms-marco-MiniLM models accept up to 512 tokens (~2048 chars at 4 chars/token).
-# The old 512-char limit wasted 75% of model capacity on long sessions.
+# The recall pipeline passes its own cap (``MemoryConfig.recall_rerank_passage_chars``);
+# this is the default for direct callers.
 _MAX_PASSAGE_CHARS = 2048
 
 
@@ -138,15 +139,15 @@ def _get_model(model_name: str) -> object | None:
         return _LOADED_MODELS[model_name]
 
 
-def _entry_text(entry: MemoryEntry) -> str:
-    """Build a passage string from a MemoryEntry for cross-encoder input."""
+def _entry_text(entry: MemoryEntry, max_chars: int = _MAX_PASSAGE_CHARS) -> str:
+    """Build a passage string from a MemoryEntry for cross-encoder input, at most *max_chars* long."""
     parts = [entry.content]
     if entry.detail:
         parts.append(entry.detail)
     if entry.tags:
         parts.append(" ".join(entry.tags))
     text = " ".join(parts)
-    return text[:_MAX_PASSAGE_CHARS]
+    return text[:max_chars]
 
 
 def cross_encode_scores(
@@ -154,8 +155,13 @@ def cross_encode_scores(
     entries: list[MemoryEntry],
     *,
     model_name: str = _DEFAULT_MODEL,
+    passage_chars: int = _MAX_PASSAGE_CHARS,
 ) -> list[tuple[MemoryEntry, float]] | None:
     """Score every entry against *query* with the cross-encoder.
+
+    Each passage is cut to *passage_chars* characters first. Inference cost grows
+    with passage length: on the real TRW store 50 pairs took 2.29 s at 2048
+    chars and 0.92 s at 512 on CPU.
 
     Returns ``(entry, score)`` pairs sorted by score descending, on the model's
     native logit scale (ms-marco MiniLM: roughly -11 for unrelated text up to
@@ -168,7 +174,7 @@ def cross_encode_scores(
     if model is None:
         logger.debug("cross_encode_scores_skipped", reason="model_unavailable", count=len(entries))
         return None
-    pairs = [[query, _entry_text(e)] for e in entries]
+    pairs = [[query, _entry_text(e, passage_chars)] for e in entries]
     try:
         scores = model.predict(pairs)  # type: ignore[attr-defined]
         # A model that returns the wrong shape or non-numeric output counts as

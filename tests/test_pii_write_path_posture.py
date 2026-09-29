@@ -267,3 +267,56 @@ def test_mock_helper_is_wired(monkeypatch: pytest.MonkeyPatch) -> None:
     with patch("httpx.Client") as mock_cls:
         client = _mock_httpx_client(mock_cls, json_data={"id": "x"})
         assert isinstance(client, MagicMock)
+
+
+class TestReplacePiiOverlappingSpans:
+    """B71-124 M4: ``replace_pii`` splices CUSTOM matches in reverse ``start`` order.
+
+    Two overlapping matches must be merged into one masked region before splicing
+    -- otherwise the earlier (lower-``start``) match's ``end`` offset is computed
+    against pre-splice text but applied to text a later splice already shifted,
+    which garbles the output and can leave PII characters unmasked.
+    """
+
+    @staticmethod
+    def _match(start: int, end: int, value: str) -> Any:
+        from trw_memory.security.pii import PIIMatch, PIIType
+
+        return PIIMatch(pii_type=PIIType.CUSTOM, value=value, start=start, end=end, confidence=1.0)
+
+    def test_overlapping_matches_produce_one_marker_and_no_leftover_pii(self) -> None:
+        from trw_memory.security._runtime_pii import CUSTOM_PII_MARKER, replace_pii
+
+        text = "0123456789ABCDEFGHIJ"  # 20 chars, indices 0-19
+        # A = [5, 15) "56789ABCDE", B = [10, 20) "ABCDEFGHIJ" -- overlap [10, 15)
+        matches = [self._match(5, 15, text[5:15]), self._match(10, 20, text[10:20])]
+
+        result = replace_pii(text, matches)
+
+        assert result == "01234" + CUSTOM_PII_MARKER
+        assert result.count(CUSTOM_PII_MARKER) == 1
+        for leaked in ("56789", "ABCDE", "FGHIJ"):
+            assert leaked not in result
+
+    def test_nested_spans_are_masked(self) -> None:
+        from trw_memory.security._runtime_pii import CUSTOM_PII_MARKER, replace_pii
+
+        text = "0123456789ABCDEFGHIJ"
+        # Outer [2, 18), inner [5, 10) fully nested inside it.
+        matches = [self._match(2, 18, text[2:18]), self._match(5, 10, text[5:10])]
+
+        result = replace_pii(text, matches)
+
+        assert result == "01" + CUSTOM_PII_MARKER + "IJ"
+        assert result.count(CUSTOM_PII_MARKER) == 1
+
+    def test_non_overlapping_spans_each_get_their_own_marker(self) -> None:
+        from trw_memory.security._runtime_pii import CUSTOM_PII_MARKER, replace_pii
+
+        text = "0123456789ABCDEFGHIJ"
+        matches = [self._match(0, 3, text[0:3]), self._match(10, 13, text[10:13])]
+
+        result = replace_pii(text, matches)
+
+        assert result == f"{CUSTOM_PII_MARKER}3456789{CUSTOM_PII_MARKER}DEFGHIJ"
+        assert result.count(CUSTOM_PII_MARKER) == 2

@@ -29,11 +29,9 @@ DEFAULT_NAMESPACE = "default"
 def validate_namespace(ns: str) -> str:
     """Validate a namespace string and return it unchanged.
 
-    Args:
-        ns: Namespace to validate.
-
-    Returns:
-        The validated namespace string.
+    Whitespace is refused, never stripped (PRD-CORE-308 S4): an accepted name
+    is byte-identical to its input, so a caller that discards the return value
+    cannot authorize one spelling and store under another.
 
     Raises:
         ConfigError: If *ns* does not match one of the canonical patterns.
@@ -41,15 +39,13 @@ def validate_namespace(ns: str) -> str:
     if not isinstance(ns, str):
         raise ConfigError("namespace must be a string")
 
-    if not ns or not ns.strip():
+    if not ns:
         raise ConfigError("namespace must not be empty")
-
-    ns = ns.strip()
 
     if len(ns) > _MAX_LENGTH:
         raise ConfigError(f"namespace too long: {len(ns)} chars (max {_MAX_LENGTH})")
 
-    if not _NS_PATTERN.match(ns):
+    if not _NS_PATTERN.fullmatch(ns):  # fullmatch: ``$`` alone admits a trailing newline
         raise ConfigError(
             f"Invalid namespace {ns!r}. "
             "Must match project:<name>, global, default, team:<name>, org:<name>, "

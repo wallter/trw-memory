@@ -214,15 +214,17 @@ class TestApprovalNeverOverwritesALiveActiveRow:
         legit = MemoryEntry(id="M-race", content="a legitimate racing write", namespace="project:a")
         writer = threading.Thread(target=racer.store, args=(legit,))
         real_get = SQLiteBackend.get
+        real_holds = SQLiteBackend.holds_id
 
-        def get_then_race(self: SQLiteBackend, entry_id: str, *, namespace: str) -> MemoryEntry | None:
-            found = real_get(self, entry_id, namespace=namespace)
+        def check_then_race(self: SQLiteBackend, entry_id: str, *, namespace: str) -> bool:
+            found = real_holds(self, entry_id, namespace=namespace)
             if self is active and not writer.is_alive() and writer.ident is None:
                 writer.start()
                 writer.join(timeout=1.0)  # lands now, unless the approval holds the write lock
             return found
 
-        monkeypatch.setattr(SQLiteBackend, "get", get_then_race)
+        # The conflict check is the identity probe (review r1 P0-1), so the race starts right after it.
+        monkeypatch.setattr(SQLiteBackend, "holds_id", check_then_race)
         try:
             review_quarantined_entry(
                 cfg,

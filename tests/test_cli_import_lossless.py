@@ -153,12 +153,14 @@ def test_the_source_stores_system_canaries_are_skipped_and_counted_not_imported_
     """4.0.0's intake strips the reserved ``system_canary`` key, so an exported store's FR-007 canary rows
     arrived as ordinary, recall-visible entries. They are the source store's system rows: import leaves
     them out and says how many (the destination plants its own)."""
+    from trw_memory.models.memory import MemoryEntry
     from trw_memory.security.canary import _CANARY_FIXTURES, PINNED_HASHES
 
-    canaries = [  # the default store plants five, exported as ``MemoryEntry.to_dict`` writes them
-        {**_rich_entry(content), "id": canary_id, "metadata": {"system_canary": "true", "provenance_content_hash": h}}
+    seeded = [  # the default store plants five, as ``_runtime_canary`` seeds them: no user data
+        MemoryEntry(id=canary_id, content=content, metadata={"system_canary": "true", "provenance_content_hash": h})
         for (canary_id, content), h in list(zip(_CANARY_FIXTURES, PINNED_HASHES.values(), strict=True))[:5]
     ]
+    canaries = [json.loads(json.dumps(entry.to_dict(), default=str)) for entry in seeded]  # as export writes them
     ordinary = _rich_entry("an ordinary learning travels")
     foreign = {"content": "a foreign note whose metadata is not a mapping", "metadata": "system_canary"}
     # The flag alone is caller-controlled: a row that is not a pinned canary cannot use it to be dropped.

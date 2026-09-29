@@ -13,6 +13,8 @@ import structlog
 from trw_memory.lifecycle.tiers._cold import ColdTierStore
 from trw_memory.lifecycle.tiers._manager_io import load_warm_entries, open_canonical_backend
 from trw_memory.lifecycle.tiers._manager_search import (
+    RESOLVE_MARGIN,
+    WindowRank,
     discover_candidates,
     merge_search_results,
     rank_search_hits,
@@ -30,7 +32,7 @@ from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocati
 logger = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
     from trw_memory.storage.interface import StorageBackend
@@ -343,7 +345,7 @@ class TierManager:
         force_delete_restored_entry_fn: Callable[[str], bool | None] | None = None,
         verify_restored_entry_removed_fn: Callable[[str], bool] | None = None,
         invocation: RecallInvocation | None = None,
-        resolve_entry: Callable[[str], MemoryEntry | None] | None = None,
+        resolve_entries: Callable[[list[str]], Mapping[str, MemoryEntry | None]] | None = None,
         covered_ids: frozenset[str] = frozenset(),
     ) -> list[dict[str, object]] | list[LocalCandidate]:
         """Search hot, warm, and cold tiers as one merged runtime surface.
@@ -355,18 +357,26 @@ class TierManager:
         rows with no primary copy).
         """
         if invocation is not None:
-            if resolve_entry is None:
+            if resolve_entries is None:
                 raise ValueError("tier discovery requires canonical entry resolution")
             with self._hot_lock:
                 hot = [entry.model_dump(mode="json") for entry in self._hot.values()]
             warm = self._warm_store.discovery_entries(
-                query_embedding, covered_ids=covered_ids, namespace=invocation.namespace, query_space=query_space
+                query_embedding,
+                query_tokens=query_tokens,
+                limit=RESOLVE_MARGIN * top_k,
+                covered_ids=covered_ids,
+                namespace=invocation.namespace,
+                query_space=query_space,
+                rank=WindowRank(
+                    invocation, query_tokens=query_tokens, query_embedding=query_embedding, config=self._config
+                ),
             )
             with closing(self._cold_store.iter_search(query_tokens, promote=False)) as cold:
                 return discover_candidates(
                     ((row, is_cold) for group, is_cold in ((hot, False), (warm, False), (cold, True)) for row in group),
                     invocation=invocation,
-                    resolve_entry=resolve_entry,
+                    resolve_entries=resolve_entries,
                     query_tokens=query_tokens,
                     query_embedding=query_embedding,
                     config=self._config,

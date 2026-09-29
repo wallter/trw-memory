@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._optional_extras import vec_unavailable
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
@@ -56,7 +57,7 @@ def _vec_memory_rows(backend: SQLiteBackend) -> int:
 def seeded_backend(tmp_path: Path) -> SQLiteBackend:
     backend = SQLiteBackend(tmp_path / "purge.db", dim=_DIM)
     if not backend.vec_available:
-        pytest.skip("sqlite-vec virtual table unavailable in this build")
+        vec_unavailable("sqlite-vec virtual table unavailable in this build")
     _seed(backend, "project:doomed", _ENTRIES_PER_NAMESPACE)
     _seed(backend, "project:keeper", 5)
     return backend

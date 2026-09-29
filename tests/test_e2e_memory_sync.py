@@ -9,6 +9,8 @@ import pytest
 
 from trw_memory.client import MemoryClient
 
+pytestmark = pytest.mark.e2e
+
 
 class TestSyncE2E:
     """Verify MemoryClient wires the package sync surface end-to-end."""

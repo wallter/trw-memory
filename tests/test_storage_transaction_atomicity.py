@@ -20,9 +20,11 @@ import sqlite3
 import threading
 from pathlib import Path
 from types import TracebackType
+from typing import Any
 
 import pytest
 
+from tests._optional_extras import vec_unavailable
 from tests.conftest import make_entry
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry
@@ -354,7 +356,7 @@ def test_store_and_vector_in_transaction_are_atomic_on_success(tmp_path: Path) -
     backend = SQLiteBackend(db_path)
     if not backend._vec_available:
         backend.close()
-        pytest.skip("sqlite-vec extension not available")
+        vec_unavailable("sqlite-vec extension not available")
     try:
         emb = [1.0] * backend._dim
         entry = _vec_entry("M-atomic")
@@ -380,7 +382,7 @@ def test_store_and_vector_rollback_leaves_neither(tmp_path: Path) -> None:
     backend = SQLiteBackend(db_path)
     if not backend._vec_available:
         backend.close()
-        pytest.skip("sqlite-vec extension not available")
+        vec_unavailable("sqlite-vec extension not available")
     try:
         emb = [1.0] * backend._dim
         entry = _vec_entry("M-rollback")
@@ -418,7 +420,7 @@ def test_delete_vector_inside_transaction_defers_commit(tmp_path: Path) -> None:
     backend = SQLiteBackend(db_path)
     if not backend._vec_available:
         backend.close()
-        pytest.skip("sqlite-vec extension not available")
+        vec_unavailable("sqlite-vec extension not available")
     try:
         emb = [1.0] * backend._dim
         entry = _vec_entry("M-delvec")
@@ -448,7 +450,7 @@ def test_delete_vector_standalone_still_commits(tmp_path: Path) -> None:
     backend = SQLiteBackend(db_path)
     if not backend._vec_available:
         backend.close()
-        pytest.skip("sqlite-vec extension not available")
+        vec_unavailable("sqlite-vec extension not available")
     try:
         emb = [1.0] * backend._dim
         entry = _vec_entry("M-delvec-now")
@@ -467,7 +469,7 @@ def test_upsert_vector_standalone_still_commits(tmp_path: Path) -> None:
     backend = SQLiteBackend(db_path)
     if not backend._vec_available:
         backend.close()
-        pytest.skip("sqlite-vec extension not available")
+        vec_unavailable("sqlite-vec extension not available")
     try:
         emb = [1.0] * backend._dim
         entry = _vec_entry("M-vec-now")
@@ -485,7 +487,7 @@ def test_standalone_vector_writes_roll_back_on_commit_failure(tmp_path: Path, op
     backend = SQLiteBackend(tmp_path / f"{operation}_commit_failure.db")
     if not backend._vec_available:
         backend.close()
-        pytest.skip("sqlite-vec extension not available")
+        vec_unavailable("sqlite-vec extension not available")
 
     entry_id = "P#hype0" if operation == "delete_hype" else "M-vector"
     embedding = [1.0] * backend._dim
@@ -530,7 +532,7 @@ def test_transaction_commits_exactly_once(tmp_path: Path) -> None:
     backend = SQLiteBackend(db_path)
     if not backend._vec_available:
         backend.close()
-        pytest.skip("sqlite-vec extension not available")
+        vec_unavailable("sqlite-vec extension not available")
     try:
         real_conn = backend._conn
         commit_calls = {"n": 0}
@@ -823,7 +825,7 @@ def test_delete_by_namespace_removes_vectors_atomically(tmp_path: Path) -> None:
     backend = SQLiteBackend(db_path)
     if not backend._vec_available:
         backend.close()
-        pytest.skip("sqlite-vec extension not available")
+        vec_unavailable("sqlite-vec extension not available")
     try:
         emb = [1.0] * backend._dim
         backend.store(make_entry(entry_id="M-vec-ns", namespace="doomed"))
@@ -834,5 +836,140 @@ def test_delete_by_namespace_removes_vectors_atomically(tmp_path: Path) -> None:
 
         assert backend.get("M-vec-ns", namespace="doomed") is None
         assert backend.vector_exists("M-vec-ns", namespace="doomed") is False
+    finally:
+        backend.close()
+
+
+# ---------------------------------------------------------------------------
+# PRD-CORE-332 FR01: anchor postings stay equal to the rows' anchors column
+# ---------------------------------------------------------------------------
+
+#: ``Anchor`` refuses absolute and ``..`` paths, so the unnormalizable forms here are the ones it admits.
+_ANCHOR_FILES = ("a.py", "./a.py", "pkg//b.py", "pkg/b.py", "Pkg/B.py", ".", "./")
+
+
+def _derived_anchor_postings(conn: sqlite3.Connection) -> set[tuple[str, str, str]]:
+    """The postings the surviving rows' ``anchors`` column implies (the FR01 oracle)."""
+    import json
+
+    from trw_memory.storage._anchor_index import normalize_anchor_file
+
+    derived: set[tuple[str, str, str]] = set()
+    for namespace, entry_id, raw in conn.execute("SELECT namespace, id, anchors FROM memories").fetchall():
+        for item in json.loads(raw or "[]"):
+            if (key := normalize_anchor_file(item.get("file"))) is not None:
+                derived.add((namespace, key, entry_id))
+    return derived
+
+
+def _anchor_postings(conn: sqlite3.Connection) -> set[tuple[str, str, str]]:
+    rows = conn.execute("SELECT namespace, file, entry_id FROM anchor_postings").fetchall()
+    return {(str(r[0]), str(r[1]), str(r[2])) for r in rows}
+
+
+def _random_anchored(rng: object, entry_id: str, namespace: str) -> MemoryEntry:
+    import random
+
+    from trw_memory.models.memory import Anchor
+
+    assert isinstance(rng, random.Random)
+    entry = make_entry(entry_id=entry_id, namespace=namespace, tags=[f"t{rng.randrange(3)}"])
+    files = rng.sample(_ANCHOR_FILES, rng.randrange(4))
+    entry.anchors = [Anchor(file=f, symbol_name=f"s{i}") for i, f in enumerate(files)]
+    return entry
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_anchor_postings_match_rows_after_random_write_sequences(tmp_path: Path, seed: int) -> None:
+    """Property: after ANY sequence of store/store_many/update/delete/delete_many/delete_by_namespace,
+    ``anchor_postings`` equals the postings derived from the surviving rows' ``anchors`` column."""
+    import random
+
+    from trw_memory.models.memory import Anchor
+
+    rng = random.Random(seed)
+    ids, namespaces = ["L-1", "L-2", "L-3", "L-4"], ["project:a", "project:b"]
+    backend = SQLiteBackend(tmp_path / f"prop{seed}.db")
+    try:
+        for _ in range(40):
+            op, entry_id, namespace = rng.randrange(7), rng.choice(ids), rng.choice(namespaces)
+            if op == 0:
+                backend.store(_random_anchored(rng, entry_id, namespace))
+            elif op == 1:
+                batch = [_random_anchored(rng, rng.choice(ids), namespace) for _ in range(rng.randrange(1, 4))]
+                backend.store_many(batch)
+            elif op == 2:
+                files = rng.sample(_ANCHOR_FILES, rng.randrange(4))
+                backend.update(entry_id, namespace=namespace, anchors=[Anchor(file=f, symbol_name="u") for f in files])
+            elif op == 3:
+                backend.update(entry_id, namespace=namespace, content=f"c{rng.random()}", tags=["x"])
+            elif op == 4:
+                backend.delete(entry_id, namespace=namespace)
+            elif op == 5:
+                backend.delete_many(rng.sample(ids, 2), namespace=namespace)
+            else:
+                backend.delete_by_namespace(namespace)
+            assert _anchor_postings(backend._conn) == _derived_anchor_postings(backend._conn)
+    finally:
+        backend.close()
+
+
+class _FailingAnchorPostingConn:
+    """Delegating proxy that fails the anchor-posting INSERT, after the row write is staged."""
+
+    def __init__(self, real: sqlite3.Connection) -> None:
+        self._real = real
+
+    def _check(self, sql: str) -> None:
+        if "INTO anchor_postings" in sql:
+            raise sqlite3.OperationalError("injected anchor posting failure")
+
+    def execute(self, sql: str, *args: Any) -> object:
+        self._check(sql)
+        return self._real.execute(sql, *args)
+
+    def executemany(self, sql: str, *args: Any) -> object:
+        self._check(sql)
+        return self._real.executemany(sql, *args)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+@pytest.mark.parametrize("writer", ["store", "store_many", "update"])
+def test_anchor_posting_failure_rolls_back_row_and_postings(tmp_path: Path, writer: str) -> None:
+    """A failure after the row write rolls the row and its postings back together (committed state)."""
+    from trw_memory.models.memory import Anchor
+
+    db_path = tmp_path / "anchor-atomic.db"
+    backend = SQLiteBackend(db_path)
+    try:
+        original = make_entry(entry_id="L-keep")
+        original.anchors = [Anchor(file="old.py", symbol_name="f")]
+        backend.store(original)
+        changed = make_entry(entry_id="L-keep" if writer == "update" else "L-new", content="changed")
+        changed.anchors = [Anchor(file="new.py", symbol_name="g")]
+
+        real_conn = backend._conn
+        backend._conn = _FailingAnchorPostingConn(real_conn)
+        try:
+            with pytest.raises(StorageError, match="injected anchor posting failure"):
+                if writer == "store":
+                    backend.store(changed)
+                elif writer == "store_many":
+                    backend.store_many([changed])
+                else:
+                    backend.update("L-keep", namespace="default", anchors=changed.anchors, content="changed")
+        finally:
+            backend._conn = real_conn
+
+        observer = sqlite3.connect(str(db_path))
+        try:
+            rows = observer.execute("SELECT id, content, anchors FROM memories ORDER BY id").fetchall()
+            assert [(r[0], r[1]) for r in rows] == [("L-keep", "test content")]
+            assert "old.py" in rows[0][2]
+            assert _anchor_postings(observer) == {("default", "old.py", "L-keep")}
+        finally:
+            observer.close()
     finally:
         backend.close()

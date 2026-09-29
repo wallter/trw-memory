@@ -30,7 +30,6 @@ import functools
 import socket
 import threading
 from collections.abc import Coroutine
-from datetime import datetime, timezone
 from math import isfinite
 from pathlib import Path
 from types import TracebackType
@@ -50,6 +49,7 @@ from trw_memory._client_sse import (
 from trw_memory._client_sse import (
     should_start_sse_subscription as should_start_sse_subscription,
 )
+from trw_memory._project_anchor import resolve_storage_root
 from trw_memory.exceptions import MemoryConnectionError, SecurityDependencyError, StorageError
 from trw_memory.lifecycle.tiers._runtime import tier_runtime_enabled, warmup_tier_manager
 from trw_memory.models.config import MemoryConfig
@@ -105,10 +105,11 @@ def init_client(
     explicit_db_path = Path(db_path).expanduser().resolve() if db_path is not None else None
     client._config = MemoryConfig(storage_path=str(explicit_db_path.parent)) if explicit_db_path else MemoryConfig()
     client._project_root = str(Path.cwd())
-    client._installation_id = f"{socket.gethostname()}:{Path(client._config.storage_path).resolve()}"
+    storage_root = resolve_storage_root(client._config)
+    client._installation_id = f"{socket.gethostname()}:{storage_root.resolve()}"
     client._local_node_id = anonymize_installation_id(client._installation_id)
     client._background_tasks = set()
-    client._retry_queue = RetryQueue(Path(client._config.storage_path) / "sync_queue.jsonl")
+    client._retry_queue = RetryQueue(storage_root / "sync_queue.jsonl")
     client._retry_drain_started = False
     client._shared_event_cache = []
     client._shared_event_cache_lock = threading.Lock()
@@ -213,7 +214,11 @@ async def publish_entry(
 
     payload = await asyncio.to_thread(_c._anonymize_entry, entry, client._project_root)
     queue_payload = cast("dict[str, object]", payload)
-    enqueued = await asyncio.to_thread(client._retry_queue.enqueue, entry.id, queue_payload)
+    enqueued = await asyncio.to_thread(
+        functools.partial(client._retry_queue.enqueue, revision=(entry.sync_seq, entry.sync_hash)),
+        entry.id,
+        queue_payload,
+    )
     if not enqueued:
         _client_logger().warning(
             "memory_sync_queue_full",
@@ -246,8 +251,13 @@ async def aexit(
 
 
 async def _drain_owned_graph_updates(backend: StorageBackend) -> asyncio.CancelledError | None:
-    """Finish owned workers even when close is cancelled; timeout stays visible."""
-    from trw_memory.graph import wait_for_graph_updates
+    """Finish owned workers even when close is cancelled; a timed-out drain is abandoned, not raised.
+
+    PRD-CORE-331 FR08: a backlog no longer makes close() raise past the drain's
+    bound -- a timeout drops this owner's still-queued jobs (never started, so
+    never write) and logs how many; an already-running job finishes on its own.
+    """
+    from trw_memory.graph import abandon_graph_jobs, wait_for_graph_updates
 
     drain = asyncio.create_task(asyncio.to_thread(wait_for_graph_updates, owner=backend))
     cancellation: asyncio.CancelledError | None = None
@@ -256,7 +266,20 @@ async def _drain_owned_graph_updates(backend: StorageBackend) -> asyncio.Cancell
             await asyncio.shield(drain)
         except asyncio.CancelledError as exc:
             cancellation = exc
-    drain.result()  # A timeout is not successful teardown, even after cancellation.
+        except TimeoutError:
+            break  # the drain task itself finished (with this error); handled below
+    try:
+        drain.result()
+    except TimeoutError:
+        # Marks this owner's still-QUEUED jobs to be skipped, not run; a job the worker had
+        # already started keeps going, and only those are counted (they can still write).
+        running = abandon_graph_jobs(backend)
+        _client_logger().warning(
+            "client_close_graph_drain_timed_out",
+            op="close",
+            outcome="abandoned",
+            running_jobs=running,
+        )
     return cancellation
 
 
@@ -341,23 +364,31 @@ async def drain_retry_queue_impl(client: MemoryClient) -> None:
 async def _drain_retry_queue_once(client: MemoryClient) -> None:
     """Drain one retry batch; the public wrapper owns restart state."""
     from trw_memory.sync._remote_publish import _drain_retry_queue_with_ids
+    from trw_memory.sync.delta import ack_revision
 
-    result, published_entry_ids = await asyncio.to_thread(
+    result, published = await asyncio.to_thread(
         _drain_retry_queue_with_ids,
         client._retry_queue,
         client._config,
     )
-    drained_ids = set(published_entry_ids)
-    if drained_ids:
+    if published:
         async with client._lock:
             backend = client._get_backend()
-            synced_at = datetime.now(timezone.utc)
-            for entry_id in drained_ids:
-                remote_id = result["remote_ids"].get(entry_id)
-                known = {"remote_id": remote_id} if remote_id is not None else {}
-                backend.update(
-                    entry_id, namespace=client._namespace, published_to_platform=True, last_synced_at=synced_at, **known
+            # Ack each entry once, at its LAST queued record (its newest revision): every ack's update() numbers a
+            # new revision, so acking a stale record first would make the current one fail its compare.
+            latest: dict[str, tuple[tuple[int, str] | None, str | None]] = {}
+            for entry_id, revision, remote_id in published:
+                # The newest revision, but the last remote id the platform returned: a later success
+                # that returned none must not drop the id an earlier one did (sol r2 P2).
+                latest[entry_id] = (
+                    revision,
+                    remote_id if remote_id is not None else latest.get(entry_id, (None, None))[1],
                 )
+            for entry_id, (revision, remote_id) in latest.items():
+                known = {"remote_id": remote_id} if remote_id is not None else {}
+                # last_synced_at only while the row is still the revision that was queued: an edit made while the
+                # record waited stays dirty and is pushed again (B71-77).
+                ack_revision(backend, entry_id, client._namespace, revision, published_to_platform=True, **known)
     _client_logger().debug(
         "memory_sync_queue_drained",
         op="session_start",

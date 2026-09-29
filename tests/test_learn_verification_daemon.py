@@ -5,16 +5,23 @@ reviewer are driven through the REGISTERED tools on a real FastMCP server.
 
 (b) The verification pass runs from the daemon.
 
-Every test here goes through the REGISTERED maintenance implementation
-(``memory_maintain_impl``) against a real SQLite store, then reads the row back.
-The pinned truths: a configured ``project_root`` persists real verdicts, no root
-means nothing is verified (the verdict stays unknown, never "verified"), and the
+Every test here drives the maintain passes (decay, consolidation, verification, WAL
+checkpoint) against a real SQLite store via ``tests._maintain_sync.run_maintain_sync``,
+then reads the row back. That helper calls the same production pass functions the
+served ``memory_maintain`` tool's ``serve_maintain`` lane-job orchestration calls
+(``tools.maintain._run_decay``/``_run_consolidation``/``_run_checkpoint``,
+``tools._maintain_sweep.begin``/``verify_slice``/``finish``), sequenced synchronously
+against an injected backend and config instead of the daemon's per-job lane and pool — see
+its docstring. The pinned truths: a configured ``project_root`` persists real verdicts, no
+root means nothing is verified (the verdict stays unknown, never "verified"), and the
 daemon and trw-mcp's ``maintain-verify`` call the SAME trw-memory function.
 """
 
 from __future__ import annotations
 
+import asyncio
 import getpass
+import json
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -31,9 +38,10 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import Assertion, MemoryEntry, MemoryStatus
 from trw_memory.security.runtime import get_status_history, store_quarantined_entry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
-from trw_memory.tools.maintain import memory_maintain_impl
 from trw_memory.tools.review import register_review_tool
 from trw_memory.tools.store import register_store_tool
+
+from ._maintain_sync import run_maintain_sync
 
 _NS = "project:default"
 
@@ -77,7 +85,7 @@ def test_fr07b_configured_root_persists_verified_and_failed_verdicts(
     long_ago = datetime.now(timezone.utc) - timedelta(days=90)
     fr07b_store.store(_fr07b_entry("L-stale", "removed_symbol", first_failed_at=long_ago))
 
-    result = memory_maintain_impl(_NS, backend=fr07b_store, config=_fr07b_config(fr07b_project))
+    result = run_maintain_sync(_NS, backend=fr07b_store, config=_fr07b_config(fr07b_project))
 
     verification = result["passes"]["verification"]  # type: ignore[index]
     assert verification["status"] == "ok", verification
@@ -108,7 +116,7 @@ def test_fr07b_configured_root_persists_verified_and_failed_verdicts(
 def test_fr07b_without_project_root_nothing_is_verified(fr07b_store: SQLiteBackend) -> None:
     fr07b_store.store(_fr07b_entry("L-holds", "feature_flag"))
 
-    result = memory_maintain_impl(_NS, backend=fr07b_store, config=_fr07b_config(None))
+    result = run_maintain_sync(_NS, backend=fr07b_store, config=_fr07b_config(None))
 
     verification = result["passes"]["verification"]  # type: ignore[index]
     assert (verification["status"], verification["reason"], verification["invalidated"]) == (
@@ -128,12 +136,12 @@ def test_fr07b_a_verified_verdict_is_cleared_once_no_root_can_recheck_it(
     fr07b_store: SQLiteBackend, fr07b_project: Path
 ) -> None:
     fr07b_store.store(_fr07b_entry("L-holds", "feature_flag"))
-    memory_maintain_impl(_NS, backend=fr07b_store, config=_fr07b_config(fr07b_project))
+    run_maintain_sync(_NS, backend=fr07b_store, config=_fr07b_config(fr07b_project))
     verified = fr07b_store.get("L-holds", namespace=_NS)
     assert verified is not None
     assert verified.verification_status == "verified"
 
-    result = memory_maintain_impl(_NS, backend=fr07b_store, config=_fr07b_config(None))
+    result = run_maintain_sync(_NS, backend=fr07b_store, config=_fr07b_config(None))
 
     assert result["passes"]["verification"]["invalidated"] == 1  # type: ignore[index]
     row = fr07b_store.get("L-holds", namespace=_NS)
@@ -155,7 +163,7 @@ def test_fr07b_a_failing_entry_fails_the_pass_and_holds_the_stamp(
     fr07b_store.store(_fr07b_entry("L-bad", "feature_flag"))
     fr07b_store.store(_fr07b_entry("L-holds", "feature_flag"))
 
-    result = memory_maintain_impl(_NS, backend=fr07b_store, config=_fr07b_config(fr07b_project))
+    result = run_maintain_sync(_NS, backend=fr07b_store, config=_fr07b_config(fr07b_project))
 
     verification = result["passes"]["verification"]  # type: ignore[index]
     assert (verification["status"], verification["reason"], verification["entry_failures"]) == (
@@ -185,7 +193,7 @@ def test_fr07b_a_persisted_malformed_row_fails_the_pass_with_or_without_a_root(
     _persist_malformed_assertions(fr07b_store, "L-bad")
 
     config = _fr07b_config(fr07b_project if with_root else None)
-    result = memory_maintain_impl(_NS, backend=fr07b_store, config=config)
+    result = run_maintain_sync(_NS, backend=fr07b_store, config=config)
 
     verification = result["passes"]["verification"]  # type: ignore[index]
     # No root is a skip only when the sweep itself was clean.
@@ -201,7 +209,7 @@ def test_fr07b_a_persisted_malformed_row_fails_the_pass_with_or_without_a_root(
 def test_fr07b_missing_root_directory_is_an_error_not_a_skip(fr07b_store: SQLiteBackend, tmp_path: Path) -> None:
     fr07b_store.store(_fr07b_entry("L-holds", "feature_flag"))
 
-    result = memory_maintain_impl(_NS, backend=fr07b_store, config=_fr07b_config(tmp_path / "absent"))
+    result = run_maintain_sync(_NS, backend=fr07b_store, config=_fr07b_config(tmp_path / "absent"))
 
     assert result["passes"]["verification"]["status"] == "error"  # type: ignore[index]
     assert result["status"] == "error"
@@ -218,11 +226,123 @@ def test_fr07b_a_raising_sweep_marks_the_pass_error(
 
     monkeypatch.setattr(verification_pass, "run_maintain_verify", boom)
 
-    result = memory_maintain_impl(_NS, backend=fr07b_store, config=_fr07b_config(fr07b_project))
+    result = run_maintain_sync(_NS, backend=fr07b_store, config=_fr07b_config(fr07b_project))
 
     assert result["passes"]["verification"] == {"status": "error", "reason": "ValueError"}  # type: ignore[index]
     assert result["status"] == "error"
     assert result["last_maintained_at"] == ""
+
+
+async def test_the_served_memory_maintain_runs_the_same_passes_in_the_same_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """run_maintain_sync (used above) is a test harness, not the served path: the REAL
+    memory_maintain tool runs through _maintain_sweep.serve_maintain's lane-job orchestration,
+    which resolves its own backend from MEMORY_STORAGE_PATH rather than an injected one. This
+    proves that path calls the SAME decay/consolidation/verification/checkpoint pass functions,
+    in the SAME order (decay -> consolidation -> verification -> wal_checkpoint), as
+    run_maintain_sync uses above -- so the tests above are not proving order or identity for a
+    copy that has since diverged from what is actually served."""
+    monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path))
+    monkeypatch.delenv("MEMORY_SINGLE_STORE_PATH", raising=False)
+    monkeypatch.delenv("MEMORY_PROJECT_ROOT", raising=False)  # verification pass runs for real, and skips (no root)
+
+    from trw_memory.server import mcp
+    from trw_memory.tools import maintain
+
+    order: list[str] = []
+    real_decay, real_consolidation, real_verification, real_checkpoint = (
+        maintain._run_decay,
+        maintain._run_consolidation,
+        maintain._run_verification,
+        maintain._run_checkpoint,
+    )
+
+    def _decay(backend: Any, namespace: str, config: MemoryConfig | None = None) -> dict[str, object]:
+        order.append("decay")
+        return real_decay(backend, namespace, config)
+
+    def _consolidation(namespace: str, backend: Any, config: MemoryConfig, lane: Any = None) -> dict[str, object]:
+        order.append("consolidation")
+        return real_consolidation(namespace, backend, config, lane=lane)
+
+    def _verification(namespace: str, backend: Any, config: MemoryConfig, **kwargs: Any) -> dict[str, object]:
+        order.append("verification")
+        return real_verification(namespace, backend, config, **kwargs)
+
+    def _checkpoint(backend: Any) -> dict[str, object]:
+        order.append("wal_checkpoint")
+        return real_checkpoint(backend)
+
+    real_security_maintenance = maintain._run_security_maintenance
+
+    def _security_maintenance() -> dict[str, object]:
+        order.append("security_maintenance")
+        return real_security_maintenance()
+
+    monkeypatch.setattr(maintain, "_run_decay", _decay)
+    monkeypatch.setattr(maintain, "_run_consolidation", _consolidation)
+    monkeypatch.setattr(maintain, "_run_verification", _verification)
+    monkeypatch.setattr(maintain, "_run_checkpoint", _checkpoint)
+    monkeypatch.setattr(maintain, "_run_security_maintenance", _security_maintenance)
+
+    tool = await mcp.get_tool("memory_maintain")
+    result = await asyncio.wait_for(tool.run({"namespace": "project:default"}), timeout=60.0)
+    reply = result.structured_content
+    assert isinstance(reply, dict)
+
+    assert order == ["decay", "consolidation", "verification", "security_maintenance", "wal_checkpoint"]
+    assert reply["status"] == "ok"
+    assert reply["passes"]["verification"]["status"] == "skipped"  # no MEMORY_PROJECT_ROOT: real skip path
+
+
+async def test_the_served_memory_maintain_drains_a_queued_security_maintenance_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B71-97, on the REAL served path (not run_maintain_sync -- see the test above for why that
+    distinction matters): a log queued while security_maintenance_inline=False is compacted by the
+    next real memory_maintain call, through _maintain_sweep.serve_maintain's own lane job, not just
+    the test-only sync copy."""
+    from trw_memory.security import runtime as security_runtime
+    from trw_memory.security.audit import AuditLog
+
+    monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "store"))
+    monkeypatch.delenv("MEMORY_SINGLE_STORE_PATH", raising=False)
+    monkeypatch.delenv("MEMORY_PROJECT_ROOT", raising=False)
+    audit_path = tmp_path / "audit.jsonl"
+    monkeypatch.setenv("MEMORY_AUDIT_LOG_PATH", str(audit_path))
+    monkeypatch.setenv("MEMORY_AUDIT_RETENTION_DAYS", "365")
+    monkeypatch.setenv("MEMORY_SECURITY_MAINTENANCE_INLINE", "false")
+
+    security_runtime._AUDIT_MAINTENANCE_CACHE.clear()
+    security_runtime._AUDIT_MAINTENANCE_QUEUE.clear()
+    log = AuditLog(audit_path)
+    for index in range(2):
+        log.append("store", entry_id=f"M-{index}")
+    lines = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    stale_ts = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+    for line in lines:
+        line["ts"] = stale_ts
+    audit_path.write_text("\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
+
+    security_runtime.ensure_security_maintenance(MemoryConfig())
+    assert security_runtime.security_maintenance_status()["queued"] == 1
+    assert len(AuditLog(audit_path).read_all()) == 2  # queued, not yet compacted
+
+    from trw_memory.server import mcp as real_mcp
+
+    tool = await real_mcp.get_tool("memory_maintain")
+    result = await asyncio.wait_for(tool.run({"namespace": "project:default"}), timeout=60.0)
+    reply = result.structured_content
+    assert isinstance(reply, dict)
+
+    assert reply["passes"]["security_maintenance"]["status"] == "ok"
+    assert security_runtime.security_maintenance_status()["queued"] == 0
+    # The stale queued records (M-0, M-1) are gone; a fresh audit event from THIS maintain call
+    # (decay/consolidation append while audit_enabled) is expected and fine.
+    remaining_ids = {record.id for record in AuditLog(audit_path).read_all()}
+    assert not remaining_ids & {"M-0", "M-1"}
+    security_runtime._AUDIT_MAINTENANCE_CACHE.clear()
 
 
 # --- FR07 (a) and (c): the registered store and review tools ---

@@ -46,6 +46,8 @@ def build_scored_candidates(
     stored_embeddings: dict[str, list[float]],
     limit: int,
     tags: list[str] | None,
+    distilled_weight: float | None = None,
+    rerank: bool = True,
 ) -> tuple[list[dict[str, object]], list[float] | None]:
     """Rank the candidate pool and return (scored entry dicts, query embedding).
 
@@ -53,6 +55,12 @@ def build_scored_candidates(
     SAME vector the dense step used; recomputing it there would score the tier
     candidates against different text whenever the temporal rewrite stripped a
     prefix.
+
+    *distilled_weight* is the resolved source policy's ``git_distilled`` weight,
+    applied inside the pipeline (PRD-CORE-336 FR01), so the reported score is
+    the weighted one and nothing downstream re-sorts (PRD-CORE-298 FR05).
+
+    *rerank* ``False`` skips the cross-encoder and its bridge hop (``ranking_arguments``).
     """
     from trw_memory.tools import recall as _recall
 
@@ -71,8 +79,14 @@ def build_scored_candidates(
             embedder=embedder,
             query_embedding=query_embedding,
             stored_embeddings=stored_embeddings or None,
+            distilled_weight=distilled_weight,
             **ranking_arguments(
-                cfg, limit=limit, pool_size=len(all_entries), recency_weight=retrieval.recency_weight, tags=tags
+                cfg,
+                limit=limit,
+                pool_size=len(all_entries),
+                recency_weight=retrieval.recency_weight,
+                tags=tags,
+                rerank=rerank,
             ),
         )
     else:

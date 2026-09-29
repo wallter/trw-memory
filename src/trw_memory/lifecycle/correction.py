@@ -15,8 +15,12 @@ Patch semantics: a field the caller did not name is untouched (``None`` is
 tag set; ``tags_add`` appends, keeping order and dropping duplicates. Retiring
 a learning is ``status="obsolete"``: default recall reads active rows only.
 
-Failures are returned, never raised: ``{"status": "invalid" | "not_found", "error": ...}``,
+Failures are returned, never raised: ``{"status": "invalid" | "not_found" | "conflict", "error": ...}``,
 and ``not_found`` also carries ``error_type: learning_not_found``.
+
+``if_revision`` makes the patch conditional (PRD-CORE-308): it applies only while
+``revision_of(row)`` still equals it, else ``conflict`` and nothing is written. A
+caller that computes absolute values from a row it read sends that row's revision.
 """
 
 from __future__ import annotations
@@ -37,8 +41,11 @@ from trw_memory.lifecycle.tiers._runtime import (
 )
 from trw_memory.models._assertion_cap import OVERLONG, overlong
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import Assertion, Confidence, MemoryStatus, MemoryType, ProtectionTier
+from trw_memory.models.memory import Assertion, Confidence, EvidenceLevel, MemoryStatus, MemoryType, ProtectionTier
 from trw_memory.security.poisoning import reject_unsubstantiated_verified
+from trw_memory.storage._shared import revision_of
+from trw_memory.storage._utf8_validator import refuse_overlong_text_fields
+from trw_memory.storage.interface import is_transactional
 
 if TYPE_CHECKING:
     from trw_memory.embeddings.interface import EmbeddingProvider
@@ -48,7 +55,10 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-__all__ = ["LearningPatch", "Store", "apply_correction", "not_found", "parse_patch"]
+__all__ = ["CONFLICT_ATTEMPTS", "LearningPatch", "Store", "apply_correction", "not_found", "parse_patch", "revision_of"]
+
+#: Times a revision-conditional writer re-reads and retries before it reports ``conflict`` (PRD-CORE-308).
+CONFLICT_ATTEMPTS = 3
 
 
 class Store(NamedTuple):
@@ -74,6 +84,7 @@ class LearningPatch(BaseModel):
     impact: float | None = Field(default=None, ge=0.0, le=1.0)
     type: MemoryType | None = None
     confidence: Confidence | None = None
+    evidence_level: EvidenceLevel | None = None  # PRD-CORE-312-FR01
     protection_tier: ProtectionTier | None = None
     phase_origin: Phase | None = None
     phase_affinity: list[str] | None = None
@@ -93,6 +104,7 @@ class LearningPatch(BaseModel):
     recurrence: int | None = Field(default=None, ge=0)
     merged_from: list[str] | None = None
     metadata_add: dict[str, str] | None = None
+    if_revision: str | None = None  # apply only over this ``revision_of`` the row (PRD-CORE-308)
 
     @field_validator("assertions", mode="before")
     @classmethod
@@ -133,6 +145,7 @@ _PLAIN_FIELDS: tuple[tuple[str, str], ...] = (
     ("nudge_line", "nudge_line"),
     ("expires", "expires"),
     ("confidence", "confidence"),
+    ("evidence_level", "evidence_level"),
     ("task_type", "task_type"),
     ("domain", "domain"),
     ("phase_origin", "phase_origin"),
@@ -192,6 +205,8 @@ def _collect(entry: MemoryEntry, patch: LearningPatch) -> tuple[dict[str, object
 def _refuse_unsubstantiated(entry: MemoryEntry, fields: dict[str, object], min_items: int) -> dict[str, str] | None:
     # PRD-CORE-244 FR02 on the update path: only a promotion needs a basis, and the
     # entry judged is the post-update one, since this call may carry the assertions.
+    # PRD-CORE-312: the evidence_level axis is enforced separately, as a data
+    # invariant in the storage layer (``_evidence_invariant``), not here.
     if fields.get("confidence") != Confidence.VERIFIED.value:
         return None
     projected = entry.model_copy(
@@ -224,7 +239,7 @@ def apply_correction(
     prior: tuple[Store, MemoryEntry | None] | None = None,
     embedder: EmbeddingProvider | None = None,
 ) -> dict[str, str]:
-    """Apply ``patch`` to ``entry`` in ``store``; return ``updated`` / ``no_changes`` / ``invalid``.
+    """Apply ``patch`` to ``entry`` in ``store``; return ``updated`` / ``no_changes`` / ``invalid`` / ``conflict``.
 
     ``entry`` identifies the row; the patch is applied to the row as re-read inside
     the write transaction, not to this possibly stale copy. ``prior`` is the owning
@@ -239,6 +254,16 @@ def apply_correction(
     stays without one; ``memory_reembed`` owns that backfill.
     """
     backend = store.backend
+    if patch.if_revision is not None and not is_transactional(backend):
+        # The compare and the write must share one lock; a no-op transaction (YAML) cannot give one.
+        msg = f"if_revision needs a transactional backend, not {type(backend).__name__}"
+        return {"status": "invalid", "error": msg}
+    try:
+        # Same local cap as a store (PRD-CORE-331 FR07 / B71-94): refused, not truncated, before
+        # any encoding or backend work, so a patched-in overlong value can't slip past the write path.
+        refuse_overlong_text_fields(content=patch.summary, detail=patch.detail)
+    except SchemaValidationError as exc:
+        return {"status": "invalid", "error": str(exc), "failed_fields": ",".join(exc.failed_fields)}
     text_changed = patch.summary is not None or patch.detail is not None
     encoded_text, vector, proof = _encode_patched(entry, patch, embedder) if text_changed else ("", None, {})
     same_store, closed = prior is not None and prior[0].backend is backend, None
@@ -246,12 +271,24 @@ def apply_correction(
         # A row deleted since the caller read it is gone, not a stale copy to patch (C12 rc7).
         if (current := backend.get(entry.id, namespace=entry.namespace)) is None:
             return not_found(entry.id)
+        if patch.if_revision is not None and patch.if_revision != revision_of(current):
+            msg = f"{entry.id} changed since revision {patch.if_revision[:12]}; nothing was written, re-read and retry"
+            return {"learning_id": entry.id, "status": "conflict", "error": msg}
         fields, changes = _collect(current, patch)
         refusal = _refuse_unsubstantiated(current, fields, int(store.config.min_evidence_items_for_verified))
         if refusal is not None:
             return refusal
-        if fields and backend.update(entry.id, namespace=entry.namespace, **fields) is None:
-            return not_found(entry.id)
+        if fields:
+            try:
+                if backend.update(entry.id, namespace=entry.namespace, **fields) is None:
+                    return not_found(entry.id)
+            except SchemaValidationError as exc:
+                # PRD-CORE-312: the evidence-invariant refusal now fires INSIDE
+                # backend.update() itself (a data invariant, not a per-caller
+                # chokepoint check) -- convert it to the same rejection shape
+                # ``_refuse_unsubstantiated``'s own check already returns.
+                logger.warning("unsubstantiated_verified_update_rejected", learning_id=entry.id, reason=exc.reason)
+                return {"status": "invalid", "error": str(exc), "reason": exc.reason}
         if text_changed and backend.vector_exists(entry.id, namespace=entry.namespace):
             backend.delete_vector(entry.id, namespace=entry.namespace)
             committed = f"{fields.get('content', current.content)} {fields.get('detail', current.detail)}"

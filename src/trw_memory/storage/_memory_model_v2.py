@@ -1,17 +1,14 @@
-"""Quiesced ``memory_model_v2_importance_type`` cutover orchestrator (PRD-CORE-181-FR06).
+"""SQLite ``memory_model_v2_importance_type`` delta (PRD-CORE-181-FR06).
 
-Wave 717B converts the persisted memory model from the legacy dual
+Wave 717B converted the persisted memory model from the legacy dual
 ``impact``/``importance`` vocabulary to a single canonical ``importance`` +
-valid ``type`` shape. This module owns the *one-time, quiesced* orchestration:
-
-* the SQLite forward-only delta registered as ``_MIGRATIONS[2]`` in
-  :mod:`trw_memory.storage._schema` (:func:`migrate_sqlite_importance_type`);
-* the full maintenance-window orchestrator that checkpoints the WAL, snapshots
-  the database through the SQLite backup API, stages the active/cold YAML
-  ``impact -> importance`` rewrite, and commits both atomically or rolls back
-  with a path/row classification report (:func:`run_memory_model_v2_cutover`);
-* the backup restore path exercised on interruption
-  (:func:`restore_from_backup`).
+valid ``type`` shape. This module owns the SQLite forward-only delta
+registered as ``_MIGRATIONS[2]`` in :mod:`trw_memory.storage._schema`
+(:func:`migrate_sqlite_importance_type`). The one-time, quiesced YAML +
+backup-API cutover orchestrator this delta originally shipped alongside
+(the real 2026-07-12 maintenance-window run) had no upgrade-path caller —
+`ensure_schema` alone runs on every store open — and was removed in the
+trw-memory deletion wave (2026-09-26); see UPGRADE-NOTES-8.0.0.md.
 
 Invariants (do not relax without updating PRD-CORE-181):
 
@@ -27,28 +24,17 @@ Invariants (do not relax without updating PRD-CORE-181):
 
 from __future__ import annotations
 
-import contextlib
 import json
 import sqlite3
-from pathlib import Path
 
-import structlog
 from pydantic import BaseModel, Field
 
-from trw_memory._live_stores import connect_registered
-from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryType
-from trw_memory.storage.persistence import read_yaml, write_yaml
-
-logger = structlog.get_logger(__name__)
 
 __all__ = [
     "ClassificationEntry",
-    "CutoverReceipt",
     "MigrationBlocked",
     "migrate_sqlite_importance_type",
-    "restore_from_backup",
-    "run_memory_model_v2_cutover",
 ]
 
 MIGRATION_KEY = "memory_model_v2_importance_type"
@@ -77,17 +63,6 @@ class MigrationBlocked(RuntimeError):
     def __init__(self, report: list[ClassificationEntry]) -> None:
         self.report = report
         super().__init__(f"{MIGRATION_KEY} blocked: {len(report)} unmigratable item(s)")
-
-
-class CutoverReceipt(BaseModel):
-    """Outcome of a :func:`run_memory_model_v2_cutover` invocation."""
-
-    migrated: bool
-    schema_version: int
-    active_yaml_rewritten: int = 0
-    cold_yaml_rewritten: int = 0
-    backup_path: str | None = None
-    report: list[ClassificationEntry] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -158,232 +133,3 @@ def migrate_sqlite_importance_type(cursor: sqlite3.Cursor) -> None:
 
     if report:
         raise MigrationBlocked(report)
-
-
-# ---------------------------------------------------------------------------
-# YAML staging (active + cold tiers)
-# ---------------------------------------------------------------------------
-
-
-def _plan_yaml_rewrites(
-    directory: Path | None,
-    *,
-    kind: str,
-) -> tuple[dict[Path, dict[str, object]], list[ClassificationEntry]]:
-    """Stage (never write) the canonical rewrite for every YAML under *directory*.
-
-    Returns a ``{path: rewritten_dict}`` plan plus a classification report of
-    files that cannot be migrated (conflicting values or an invalid ``type``).
-    A file appearing in the report is NOT included in the plan, so a blocked
-    run discards it entirely.
-    """
-    plan: dict[Path, dict[str, object]] = {}
-    report: list[ClassificationEntry] = []
-    if directory is None or not directory.exists():
-        return plan, report
-
-    for path in sorted(directory.rglob("*.yaml")):
-        try:
-            data = read_yaml(path)
-        except StorageError:
-            report.append(ClassificationEntry(kind=kind, ref=str(path), reason="unreadable YAML"))
-            continue
-
-        rewritten = _rewrite_yaml_data(data, kind=kind, ref=str(path), report=report)
-        if rewritten is not None:
-            plan[path] = rewritten
-
-    return plan, report
-
-
-def _rewrite_yaml_data(
-    data: dict[str, object],
-    *,
-    kind: str,
-    ref: str,
-    report: list[ClassificationEntry],
-) -> dict[str, object] | None:
-    """Compute the canonical ``importance``/``type`` rewrite for one YAML dict.
-
-    Appends to *report* and returns ``None`` when the file is unmigratable.
-    """
-    has_impact = "impact" in data
-    has_importance = "importance" in data
-    if has_impact and has_importance and data["impact"] != data["importance"]:
-        report.append(ClassificationEntry(kind=kind, ref=ref, reason="conflicting impact vs importance value"))
-        return None
-
-    new_data = dict(data)
-    if has_impact:
-        legacy_value = new_data.pop("impact")
-        new_data["importance"] = legacy_value if not has_importance else new_data["importance"]
-
-    type_value = new_data.get("type")
-    if type_value is None or str(type_value).strip() == "":
-        new_data["type"] = _DEFAULT_TYPE
-    elif str(type_value) not in _VALID_TYPES:
-        report.append(ClassificationEntry(kind=kind, ref=ref, reason=f"invalid type {type_value!r}"))
-        return None
-
-    return new_data
-
-
-def _apply_yaml_rewrites(plan: dict[Path, dict[str, object]]) -> int:
-    """Atomically write every staged rewrite. Returns the count written."""
-    for path, data in plan.items():
-        write_yaml(path, data)
-    return len(plan)
-
-
-# ---------------------------------------------------------------------------
-# SQLite backup / restore (backup API)
-# ---------------------------------------------------------------------------
-
-
-def _snapshot_backup(conn: sqlite3.Connection, backup_path: Path) -> None:
-    """Create a SQLite backup-API snapshot of *conn* at *backup_path*."""
-    backup_path.parent.mkdir(parents=True, exist_ok=True)
-    dest = connect_registered(backup_path, sqlite3, str(backup_path))
-    try:
-        conn.backup(dest)
-    finally:
-        dest.close()
-
-
-def restore_from_backup(db_path: Path, backup_path: Path) -> None:
-    """Restore *db_path* from a backup-API snapshot at *backup_path*.
-
-    Used to recover from an interrupted cutover: the pre-migration snapshot is
-    copied back over the live database via the SQLite backup API.
-    """
-    if not backup_path.exists():
-        raise StorageError(f"backup snapshot not found: {backup_path}", path=str(backup_path))
-    source = connect_registered(backup_path, sqlite3, str(backup_path))
-    dest = connect_registered(db_path, sqlite3, str(db_path))
-    try:
-        source.backup(dest)
-        dest.commit()
-    finally:
-        source.close()
-        dest.close()
-
-
-# ---------------------------------------------------------------------------
-# Full quiesced orchestrator
-# ---------------------------------------------------------------------------
-
-
-def run_memory_model_v2_cutover(
-    db_path: Path,
-    *,
-    active_dir: Path | None = None,
-    cold_dir: Path | None = None,
-    backup_dir: Path | None = None,
-) -> CutoverReceipt:
-    """Run the one-time, quiesced ``memory_model_v2_importance_type`` cutover.
-
-    Sequence:
-      1. Stage (validate-only) the active + cold YAML ``impact -> importance``
-         rewrites. Any conflicting/invalid file is classified, not written.
-      2. Open the database, ``PRAGMA wal_checkpoint(TRUNCATE)``, and snapshot it
-         through the SQLite backup API. The snapshot is MANDATORY — when
-         *backup_dir* is omitted it defaults to
-         ``<db_path parent>/backups/pre-v2-cutover/`` (FR06: the orchestrator
-         "creates a SQLite backup-API snapshot", not "may create").
-      3. If the YAML staging already found blockers, refuse before touching
-         SQLite — ``user_version`` is untouched and no YAML is written.
-      4. Otherwise apply the SQLite v1->v2 migration through ``ensure_schema``
-         (``BEGIN IMMEDIATE`` + rollback-on-block). A block restores the
-         snapshot and discards the staged YAML.
-      5. On full success, atomically write the staged YAML rewrites.
-
-    Args:
-        db_path: Path to the SQLite ``memory.db``.
-        active_dir: Directory of active-tier ``*.yaml`` entries (optional).
-        cold_dir: Directory of cold-tier ``*.yaml`` archives (optional).
-        backup_dir: Directory to hold the pre-migration snapshot. Defaults to
-            ``<db_path parent>/backups/pre-v2-cutover`` — a snapshot is always
-            taken before any migration attempt.
-
-    Returns:
-        A :class:`CutoverReceipt` describing the outcome. ``migrated=False``
-        with a non-empty ``report`` means the cutover blocked without partial
-        writes.
-    """
-    # Lazily import to avoid an import cycle: _schema imports this module to
-    # register _MIGRATIONS[2].
-    from trw_memory.storage._schema import SCHEMA_VERSION, _user_version, ensure_schema
-
-    active_plan, active_report = _plan_yaml_rewrites(active_dir, kind="active_yaml")
-    cold_plan, cold_report = _plan_yaml_rewrites(cold_dir, kind="cold_yaml")
-    yaml_report = active_report + cold_report
-
-    conn = connect_registered(db_path, sqlite3, str(db_path))
-    backup_path: Path | None = None
-    try:
-        # WAL checkpoint before snapshot; a non-WAL db raises OperationalError.
-        with contextlib.suppress(sqlite3.OperationalError):
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-
-        # FR06: the pre-migration snapshot is mandatory, never optional —
-        # running without an explicit backup_dir must still leave a restore
-        # point (gap observed on the real 2026-07-12 cutover, which ran
-        # snapshot-less because the parameter defaulted to None).
-        effective_backup_dir = backup_dir or (db_path.parent / "backups" / "pre-v2-cutover")
-        backup_path = effective_backup_dir / f"{db_path.name}.v1-backup"
-        _snapshot_backup(conn, backup_path)
-
-        if yaml_report:
-            # YAML ambiguity blocks before any SQLite version change.
-            logger.warning(
-                "memory_model_v2_blocked",
-                migration=MIGRATION_KEY,
-                phase="yaml_staging",
-                blocked=len(yaml_report),
-            )
-            return CutoverReceipt(
-                migrated=False,
-                schema_version=_user_version(conn),
-                backup_path=str(backup_path) if backup_path else None,
-                report=yaml_report,
-            )
-
-        try:
-            ensure_schema(conn)
-        except MigrationBlocked as exc:
-            # ensure_schema already rolled the SQLite transaction back; restore
-            # the snapshot for defence-in-depth and discard the staged YAML.
-            if backup_path is not None:
-                restore_from_backup(db_path, backup_path)
-            logger.warning(
-                "memory_model_v2_blocked",
-                migration=MIGRATION_KEY,
-                phase="sqlite_migration",
-                blocked=len(exc.report),
-            )
-            return CutoverReceipt(
-                migrated=False,
-                schema_version=_user_version(conn),
-                backup_path=str(backup_path) if backup_path else None,
-                report=exc.report,
-            )
-
-        active_written = _apply_yaml_rewrites(active_plan)
-        cold_written = _apply_yaml_rewrites(cold_plan)
-
-        logger.info(
-            "memory_model_v2_complete",
-            migration=MIGRATION_KEY,
-            schema_version=SCHEMA_VERSION,
-            active_yaml_rewritten=active_written,
-            cold_yaml_rewritten=cold_written,
-        )
-        return CutoverReceipt(
-            migrated=True,
-            schema_version=SCHEMA_VERSION,
-            active_yaml_rewritten=active_written,
-            cold_yaml_rewritten=cold_written,
-            backup_path=str(backup_path) if backup_path else None,
-        )
-    finally:
-        conn.close()

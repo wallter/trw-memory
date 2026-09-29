@@ -1,4 +1,4 @@
-# ruff: noqa: F401,I001
+# ruff: noqa: I001
 """Knowledge graph -- edge creation, traversal, cross-validation, importance ops.
 
 Supports 13 typed edge types (PRD-CORE-107).  Graph traversal via BFS up to depth 3.
@@ -6,22 +6,18 @@ Supports 13 typed edge types (PRD-CORE-107).  Graph traversal via BFS up to dept
 
 from __future__ import annotations
 
-import contextlib
-import threading
-from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from heapq import nsmallest
 
 from trw_memory.retrieval.recall_selection import RecallInvocation
 from trw_memory.storage.interface import EntryCursor
-from pathlib import Path
-from typing import Any
 
 import structlog
 
 __all__ = [
     "VALID_EDGE_TYPES",
+    "abandon_graph_jobs",
     "apply_importance_boost",
     "apply_importance_decay",
     "backfill_graph_page",
@@ -42,36 +38,22 @@ __all__ = [
     "wait_for_graph_updates",
 ]
 
-from trw_memory.exceptions import AuthorizationError, StorageError
+from trw_memory.exceptions import AuthorizationError
 from trw_memory._graph_config import derive_graph_config as _derive_graph_config
-from trw_memory._graph_worker_pool import submit_graph_job as _submit_graph_job, worker_backend as _worker_backend
+from trw_memory._graph_worker_pool import (
+    abandon_graph_jobs as abandon_graph_jobs,
+    submit_graph_job as _submit_graph_job,
+    worker_backend as _worker_backend,
+)
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.interface import StorageBackend
-from trw_memory.storage._sql_utils import iter_bind_chunks
 
-# Background graph-update thread registry extracted to _graph_threads.py.
-# Re-export the shims + join primitive so trw_memory.graph.<name> keeps working
-# for the 4 prod + 4 test importers of wait_for_graph_updates.
-from trw_memory._graph_threads import (
-    _REGISTRY as _GRAPH_THREAD_REGISTRY,
-    _track_graph_thread as _track_graph_thread,
-    _untrack_graph_thread as _untrack_graph_thread,
-    wait_for_graph_updates as wait_for_graph_updates,
-)
-
-# Back-compat aliases for the pre-extraction module globals. They point at the
-# registry's live internals (mutated in place by track/untrack), so any external
-# reader still observes the real registry state rather than a detached copy.
-_BACKGROUND_GRAPH_THREADS = _GRAPH_THREAD_REGISTRY._threads
-_BACKGROUND_GRAPH_THREADS_GUARD = _GRAPH_THREAD_REGISTRY._guard
+from trw_memory._graph_threads import wait_for_graph_updates as wait_for_graph_updates
 
 logger = structlog.get_logger(__name__)
 
-SIMILARITY_THRESHOLD = 0.75
 CANDIDATE_LIMIT = 500
-IMPORTANCE_BOOST = 0.05
-DECAY_DELTA = 0.1
 
 # PRD-CORE-107: All valid edge types (13 total)
 VALID_EDGE_TYPES: frozenset[str] = frozenset(
@@ -93,19 +75,6 @@ VALID_EDGE_TYPES: frozenset[str] = frozenset(
         "conflicts_with",
     }
 )
-
-# _ENTRY_UPDATE_LOCKS / _ENTRY_UPDATE_LOCKS_GUARD are owned by
-# _graph_cross_project and re-imported below for back-compat; no local copy here.
-# Background graph-update thread tracking lives in _graph_threads.py (registry
-# class + singleton); the shims/aliases are re-exported near the bottom of this
-# module so trw_memory.graph.wait_for_graph_updates et al. keep working.
-
-
-def _optional_lock(lock: threading.Lock | None) -> contextlib.AbstractContextManager[bool]:
-    """Return a context manager that acquires *lock* if provided, else no-op."""
-    if lock is not None:
-        return lock
-    return contextlib.nullcontext(True)
 
 
 def _run_scheduled_graph_update(
@@ -183,49 +152,31 @@ from trw_memory._graph_batch import update_entries_graph as update_entries_graph
 # One resumable page of the forced sweep over existing rows lives in _graph_backfill.py.
 from trw_memory._graph_backfill import backfill_graph_page as backfill_graph_page  # noqa: E402
 
-# Cross-project validation cluster extracted to _graph_cross_project.py
-# (PRD-DIST-245 batch 93). Re-exports preserve back-compat names.
-# ``merge_cross_validated_entry`` has no consumer through this facade -- import
-# it from `_graph_cross_project` directly (as the tests below do).
+# The facade's public names live in these cluster modules (PRD-DIST-245).
 from trw_memory._graph_cross_project import (  # noqa: E402
-    _ENTRY_UPDATE_LOCKS as _ENTRY_UPDATE_LOCKS,
-    _ENTRY_UPDATE_LOCKS_GUARD as _ENTRY_UPDATE_LOCKS_GUARD,
     cross_validate_entries as cross_validate_entries,
     project_scope_key as _project_scope_key,
 )
-
-# Importance boost / decay cluster extracted to _graph_decay.py
-# (PRD-DIST-245 batch 94). Re-exports preserve back-compat names.
 from trw_memory._graph_decay import (  # noqa: E402
+    IMPORTANCE_BOOST as IMPORTANCE_BOOST,
     apply_importance_boost as apply_importance_boost,
     apply_importance_decay as apply_importance_decay,
     memory_decay_pass as memory_decay_pass,
 )
-
-# Edge-creation cluster extracted to _graph_edges.py (PRD-DIST-245 batch 95).
 from trw_memory._graph_edges import (  # noqa: E402
+    SIMILARITY_THRESHOLD as SIMILARITY_THRESHOLD,
     create_consolidation_edges as create_consolidation_edges,
     create_similarity_edges as create_similarity_edges,
 )
-
-# Cluster detection + impact propagation extracted to _graph_clusters.py
-# (PRD-DIST-245 batch 96).
 from trw_memory._graph_clusters import (  # noqa: E402
-    _propose_domain_name as _propose_domain_name,
     detect_clusters as detect_clusters,
     propagate_impact as propagate_impact,
 )
-
-# BFS traversal + derived tag neighbours extracted to _graph_traversal.py
-# (PRD-CORE-245 FR07 — the facade had 8 effective LOC of headroom).
 from trw_memory._graph_traversal import (  # noqa: E402
     DERIVED_EDGE_TYPE as DERIVED_EDGE_TYPE,
     MAX_TRAVERSAL_DEPTH as MAX_TRAVERSAL_DEPTH,
     graph_query as graph_query,
 )
-
-# Conflict detection + co-anchored edges extracted to _graph_conflicts.py
-# (PRD-DIST-245 batch 97).
 from trw_memory._graph_conflicts import (  # noqa: E402
     create_co_anchored_edges as create_co_anchored_edges,
     filter_conflicts as filter_conflicts,
@@ -319,10 +270,3 @@ def list_org_shared_entries(
             limit, candidates(), key=lambda entry: invocation.rank_key(entry, entry.importance, source="org")
         )
     return sorted(candidates(), key=lambda entry: (entry.importance, entry.updated_at), reverse=True)[:limit]
-
-
-# Graph primitives extracted to _graph_primitives.py (PRD-DIST-245 batch 98).
-from trw_memory._graph_primitives import (  # noqa: E402
-    _safe_cosine_similarity as _safe_cosine_similarity,
-    _upsert_edge as _upsert_edge,
-)

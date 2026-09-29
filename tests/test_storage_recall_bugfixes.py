@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._optional_extras import vec_unavailable
 from trw_memory.lifecycle._recall import (
     _expires_in_past,
     drop_expired_entries,
@@ -288,7 +289,7 @@ class TestF11VectorPruneOnTerminalStatus:
         backend = SQLiteBackend(Path(":memory:"))
         if not backend.vec_available:
             backend.close()
-            pytest.skip("sqlite-vec virtual table unavailable")
+            vec_unavailable("sqlite-vec virtual table unavailable")
         return backend
 
     def test_vector_deleted_when_marked_obsolete(self) -> None:

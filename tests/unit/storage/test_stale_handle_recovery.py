@@ -14,6 +14,7 @@ from unittest.mock import patch
 import pytest
 import structlog.testing
 
+from tests._optional_extras import vec_unavailable
 from trw_memory.exceptions import StaleConnectionError
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage._stale_handle_detector import sentinel_path, write_sentinel
@@ -305,7 +306,7 @@ def test_reconnect_reloads_vector_capabilities(tmp_path: Path) -> None:
     backend = SQLiteBackend(db_path)
     if not backend.vec_available:
         backend.close()
-        pytest.skip("sqlite-vec extension not available")
+        vec_unavailable("sqlite-vec extension not available")
     try:
         backup = tmp_path / "vectors.bak"
         shutil.move(str(db_path), backup)

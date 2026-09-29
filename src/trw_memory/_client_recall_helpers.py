@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, cast
 import structlog
 
 from trw_memory._client_distilled_tiering import entry_to_result as _entry_to_result
+from trw_memory._client_org_shared import coerce_float, matches_query
 from trw_memory._client_recall_mirror import (
     remember_results_in_tiers as remember_results_in_tiers,
 )
@@ -128,7 +129,7 @@ async def _org_candidates(
                     and (exclude_ids is None or entry.id not in exclude_ids)
                     and (exclude_content is None or entry.content not in exclude_content)
                     and (not tags or set(tags).issubset(entry.tags))
-                    and (not query.strip() or client._matches_query(_entry_to_result(entry), query))
+                    and (not query.strip() or matches_query(_entry_to_result(entry), query))
                 ),
             )
         org_entries = await asyncio.to_thread(producer)
@@ -152,7 +153,7 @@ async def _org_candidates(
             continue
         if tags and not set(tags).issubset(entry.tags):
             continue
-        if query.strip() and not client._matches_query(_entry_to_result(entry), query):
+        if query.strip() and not matches_query(_entry_to_result(entry), query):
             continue
         candidates.append(LocalCandidate(entry, entry.importance, source="org"))
     return candidates
@@ -238,8 +239,6 @@ def merge_tier_results(
 
 def tier_result_from_entry(entry: dict[str, object]) -> MemoryResultDict:
     """Convert a tier-managed entry dict into the client recall result shape."""
-    from trw_memory.client import MemoryClient
-
     raw_score = entry.get("score")
     score = float(str(raw_score)) if raw_score is not None else entry_utility(entry)
     raw_tags = entry.get("tags", [])
@@ -255,7 +254,7 @@ def tier_result_from_entry(entry: dict[str, object]) -> MemoryResultDict:
         "content": str(entry.get("content", "")),
         "detail": str(entry.get("detail", "")),
         "tags": [str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else [],
-        "importance": MemoryClient._coerce_float(entry.get("importance", 0.0)),
+        "importance": coerce_float(entry.get("importance", 0.0)),
         "score": round(score, 4),
         "created_at": str(entry.get("created_at", "")),
         "updated_at": str(entry.get("updated_at", entry.get("created_at", ""))),
@@ -265,7 +264,7 @@ def tier_result_from_entry(entry: dict[str, object]) -> MemoryResultDict:
         "recurrence": int(str(entry.get("recurrence", 1))),
         "access_count": int(str(entry.get("access_count", 0))),
         "metadata": metadata,
-        "_relevance_hint": MemoryClient._coerce_float(entry.get("_tier_relevance", score)),
+        "_relevance_hint": coerce_float(entry.get("_tier_relevance", score)),
     }
     return tier_result
 
@@ -314,7 +313,12 @@ def merge_local_candidates(
 
         floor = adaptive_rerank_floor(limit).min_score
         warm = [c for c in added if not c.cold]
-        scored = cross_encode_scores(query, [c.entry for c in warm], model_name=config.recall_rerank_model)
+        scored = cross_encode_scores(
+            query,
+            [c.entry for c in warm],
+            model_name=config.recall_rerank_model,
+            passage_chars=config.recall_rerank_passage_chars,
+        )
         if scored is not None:
             passing = {e.id for e, s in scored if s >= floor}
             added = [c for c in added if c.cold or c.entry.id in passing]
@@ -375,7 +379,7 @@ async def finish_candidates(
         if not eligible and not policy.temporal.include_superseded:
             continue
         row = candidate_to_result(candidate)
-        bucket, negative_score = policy.source.rank_key(row)
+        bucket, negative_score = policy.source.rank_key(row, pipeline_weighted=candidate.distilled_weighted)
         row["score"] = -negative_score
         if candidate.raw_score >= min_score and row["score"] >= min_score:
             fallback = int(candidate.tier_fallback and not explicit_weights)

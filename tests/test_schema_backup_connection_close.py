@@ -127,3 +127,39 @@ def test_snapshot_skipped_for_empty_store_opens_no_connection(
 
     assert recorded_targets == []
     assert not (tmp_path / BACKUP_DIR_NAME).exists()
+
+
+@pytest.mark.parametrize("page_size", [4096, 65536])
+def test_backup_step_size_derives_from_page_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, page_size: int
+) -> None:
+    """Each ``backup`` step copies at most 16 MiB whatever the source's page size (B71-88).
+
+    A fixed ``pages=4096`` is a 256 MiB step, and 256 MiB between deadline checks, at a 64 KiB page.
+    """
+    steps: list[int] = []
+    real_open = _schema_backup._open_snapshot_source
+
+    class _Source:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self._conn = conn
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._conn, name)
+
+        def backup(self, target: object, *, pages: int, progress: object) -> None:
+            steps.append(pages)
+            self._conn.backup(target, pages=pages, progress=progress)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(_schema_backup, "_open_snapshot_source", lambda path: _Source(real_open(path)))
+    conn = sqlite3.connect(tmp_path / "memory.db")
+    conn.execute(f"PRAGMA page_size={page_size}")
+    conn.execute("CREATE TABLE memories (id TEXT PRIMARY KEY, content TEXT)")
+    conn.execute("INSERT INTO memories VALUES ('a', 'content')")
+    conn.commit()
+    try:
+        assert snapshot_before_migration(conn, from_version=4, to_version=5) is not None
+    finally:
+        conn.close()
+
+    assert steps == [16 * 1024 * 1024 // page_size]

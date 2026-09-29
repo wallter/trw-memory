@@ -107,10 +107,7 @@ _QUERY_STOPWORDS = frozenset(_QUERY_STOPWORD_TEXT.split())
 
 def _normalize_text(text: str) -> str:
     """Lowercase, strip punctuation, and split CamelCase."""
-    text = _CAMEL_RE.sub(" ", text)
-    text = text.lower()
-    text = _PUNCT_RE.sub(" ", text)
-    return text
+    return _PUNCT_RE.sub(" ", _CAMEL_RE.sub(" ", text).lower())
 
 
 # Suffix-strip stemming applied to document AND query tokens so "researched"

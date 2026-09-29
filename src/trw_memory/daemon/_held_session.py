@@ -12,10 +12,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
-from collections.abc import Callable
-from typing import Any
+from collections.abc import AsyncIterator, Callable
+from typing import TYPE_CHECKING, Any
 
-from fastmcp import Client
+if TYPE_CHECKING:
+    from fastmcp import Client
 
 
 @dataclasses.dataclass(eq=False)
@@ -28,6 +29,10 @@ class HeldSession:
     stack: contextlib.AsyncExitStack
     active: int = 0
     released: bool = False
+    closed: bool = False
+    # Strong ref to the primed generator from ``_watch_loop_shutdown``: kept alive so the
+    # owning loop's weak asyncgen registry still finds it at shutdown (B71-09 below).
+    _loop_watcher: AsyncIterator[None] | None = None
 
 
 class HeldSessions:
@@ -57,6 +62,11 @@ class HeldSessions:
                 held.released = self.retired
                 if not self.retired:
                     self.held = held
+                    # Primed past its yield so the loop's asyncgen finalizer hook tracks it
+                    # (B71-09): nothing else ever runs this held session's close on loop end.
+                    watcher = _watch_loop_shutdown(held)
+                    await watcher.__anext__()
+                    held._loop_watcher = watcher
             held.active += 1
             return held
 
@@ -84,6 +94,24 @@ class HeldSessions:
 
 
 async def _close(held: HeldSession) -> None:
+    if held.closed:
+        return
     if held.loop is asyncio.get_running_loop():
+        held.closed = True
         with contextlib.suppress(Exception):  # justified: closing a broken session must not mask the call's error
             await held.stack.aclose()
+
+
+async def _watch_loop_shutdown(held: HeldSession) -> AsyncIterator[None]:
+    """One-shot generator whose ``finally`` runs when *held*'s loop ends (B71-09 / PRD-CORE-331 FR09).
+
+    ``asyncio.run()`` calls ``loop.shutdown_asyncgens()`` before closing the
+    loop, ``aclose()``-ing every async generator the loop still tracks -- the
+    one hook that fires ON the owning loop while it is still alive, even when
+    no explicit ``close()``/``retire()`` ever ran. A no-op once ``_close`` has
+    already run through any other path (``held.closed`` guards it either way).
+    """
+    try:
+        yield
+    finally:
+        await _close(held)

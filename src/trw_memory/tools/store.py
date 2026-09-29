@@ -12,9 +12,9 @@ from typing import Literal
 from uuid import uuid4
 
 import structlog
-from pydantic import BaseModel, ConfigDict
 
-from trw_memory._client_store import _existing_entry_for_namespace, _revision
+from trw_memory._client_store import _existing_entry_for_namespace
+from trw_memory._project_anchor import resolve_storage_root
 from trw_memory.daemon._offload import run_offloaded
 from trw_memory.embeddings import get_local_embedder, keyword_only_on_refusal
 from trw_memory.embeddings.provenance import generation_provenance_kwargs
@@ -36,13 +36,24 @@ from trw_memory.lifecycle.tiers._runtime import (
 )
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.entry_factory import local_node_id_for, new_entry, revise_entry
-from trw_memory.models.memory import Anchor, Assertion, Confidence, MemoryStatus, MemoryType, ProtectionTier
+from trw_memory.models.memory import (
+    Anchor,
+    Assertion,
+    Confidence,
+    EvidenceLevel,
+    MemoryStatus,
+    MemoryType,
+    ProtectionTier,
+)
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
+from trw_memory.security import runtime as _rt
 from trw_memory.security.poisoning import validate_store_inputs
 from trw_memory.security.rbac import Permission, require_namespace_permission
 from trw_memory.security.runtime import append_audit_event, prepare_entry_for_store, store_quarantined_entry
+from trw_memory.storage._shared import revision_of
 from trw_memory.storage.interface import StorageBackend
+from trw_memory.tools._store_fields import LearningFields as LearningFields
 from trw_memory.tools._types import McpServer
 
 logger = structlog.get_logger(__name__)
@@ -70,6 +81,7 @@ def memory_store_impl(
     type: MemoryType | str | None = None,
     nudge_line: str | None = None,
     confidence: Confidence | str | None = None,
+    evidence_level: EvidenceLevel | str | None = None,  # PRD-CORE-312-FR01
     task_type: str | None = None,
     domain: list[str] | None = None,
     phase_origin: str | None = None,
@@ -98,6 +110,7 @@ def memory_store_impl(
         type: Entry classification (PRD-CORE-110).
         nudge_line: Short nudge text rendered from this entry.
         confidence: Validation confidence (PRD-CORE-110).
+        evidence_level: Author-claimed evidence level (PRD-CORE-312 FR01).
         task_type: Task-type identifier the entry was learned under.
         domain: Domain tags.
         phase_origin: Phase the entry was learned in.
@@ -113,7 +126,8 @@ def memory_store_impl(
         status, never a raise: "invalid" (schema), "blocked" (PII, poisoning),
         "rate_limited" (retry after ``retry_after`` seconds), "conflict" (the row changed
         while the store was prepared; retry), "error" (storage).
-        Only an authorization refusal raises.
+        Only an authorization refusal raises, and a DEFAULT storage_path with no project
+        anchor (StorageRootUnresolvableError) -- a configuration error, refused before any write.
 
     The status vocabulary this returns is mapped -- explicitly and under test --
     onto the trw-mcp learning vocabulary by
@@ -146,7 +160,13 @@ def memory_store_impl(
         raise
     try:
         validate_store_inputs(
-            content=content, detail=detail, tags=tags, metadata=metadata, importance=importance, assertions=assertions
+            content=content,
+            detail=detail,
+            tags=tags,
+            metadata=metadata,
+            importance=importance,
+            assertions=assertions,
+            entry_id=entry_id,
         )
     except SchemaValidationError as exc:
         append_audit_event(
@@ -172,7 +192,7 @@ def memory_store_impl(
     # This surface is what ``trw-memory-server`` writes through, and it used to
     # leave ``vector_clock`` at its ``{}`` default -- which makes an org-shared
     # pull discard a newer local edit rather than merge it.
-    local_node_id = local_node_id_for(cfg.storage_path)
+    local_node_id = local_node_id_for(resolve_storage_root(cfg))
     # Optional entry facets. ``None`` means "the caller said nothing about this
     # field", which must NOT overwrite what an existing row already carries --
     # that is the difference between an update and a silent reset.
@@ -184,6 +204,7 @@ def memory_store_impl(
             ("type", type),
             ("nudge_line", nudge_line),
             ("confidence", confidence),
+            ("evidence_level", evidence_level),
             ("task_type", task_type),
             ("domain", domain),
             ("phase_origin", phase_origin),
@@ -275,7 +296,9 @@ def memory_store_impl(
         # otherwise the embed call is wasted on a no-op upsert_vector.
         embedder = (
             keyword_only_on_refusal(
-                lambda: get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim),
+                lambda: get_local_embedder(
+                    model_name=cfg.embedding_model, dim=cfg.embedding_dim, enabled=cfg.embeddings_enabled
+                ),
                 surface="memory_store",
             )[0]
             if embedding_has_consumer(cfg, backend)
@@ -300,12 +323,19 @@ def memory_store_impl(
         # other store may have landed since: write only over the row this revision was built from.
         try:
             with backend.transaction():
-                if _revision(_existing_entry_for_namespace(backend, entry_id, namespace)) != _revision(existing):
+                if revision_of(_existing_entry_for_namespace(backend, entry_id, namespace)) != revision_of(existing):
                     msg = f"{entry_id!r} changed while this store was prepared; nothing was written, retry"
+                    _rt.refund_write_slot(cfg, session_id=session_id, receipt=decision.rate_receipt)  # B71-81
                     return {"error": msg, "status": "conflict", "namespace": namespace}
                 backend.store(entry)
                 if embedding is not None:
                     backend.upsert_vector(entry.id, embedding, namespace=entry.namespace, **proof)
+        except SchemaValidationError:
+            # PRD-CORE-312: the evidence-invariant refusal now fires INSIDE
+            # backend.store() itself; let it reach the SchemaValidationError
+            # handler below with its own reason/message, not the generic
+            # storage-error wrapping every other failure here gets.
+            raise
         except Exception as exc:
             raise StorageError(f"failed to persist entry+vector for {entry_id!r}; transaction rolled back") from exc
         try:
@@ -354,32 +384,6 @@ def memory_store_impl(
     }
 
 
-class LearningFields(BaseModel):
-    """The typed learning fields ``memory_store`` forwards to :func:`memory_store_impl` (PRD-CORE-294 FR07a).
-
-    One optional object instead of ten parameters keeps the tool definition small;
-    an unknown key is refused rather than silently dropped.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    type: MemoryType | None = None
-    confidence: Confidence | None = None
-    task_type: str | None = None
-    domain: list[str] | None = None
-    phase_origin: str | None = None
-    phase_affinity: list[str] | None = None
-    team_origin: str | None = None
-    protection_tier: ProtectionTier | None = None
-    anchors: list[Anchor] | None = None
-    nudge_line: str | None = None
-    # PRD-CORE-298 FR01: provenance the daemon store forwards for trw-mcp writes.
-    source: Literal["human", "agent", "tool", "consolidated", "team_sync", "company_sync"] | None = None
-    client_profile: str | None = None
-    model_id: str | None = None
-    anchor_validity: float | None = None
-
-
 def register_store_tool(mcp: McpServer) -> None:
     """Register memory_store with a FastMCP server instance.
 
@@ -416,8 +420,8 @@ def register_store_tool(mcp: McpServer) -> None:
             evidence: Optional source references supporting the entry.
             expires: Optional expiration date or condition.
             assertions: Optional machine-verifiable grounding assertions.
-            learning: Optional typed fields (type, confidence, task_type, domain,
-                phase_origin, phase_affinity, team_origin, protection_tier, anchors,
+            learning: Optional typed fields (type, confidence, evidence_level, task_type,
+                domain, phase_origin, phase_affinity, team_origin, protection_tier, anchors,
                 nudge_line, source, client_profile, model_id, anchor_validity);
                 unknown keys are rejected.
 
@@ -452,6 +456,7 @@ def register_store_tool(mcp: McpServer) -> None:
                     anchor_validity=typed.anchor_validity,
                     type=typed.type,
                     confidence=typed.confidence,
+                    evidence_level=typed.evidence_level,
                     task_type=typed.task_type,
                     domain=typed.domain,
                     phase_origin=typed.phase_origin,

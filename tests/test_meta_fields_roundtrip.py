@@ -57,6 +57,7 @@ def _make_full_entry(entry_id: str = "M-FULL") -> MemoryEntry:
         # PRD-CORE-110: Typed entry fields
         type="incident",
         confidence="verified",
+        evidence_level="verified",  # PRD-CORE-312: keeps confidence observable through get()
         protection_tier="critical",
         domain=["auth", "api"],
         phase_origin="IMPLEMENT",
@@ -188,6 +189,9 @@ class TestEnumRoundTrip:
             id=f"M-CONF-{conf_val}",
             content=f"test {conf_val}",
             confidence=conf_val,
+            # PRD-CORE-312: a served 'verified' with no evidence is demoted by
+            # design; give it one so this test still observes confidence round-tripping.
+            evidence_level="verified" if conf_val == "verified" else "unknown",
             created_at=now,
             updated_at=now,
         )

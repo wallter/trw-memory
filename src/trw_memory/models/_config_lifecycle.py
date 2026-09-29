@@ -118,6 +118,10 @@ class _LifecycleConfigMixin(BaseModel):
         ),
     )
 
+    # ``_graph_decay.memory_decay_pass`` knobs, read by ``tools.maintain._run_decay`` (PRD-CORE-331 FR10 B71-135h).
+    decay_cutoff_days: int = Field(default=90, gt=0, le=36500, description="Disuse days before decay-pass eligibility")
+    decay_batch_size: int = Field(default=1000, gt=0, description="Rows one decay pass examines (clamped 1000)")
+
     # Scoring
     decay_half_life_days: float = Field(default=14.0, gt=0.0, description="Half-life in days for recency decay")
     decay_use_exponent: float = Field(default=0.6, ge=0.0, le=1.0, description="Exponent for utility-based decay")

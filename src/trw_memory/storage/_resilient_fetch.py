@@ -38,6 +38,7 @@ from typing import Protocol
 import structlog
 
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.security._evidence_invariant import served_view
 from trw_memory.storage._row_mapper import row_to_entry
 
 logger = structlog.get_logger(__name__)
@@ -219,7 +220,9 @@ def fetch_rows_resilient(
     quarantine_delta = 0
     for idx, raw_row in enumerate(raw_rows):
         try:
-            entry = row_to_entry(tuple(raw_row))
+            # PRD-CORE-312: every query/list read is SERVED, so a legacy verified-
+            # without-evidence row is demoted here, never claimed as fact.
+            entry = served_view(row_to_entry(tuple(raw_row)))
             results.append(entry)
         except (UnicodeDecodeError, UnicodeEncodeError) as exc:
             quarantine_delta += 1
@@ -335,7 +338,7 @@ def _decode_bytes_rows(
         if retain_row is not None and not retain_row(decoded):
             continue
         try:
-            entry = row_to_entry(tuple(decoded), reference_time=reference_time)
+            entry = served_view(row_to_entry(tuple(decoded), reference_time=reference_time))
         except (ValueError, TypeError, KeyError) as exc:
             # Columns decoded cleanly but model construction failed (bad
             # enum value, malformed JSON, schema drift). Quarantine the row

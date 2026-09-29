@@ -92,7 +92,7 @@ class TestColdTier:
         )
 
         fake_backend = _FakeWarmBackend()
-        mgr._warm_store._get_warm_backend = lambda dim=None: fake_backend  # type: ignore[assignment,return-value]
+        mgr._warm_store._get_warm_backend = lambda dim=None, **_kw: fake_backend  # type: ignore[assignment,return-value]
 
         result = mgr.cold_promote("vector-entry")
 

@@ -20,6 +20,7 @@ from trw_memory.cli_formatters import (
 from trw_memory.cli_namespace import handle_namespace
 from trw_memory.cli_parser import build_parser
 from trw_memory.cli_storage import (
+    handle_backup,
     handle_import,
     handle_restore,
     handle_snapshot,
@@ -134,6 +135,11 @@ def _handle_snapshot(args: argparse.Namespace) -> int:
 
 
 @_cli_error_boundary
+def _handle_backup(args: argparse.Namespace) -> int:
+    return handle_backup(args, config_cls=MemoryConfig)
+
+
+@_cli_error_boundary
 async def _handle_namespace(args: argparse.Namespace) -> int:
     return await handle_namespace(args)
 
@@ -151,6 +157,7 @@ async def _dispatch(args: argparse.Namespace) -> int:
         "reembed": _handle_reembed,
         "restore": _handle_restore,
         "snapshot": _handle_snapshot,
+        "backup": _handle_backup,
         "namespace": _handle_namespace,
     }
     handler = handlers.get(args.command)

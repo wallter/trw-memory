@@ -24,7 +24,7 @@ from trw_memory.exceptions import ConfigError
 from trw_memory.lifecycle._recall import drop_expired_entries, rank_by_utility
 from trw_memory.lifecycle.tiers._runtime import remember_entries_data_in_tiers, supports_tier_runtime, tier_candidates
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import MemoryStatus
+from trw_memory.models.memory import MemoryStatus, MemoryType
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.namespaces.validation import validate_namespace
 
@@ -109,6 +109,8 @@ def memory_recall_impl(
     exclude_expired: bool = True,
     status: str | None = "active",
     record_access: bool = True,
+    types: list[str] | None = None,
+    rerank: bool = True,
 ) -> dict[str, object]:
     """Core implementation of memory_recall (callable without MCP).
 
@@ -132,6 +134,9 @@ def memory_recall_impl(
             budget.  Must be a positive integer.  ``None`` disables budget
             fitting (all results returned up to *limit*).
         status: Lifecycle status searched; ``None`` searches every status.
+        types: Only these ``MemoryType`` values, applied before the limit (PRD-CORE-334).
+        rerank: ``False`` skips the cross-encoder re-rank and its bridge hop and
+            keeps the fusion order: for a caller with a latency budget.
 
     Returns:
         {"memories": list[dict], "total_matches": int,
@@ -155,6 +160,7 @@ def memory_recall_impl(
     try:
         validate_namespace(namespace)
         wanted_status = MemoryStatus(status) if status is not None else None
+        kinds = {MemoryType(kind).value for kind in types or ()}
     except (ConfigError, ValueError) as exc:
         return {"error": str(exc), "status": "invalid"}
     if not 1 <= limit <= MAX_RECALL_LIMIT:  # *limit* sizes the scored candidate pool (C12 rc7)
@@ -223,7 +229,14 @@ def memory_recall_impl(
             # recency pool, with the tag predicate in SQL so the LIMIT applies
             # after it, plus the rows full-text search finds past the pool.
             ns_entries = acquire_candidates(
-                ns_backend, query, namespace=ns, limit=depth, config=cfg, status=wanted_status, tags=tags or None
+                ns_backend,
+                query,
+                namespace=ns,
+                limit=depth,
+                config=cfg,
+                status=wanted_status,
+                tags=tags or None,
+                acquire=(lambda fetch, limit: fetch(lambda e: e.type in kinds, limit)) if kinds else None,
             ).entries
             all_entries.extend(ns_entries)
 
@@ -239,7 +252,10 @@ def memory_recall_impl(
     # empty query still resolves nothing: there is nothing to embed.
     embedder, dense_refused = (
         keyword_only_on_refusal(
-            lambda: get_local_embedder(model_name=cfg.embedding_model, dim=cfg.embedding_dim), surface="memory_recall"
+            lambda: get_local_embedder(
+                model_name=cfg.embedding_model, dim=cfg.embedding_dim, enabled=cfg.embeddings_enabled
+            ),
+            surface="memory_recall",
         )
         if query
         else (None, "")
@@ -251,6 +267,17 @@ def memory_recall_impl(
     for ns, records in vector_records if embedder is not None else ():
         stored_embeddings.update(admit_space_vectors(records, active_space, namespace=ns, surface="memory_recall_tool"))
 
+    # Source admission only, as trw_recall applies it (PRD-CORE-298 FR05): the
+    # order stays the pipeline's, with supplements after it. Re-sorting by source
+    # weight here made mixed-source results diverge from trw_recall's order. The
+    # one weight that does reach the order is git_distilled's, inside the
+    # pipeline (PRD-CORE-336 FR01).
+    admission = SourcePolicy.resolve(
+        include_distilled=include_distilled,
+        include_source_kinds=include_source_kinds,
+        exclude_source_kinds=exclude_source_kinds,
+        exclude_expired=exclude_expired,
+    )
     entry_dicts, query_embedding = build_scored_candidates(
         query,
         all_entries,
@@ -260,6 +287,8 @@ def memory_recall_impl(
         stored_embeddings=stored_embeddings,
         limit=depth,
         tags=tags,
+        distilled_weight=admission.weights.get("git_distilled", 1.0),
+        rerank=rerank,
     )
 
     # A query keeps the pipeline's order, as trw_recall does (PRD-CORE-298 FR05):
@@ -333,16 +362,8 @@ def memory_recall_impl(
     # on one scale explains the whole result and ``min_score`` filters the same
     # number the response reports.
     _rescale_supplementary_scores(result_dicts, retrieval_keys, namespace)
-    # Source admission only, as trw_recall applies it (PRD-CORE-298 FR05): the
-    # order stays the pipeline's, with supplements after it. Re-sorting by source
-    # weight here made mixed-source results diverge from trw_recall's order.
-    admission = SourcePolicy.resolve(
-        include_distilled=include_distilled,
-        include_source_kinds=include_source_kinds,
-        exclude_source_kinds=exclude_source_kinds,
-        exclude_expired=exclude_expired,
-    )
-    result_dicts = [row for row in result_dicts if admission.allows(row)]
+    # The type filter also covers the tier and org supplements, which the acquisition above never saw.
+    result_dicts = [row for row in result_dicts if admission.allows(row) and (not kinds or row.get("type") in kinds)]
     # ``min_score`` is applied ONCE, here, on the score the response reports.
     if min_score > 0.0:
         result_dicts = [row for row in result_dicts if float(str(row.get("score", 0.0))) >= min_score]
@@ -471,6 +492,8 @@ def register_recall_tool(mcp: McpServer) -> None:
         exclude_expired: bool = True,
         status: str | None = "active",
         record_access: bool = True,
+        types: list[str] | None = None,
+        rerank: bool = True,
     ) -> dict[str, object]:
         """Search memory entries using hybrid BM25 + vector retrieval.
 
@@ -511,6 +534,10 @@ def register_recall_tool(mcp: McpServer) -> None:
             record_access: Count the returned rows as accessed. A caller that filters
                 the page before showing it passes False and reports what it showed
                 through ``memory_record_surfaced``.
+            types: Only entries of these types (e.g. ['decision']), before the limit.
+            rerank: False skips the cross-encoder re-rank (and its bridge hop) and
+                keeps the fusion order. On CPU the re-rank costs seconds per call on
+                long entries; a caller with a latency budget passes False.
 
         Returns:
             {"memories": [...], "total_matches": int, "query": str,
@@ -549,6 +576,8 @@ def register_recall_tool(mcp: McpServer) -> None:
                     exclude_expired=exclude_expired,
                     status=status,
                     record_access=record_access,
+                    types=types,
+                    rerank=rerank,
                 )
 
         return await run_offloaded(_run)

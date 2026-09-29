@@ -29,7 +29,7 @@ class TestBackendHelper:
     def test_create_backend_returns_storage_backend(self, tmp_path: Any) -> None:
         from trw_memory.storage.interface import StorageBackend
 
-        backend = create_backend("test", storage_path=str(tmp_path))
+        backend = create_backend("project:test", storage_path=str(tmp_path))
         try:
             assert isinstance(backend, StorageBackend)
         finally:

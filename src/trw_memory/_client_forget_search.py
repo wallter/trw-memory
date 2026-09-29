@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 from trw_memory._client_backend import client_logger as _client_logger
 from trw_memory._client_distilled_tiering import entry_to_result as _entry_to_result
+from trw_memory._client_lifecycle import schedule_background_task
 from trw_memory.exceptions import MemoryNotFoundError
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.security.rbac import Permission
@@ -97,7 +98,7 @@ async def forget_impl(
             }
             return actor_forget_result
 
-        assert memory_id is not None  # noqa: S101
+        assert memory_id is not None  # noqa: S101  # trw:intentional narrowed by the memory_id-is-None early return above
         existing = backend.get(memory_id, namespace=client._namespace)
         if existing is None:
             quarantined_deleted = _c.delete_quarantined_entries(
@@ -142,7 +143,7 @@ async def forget_impl(
             data={"entries_deleted": 1, "quarantined": False},
         )
     if remote_id:
-        client._schedule_background_task(client._retire_remote_entry(memory_id, remote_id))
+        schedule_background_task(client, client._retire_remote_entry(memory_id, remote_id))
 
     _client_logger().debug(
         "memory_forgotten",

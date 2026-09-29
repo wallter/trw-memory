@@ -25,6 +25,10 @@ import pytest
 
 MARKER = "requires_local_timing"
 REPORT_ENV = "TRW_TIMING_REPORT"
+TRUST_LOAD_ENV = "TRW_TIMING_TRUST_LOAD"
+#: 1-minute load average above which a MISSED budget is reported UNTRUSTED (see ``assert_budget``).
+DEFAULT_TRUST_LOAD = 12.0
+UNTRUSTED_PREFIX = "UNTRUSTED"
 
 #: Budget measurements made in this process: test id, name, value, limit, unit, ok.
 RECORDS: list[dict[str, Any]] = []
@@ -36,11 +40,28 @@ def on_ci_runner() -> bool:
     return bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
 
 
+def trust_load_limit() -> float:
+    """Load ceiling above which a budget miss is untrusted: ``TRW_TIMING_TRUST_LOAD`` or the default."""
+    raw = os.environ.get(TRUST_LOAD_ENV)
+    try:
+        return float(raw) if raw else DEFAULT_TRUST_LOAD
+    except ValueError:
+        return DEFAULT_TRUST_LOAD
+
+
 def assert_budget(name: str, value: float, limit: float, unit: str, *, at_least: bool = False) -> None:
     """Record a measured host-resource value, then assert it against its budget.
 
     ``unit`` is required and explicit (``"s"``, ``"ms"``, ``"MB"``, ``"ops/s"``). The budget is
     an upper bound unless ``at_least`` (throughput, rates).
+
+    A budget that is met passes at any load. A budget that is MISSED while the 1-minute load
+    average exceeds ``TRW_TIMING_TRUST_LOAD`` (default 12.0) still fails, but the message starts
+    ``UNTRUSTED (load X.X > N)``: the miss was measured on a saturated host, so it is not evidence
+    about the code and a gate can count it apart from a trusted miss. Default 12 is twice the 6
+    performance cores of the reference host: the budgets passed alone at load 8.5 and missed at
+    load 14-17 (KNOWN-RED 2026-09-28), and 12 splits those two populations. Wall-clock is kept
+    (not CPU time) because these budgets time I/O, locks and subprocesses.
     """
     ok = value >= limit if at_least else value <= limit
     RECORDS.append(
@@ -54,7 +75,17 @@ def assert_budget(name: str, value: float, limit: float, unit: str, *, at_least:
             "ok": ok,
         }
     )
-    assert ok, f"{name}: {value:.4g} {unit} {'below' if at_least else 'above'} budget {limit:g} {unit}"
+    if ok:
+        return
+    miss = f"{name}: {value:.4g} {unit} {'below' if at_least else 'above'} budget {limit:g} {unit}"
+    trust = trust_load_limit()
+    try:
+        load1 = os.getloadavg()[0]
+    except OSError:
+        load1 = 0.0
+    if load1 > trust:
+        raise AssertionError(f"{UNTRUSTED_PREFIX} (load {load1:.1f} > {trust:g}): {miss}")
+    raise AssertionError(miss)
 
 
 def apply_timing_policy(items: list[pytest.Item]) -> None:

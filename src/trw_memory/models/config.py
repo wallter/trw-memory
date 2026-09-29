@@ -9,8 +9,9 @@ backward compatible.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
-from pydantic import model_validator
+from pydantic import ModelWrapValidatorHandler, PrivateAttr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import PydanticBaseSettingsSource
 
@@ -20,10 +21,9 @@ from trw_memory.models._config_lifecycle import _LifecycleConfigMixin
 from trw_memory.models._config_retrieval import _RetrievalConfigMixin
 from trw_memory.models._config_security import _SecurityConfigMixin
 from trw_memory.models._config_sources import (
-    _check_retired_hype_environment,
-    _check_retired_hype_settings,
     _check_retired_local_only_environment,
     _check_retired_local_only_settings,
+    _project_trw_dir,
     _TRWConfigYamlSource,
     _warn_retired_environment,
     _warn_retired_settings,
@@ -51,6 +51,8 @@ class MemoryConfig(
         env_prefix="MEMORY_",
         case_sensitive=False,
         extra="ignore",
+        # A field aliased to its MEMORY_ spelling still accepts its own name as a kwarg.
+        populate_by_name=True,
     )
 
     def __repr__(self) -> str:
@@ -63,6 +65,27 @@ class MemoryConfig(
             f"rbac={self.rbac_enabled})"
         )
 
+    _source_trw_dir: Path | None = PrivateAttr(default=None)
+
+    @property
+    def source_trw_dir(self) -> Path | None:
+        """The ``.trw`` this config's ``config.yaml`` was loaded from; ``None`` when there was none."""
+        return self._source_trw_dir
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _record_source_trw_dir(cls, data: Any, handler: ModelWrapValidatorHandler[MemoryConfig]) -> MemoryConfig:
+        """Record the ``.trw`` the yaml source read through (the nearest project's); re-validation keeps it.
+
+        ``model_validate(config)`` re-runs validation without the settings sources, so its fields
+        (RBAC, sync, ...) are the original's. Re-deriving the source there would move the default
+        store to wherever the process now runs while the policy stayed behind (review r3 P1).
+        """
+        source = data.source_trw_dir if isinstance(data, MemoryConfig) else _project_trw_dir()
+        config = handler(data)
+        config._source_trw_dir = source
+        return config
+
     @model_validator(mode="after")
     def _check_weight_sum(self) -> MemoryConfig:
         total = self.score_relevance_weight + self.score_recency_weight + self.score_importance_weight
@@ -72,10 +95,8 @@ class MemoryConfig(
 
     @model_validator(mode="after")
     def _apply_security_switches(self) -> MemoryConfig:
-        """4.0 refuses ``encryption_enabled`` at config load, as backend creation does too (C12), and
-        ``platform_contact_enabled: false`` turns sync off here, so every publish and subscribe path inherits it (rc11)."""
+        """4.0 refuses ``encryption_enabled`` at config load, as backend creation does too (C12)."""
         refuse_encryption_at_rest(self)
-        self.sync_enabled = self.sync_enabled and self.platform_contact_enabled
         return self
 
     @model_validator(mode="after")
@@ -97,6 +118,8 @@ class MemoryConfig(
             self.quarantine_path = str(security_root / "quarantine")
         if not self.quarantine_db_path:
             self.quarantine_db_path = str(security_root / "quarantine.db")
+        if not self.quarantine_ledger_path:
+            self.quarantine_ledger_path = str(security_root / "quarantine_ledger.db")
         if not self.rate_limit_state_path:
             self.rate_limit_state_path = str(security_root / "rate_limits.yaml")
         if not self.provenance_signing_key_path:
@@ -115,10 +138,8 @@ class MemoryConfig(
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """Load ``.trw/config.yaml`` after environment variables."""
-        _check_retired_hype_settings(init_settings(), source="constructor")
         _check_retired_local_only_settings(init_settings(), source="constructor")
         # Inspect source data before Pydantic drops aliases of removed fields.
-        _check_retired_hype_environment(dotenv_settings)
         _check_retired_local_only_environment(dotenv_settings)
         _warn_retired_settings(init_settings(), source="constructor")
         _warn_retired_environment(dotenv_settings)

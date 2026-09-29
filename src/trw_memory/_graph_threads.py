@@ -7,15 +7,13 @@ and process teardown use to wait for them to finish.
 
 Extracted from ``graph.py`` so the mutable registry lives behind a small class
 interface (one module-level singleton) instead of bare module globals — this
-prevents thread state from leaking across the module surface. The back-compat
-names ``_track_graph_thread`` / ``_untrack_graph_thread`` /
-``wait_for_graph_updates`` (and the ``_BACKGROUND_GRAPH_THREADS`` /
-``_BACKGROUND_GRAPH_THREADS_GUARD`` aliases) are re-exported from
-``trw_memory.graph``.
+prevents thread state from leaking across the module surface.
+``wait_for_graph_updates`` is re-exported from ``trw_memory.graph``.
 """
 
 from __future__ import annotations
 
+import os
 import threading
 from time import monotonic, sleep
 
@@ -24,8 +22,6 @@ class _GraphThreadRegistry:
     """Thread-safe registry of in-flight background graph-update threads.
 
     Encapsulates the ``set`` of live threads plus the guard lock protecting it.
-    ``track`` / ``untrack`` mutate the set in place so external aliases bound to
-    :attr:`_threads` keep observing the live registry state.
     """
 
     def __init__(self) -> None:
@@ -38,6 +34,12 @@ class _GraphThreadRegistry:
         with self._guard:
             self._threads.add(thread)
             self._owners[thread] = owner
+
+    def after_fork_in_child(self) -> None:
+        """A forked child has none of the parent's threads, and may inherit ``_guard`` held by one of them."""
+        self._threads = set()
+        self._owners = {}
+        self._guard = threading.Lock()
 
     def untrack(self, thread: threading.Thread) -> None:
         """Remove *thread* once it has finished (called from the worker finally)."""
@@ -75,19 +77,14 @@ class _GraphThreadRegistry:
 
 # Module-level singleton — one registry for the process, matching the previous
 # module-global semantics.
-_REGISTRY = _GraphThreadRegistry()
+GRAPH_THREADS = _GraphThreadRegistry()
+os.register_at_fork(after_in_child=GRAPH_THREADS.after_fork_in_child)
 
 
-def _track_graph_thread(thread: threading.Thread, owner: object | None = None) -> None:
-    """Back-compat shim: register *thread* on the process registry."""
-    _REGISTRY.track(thread, owner)
+#: How long a drain waits for background graph work: close()'s drain, and interpreter exit's.
+GRAPH_DRAIN_SECONDS = 5.0
 
 
-def _untrack_graph_thread(thread: threading.Thread) -> None:
-    """Back-compat shim: unregister *thread* from the process registry."""
-    _REGISTRY.untrack(thread)
-
-
-def wait_for_graph_updates(timeout: float = 5.0, *, owner: object | None = None) -> None:
+def wait_for_graph_updates(timeout: float = GRAPH_DRAIN_SECONDS, *, owner: object | None = None) -> None:
     """Drain one backend owner's workers, or all workers when owner is omitted."""
-    _REGISTRY.wait(timeout, owner=owner)
+    GRAPH_THREADS.wait(timeout, owner=owner)

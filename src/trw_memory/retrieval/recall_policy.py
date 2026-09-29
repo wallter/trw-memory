@@ -188,6 +188,7 @@ def hybrid_policy(config: MemoryConfig, *, limit: int, recency_weight: float) ->
         "rerank_candidates": config.recall_rerank_candidates,
         "rerank_min_score": floor.min_score,
         "rerank_min_keep": floor.min_keep,
+        "rerank_passage_chars": config.recall_rerank_passage_chars,
         # The entity-bridge second hop only runs when the cross-encoder scored the
         # pool; MEMORY_RECALL_BRIDGE_HOP=false turns it off.
         "bridge_hop": config.recall_bridge_hop,
@@ -204,7 +205,13 @@ MAX_RECALL_LIMIT = 10_000
 
 
 def ranking_arguments(
-    config: MemoryConfig, *, limit: int, pool_size: int, recency_weight: float, tags: list[str] | None = None
+    config: MemoryConfig,
+    *,
+    limit: int,
+    pool_size: int,
+    recency_weight: float,
+    tags: list[str] | None = None,
+    rerank: bool = True,
 ) -> dict[str, Any]:
     """Every ``hybrid_search`` argument that decides the order, for the tool surfaces.
 
@@ -216,10 +223,13 @@ def ranking_arguments(
     BM25 and dense caps scale to the pool, so the configured values are floors.
     A tag filter applies after ranking, so it asks for the whole pool back.
     ``importance_alpha`` is 1.0 (CORE116 RA2), the value the MCP path has always
-    ranked with, overriding ``hybrid_policy``'s configured blend.
+    ranked with, overriding ``hybrid_policy``'s configured blend. ``rerank=False``
+    is a caller's per-call opt-out of the cross-encoder, and with it the bridge
+    hop that only runs on its scores: the fusion order is returned.
     """
     return {
         **hybrid_policy(config, limit=limit, recency_weight=recency_weight),
+        "rerank": rerank,
         "importance_alpha": 1.0,
         "bm25_candidates": max(config.bm25_candidates, pool_size),
         "vector_candidates": max(config.vector_candidates, pool_size),

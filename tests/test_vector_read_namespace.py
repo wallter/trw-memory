@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._optional_extras import vec_unavailable
 from trw_memory.storage._vector_ops import get_stored_embeddings
 
 
@@ -95,7 +96,7 @@ def test_real_sqlite_vec_backend_forwards_namespace(tmp_path: Path) -> None:
     backend = SQLiteBackend(tmp_path / "memory.db", dim=2)
     try:
         if not backend.vec_available:
-            pytest.skip("sqlite-vec virtual table unavailable")
+            vec_unavailable("sqlite-vec virtual table unavailable")
         backend.upsert_vector("same-id", [1.0, 0.0], namespace="default")
         backend.upsert_vector("same-id", [0.0, 1.0], namespace="user:other")
         assert backend.get_stored_embeddings(["same-id"], namespace="default") == {"same-id": [1.0, 0.0]}

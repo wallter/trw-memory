@@ -188,12 +188,6 @@ class TestConfigFields:
         cfg = MemoryConfig()
         assert cfg.sync_min_importance == 0.7
 
-    def test_sync_namespace_defaults_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """sync_namespace defaults to empty string."""
-        self._isolate_defaults(tmp_path, monkeypatch)
-        cfg = MemoryConfig()
-        assert cfg.sync_namespace == ""
-
     def test_platform_url_defaults_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """platform_url defaults to empty string."""
         self._isolate_defaults(tmp_path, monkeypatch)

@@ -8,6 +8,8 @@ Public API re-exported from submodules:
 - ``poisoning`` — memory poisoning anomaly detection
 """
 
+from typing import TYPE_CHECKING, Any
+
 from trw_memory.exceptions import ModelNotCachedError
 from trw_memory.security.audit import (
     AuditLog,
@@ -17,11 +19,6 @@ from trw_memory.security.canary import (
     CanaryLearning,
     CanaryStore,
     CanaryVerificationResult,
-)
-from trw_memory.security.keys import (
-    generate_ed25519_signing_key,
-    get_or_create_ed25519_key,
-    load_ed25519_signing_key,
 )
 from trw_memory.security.observe_clock import (
     ObserveClockState,
@@ -69,6 +66,27 @@ from trw_memory.security.trust_scorer import (
     TrustScore,
     score_intake,
 )
+
+if TYPE_CHECKING:
+    from trw_memory.security.keys import (
+        generate_ed25519_signing_key,
+        get_or_create_ed25519_key,
+        load_ed25519_signing_key,
+    )
+
+#: Re-exported on first access, not at import: ``keys`` imports nacl and cryptography,
+#: which every importer of any ``trw_memory.security`` submodule (the edit hook's recall
+#: admission among them) paid for at ~0.1-0.2 s without ever touching a key.
+_LAZY_KEYS = frozenset({"generate_ed25519_signing_key", "get_or_create_ed25519_key", "load_ed25519_signing_key"})
+
+
+def __getattr__(name: str) -> Any:
+    if name in _LAZY_KEYS:
+        from trw_memory.security import keys
+
+        return getattr(keys, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "ROLE_PERMISSIONS",

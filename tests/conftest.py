@@ -1,20 +1,26 @@
 """Shared test fixtures for the trw-memory test suite.
 
-Test Tiering Philosophy
------------------------
-Tests are classified by their resource usage:
+Test Tiering Philosophy (PRD-INFRA-197-FR04)
+---------------------------------------------
+Tiering is by EXPLICIT MARKER, never inferred from a filename or directory.
 
-- **unit**: Pure logic — in-memory backends or no I/O at all, no ``tmp_path``.
-  Target: <30s for the full unit tier.
-- **integration**: Tests that write files, use SQLite on disk, or exercise
-  the full ``MemoryClient`` stack with real storage.
-- **slow**: Tests loading sentence-transformer models or running full
-  consolidation cycles (individual runtime >5s).
+- **unit**: a test is unit ONLY if it (or its module) carries an explicit
+  ``@pytest.mark.unit`` / ``pytestmark = pytest.mark.unit`` — reserve it for
+  pure logic (in-memory backends, ``:memory:`` SQLite, mocks only). Target:
+  the whole unit tier stays comfortably under 90s.
+- **integration**: the CONSERVATIVE DEFAULT, applied automatically below by
+  ``pytest_collection_modifyitems`` to any test not explicitly marked
+  ``unit`` or ``e2e``. Nothing needs to opt in.
+- **e2e**: end-to-end workflow tests covering a full package flow (store,
+  recall, sync, security) — explicit ``pytestmark = pytest.mark.e2e`` only.
+- **smoke**: a minimal sanity-check subset — additive, explicit
+  ``@pytest.mark.smoke``/``pytestmark`` only, can combine with any tier.
+- **slow**: individual-test runtime >5s (sentence-transformer loads, full
+  consolidation cycles) — additive, explicit marker, excluded from default
+  runs via this package's ``addopts``.
 
-To classify a test file:
-  1. Uses ``tmp_path`` or real disk backends → integration (default).
-  2. Only patches/mocks or uses ``:memory:`` SQLite → unit.
-  3. Loads sentence-transformers or runs 100+ dedup cycles → slow.
+To classify a new test file: mark it explicitly, or leave it unmarked and let
+it default to ``integration``.
 """
 
 from __future__ import annotations
@@ -38,10 +44,18 @@ import pytest
 # silently miss them. Pulling trw_memory in here at the top of conftest
 # guarantees the swap is in place before any test module is loaded.
 import trw_memory as _trw_memory_shim_trigger  # noqa: F401
-from tests._daemon_reaper import reap_daemons_under
+from tests._cwd_isolation import (  # the autouse fixture must be imported BY NAME to be active
+    _cwd_outside_the_package,  # noqa: F401
+    fail_session_on_leaked_store,
+    snapshot_package_store,
+)
 from tests._timing import apply_timing_policy
 from tests._timing import pytest_sessionfinish as _timing_sessionfinish
-from tests._trw_home import isolated_trw_home  # noqa: F401  (canonical copy; see that module's docstring)
+from tests._trw_home import (  # noqa: F401  (canonical copy; the autouse fixtures must be imported BY NAME to be active)
+    isolated_trw_home,
+    real_config_tripwire,
+    session_trw_home,
+)
 from trw_memory.client import MemoryClient
 from trw_memory.embeddings import reset_provider_cache
 from trw_memory.graph import wait_for_graph_updates
@@ -49,6 +63,13 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage import _resilient_fetch
 from trw_memory.storage.sqlite_backend import SQLiteBackend
+from trw_memory.testing.daemon_reaper import sweep_session_daemons, tag_daemon_ownership
+
+pytest_plugins = (
+    "tests._duration_budget",  # PRD-INFRA-197-FR05: duration_exempt marker + duration budgets
+    "tests._session_tmpdir",  # PRD-QUAL-146 FR09: mkdtemp outside tmp_path lands under basetemp
+    "pytester",  # enables the `pytester` fixture used by tests/test_duration_budget.py
+)
 
 # --------------------------------------------------------------------------
 # xdist fan-out cap (2026-09-05 OOM incident)
@@ -132,7 +153,14 @@ def pytest_configure(config: pytest.Config) -> None:
     (test_dir_trust: the ``umask_0002`` tests).
     """
     os.umask(0o022)
+    config.stash[_DAEMON_OWNER] = tag_daemon_ownership()
+    snapshot_package_store(config)
     _refuse_on_low_disk(config)
+    from tests._optional_extras import refuse_missing_sqlite_vec_when_required
+
+    vec_refusal = refuse_missing_sqlite_vec_when_required()
+    if vec_refusal is not None:
+        pytest.exit(vec_refusal, returncode=3)
     allow_wide = os.environ.get(_ALLOW_WIDE_XDIST_ENV) == "1"
     violation = _xdist_fanout_violation(getattr(config.option, "numprocesses", None), allow_wide)
     if violation is not None:
@@ -144,28 +172,57 @@ def pytest_configure(config: pytest.Config) -> None:
         )
 
 
-def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """Stop every memory daemon still published or placed under this run's basetemp.
+#: This process's ``TRW_PYTEST_DAEMON_OWNER`` token. Every pytest process (the xdist controller and each
+#: worker alike) exports its own, which auto-started daemons inherit, and caps their idle life at 60 s so a
+#: session killed before its sweep leaves daemons that exit on their own (DAEMON-ORPHAN-SPAWN, 2026-09-26).
+_DAEMON_OWNER = pytest.StashKey[str]()
+#: Where an xdist worker hands its leaked daemon pids to the controller: a worker's own exit status never
+#: reaches the controller, so under ``-n`` a leak would only fail the worker's session.
+_WORKER_LEAKS_KEY = "trw_leaked_daemons"
+_WORKER_LEAKS = pytest.StashKey[list[int]]()
+#: The same handoff for daemons that survived a worker's own sweep (the survivor guard).
+_WORKER_SURVIVORS_KEY = "trw_surviving_daemons"
+_WORKER_SURVIVORS = pytest.StashKey[list[int]]()
 
-    PRD-INFRA-196-FR07: trw-memory lacked this sweep entirely (unlike trw-mcp's
-    and the root suite's own copies); reaping still runs first (a daemon its own
-    test already stopped is not a leak), but any pid the sweep still had to
-    signal now fails the session too.
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Stop every memory daemon published or placed under this run's basetemp, or owned by this process.
+
+    PRD-INFRA-196-FR07: reaping still runs first (a daemon its own test already
+    stopped is not a leak), but any pid the sweep still had to signal fails the
+    session too, and so does a daemon that survives the sweep.
     """
     try:
         _timing_sessionfinish(session, exitstatus)
+        fail_session_on_leaked_store(session)
     finally:
         factory = getattr(session.config, "_tmp_path_factory", None)
         if factory is not None:
-            leaked = reap_daemons_under(factory.getbasetemp(), wait=True, by_process=True)
-            if leaked:
-                print(
-                    f"\nFAIL: {len(leaked)} leaked memory daemon(s) stopped at session end under "
-                    f"{factory.getbasetemp()}: pids {leaked}",
-                    file=sys.stderr,
-                )
+            sweep = sweep_session_daemons(factory.getbasetemp(), session.config.stash.get(_DAEMON_OWNER, None))
+            workeroutput = getattr(session.config, "workeroutput", None)
+            if workeroutput is not None:
+                workeroutput[_WORKER_LEAKS_KEY] = sweep.leaked
+                workeroutput[_WORKER_SURVIVORS_KEY] = sweep.survivors
+            report = sweep.report(
+                session.config.stash.get(_WORKER_LEAKS, []), session.config.stash.get(_WORKER_SURVIVORS, [])
+            )
+            if report:
+                print("\n" + "\n".join(report), file=sys.stderr)
                 if session.exitstatus == 0:
                     session.exitstatus = 1
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node: object, error: object) -> None:
+    """xdist controller: collect the daemon pids a finished worker had to reap, and any that survived its sweep."""
+    del error
+    output = getattr(node, "workeroutput", {})
+    config = getattr(node, "config", None)
+    if config is None:
+        return
+    for key, stash_key in ((_WORKER_LEAKS_KEY, _WORKER_LEAKS), (_WORKER_SURVIVORS_KEY, _WORKER_SURVIVORS)):
+        if pids := output.get(key) or []:
+            config.stash[stash_key] = [*config.stash.get(stash_key, []), *pids]
 
 
 @pytest.fixture(autouse=True)
@@ -259,10 +316,15 @@ def _clear_runtime_caches() -> None:
     from trw_memory.daemon._offload import shutdown_offload_pool
     from trw_memory.lifecycle.tiers._runtime import reset_tier_manager_cache
     from trw_memory.security._runtime_canary import CANARY_STATE
+    from trw_memory.storage.sqlite_backend import _warn_wal_reset_unsafe_once
 
     reset_tier_manager_cache()
     CANARY_STATE.clear()
     shutdown_offload_pool()
+    # B71-11: the WAL-reset boot warning is memoized per (version, driver) for
+    # the life of a real process; without clearing it, a test that asserts the
+    # warning fired is order-dependent on whichever test hit that cache first.
+    _warn_wal_reset_unsafe_once.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -582,8 +644,17 @@ _require_this_checkout("trw_memory", _PACKAGE_ROOT / "src")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Host-resource budgets are skipped on CI runners; the timing job measures them (PRD-QUAL-141)."""
+    """Skip host-resource budgets on CI (PRD-QUAL-141); default the tier to integration (PRD-INFRA-197-FR04).
+
+    unit and e2e are never inferred here — only an explicit marker on the
+    item or its module puts a test in one of those tiers. Everything else
+    falls through to ``integration``, the conservative default.
+    """
     apply_timing_policy(items)
+    for item in items:
+        has_tier = any(m.name in ("unit", "integration", "e2e") for m in item.iter_markers())
+        if not has_tier:
+            item.add_marker(pytest.mark.integration)
 
 
 @pytest.fixture(autouse=True)

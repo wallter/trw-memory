@@ -9,7 +9,7 @@ import pytest
 from trw_memory.embeddings._space_gate import select_space_vectors
 from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import MemoryEntry
+from trw_memory.models.memory import MAX_ENTRY_ID_CHARS, MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools.reembed import memory_reembed_impl
 
@@ -125,7 +125,83 @@ def test_one_call_stops_at_its_budget_and_its_cursor_resumes_the_rest(
     }
 
 
-@pytest.mark.parametrize("cursor", ["not json", '["rows", "x"]', '["elsewhere", "", ""]', '["rows", 1, 2]'])
+def test_a_pass_that_ends_on_the_longest_id_hands_back_a_cursor_that_resumes(
+    backend: SQLiteBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B71-85: a 4,096-character id, escaped six-fold in the cursor, no longer stops the run at its row."""
+    longest = "\x01" * MAX_ENTRY_ID_CHARS
+    backend.store(MemoryEntry(id=longest, content="the longest id", namespace="default"))
+    backend.upsert_vector(longest, [1.0, 0.0, 0.0], namespace="default", provenance=None)
+    monkeypatch.setattr("trw_memory._client_reembed.REEMBED_CALL_ROWS", 1)  # every pass ends on one row
+
+    answer = _reembed(backend)
+
+    assert (answer["status"], answer["examined"], answer["cursor"]) == ("ok", 5, None)
+    assert longest in _admitted(backend, [longest])
+
+
+def test_a_row_edited_between_passes_is_still_reembedded(
+    backend: SQLiteBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B71-86: an edit bumps a row's updated_at; paged by id, the sweep cannot lose it above the cursor."""
+    monkeypatch.setattr("trw_memory._client_reembed.REEMBED_CALL_ROWS", 1)
+    first = memory_reembed_impl("default", None, backend=backend, config=MemoryConfig())
+    assert first["examined"] == 1
+    for entry_id in ("clean", "newline", "no-proof", "trailing"):  # every row is edited: one is ahead of the cursor
+        backend.update(entry_id, namespace="default", importance=0.9)
+
+    cursor = first["cursor"]
+    while cursor is not None:
+        answer = memory_reembed_impl("default", cursor, backend=backend, config=MemoryConfig())  # type: ignore[arg-type]
+        cursor = answer["cursor"]
+
+    assert answer["outside_active_space"] == 0
+    assert _admitted(backend, ["clean", "trailing", "newline", "no-proof"]) == {
+        "clean",
+        "trailing",
+        "newline",
+        "no-proof",
+    }
+
+
+def test_rows_inserted_while_a_run_is_under_way_cannot_extend_it(
+    backend: SQLiteBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B71-86 sol r2: the run ends at the highest id when it began, however fast a writer adds higher ones."""
+    listing = backend.list_entries_by_id
+    added: list[str] = []
+
+    def list_then_insert(**kwargs: object) -> list[MemoryEntry]:
+        added.append(f"zz-{len(added):04d}")  # always above every id listed so far
+        backend.store(MemoryEntry(id=added[-1], content="written mid-run", namespace="default"))
+        return listing(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(backend, "list_entries_by_id", list_then_insert)
+    monkeypatch.setattr("trw_memory._client_reembed.REEMBED_CALL_ROWS", 1)
+
+    answer = _reembed(backend)
+
+    assert (answer["status"], answer["examined"]) == ("ok", 4)
+    assert len(added) <= 6  # one listing per pass plus the short last page, not one per inserted row
+
+
+def test_a_nonpositive_limit_lists_nothing(backend: SQLiteBackend) -> None:
+    assert backend.list_entries_by_id(namespace="default", limit=0) == []
+    assert backend.list_entries_by_id(namespace="default", limit=-1) == []
+
+
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        "not json",
+        '["rows-by-id", "x"]',
+        '["elsewhere", "", ""]',
+        '["rows-by-id", 1, 2]',
+        # B71-86 sol r3: a pre-id-paging cursor ([phase, updated_at, id]) must not be read as [phase, id, last_id].
+        '["rows", "2026-09-25T00:00:00+00:00", "clean"]',
+        '["warm", "", ""]',
+    ],
+)
 def test_a_malformed_cursor_is_invalid_and_writes_nothing(backend: SQLiteBackend, cursor: str) -> None:
     answer = memory_reembed_impl("default", cursor, backend=backend, config=MemoryConfig())
 

@@ -402,7 +402,7 @@ class TestMakeIdLength:
 
     def test_make_id_length(self) -> None:
         """_make_id generates IDs with M- prefix and sufficient hex length."""
-        from trw_memory.client import _make_id
+        from trw_memory.models.entry_factory import new_memory_id as _make_id
 
         mid = _make_id()
         assert mid.startswith("M-")
@@ -412,7 +412,7 @@ class TestMakeIdLength:
 
     def test_make_id_uniqueness(self) -> None:
         """_make_id produces distinct IDs on successive calls."""
-        from trw_memory.client import _make_id
+        from trw_memory.models.entry_factory import new_memory_id as _make_id
 
         ids = {_make_id() for _ in range(100)}
         assert len(ids) == 100

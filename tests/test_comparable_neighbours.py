@@ -3,8 +3,8 @@
 ``memory_similar`` runs this rule in the daemon; trw-mcp decides exhaustively
 (its YAML scan) whenever it answers ``None``. A window of other-space vectors
 compares nothing, and a single-space window is trusted only when the store's
-provenance census shows the WHOLE namespace in the loaded space: an unsupported
-census, an unknown-provenance row or an other-space row past the window defers.
+provenance proves the WHOLE namespace in the loaded space (``vectors_proven_in_space``):
+an unsupported backend, an unknown-provenance row or an other-space row past the window defers.
 """
 
 from __future__ import annotations
@@ -27,12 +27,12 @@ def _stored(vector: Sequence[float], space: EmbeddingSpace | None) -> StoredVect
 
 
 def _backend(
-    hits: list[tuple[str, float]], records: dict[str, StoredVector], census: object, rows: int | None = None
+    hits: list[tuple[str, float]], records: dict[str, StoredVector], proven: object, rows: int | None = None
 ) -> MagicMock:
     backend = MagicMock()
     backend.search_vectors.return_value = hits
     backend.get_vector_records.return_value = records
-    backend.vector_space_census.return_value = census
+    backend.vectors_proven_in_space.return_value = proven
     backend.count.return_value = len(hits) if rows is None else rows
     return backend
 
@@ -45,47 +45,37 @@ def test_an_all_other_space_window_is_incomplete() -> None:
     hits = [(f"L-old{i}", 0.01 * i) for i in range(10)]
     records = {entry_id: _stored((1.0, 0.0), OLD_SPACE) for entry_id, _ in hits}
 
-    assert _window(_backend(hits, records, {OLD_SPACE: 10})) is None
+    assert _window(_backend(hits, records, None)) is None
 
 
 def test_a_mixed_window_is_incomplete_even_with_an_admitted_hit() -> None:
     hits = [("L-unmigrated", 0.0), ("L-unrelated", 1.4)]
     records = {"L-unmigrated": _stored((1.0, 0.0), OLD_SPACE), "L-unrelated": _stored((0.0, 1.0), NEW_SPACE)}
 
-    assert _window(_backend(hits, records, {NEW_SPACE: 1, OLD_SPACE: 1})) is None
+    assert _window(_backend(hits, records, None)) is None
 
 
 def test_a_single_space_window_over_a_proven_namespace_is_the_verdict() -> None:
-    backend = _backend([("L-new", 0.0)], {"L-new": _stored((1.0, 0.0), NEW_SPACE)}, {NEW_SPACE: 1})
+    backend = _backend([("L-new", 0.0)], {"L-new": _stored((1.0, 0.0), NEW_SPACE)}, 1)
 
     assert _window(backend) == [("L-new", 0.0)]
+    backend.vectors_proven_in_space.assert_called_once_with(namespace="project:a", space=NEW_SPACE)
 
 
 @pytest.mark.parametrize(
-    "census",
-    [
-        None,
-        {NEW_SPACE: 1, OLD_SPACE: 1},
-        {NEW_SPACE: 1, None: 1},
-        MagicMock(),
-        {},
-        {NEW_SPACE: 0},
-        {NEW_SPACE: True},
-        {NEW_SPACE: "1"},
-    ],
+    "proven",
+    [None, MagicMock(), 0, True, "1", 1.0],
     ids=[
-        "unsupported",
-        "other-space-row-past-the-window",
-        "unknown-provenance-row",
-        "not-a-mapping",
-        "empty",
+        "unsupported-or-another-space-or-unknown-provenance",
+        "not-an-int",
         "zero-count",
         "bool-count",
         "str-count",
+        "float-count",
     ],
 )
-def test_an_unproven_namespace_makes_a_single_space_window_incomplete(census: object) -> None:
-    backend = _backend([("L-new", 0.5)], {"L-new": _stored((1.0, 0.0), NEW_SPACE)}, census)
+def test_an_unproven_namespace_makes_a_single_space_window_incomplete(proven: object) -> None:
+    backend = _backend([("L-new", 0.5)], {"L-new": _stored((1.0, 0.0), NEW_SPACE)}, proven)
 
     assert _window(backend) is None
 
@@ -94,12 +84,12 @@ def test_a_census_smaller_than_the_window_proves_nothing() -> None:
     hits = [("L-a", 0.5), ("L-b", 0.6)]
     records = {"L-a": _stored((1.0, 0.0), NEW_SPACE), "L-b": _stored((1.0, 0.0), NEW_SPACE)}
 
-    assert _window(_backend(hits, records, {NEW_SPACE: 1})) is None
+    assert _window(_backend(hits, records, 1)) is None
 
 
 def test_a_census_that_misses_a_vectorless_row_proves_nothing() -> None:
     """C12 rc4: one in-space vector proved a window although a vectorless near-duplicate was never compared."""
-    backend = _backend([("L-unrelated", 1.4)], {"L-unrelated": _stored((0.0, 1.0), NEW_SPACE)}, {NEW_SPACE: 1}, rows=2)
+    backend = _backend([("L-unrelated", 1.4)], {"L-unrelated": _stored((0.0, 1.0), NEW_SPACE)}, 1, rows=2)
 
     assert _window(backend) is None
 
