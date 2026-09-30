@@ -192,11 +192,42 @@ def test_the_session_sweep_reports_what_it_stopped_and_finds_no_survivor(
 def test_the_session_sweep_censuses_survivors_after_reaping(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The survivor guard: a daemon still found after the reap is reported, even if the reap counted none."""
     monkeypatch.setattr(daemon_reaper, "reap_daemons_under", lambda *_a, **_k: [])
-    monkeypatch.setattr(daemon_reaper, "daemon_pids_placed_under", lambda _root: [7])
-    monkeypatch.setattr(daemon_reaper, "daemon_pids_owned_by", lambda owner: [9] if owner == "o" else [])
+    monkeypatch.setattr(daemon_reaper, "daemon_pids_placed_under", lambda _root, _census=None: [7])
+    monkeypatch.setattr(daemon_reaper, "daemon_pids_owned_by", lambda owner, _census=None: [9] if owner == "o" else [])
 
     assert sweep_session_daemons(tmp_path, "o").survivors == [7, 9]
     assert sweep_session_daemons(tmp_path, None).survivors == [7]
+
+
+@pytest.mark.parametrize("foreign", [0, 6])
+def test_the_session_sweep_spawns_one_lsof_and_at_most_two_ps_whatever_the_daemon_count(
+    tmp_path: Path, spawned: list[subprocess.Popen[bytes]], monkeypatch: pytest.MonkeyPatch, foreign: int
+) -> None:
+    """Planted daemons are still reaped and reported, and the host scan does not grow with their number."""
+    basetemp, elsewhere = tmp_path / "bt", tmp_path / "elsewhere"
+    basetemp.mkdir()
+    elsewhere.mkdir()
+    owner = _owner()
+    env = {"HOME": str(elsewhere), "TRW_USER_DIR": str(elsewhere)}
+    planted = [_unpublished(basetemp, env)]
+    planted += [_unpublished(elsewhere, {**env, OWNER_VARIABLE: owner}, detached=True)]
+    bystanders = [_unpublished(elsewhere, {**env, OWNER_VARIABLE: _owner()}, detached=True) for _ in range(foreign)]
+    spawned += [*planted, *bystanders]
+    real_run, calls = subprocess.run, []
+
+    def counting(argv: list[str], *args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv[0])
+        return real_run(argv, *args, **kwargs)  # type: ignore[no-any-return, call-overload]
+
+    monkeypatch.setattr(subprocess, "run", counting)
+
+    sweep = sweep_session_daemons(basetemp, owner)
+
+    assert sweep.leaked == sorted(p.pid for p in planted)
+    assert sweep.survivors == []
+    assert all(b.poll() is None for b in bystanders), "another session's daemon must survive"
+    assert calls.count("ps") <= 2
+    assert calls.count("lsof") <= 1
 
 
 @pytest.mark.parametrize(

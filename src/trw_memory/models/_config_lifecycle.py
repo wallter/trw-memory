@@ -175,7 +175,10 @@ class _LifecycleConfigMixin(BaseModel):
 
     # PII
     pii_enabled: bool = Field(default=True, description="Enable PII detection in memory content")
-    pii_action: Literal["block", "redact", "warn"] = "warn"
+    pii_action: Literal["block", "redact", "warn"] = Field(
+        default="warn",
+        description="What to do when PII is detected in memory content: block the write, redact it, or warn",
+    )
     pii_entropy_threshold: float = Field(default=4.5, gt=0.0, description="Shannon entropy threshold for PII detection")
     pii_custom_patterns: list[str] = Field(
         default_factory=list, description="Additional regex patterns treated as custom PII"

@@ -143,7 +143,7 @@ results = backend.search("query", top_k=10, namespace="default")
 ```
 
 ## What's new in 5.x
-<!-- whats-new: 5.0.0 -->
+<!-- whats-new: 5.1.1 -->
 
 - **Quarantined memories stay out of every read.** An append-only ledger records each quarantine decision, and every backend read filters quarantined entries inside the backend itself.
 - **A daemon that survives its own death.** A crash or reboot leaves a record that reads as dead, so clients restart cleanly. `probe_endpoint` pings without starting one; `MEMORY_DAEMON_AUTOSTART=false` fails closed.
@@ -151,7 +151,7 @@ results = backend.search("query", top_k=10, namespace="default")
 - **Your store stays where your project is.** The default store follows the nearest project at or above the working directory, never an arbitrary one; an explicit `storage_path` still wins.
 - **Embeddings when you want them.** `MEMORY_EMBEDDINGS_ENABLED=false` never loads the local model: stores write no vectors and recall runs keyword-only.
 - **Lessons indexed by the files they're about.** Schema 12 adds an anchor index, so file-anchored recall and co-anchored graph edges read an index instead of scanning.
-- **Faster, tighter imports and reads.** A 20k-row checkout import takes about 5 s instead of about 50 s, and `graph_query` bounds the SQL work a dense root can force.
+- **A backup of the store that's served.** The daemon and trw-mcp's backup now resolve the served store the same way, so a backup archives the store the daemon actually uses.
 
 5.0.0 is a breaking release (custom `StorageBackend`s must add `get_many`, and unprefixed settings variables such as `DAEMON_PORT` are no longer read, so use `MEMORY_<SETTING>`; Python <!-- inv:python_min_trw_memory -->3.11<!-- /inv -->+): read the [CHANGELOG](https://github.com/wallter/trw-memory/blob/main/CHANGELOG.md) before upgrading, and upgrade trw-mcp to 8.0.0 with it.
 
@@ -328,6 +328,8 @@ trw-memory is **local-first**: all data lives in a local SQLite store (and an op
 | **Model loads at runtime** | Never. The embedder and re-ranker load from the local Hugging Face cache only (`local_files_only=True`, and a complete snapshot is opened from its directory), so a warm cache makes **zero** huggingface.co requests | cache-only, always | nothing to turn off |
 | **Remote sync / publish** | Only when `sync_enabled=true` and a platform URL is set. Text only: no vector ever leaves the machine | **off** | leave sync disabled |
 | **Decision judge** (`trw_memory.decisions`) | Only when enabled **and** an `OPENROUTER_API_KEY` is present. For the store path, enabled means `TRW_JEV_ENABLED` in the process environment or `assess_enabled` in the user's `~/.trw/config.yaml`; that path does not read project `.trw/config.yaml` or `.env`, and it takes the key from the process environment only. `python -m trw_memory.decisions.cli` also reads project settings via `--dotenv`. When enabled, the store path's poisoning screen sends each written entry's text, after credential and PII redaction, to the judge endpoint (default `https://openrouter.ai`, an allowlisted https host) as a shadow check that never changes the outcome; `python -m trw_memory.decisions.cli` calls it directly | **off** | leave it disabled: unset `TRW_JEV_ENABLED` / `assess_enabled` at every layer, or set `TRW_JEV_ENABLED=false` in the process environment, which overrides the others |
+
+**OpenTelemetry spans** are off unless the host installs an SDK provider (for the daemon: `TRW_OTEL_ENABLED=true`). They carry ids, counts and enums, never memory content or query text: see [`OTEL.md`](OTEL.md).
 
 `learning_sharing_enabled` governs learning-content publishing. Model downloads are not a runtime behaviour at all, so no consent flag gates them.
 

@@ -469,3 +469,22 @@ def test_a_failed_no_follow_directory_open_is_a_refusal_even_when_the_entry_vani
 
     assert refused.value.reason == reason
     assert refused.value.path == str(project / "sub")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_exact_mode_publishes_the_requested_bits_unnarrowed_and_before_any_byte(tmp_path: Path) -> None:
+    """``exact_mode`` is for a caller keeping the bits of the file it replaces: the umask must not narrow them again.
+
+    The default (no ``exact_mode``) still lets the umask narrow the mode, as ``open()`` does.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    previous_umask = os.umask(0o022)
+    try:
+        write_beneath(project, "kept.json", b"{}\n", mode=0o664, exact_mode=True)
+        write_beneath(project, "default.json", b"{}\n", mode=0o664)
+    finally:
+        os.umask(previous_umask)
+
+    assert stat.S_IMODE((project / "kept.json").stat().st_mode) == 0o664
+    assert stat.S_IMODE((project / "default.json").stat().st_mode) == 0o644

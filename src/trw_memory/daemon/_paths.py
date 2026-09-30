@@ -274,3 +274,18 @@ def _unreadable(path: Path, exc: BaseException) -> DaemonSecretUnreadableError:
     reason = read_failure_reason(exc)
     logger.warning("daemon_secret_read_refused", path=str(path), error=type(exc).__name__)
     return DaemonSecretUnreadableError(f"{path} exists but could not be read: {reason}")
+
+
+def served_store_path(paths: DaemonPaths | None = None, *, create: bool = False) -> Path:
+    """The ONE store the daemon serves, for the daemon itself and for every tool that must name it.
+
+    ``memory_single_store_path`` wins when configured; otherwise the machine-local user store. An explicit
+    ``MEMORY_STORAGE_PATH`` does not move it (E2E-BACKUP-DAEMON-STORE-ONE-RESOLVER): backup and the daemon
+    resolving the store two ways let a backup archive a file the daemon never served.
+    """
+    from trw_memory.models.config import MemoryConfig
+
+    configured = MemoryConfig().memory_single_store_path
+    if configured:
+        return Path(configured)
+    return (paths or DaemonPaths.resolve(create=create)).store

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import cast
 
+from trw_memory._otel import memory_op
 from trw_memory.lifecycle.correction import LearningPatch, Store, apply_correction, not_found, parse_patch
 from trw_memory.models.config import MemoryConfig
 from trw_memory.security.rbac import Permission
@@ -19,6 +20,7 @@ from trw_memory.tools._types import McpServer
 from trw_memory.tools.entry import refused_namespace
 
 
+@memory_op("update")
 def memory_update_impl(
     entry_id: str,
     patch: LearningPatch,

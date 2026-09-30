@@ -9,6 +9,7 @@ from contextlib import ExitStack
 
 import structlog
 
+from trw_memory._otel import note
 from trw_memory.graph import graph_query, list_org_shared_entries
 from trw_memory.lifecycle._recall import rank_by_utility, record_recall_access
 from trw_memory.lifecycle.scoring import entry_utility
@@ -21,6 +22,13 @@ from trw_memory.security.telemetry_emit import build_security_traceability, emit
 from trw_memory.storage.interface import StorageBackend
 
 logger = structlog.get_logger(__name__)
+
+
+def _apply_min_score(rows: list[dict[str, object]], min_score: float) -> list[dict[str, object]]:
+    """Drop rows scoring below ``min_score`` and record the threshold and drop count on the memory span."""
+    kept = [row for row in rows if float(str(row.get("score", 0.0))) >= min_score]
+    note(threshold=float(min_score), filtered=len(rows) - len(kept))
+    return kept
 
 
 def _apply_sec001_recall_policy(

@@ -180,7 +180,10 @@ class _SecurityConfigMixin(BaseModel):
     sync_enabled: bool = Field(default=False, description="Enable remote platform sync")
     #: An in-process veto only: False stops every platform contact from this config. The operator's
     #: switch (files and TRW_PLATFORM_CONTACT_ENABLED) is read live by trw_memory.platform_contact.
-    platform_contact_enabled: bool = True
+    platform_contact_enabled: bool = Field(
+        default=True,
+        description="Allow this config to contact the TRW platform (an in-process veto; false stops every platform call)",
+    )
     sync_min_importance: float = Field(default=0.7, ge=0.0, le=1.0, description="Min importance to publish remotely")
     # `sync_namespace` was REMOVED on 2026-09-26 (PRD-QUAL-145 wave 3): PRD-CORE-047
     # declared it as an additive field but nothing in `sync/` ever read it -- every

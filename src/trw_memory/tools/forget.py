@@ -10,6 +10,7 @@ import contextlib
 
 import structlog
 
+from trw_memory._otel import memory_op
 from trw_memory.daemon._lane import INTERACTIVE, run_on_lane
 from trw_memory.exceptions import AuthorizationError, StorageError
 from trw_memory.lifecycle.tiers._runtime import remove_entry_from_tiers, supports_tier_runtime
@@ -25,6 +26,7 @@ from trw_memory.tools.search import _SCAN_ROWS
 logger = structlog.get_logger(__name__)
 
 
+@memory_op("forget")
 def memory_forget_impl(
     memory_id: str | None,
     query: str | None,

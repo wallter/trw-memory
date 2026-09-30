@@ -35,13 +35,22 @@ from trw_memory.storage._pid_liveness import _pid_is_live, process_start
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="zombies and POSIX process groups")
 
 
+def _has_exited_unreaped(pid: int) -> bool:
+    """Whether *pid* has exited but is still in the process table (a zombie), without reaping it."""
+    if hasattr(os, "waitid"):
+        # waitid(WNOWAIT) reports the exit without reaping, so the child stays a zombie.
+        return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    # os.waitid is missing on macOS before Python 3.13; `ps` reports the same fact (state Z) without reaping.
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False)
+    return state.stdout.strip().startswith("Z")
+
+
 def _zombie() -> subprocess.Popen[bytes]:
     """A child that has exited and is not yet reaped."""
     child = subprocess.Popen([sys.executable, "-c", "pass"])
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        # waitid(WNOWAIT) reports the exit without reaping, so the child stays a zombie.
-        if os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+        if _has_exited_unreaped(child.pid):
             return child
         time.sleep(0.01)
     raise AssertionError("the child did not exit")
@@ -417,3 +426,15 @@ def test_no_model_runs_on_metal_on_macos(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setattr(reranker, "_LOADED_MODELS", {})
     assert reranker._get_model("cross-encoder/ms-marco-MiniLM-L-6-v2") is not None
     assert built["device"] == "cpu"
+
+
+def test_the_zombie_helper_still_works_where_os_waitid_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """macOS before Python 3.13 has no os.waitid: the helper falls back to `ps` and still yields an unreaped zombie."""
+    monkeypatch.delattr(os, "waitid", raising=False)
+    zombie = _zombie()
+    try:
+        assert _pid_is_live(zombie.pid, tmp_path / "lock") is False
+    finally:
+        zombie.wait()

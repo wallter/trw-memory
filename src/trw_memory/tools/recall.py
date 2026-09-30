@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 import structlog
 
+from trw_memory._otel import memory_op
 from trw_memory.daemon._offload import run_offloaded
 from trw_memory.embeddings import get_local_embedder, keyword_only_on_refusal
 from trw_memory.embeddings._space_gate import active_embedding_space, admit_space_vectors
@@ -43,6 +44,7 @@ from trw_memory.security.rbac import Permission, require_namespace_permission
 from trw_memory.security.runtime import append_audit_event, initialize_canaries, probe_canaries, should_halt_recalls
 from trw_memory.storage.interface import StorageBackend
 from trw_memory.tools._recall_helpers import (
+    _apply_min_score,
     _apply_sec001_recall_policy,
     _graph_related,
     _merge_tier_entries,
@@ -88,6 +90,7 @@ def _rescale_supplementary_scores(
         row["score"] = round(floor - step * position, 9)
 
 
+@memory_op("recall")
 def memory_recall_impl(
     query: str,
     namespace: str,
@@ -366,7 +369,7 @@ def memory_recall_impl(
     result_dicts = [row for row in result_dicts if admission.allows(row) and (not kinds or row.get("type") in kinds)]
     # ``min_score`` is applied ONCE, here, on the score the response reports.
     if min_score > 0.0:
-        result_dicts = [row for row in result_dicts if float(str(row.get("score", 0.0))) >= min_score]
+        result_dicts = _apply_min_score(result_dicts, min_score)
 
     # SEC-001 recall filter runs on the FULL ranked candidate set BEFORE the
     # token-budget fitting and limit cap (trw-memory-3 / trw-memory-8). Running

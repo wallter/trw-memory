@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Literal
 
 from trw_memory._client_backend import client_logger as _client_logger
 from trw_memory._client_lifecycle import publish_entry, schedule_background_task, should_attempt_remote_publish
+from trw_memory._otel import memory_op
 from trw_memory.embeddings.provenance import generation_provenance_kwargs
 from trw_memory.exceptions import MemoryNotFoundError, SchemaValidationError, StorageError
 from trw_memory.graph import schedule_graph_update
@@ -124,6 +125,7 @@ def _build_store_entry(
     )
 
 
+@memory_op("store")
 async def store_impl(
     client: MemoryClient,
     content: str,

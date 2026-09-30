@@ -19,6 +19,12 @@ from enum import Enum
 from pydantic import BaseModel, ConfigDict, Field
 
 from trw_memory.exceptions import ConfigError
+from trw_memory.security.credentials import (
+    _PROVIDER_SECRET_PATTERN,
+    _SECRET_PREFIX_PATTERN,
+    credential_spans,
+    mask_credentials,
+)
 
 
 class PIIType(str, Enum):
@@ -67,48 +73,8 @@ class PIIAction(str, Enum):
 # verbatim to the shadow-quarantine JSONL. Add a new credential shape HERE and
 # both paths stay in sync.
 
-# Generic ``<prefix>[-_]<20+ alnum>`` credential shape, tolerating ONE optional
-# environment/scope segment between the prefix and the random body.
-#
-# That optional segment is why ``sk_live_…`` (Stripe) and ``sk-proj-…`` (OpenAI)
-# escaped until 2026-07-30. ``sk`` was already in the prefix list — the author
-# plainly intended to catch them — but requiring 20+ alnum IMMEDIATELY after the
-# separator meant the pattern died on ``live``/``proj``, which every real provider
-# key carries. The tokens were still *detected*, as HIGH_ENTROPY; but only
-# ``PIIType.API_KEY`` is in ``_runtime_pii.BLOCKING_PII_TYPES`` and only the regex
-# types are masked by ``strip_pii``. So a live Stripe key was persisted verbatim
-# AND published verbatim to the platform, while an AWS key in the identical
-# position was blocked and masked. Same threat class, opposite handling, decided
-# by which regex happened to match.
-#
-# The optional segment is a CLOSED SET of real provider scope words, not a generic
-# `[a-zA-Z0-9]{1,12}`. A generic segment is indistinguishable from an ordinary
-# snake_case identifier, and `PIIType.API_KEY` BLOCKS the write — so the first
-# draft of this fix rejected `pk_users_organizationmembership`,
-# `key_error_troubleshootingnotes` and `token_cache_invalidationstrategy`, losing
-# the learning outright. Every provider shape this exists to catch
-# (`sk_live_`, `sk_test_`, `rk_live_`, `sk-proj-`) is covered by the closed set.
-_SECRET_SCOPE_WORDS = "live|test|proj|prod|dev|sandbox|staging"  # noqa: S105 — regex alternation, not a credential
-# Word-anchored HERE, in the shared constant, so `detect_pii` and `strip_pii` apply
-# identical boundaries. `detect_pii` used to wrap it in `\b...\b` while `strip_pii`
-# applied it bare, so `strip_pii` masked mid-token substrings the detector would
-# not flag — a divergence in the one constant whose comment claims it exists to
-# prevent divergence.
-_SECRET_PREFIX_PATTERN = (
-    r"\b(?:sk|pk|rk|api|key|token|secret)[-_]"
-    rf"(?:(?:{_SECRET_SCOPE_WORDS})[-_])?[a-zA-Z0-9]{{20,}}\b"
-)
-# Provider-specific shapes that lack a "<prefix>[-_]" separator and fall below
-# the Shannon-entropy backstop (GitHub PATs, AWS access key IDs), plus shapes that
-# sit ABOVE it and were therefore mis-typed as HIGH_ENTROPY rather than API_KEY
-# (Slack, Google). Anchored + bounded (no nested quantifiers) so they stay
-# ReDoS-free.
-_PROVIDER_SECRET_PATTERN = (
-    r"\b(?:gh[posru]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,})\b"  # noqa: S105 — regex, not a credential
-    r"|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"
-    r"|\bxox[baprs]-[A-Za-z0-9-]{20,}\b"
-    r"|\bAIza[A-Za-z0-9_-]{35}\b"
-)
+# The credential patterns (``_SECRET_PREFIX_PATTERN`` / ``_PROVIDER_SECRET_PATTERN`` and the
+# structural set) live in ``trw_memory.security.credentials``, the one detector.
 
 # ---------------------------------------------------------------------------
 # Regex patterns for each PII type
@@ -175,22 +141,6 @@ _PII_PATTERNS: list[tuple[PIIType, re.Pattern[str], float]] = [
         PIIType.CREDIT_CARD,
         re.compile(r"\b(?:\d{4}[-\s]?){3}\d{4}\b"),
         0.85,
-    ),
-    (
-        PIIType.API_KEY,
-        re.compile(_SECRET_PREFIX_PATTERN, re.IGNORECASE),
-        0.9,
-    ),
-    # Provider-specific secret shapes that lack a "<prefix>[-_]" separator and
-    # fall below the Shannon-entropy backstop (e.g. a 40-char GitHub PAT scores
-    # ~4.1 bits/char, under the 4.5 default). These leaked silently before — a
-    # token in `content`/`detail` matched neither the generic API_KEY pattern
-    # nor the high-entropy path. See _PROVIDER_SECRET_PATTERN (shared with
-    # strip_pii).
-    (
-        PIIType.API_KEY,
-        re.compile(_PROVIDER_SECRET_PATTERN),
-        0.95,
     ),
     (
         PIIType.IP_ADDRESS,
@@ -539,6 +489,11 @@ def detect_pii(
                 )
             )
 
+    # Credentials: one detector (``credentials.py``) shared with trw-mcp's ``redact_secrets``.
+    # Every shape it blocks on is an API_KEY, the class the write gate refuses.
+    for start, end in credential_spans(text):
+        matches.append(PIIMatch(pii_type=PIIType.API_KEY, value=text[start:end], start=start, end=end, confidence=0.95))
+
     patterns = custom_patterns or []
     if len(patterns) > _MAX_CUSTOM_PATTERNS:
         raise ConfigError(
@@ -671,6 +626,10 @@ def strip_pii(text: str) -> str:
         "<api_key>",
         text,
     )
+    # Every other credential shape (password assignments, URL credentials, JWTs, PEM blocks, hyphenated provider
+    # keys). The two subs above keep their ``<api_key>`` marker where they matched; this catches what they do not.
+    # Before the detector pass below for the reason it states: digits inside a credential match the SSN shape.
+    text = mask_credentials(text)
     # Second pass, detector-driven so it inherits detect_pii's quality guards
     # (octet-validated IPv4 + version-context suppression) rather than re-inlining
     # weaker regexes. It MUST run after the credential subs above: a long digit run

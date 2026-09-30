@@ -60,7 +60,9 @@ class _StorageConfigMixin(BaseModel):
     # (security/rbac.py) gates only on `rbac_enabled`. A settable "local"/"remote"
     # selector with no reader misrepresented RBAC as having a remote enforcement
     # mode it never had.
-    default_role: Literal["admin", "reader", "writer", "none"] = "admin"
+    default_role: Literal["admin", "reader", "writer", "none"] = Field(
+        default="admin", description="Role granted to a caller with no explicit role when RBAC is enabled"
+    )
     namespace_roles: dict[str, str] = Field(
         default_factory=dict,
         validation_alias=AliasChoices("memory_namespace_roles"),

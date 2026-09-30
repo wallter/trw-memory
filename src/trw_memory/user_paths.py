@@ -32,7 +32,7 @@ import structlog
 from trw_memory._dir_trust import make_private_dirs, open_verified_dir_fd, verify_and_harden_dir_fd
 from trw_memory.exceptions import UnsupportedPlatformError
 
-__all__ = ["USER_MEMORY_SUBDIR", "resolve_user_memory_dir"]
+__all__ = ["USER_MEMORY_SUBDIR", "resolve_user_memory_dir", "user_memory_dir_path"]
 
 logger = structlog.get_logger(__name__)
 
@@ -57,6 +57,26 @@ def require_supported_platform() -> None:
         raise UnsupportedPlatformError(UNSUPPORTED_PLATFORM_MESSAGE)
 
 
+def user_memory_dir_path() -> Path:
+    """Where the user-space ``memory`` directory is, resolved, WITHOUT creating, verifying or hardening anything.
+
+    For callers that only compare paths (trw-mcp's state-containment scope check) and must not chmod the user's
+    store as a side effect; anything that reads or writes the store uses :func:`resolve_user_memory_dir`.
+    """
+    return _user_memory_dir_and_source()[0]
+
+
+def _user_memory_dir_and_source() -> tuple[Path, str]:
+    """Precedence: ``TRW_USER_DIR`` > ``$XDG_DATA_HOME`` > ``~/.trw``; the base is resolved (links followed)."""
+    user_dir = os.environ.get("TRW_USER_DIR")
+    if user_dir:
+        return (Path(user_dir) / USER_MEMORY_SUBDIR).resolve(), "trw_user_dir"
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        return (Path(xdg) / _XDG_APP_DIR / USER_MEMORY_SUBDIR).resolve(), "xdg_data_home"
+    return (Path.home() / _HOME_TRW_DIR / USER_MEMORY_SUBDIR).resolve(), "home_fallback"
+
+
 def resolve_user_memory_dir(*, create: bool = True) -> Path:
     """Resolve the machine-local user-space memory directory.
 
@@ -75,20 +95,7 @@ def resolve_user_memory_dir(*, create: bool = True) -> Path:
         ``memory.db`` lives at ``<returned>/memory.db``.
     """
     require_supported_platform()
-    user_dir = os.environ.get("TRW_USER_DIR")
-    if user_dir:
-        base = Path(user_dir) / USER_MEMORY_SUBDIR
-        source = "trw_user_dir"
-    else:
-        xdg = os.environ.get("XDG_DATA_HOME")
-        if xdg:
-            base = Path(xdg) / _XDG_APP_DIR / USER_MEMORY_SUBDIR
-            source = "xdg_data_home"
-        else:
-            base = Path.home() / _HOME_TRW_DIR / USER_MEMORY_SUBDIR
-            source = "home_fallback"
-
-    resolved = base.resolve()
+    resolved, source = _user_memory_dir_and_source()
     if create:
         make_private_dirs(resolved)
         _verify_trusted(resolved.parent)

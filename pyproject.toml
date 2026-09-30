@@ -2,12 +2,14 @@
 # Pinned below 1.29: hatchling 1.29+ stamps Metadata-Version 2.5, which twine 7.0 /
 # packaging 26.3 reject ("'2.5' is not a valid metadata version"). Every wheel we
 # have published carries 2.4. Re-verified 2026-09-05 in the release rehearsal.
-requires = ["hatchling>=1.27,<1.29"]
+# Exact since R9 #8: the signed tag attests the wheel's sha256, and the mirror rebuilds it; both
+# isolated builds must resolve the same backend or every publish fails closed. Bump deliberately.
+requires = ["hatchling==1.28.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "trw-memory"
-version = "5.0.1"
+version = "5.1.1"
 description = "Persistent memory engine with hybrid retrieval, tiered storage, and semantic dedup for AI agents"
 readme = "README.md"
 license = "BUSL-1.1"
@@ -75,6 +77,9 @@ dependencies = [
     # went unnoticed -- and CI installed `.[dev,vectors,bm25,mcp]`, so a
     # core-only install was never exercised.
     "fastmcp>=3.2.0,<4.0.0",
+    # PRD-CORE-342 FR01: the one OTel API floor. Already transitive via fastmcp-slim[client]
+    # (>=1.20.0), so this raises the floor and adds no package. Libraries import the API only.
+    "opentelemetry-api>=1.38,<2",
     # The floors below pin fastmcp's own transitive deps past their patched
     # advisories (2026-09 dependabot sweep); fastmcp's own version range does
     # not force these on its own.
@@ -128,6 +133,12 @@ embeddings = [
     "transformers>=5.10.0",  # GHSA-xrqw-3rrv-vx5w
     "setuptools>=83.0.0",  # GHSA-h35f-9h28-mq5c
 ]
+# PRD-CORE-342 FR01: SDK + OTLP/HTTP exporter for application entrypoints (trw_memory.otel_setup).
+# Installing it never enables export: TRW_OTEL_ENABLED defaults to false.
+otel = [
+    "opentelemetry-sdk>=1.38,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.38,<2",
+]
 # `mcp` dropped from this alias: it is now a required dependency, so naming
 # it here would reference a nonexistent extra and pip would warn.
 all = ["trw-memory[embeddings]"]
@@ -143,6 +154,8 @@ dev = [
     "vulture>=2.11",
     "deptry>=0.21.0",
     "defusedxml>=0.7.1",  # PRD-SEC-020 FR06: .github/scripts/{timing_job,verify_suite}.py parse fork-PR-triggered JUnit XML with this instead of stdlib xml.etree
+    "opentelemetry-sdk>=1.38,<2",  # PRD-CORE-342 FR09: the in-memory-exporter test fixture
+    "opentelemetry-exporter-otlp-proto-http>=1.38,<2",  # PRD-CORE-342 FR03: file-exporter encoder tests
     # pip-audit's own range does not force these transitive deps past their
     # patched advisories (2026-09 dependabot sweep).
     "msgpack>=1.2.1",  # GHSA-6v7p-g79w-8964 (pulled via cachecontrol)
@@ -342,6 +355,11 @@ ignore_missing_imports = true
 # Pulled in only by the [embeddings] extra; _hf_cache imports it lazily and
 # treats ImportError as "cache state unknown".
 module = "huggingface_hub"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# protobuf ships no stubs; pulled in only by the [otel] extra (otel_setup imports it lazily).
+module = "google.protobuf.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

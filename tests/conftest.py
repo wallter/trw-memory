@@ -49,6 +49,7 @@ from tests._cwd_isolation import (  # the autouse fixture must be imported BY NA
     fail_session_on_leaked_store,
     snapshot_package_store,
 )
+from tests._otel_support import otel_spans  # noqa: F401  (PRD-CORE-342 FR09 shared fixture)
 from tests._timing import apply_timing_policy
 from tests._timing import pytest_sessionfinish as _timing_sessionfinish
 from tests._trw_home import (  # noqa: F401  (canonical copy; the autouse fixtures must be imported BY NAME to be active)

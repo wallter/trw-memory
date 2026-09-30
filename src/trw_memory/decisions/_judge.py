@@ -49,6 +49,11 @@ class NullJudge:
     reference unconditionally and never branch on "is a judge configured".
     """
 
+    def __init__(self, detail: str = "no judge configured (TRW_JEV_ENABLED / OPENROUTER_API_KEY unset)") -> None:
+        # E2E-INC-098: judge_from_env passes the ONE prerequisite that is actually missing, so the failure never
+        # tells a caller to set a variable that is already set.
+        self.detail = detail
+
     def decide(
         self,
         state: DecisionState,
@@ -57,9 +62,7 @@ class NullJudge:
         timeout_s: float = 10.0,
         session_id: str | None = None,
     ) -> DecisionOutcome:
-        return DecisionFailure(
-            kind="disabled", detail="no judge configured (TRW_JEV_ENABLED / OPENROUTER_API_KEY unset)"
-        )
+        return DecisionFailure(kind="disabled", detail=self.detail)
 
 
 __all__ = ["DecisionJudge", "DecisionState", "NullJudge"]

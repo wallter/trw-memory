@@ -208,7 +208,7 @@ def test_pyproject_declares_current_package_contract() -> None:
     assert isinstance(classifiers, list)
 
     assert pyproject["build-system"] == {
-        "requires": ["hatchling>=1.27,<1.29"],
+        "requires": ["hatchling==1.28.0"],  # R9-8: exact pin, the attested wheel is byte-reproducible
         "build-backend": "hatchling.build",
     }
     assert project["name"] == "trw-memory"
@@ -250,6 +250,7 @@ def test_pyproject_declares_current_optional_extras_and_scripts() -> None:
     assert set(optional) == {
         "sqlite-fix",
         "embeddings",
+        "otel",  # PRD-CORE-342 FR01: SDK + OTLP/HTTP exporter for entrypoints; installing it never enables export
         "all",
         "dev",
     }
@@ -391,7 +392,13 @@ def test_memory_release_workflow_matches_current_publish_contract() -> None:
     # PRD-SEC-020: least privilege; only the publish job may mint an OIDC token.
     assert workflow["permissions"] == {"contents": "read"}
 
-    assert _find_step(build_job, "Build package")["run"] == "python -m build"
+    # R9-8 attestation v2: build at the tag's attested SOURCE_DATE_EPOCH, then prove the wheel is the attested one.
+    build_run = str(_find_step(build_job, "Build package at the attested epoch")["run"])
+    assert "--field TRW-Source-Date-Epoch" in build_run
+    assert 'SOURCE_DATE_EPOCH="${epoch}" python -m build --wheel' in build_run
+    assert 'SOURCE_DATE_EPOCH="${epoch}" python -m build --sdist' in build_run
+    wheel_run = str(_find_step(build_job, "Verify the built wheel is the attested one")["run"])
+    assert '--wheel "${wheels[0]}"' in wheel_run and 'if [ "${#wheels[@]}" -ne 1 ]' in wheel_run
     assert smoke_test_job["needs"] == "build"
     assert not [name for name, job in jobs.items() if "ci.yml" in str(job.get("uses", ""))]
     assert "strategy" not in smoke_test_job

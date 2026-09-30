@@ -110,7 +110,7 @@ def judge_from_env(
     root = Path(project_root) if project_root is not None else None
     enabled, _source = resolve_backend_enablement(root, process_env)
     if not enabled:
-        return NullJudge()
+        return NullJudge("judge not enabled: set TRW_JEV_ENABLED=1 (or assess_enabled: true in .trw/config.yaml)")
 
     api_key = process_env.get("OPENROUTER_API_KEY") or (
         parse_dotenv_subset(dotenv_path, allowed_keys=_DOTENV_ALLOWED_KEYS).get("OPENROUTER_API_KEY")
@@ -118,7 +118,7 @@ def judge_from_env(
         else None
     )
     if not api_key:
-        return NullJudge()
+        return NullJudge("judge enabled, but no OPENROUTER_API_KEY in the environment or the project .env")
 
     # Lazy: JevHttpJudge (and its httpx dependency) is imported only once we know the backend is
     # actually being enabled — every disabled/off-by-default caller never loads httpx (PRD-CORE-295-FR01).
@@ -133,7 +133,9 @@ def judge_from_env(
             host=host,
             scheme=scheme,
         )
-        return NullJudge()
+        return NullJudge(
+            "judge enabled, but TRW_JEV_BASE_URL is not https on an allowlisted host; the key was not sent"
+        )
 
     model = process_env.get("TRW_JEV_MODEL") or DEFAULT_MODEL
     return JevHttpJudge(api_key, base_url=base_url, model=model)

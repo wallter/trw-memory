@@ -148,10 +148,20 @@ def _redirect_home(mp: pytest.MonkeyPatch, home_dir: Path) -> None:
     The HF model cache and the uv cache must survive the redirect: the embedding fixture is provisioned
     into the real ~/.cache/huggingface, and an offline CI replay (HF_HUB_OFFLINE=1) cannot re-download it
     into the temp home; a test that runs ``uv`` under the redirected HOME would otherwise rebuild every
-    wheel into an empty cache. Both are pinned to the real locations (``_REAL_HOME``) unless already set.
+    wheel into an empty cache. Both are pinned to the real locations (``_REAL_HOME``) unless already set, and the
+    HF cache is read-only in effect: HF_HUB_OFFLINE and TRANSFORMERS_OFFLINE default to 1, so a test that lacks
+    the weights fails (or skips) instead of downloading. XDG_CACHE_HOME goes to *home_dir*; SENTENCE_TRANSFORMERS_HOME is deliberately not redirected (it would hide the provisioned weights).
     """
     if not os.environ.get("HF_HOME"):
         mp.setenv("HF_HOME", str(_REAL_HOME / ".cache" / "huggingface"))
+    # Read the provisioned cache, never write to it: offline switches (an explicit value, even "0", is kept) so
+    # no test can download into the operator's real model cache. SENTENCE_TRANSFORMERS_HOME is left alone on
+    # purpose: when set it REPLACES the HF cache as the model folder, so pointing it at the temp home hides the
+    # provisioned weights (test_prd_frontier_001_gar failed that way, 2026-09-30).
+    for offline in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+        if not os.environ.get(offline):
+            mp.setenv(offline, "1")
+    mp.setenv("XDG_CACHE_HOME", str(home_dir / ".cache"))
     if not os.environ.get("UV_CACHE_DIR") and (uv_cache := _real_uv_cache()):
         mp.setenv("UV_CACHE_DIR", uv_cache)
     home_dir.mkdir(parents=True, exist_ok=True)

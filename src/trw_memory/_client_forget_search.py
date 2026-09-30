@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 from trw_memory._client_backend import client_logger as _client_logger
 from trw_memory._client_distilled_tiering import entry_to_result as _entry_to_result
 from trw_memory._client_lifecycle import schedule_background_task
+from trw_memory._otel import memory_op
 from trw_memory.exceptions import MemoryNotFoundError
 from trw_memory.models.memory import MemoryStatus
 from trw_memory.security.rbac import Permission
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
     from trw_memory.client import ForgetResultDict, MemoryClient, MemoryResultDict
 
 
+@memory_op("forget")
 async def forget_impl(
     client: MemoryClient,
     memory_id: str | None = None,
@@ -161,6 +163,7 @@ async def forget_impl(
     return forget_result
 
 
+@memory_op("search")
 async def search_impl(
     client: MemoryClient,
     tags: list[str] | None = None,

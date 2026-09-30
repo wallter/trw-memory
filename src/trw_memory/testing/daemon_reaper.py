@@ -93,26 +93,74 @@ def daemon_env_passthrough() -> dict[str, str]:
     return {name: os.environ[name] for name in (OWNER_VARIABLE, IDLE_VARIABLE) if name in os.environ}
 
 
-def _ps(*args: str) -> str:
+def _run(argv: list[str]) -> str:
     try:
         # Fixed argv: pids and flags only, never a shell or test-supplied text.
-        return subprocess.run(["ps", "-ww", *args], capture_output=True, text=True, check=False).stdout  # noqa: S603, S607
-    except OSError:  # trw-fail-silent-allow: ps unavailable: no pid is known to be a daemon, so none is signalled
+        return subprocess.run(argv, capture_output=True, text=True, check=False).stdout  # noqa: S603
+    except OSError:  # trw-fail-silent-allow: ps/lsof unavailable: no pid is known to be a daemon, so none is signalled
         return ""
 
 
-def _is_daemon(pid: int) -> bool:
-    return _DAEMON_ARGV_MARK in _ps("-o", "command=", "-p", str(pid))
+class _Census:
+    """One read of the host's process table, shared by every pass of a sweep.
 
+    ``ps`` runs once (lazily) and ``lsof`` once, for every daemon's cwd together, however many
+    daemons are alive: a per-daemon call cost ~0.2 s each with foreign daemons on the host.
+    -ww: Linux ps cuts piped output to $COLUMNS, which pytest sets. On macOS ``-E`` appends
+    the environment to each command line; a value containing a space is cut short there, and
+    tmp paths contain none.
+    """
 
-def _daemon_pids() -> list[int]:
-    """Every live daemon on the host. -ww: Linux ps cuts piped output to $COLUMNS, which pytest sets."""
-    pids: list[int] = []
-    for line in _ps("-axo", "pid=,command=").splitlines():
-        pid_text, _, command = line.strip().partition(" ")
-        if _DAEMON_ARGV_MARK in command and pid_text.isdigit():
-            pids.append(int(pid_text))
-    return pids
+    def __init__(self, previous: _Census | None = None) -> None:
+        self._commands: dict[int, str] | None = None
+        # A daemon's cwd never changes, so a later census reuses the earlier one's answers.
+        self._cwds: dict[int, str | None] = dict(previous._cwds) if previous else {}
+
+    @property
+    def commands(self) -> dict[int, str]:
+        """Every live daemon on the host: pid -> its command line (plus environment on macOS)."""
+        if self._commands is None:
+            self._commands = {}
+            # No /proc (macOS): -E appends each process's environment, which _environment reads.
+            environ = [] if os.path.isdir("/proc") else ["-E"]
+            for line in _run(["ps", "-ww", *environ, "-axo", "pid=,command="]).splitlines():
+                pid_text, _, command = line.strip().partition(" ")
+                if _DAEMON_ARGV_MARK in command and pid_text.isdigit():
+                    self._commands[int(pid_text)] = command
+        return self._commands
+
+    def environment(self, pid: int) -> dict[str, str]:
+        """*pid*'s placing variables and owner token: ``/proc`` on Linux, the census line on macOS."""
+        try:
+            raw = Path(f"/proc/{pid}/environ").read_bytes().decode("utf-8", "replace").split("\0")
+        except OSError:  # trw-fail-silent-allow: no /proc (macOS): the census line carries the environment
+            raw = self.commands.get(pid, "").split()
+        found: dict[str, str] = {}
+        for entry in raw:
+            name, sep, value = entry.partition("=")
+            if sep and (name in _PLACING_VARIABLES or name == OWNER_VARIABLE):
+                found.setdefault(name, value)
+        return found
+
+    def cwd(self, pid: int) -> str | None:
+        try:
+            return str(Path(os.readlink(f"/proc/{pid}/cwd")).resolve())
+        except OSError:  # trw-fail-silent-allow: no /proc (macOS): one lsof for every daemon
+            pass
+        if pid not in self._cwds:
+            self._load_cwds([p for p in self.commands if p not in self._cwds] or [pid])
+        return self._cwds.get(pid)
+
+    def _load_cwds(self, pids: list[int]) -> None:
+        current: int | None = None
+        found: dict[int, str] = {}
+        for line in _run(["lsof", "-a", "-d", "cwd", "-p", ",".join(map(str, pids)), "-Fn"]).splitlines():
+            if line.startswith("p") and line[1:].isdigit():
+                current = int(line[1:])
+            elif line.startswith("n") and current is not None:
+                found.setdefault(current, str(Path(line[1:]).resolve()))
+        for pid in pids:
+            self._cwds[pid] = found.get(pid)
 
 
 def _alive(pid: int) -> bool:
@@ -125,7 +173,7 @@ def _alive(pid: int) -> bool:
     return True
 
 
-def _discoveries_under(root: Path) -> dict[int, Path]:
+def _discoveries_under(root: Path, census: _Census) -> dict[int, Path]:
     """Each live daemon published under *root*, and the discovery file that names it."""
     pids: dict[int, Path] = {}
     if not root.is_dir():
@@ -140,81 +188,48 @@ def _discoveries_under(root: Path) -> dict[int, Path]:
             TypeError,
         ):  # trw-fail-silent-allow: an unreadable or partial discovery file names no daemon to stop
             continue
-        if pid > 0 and pid != os.getpid() and _is_daemon(pid):
+        if pid > 0 and pid != os.getpid() and pid in census.commands:
             pids[pid] = discovery
     return pids
 
 
 def daemon_pids_under(root: Path) -> list[int]:
     """Pids of live daemons whose discovery file lies under *root*."""
-    return list(_discoveries_under(root))
+    return list(_discoveries_under(root, _Census()))
 
 
-def _environment(pid: int) -> dict[str, str]:
-    """*pid*'s placing variables and owner token: ``/proc`` on Linux, ``ps -E`` on macOS.
-
-    ``ps -E`` appends the environment to the command line space-separated, so a
-    value containing a space is cut short there; tmp paths contain none.
-    """
-    try:
-        raw = Path(f"/proc/{pid}/environ").read_bytes().decode("utf-8", "replace").split("\0")
-    except OSError:  # trw-fail-silent-allow: no /proc (macOS): ps -E below
-        raw = _ps("-E", "-o", "command=", "-p", str(pid)).split()
-    found: dict[str, str] = {}
-    for entry in raw:
-        name, sep, value = entry.partition("=")
-        if sep and (name in _PLACING_VARIABLES or name == OWNER_VARIABLE):
-            found.setdefault(name, value)
-    return found
-
-
-def _cwd(pid: int) -> str | None:
-    try:
-        return str(Path(os.readlink(f"/proc/{pid}/cwd")).resolve())
-    except OSError:  # trw-fail-silent-allow: no /proc (macOS): fall through to lsof
-        pass
-    try:
-        out = subprocess.run(  # noqa: S603 -- fixed argv, the pid is an int
-            ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],  # noqa: S607
-            capture_output=True,
-            text=True,
-            check=False,
-        ).stdout
-    except OSError:  # trw-fail-silent-allow: lsof unavailable: the cwd is unknown, so it places nothing
-        return None
-    names = [line[1:] for line in out.splitlines() if line.startswith("n")]
-    return str(Path(names[0]).resolve()) if names else None
-
-
-def daemon_pids_placed_under(root: Path) -> list[int]:
+def daemon_pids_placed_under(root: Path, census: _Census | None = None) -> list[int]:
     """Pids of live daemons whose working directory, ``TRW_USER_DIR`` or ``HOME`` lies under *root*.
 
     Catches a daemon with no discovery file: one that stalled before publishing,
     or whose file a fixture already removed with its tmp tree.
     """
+    census = census or _Census()
     wanted = root.resolve()
     pids: list[int] = []
-    for pid in _daemon_pids():
-        environment = _environment(pid)
+    for pid in census.commands:
+        environment = census.environment(pid)
         environment.pop(OWNER_VARIABLE, None)
-        cwd = _cwd(pid)
+        cwd = census.cwd(pid)
         places = [*environment.values(), *([cwd] if cwd is not None else [])]
         if any(Path(place).resolve().is_relative_to(wanted) for place in places):
             pids.append(pid)
     return pids
 
 
-def daemon_pids_owned_by(owner: str) -> list[int]:
+def daemon_pids_owned_by(owner: str, census: _Census | None = None) -> list[int]:
     """Pids of live daemons that inherited ``OWNER_VARIABLE=<owner>`` from the session that started them."""
-    return [pid for pid in _daemon_pids() if _environment(pid).get(OWNER_VARIABLE) == owner]
+    census = census or _Census()
+    return [pid for pid in census.commands if census.environment(pid).get(OWNER_VARIABLE) == owner]
 
 
-def daemon_placement(pid: int, discovery: Path | None = None) -> str:
+def daemon_placement(pid: int, discovery: Path | None = None, census: _Census | None = None) -> str:
     """Where *pid* was started from: its discovery file, owner, ``HOME``, ``TRW_USER_DIR`` and cwd.
 
     Each lies under the tmp tree of the test that started it, so it names that test.
     """
-    places = {**_environment(pid), "cwd": _cwd(pid) or "?"}
+    census = census or _Census()
+    places = {**census.environment(pid), "cwd": census.cwd(pid) or "?"}
     if discovery is not None:
         places["discovery"] = str(discovery)
     return " ".join(f"{name}={value}" for name, value in sorted(places.items()))
@@ -226,6 +241,7 @@ def reap_daemons_under(
     by_process: bool = False,
     placements: dict[int, str] | None = None,
     owner: str | None = None,
+    census: _Census | None = None,
 ) -> list[int]:
     """Stop every daemon published (or, with *by_process*, placed) under any of *roots*.
 
@@ -234,17 +250,19 @@ def reap_daemons_under(
     wait, and the session-end sweep does. *placements*, when given, receives each
     pid's :func:`daemon_placement` before it is signalled, so a leak report can
     name the test that started it. *owner*, when given, also stops every daemon
-    that inherited that session's ``OWNER_VARIABLE``.
+    that inherited that session's ``OWNER_VARIABLE``. *census* shares one process-table
+    read across the passes (see :class:`_Census`); without it the reap takes its own.
     """
-    published = {pid: path for root in roots for pid, path in _discoveries_under(root).items()}
+    census = census or _Census()
+    published = {pid: path for root in roots for pid, path in _discoveries_under(root, census).items()}
     pids = set(published)
     if by_process:
-        pids |= {pid for root in roots for pid in daemon_pids_placed_under(root)}
+        pids |= {pid for root in roots for pid in daemon_pids_placed_under(root, census)}
     if owner is not None:
-        pids |= set(daemon_pids_owned_by(owner))
+        pids |= set(daemon_pids_owned_by(owner, census))
     pids.discard(os.getpid())
     if placements is not None:
-        placements.update({pid: daemon_placement(pid, published.get(pid)) for pid in pids})
+        placements.update({pid: daemon_placement(pid, published.get(pid), census) for pid in pids})
     _signal_all(pids, signal.SIGTERM)
     if wait:
         deadline = time.monotonic() + _GRACE_SECONDS
@@ -312,6 +330,10 @@ def sweep_session_daemons(basetemp: Path, owner: str | None) -> SessionSweep:
     caller fails the session: this is the survivor guard both suites share.
     """
     placements: dict[int, str] = {}
-    leaked = reap_daemons_under(basetemp, wait=True, by_process=True, placements=placements, owner=owner)
-    survivors = sorted({*daemon_pids_placed_under(basetemp), *(daemon_pids_owned_by(owner) if owner else [])})
+    census = _Census()
+    leaked = reap_daemons_under(basetemp, wait=True, by_process=True, placements=placements, owner=owner, census=census)
+    after = _Census(census)  # the daemons alive now: one fresh ps, the cwds already known
+    survivors = sorted(
+        {*daemon_pids_placed_under(basetemp, after), *(daemon_pids_owned_by(owner, after) if owner else [])}
+    )
     return SessionSweep(basetemp, leaked, survivors, placements)

@@ -32,6 +32,7 @@ import structlog
 from trw_memory.exceptions import PIIBlockError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.security.credentials import mask_low_confidence
 from trw_memory.security.pii import PIIMatch, PIIType, detect_pii
 from trw_memory.security.provenance import PII_TYPES
 
@@ -88,6 +89,26 @@ CODE_SNIPPET_PATTERNS = (
     re.compile(r"\bimport\s+\w+"),
     re.compile(r"\bfunction\s+\w+\s*\("),
 )
+
+
+def _masked_entry(entry: MemoryEntry) -> MemoryEntry:
+    """*entry* with placeholder-prone credential shapes (``KEY=value``, URL passwords, ...) masked.
+
+    The block decision has already been made on the ORIGINAL text, so what is stored is masked
+    on every write path (``trw_learn`` and direct ``memory_store`` alike). Idempotent.
+    """
+    update: dict[str, object] = {
+        "content": mask_low_confidence(entry.content),
+        "detail": mask_low_confidence(entry.detail),
+        "nudge_line": mask_low_confidence(entry.nudge_line),
+        "tags": [mask_low_confidence(tag) for tag in entry.tags],
+        "evidence": [mask_low_confidence(item) for item in entry.evidence],
+        "assertions": [
+            assertion.model_copy(update={"last_evidence": mask_low_confidence(assertion.last_evidence)})
+            for assertion in entry.assertions
+        ],
+    }
+    return entry.model_copy(update=update)
 
 
 def apply_runtime_pii_policy(
@@ -155,7 +176,7 @@ def apply_runtime_pii_policy(
         content_matches + detail_matches + nudge_line_matches + tag_matches + evidence_matches + assertion_matches
     )
     if not all_matches:
-        return entry, []
+        return _masked_entry(entry), []
 
     blocking = [match for match in all_matches if match.pii_type in BLOCKING_PII_TYPES]
     if blocking:
@@ -194,16 +215,18 @@ def apply_runtime_pii_policy(
     if any(match.pii_type == PIIType.HIGH_ENTROPY for match in all_matches):
         metadata["contains_high_entropy_token"] = "true"  # noqa: S105 — flag value, not a credential
     return (
-        entry.model_copy(
-            update={
-                "content": new_content,
-                "detail": new_detail,
-                "nudge_line": new_nudge_line,
-                "tags": new_tags,
-                "evidence": new_evidence,
-                "assertions": new_assertions,
-                "metadata": metadata,
-            }
+        _masked_entry(
+            entry.model_copy(
+                update={
+                    "content": new_content,
+                    "detail": new_detail,
+                    "nudge_line": new_nudge_line,
+                    "tags": new_tags,
+                    "evidence": new_evidence,
+                    "assertions": new_assertions,
+                    "metadata": metadata,
+                }
+            )
         ),
         all_matches,
     )

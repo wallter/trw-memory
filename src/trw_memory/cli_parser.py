@@ -25,6 +25,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="trw-memory",
         description="trw-memory CLI — manage your AI agent memory",
     )
+    from trw_memory._version import __version__
+
+    parser.add_argument("--version", action="version", version=f"trw-memory {__version__}")
 
     # Global logging flags
     parser.add_argument(

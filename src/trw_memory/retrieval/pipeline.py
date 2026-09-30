@@ -22,6 +22,7 @@ from datetime import datetime
 
 import structlog
 
+from trw_memory import _otel
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.bm25 import bm25_search
@@ -453,6 +454,8 @@ def hybrid_search_scored(
             or len(fused_entries) != len(pre_rerank_order) + len(tail)
         )
 
+    method = "hybrid" if len(rankings) > 1 else "keyword" if bm25_results else "other"
+    _otel.note(reranked=reranked, rank_scores=prior_reordered or reranked, method=method)
     # PRD-CORE-278 FR01: report the score that explains the order actually
     # returned, and say which basis it is on.
     if distilled_weight is not None and distilled_weight != 1.0:

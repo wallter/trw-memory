@@ -61,7 +61,14 @@ import structlog
 from trw_memory._dir_trust import DIR_FD_SUPPORTED, NOFOLLOW_SUPPORTED, open_or_create_at, open_verified_dir_fd
 from trw_memory.exceptions import UnsafeWriteError, UntrustedDirectoryError
 
-__all__ = ["UnsafeWriteError", "append_beneath", "write_beneath"]
+__all__ = [
+    "UnsafeWriteError",
+    "anchored_removal_supported",
+    "append_beneath",
+    "check_parent_beneath",
+    "open_parent_beneath",
+    "write_beneath",
+]
 
 logger = structlog.get_logger(__name__)
 
@@ -93,35 +100,73 @@ def _select_branch(os_name: str, dir_fd_supported: bool, nofollow_supported: boo
 _BRANCH = _select_branch(os.name, DIR_FD_SUPPORTED, NOFOLLOW_SUPPORTED)
 
 
-def write_beneath(root: Path, rel_path: str | PurePath, data: bytes, *, mode: int) -> None:
+def write_beneath(root: Path, rel_path: str | PurePath, data: bytes, *, mode: int, exact_mode: bool = False) -> None:
     """Replace ``root/rel_path`` with *data*, atomically, refusing any symlinked component.
 
-    The file is created at *mode* (narrowed by the umask, never widened). Raises
+    The file is created at *mode* (narrowed by the umask, never widened). With *exact_mode* the
+    published file carries *mode* exactly -- for a caller keeping the bits of the file it replaces,
+    which the umask must not narrow a second time (the temp is ``fchmod``-ed before the replace). Raises
     ``UnsafeWriteError`` on a refusal; see the module docstring for the reasons and the
     platform contract.
     """
     dirs, leaf = _split(root, rel_path)
     if _BRANCH == "windows":
-        _write_best_effort(_walk_best_effort(root, dirs), leaf, data, mode)
+        _write_best_effort(_walk_best_effort(root, dirs), leaf, data, mode, exact_mode=exact_mode)
         return
     parent_fd = _open_parent(root, dirs)
     try:
-        _publish_at(parent_fd, root.joinpath(*dirs, leaf), leaf, data, mode)
+        _publish_at(parent_fd, root.joinpath(*dirs, leaf), leaf, data, mode, exact_mode=exact_mode)
     finally:
         os.close(parent_fd)
 
 
-def append_beneath(root: Path, rel_path: str | PurePath, data: bytes, *, mode: int) -> None:
-    """Append *data* to ``root/rel_path``, creating it at *mode* when absent; a symlinked leaf is refused."""
+def append_beneath(root: Path, rel_path: str | PurePath, data: bytes, *, mode: int, sync: bool = False) -> None:
+    """Append *data* to ``root/rel_path``, creating it at *mode* when absent; a symlinked leaf is refused.
+
+    With *sync* the file is ``fsync``-ed before the call returns -- for the last append of a copy that
+    ``write_beneath`` would have synced whole.
+    """
     dirs, leaf = _split(root, rel_path)
     if _BRANCH == "windows":
-        _append_best_effort(_walk_best_effort(root, dirs), leaf, data, mode)
+        _append_best_effort(_walk_best_effort(root, dirs), leaf, data, mode, sync=sync)
         return
     parent_fd = _open_parent(root, dirs)
     try:
-        _append_at(parent_fd, root.joinpath(*dirs, leaf), leaf, data, mode)
+        _append_at(parent_fd, root.joinpath(*dirs, leaf), leaf, data, mode, sync=sync)
     finally:
         os.close(parent_fd)
+
+
+def anchored_removal_supported() -> bool:
+    """Whether :func:`open_parent_beneath` can run here (the descriptor-anchored POSIX branch)."""
+    return _BRANCH == "posix"
+
+
+def open_parent_beneath(root: Path, rel_path: str | PurePath) -> tuple[int, str]:
+    """``(fd of rel_path's parent, leaf name)`` for a caller that removes ``root/rel_path`` (POSIX only).
+
+    Every component is opened no-follow and none is created: a symlinked ancestor is refused
+    (``UnsafeWriteError``) and an absent one raises ``FileNotFoundError``. The caller closes the fd and
+    acts on the leaf with ``dir_fd=`` so a link swapped in above it after this call cannot redirect it.
+    """
+    dirs, leaf = _split(root, rel_path)
+    return _open_parent(root, dirs, create=False), leaf
+
+
+def check_parent_beneath(root: Path, rel_path: str | PurePath) -> tuple[Path, str]:
+    """``(parent path, leaf name)`` after an ``lstat`` check that no existing ancestor is a link (Windows, best effort).
+
+    Not race-safe, like the rest of the Windows branch. An absent ancestor raises ``FileNotFoundError``.
+    """
+    dirs, leaf = _split(root, rel_path)
+    if _is_link(os.lstat(root)):
+        raise _refusal(root, "root_untrusted")
+    current = root
+    for name in dirs:
+        current = current / name
+        if _is_link(os.lstat(current)):
+            raise _refusal(current, "symlink_component")
+    return current, leaf
 
 
 def _split(root: Path, rel_path: str | PurePath) -> tuple[tuple[str, ...], str]:
@@ -150,8 +195,11 @@ def _temp_name(leaf: str) -> str:
 # --- POSIX: descriptor-anchored ------------------------------------------------------------------
 
 
-def _open_parent(root: Path, dirs: tuple[str, ...]) -> int:
-    """The fd of ``root/dirs``, reached one no-follow component at a time; the caller closes it."""
+def _open_parent(root: Path, dirs: tuple[str, ...], *, create: bool = True) -> int:
+    """The fd of ``root/dirs``, reached one no-follow component at a time; the caller closes it.
+
+    With ``create=False`` a missing component raises ``FileNotFoundError`` instead of being made.
+    """
     if _BRANCH != "posix":
         raise _refusal(root, "unsupported_platform")
     try:
@@ -160,7 +208,7 @@ def _open_parent(root: Path, dirs: tuple[str, ...]) -> int:
         raise _refusal(root, "root_untrusted") from exc
     try:
         for depth, name in enumerate(dirs, start=1):
-            child = _open_dir_at(fd, name, root.joinpath(*dirs[:depth]))
+            child = _open_dir_at(fd, name, root.joinpath(*dirs[:depth]), create=create)
             os.close(fd)
             fd = child
     except BaseException:
@@ -169,11 +217,12 @@ def _open_parent(root: Path, dirs: tuple[str, ...]) -> int:
     return fd
 
 
-def _open_dir_at(dir_fd: int, name: str, shown: Path) -> int:
-    try:
-        os.mkdir(name, _DIR_MODE, dir_fd=dir_fd)
-    except FileExistsError:  # trw-fail-silent-allow: an existing entry is the common case; the no-follow open below decides whether it is a directory we may use
-        pass
+def _open_dir_at(dir_fd: int, name: str, shown: Path, *, create: bool = True) -> int:
+    if create:
+        try:
+            os.mkdir(name, _DIR_MODE, dir_fd=dir_fd)
+        except FileExistsError:  # trw-fail-silent-allow: an existing entry is the common case; the no-follow open below decides whether it is a directory we may use
+            pass
     try:
         return os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
     except OSError as exc:
@@ -195,7 +244,7 @@ def _kind_at(dir_fd: int, name: str) -> int | None:
         return None
 
 
-def _publish_at(parent_fd: int, shown: Path, leaf: str, data: bytes, mode: int) -> None:
+def _publish_at(parent_fd: int, shown: Path, leaf: str, data: bytes, mode: int, *, exact_mode: bool = False) -> None:
     kind = _kind_at(parent_fd, leaf)
     if kind == stat.S_IFLNK:
         raise _refusal(shown, "symlink_leaf")
@@ -204,6 +253,8 @@ def _publish_at(parent_fd: int, shown: Path, leaf: str, data: bytes, mode: int) 
     tmp_name, tmp_fd = _create_temp_at(parent_fd, leaf, mode)
     try:
         try:
+            if exact_mode:
+                os.fchmod(tmp_fd, mode)  # on the descriptor: the temp it names is ours (O_EXCL|O_NOFOLLOW)
             _write_all(tmp_fd, data)
             os.fsync(tmp_fd)
         finally:
@@ -232,7 +283,7 @@ def _discard_temp_at(parent_fd: int, tmp_name: str) -> None:
         logger.warning("safe_write_temp_not_removed", temp=tmp_name)
 
 
-def _append_at(parent_fd: int, shown: Path, leaf: str, data: bytes, mode: int) -> None:
+def _append_at(parent_fd: int, shown: Path, leaf: str, data: bytes, mode: int, *, sync: bool = False) -> None:
     try:
         fd = open_or_create_at(parent_fd, leaf, _APPEND_FLAGS, mode)
     except OSError as exc:
@@ -248,6 +299,8 @@ def _append_at(parent_fd: int, shown: Path, leaf: str, data: bytes, mode: int) -
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise _refusal(shown, "leaf_not_regular_file")
         _write_all(fd, data)
+        if sync:
+            os.fsync(fd)
     finally:
         os.close(fd)
 
@@ -287,13 +340,17 @@ def _refuse_linked_leaf(leaf_path: Path) -> None:
         raise _refusal(leaf_path, "symlink_leaf")
 
 
-def _write_best_effort(parent: Path, leaf: str, data: bytes, mode: int) -> None:
+def _write_best_effort(parent: Path, leaf: str, data: bytes, mode: int, *, exact_mode: bool = False) -> None:
     target = parent / leaf
     _refuse_linked_leaf(target)
     tmp = parent / _temp_name(leaf)
     fd = os.open(tmp, _TEMP_FLAGS, mode)
     try:
         try:
+            if exact_mode and hasattr(
+                os, "fchmod"
+            ):  # Windows has no fchmod; its permission bits are best effort anyway
+                os.fchmod(fd, mode)
             _write_all(fd, data)
             os.fsync(fd)
         finally:
@@ -307,11 +364,13 @@ def _write_best_effort(parent: Path, leaf: str, data: bytes, mode: int) -> None:
         raise
 
 
-def _append_best_effort(parent: Path, leaf: str, data: bytes, mode: int) -> None:
+def _append_best_effort(parent: Path, leaf: str, data: bytes, mode: int, *, sync: bool = False) -> None:
     target = parent / leaf
     _refuse_linked_leaf(target)
     fd = os.open(target, os.O_WRONLY | os.O_APPEND | os.O_CREAT | _BINARY, mode)
     try:
         _write_all(fd, data)
+        if sync:
+            os.fsync(fd)
     finally:
         os.close(fd)

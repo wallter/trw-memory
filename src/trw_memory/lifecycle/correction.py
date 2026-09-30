@@ -41,7 +41,15 @@ from trw_memory.lifecycle.tiers._runtime import (
 )
 from trw_memory.models._assertion_cap import OVERLONG, overlong
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import Assertion, Confidence, EvidenceLevel, MemoryStatus, MemoryType, ProtectionTier
+from trw_memory.models.memory import (
+    Anchor,
+    Assertion,
+    Confidence,
+    EvidenceLevel,
+    MemoryStatus,
+    MemoryType,
+    ProtectionTier,
+)
 from trw_memory.security.poisoning import reject_unsubstantiated_verified
 from trw_memory.storage._shared import revision_of
 from trw_memory.storage._utf8_validator import refuse_overlong_text_fields
@@ -100,6 +108,7 @@ class LearningPatch(BaseModel):
     # Written by maintenance rather than by hand: anchor re-verification, dedup
     # merges and promotion marks. ``metadata_add`` merges into metadata like ``tags_add``.
     anchor_validity: float | None = Field(default=None, ge=0.0, le=1.0)
+    anchors: list[Anchor] | None = None  # replaces the whole list; the anchor postings follow it
     evidence: list[str] | None = None
     recurrence: int | None = Field(default=None, ge=0)
     merged_from: list[str] | None = None
@@ -153,6 +162,7 @@ _PLAIN_FIELDS: tuple[tuple[str, str], ...] = (
     ("team_origin", "team_origin"),
     ("protection_tier", "protection_tier"),
     ("anchor_validity", "anchor_validity"),
+    ("anchors", "anchors"),
     ("evidence", "evidence"),
     ("recurrence", "recurrence"),
     ("merged_from", "merged_from"),

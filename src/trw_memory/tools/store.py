@@ -14,6 +14,7 @@ from uuid import uuid4
 import structlog
 
 from trw_memory._client_store import _existing_entry_for_namespace
+from trw_memory._otel import memory_op
 from trw_memory._project_anchor import resolve_storage_root
 from trw_memory.daemon._offload import run_offloaded
 from trw_memory.embeddings import get_local_embedder, keyword_only_on_refusal
@@ -59,6 +60,7 @@ from trw_memory.tools._types import McpServer
 logger = structlog.get_logger(__name__)
 
 
+@memory_op("store")
 def memory_store_impl(
     content: str,
     namespace: str,

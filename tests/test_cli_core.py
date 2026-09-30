@@ -224,3 +224,14 @@ class TestForgetCommand:
     def test_forget_missing_id(self) -> None:
         with pytest.raises(SystemExit):
             main(["forget"])
+
+
+def test_version_flag_prints_the_package_version_and_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
+    """E2E-INC-017: `trw-memory --version` printed usage and exited 2."""
+    from trw_memory import __version__
+    from trw_memory.cli_parser import build_parser
+
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["--version"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.strip() == f"trw-memory {__version__}"

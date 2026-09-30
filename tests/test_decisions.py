@@ -870,3 +870,23 @@ def test_a_live_provider_call_is_blocked_and_recorded(_no_live_decision_backend:
 def test_jev_env_is_cleared_for_every_test(_isolated_home) -> None:
     assert not any(os.environ.get(name) for name in ("TRW_JEV_ENABLED", "OPENROUTER_API_KEY"))
     assert isinstance(judge_from_env(), NullJudge)
+
+
+def _abstain_detail(judge: object) -> str:
+    result = judge.decide("s", {"q": NoulQuestion(instructions="Q?")})  # type: ignore[attr-defined]
+    assert isinstance(result, DecisionFailure) and result.kind == "disabled"
+    return result.detail
+
+
+def test_judge_from_env_names_only_the_missing_prerequisite() -> None:
+    """E2E-INC-098: enabled with no key used to say 'TRW_JEV_ENABLED / OPENROUTER_API_KEY unset'."""
+    off = _abstain_detail(judge_from_env(env={"TRW_JEV_ENABLED": "false", "OPENROUTER_API_KEY": "sk-x"}))
+    assert "TRW_JEV_ENABLED" in off and "OPENROUTER_API_KEY" not in off
+
+    no_key = _abstain_detail(judge_from_env(env={"TRW_JEV_ENABLED": "true"}))
+    assert "OPENROUTER_API_KEY" in no_key and "TRW_JEV_ENABLED" not in no_key
+
+    bad_url = _abstain_detail(
+        judge_from_env(env={"TRW_JEV_ENABLED": "true", "OPENROUTER_API_KEY": "sk-x", "TRW_JEV_BASE_URL": "http://evil"})
+    )
+    assert "TRW_JEV_BASE_URL" in bad_url and "not sent" in bad_url

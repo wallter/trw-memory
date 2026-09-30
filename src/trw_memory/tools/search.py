@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import structlog
 
+from trw_memory._otel import memory_op
 from trw_memory.daemon._lane import INTERACTIVE, run_on_lane
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryStatus
@@ -36,6 +37,7 @@ def _quarantine_rows(config: MemoryConfig, namespace: str) -> int:
         return store.count(namespace=namespace)
 
 
+@memory_op("search")
 def memory_search_impl(
     namespace: str,
     *,

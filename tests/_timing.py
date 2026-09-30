@@ -26,6 +26,9 @@ import pytest
 MARKER = "requires_local_timing"
 REPORT_ENV = "TRW_TIMING_REPORT"
 TRUST_LOAD_ENV = "TRW_TIMING_TRUST_LOAD"
+#: What a budget missed above the trust load does: ``skip`` (default; a routine run on a busy host is not red) or ``fail``
+#: (the release gate's dedicated timing stage sets this so it can report UNTRUSTED as its own verdict).
+UNTRUSTED_MODE_ENV = "TRW_TIMING_UNTRUSTED"
 #: 1-minute load average above which a MISSED budget is reported UNTRUSTED (see ``assert_budget``).
 DEFAULT_TRUST_LOAD = 12.0
 UNTRUSTED_PREFIX = "UNTRUSTED"
@@ -56,9 +59,11 @@ def assert_budget(name: str, value: float, limit: float, unit: str, *, at_least:
     an upper bound unless ``at_least`` (throughput, rates).
 
     A budget that is met passes at any load. A budget that is MISSED while the 1-minute load
-    average exceeds ``TRW_TIMING_TRUST_LOAD`` (default 12.0) still fails, but the message starts
-    ``UNTRUSTED (load X.X > N)``: the miss was measured on a saturated host, so it is not evidence
-    about the code and a gate can count it apart from a trusted miss. Default 12 is twice the 6
+    average exceeds ``TRW_TIMING_TRUST_LOAD`` (default 12.0) was measured on a saturated host, so it
+    is not evidence about the code: by default the test SKIPS with the visible reason
+    ``timing not asserted: load X.X > N (...)`` (a routine run must not go red on load the lane tooling
+    itself allows). With ``TRW_TIMING_UNTRUSTED=fail`` (the release gate's timing stage) it fails with a
+    message that starts ``UNTRUSTED (load X.X > N)``, so the gate counts it apart from a trusted miss. Default 12 is twice the 6
     performance cores of the reference host: the budgets passed alone at load 8.5 and missed at
     load 14-17 (KNOWN-RED 2026-09-28), and 12 splits those two populations. Wall-clock is kept
     (not CPU time) because these budgets time I/O, locks and subprocesses.
@@ -84,7 +89,9 @@ def assert_budget(name: str, value: float, limit: float, unit: str, *, at_least:
     except OSError:
         load1 = 0.0
     if load1 > trust:
-        raise AssertionError(f"{UNTRUSTED_PREFIX} (load {load1:.1f} > {trust:g}): {miss}")
+        if os.environ.get(UNTRUSTED_MODE_ENV, "skip") == "fail":
+            raise AssertionError(f"{UNTRUSTED_PREFIX} (load {load1:.1f} > {trust:g}): {miss}")
+        pytest.skip(f"timing not asserted: load {load1:.1f} > {trust:g} ({miss})")  # skip-category: opt-in
     raise AssertionError(miss)
 
 

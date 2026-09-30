@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, cast
 
 import structlog
 
+from trw_memory._otel import memory_op
 from trw_memory._client_backend import client_logger as _client_logger
 from trw_memory._client_backend import create_local_backend as _create_local_backend
 from trw_memory._client_distilled_tiering import entry_to_result as _entry_to_result
@@ -66,6 +67,7 @@ _FALLBACK_IMPORTANCE_WEIGHT: float = 0.3
 _FALLBACK_TF_SCALE: float = 10.0
 
 
+@memory_op("recall")
 async def recall_impl(
     client: MemoryClient,
     query: str,

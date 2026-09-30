@@ -55,7 +55,9 @@ async def post_tool(info: DaemonInfo, token: str, version: str, name: str, argum
     session's. A refusal (``isError``, or a JSON-RPC ``error``) is a ``ToolError``; a
     reply that is neither a refusal nor an object answer is a :class:`DaemonProtocolError`.
     """
-    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
+    params: dict[str, Any] = {"name": name, "arguments": arguments}
+    _inject_trace_context(params)
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params}
     # The bearer comes from the one sanctioned builder (the census in test_platform_trust*), which
     # attaches it only to a trusted or loopback host: the daemon's record is loopback-only (FIX-157).
     headers = {
@@ -67,6 +69,26 @@ async def post_tool(info: DaemonInfo, token: str, version: str, name: str, argum
         response = await http.post(info.url, json=request, headers=headers)
     response.raise_for_status()
     return _answer(name, response)
+
+
+def _inject_trace_context(params: dict[str, Any]) -> None:
+    """Carry the caller's span into ``params._meta`` (PRD-CORE-343 FR08, OTEL-CONVENTIONS §7.2).
+
+    Only a process that already imported OpenTelemetry can hold a current span, so the
+    idle hook path never pays the import. FastMCP's server extracts ``_meta.traceparent``.
+    """
+    if "opentelemetry.trace" not in sys.modules:
+        return
+    try:
+        from opentelemetry import propagate, trace
+
+        if trace.get_current_span().get_span_context().is_valid:
+            carrier: dict[str, str] = {}
+            propagate.inject(carrier)
+            if "traceparent" in carrier:  # never baggage or tracestate (SEC-04.2)
+                params.setdefault("_meta", {})["traceparent"] = carrier["traceparent"]
+    except Exception:  # trw-fail-silent-allow: no traceparent is the no-telemetry path; a daemon read never fails on it
+        return
 
 
 def _answer(name: str, response: httpx.Response) -> dict[str, Any]:

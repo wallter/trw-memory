@@ -14,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import time
 
+from trw_memory._otel import memory_op
 from trw_memory.embeddings._space_gate import active_embedding_space, comparable_neighbours, select_space_vectors
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.embeddings.provenance import EmbeddingSpace
@@ -93,6 +94,7 @@ def _exhaustive(
     return None
 
 
+@memory_op("similar")
 def memory_similar_impl(
     namespace: str,
     text: str,

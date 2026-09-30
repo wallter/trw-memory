@@ -56,8 +56,24 @@ jobs:
           python-version: "3.12"
       - name: Install build tools
         run: pip install build
-      - name: Build package
-        run: python -m build
+      - name: Build package at the attested epoch
+        # R9 #8: the wheel is built from the tree (not from the sdist) at the tag's TRW-Source-Date-Epoch,
+        # exactly as `release_public.py cut` built the wheel whose sha256 the tag attests. A tag with no
+        # epoch (a v1 attestation) stops here: no new publish goes out without a wheel binding.
+        run: |
+          git fetch --no-tags --force origin "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          epoch="$(python3 .github/scripts/verify_release_tag.py "${GITHUB_REF_NAME}" --commit "${GITHUB_SHA}" --field TRW-Source-Date-Epoch)"
+          SOURCE_DATE_EPOCH="${epoch}" python -m build --wheel
+          SOURCE_DATE_EPOCH="${epoch}" python -m build --sdist
+      - name: Verify the built wheel is the attested one
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [ "${#wheels[@]}" -ne 1 ]; then
+            echo "::error::release attestation refused: expected one built wheel, found ${#wheels[@]}"
+            exit 1
+          fi
+          python3 .github/scripts/verify_release_tag.py "${GITHUB_REF_NAME}" --commit "${GITHUB_SHA}" --wheel "${wheels[0]}"
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:

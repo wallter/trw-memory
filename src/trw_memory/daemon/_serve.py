@@ -40,7 +40,7 @@ from trw_memory.daemon._drain_key import remove_drain_key
 from trw_memory.daemon._instance import claim_single_instance, release_single_instance
 from trw_memory.daemon._lane import refuse_lane_submissions
 from trw_memory.daemon._offload import refuse_offload_submissions, shutdown_offload_pool
-from trw_memory.daemon._paths import DaemonPaths
+from trw_memory.daemon._paths import DaemonPaths, served_store_path
 from trw_memory.daemon._verifier import LoopbackTokenVerifier
 from trw_memory.daemon.client import _package_version
 from trw_memory.exceptions import ConfigError, UntrustedDirectoryError
@@ -236,6 +236,19 @@ def _redeliver(captured: list[signal.Signals]) -> None:
         signal.raise_signal(signum)
 
 
+def _configure_tracing(paths: DaemonPaths) -> bool:
+    """PRD-CORE-343 FR10: export only when the first spawner set ``TRW_OTEL_ENABLED=true``.
+
+    The daemon drops an inherited ``TRACEPARENT`` (OTEL-CONVENTIONS §7.3): each request's parent
+    comes from its ``_meta`` only, or every request would join the spawner's one trace.
+    """
+    os.environ.pop("TRACEPARENT", None)
+    from trw_memory.otel_setup import configure_tracing
+
+    enabled = os.environ.get("TRW_OTEL_ENABLED", "").strip().lower() == "true"
+    return configure_tracing("trw-memory", paths.user_memory_dir / "traces", enabled=enabled)
+
+
 async def serve_loopback(options: DaemonServeOptions, *, paths: DaemonPaths | None = None) -> None:
     """Run the loopback daemon until its idle window elapses or it is signalled.
 
@@ -266,7 +279,8 @@ async def serve_loopback(options: DaemonServeOptions, *, paths: DaemonPaths | No
     except UntrustedDirectoryError as exc:
         raise ConfigError(str(exc)) from exc
     os.environ.setdefault(_STORAGE_PATH_ENV, str(resolved.user_memory_dir))
-    os.environ.setdefault(_SINGLE_STORE_ENV, str(resolved.store))
+    os.environ.setdefault(_SINGLE_STORE_ENV, str(served_store_path(resolved)))  # the resolver backup shares
+    _configure_tracing(resolved)
     # Every tool body runs on one serialized lane, bounded on the single SQLite store only (rc9).
     if (backend := MemoryConfig().storage_backend) != "sqlite":
         raise ConfigError(f"refusing to start: the daemon serves one SQLite store, not storage_backend={backend!r}")

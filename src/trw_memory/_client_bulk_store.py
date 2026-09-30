@@ -30,6 +30,7 @@ import structlog
 
 from trw_memory._client_lifecycle import publish_entry, schedule_background_task, should_attempt_remote_publish
 from trw_memory._client_store import _build_store_entry, _existing_entry_for_namespace
+from trw_memory._otel import memory_op
 from trw_memory.embeddings.provenance import generation_provenance_kwargs
 from trw_memory.exceptions import MemoryNotFoundError, SchemaValidationError, SecurityDependencyError, StorageError
 from trw_memory.graph import schedule_graph_update_many
@@ -121,6 +122,7 @@ class BulkStoreSummary:
         return self.stored + self.updated
 
 
+@memory_op("bulk_store")
 async def bulk_store_impl(
     client: MemoryClient,
     requests: list[BulkStoreRequest],
@@ -398,6 +400,7 @@ async def bulk_store_impl(
     )
 
 
+@memory_op("store_many")
 async def store_many_impl(client: MemoryClient, entries: list[dict[str, object]]) -> int:
     """Async impl for :meth:`MemoryClient.store_many` (dict-shaped batch over ``bulk_store``)."""
     if not entries:
