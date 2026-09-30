@@ -85,9 +85,9 @@ _AUDITED_WRITES: dict[Site, tuple[str, str]] = {
         "unscheduled-checkout-write",
         "gzip archive into a mkstemp tmp and the .sha256 sidecar beside the backup in the store's backups dir.",
     ),
-    ("storage/_backup_archive.py", "restore_from_archive", 1): (
+    ("storage/_backup_archive.py", "verified_archive", 1): (
         "unscheduled-checkout-write",
-        "NamedTemporaryFile path in the snapshots dir re-opened 'wb' by name for the decompressed restore.",
+        "NamedTemporaryFile path in the snapshots dir re-opened 'wb' by name for the decompressed (and then verified) restore source.",
     ),
     ("storage/_integrity_scheduler.py", "IntegrityScheduler._write_sentinel", 1): (
         "unscheduled-checkout-write",

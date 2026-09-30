@@ -36,6 +36,7 @@ CENSUS: dict[str, tuple[str, str] | str] = {
     "storage/_schema_v5.py:_apply_rebuilds": _S3,
     "storage/_schema_backup.py:snapshot_before_migration": "not a store: backs the store up into a new file",
     "storage/_snapshot.py:create_snapshot": "not a store: VACUUM INTO a new file, renamed onto the snapshot",
+    "storage/_backup_archive.py:verified_archive": "not a store: removes its own staged temp copy and that copy's sidecars",
     "daemon/_paths.py:write_secret_file": "not a store: the daemon's finalize rename of a new secret file",
     "lifecycle/tiers/_warm.py:_replace_sidecar": "not a store: the warm tier's own sidecar file",
     "security/audit.py:compact": "not a store: the JSONL audit log's compaction",

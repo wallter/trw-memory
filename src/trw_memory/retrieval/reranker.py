@@ -36,6 +36,7 @@ from typing import Any, NamedTuple
 import structlog
 
 from trw_memory._model_pin import model_revision
+from trw_memory.embeddings._hf_cache import probe_model_cache, rules_out_local_load
 from trw_memory.embeddings.local import FETCH_COMMAND, INFERENCE_DEVICE
 from trw_memory.models.memory import MemoryEntry
 
@@ -107,6 +108,32 @@ def __getattr__(name: str) -> object:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+def _proven_uncached(model_name: str) -> bool:
+    """Record an uncached model as a failed load without importing the cross-encoder runtime.
+
+    EMBED-PROBE-FAST-PATH: importing ``sentence_transformers`` (and torch) cost a daemon ~4 s on its first
+    recall only for the local-files-only load to miss a model the cache probe already knew was absent. Same
+    warning, same retry window as the real miss; a loaded model is never re-probed.
+    """
+    with _LOAD_LOCK:
+        cached = _LOADED_MODELS.get(model_name)
+        if cached is not None and not isinstance(cached, _FailedLoad):
+            return False
+        if isinstance(cached, _FailedLoad) and time.monotonic() - cached.at < _RETRY_AFTER_S:
+            return True
+        try:
+            proven = rules_out_local_load(probe_model_cache(model_name))
+        # trw-fail-silent-allow: logged at warning; an unreadable cache is not proof of a miss, so the protected loader decides
+        except Exception:
+            logger.warning("reranker_cache_probe_degraded", model=model_name, exc_info=True)
+            return False
+        if not proven:
+            return False
+        logger.warning("reranker_model_load_failed", model=model_name, fix=FETCH_COMMAND)
+        _LOADED_MODELS[model_name] = _FailedLoad(time.monotonic())
+        return True
+
+
 def _get_model(model_name: str) -> object | None:
     """Lazy-load and cache a CrossEncoder model by name, from the local cache only.
 
@@ -115,6 +142,8 @@ def _get_model(model_name: str) -> object | None:
     failed load is retried once ``_RETRY_AFTER_S`` has passed, so a model fetched
     while the daemon runs is used without a restart.
     """
+    if _proven_uncached(model_name):
+        return None
     if not _import_cross_encoder():
         return None
     # One load per model: the daemon's first concurrent recalls must not load it twice (W27).

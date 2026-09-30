@@ -24,7 +24,7 @@ import structlog
 
 from trw_memory._model_pin import DEFAULT_EMBEDDING_MODEL, model_revision
 from trw_memory.embeddings._declared_space import declared_embedding_space, snapshot_revision
-from trw_memory.embeddings._hf_cache import CacheProbe, CacheState, probe_model_cache
+from trw_memory.embeddings._hf_cache import CacheProbe, CacheState, probe_model_cache, rules_out_local_load
 from trw_memory.embeddings._loaded_state import dependency_versions, loaded_state_digest
 from trw_memory.embeddings._query_prompts import query_prefix
 from trw_memory.embeddings._runtime_identity import capture_runtime_identity, runtime_identity_matches
@@ -250,6 +250,13 @@ class LocalEmbeddingProvider:
             f"because its code runs with this process's privileges."
         )
 
+    def _not_cached_error(self) -> ModelNotCachedError:
+        """The one "not cached" refusal, whether the probe or the loader found the miss."""
+        return ModelNotCachedError(
+            f"Model '{self._model_name}' is not in the local cache, and runtime loads never "
+            f"download. Fetch it: {FETCH_COMMAND}"
+        )
+
     def _load_model(self) -> object | None:
         """Load and cache the sentence-transformers model.
 
@@ -273,6 +280,8 @@ class LocalEmbeddingProvider:
         trust_remote_code = bool(config.embedding_trust_remote_code)
         if probe.declares_remote_code and not trust_remote_code:
             raise self._remote_code_error("its cached snapshot ships Python modules")
+        if rules_out_local_load(probe):  # EMBED-PROBE-FAST-PATH: the same answer, without importing torch
+            raise self._not_cached_error()
         try:
             with _hide_broken_torchcodec_for_sentence_transformers():
                 from sentence_transformers import SentenceTransformer
@@ -361,10 +370,7 @@ class LocalEmbeddingProvider:
                 self._last_load_error = f"model load failed: {type(exc).__name__}: {exc}"
                 logger.warning("embedding_model_load_failed", model=self._model_name, exc_info=True)
                 return self._model
-            raise ModelNotCachedError(
-                f"Model '{self._model_name}' is not in the local cache, and runtime loads never "
-                f"download. Fetch it: {FETCH_COMMAND}"
-            ) from exc
+            raise self._not_cached_error() from exc
         except (RuntimeError, TypeError, ValueError) as exc:
             if not trust_remote_code and _is_remote_code_error(exc):
                 raise self._remote_code_error("the loader refused to load it without that consent") from exc

@@ -206,6 +206,9 @@ def test_the_reranker_loads_cache_only_and_an_uncached_model_keeps_fusion_order(
             raise OSError("not in local cache")  # what huggingface_hub raises with local_files_only
 
     monkeypatch.setattr(reranker, "_cross_encoder_cls", FakeCrossEncoder)
+    monkeypatch.setattr(
+        reranker, "rules_out_local_load", lambda _probe: False
+    )  # drive the loader, not the probe fast path
     monkeypatch.setattr(reranker, "_cross_encoder_available", True)
     monkeypatch.setattr(reranker, "_LOADED_MODELS", {})
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
@@ -232,6 +235,9 @@ def test_concurrent_first_loads_construct_the_cross_encoder_once(monkeypatch) ->
             threading.Event().wait(0.05)  # long enough for an unlocked second caller to enter
 
     monkeypatch.setattr(reranker, "_cross_encoder_cls", SlowCrossEncoder)
+    monkeypatch.setattr(
+        reranker, "rules_out_local_load", lambda _probe: False
+    )  # drive the loader, not the probe fast path
     monkeypatch.setattr(reranker, "_cross_encoder_available", True)
     monkeypatch.setattr(reranker, "_LOADED_MODELS", {})
     loaded: list[object] = []

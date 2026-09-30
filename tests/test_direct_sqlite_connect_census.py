@@ -91,6 +91,10 @@ _AUDITED_EXCEPTIONS: dict[tuple[str, str, int], str] = {
         "apply the same way. Left unfixed pending a decision on whether recovery-scratch files "
         "warrant the same check; flagged rather than silently accepted."
     ),
+    ("storage/_backup_archive.py", "_assert_restorable_store", 1): (
+        "A read-only, immutable connection to the restore's STAGED temp copy (never the live store) to run "
+        "integrity_check and list its tables before anything is swapped in."
+    ),
     ("storage/_snapshot.py", "_checkpoint", 1): (
         "The snapshot restore's checkpoint of the store it replaces, inside the CLI restore's own RESTORE hold."
     ),

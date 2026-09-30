@@ -143,11 +143,11 @@ results = backend.search("query", top_k=10, namespace="default")
 ```
 
 ## What's new in 5.x
-<!-- whats-new: 5.1.1 -->
+<!-- whats-new: 5.1.2 -->
 
 - **Quarantined memories stay out of every read.** An append-only ledger records each quarantine decision, and every backend read filters quarantined entries inside the backend itself.
 - **A daemon that survives its own death.** A crash or reboot leaves a record that reads as dead, so clients restart cleanly. `probe_endpoint` pings without starting one; `MEMORY_DAEMON_AUTOSTART=false` fails closed.
-- **Future upgrades without the manual stop.** From 5.0 on, a newer major can drain and replace an older running daemon instead of refusing it.
+- **A backup restore that checks first.** `backup restore` refuses a source that is not a healthy memory store instead of swapping it in as the live one.
 - **Your store stays where your project is.** The default store follows the nearest project at or above the working directory, never an arbitrary one; an explicit `storage_path` still wins.
 - **Embeddings when you want them.** `MEMORY_EMBEDDINGS_ENABLED=false` never loads the local model: stores write no vectors and recall runs keyword-only.
 - **Lessons indexed by the files they're about.** Schema 12 adds an anchor index, so file-anchored recall and co-anchored graph edges read an index instead of scanning.

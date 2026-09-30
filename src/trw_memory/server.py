@@ -194,7 +194,7 @@ def main(argv: list[str] | None = None) -> None:
         _serve_http(args.port, args.idle_shutdown_seconds)
         return
     _preflight(MemoryConfig())
-    mcp.run()
+    mcp.run(show_banner=False)  # no banner and no PyPI version check on every stdio start
 
 
 if __name__ == "__main__":  # pragma: no cover - process entry point

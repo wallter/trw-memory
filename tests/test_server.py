@@ -273,3 +273,17 @@ def test_update_impl_is_declared_and_implemented_together() -> None:
         if declared
         else "memory_update_impl is exported by trw_memory.tools but missing from MemoryToolSurface (PRD-CORE-251 FR07)"
     )
+
+
+def test_the_stdio_server_is_started_with_the_banner_off(monkeypatch) -> None:
+    """FASTMCP-BANNER-OFF: no logo, no "Update available" notice and no PyPI version check on every start."""
+    from trw_memory import server
+
+    calls: list[dict] = []
+    monkeypatch.setattr(server.mcp, "run", lambda *a, **kw: calls.append(kw))
+    monkeypatch.setattr(server, "_preflight", lambda _config: None)
+    monkeypatch.setattr("trw_memory.user_paths.require_supported_platform", lambda: None)
+
+    server.main([])
+
+    assert calls == [{"show_banner": False}]

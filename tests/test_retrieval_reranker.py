@@ -113,6 +113,7 @@ class TestFailedLoadRetry:
 
         now = [1000.0]
         loads: list[str] = []
+        monkeypatch.setattr(reranker, "rules_out_local_load", lambda _probe: False)  # the loader seam, not the probe
 
         def fake_cross_encoder(model_name: str, **_kw: object) -> object:
             loads.append(model_name)

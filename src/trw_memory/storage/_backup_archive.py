@@ -22,7 +22,10 @@ import gzip
 import hashlib
 import os
 import secrets
+import sqlite3
 import tempfile
+import zlib
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +41,7 @@ __all__ = [
     "backups_base_dir",
     "create_backup_archive",
     "restore_from_archive",
+    "verified_archive",
 ]
 
 logger = structlog.get_logger(__name__)
@@ -170,30 +174,55 @@ def _sidecar_sha256(archive_path: Path) -> str | None:
     return first_token
 
 
-def restore_from_archive(archive_path: Path, db_path: Path, *, expected_sha256: str | None = None) -> None:
-    """Gunzip *archive_path*, verify its sha256, then restore ``db_path`` from it.
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+_REQUIRED_TABLE = "memories"
 
-    Verifies the decompressed bytes' sha256 against *expected_sha256* when
-    given, else against a ``.sha256`` sidecar sitting beside *archive_path*
-    when one exists (skip-if-absent otherwise). Delegates the actual
-    replace to the existing :func:`~trw_memory.storage._snapshot.restore_from_snapshot`,
-    which holds the store's ``restore`` op for the duration — a store another
-    process (the daemon) has open is refused with :class:`StoreBusyError`,
-    nothing changed, identically to ``trw-memory restore --from-snapshot``.
 
-    Raises:
-        BackupArchiveError: the archive is missing, fails to decompress, or
-            its sha256 does not match the expected/sidecar value. The store
-            is left untouched on any of these failures.
-        StoreBusyError: a running daemon holds the store open.
+def _assert_restorable_store(path: Path) -> None:
+    """Refuse *path* unless it is a healthy TRW memory store (INC-127).
+
+    A gzip of anything decompresses; only the bytes say whether it is a store. Checks the SQLite header, runs
+    ``PRAGMA integrity_check`` on a read-only connection, and requires the ``memories`` table. Raises
+    :class:`BackupArchiveError` naming the failed check and never the file's content.
     """
-    if not archive_path.exists():
+    with open(path, "rb") as handle:
+        if handle.read(len(_SQLITE_MAGIC)) != _SQLITE_MAGIC:
+            raise BackupArchiveError(
+                "backup archive is not a SQLite database (the decompressed bytes have no SQLite header)"
+            )
+    try:
+        conn = sqlite3.connect(f"{path.as_uri()}?mode=ro&immutable=1", uri=True)
+        try:
+            verdict = [row[0] for row in conn.execute("PRAGMA integrity_check")]
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError as exc:
+        raise BackupArchiveError(f"backup archive is not a readable SQLite database ({type(exc).__name__})") from exc
+    if verdict != ["ok"]:
+        raise BackupArchiveError("backup archive failed the SQLite integrity_check")
+    if _REQUIRED_TABLE not in tables:
+        raise BackupArchiveError(
+            f"backup archive is a SQLite database but has no '{_REQUIRED_TABLE}' table: not a TRW memory store"
+        )
+
+
+@contextlib.contextmanager
+def verified_archive(archive_path: Path, db_path: Path, *, expected_sha256: str | None = None) -> Iterator[Path]:
+    """Yield a staged, fully verified decompressed copy of *archive_path*; it is removed on exit.
+
+    Nothing about ``db_path`` is read or changed here: the archive is refused (``BackupArchiveError``) while the
+    live store is still byte-identical. Refused: a missing or symlinked archive, a truncated or corrupt gzip, a
+    sha256 that differs from *expected_sha256* or the ``.sha256`` sidecar beside the archive (when one exists),
+    bytes that are not a healthy TRW memory store.
+    """
+    if archive_path.is_symlink():
+        raise BackupArchiveError(f"backup archive is a symlink, which restore does not follow: {archive_path}")
+    if not archive_path.is_file():
         raise BackupArchiveError(f"backup archive does not exist: {archive_path}")
 
     sha_to_check = expected_sha256 or _sidecar_sha256(archive_path)
-
-    base_dir = db_path.parent
-    snap_dir = snapshots_base_dir(base_dir)
+    snap_dir = snapshots_base_dir(db_path.parent)
     snap_dir.mkdir(parents=True, exist_ok=True)
 
     digest = hashlib.sha256()
@@ -206,18 +235,36 @@ def restore_from_archive(archive_path: Path, db_path: Path, *, expected_sha256: 
                 while chunk := gz_in.read(_CHUNK_SIZE):
                     out.write(chunk)
                     digest.update(chunk)
-        except OSError as exc:
-            raise BackupArchiveError(f"backup archive decompress failed: {exc}") from exc
+        except (OSError, EOFError, zlib.error) as exc:
+            raise BackupArchiveError(
+                f"backup archive decompress failed ({type(exc).__name__}): the archive is truncated or not gzip"
+            ) from exc
 
         actual_sha256 = digest.hexdigest()
         if sha_to_check is not None and actual_sha256 != sha_to_check:
             raise BackupArchiveError(f"backup archive sha256 mismatch: expected {sha_to_check}, got {actual_sha256}")
-
-        try:
-            restore_from_snapshot(base_dir, tmp_snapshot, db_path)
-        except SnapshotError as exc:
-            raise BackupArchiveError(f"backup restore failed: {exc}") from exc
+        _assert_restorable_store(tmp_snapshot)
+        yield tmp_snapshot
     finally:
         if tmp_snapshot is not None:
-            with contextlib.suppress(OSError):
-                tmp_snapshot.unlink(missing_ok=True)
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                with contextlib.suppress(OSError):
+                    tmp_snapshot.with_name(tmp_snapshot.name + suffix).unlink(missing_ok=True)
+
+
+def restore_from_archive(archive_path: Path, db_path: Path, *, expected_sha256: str | None = None) -> None:
+    """Verify *archive_path* (see :func:`verified_archive`), then replace ``db_path`` with it atomically.
+
+    Delegates the replace to :func:`~trw_memory.storage._snapshot.restore_from_snapshot`, which holds the store's
+    ``restore`` op: a store another process (the daemon) has open is refused with :class:`StoreBusyError`, nothing
+    changed, identically to ``trw-memory restore --from-snapshot``.
+
+    Raises:
+        BackupArchiveError: the archive failed verification; the store is left untouched.
+        StoreBusyError: a running daemon holds the store open.
+    """
+    with verified_archive(archive_path, db_path, expected_sha256=expected_sha256) as staged:
+        try:
+            restore_from_snapshot(db_path.parent, staged, db_path)
+        except SnapshotError as exc:
+            raise BackupArchiveError(f"backup restore failed: {exc}") from exc

@@ -20,6 +20,8 @@ otherwise succeed (NFR02).
 
 from __future__ import annotations
 
+import importlib.metadata
+import importlib.util
 import json
 import os
 from dataclasses import dataclass
@@ -88,6 +90,21 @@ class CacheProbe:
     snapshot_path: str = ""
 
 
+def _expanded(path: str) -> str:
+    """``~`` and ``$VARS`` expanded the way huggingface_hub expands its cache variables."""
+    return os.path.expandvars(os.path.expanduser(path))
+
+
+def _loader_cache_dir() -> str | None:
+    """The hub cache the loader reads: huggingface_hub's constant, frozen when that module is first imported."""
+    try:
+        from huggingface_hub import constants
+    # trw-fail-silent-allow: no huggingface_hub means no known loader cache, and the caller then keeps the real load
+    except ImportError:
+        return None
+    return str(constants.HF_HUB_CACHE)
+
+
 def _resolve_cache_dir() -> str | None:
     """Return the hub cache directory, honoring env overrides set after import.
 
@@ -98,9 +115,9 @@ def _resolve_cache_dir() -> str | None:
     """
     for var in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
         if override := os.environ.get(var, "").strip():
-            return override
+            return _expanded(override)
     if hf_home := os.environ.get("HF_HOME", "").strip():
-        return os.path.join(hf_home, "hub")
+        return os.path.join(_expanded(hf_home), "hub")
     try:
         from huggingface_hub import constants
     except ImportError:
@@ -231,3 +248,30 @@ def probe_model_cache(model_name: str) -> CacheProbe:
     except OSError:
         return CacheProbe(CacheState.UNKNOWN)
     return CacheProbe(CacheState.INCOMPLETE if cached else CacheState.ABSENT)
+
+
+def rules_out_local_load(probe: CacheProbe) -> bool:
+    """True when *probe* alone proves a local-files-only sentence-transformers load must miss.
+
+    EMBED-PROBE-FAST-PATH: the provider then reports the model as not cached without importing
+    sentence-transformers and torch, which cost a daemon ~4 s on its first embed only to learn the
+    same thing. Only ``ABSENT`` qualifies (no hub-cache entry for any repo id the loader would try);
+    ``INCOMPLETE`` keeps the real load. So do three cases where the loader may know more than this
+    probe: ``SENTENCE_TRANSFORMERS_HOME`` set or sentence-transformers older than 3 (both read a
+    cache folder of their own), and the library missing (reported as itself, not as a cache miss).
+    """
+    if probe.state is not CacheState.ABSENT or os.environ.get("SENTENCE_TRANSFORMERS_HOME", "").strip():
+        return False
+    # The probe honours cache variables set after huggingface_hub was imported; the loader reads the frozen
+    # constant. ABSENT proves nothing about a cache the loader does not read (EMBED-PROBE-FAST-PATH r1 KI).
+    probed, loader = _resolve_cache_dir(), _loader_cache_dir()
+    if probed is None or loader is None or os.path.realpath(probed) != os.path.realpath(loader):
+        return False
+    try:
+        if importlib.util.find_spec("sentence_transformers") is None:
+            return False
+        major = int(importlib.metadata.version("sentence-transformers").split(".", 1)[0])
+    # trw-fail-silent-allow: not proven absent (no metadata, a stub module, an odd version) keeps the real load, which reports its own outcome
+    except (ImportError, ValueError):
+        return False
+    return major >= 3
