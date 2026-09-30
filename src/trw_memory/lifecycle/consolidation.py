@@ -21,6 +21,7 @@ from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.embeddings.provenance import generation_provenance_kwargs
 from trw_memory.exceptions import DimensionMismatchError, StorageError
 from trw_memory.graph import schedule_graph_update
+from trw_memory.lifecycle._consolidated_fields import merged_entry_fields
 from trw_memory.lifecycle._consolidation_metrics import mean_pairwise_similarity as _mean_pairwise_similarity
 
 # Archive / restore / rollback live in the ``_consolidation_rollback`` sibling
@@ -36,11 +37,10 @@ from trw_memory.lifecycle._consolidation_rollback import (
     _rollback_consolidation as _rollback_consolidation,
 )
 from trw_memory.lifecycle._redaction import redact_paths
-from trw_memory.lifecycle.dedup import _stronger_protection_tier, _union_assertions
 from trw_memory.lifecycle.protection import is_removal_exempt
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.entry_factory import local_node_id_for, new_entry
-from trw_memory.models.memory import MemoryEntry, MemoryStatus, ProtectionTier
+from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.retrieval.dense import cosine_similarity
 from trw_memory.storage._connection import outside_lane_deadline
 from trw_memory.storage._shared import revision_of
@@ -63,6 +63,11 @@ T = TypeVar("T")
 #: (the daemon's config, or a caller's policy on ``memory_maintain``) can only lower it. On the daemon
 #: the read, embed and cluster run off the write lane; each cluster's writes are one lane job (B71-89).
 CONSOLIDATION_ROWS_MAX = 50
+
+#: The largest cluster one cycle merges. A bigger one is skipped with a warning: one merge of many
+#: entries is the recall-poisoning path PRD-FIX-114 closed (an entry matching every query).
+CONSOLIDATION_CLUSTER_MAX = 10
+
 
 #: What one cluster's write step (:func:`_write_cluster`) reports, besides a failure's message.
 _WRITTEN, _SKIPPED = "written", "skipped"
@@ -272,9 +277,9 @@ def _create_consolidated_entry(
 
     Derives the consolidated entry's fields from the cluster:
     - importance: max of cluster
-    - tags: sorted union of all tags
+    - tags: the ``CONSOLIDATION_TAGS_MAX`` most frequent tags across the cluster, sorted
     - evidence: union of all evidence (deduplicated)
-    - recurrence: sum of cluster recurrences
+    - recurrence: the cluster size (one recurrence per merged entry, not the sum of their counts)
 
     Writes the entry via storage.store().
 
@@ -290,24 +295,6 @@ def _create_consolidated_entry(
     """
     entry_id = "M-" + uuid4().hex
 
-    # Inherit provenance from highest-importance source (PRD-CORE-099)
-    best_source = max(cluster, key=lambda e: e.importance)
-
-    # Preserve maintenance evidence, not verification of the newly changed claim.
-    # Reuse dedup's tier ordering and assertion identity rather than allowing
-    # the two maintenance paths to evolve incompatible preservation policies.
-    protection_tier: ProtectionTier | str = cluster[0].protection_tier
-    assertions = cluster[0].assertions
-    for source_entry in cluster[1:]:
-        protection_tier = _stronger_protection_tier(protection_tier, source_entry.protection_tier)
-        assertions = _union_assertions(assertions, source_entry.assertions)
-    assertions = [
-        assertion.model_copy(
-            update={"last_result": None, "last_verified_at": None, "last_evidence": "", "first_failed_at": None}
-        )
-        for assertion in assertions
-    ]
-
     now = datetime.now(timezone.utc)
     entry = new_entry(
         entry_id=entry_id,
@@ -315,23 +302,7 @@ def _create_consolidated_entry(
         namespace=namespace,
         local_node_id=local_node_id_for(namespace),
         now=now,
-        fields={
-            "detail": detail,
-            "source": "consolidated",
-            "source_identity": best_source.source_identity,
-            "client_profile": best_source.client_profile,
-            "model_id": best_source.model_id,
-            "consolidated_from": [e.id for e in cluster],
-            "importance": max(e.importance for e in cluster),
-            "tags": sorted({t for e in cluster for t in e.tags}),
-            "evidence": list(dict.fromkeys(ev for e in cluster for ev in e.evidence)),
-            "recurrence": sum(e.recurrence for e in cluster),
-            "access_count": sum(e.access_count for e in cluster),
-            "recall_count": sum(e.recall_count for e in cluster),
-            "protection_tier": protection_tier,
-            "assertions": assertions,
-            "status": MemoryStatus.ACTIVE,
-        },
+        fields={"detail": detail, **merged_entry_fields(cluster)},
     )
 
     # Computed before the write transaction (pure CPU: a failure writes nothing), unless the caller
@@ -550,6 +521,15 @@ def consolidate_cycle(
     write: Callable[[ClusterWrite], str] = lane or (lambda step: step(storage))
     outcomes: list[str] = []
     for cluster in clusters:
+        if len(cluster) > CONSOLIDATION_CLUSTER_MAX:
+            logger.warning(
+                "consolidation_cluster_skipped",
+                cluster_size=len(cluster),
+                max_cluster_size=CONSOLIDATION_CLUSTER_MAX,
+                entry_ids=[e.id for e in cluster],
+            )
+            outcomes.append(_SKIPPED)
+            continue
         # FR02/FR05: longest-entry selection (the LLM summarization hook point); its vector is computed
         # here, off the daemon's write lane, and only the cluster's writes take the lane (B71-89).
         chosen = _summarize_cluster_fallback(cluster)

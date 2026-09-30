@@ -25,6 +25,8 @@ import pytest
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
+from ._timing import assert_budget
+
 
 def _now() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc)
@@ -246,6 +248,7 @@ class TestStoreManyRollbackLocking:
 
 
 class TestStoreManyThroughput:
+    @pytest.mark.requires_local_timing
     def test_store_many_faster_than_per_row_at_1k(self, tmp_path: Path) -> None:
         """Median paired speedup must be at least 3x at 1K entries."""
         # Fixed sample count and alternating arm order reduce one-shot scheduling
@@ -273,4 +276,4 @@ class TestStoreManyThroughput:
                 measurements.append(timings)
 
         speedup = statistics.median(pair["speedup"] for pair in measurements)
-        assert speedup >= 3, f"store_many median speedup {speedup:.3f}x < 3x; all paired timings (ms): {measurements}"
+        assert_budget("store_many_1k_median_speedup", speedup, 3.0, "x", at_least=True)

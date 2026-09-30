@@ -397,7 +397,7 @@ def seed_ledger(source: Path, destination: Path) -> tuple[int, int] | None:
             "ledger; no store was seeded"
         ) from exc
     except (_snapshot.SnapshotError, OSError) as exc:
-        if source.is_symlink():
+        if os.path.islink(source):  # Path.is_symlink() re-raises EACCES on Python < 3.13
             raise LedgerSeedError(f"the quarantine ledger {source} is a symlink; no store was seeded") from exc
         raise LedgerSeedError(
             f"the quarantine ledger {source} could not be copied to {destination} ({type(exc).__name__}: {exc}); "

@@ -80,8 +80,28 @@ class TestCreateConsolidatedEntry:
         assert result.importance == 0.8
         assert result.tags == ["a", "b", "c"]
         assert result.evidence == ["ev1", "ev2"]
-        assert result.recurrence == 5
+        assert result.recurrence == 2  # cluster size, not the sum of the members' counts
         assert set(result.consolidated_from) == {"e1", "e2"}
+
+    def test_recurrence_is_the_cluster_size_not_the_sum(self) -> None:
+        """PRD-FIX-114: summing let one merge inflate a claim's recurrence by every member's own count."""
+        cluster = [_make_entry(f"e{i}", recurrence=r) for i, r in enumerate((7, 9, 11))]
+        result = _create_consolidated_entry(cluster, "c", "d", _InMemoryBackend())
+        assert result.recurrence == 3
+
+    def test_merged_tags_are_capped_to_the_most_frequent(self) -> None:
+        """PRD-FIX-114: the uncapped union across a cluster made a 500-tag entry that matched every query."""
+        shared = ["core-a", "core-b"]
+        cluster = [_make_entry(f"e{i}", tags=[*shared, f"only-{i}-x", f"only-{i}-y"]) for i in range(10)]
+        cluster.append(_make_entry("e-extra", tags=[*shared, "core-c"]))
+        result = _create_consolidated_entry(cluster, "c", "d", _InMemoryBackend())
+        assert len(result.tags) == 20
+        assert {"core-a", "core-b"} <= set(result.tags)
+        assert result.tags == sorted(result.tags)
+
+    def test_tags_under_the_cap_are_all_kept(self) -> None:
+        cluster = [_make_entry("e1", tags=["b", "a"]), _make_entry("e2", tags=["c"])]
+        assert _create_consolidated_entry(cluster, "c", "d", _InMemoryBackend()).tags == ["a", "b", "c"]
 
     def test_entry_persisted_in_storage(self) -> None:
         storage = _InMemoryBackend()

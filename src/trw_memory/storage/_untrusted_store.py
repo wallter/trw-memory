@@ -55,6 +55,11 @@ def verify_untrusted_store(db_path: Path) -> None:
         if refused := [row[0] for row in conn.execute(_REFUSED)]:
             raise StorageError(f"{db_path.name} holds schema objects trw-memory never creates: {', '.join(refused)}")
         if [tuple(row) for row in conn.execute("PRAGMA quick_check")] != [("ok",)]:
+            # An older SQLite (3.45) reports a value over the untrusted-copy cap as damage. If the file is sound
+            # with the cap lifted, the cap is the reason: "too big" is what the caller maps to the limit text.
+            conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 2**30)
+            if [tuple(row) for row in conn.execute("PRAGMA quick_check")] == [("ok",)]:
+                raise StorageError(f"{db_path.name} holds a value too big for the untrusted-copy cap")
             raise StorageError(f"{db_path.name} fails its integrity check")
     finally:
         conn.close()

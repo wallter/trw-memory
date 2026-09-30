@@ -30,8 +30,13 @@ SourceFamily = str
 DISTILLED_WEIGHT_ENV = "TRW_MEMORY_DISTILLED_RECALL_WEIGHT"
 _TRANSIENT_SOURCE_FAMILIES = frozenset({"lifecycle", "episodic"})
 
+#: The one default for the ``git_distilled`` weight. Both recall routes (the library's
+#: ``MemoryClient.recall`` and the daemon's ``memory_recall_impl``) read it through
+#: ``SourcePolicy.resolve``; neither keeps a literal of its own.
+DEFAULT_DISTILLED_WEIGHT = 0.75
+
 DEFAULT_SOURCE_WEIGHTS: dict[SourceFamily, float] = {
-    "git_distilled": 0.75,
+    "git_distilled": DEFAULT_DISTILLED_WEIGHT,
     "instruction_rule": 0.95,
     "semantic_memory": 0.9,
     "lifecycle": 0.55,

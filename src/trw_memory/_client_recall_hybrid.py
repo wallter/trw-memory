@@ -243,7 +243,7 @@ async def try_hybrid_recall(
             # PRD-CORE-284/292: the one resolved policy every recall surface ranks with.
             **hybrid_policy(client._config, limit=limit, recency_weight=effective_recency_weight),
             # PRD-CORE-336 FR01: the distilled weight enters the order here, once.
-            distilled_weight=invocation.source.weights.get("git_distilled", 1.0) if invocation else None,
+            distilled_weight=invocation.source.weights["git_distilled"] if invocation else None,
             score_observer=observed.append,
             # When prefix was stripped, the cross-encoder also uses the stripped
             # query — the original "latest guidance on X" confuses the ms-marco

@@ -62,6 +62,43 @@ class TestConsolidateCycle:
         assert result["dry_run"] is True
         assert before == after
 
+    def test_a_cluster_over_ten_is_skipped_with_a_warning_and_nothing_is_written(self) -> None:
+        """PRD-FIX-114: one merge of an oversized cluster is the recall-poisoning path; skip it and say so."""
+        from unittest.mock import patch
+
+        storage = _InMemoryBackend()
+        for i in range(11):
+            storage.store(_make_entry(f"e{i}", content=f"content {i}", detail=f"detail {i}"))
+        embedder = _make_embedder(vectors=[_V1] * 11)
+
+        with patch("trw_memory.lifecycle.consolidation.logger") as mock_logger:
+            result = consolidate_cycle(
+                storage,
+                embedder,
+                config=MemoryConfig(consolidation_similarity_threshold=0.5, consolidation_min_cluster=3),
+            )
+
+        assert result["clusters_found"] == 1
+        assert result["consolidated_count"] == 0
+        assert result["clusters_skipped"] == 1
+        assert storage.count() == 11
+        events = [call.args[0] for call in mock_logger.warning.call_args_list]
+        assert "consolidation_cluster_skipped" in events
+
+    def test_a_cluster_of_exactly_ten_is_still_consolidated(self) -> None:
+        storage = _InMemoryBackend()
+        for i in range(10):
+            storage.store(_make_entry(f"e{i}", content=f"content {i}", detail=f"detail {i}"))
+        embedder = _make_embedder(vectors=[_V1] * 10)
+
+        result = consolidate_cycle(
+            storage,
+            embedder,
+            config=MemoryConfig(consolidation_similarity_threshold=0.5, consolidation_min_cluster=3),
+        )
+
+        assert result["consolidated_count"] == 1
+
     def test_no_clusters_returns_no_clusters_status(self) -> None:
         storage = _InMemoryBackend()
         result = consolidate_cycle(storage, None, config=MemoryConfig())

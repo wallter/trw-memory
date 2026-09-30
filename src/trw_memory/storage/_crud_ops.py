@@ -49,6 +49,7 @@ import structlog
 from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.security._evidence_invariant import refuse_new_violation, violates_evidence_invariant
+from trw_memory.storage._bulk_write_support import refuse_new_violations, restore_entry_state, stamp_sync_bookkeeping
 from trw_memory.storage._change_feed import note_delete
 from trw_memory.storage._crud_counters import increment_session_counts
 from trw_memory.storage._crud_index_ops import (
@@ -203,21 +204,11 @@ def store_many(
 
     for entry in entries:
         validate_entry_for_write(entry)
-        if select_columns_sql and violates_evidence_invariant(entry):  # PRD-CORE-312, as in store()
-            refuse_new_violation(get(backend, select_columns_sql, entry.id, entry.namespace), entry)
 
     placeholders = ", ".join(["?"] * len(columns))
     sql = f"INSERT OR REPLACE INTO memories ({insert_columns_sql}) VALUES ({placeholders})"  # noqa: S608
 
-    now = datetime.now(timezone.utc)
-    for entry in entries:
-        if not entry.created_at:
-            entry.created_at = now
-        if not entry.updated_at:
-            entry.updated_at = now
-        entry.sync_seq = (entry.sync_seq or 0) + 1
-        entry.sync_hash = DeltaTracker.compute_sync_hash(entry)
-        entry.last_synced_at = None
+    prior = stamp_sync_bookkeeping(entries)
 
     rows = [entry_to_row(e) for e in entries]
     # INSERT OR REPLACE makes the last occurrence authoritative. Mirror that
@@ -235,6 +226,16 @@ def store_many(
             _own_txn = backend._skip_commit_depth == 0
             if _own_txn:
                 backend._conn.execute("BEGIN IMMEDIATE")
+            if select_columns_sql:
+                # PRD-CORE-312, CORE-312-STORE-MANY-TXN: read each replaced row inside the write
+                # transaction, so the carried-forward check sees the state this write replaces.
+                try:
+                    refuse_new_violations(entries, lambda e: get(backend, select_columns_sql, e.id, e.namespace))
+                except Exception:  # justified: release the write lock's transaction on any refusal, then re-raise
+                    if _own_txn:
+                        backend._conn.rollback()
+                    restore_entry_state(entries, prior)
+                    raise
             backend._conn.executemany(sql, rows)
             fts_batch = getattr(backend, "_fts_available", False)
             if fts_batch:

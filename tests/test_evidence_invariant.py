@@ -245,6 +245,39 @@ class TestNoWriteSeamSkipsTheInvariant:
         ]
         assert backend.store_many(batch) == 2
 
+    def test_store_many_reads_the_replaced_rows_inside_the_write_transaction(
+        self, backend: SQLiteBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CORE-312-STORE-MANY-TXN: the carried-forward check read the row BEFORE ``BEGIN IMMEDIATE``, so a
+        concurrent writer could change it between the check and the replace. The read must see the
+        state the write then replaces: inside the transaction, holding the backend lock."""
+        from trw_memory.storage import _crud_ops
+
+        _legacy_violation(backend, "M-legacy")
+        real_get = _crud_ops.get
+        seen: list[tuple[bool, bool]] = []
+
+        def spy(target: SQLiteBackend, *args: Any, **kwargs: Any) -> Any:
+            conn = cast("Any", target)._conn
+            seen.append((conn.in_transaction, cast("Any", target)._lock._is_owned()))
+            return real_get(target, *args, **kwargs)
+
+        monkeypatch.setattr(_crud_ops, "get", spy)
+        batch = [_entry("M-legacy", content="legacy claim M-legacy", confidence="verified", tags=["re-synced"])]
+        assert backend.store_many(batch) == 1
+        assert seen == [(True, True)]
+
+    def test_store_many_refusal_inside_the_transaction_rolls_back_and_frees_the_connection(
+        self, backend: SQLiteBackend
+    ) -> None:
+        batch = [_entry("M-ok", confidence="unverified"), _entry("M-bad", confidence="verified")]
+        before = [(e.sync_seq, e.sync_hash, e.last_synced_at) for e in batch]
+        with pytest.raises(SchemaValidationError):
+            backend.store_many(batch)
+        assert [(e.sync_seq, e.sync_hash, e.last_synced_at) for e in batch] == before  # caller's entries untouched
+        assert cast("Any", backend)._conn.in_transaction is False
+        assert backend.store_many([_entry("M-after", confidence="unverified")]) == 1
+
 
 @pytest.mark.parametrize("read", ["dirty_page", "find"])
 def test_sync_served_rows_are_demoted(tmp_path: Path, read: str) -> None:

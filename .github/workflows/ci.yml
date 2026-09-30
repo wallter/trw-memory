@@ -1,17 +1,13 @@
 name: CI
 
-# What runs where (PRD-INFRA-188 Amendment 01):
-# - Pull requests and manual dispatches run this workflow at the package baseline
-#   suite (full). A dispatch can pick either suite.
-# - The tag-triggered release.yml calls this workflow with suite=full, and publish
-#   waits for it: the package's full pytest suite on Linux gates every release.
-# - A push to main (a release sync) does not run it; the monorepo's
-#   `release_public.py check` replays these steps locally before the cut, and its
-#   Linux leg runs the full suite in a container when Docker is available.
-# - release.yml also keeps the multi-OS installed-wheel smoke test.
+# What runs where (operator direction 2026-09-29: the mirrors run no test suites):
+# - Nothing on GitHub runs this workflow automatically: the mirrors run no test suites.
+#   Every gate runs locally before the cut; the monorepo's `release_public.py check`
+#   replays these steps (its Linux leg runs the full suite in a container when Docker
+#   is available), and `cut` refuses a tree without that passing receipt.
+# - The file stays as the replay's spec. A manual dispatch can still run either suite.
+# - release.yml builds, smoke-tests the wheel once and publishes; it calls no suite.
 on:
-  pull_request:
-    branches: [main]
   workflow_dispatch:
     inputs:
       suite:
@@ -19,17 +15,8 @@ on:
         type: choice
         options: [unit, full]
         default: full
-      correlation_id:
-        description: "set by release_public.py all so it can find this exact run"
-        type: string
-        default: ""
-  workflow_call:
-    inputs:
-      suite:
-        type: string
-        default: full
 
-run-name: ${{ inputs.correlation_id && format('CI {0}', inputs.correlation_id) || github.event.pull_request.title || 'CI' }}
+run-name: CI
 
 permissions:
   contents: read

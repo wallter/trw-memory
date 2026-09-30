@@ -287,7 +287,7 @@ def memory_recall_impl(
         stored_embeddings=stored_embeddings,
         limit=depth,
         tags=tags,
-        distilled_weight=admission.weights.get("git_distilled", 1.0),
+        distilled_weight=admission.weights["git_distilled"],
         rerank=rerank,
     )
 

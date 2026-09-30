@@ -145,15 +145,15 @@ results = backend.search("query", top_k=10, namespace="default")
 ## What's new in 5.x
 <!-- whats-new: 5.0.0 -->
 
+- **Quarantined memories stay out of every read.** An append-only ledger records each quarantine decision, and every backend read filters quarantined entries inside the backend itself.
 - **A daemon that survives its own death.** A crash or reboot leaves a record that reads as dead, so clients restart cleanly. `probe_endpoint` pings without starting one; `MEMORY_DAEMON_AUTOSTART=false` fails closed.
-- **Fair, bounded daemon work.** Every write job is scheduled by budget, class and tenant, the decay pass resumes from a persisted cursor, and namespace rename and merge move in batches.
-- **Your store stays where your project is.** A default store lives beside the project's `.trw` and refuses to write into an arbitrary working directory. An explicit `storage_path` works as before.
-- **Safe writes into a checkout.** `trw_memory.safe_fs` writes and appends beneath a directory without ever following a symlink, and refuses with a typed error.
+- **Future upgrades without the manual stop.** From 5.0 on, a newer major can drain and replace an older running daemon instead of refusing it.
+- **Your store stays where your project is.** The default store follows the nearest project at or above the working directory, never an arbitrary one; an explicit `storage_path` still wins.
+- **Embeddings when you want them.** `MEMORY_EMBEDDINGS_ENABLED=false` never loads the local model: stores write no vectors and recall runs keyword-only.
 - **Lessons indexed by the files they're about.** Schema 12 adds an anchor index, so file-anchored recall and co-anchored graph edges read an index instead of scanning.
-- **Safer migrations.** Every schema upgrade takes a pre-migration backup, and a forged non-loopback daemon discovery record is rejected.
 - **Faster, tighter imports and reads.** A 20k-row checkout import takes about 5 s instead of about 50 s, and `graph_query` bounds the SQL work a dense root can force.
 
-5.0.0 is a breaking release (custom `StorageBackend`s must add `get_many`; Python <!-- inv:python_min_trw_memory -->3.11<!-- /inv -->+): read the [CHANGELOG](https://github.com/wallter/trw-memory/blob/main/CHANGELOG.md) before upgrading, and upgrade trw-mcp to 8.0.0 with it.
+5.0.0 is a breaking release (custom `StorageBackend`s must add `get_many`, and unprefixed settings variables such as `DAEMON_PORT` are no longer read, so use `MEMORY_<SETTING>`; Python <!-- inv:python_min_trw_memory -->3.11<!-- /inv -->+): read the [CHANGELOG](https://github.com/wallter/trw-memory/blob/main/CHANGELOG.md) before upgrading, and upgrade trw-mcp to 8.0.0 with it.
 
 ## Benchmarks
 

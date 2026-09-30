@@ -366,11 +366,11 @@ def test_memory_ci_test_job_runs_mypy_strict() -> None:
 
 
 def test_memory_release_workflow_matches_current_publish_contract() -> None:
-    """The release workflow builds, smoke-tests, then publishes; the full suite runs alongside.
+    """The release workflow verifies the tag, builds, smoke-tests once, then publishes.
 
-    PRD-INFRA-188 Amendment 02 (release.yml comment): publish gates on build + smoke-test,
-    and the Linux full-suite proof is the local release-check receipt `cut` enforces for
-    this exact tree, so ``full-suite`` is asserted to exist but is not in ``publish.needs``.
+    The mirror runs no test suite (operator direction 2026-09-29): the full-suite proof is
+    the local release-check receipt `cut` enforces for this exact tree, so no job calls
+    ``ci.yml`` and the smoke test is one ubuntu-latest job on the requires-python floor.
     """
     workflow = _load_workflow(MEMORY_RELEASE_PATH)
     on_config = workflow["on"]
@@ -382,11 +382,9 @@ def test_memory_release_workflow_matches_current_publish_contract() -> None:
 
     build_job = jobs["build"]
     smoke_test_job = jobs["smoke-test"]
-    full_suite_job = jobs["full-suite"]
     publish_job = jobs["publish"]
     assert isinstance(build_job, dict)
     assert isinstance(smoke_test_job, dict)
-    assert isinstance(full_suite_job, dict)
     assert isinstance(publish_job, dict)
 
     assert push["tags"] == ["v*"]
@@ -395,8 +393,9 @@ def test_memory_release_workflow_matches_current_publish_contract() -> None:
 
     assert _find_step(build_job, "Build package")["run"] == "python -m build"
     assert smoke_test_job["needs"] == "build"
-    assert full_suite_job["uses"] == "./.github/workflows/ci.yml"
-    assert full_suite_job["with"] == {"suite": "full"}
+    assert not [name for name, job in jobs.items() if "ci.yml" in str(job.get("uses", ""))]
+    assert "strategy" not in smoke_test_job
+    assert smoke_test_job["runs-on"] == "ubuntu-latest"
     # PRD-INFRA-198-FR01: publish also waits for the signed-tag attestation check.
     assert publish_job["needs"] == ["verify-attestation", "build", "smoke-test"]
     verify_job = jobs["verify-attestation"]

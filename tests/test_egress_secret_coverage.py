@@ -157,7 +157,14 @@ def _mock_client(mock_cls: MagicMock, *, status_code: int = 200, payload: object
     return client
 
 
+# The platform-contact switch is read from the config's own project and fails closed with none, so a
+# config with no project_root never POSTs anywhere the moment the working directory has no ``.trw``
+# above it (a mirror checkout, CI): every test below then saw "disabled" and asserted on nothing.
+_PROJECT_ROOT = pathlib.Path(tempfile.mkdtemp(prefix="egress-project-"))
+(_PROJECT_ROOT / ".trw").mkdir()
+
 SYNC_CONFIG = MemoryConfig(
+    project_root=str(_PROJECT_ROOT),
     sync_enabled=True,
     platform_url="https://api.example.com",
     platform_api_key="test-key-123",
@@ -175,6 +182,7 @@ class TestSearchQueryIsSanitizedOnTheWire:
                 f"why did {secret} start 401ing", SYNC_CONFIG, admit=store_gate(SYNC_CONFIG, gate_backend())
             )
 
+        client.post.assert_called_once()  # a fetch blocked before the POST must fail here, not vacuously pass
         body = json.dumps(client.post.call_args.kwargs["json"])
         assert secret not in body
         assert "<api_key>" in body
@@ -188,6 +196,7 @@ class TestSearchQueryIsSanitizedOnTheWire:
                 admit=store_gate(SYNC_CONFIG, gate_backend()),
             )
 
+        client.post.assert_called_once()  # a fetch blocked before the POST must fail here, not vacuously pass
         body = json.dumps(client.post.call_args.kwargs["json"])
         assert "alice@example.com" not in body
         assert "<email>" in body
@@ -213,6 +222,7 @@ class TestSearchQueryIsSanitizedOnTheWire:
             client = _mock_client(mock_cls)
             fetch_shared_memories(query, SYNC_CONFIG, admit=store_gate(SYNC_CONFIG, gate_backend()))
 
+        client.post.assert_called_once()
         assert client.post.call_args.kwargs["json"]["query"] == query
 
 
