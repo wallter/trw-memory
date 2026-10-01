@@ -52,6 +52,7 @@ from trw_memory.daemon._discovery import (
     read_live_discovery,
 )
 from trw_memory.daemon._held_session import HeldSessions
+from trw_memory.daemon._launcher_record import launch_from_record
 from trw_memory.daemon._paths import DaemonPaths
 from trw_memory.daemon._session import is_unauthorized, never_sent, open_session
 from trw_memory.daemon._spawn import SpawnedDaemon, start_daemon_detached
@@ -287,7 +288,11 @@ class DaemonClient:
             raise self._refuse_invalid(result)
         if not self._config.memory_daemon_autostart:  # PRD-CORE-310 FR04: the one spawn site honours it
             raise self._unreachable(f"{result.reason}, and auto-start is off (MEMORY_DAEMON_AUTOSTART=false)")
-        spawned = start_daemon_detached(self._paths) if self._launcher is None else self._launcher(self._paths)
+        spawned = (
+            self._launcher(self._paths)
+            if self._launcher is not None
+            else launch_from_record(self._paths) or start_daemon_detached(self._paths)
+        )
         deadline = time.monotonic() + self._config.memory_daemon_startup_timeout_seconds
         while time.monotonic() < deadline:
             result = read_live_discovery(self._paths)

@@ -22,7 +22,6 @@ from trw_memory.lifecycle.protection import (
 from trw_memory.lifecycle.scoring import (
     apply_time_decay,
     compute_utility_score,
-    enforce_tier_distribution,
     entry_utility,
 )
 from trw_memory.lifecycle.tiers import TierManager, TierSweepResult
@@ -39,7 +38,6 @@ __all__ = [
     "complete_linkage_cluster",
     "compute_utility_score",
     "consolidate_cycle",
-    "enforce_tier_distribution",
     "entry_protection_tier",
     "entry_utility",
     "find_clusters",

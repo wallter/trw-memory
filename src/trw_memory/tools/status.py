@@ -199,7 +199,6 @@ def memory_status_impl(
         "dedup_enabled": cfg.dedup_enabled,
         "consolidation_enabled": cfg.consolidation_enabled,
         "hot_max_entries": cfg.hot_max_entries,
-        "retention_days": cfg.retention_days,
         "security_maintenance_inline": cfg.security_maintenance_inline,
         "memory_recovery_inline_max_bytes": cfg.memory_recovery_inline_max_bytes,
     }

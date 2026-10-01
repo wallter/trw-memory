@@ -22,7 +22,7 @@ that they were safe.
 Round-5 audit (2026-09-24): closed all 4 of round-4's residual entries.
 ``storage/_schema_backup.py``'s LIVE-store connection is now routed through
 ``storage._connection.connect`` (removed from the exceptions entirely).
-``lifecycle/tiers/_warm.py`` and ``storage/_integrity_scheduler.py`` open
+``lifecycle/tiers/_warm.py`` opens
 with ``uri=True``/``mode=ro`` -- a shape ``connect()``'s current signature
 does not accept -- so they call ``connect_registered`` directly, which runs
 the same pinned before/after identity check ``connect()`` gets; they remain
@@ -59,14 +59,6 @@ _AUDITED_EXCEPTIONS: dict[tuple[str, str, int], str] = {
         "runs the same pinned before/after identity check. Its StorageError on a mismatch degrades "
         "to 'vectors unavailable' (this is a ranking enhancement, not a data path). Moved out of "
         "_warm.py's WarmTierStore.discovery_entries by PRD-CORE-318 FR02b (the KNN window)."
-    ),
-    ("storage/_integrity_scheduler.py", "IntegrityScheduler._probe", 1): (
-        "Round-5: no longer an unchecked gap. A read-only (mode=ro) periodic integrity check that "
-        "runs INSIDE the live daemon process on the store's own db_path. Same signature blocker as "
-        "_warm.py above -- connect_registered runs the pinned identity check, and its StorageError "
-        "is reported as a genuine regression signal (False, 'db identity changed during open') "
-        "through the scheduler's own (ok, detail) contract, since surfacing exactly this kind of "
-        "anomaly is the scheduler's whole purpose."
     ),
     ("storage/_schema_backup.py", "snapshot_before_migration", 1): (
         "The BACKUP SNAPSHOT TARGET, not the live store -- snapshot_before_migration() creates it "
@@ -207,7 +199,7 @@ _UNLOCKED: dict[tuple[str, int], str] = {
     ("storage/_backup_archive.py", 195): "a read-only immutable check of the restore's STAGED temp copy, never a store",
     ("storage/_connection.py", 170): "connect(read_only=True): a read of a file trw-memory did not write (a "
     "checkout's) must create no <db>.oplock beside it; immutable read plus re-stat, identity check kept (PRD-QUAL-147)",
-    ("storage/_init_helpers.py", 105): "a read-only user_version read that must hold nothing: it decides whether "
+    ("storage/_init_helpers.py", 103): "a read-only user_version read that must hold nothing: it decides whether "
     "the open takes MIGRATE before any shared hold (PRD-CORE-306 S3, no upgrade)",
 }
 

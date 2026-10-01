@@ -146,20 +146,6 @@ class _SecurityConfigMixin(BaseModel):
         ),
     )
 
-    # Periodic integrity scheduler (PRD-INFRA-063 / B2)
-    memory_integrity_check_interval_minutes: int = Field(
-        default=0,
-        ge=0,
-        le=1440,
-        validation_alias=AliasChoices("memory_integrity_check_interval_minutes"),
-        description=(
-            "Interval in minutes between background PRAGMA quick_check runs on a read-only "
-            "connection. 0 disables (default — opt-in). Max 1440 (1 day). Observability-only: "
-            "a failed check sets integrity_warning=True and logs db_integrity_regression_detected; "
-            "it NEVER triggers auto-recovery."
-        ),
-    )
-
     # Snapshot rotation (PRD-INFRA-065 / B4)
     memory_snapshot_daily_keep: int = Field(
         default=7,

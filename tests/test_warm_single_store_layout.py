@@ -14,14 +14,11 @@ isolation: :class:`~trw_memory.lifecycle.tiers._warm.WarmTierStore` is
 single-tenant (its rows are never partitioned by namespace), so two namespaces
 sharing one ``warm.db`` cross-contaminate. The correct fix keeps ONE
 tier directory PER namespace, rooted at the single store's own directory
-(``tier_root_dir``) rather than at ``storage_path``.
+rather than at ``storage_path``.
 
 There is no automatic copy of an already-orphaned pre-fix ``warm.db``: the
 warm tier simply rebuilds itself from the canonical backend on next use
-(see ``warmup_tier_manager``), so an orphan is unused, not lost data. A
-leftover orphan (and a stranded cold-tier archive) is reported, read-only, by
-trw-mcp's ``memory_warm_legacy`` doctor row, which reads
-:func:`trw_memory.lifecycle.tiers._legacy_warm_migration.legacy_tier_dirs`.
+(see ``warmup_tier_manager``), so an orphan is unused, not lost data.
 """
 
 from __future__ import annotations

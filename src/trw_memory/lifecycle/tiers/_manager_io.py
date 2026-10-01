@@ -7,9 +7,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from trw_memory.exceptions import StorageError, refuse_encryption_at_rest
+from trw_memory.exceptions import refuse_encryption_at_rest
 from trw_memory.models.config import MemoryConfig
-from trw_memory.storage.persistence import read_yaml
 
 if TYPE_CHECKING:
     from trw_memory.storage.interface import StorageBackend
@@ -44,36 +43,3 @@ def open_canonical_backend(
     from trw_memory.storage.yaml_backend import YAMLBackend
 
     return YAMLBackend(entries_dir, quarantine_ledger=quarantine_ledger_for(config))
-
-
-def load_warm_entries(
-    base_dir: Path,
-    entries_dir: Path,
-    namespace: str,
-    config: MemoryConfig,
-) -> tuple[list[dict[str, object]], int]:
-    """Load canonical entries for warm/cold sweep evaluation."""
-    db_path = base_dir / config.sqlite_db_name
-    if config.storage_backend == "sqlite" and db_path.exists():
-        try:
-            with open_canonical_backend(base_dir, entries_dir, namespace, config) as backend:
-                backend_entries = backend.list_entries(limit=max(backend.count(), config.hot_max_entries * 8, 200))
-            return [entry.model_dump(mode="json") for entry in backend_entries], 0
-        except (OSError, StorageError, ValueError):
-            logger.warning("tier_sweep_backend_scan_failed", namespace=namespace, exc_info=True)
-            return [], 1
-
-    if not entries_dir.exists():
-        return [], 0
-
-    entries: list[dict[str, object]] = []
-    errors = 0
-    for yaml_file in sorted(entries_dir.glob("*.yaml")):
-        if yaml_file.name == "index.yaml":
-            continue
-        try:
-            entries.append(read_yaml(yaml_file))
-        except (OSError, StorageError, ValueError):
-            logger.warning("tier_sweep_entry_scan_failed", path=str(yaml_file), exc_info=True)
-            errors += 1
-    return entries, errors

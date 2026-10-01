@@ -76,6 +76,7 @@ _START_LOG_NAME = "daemon-start.log"
 IMPORT_TMP_SUBDIR = "import-tmp"
 _TOKEN_FILE_NAME = "daemon-token"  # noqa: S105 - a filename, not a credential
 _GRANTS_FILE_NAME = "daemon-grants.json"
+_LAUNCHER_FILE_NAME = "launcher.json"
 #: ``lock_for_rmw(path)`` locks ``<path>.lock``, so the anchor is the stem.
 _LOCK_ANCHOR_NAME = "daemon"
 
@@ -105,6 +106,11 @@ class DaemonPaths:
     def token(self) -> Path:
         """The retired Slice A all-namespace bearer; its presence refuses startup (PRD-CORE-298 FR02)."""
         return self.user_memory_dir / _TOKEN_FILE_NAME
+
+    @property
+    def launcher(self) -> Path:
+        """The 0600 record of the interpreter that starts this store's daemon (``_launcher_record``)."""
+        return self.user_memory_dir / _LAUNCHER_FILE_NAME
 
     @property
     def grants(self) -> Path:

@@ -48,35 +48,6 @@ class _LifecycleConfigMixin(BaseModel):
 
     # Tiers
     hot_max_entries: int = Field(default=50, gt=0, description="Maximum entries in the hot tier")
-    hot_ttl_days: int = Field(default=7, gt=0, description="TTL in days for hot tier entries")
-    cold_threshold_days: int = Field(default=90, gt=0, description="Days after which entries move to cold tier")
-    retention_days: int = Field(default=365, gt=0, description="Days before entries are purged from cold tier")
-    warm_archive_max_score: float = Field(
-        default=0.22,
-        ge=0.0,
-        le=1.0,
-        description="Maximum composite tier score allowed before a warm entry is archived to cold storage",
-    )
-    cold_purge_max_score: float = Field(
-        default=0.1,
-        ge=0.0,
-        le=1.0,
-        description="Maximum composite tier score allowed before a cold entry is purged",
-    )
-
-    # Forced importance-tier distribution caps (mirror trw-mcp impact_tier_*_cap)
-    impact_tier_critical_cap: float = Field(
-        default=0.05,
-        ge=0.0,
-        le=1.0,
-        description="Maximum fraction of active entries allowed in the critical importance tier (>=0.9)",
-    )
-    impact_tier_high_cap: float = Field(
-        default=0.20,
-        ge=0.0,
-        le=1.0,
-        description="Maximum fraction of active entries allowed in the high importance tier (0.7-0.89)",
-    )
 
     # Automatic-removal protection (PRD-CORE-244 FR10)
     protection_tier_prune_discount: dict[str, float] = Field(

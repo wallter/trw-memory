@@ -62,7 +62,7 @@ class TestMemoryRecallImpl:
     def test_recall_refreshes_hot_recency_for_ttl(self, tmp_path: Path) -> None:
         from trw_memory.lifecycle.tiers._runtime import get_tier_manager
 
-        cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path), hot_ttl_days=7, hot_max_entries=5)
+        cfg = MemoryConfig(storage_backend="yaml", storage_path=str(tmp_path), hot_max_entries=5)
         with create_backend_from_config(cfg, "project:default") as backend:
             manager = get_tier_manager(cfg, "project:default")
             stale_time = datetime.now(timezone.utc) - timedelta(days=30)
@@ -86,8 +86,6 @@ class TestMemoryRecallImpl:
             assert any(memory["id"] == "M-tool-hot-ttl" for memory in memories)
             hot_entry = _hot_get(manager, "M-tool-hot-ttl")
             assert hot_entry is not None
-            sweep_result = manager.sweep(config=cfg)
-            assert sweep_result.demoted == 0
 
     def test_merge_tier_entries_appends_tier_only_below_scored_results(self) -> None:
         """PRD-CORE-278 FR03: a retrieval score is never rescored away.

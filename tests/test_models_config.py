@@ -30,8 +30,6 @@ def test_memory_config_defaults() -> None:
     assert cfg.rrf_k == 5  # promoted 2026-06-13 by the memory meta-harness loop (LME +0.8pp)
     assert cfg.dedup_enabled is True
     assert cfg.hot_max_entries == 50
-    assert cfg.warm_archive_max_score == 0.22
-    assert cfg.cold_purge_max_score == 0.1
     assert cfg.decay_half_life_days == 14.0
     assert cfg.consolidation_enabled is True
     assert cfg.consolidation_max_per_cycle == 50
@@ -134,9 +132,6 @@ def test_memory_config_reads_tier_fields_from_trw_config_yaml(
         tmp_path,
         [
             "memory_hot_max_entries: 12",
-            "memory_hot_ttl_days: 3",
-            "memory_cold_threshold_days: 45",
-            "memory_retention_days: 180",
             "memory_score_w1: 0.5",
             "memory_score_w2: 0.2",
             "memory_score_w3: 0.3",
@@ -147,9 +142,6 @@ def test_memory_config_reads_tier_fields_from_trw_config_yaml(
     cfg = MemoryConfig()
 
     assert cfg.hot_max_entries == 12
-    assert cfg.hot_ttl_days == 3
-    assert cfg.cold_threshold_days == 45
-    assert cfg.retention_days == 180
     assert cfg.score_relevance_weight == 0.5
     assert cfg.score_recency_weight == 0.2
     assert cfg.score_importance_weight == 0.3

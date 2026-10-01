@@ -8,12 +8,14 @@ condition that makes it the software's own safe act holds, in this order:
 1. the client is not pinned to one instance (a pinned caller checked THAT daemon);
 2. auto-start is on (off means a supervisor owns the daemon);
 3. the daemon is a MAJOR version older (a newer one is never retired);
-4. it advertises the drain handshake (every 4.x and 5.0.0 daemon does not);
+4. it advertises the drain handshake (every 4.x and 5.0.0 daemon does not; a 4.x record, which has no OS start
+   either, is instead stopped on the socket, record and ``ps`` proof of ``_legacy_identity``);
 5. its pid and OS start prove it is the process its record names;
 6. its drain key (:mod:`._drain_key`) is readable as this user's private file.
 
 It then asks the daemon to drain (``memory_drain``, presenting that key), which finishes the calls in
-flight and exits by itself: nothing is signalled. A bounded wait for the record
+flight and exits by itself: nothing is signalled (but a proven 4.x daemon, which has no handshake, gets
+SIGTERM). A bounded wait for the record
 to withdraw follows; a record still there refuses, so no daemon is ever started
 beside it. Any failed condition returns the reason, and the caller keeps the
 refusal it gave before, naming that reason.
@@ -30,6 +32,7 @@ import structlog
 
 from trw_memory.daemon._discovery import DRAIN_CAPABILITY, DRAIN_TOOL, VERSION_HEADER, DaemonInfo, read_live_discovery
 from trw_memory.daemon._drain_key import read_drain_key
+from trw_memory.daemon._legacy_identity import stop_legacy_daemon
 from trw_memory.daemon._paths import DaemonPaths
 from trw_memory.daemon._spawn import SpawnedDaemon
 from trw_memory.daemon._versions import major
@@ -112,7 +115,9 @@ def _request_drain(info: DaemonInfo, token: str, mine: str, deadline: float, adm
 def _drain(info: DaemonInfo, paths: DaemonPaths, token: str, mine: str, timeout: float) -> str:
     """The drain handshake on *info* and the wait for its record to withdraw; ``""`` when the slot is free."""
     if DRAIN_CAPABILITY not in info.capabilities:
-        return "it does not offer the drain handshake (trw-memory 5.0.0 and older)"
+        if info.process_start is not None:
+            return "it does not offer the drain handshake (trw-memory 5.0.0 and older)"
+        return _stop_start_less(info, paths, token, mine, timeout)
     if not SpawnedDaemon(info.pid, info.process_start, paths.lock).proven():
         return f"process {info.pid} could not be proven to be the daemon its record names"
     admin_key = read_drain_key(paths)
@@ -133,6 +138,15 @@ def _drain(info: DaemonInfo, paths: DaemonPaths, token: str, mine: str, timeout:
         )
     logger.info("daemon_replaced_older", pid=info.pid, served=info.version, installed=mine)
     return ""
+
+
+def _stop_start_less(info: DaemonInfo, paths: DaemonPaths, token: str, mine: str, timeout: float) -> str:
+    """A 4.0 daemon (no OS start, no drain handshake): stopped only on the socket, record and ``ps`` proof of
+    :func:`stop_legacy_daemon`, the same one the installer's stop uses (E2E-INC-136); ``""`` when its slot is free."""
+    gap = stop_legacy_daemon(info, paths, token, mine)
+    if gap:
+        return f"it does not offer the drain handshake (trw-memory 4.x) and its identity is not proven: {gap}"
+    return "" if await_withdrawal(paths, info, timeout) else f"it did not exit within {timeout}s of the stop"
 
 
 def drain_daemon(paths: DaemonPaths, *, token: str, mine: str, timeout: float | None = None) -> str:

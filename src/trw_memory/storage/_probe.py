@@ -115,8 +115,11 @@ def _harden(conn: sqlite3.Connection) -> None:
         conn.execute(f"PRAGMA {pragma}")
 
 
-def _count(conn: sqlite3.Connection, namespace: str | None) -> int:
-    """Rows in ``memories`` (in *namespace*), minus the pinned canaries among them."""
+def pinned_canary_ids(conn: sqlite3.Connection, namespace: str | None) -> list[str]:
+    """Ids (in *namespace*) of the rows ``classify_canary`` calls the store's own canary: pinned id AND content.
+
+    The one canary test every count shares; a row that merely carries a ``system_canary`` flag is not one.
+    """
     from trw_memory.security._runtime_canary import classify_canary
     from trw_memory.security.canary import PINNED_HASHES
     from trw_memory.storage._row_mapper import row_to_entry
@@ -129,15 +132,22 @@ def _count(conn: sqlite3.Connection, namespace: str | None) -> int:
     where, params = ("namespace = ?", (namespace,)) if namespace is not None else ("1", ())
     marks = ",".join("?" * len(PINNED_HASHES))
     sql = f"SELECT {columns} FROM memories WHERE id IN ({marks}) AND {where}"  # noqa: S608
-    pinned = conn.execute(sql, (*PINNED_HASHES, *params))
-    total = int(conn.execute(f"SELECT COUNT(*) FROM memories WHERE {where}", params).fetchone()[0])  # noqa: S608
 
-    def is_canary(row: tuple[object, ...]) -> bool:
+    def canary_id(row: tuple[object, ...]) -> str | None:
         try:
-            return classify_canary(row_to_entry(row)) == "canary"
+            entry = row_to_entry(row)
+            return entry.id if classify_canary(entry) == "canary" else None
         # Total over whatever the file holds: a field no entry can decode (bad JSON, a float overflow, nesting
         # past the recursion limit) makes the row something other than the seeded canary, so real data.
         except Exception:  # trw-fail-silent-allow: a pinned-id row that cannot decode is counted as a real row
-            return False
+            return None
 
-    return total - sum(is_canary(tuple(row)) for row in pinned)
+    ids = (canary_id(tuple(row)) for row in conn.execute(sql, (*PINNED_HASHES, *params)).fetchall())
+    return [found for found in ids if found is not None]
+
+
+def _count(conn: sqlite3.Connection, namespace: str | None) -> int:
+    """Rows in ``memories`` (in *namespace*), minus the pinned canaries among them."""
+    where, params = ("namespace = ?", (namespace,)) if namespace is not None else ("1", ())
+    total = int(conn.execute(f"SELECT COUNT(*) FROM memories WHERE {where}", params).fetchone()[0])  # noqa: S608
+    return total - len(pinned_canary_ids(conn, namespace))

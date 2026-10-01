@@ -61,10 +61,6 @@ _AUDITED_WRITES: dict[Site, tuple[str, str]] = {
         "unscheduled-checkout-write",
         "namespace metadata file inside the store dir, which is under a project's .trw when the store is project-scoped.",
     ),
-    ("lifecycle/tiers/_sweep.py", "_sweep_cold_to_purge", 1): (
-        "unscheduled-checkout-write",
-        "purge_audit.jsonl append via Path.open('a') in the store dir (project .trw when project-scoped).",
-    ),
     ("lifecycle/tiers/_warm.py", "WarmTierStore._replace_sidecar", 1): (
         "unscheduled-checkout-write",
         "deterministic .tmp sibling of the warm sidecar written by name, then replaced.",
@@ -88,10 +84,6 @@ _AUDITED_WRITES: dict[Site, tuple[str, str]] = {
     ("storage/_backup_archive.py", "verified_archive", 1): (
         "unscheduled-checkout-write",
         "NamedTemporaryFile path in the snapshots dir re-opened 'wb' by name for the decompressed (and then verified) restore source.",
-    ),
-    ("storage/_integrity_scheduler.py", "IntegrityScheduler._write_sentinel", 1): (
-        "unscheduled-checkout-write",
-        ".integrity_last_check sentinel beside the store db; plain write_text.",
     ),
     ("storage/_recovery_preflight.py", "_write_json_atomic", 1): (
         "unscheduled-checkout-write",

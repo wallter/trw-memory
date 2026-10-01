@@ -164,7 +164,6 @@ from trw_memory.storage._crud_ops import (
 from trw_memory.storage._init_helpers import (
     load_vec_extension as _init_load_vec_extension,
     open_connection_with_recovery as _init_open_connection_with_recovery,
-    start_integrity_scheduler as _init_start_integrity_scheduler,
 )
 
 # Stale-handle + integrity-check helpers extracted to _stale_handle.py
@@ -172,7 +171,6 @@ from trw_memory.storage._init_helpers import (
 from trw_memory.storage._stale_handle import (
     ensure_connection_fresh as _stale_handle_ensure_fresh,
     fresh_connection as _stale_handle_fresh_connection,
-    handle_integrity_regression as _stale_handle_integrity_regression,
     reconnect as _stale_handle_reconnect,
 )
 from trw_memory.storage._transaction import transaction as _transaction_impl
@@ -202,7 +200,6 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         corrupt_backup_keep: int = 5,
         rebuild_from_cold: bool = True,
         recovery_inline_max_bytes: int = 64 * 1024 * 1024,
-        integrity_check_interval_minutes: int = 0,
         check_integrity_once: bool = False,
         quarantine_ledger: QuarantineLedger | None = None,
     ) -> None:
@@ -225,7 +222,6 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         self._recovery_policy = recovery_policy
         self._corrupt_backup_keep = corrupt_backup_keep
         self._rebuild_from_cold = rebuild_from_cold
-        self._integrity_check_interval_minutes = integrity_check_interval_minutes
         db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         _prepare_db_file_mode(db_path)
 
@@ -280,17 +276,6 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         from trw_memory.storage._schema import ensure_fts_table as _ensure_fts_table
 
         self._fts_available: bool = _ensure_fts_table(self._conn)
-
-        # PRD-INFRA-063 (B2): periodic integrity scheduler (fail-open)
-        self._integrity_scheduler = _init_start_integrity_scheduler(
-            db_path,
-            interval_minutes=self._integrity_check_interval_minutes,
-            on_regression=self._handle_integrity_regression,
-        )
-
-    def _handle_integrity_regression(self, _db_path: Path, _detail: str) -> None:
-        """Delegate to ``_stale_handle.handle_integrity_regression``."""
-        _stale_handle_integrity_regression(self)
 
     _reconnect = _stale_handle_reconnect
     _ensure_connection_fresh = _stale_handle_ensure_fresh
@@ -736,11 +721,7 @@ class SQLiteBackend(SQLiteCheckpointVectorMixin, StorageBackend):
         return _namespace_purge_delete(self, namespace)
 
     def close(self) -> None:
-        """Stop integrity scheduler, then close connection."""
-        if self._integrity_scheduler is not None:
-            with contextlib.suppress(Exception):
-                self._integrity_scheduler.stop(timeout=2.0)
-            self._integrity_scheduler = None
+        """Close the connection."""
         with self._lock, contextlib.suppress(sqlite3.Error):
             self._conn.close()
         logger.debug("sqlite_backend_closed", db=str(self._db_path))

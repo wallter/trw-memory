@@ -258,7 +258,6 @@ _READER_FILES = (
     "storage/_row_mapper.py",
     "storage/yaml_backend.py",
     "lifecycle/tiers/_scoring.py",
-    "lifecycle/tiers/_sweep.py",
     "sync/_remote_publish.py",
     "sync/_remote_fetch.py",
 )

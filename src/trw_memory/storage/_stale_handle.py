@@ -3,10 +3,8 @@
 Belongs to the ``sqlite_backend.py`` facade. Re-exported there for
 back-compat — class methods become 1-line delegators.
 
-3 helpers covering the connection-resilience boundary:
+2 helpers covering the connection-resilience boundary:
 
-- ``handle_integrity_regression`` — IntegrityScheduler callback;
-  flips ``integrity_warning`` on the backend.
 - ``reconnect`` — validate a replacement connection, then atomically swap it;
   ``backend._conn`` and increments ``backend.reconnect_count``.
 - ``ensure_connection_fresh`` — best-effort stale probe; calls
@@ -33,15 +31,6 @@ if TYPE_CHECKING:
     from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 logger = structlog.get_logger(__name__)
-
-
-def handle_integrity_regression(backend: SQLiteBackend) -> None:
-    """IntegrityScheduler callback: flip ``integrity_warning`` flag.
-
-    Same flag used by the transient-WAL-contention path so external code
-    can observe both regressions uniformly.
-    """
-    backend.integrity_warning = True
 
 
 def reconnect(backend: SQLiteBackend) -> None:

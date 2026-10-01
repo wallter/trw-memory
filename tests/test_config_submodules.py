@@ -83,10 +83,6 @@ class TestLifecycleConfig:
         # ints are ints, not None
         assert isinstance(cfg.hot_max_entries, int)
         assert cfg.hot_max_entries == 50
-        assert isinstance(cfg.hot_ttl_days, int)
-        assert cfg.hot_ttl_days == 7
-        assert cfg.cold_threshold_days == 90
-        assert cfg.retention_days == 365
         # bools default sensibly
         assert cfg.dedup_enabled is True
         assert cfg.consolidation_enabled is True
@@ -125,12 +121,6 @@ class TestLifecycleConfig:
         with pytest.raises(ValidationError):
             _LifecycleModel(hot_max_entries=-5)
 
-    def test_ttl_days_must_be_positive(self) -> None:
-        with pytest.raises(ValidationError):
-            _LifecycleModel(hot_ttl_days=0)
-        with pytest.raises(ValidationError):
-            _LifecycleModel(retention_days=-1)
-
     def test_decay_half_life_must_be_positive(self) -> None:
         with pytest.raises(ValidationError):
             _LifecycleModel(decay_half_life_days=0.0)
@@ -145,12 +135,6 @@ class TestLifecycleConfig:
     def test_unknown_pii_action_rejected(self) -> None:
         with pytest.raises(ValidationError):
             _LifecycleModel(pii_action="delete")
-
-    def test_impact_tier_caps_are_fractions(self) -> None:
-        assert _LifecycleModel(impact_tier_critical_cap=0.0).impact_tier_critical_cap == 0.0
-        assert _LifecycleModel(impact_tier_high_cap=1.0).impact_tier_high_cap == 1.0
-        with pytest.raises(ValidationError):
-            _LifecycleModel(impact_tier_critical_cap=1.01)
 
     def test_score_weights_are_fractions(self) -> None:
         with pytest.raises(ValidationError):
@@ -347,14 +331,6 @@ class TestSecurityConfig:
             _SecurityModel(memory_corrupt_backup_keep=0)
         with pytest.raises(ValidationError):
             _SecurityModel(memory_corrupt_backup_keep=51)
-
-    def test_integrity_check_interval_bounds(self) -> None:
-        # ge=0 (0 disables), le=1440
-        assert _SecurityModel(memory_integrity_check_interval_minutes=0).memory_integrity_check_interval_minutes == 0
-        with pytest.raises(ValidationError):
-            _SecurityModel(memory_integrity_check_interval_minutes=1441)
-        with pytest.raises(ValidationError):
-            _SecurityModel(memory_integrity_check_interval_minutes=-1)
 
     def test_snapshot_keep_bounds(self) -> None:
         with pytest.raises(ValidationError):

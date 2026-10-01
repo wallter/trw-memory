@@ -3234,7 +3234,7 @@ wheels = [
 
 [[package]]
 name = "trw-memory"
-version = "5.1.5"
+version = "5.1.6"
 source = { editable = "." }
 dependencies = [
     { name = "authlib" },

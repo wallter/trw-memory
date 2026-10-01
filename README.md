@@ -18,7 +18,7 @@ trw-memory gives your AI agents long-term memory that runs locally. Memories liv
 - **No LLM calls to store.** `store_conversation()` keeps each chat turn as written, with its date and the turn it replied to, so saving memory costs no API calls (by default). The reader does the inference at recall time.
 - **Runs on your machine.** Memories live in a local SQLite file. There is no hosted service, no account and no usage tracking. Models download once, when you fetch them, and runtime never touches the network; remote sync and the decision judge are opt-in and off by default.
 - **Hybrid recall.** Keyword ranking (BM25) and local vector search are fused, then a local cross-encoder re-ranks the results.
-- **Stale knowledge stays out.** Every memory has a lifecycle status, and superseded or retired memories are excluded from recall by default. Near-duplicates are merged and old memories move to colder storage tiers.
+- **Stale knowledge stays out.** Every memory has a lifecycle status, and superseded or retired memories are excluded from recall by default. Near-duplicates are merged.
 - **Three ways in.** An async Python SDK (`MemoryClient`), a CLI (`trw-memory`), and an MCP server (`trw-memory-server`) that any MCP client can launch.
 
 ## Install and quick start
@@ -143,7 +143,7 @@ results = backend.search("query", top_k=10, namespace="default")
 ```
 
 ## What's new in 5.x
-<!-- whats-new: 5.1.5 -->
+<!-- whats-new: 5.1.6 -->
 
 - **Quarantined memories stay out of every read.** An append-only ledger records each quarantine decision, and every backend read filters quarantined entries inside the backend itself.
 - **A daemon that survives its own death.** A crash or reboot leaves a record that reads as dead, so clients restart cleanly. `probe_endpoint` pings without starting one; `MEMORY_DAEMON_AUTOSTART=false` fails closed.
@@ -230,7 +230,7 @@ Candidates come from two places: the most recently updated rows of the namespace
 - **Deduplication:** near-duplicates are merged at a cosine threshold (0.85 on the reference scale, calibrated per embedding model).
 - **Consolidation:** episodic-to-semantic consolidation clusters related memories and summarises each cluster with a longest-content heuristic. No LLM is involved.
 - **Knowledge graph:** tag co-occurrence and similarity edges, BFS traversal, importance boost and decay.
-- **Tiers:** hot (in-memory LRU, design target under 1 ms), warm (SQLite plus a JSONL sidecar, under 50 ms) and cold (YAML archive partitioned by year and month, under 200 ms). The targets are for the tier lookup, not end-to-end recall. Cold hits are promoted back to warm within the same recall, and `TierManager.sweep()` applies the archive and purge policy.
+- **Tiers:** hot (in-memory LRU, design target under 1 ms), warm (SQLite plus a JSONL sidecar, under 50 ms) and cold (YAML archive partitioned by year and month, under 200 ms). The targets are for the tier lookup, not end-to-end recall. Cold hits are promoted back to warm within the same recall. There is no automatic archive or purge sweep.
 - **Remote sync:** optional publish and fetch across installations, with vector-clock conflict resolution and SSE live updates. Off by default.
 
 ### Security features

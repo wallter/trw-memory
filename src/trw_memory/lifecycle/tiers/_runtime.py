@@ -13,10 +13,10 @@ import structlog
 from pydantic import ValidationError
 from typing_extensions import TypedDict
 
+from trw_memory._project_anchor import resolve_storage_root
 from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
 from trw_memory.exceptions import SchemaValidationError, StorageError
 from trw_memory.integrations._backend import create_backend_from_config
-from trw_memory.lifecycle.tiers._legacy_warm_migration import tier_root_dir
 from trw_memory.lifecycle.tiers._manager import TierManager
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
@@ -58,8 +58,16 @@ def namespace_storage_dir(config: MemoryConfig, namespace: str) -> Path:
     two namespaces onto one tier directory would share one ``warm.db`` between
     them and reintroduce, at the tier layer, exactly the cross-namespace
     leak the single store's row-keying was designed to avoid.
+
+    The base is the directory CONTAINING ``memory_single_store_path`` when one is
+    set (it can differ from ``resolve_storage_root(config)``), else
+    ``resolve_storage_root(config)``, unchanged from every earlier layout.
     """
-    return tier_root_dir(config) / namespace.replace(":", "_")
+    if config.memory_single_store_path:
+        root = Path(config.memory_single_store_path).expanduser().resolve().parent
+    else:
+        root = resolve_storage_root(config).resolve()
+    return root / namespace.replace(":", "_")
 
 
 def supports_tier_runtime(backend: object) -> bool:

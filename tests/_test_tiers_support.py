@@ -18,9 +18,6 @@ def cfg() -> MemoryConfig:
 def _cfg() -> MemoryConfig:
     return MemoryConfig(
         hot_max_entries=3,
-        hot_ttl_days=7,
-        cold_threshold_days=90,
-        retention_days=365,
         decay_half_life_days=14.0,
         score_relevance_weight=0.4,
         score_recency_weight=0.3,

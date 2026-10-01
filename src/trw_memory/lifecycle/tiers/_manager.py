@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from trw_memory.lifecycle.tiers._cold import ColdTierStore
-from trw_memory.lifecycle.tiers._manager_io import load_warm_entries, open_canonical_backend
+from trw_memory.lifecycle.tiers._manager_io import open_canonical_backend
 from trw_memory.lifecycle.tiers._manager_search import (
     RESOLVE_MARGIN,
     WindowRank,
@@ -22,8 +22,6 @@ from trw_memory.lifecycle.tiers._manager_search import (
     warmup_hot_from_entries,
     warmup_hot_from_warm_entries,
 )
-from trw_memory.lifecycle.tiers._scoring import TierSweepResult
-from trw_memory.lifecycle.tiers._sweep import execute_sweep
 from trw_memory.lifecycle.tiers._warm import WarmTierStore
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -409,32 +407,5 @@ class TierManager:
         )
         return ranked[:top_k]
 
-    def sweep(self, config: MemoryConfig | None = None) -> TierSweepResult:
-        """Execute lifecycle sweep across all tiers."""
-        active_config = config or MemoryConfig()
-        self._config = active_config
-        warm_entries, preload_errors = self._load_warm_entries(active_config)
-        result = execute_sweep(
-            hot=self._hot,
-            config=active_config,
-            warm_entries=warm_entries,
-            base_dir=self._base_dir,
-            warm_add_fn=self.warm_add,
-            cold_archive_entry_fn=self.cold_archive_entry,
-            cold_dir=self._cold_dir(),
-            hot_lock=self._hot_lock,
-        )
-        if preload_errors == 0:
-            return result
-        return TierSweepResult(
-            promoted=result.promoted,
-            demoted=result.demoted,
-            purged=result.purged,
-            errors=result.errors + preload_errors,
-        )
-
     def _open_canonical_backend(self, config: MemoryConfig) -> StorageBackend:
         return open_canonical_backend(self._base_dir, self._entries_dir, self._namespace, config)
-
-    def _load_warm_entries(self, config: MemoryConfig) -> tuple[list[dict[str, object]], int]:
-        return load_warm_entries(self._base_dir, self._entries_dir, self._namespace, config)

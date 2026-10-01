@@ -88,10 +88,30 @@ _RETIRED_SETTINGS: dict[str, tuple[str, str]] = {
         "PRD-CORE-293",
         "none; nothing has read it since the Q-learning reward loop was removed in trw-memory 3.0.0",
     ),
+    **dict.fromkeys(
+        ("impact_tier_critical_cap", "impact_tier_high_cap"),
+        ("UF-MCP-07", "none; the forced tier-distribution function they capped was removed (it had no caller)"),
+    ),
+    "integrity_check_interval_minutes": (
+        "UF-MEM-06",
+        "none; the periodic integrity scheduler was removed (the daemon never passed it the interval, and the "
+        "integrity_warning flag it set had no reader)",
+    ),
     "rbac_mode": ("PRD-QUAL-145", "none; RBAC is decided by rbac_enabled alone, which is all it ever read"),
     "quarantine_ttl_seconds": ("PRD-QUAL-145", "none; quarantined entries never expired by it, nothing read it"),
     "sync_namespace": ("PRD-QUAL-145", "none; sync uses each entry's own namespace, nothing read it"),
+    **dict.fromkeys(
+        ("hot_ttl_days", "cold_threshold_days", "retention_days", "warm_archive_max_score", "cold_purge_max_score"),
+        (
+            "UF-MEM-01",
+            "none; the tier sweep they tuned was removed (it had no caller and would have archived rows nothing "
+            "reads back); the hot cache size, hot_max_entries, stays",
+        ),
+    ),
 }
+#: Retired here, yet still LIVE under the ``memory_`` prefix in ``.trw/config.yaml``: trw-mcp's own YAML-store
+#: tier sweep reads them, so that spelling in that source is not a leftover.
+_LIVE_IN_TRW_MCP_YAML = frozenset({"hot_ttl_days", "cold_threshold_days", "retention_days"})
 _warned_retired_settings: set[tuple[str, str]] = set()
 _logger = structlog.get_logger(__name__)
 
@@ -103,6 +123,8 @@ def _warn_retired_settings(raw: dict[str, object], *, source: str) -> None:
             continue
         name = key.lower().removeprefix("memory_")
         if name not in _RETIRED_SETTINGS or (name, source) in _warned_retired_settings:
+            continue
+        if source == ".trw/config.yaml" and name in _LIVE_IN_TRW_MCP_YAML and key.lower().startswith("memory_"):
             continue
         _warned_retired_settings.add((name, source))
         prd, replacement = _RETIRED_SETTINGS[name]
@@ -210,14 +232,9 @@ def _map_trw_config_yaml_to_memory_settings(raw: dict[str, object]) -> dict[str,
             ("embedding_trust_remote_code", "memory_embedding_trust_remote_code"),
         ),
         ("hot_max_entries", ("hot_max_entries", "memory_hot_max_entries")),
-        ("hot_ttl_days", ("hot_ttl_days", "memory_hot_ttl_days")),
-        ("cold_threshold_days", ("cold_threshold_days", "memory_cold_threshold_days")),
-        ("retention_days", ("retention_days", "memory_retention_days")),
         ("score_relevance_weight", ("score_relevance_weight", "memory_score_w1")),
         ("score_recency_weight", ("score_recency_weight", "memory_score_w2")),
         ("score_importance_weight", ("score_importance_weight", "memory_score_w3")),
-        ("warm_archive_max_score", ("warm_archive_max_score",)),
-        ("cold_purge_max_score", ("cold_purge_max_score",)),
         ("encryption_enabled", ("encryption_enabled", "memory_encryption_enabled")),
         ("rbac_enabled", ("rbac_enabled", "memory_rbac_enabled")),
         ("namespace_roles", ("namespace_roles", "memory_namespace_roles")),
@@ -232,10 +249,6 @@ def _map_trw_config_yaml_to_memory_settings(raw: dict[str, object]) -> dict[str,
             ("memory_recovery_inline_max_bytes", "recovery_inline_max_bytes"),
         ),
         ("security_maintenance_inline", ("security_maintenance_inline", "memory_security_maintenance_inline")),
-        (
-            "memory_integrity_check_interval_minutes",
-            ("memory_integrity_check_interval_minutes", "integrity_check_interval_minutes"),
-        ),
         ("memory_snapshot_daily_keep", ("memory_snapshot_daily_keep", "snapshot_daily_keep")),
         ("memory_snapshot_weekly_keep", ("memory_snapshot_weekly_keep", "snapshot_weekly_keep")),
         # PRD-CORE-253 FR03 loopback daemon. There is deliberately no bind-host

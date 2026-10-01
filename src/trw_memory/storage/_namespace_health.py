@@ -17,6 +17,7 @@ import sqlite3
 
 from trw_memory.models.config import MemoryConfig
 from trw_memory.retrieval.tag_derivation import derive_tag_neighbours
+from trw_memory.storage._probe import pinned_canary_ids
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 
 #: Rows team sync pulled from another project: recalled, but not authored here.
@@ -32,29 +33,32 @@ def namespace_health(backend: SQLiteBackend, namespace: str, config: MemoryConfi
     keeps no vectors, which a caller reports as not measured, never as zero; a read
     error propagates rather than reading as an empty store.
     """
-    # Canaries are the store's own health-check rows: instrumentation, not knowledge.
-    # Same value rule as recall (metadata["system_canary"] == "true"), so a row
-    # carrying "false" is knowledge and counts.
+    # Canaries are the store's own health-check rows: instrumentation, not knowledge. They are the rows the
+    # probe calls canaries (pinned id AND content, ``classify_canary``), NOT rows carrying a ``system_canary``
+    # metadata flag: a caller-writable flag would let a row hide itself from this count (UF-MEM-15).
     with backend._fresh_connection(), backend._lock:
         conn = backend._conn
-        entries, synced, max_recall = conn.execute(
-            "SELECT COUNT(*), COALESCE(SUM(m.source = ?), 0), COALESCE(MAX(m.recall_count), 0) FROM memories m "
-            "WHERE m.namespace = ? AND json_extract(m.metadata, '$.system_canary') IS NOT 'true'",
-            (SYNCED_SOURCE, namespace),
-        ).fetchone()
-        types = conn.execute(
-            "SELECT COALESCE(NULLIF(m.type, ''), 'pattern') AS kind, COUNT(*) FROM memories m WHERE m.namespace = ? "
-            "AND json_extract(m.metadata, '$.system_canary') IS NOT 'true' GROUP BY kind",
-            (namespace,),
-        ).fetchall()
+        canaries = pinned_canary_ids(conn, namespace)
+        skip = f"AND m.id NOT IN ({','.join('?' * len(canaries))})" if canaries else ""
+        # `skip` is only "?" placeholders for the canary ids: no value is interpolated into the SQL.
+        totals_sql = (
+            "SELECT COUNT(*), COALESCE(SUM(m.source = ?), 0), COALESCE(MAX(m.recall_count), 0) FROM memories m "  # noqa: S608
+            "WHERE m.namespace = ? " + skip
+        )
+        types_sql = (
+            "SELECT COALESCE(NULLIF(m.type, ''), 'pattern') AS kind, COUNT(*) FROM memories m "  # noqa: S608
+            "WHERE m.namespace = ? " + skip + " GROUP BY kind"
+        )
+        entries, synced, max_recall = conn.execute(totals_sql, (SYNCED_SOURCE, namespace, *canaries)).fetchone()
+        types = conn.execute(types_sql, (namespace, *canaries)).fetchall()
         edges = conn.execute("SELECT COUNT(*) FROM memory_graph_edges WHERE namespace = ?", (namespace,)).fetchone()[0]
         has_relations = edges > 0 or _derives_a_relation(conn, namespace, config)
         # Counted in SQL, and a read error propagates: an unreadable index is not zero vectors.
         embedded = (
             conn.execute(
-                "SELECT COUNT(*) FROM vec_index v JOIN memories m ON m.namespace = v.namespace AND m.id = v.entry_id "
-                "WHERE v.namespace = ? AND json_extract(m.metadata, '$.system_canary') IS NOT 'true'",
-                (namespace,),
+                "SELECT COUNT(*) FROM vec_index v JOIN memories m ON m.namespace = v.namespace AND m.id = v.entry_id "  # noqa: S608
+                "WHERE v.namespace = ? " + skip,
+                (namespace, *canaries),
             ).fetchone()[0]
             if backend.supports_vectors()
             else None

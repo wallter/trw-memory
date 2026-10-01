@@ -9,15 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from trw_memory.exceptions import StaleConnectionError
-from trw_memory.storage._stale_handle import handle_integrity_regression, reconnect
-
-
-class TestHandleIntegrityRegression:
-    def test_sets_integrity_warning_flag(self) -> None:
-        """handle_integrity_regression sets backend.integrity_warning = True (line 42)."""
-        backend = MagicMock()
-        handle_integrity_regression(backend)
-        assert backend.integrity_warning is True
+from trw_memory.storage._stale_handle import reconnect
 
 
 class TestReconnectPath:

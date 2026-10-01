@@ -5,7 +5,6 @@ Covers:
 - compute_utility_score: cold-start blending, Ebbinghaus decay, access boost,
   source boost, clamp behaviour
 - apply_time_decay: linear decay, 0.3 floor, naive/aware datetime handling
-- enforce_tier_distribution: demotion logic, small-set no-op
 - rank_by_utility: relevance+utility blending, wildcard query
 - entry_utility: field extraction from MemoryEntry dict
 - utility_based_prune_candidates: three tiers
@@ -22,7 +21,6 @@ from trw_memory.lifecycle import rank_by_utility, utility_based_prune_candidates
 from trw_memory.lifecycle.scoring import (
     apply_time_decay,
     compute_utility_score,
-    enforce_tier_distribution,
     entry_utility,
 )
 from trw_memory.models.config import MemoryConfig
@@ -150,144 +148,14 @@ def test_compute_utility_score_minimum_zero() -> None:
 
 
 # ---------------------------------------------------------------------------
-# enforce_tier_distribution
-# ---------------------------------------------------------------------------
-
-
-def test_enforce_tier_no_op_below_minimum() -> None:
-    # < 5 entries — no enforcement
-    entries = [("M-001", 0.95), ("M-002", 0.91), ("M-003", 0.75)]
-    result = enforce_tier_distribution(entries)
-    assert result == []
-
-
-def test_enforce_tier_no_op_when_within_caps() -> None:
-    # 10 entries, 1 critical (10%), cap is typically 0.05 but none exceed with <=1
-    entries = [
-        ("M-001", 0.95),  # critical
-        ("M-002", 0.75),  # high
-        ("M-003", 0.65),  # medium
-        ("M-004", 0.60),  # medium
-        ("M-005", 0.55),  # medium
-    ]
-    # 1/5 critical = 0.2, but default cap is 0.05 — expect demotion
-    result = enforce_tier_distribution(entries, critical_cap=0.3, high_cap=0.5)
-    assert result == []
-
-
-def test_enforce_tier_demotes_critical() -> None:
-    entries = [
-        ("M-001", 0.98),
-        ("M-002", 0.95),
-        ("M-003", 0.91),  # 3/5 = 60% critical, cap is 0.05 → demote lowest
-        ("M-004", 0.65),
-        ("M-005", 0.50),
-    ]
-    result = enforce_tier_distribution(entries, critical_cap=0.05, high_cap=0.5)
-    assert len(result) >= 1
-    demoted_id = result[0][0]
-    new_score = result[0][1]
-    assert new_score < 0.9  # moved out of critical tier
-    assert demoted_id in {"M-001", "M-002", "M-003"}
-
-
-def test_enforce_tier_demotes_high() -> None:
-    entries = [
-        ("M-001", 0.50),
-        ("M-002", 0.75),
-        ("M-003", 0.78),
-        ("M-004", 0.72),  # 3/4 of remaining = high, cap exceeded
-        ("M-005", 0.60),
-    ]
-    result = enforce_tier_distribution(entries, critical_cap=0.5, high_cap=0.1)
-    assert any(new_score < 0.7 for _, new_score in result)
-
-
-def test_enforce_tier_empty_input() -> None:
-    assert enforce_tier_distribution([]) == []
-
-
-# ---------------------------------------------------------------------------
-# S12: caps are config-driven (no drift vs trw-mcp)
-# ---------------------------------------------------------------------------
-
-
-def _critical_heavy_entries() -> list[tuple[str, float]]:
-    # 3/5 = 60% critical — over the default 5% cap, under a custom 70% cap.
-    return [
-        ("M-001", 0.98),
-        ("M-002", 0.95),
-        ("M-003", 0.91),
-        ("M-004", 0.60),
-        ("M-005", 0.50),
-    ]
-
-
-def test_enforce_tier_caps_resolve_from_config() -> None:
-    # FAILS before fix: with caps hardcoded to 0.05, a config raising the cap
-    # to 0.70 would be ignored and a demotion would still occur.
-    entries = _critical_heavy_entries()
-    cfg = MemoryConfig(impact_tier_critical_cap=0.7, impact_tier_high_cap=0.9)
-    result = enforce_tier_distribution(entries, config=cfg)
-    assert result == []  # 60% critical is within the config's 70% cap
-
-
-def test_enforce_tier_explicit_cap_overrides_config() -> None:
-    # Explicit cap must win over the config value.
-    entries = _critical_heavy_entries()
-    cfg = MemoryConfig(impact_tier_critical_cap=0.7)
-    result = enforce_tier_distribution(entries, critical_cap=0.05, config=cfg)
-    assert len(result) >= 1  # tight explicit cap forces a demotion
-
-
-def test_enforce_tier_default_config_matches_legacy_caps() -> None:
-    # No behaviour change when caps unspecified: default config == old literals.
-    entries = _critical_heavy_entries()
-    assert enforce_tier_distribution(entries) != []  # default 0.05 cap exceeded
-
-
-# ---------------------------------------------------------------------------
 # PRD-CORE-251 FR02: converge_tier_distribution and persist_tier_convergence
 # were RETIRED (2026-09-03). Both had zero production consumers in either
 # package; the five test functions that pinned them
 # (test_converge_brings_critical_within_cap, test_converge_no_op_within_caps,
 # test_converge_empty_input, test_persist_tier_convergence_atomic,
 # test_persist_tier_convergence_no_op_within_caps) were removed with them.
-# test_single_enforce_leaves_cluster_over_cap survives below because it
-# exercises enforce_tier_distribution directly, which FR08 keeps.
+# (enforce_tier_distribution itself was removed with UF-MCP-07: it had no caller.)
 # ---------------------------------------------------------------------------
-
-
-def _over_cap_critical_cluster() -> list[tuple[str, float]]:
-    # 8 critical out of 10 (80%); default critical cap is 5% (=> max 0 allowed
-    # by the >cap rule until count/total <= 0.05, i.e. 0 of 10 may stay critical).
-    return [
-        ("M-001", 0.99),
-        ("M-002", 0.98),
-        ("M-003", 0.97),
-        ("M-004", 0.96),
-        ("M-005", 0.95),
-        ("M-006", 0.94),
-        ("M-007", 0.93),
-        ("M-008", 0.92),
-        ("M-009", 0.40),
-        ("M-010", 0.30),
-    ]
-
-
-def test_single_enforce_leaves_cluster_over_cap() -> None:
-    # A single enforce call demotes at most one entry per tier, so an 8-over-cap
-    # cluster is STILL over the critical cap afterwards. That is the documented
-    # contract of the function, not a defect: the caller re-invokes until the
-    # returned list is empty.
-    entries = _over_cap_critical_cluster()
-    one_step = enforce_tier_distribution(entries)
-    # only one critical demotion in a single call
-    assert len(one_step) <= 2  # at most one critical + one cascaded high
-    # apply the step and recount critical members
-    moved = dict(one_step)
-    remaining_critical = sum(1 for mid, sc in entries if moved.get(mid, sc) >= 0.9)
-    assert remaining_critical / len(entries) > 0.05  # STILL over cap
 
 
 def test_retired_symbols_are_absent() -> None:

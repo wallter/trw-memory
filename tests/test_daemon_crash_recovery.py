@@ -397,12 +397,13 @@ def test_census_one_liveness_decision_and_one_spawn_site() -> None:
         # An import copy is owned by a pid named in its directory, not by a daemon record.
         "trw-memory/src/trw_memory/daemon/_instance.py::claim_single_instance",
     }
-    # The one place the client decides to spawn is ``_attach`` (it honours the auto-start setting first). trw-mcp's
-    # shared-env launcher is the second CALL site by design: ``_attach`` hands it the spawn only after that check,
-    # so a stale client's own interpreter cannot publish an older daemon (DAEMON-AUTOSTART-VERSION-RACE).
-    expected = {"trw-memory/src/trw_memory/daemon/client.py::_attach"}
-    if "trw-mcp" in sources:
-        expected.add("trw-mcp/src/trw_mcp/shared_server/_daemon_launch.py::_launch")
+    # The one place the client decides to spawn is ``_attach`` (it honours the auto-start setting first). The launcher
+    # record is the second CALL site by design: ``_attach`` hands it the spawn only after that check, so a stale
+    # client's own interpreter cannot publish an older daemon (DAEMON-AUTOSTART-VERSION-RACE).
+    expected = {
+        "trw-memory/src/trw_memory/daemon/client.py::_attach",
+        "trw-memory/src/trw_memory/daemon/_launcher_record.py::launch_from_record",
+    }
     assert set().union(*(_calls(src, "start_daemon_detached", label) for label, src in sources.items())) == expected
 
 

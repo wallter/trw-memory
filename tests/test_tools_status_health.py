@@ -22,12 +22,13 @@ _NS = "project:acme-1a2b3c4d"
 _OTHER = "project:other-00000000"
 
 
-def test_the_health_block_counts_one_namespace_without_canaries(tmp_path: Path) -> None:
+def test_the_health_block_counts_one_namespace_and_a_flag_alone_hides_nothing(tmp_path: Path) -> None:
     store = SQLiteBackend(tmp_path / "memory.db", dim=4)
     try:
         store.store(make_entry(entry_id="L-1", namespace=_NS, access_count=0))
         store.store(make_entry(entry_id="L-2", namespace=_NS, source="team_sync"))
-        # A canary counts toward nothing, its recall count included; "false" is an ordinary row.
+        # The store's canary (pinned id AND content) counts toward nothing, so it is not planted here; a row that
+        # merely carries the flag is an ordinary row (UF-MEM-15: the flag is caller-writable and hid rows).
         store.store(make_entry(entry_id="C-1", namespace=_NS, metadata={"system_canary": "true"}))
         store.store(make_entry(entry_id="L-3", namespace=_NS, metadata={"system_canary": "false"}))
         # The other namespace's row, vector and edge are not this namespace's.
@@ -46,15 +47,15 @@ def test_the_health_block_counts_one_namespace_without_canaries(tmp_path: Path) 
     finally:
         store.close()
 
-    embedded = 1 if store.vec_available else None
+    embedded = 2 if store.vec_available else None
     assert health == {
-        "entries": 3,
+        "entries": 4,
         "synced": 1,
         "edges": 1,
         "has_relations": True,
         "embedded": embedded,
-        "max_recall_count": 4,
-        "types": {"pattern": 3},
+        "max_recall_count": 40,
+        "types": {"pattern": 4},
     }
 
 

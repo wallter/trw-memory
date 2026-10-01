@@ -13,8 +13,6 @@ that mutate the backend instance.
   Returns ``(conn, integrity_warning, recovered)``.
 - ``load_vec_extension`` — load sqlite-vec when available; populate
   vec_index/vec_memories tables; flip ``_vec_available``.
-- ``start_integrity_scheduler`` — PRD-INFRA-063 periodic quick_check
-  scheduler (fail-open).
 
 Extracted as PRD-DIST-245 Phase 1 batch 88.
 """
@@ -295,25 +293,3 @@ def load_vec_extension(conn: Any, db_path: Path, dim: int) -> bool:
             hint=("Python lacks SQLite load_extension support; vector search disabled, BM25 still works"),
         )
         return False
-
-
-def start_integrity_scheduler(
-    db_path: Path,
-    *,
-    interval_minutes: int,
-    on_regression: Any,
-) -> Any:
-    """PRD-INFRA-063 periodic integrity scheduler (fail-open observability)."""
-    try:
-        from trw_memory.storage._integrity_scheduler import IntegrityScheduler
-
-        scheduler = IntegrityScheduler(
-            db_path,
-            interval_minutes=interval_minutes,
-            on_regression=on_regression,
-        )
-        scheduler.start()
-        return scheduler
-    except Exception:  # justified: observability scheduler must not block open
-        logger.debug("integrity_scheduler_unavailable", db=str(db_path), exc_info=True)
-        return None

@@ -194,17 +194,18 @@ async def test_a_daemon_that_does_not_know_a_filter_refuses_the_call(
             await client.call_tool(tool, arguments)
 
 
-def test_status_counts_each_type_exactly_without_canaries(backend: SQLiteBackend) -> None:
+def test_status_counts_each_type_exactly_and_a_flagged_row_still_counts(backend: SQLiteBackend) -> None:
     for index in range(30):
         backend.store(_row(f"D-{index:02d}", "decision", minutes=index))
     backend.store(_row("I-1", "incident"))
-    canary = _row("C-1", "decision")
-    backend.store(canary.model_copy(update={"metadata": {"system_canary": "true"}}))
+    # A row that merely carries the flag is an ordinary row (UF-MEM-15); the store's own canary is excluded by identity.
+    flagged = _row("C-1", "decision")
+    backend.store(flagged.model_copy(update={"metadata": {"system_canary": "true"}}))
     backend.store(_row("X-1", "decision").model_copy(update={"namespace": "project:other-00000000"}))
 
     health = memory_status_impl(_NS, backend=backend)["health"]
 
-    assert health["types"] == {"decision": 30, "incident": 1}  # type: ignore[index]
+    assert health["types"] == {"decision": 31, "incident": 1}  # type: ignore[index]
 
 
 async def test_the_sdk_client_filters_by_type(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
