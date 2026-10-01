@@ -136,6 +136,34 @@ def _preflight(config: object) -> None:
     refuse_encryption_at_rest(config)
 
 
+def _refuse_stdio_on_the_user_store(config: object) -> None:
+    """Exit unless this stdio server's store is NOT the machine-wide user store the daemon serves.
+
+    A stdio server has no daemon access token, so the namespace grant check is skipped for every tool
+    (``rbac.require_namespace_permission``): all namespaces are reachable, and the user store would get a second
+    writer beside the daemon. Only the daemon (``serve http``) enforces grants. A project-local store, which is the
+    default (``.memory`` beside the project's ``.trw``), and any explicit store that is not the user store stay allowed.
+    """
+    from trw_memory.daemon import served_store_path
+    from trw_memory.exceptions import StorageRootUnresolvableError
+    from trw_memory.integrations._backend import resolve_backend_db_path
+
+    try:
+        mine = resolve_backend_db_path(config, "default").resolve()  # type: ignore[arg-type]
+    except (
+        StorageRootUnresolvableError
+    ):  # trw-fail-silent-allow: no project anchor means no resolvable store, hence not the user store
+        return
+    user_store = served_store_path().resolve()  # any other failure here propagates: the server does not start (closed)
+    if mine == user_store:
+        sys.exit(
+            f"trw-memory-server serve stdio refused: its store is the machine-wide user store ({user_store}), which "
+            "only the daemon may serve, because a stdio server carries no namespace grant and every namespace would "
+            "be reachable. Use the daemon (`trw-memory-server serve http`, which the trw-mcp clients start) or point "
+            "this server at its own store."
+        )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="trw-memory-server", description=__doc__)
     subcommands = parser.add_subparsers(dest="command")
@@ -193,7 +221,9 @@ def main(argv: list[str] | None = None) -> None:
     if getattr(args, "mode", "stdio") == "http":
         _serve_http(args.port, args.idle_shutdown_seconds)
         return
-    _preflight(MemoryConfig())
+    config = MemoryConfig()
+    _preflight(config)
+    _refuse_stdio_on_the_user_store(config)
     mcp.run(show_banner=False)  # no banner and no PyPI version check on every stdio start
 
 

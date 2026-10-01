@@ -114,7 +114,7 @@ trw-memory backup create                         # local gzip archive + sha256 s
 
 `store`, `recall`, `search`, `forget`, `consolidate`, `export` and `status` run over the [loopback daemon](#loopback-daemon-serve-http). They start one if none is running and present this checkout's grant, which `trw-mcp memory token` mints; without a grant, or for a namespace outside it, the command prints the remedy and exits 1. `--namespace` defaults to the checkout's pinned `project_namespace` (pass `--namespace default` for the old default). `import`, `reembed`, `restore`, `snapshot create` and `backup create` open the store file directly, so they refuse while a daemon runs.
 
-trw-memory itself has no command that mints a grant; `trw-mcp memory token` is the one that does. On a standalone install, use the Python SDK or `trw-memory-server` for everyday reads and writes.
+trw-memory itself has no command that mints a grant; `trw-mcp memory token` is the one that does. On a standalone install, use the Python SDK or `trw-memory-server` for everyday reads and writes; a stdio `trw-memory-server` serves its own project store and refuses the machine-wide user store the daemon serves.
 
 `export` covers one namespace and holds it in memory; it is not a streaming backup and does not include stored vectors. Export from an unchanged store: pagination is not a snapshot across concurrent writes. Use the `snapshot` commands for database backups. `import` keeps export-format rows whole, re-screens every row through the write gate, writes rejected rows to `<file>.rejected.jsonl`, and exits 1 when any row is rejected.
 
@@ -143,7 +143,7 @@ results = backend.search("query", top_k=10, namespace="default")
 ```
 
 ## What's new in 5.x
-<!-- whats-new: 5.1.2 -->
+<!-- whats-new: 5.1.4 -->
 
 - **Quarantined memories stay out of every read.** An append-only ledger records each quarantine decision, and every backend read filters quarantined entries inside the backend itself.
 - **A daemon that survives its own death.** A crash or reboot leaves a record that reads as dead, so clients restart cleanly. `probe_endpoint` pings without starting one; `MEMORY_DAEMON_AUTOSTART=false` fails closed.
