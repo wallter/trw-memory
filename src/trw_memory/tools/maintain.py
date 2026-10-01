@@ -277,6 +277,46 @@ def _graph_backfill_lane_write(
     return write
 
 
+def _run_snapshot(backend: StorageBackend, config: MemoryConfig, *, now: datetime | None = None) -> dict[str, object]:
+    """Take the rolling snapshots: one daily per UTC day, and the weekly one on Sunday (UF-MEM-05).
+
+    Snapshot rotation ran only from a manual CLI before; nothing took an automatic restore point. Store-wide, like
+    the checkpoint, and never raises: a failing snapshot is reported in the pass (``status: error``), and like any failed
+    pass it keeps this run from advancing ``last_maintained_at``; the other passes still run. A day (or Sunday's week)
+    that already has its snapshot is not re-taken: a ``VACUUM INTO`` of the whole store on every maintain call would be
+    the cost of a backup per call. Pruning follows ``memory_snapshot_daily_keep`` / ``memory_snapshot_weekly_keep``.
+
+    The files land under ``<store dir>/memory/snapshots/`` (the layout ``backup restore`` reads); the default
+    ``trw-memory snapshot`` CLI derives its directory from a namespace, so it does not list them yet (open).
+    """
+    from trw_memory.storage import _snapshot
+
+    raw = str(getattr(backend, "db_path", "") or "")
+    if not raw or raw == ":memory:":
+        return {"status": _SKIPPED, "scope": "store", "reason": "no store file"}
+    db_path = Path(raw)
+    base_dir = db_path.parent  # the layout the snapshot CLI and `backup restore` read: <base>/memory/snapshots
+    moment = now or datetime.now(timezone.utc)
+    try:
+        today = _snapshot.snapshots_base_dir(base_dir) / "daily" / f"{moment.strftime('%Y-%m-%d')}.db"
+        if today.is_file():
+            daily = "already_taken"
+        else:
+            _snapshot.take_daily_snapshot(base_dir, db_path, config.memory_snapshot_daily_keep, now=moment)
+            daily = "taken"
+        iso_year, iso_week, _ = moment.isocalendar()
+        week_file = _snapshot.snapshots_base_dir(base_dir) / "weekly" / f"{iso_year:04d}-W{iso_week:02d}.db"
+        weekly = (
+            None
+            if week_file.is_file()
+            else _snapshot.take_weekly_snapshot(base_dir, db_path, config.memory_snapshot_weekly_keep, now=moment)
+        )
+    except Exception as exc:  # justified: one failing pass must not abort the others
+        logger.warning("maintenance_snapshot_failed", error=str(exc))
+        return {"status": _ERROR, "scope": "store", "reason": type(exc).__name__}
+    return {"status": _OK, "scope": "store", "daily": daily, "weekly": "taken" if weekly is not None else "not_due"}
+
+
 def _run_checkpoint(backend: StorageBackend) -> dict[str, object]:
     """Checkpoint the write-ahead log for the whole store."""
     try:

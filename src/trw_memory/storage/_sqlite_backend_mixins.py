@@ -31,7 +31,7 @@ from trw_memory.storage._vector_ops import (
     vector_space_census,
 )
 from trw_memory.storage._vector_provenance_reads import vectors_proven_in_space
-from trw_memory.storage._wal_checkpoint import CheckpointResult
+from trw_memory.storage._wal_checkpoint import CheckpointResult, stamp_checkpoint_markers
 from trw_memory.storage.interface import GraphEdge, NamespaceChangeToken
 
 if TYPE_CHECKING:
@@ -88,13 +88,15 @@ class SQLiteCheckpointVectorMixin:
                 else facade.lock_for_rmw(Path(f"{self._db_path.resolve(strict=False)}.checkpoint"))
             )
             with checkpoint_lock, self._fresh_connection():
-                return facade.run_checkpoint(
+                result = facade.run_checkpoint(
                     lambda sql: self._conn.execute(sql).fetchone(),
                     mode,
                     wal_reset_safe=self.wal_reset_safe,
                     db_path=str(self._db_path),
                     db_error=self._dbapi.Error,
                 )
+            stamp_checkpoint_markers(self._db_path, result)  # UF-MEM-26: the doctor's memory_wal row reads these
+            return result
         except OSError as exc:
             logger.warning("wal_checkpoint_lock_failed", error_type=type(exc).__name__, db=str(self._db_path))
             return CheckpointResult(busy=1, checkpointed=0, log_frames=0, mode="error")

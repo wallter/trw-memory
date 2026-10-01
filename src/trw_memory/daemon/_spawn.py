@@ -23,6 +23,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -30,6 +31,7 @@ from typing import Literal
 import structlog
 
 from trw_memory.daemon._discovery import DaemonInfo, DiscoveryInvalid, read_live_discovery
+from trw_memory.daemon._legacy_identity import stop_legacy_daemon
 from trw_memory.daemon._paths import DaemonPaths, open_private_log
 from trw_memory.daemon._versions import is_older
 from trw_memory.exceptions import DaemonUnreachableError
@@ -100,26 +102,34 @@ class SpawnedDaemon:
         return True
 
 
-def start_daemon_detached(paths: DaemonPaths) -> SpawnedDaemon:
+def start_daemon_detached(
+    paths: DaemonPaths, *, python: str | None = None, environ: Mapping[str, str] | None = None
+) -> SpawnedDaemon:
     """Launch a daemon that is not this process's child, and return it.
 
     Its stderr goes to :attr:`DaemonPaths.start_log`, emptied on each start, so a
     start that stalls or crashes before publishing leaves a reason behind. The
     daemon installs no log handlers, so stderr carries warnings and tracebacks only.
 
+    The daemon runs under *python* (default: this interpreter) with *environ* as its whole
+    environment (default: this process's). A caller that knows which installation must serve
+    names it, so a client on an older install never publishes an older daemon beside it.
+
     Raises:
         DaemonUnreachableError: The launcher failed or did not report a pid.
     """
-    logger.info("daemon_auto_start", discovery=str(paths.discovery))
+    logger.info("daemon_auto_start", discovery=str(paths.discovery), python=python)
+    interpreter = python or sys.executable
     log = open_private_log(paths.start_log)
     try:
-        launched = subprocess.run(  # noqa: S603 -- fixed argv: this interpreter and module constants
-            [sys.executable, "-I", "-c", _LAUNCHER, sys.executable, *_DAEMON_ARGV],  # -I: no cwd module shadows
+        launched = subprocess.run(  # noqa: S603 -- fixed argv: an interpreter the caller named and module constants
+            [interpreter, "-I", "-c", _LAUNCHER, interpreter, *_DAEMON_ARGV],  # -I: no cwd module shadows
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=log,
             check=True,
             timeout=_LAUNCH_TIMEOUT_SECONDS,
+            env=None if environ is None else dict(environ),
         )
         pid = int(launched.stdout.split()[-1])  # the last line: a site hook may print before it
         if pid <= 1:  # init or a process group: a stubbed launcher (int(MagicMock()) == 1), never a daemon
@@ -142,7 +152,12 @@ class OutdatedDaemonStop:
 
 
 def stop_outdated_daemon(
-    paths: DaemonPaths, version: str, *, expect: DaemonInfo | None = None, older_only: bool = False
+    paths: DaemonPaths,
+    version: str,
+    *,
+    expect: DaemonInfo | None = None,
+    older_only: bool = False,
+    token: str | None = None,
 ) -> OutdatedDaemonStop:
     """Stop the daemon when it serves a trw-memory other than *version* (PRD-INFRA-200 FR02).
 
@@ -151,7 +166,10 @@ def stop_outdated_daemon(
     here, at signal time, never trusted from an earlier read; a record naming a
     dead, zombie or reused pid is absent, and one whose OS start is missing (a 4.0
     daemon) or cannot be read now is ``unproven``: its pid may name any process,
-    so it is never signalled and the detail is the manual remedy.
+    so it is never signalled and the detail is the manual remedy. A record
+    WITHOUT a start (a 4.0 daemon) is proven by other evidence instead, and
+    only then stopped: see :mod:`trw_memory.daemon._legacy_identity`, which
+    presents *token* (a checkout grant) to the daemon's own socket.
 
     *expect* is the instance the caller observed: a record naming another pid or OS start
     at signal time is ``changed`` and never signalled. *older_only* stops only a daemon
@@ -173,6 +191,8 @@ def stop_outdated_daemon(
         return OutdatedDaemonStop(
             "not_older", f"pid {found.pid} serves trw-memory {found.version}, not older than {version}; left running"
         )
+    if found.process_start is None:
+        return _stop_legacy(found, paths, version, token)
     daemon = SpawnedDaemon(found.pid, found.process_start, paths.lock)
     if not daemon.proven():
         return OutdatedDaemonStop(
@@ -180,5 +200,16 @@ def stop_outdated_daemon(
         )
     if not daemon.stop():  # it exited, or its identity changed, between the check and the first signal
         return OutdatedDaemonStop("unproven", f"pid {found.pid} was not signalled: its identity was not proven")
+    logger.info("daemon_outdated_stopped", pid=found.pid, served=found.version, installed=version)
+    return OutdatedDaemonStop("stopped", f"stopped pid {found.pid} (trw-memory {found.version}; installed {version})")
+
+
+def _stop_legacy(found: DaemonInfo, paths: DaemonPaths, version: str, token: str | None) -> OutdatedDaemonStop:
+    """Stop a daemon whose record has no OS start, once its socket, pid and ``ps`` entry prove what it is."""
+    refused = stop_legacy_daemon(found, paths, token, version)
+    if refused:
+        return OutdatedDaemonStop(
+            "unproven", f"trw-memory {found.version} daemon: {refused}; {found.stop_remedy(paths.discovery)}"
+        )
     logger.info("daemon_outdated_stopped", pid=found.pid, served=found.version, installed=version)
     return OutdatedDaemonStop("stopped", f"stopped pid {found.pid} (trw-memory {found.version}; installed {version})")

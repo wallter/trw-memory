@@ -25,6 +25,7 @@ directory.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 import structlog
@@ -57,21 +58,23 @@ def require_supported_platform() -> None:
         raise UnsupportedPlatformError(UNSUPPORTED_PLATFORM_MESSAGE)
 
 
-def user_memory_dir_path() -> Path:
+def user_memory_dir_path(environ: Mapping[str, str] | None = None) -> Path:
     """Where the user-space ``memory`` directory is, resolved, WITHOUT creating, verifying or hardening anything.
 
     For callers that only compare paths (trw-mcp's state-containment scope check) and must not chmod the user's
     store as a side effect; anything that reads or writes the store uses :func:`resolve_user_memory_dir`.
+    *environ* answers for another process's environment (default: this one's).
     """
-    return _user_memory_dir_and_source()[0]
+    return _user_memory_dir_and_source(environ)[0]
 
 
-def _user_memory_dir_and_source() -> tuple[Path, str]:
+def _user_memory_dir_and_source(environ: Mapping[str, str] | None = None) -> tuple[Path, str]:
     """Precedence: ``TRW_USER_DIR`` > ``$XDG_DATA_HOME`` > ``~/.trw``; the base is resolved (links followed)."""
-    user_dir = os.environ.get("TRW_USER_DIR")
+    env = os.environ if environ is None else environ
+    user_dir = env.get("TRW_USER_DIR")
     if user_dir:
         return (Path(user_dir) / USER_MEMORY_SUBDIR).resolve(), "trw_user_dir"
-    xdg = os.environ.get("XDG_DATA_HOME")
+    xdg = env.get("XDG_DATA_HOME")
     if xdg:
         return (Path(xdg) / _XDG_APP_DIR / USER_MEMORY_SUBDIR).resolve(), "xdg_data_home"
     return (Path.home() / _HOME_TRW_DIR / USER_MEMORY_SUBDIR).resolve(), "home_fallback"

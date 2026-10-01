@@ -272,6 +272,9 @@ async def serve_maintain(namespace: str, consolidation: dict[str, object] | None
         # while security_maintenance_inline was False (B71-97 -- nothing else drains that queue).
         if refused := await job(lambda b: _passed(run, "security_maintenance", maintain._run_security_maintenance())):
             return refused
+        # Store-wide like the checkpoint: the rolling restore point (UF-MEM-05), before the checkpoint settles the WAL.
+        if refused := await job(lambda b: _passed(run, "snapshot", maintain._run_snapshot(b, run.config))):
+            return refused
         return await job(lambda b: (_passed(run, "wal_checkpoint", maintain._run_checkpoint(b)), finish(run, b))[1])
     finally:
         release(namespace)

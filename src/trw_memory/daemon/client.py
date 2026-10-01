@@ -210,6 +210,7 @@ class DaemonClient:
         *,
         instance: tuple[int, str] | None = None,
         keep_session: bool = False,
+        launcher: Callable[[DaemonPaths], SpawnedDaemon] | None = None,
     ) -> None:
         """Args: token: the checkout's grant. config: source of the startup deadline. paths: daemon files.
 
@@ -217,6 +218,8 @@ class DaemonClient:
         keep_session: hold one MCP session open across calls made on the same event loop (W27).
         Only for a caller whose loop outlives its calls: a session opened on a loop that
         ``asyncio.run`` then closes is abandoned, not reused.
+        launcher: starts the daemon when none runs, in place of this interpreter's
+        :func:`start_daemon_detached`; for a caller that knows another installation must serve.
         """
         require_supported_platform()  # before explicit paths skip the resolver's own check (C12)
         self._token = token
@@ -224,6 +227,7 @@ class DaemonClient:
         self._paths = paths or DaemonPaths.resolve()
         self._instance = instance
         self._keep_session = keep_session
+        self._launcher = launcher
         self._sessions = HeldSessions()
 
     @property
@@ -283,7 +287,7 @@ class DaemonClient:
             raise self._refuse_invalid(result)
         if not self._config.memory_daemon_autostart:  # PRD-CORE-310 FR04: the one spawn site honours it
             raise self._unreachable(f"{result.reason}, and auto-start is off (MEMORY_DAEMON_AUTOSTART=false)")
-        spawned = start_daemon_detached(self._paths)
+        spawned = start_daemon_detached(self._paths) if self._launcher is None else self._launcher(self._paths)
         deadline = time.monotonic() + self._config.memory_daemon_startup_timeout_seconds
         while time.monotonic() < deadline:
             result = read_live_discovery(self._paths)

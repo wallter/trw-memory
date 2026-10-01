@@ -119,11 +119,31 @@ def mint_grant(paths: DaemonPaths, namespaces: Iterable[str], *, root: Path | No
         raise ValueError("a grant needs at least one namespace")
     token = secrets.token_urlsafe(_TOKEN_BYTES)
     with lock_for_rmw(paths.lock_anchor):
-        grants = {digest: grant._asdict() for digest, grant in _read_grants(paths).items()}
+        known = _read_grants(paths)
+        live = {digest: grant for digest, grant in known.items() if not _checkout_deleted(grant)}
+        if len(live) != len(known):  # a count only: roots are paths of the user's checkouts
+            logger.info("daemon_grants_pruned", count=len(known) - len(live))
+        grants = {digest: grant._asdict() for digest, grant in live.items()}
         grants[_digest(token)] = {"namespaces": granted, "root": str(root.resolve()) if root else None}
         write_secret_file(paths.grants, json.dumps(grants, sort_keys=True, default=sorted))
     logger.info("daemon_grant_minted", namespaces=granted)
     return token
+
+
+def _checkout_deleted(grant: Grant) -> bool:
+    """True when *grant*'s checkout root was deleted (TEST-ISOLATION-DAEMON-GRANTS).
+
+    Only a positive sign counts: the root is gone while its PARENT directory is still there. A rootless grant, a root
+    that exists, and a root whose parent is also missing (an unmounted volume, an unplugged drive) are all kept, so a
+    checkout that merely cannot be seen right now never loses its grant.
+    """
+    if grant.root is None:
+        return False
+    root = Path(grant.root)
+    try:
+        return not root.exists() and root.parent.is_dir()
+    except OSError:  # trw-fail-silent-allow: an unreadable path is not evidence of deletion, and False keeps the grant
+        return False
 
 
 def read_grant(paths: DaemonPaths, token: str) -> Grant | None:

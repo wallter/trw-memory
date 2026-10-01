@@ -68,6 +68,7 @@ with no effect on the problem — and on a current interpreter it is a downgrade
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast, get_args
 
 import structlog
@@ -239,3 +240,40 @@ def run_checkpoint(
         log_frames=log_frames,
     )
     return CheckpointResult(busy=busy, checkpointed=checkpointed, log_frames=log_frames, mode=used)
+
+
+#: The three timestamp sidecars beside a store that ``trw-mcp doctor``'s ``memory_wal`` row reads (UF-MEM-26).
+#: ATTEMPT: a checkpoint ran without error. EFFECTIVE: it caught up with the WAL backlog. RESET: a resetting mode
+#: actually ran, the only observation of reclamation. Names are the contract with trw-mcp's ``_wal_triggers``.
+MARKER_ATTEMPT_SUFFIX = ".checkpoint-ts"
+MARKER_EFFECTIVE_SUFFIX = ".checkpoint-effective-ts"
+MARKER_RESET_SUFFIX = ".checkpoint-reset-ts"
+
+
+def stamp_checkpoint_markers(db_path: Path, result: CheckpointResult, *, now: float | None = None) -> None:
+    """Record what *result* proves in the marker files beside *db_path*; fail open, never raises.
+
+    A busy or errored checkpoint stamps nothing, so the next evaluation retries instead of going quiet. The effective
+    marker needs the backlog cleared (``checkpointed >= log_frames``); the reset marker needs a resetting mode to have
+    run (a PASSIVE fallback, or an unsafe engine's coercion, never counts).
+    """
+    import time
+
+    from trw_memory.safe_fs import write_beneath
+
+    if str(db_path) == ":memory:" or result.get("mode") == "error" or result.get("busy"):
+        return
+    stamps = [MARKER_ATTEMPT_SUFFIX]
+    frames = result.get("log_frames")  # absent (a malformed result) proves nothing about the backlog
+    if frames is not None and result.get("checkpointed", 0) >= frames:
+        stamps.append(MARKER_EFFECTIVE_SUFFIX)
+        if result.get("mode") in RESETTING_MODES:
+            stamps.append(MARKER_RESET_SUFFIX)
+    text = f"{time.time() if now is None else now:.3f}\n".encode()
+    for suffix in stamps:
+        try:
+            write_beneath(db_path.parent, db_path.name + suffix, text, mode=0o600)
+        except (
+            OSError
+        ) as exc:  # trw-fail-silent-allow: the marker is advisory; a failed write is logged and the checkpoint stands
+            logger.warning("wal_checkpoint_marker_write_failed", marker=db_path.name + suffix, error=type(exc).__name__)

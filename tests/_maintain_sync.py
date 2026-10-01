@@ -42,5 +42,6 @@ def run_maintain_sync(
     run.passes["consolidation"] = maintain._run_consolidation(namespace, backend, cfg)
     sweep.verify_slice(run, backend, verify_seconds)
     run.passes["security_maintenance"] = maintain._run_security_maintenance()
+    run.passes["snapshot"] = maintain._run_snapshot(backend, cfg)
     run.passes["wal_checkpoint"] = maintain._run_checkpoint(backend)
     return sweep.finish(run, backend)

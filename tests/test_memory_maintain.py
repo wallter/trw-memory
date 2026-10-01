@@ -50,7 +50,14 @@ def test_maintain_runs_the_three_passes_and_records_the_stamp(backend, tmp_path)
 
     assert result["status"] == "ok", result
     passes = result["passes"]
-    assert set(passes) == {"decay", "consolidation", "verification", "security_maintenance", "wal_checkpoint"}
+    assert set(passes) == {
+        "decay",
+        "consolidation",
+        "verification",
+        "security_maintenance",
+        "snapshot",
+        "wal_checkpoint",
+    }
     assert (passes["verification"]["status"], passes["verification"]["reason"]) == ("skipped", "no project_root")
     assert passes["decay"]["status"] == "ok", passes["decay"]
     assert passes["decay"]["scope"] == "namespace"

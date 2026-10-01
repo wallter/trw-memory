@@ -214,9 +214,14 @@ def test_the_session_sweep_spawns_one_lsof_and_at_most_two_ps_whatever_the_daemo
     bystanders = [_unpublished(elsewhere, {**env, OWNER_VARIABLE: _owner()}, detached=True) for _ in range(foreign)]
     spawned += [*planted, *bystanders]
     real_run, calls = subprocess.run, []
+    ours = {p.pid for p in (*planted, *bystanders)}
 
     def counting(argv: list[str], *args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append(argv[0])
+        # An lsof is attributed to THIS test only when it asks about a daemon this test planted. A daemon some other
+        # session starts between the sweep's two censuses legitimately costs one more lsof (it could be a straggler
+        # of the session being swept), and under load that happens: counting it made this bound flaky.
+        asked = {int(pid) for pid in argv[argv.index("-p") + 1].split(",") if pid.isdigit()} if "-p" in argv else set()
+        calls.append("lsof-ours" if argv[0] == "lsof" and asked & ours else argv[0])
         return real_run(argv, *args, **kwargs)  # type: ignore[no-any-return, call-overload]
 
     monkeypatch.setattr(subprocess, "run", counting)
@@ -227,7 +232,7 @@ def test_the_session_sweep_spawns_one_lsof_and_at_most_two_ps_whatever_the_daemo
     assert sweep.survivors == []
     assert all(b.poll() is None for b in bystanders), "another session's daemon must survive"
     assert calls.count("ps") <= 2
-    assert calls.count("lsof") <= 1
+    assert calls.count("lsof-ours") <= 1, "the cwd scan of OUR daemons must stay one call however many there are"
 
 
 @pytest.mark.parametrize(
