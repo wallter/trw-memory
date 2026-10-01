@@ -82,3 +82,21 @@ def test_embedder_status_reports_disabled() -> None:
 
     assert block["available"] is False
     assert block["reason"] == "embeddings_disabled"
+
+
+def test_an_embedder_that_cannot_load_names_the_command_that_repairs_it(monkeypatch) -> None:
+    """E2E-INC-140: ``embedder_error`` carried no ``fix``, so the warning told the operator nothing to run."""
+    from trw_memory.models.config import MemoryConfig
+    from trw_memory.tools import _embedder
+
+    monkeypatch.setattr(_embedder, "get_local_embedder", lambda **_kw: None)
+    monkeypatch.setattr(_embedder, "find_spec", lambda _name: None)
+    config = MemoryConfig(embeddings_enabled=True)
+
+    answer = _embedder.resolve_embedder(config, surface="test")
+    block = _embedder.embedder_status(config)
+
+    assert isinstance(answer, dict) and answer["reason"] == "embedder_error"
+    assert "trw-memory[embeddings]" in str(answer["fix"]) and "--no-embeddings" in str(answer["fix"])
+    assert block["reason"] == "embedder_error"
+    assert block["fix"] == answer["fix"]

@@ -13,6 +13,7 @@ from trw_memory.models.memory import Anchor, MemoryEntry, MemoryStatus
 from trw_memory.retrieval.recall_policy import MAX_RECALL_LIMIT
 from trw_memory.security._runtime_quarantine import list_quarantined_entries
 from trw_memory.storage.sqlite_backend import SQLiteBackend
+from trw_memory.tools._embedder import EMBEDDER_FIX
 from trw_memory.tools.recall_support import (
     RECALL_DUP_THRESHOLD,
     memory_admit_shared_impl,
@@ -76,7 +77,7 @@ def test_no_embedder_is_unavailable_so_recall_keeps_the_exact_content_collapse(
 
     answer = memory_vectors_impl(["row-a"], "default", backend=backend, config=MemoryConfig())
 
-    assert answer == {"status": "unavailable", "reason": "embedder_error"}
+    assert answer == {"status": "unavailable", "reason": "embedder_error", "fix": EMBEDDER_FIX}
 
 
 def test_the_gate_admits_clean_shared_results_and_refuses_a_poisoned_one(

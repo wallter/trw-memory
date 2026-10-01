@@ -11,6 +11,7 @@ from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MAX_ENTRY_ID_CHARS, MemoryEntry
 from trw_memory.storage.sqlite_backend import SQLiteBackend
+from trw_memory.tools._embedder import EMBEDDER_FIX
 from trw_memory.tools.reembed import memory_reembed_impl
 
 pytestmark = pytest.mark.integration
@@ -102,6 +103,7 @@ def test_no_embedder_answers_unavailable_and_writes_nothing(tmp_path: Path, monk
     assert memory_reembed_impl("default", None, backend=store, config=MemoryConfig()) == {
         "status": "unavailable",
         "reason": "embedder_error",
+        "fix": EMBEDDER_FIX,
     }
 
 

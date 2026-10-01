@@ -14,6 +14,7 @@ from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools import similar
+from trw_memory.tools._embedder import EMBEDDER_FIX
 from trw_memory.tools.similar import memory_similar_impl
 
 pytestmark = pytest.mark.unit
@@ -255,7 +256,11 @@ async def test_an_oversized_text_is_refused_before_the_model_is_resolved(monkeyp
 def test_no_embedder_is_unavailable_not_a_store_verdict(
     backend: SQLiteBackend, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    assert _similar(backend, None, monkeypatch) == {"status": "unavailable", "reason": "embedder_error"}
+    assert _similar(backend, None, monkeypatch) == {
+        "status": "unavailable",
+        "reason": "embedder_error",
+        "fix": EMBEDDER_FIX,
+    }
 
 
 def test_a_model_that_is_not_cached_names_the_fetch_command(

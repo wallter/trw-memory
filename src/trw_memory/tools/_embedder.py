@@ -23,6 +23,9 @@ from trw_memory.exceptions import ModelNotCachedError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.storage.interface import StorageBackend
 
+#: What repairs an embedder that cannot load, or turns the capability off on purpose.
+EMBEDDER_FIX = "pip install 'trw-memory[embeddings]' && trw-mcp models fetch; for keyword-only recall, re-run the installer with --no-embeddings"
+
 logger = structlog.get_logger(__name__)
 
 
@@ -37,7 +40,7 @@ def resolve_embedder(config: MemoryConfig, *, surface: str) -> EmbeddingProvider
         return {"status": "unavailable", "reason": "model_not_cached", "fix": FETCH_COMMAND}
     if embedder is None:
         logger.warning("embedder_unavailable", surface=surface, reason="embedder_error")
-        return {"status": "unavailable", "reason": "embedder_error"}
+        return {"status": "unavailable", "reason": "embedder_error", "fix": EMBEDDER_FIX}
     return embedder
 
 
@@ -64,6 +67,8 @@ def embedder_status(config: MemoryConfig) -> dict[str, object]:
     }
     if reason == "model_not_cached":
         block["fix"] = FETCH_COMMAND
+    elif reason == "embedder_error":
+        block["fix"] = EMBEDDER_FIX
     return block
 
 

@@ -68,17 +68,19 @@ _baseline: dict[str, _Stat] = {}
 _warned_soft: set[str] = set()
 
 
+def _stat(path: Path) -> _Stat:
+    """``(mtime_ns, size)`` of *path*, ``None`` where it does not exist."""
+    try:
+        st = path.stat()
+    # trw-fail-silent-allow: absence is the recorded state; None means the file does not exist
+    except FileNotFoundError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
 def snapshot_real_config(home: Path, rels: tuple[str, ...]) -> dict[str, _Stat]:
     """``(mtime_ns, size)`` of each file in *rels* under *home*, ``None`` where it does not exist."""
-    stats: dict[str, _Stat] = {}
-    for rel in rels:
-        try:
-            st = (home / rel).stat()
-        except FileNotFoundError:
-            stats[rel] = None
-        else:
-            stats[rel] = (st.st_mtime_ns, st.st_size)
-    return stats
+    return {rel: _stat(home / rel) for rel in rels}
 
 
 def changed_real_config(home: Path, before: dict[str, _Stat]) -> list[str]:
