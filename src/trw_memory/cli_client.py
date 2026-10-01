@@ -43,6 +43,7 @@ from trw_memory.daemon import (
     read_checkout_pin,
     read_live_discovery,
 )
+from trw_memory.daemon._discovery import AGENT_MUST_NOT_STOP
 from trw_memory.daemon.client import DaemonClient
 from trw_memory.exceptions import DaemonError
 from trw_memory.models.memory import MemoryEntry
@@ -143,9 +144,14 @@ def refused_beside_daemon(verb: str) -> bool:
     if isinstance(found, DiscoveryAbsent):
         return False
     owner = f"pid {found.pid} at {found.url}" if isinstance(found, DaemonInfo) else f"recorded in {found.path}"
+    how = (
+        f"The user stops it with: kill {found.pid} (the next memory call starts a fresh one)."
+        if isinstance(found, DaemonInfo)
+        else f"The user removes {found.path} if no daemon is running."
+    )
     print(
         f"Error: the trw-memory daemon ({owner}) owns the store, and {verb} writes it directly. "
-        f"Stop the daemon, then retry {verb}.",
+        f"Stop the daemon, then retry {verb}. {how} {AGENT_MUST_NOT_STOP}",
         file=sys.stderr,
     )
     return True

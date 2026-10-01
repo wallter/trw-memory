@@ -32,6 +32,7 @@ from pathlib import Path
 
 import structlog
 
+from trw_memory._live_stores import connect_registered
 from trw_memory.exceptions import StorageError
 from trw_memory.storage._snapshot import SnapshotError, create_snapshot, restore_from_snapshot, snapshots_base_dir
 
@@ -191,7 +192,7 @@ def _assert_restorable_store(path: Path) -> None:
                 "backup archive is not a SQLite database (the decompressed bytes have no SQLite header)"
             )
     try:
-        conn = sqlite3.connect(f"{path.as_uri()}?mode=ro&immutable=1", uri=True)
+        conn = connect_registered(path, sqlite3, f"{path.as_uri()}?mode=ro&immutable=1", uri=True, store_lock=False)
         try:
             verdict = [row[0] for row in conn.execute("PRAGMA integrity_check")]
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}

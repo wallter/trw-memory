@@ -96,7 +96,8 @@ def test_scrubbed_spans_encode_through_otlp_and_json(tmp_path: Path) -> None:
     from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
 
     path = tmp_path / "traces-x-1-20260929.jsonl"
-    scrubber = otel_setup.ScrubbingSpanExporter(otel_setup.OtlpJsonFileExporter(path))
+    st = tmp_path.stat()
+    scrubber = otel_setup.ScrubbingSpanExporter(otel_setup.OtlpJsonFileExporter(path, (st.st_dev, st.st_ino)))
     assert scrubber.export([_raising_span()]) is SpanExportResult.SUCCESS
     request = encode_spans([otel_setup._scrub(_raising_span())])
     assert request.resource_spans[0].scope_spans[0].spans[0].status.message == ""

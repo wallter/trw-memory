@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
@@ -14,6 +15,7 @@ from opentelemetry.trace import SpanKind
 
 from tests._otel_support import assert_no_unkeyed_digest
 from trw_memory import otel_setup
+from trw_memory.exceptions import UntrustedDirectoryError
 
 
 def _spans(n: int = 1) -> list[ReadableSpan]:
@@ -28,9 +30,15 @@ def _spans(n: int = 1) -> list[ReadableSpan]:
     return list(mem.get_finished_spans())
 
 
+def _exporter(path: Path) -> otel_setup.OtlpJsonFileExporter:
+    """Built the way install builds it: with the identity of the directory as it is right now."""
+    st = path.parent.lstat()
+    return otel_setup.OtlpJsonFileExporter(path, (st.st_dev, st.st_ino))
+
+
 def test_line_is_otlp_json_with_hex_ids_and_integer_enums(tmp_path: Path) -> None:
     path = tmp_path / "traces-x-1-20260929.jsonl"
-    exporter = otel_setup.OtlpJsonFileExporter(path)
+    exporter = _exporter(path)
     spans = _spans()
     assert exporter.export(spans) is SpanExportResult.SUCCESS
     (line,) = path.read_text().splitlines()
@@ -51,7 +59,7 @@ def test_cap_is_never_exceeded_and_no_line_is_truncated(tmp_path: Path, monkeypa
     path = tmp_path / "traces-x-1-20260929.jsonl"
     one = len(otel_setup.encode_otlp_json_line(_spans()))
     monkeypatch.setattr(otel_setup, "FILE_CAP_BYTES", one * 2 + one // 2)
-    exporter = otel_setup.OtlpJsonFileExporter(path)
+    exporter = _exporter(path)
     results = [exporter.export(_spans()) for _ in range(5)]
     assert results == [SpanExportResult.SUCCESS] * 5
     lines = path.read_bytes().split(b"\n")
@@ -67,7 +75,7 @@ def test_oversized_single_batch_is_dropped_with_one_warning(tmp_path: Path, monk
     monkeypatch.setattr(otel_setup.logger, "warning", lambda event, **_: warnings.append(event))
     monkeypatch.setattr(otel_setup, "FILE_CAP_BYTES", 10)
     path = tmp_path / "traces-x-1-20260929.jsonl"
-    exporter = otel_setup.OtlpJsonFileExporter(path)
+    exporter = _exporter(path)
     assert exporter.export(_spans()) is SpanExportResult.SUCCESS
     assert exporter.export(_spans()) is SpanExportResult.SUCCESS
     assert not path.exists()
@@ -79,7 +87,7 @@ def test_unwritable_directory_returns_failure(tmp_path: Path) -> None:
     ro = tmp_path / "ro"
     ro.mkdir(mode=0o500)
     try:
-        exporter = otel_setup.OtlpJsonFileExporter(ro / "traces-x-1-20260929.jsonl")
+        exporter = _exporter(ro / "traces-x-1-20260929.jsonl")
         assert exporter.export(_spans()) is SpanExportResult.FAILURE
     finally:
         ro.chmod(0o700)
@@ -137,7 +145,7 @@ def test_install_prunes_an_over_budget_directory(tmp_path: Path, monkeypatch: py
 
 def test_a_failed_write_leaves_no_partial_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "traces-x-1-20260929.jsonl"
-    exporter = otel_setup.OtlpJsonFileExporter(path)
+    exporter = _exporter(path)
     assert exporter.export(_spans()) is SpanExportResult.SUCCESS
     before = path.read_bytes()
     real_write = os.write
@@ -245,3 +253,68 @@ def test_prune_and_export_survive_a_hostile_directory_without_raising(
         if mutation == "unreadable":
             d.chmod(0o700)
     assert bystander.read_bytes() == b"b" * 1_000
+
+
+def test_an_exporter_cannot_be_built_without_the_install_time_identity(tmp_path: Path) -> None:
+    """The identity is recorded by the one install site and passed in; it is never derived from the exporter's own parent."""
+    with pytest.raises(TypeError):
+        otel_setup.OtlpJsonFileExporter(tmp_path / "traces-x-1-20260929.jsonl")  # type: ignore[call-arg]
+
+
+def test_an_identity_recorded_for_another_directory_writes_nothing(tmp_path: Path) -> None:
+    """A swap BEFORE construction: the identity handed in is not the directory the file would land in."""
+    recorded = tmp_path / "recorded"
+    recorded.mkdir(mode=0o700)
+    actual = tmp_path / "actual"
+    actual.mkdir(mode=0o700)
+    st = recorded.lstat()
+    exporter = otel_setup.OtlpJsonFileExporter(actual / "traces-x-1-20260929.jsonl", (st.st_dev, st.st_ino))
+
+    assert exporter.export(_spans()) is SpanExportResult.FAILURE
+    assert list(actual.iterdir()) == []
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
+def test_install_refuses_a_symlinked_export_directory(tmp_path: Path) -> None:
+    """A symlinked export dir has no identity of its own: install must neither chmod through it nor bind to it."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside.chmod(0o755)
+    link = tmp_path / "otel"
+    link.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(UntrustedDirectoryError):
+        otel_setup._install_file_exporter("trw-mcp", link)
+
+    assert outside.stat().st_mode & 0o777 == 0o755  # not hardened through the link
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
+def test_a_swap_between_the_identity_check_and_the_open_never_writes_outside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check and the open are one descriptor: a swap landing between them cannot redirect the write."""
+    d = tmp_path / "otel"
+    d.mkdir(mode=0o700)
+    exporter = otel_setup._install_file_exporter("trw-mcp", d)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    moved = tmp_path / "moved"
+    real_open = os.open
+    swapped: list[bool] = []
+
+    def swap_then_open(path: Any, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        if flags & os.O_APPEND and not swapped:  # the trace file's own open: the identity check has already run
+            swapped.append(True)
+            d.rename(moved)
+            d.symlink_to(outside, target_is_directory=True)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", swap_then_open)
+
+    exporter.export(_spans())
+
+    assert swapped
+    assert list(outside.iterdir()) == []  # the link was never followed
+    assert (moved / exporter.path.name).exists()  # the line went to the directory that was verified

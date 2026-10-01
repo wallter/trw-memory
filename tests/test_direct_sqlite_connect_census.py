@@ -204,6 +204,7 @@ def test_every_audited_exception_still_exists_at_its_recorded_site() -> None:
 _UNLOCKED: dict[tuple[str, int], str] = {
     ("storage/_corrupt_backup.py", 76): "a scratch salvage db inside a TemporaryDirectory",
     ("storage/_schema_backup.py", 228): "the pre-migration snapshot target, created fresh",
+    ("storage/_backup_archive.py", 195): "a read-only immutable check of the restore's STAGED temp copy, never a store",
     ("storage/_connection.py", 170): "connect(read_only=True): a read of a file trw-memory did not write (a "
     "checkout's) must create no <db>.oplock beside it; immutable read plus re-stat, identity check kept (PRD-QUAL-147)",
     ("storage/_init_helpers.py", 105): "a read-only user_version read that must hold nothing: it decides whether "

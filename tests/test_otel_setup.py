@@ -143,3 +143,16 @@ def test_console_exporter_writes_to_stderr_never_stdout(
     monkeypatch.setenv("OTEL_TRACES_EXPORTER", "console")
     assert otel_setup.configure_tracing("trw-mcp", tmp_path, enabled=True) is True
     assert _exporter_of(spy[0]).out is sys.stderr
+
+
+def test_a_symlinked_export_directory_installs_nothing(spy: list[Any], tmp_path: Path) -> None:
+    """Install refuses a link rather than bind to (or harden) whatever it points at; telemetry fails open."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = tmp_path / "otel"
+    link.symlink_to(outside, target_is_directory=True)
+
+    assert otel_setup.configure_tracing("trw-mcp", link, enabled=True) is False
+
+    assert spy == []
+    assert list(outside.iterdir()) == []

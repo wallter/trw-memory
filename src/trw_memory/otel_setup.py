@@ -16,7 +16,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import stat
 import sys
 import threading
 import time
@@ -27,6 +26,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
+from trw_memory._dir_trust import open_verified_dir_fd
 from trw_memory._version import __version__
 
 if TYPE_CHECKING:
@@ -39,6 +39,7 @@ FILE_CAP_BYTES = 52_428_800  # 50 MiB per file; a line that does not fit is drop
 DIR_BUDGET_BYTES = 268_435_456  # 256 MiB across traces-*.jsonl, enforced at install and after every write (oldest first, never the live file)
 MAX_FILES = 512  # one file per process: short-lived CLI verbs would otherwise grow the directory unboundedly
 _ID_KEYS = frozenset({"traceId", "spanId", "parentSpanId"})
+_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 _lock = threading.Lock()
 _installed = False
 
@@ -110,25 +111,35 @@ def _select_exporter(service_name: str, file_dir: Path | None) -> SpanExporter |
 
 
 def _install_file_exporter(service_name: str, file_dir: Path) -> OtlpJsonFileExporter:
-    file_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    st = file_dir.lstat()
-    if st.st_uid == os.getuid() and st.st_mode & 0o077:
-        file_dir.chmod(0o700)
-    path = file_dir / f"traces-{service_name}-{os.getpid()}-{time.strftime('%Y%m%d', time.gmtime())}.jsonl"
-    identity = _dir_identity(file_dir)
-    _prune(file_dir, keep=path, identity=identity)
-    return OtlpJsonFileExporter(path, identity)
+    """Bind the exporter to *file_dir* as it is now: the identity is read from the descriptor install itself opened.
 
-
-def _dir_identity(file_dir: Path) -> tuple[int, int] | None:
-    """``(st_dev, st_ino)`` of the export directory itself, never of what a symlink points at."""
+    A symlinked directory is refused (``UntrustedDirectoryError``): it has no identity of its own, and a
+    prune could never bound what it points at. Never ``chmod``-ed through a link either.
+    """
+    fd = open_verified_dir_fd(file_dir, create=True)
     try:
-        st = file_dir.lstat()
-    except (
-        OSError
-    ):  # trw-fail-silent-allow: a missing or unreadable directory has no identity; callers treat None as unbound
+        st = os.fstat(fd)
+        if st.st_uid == os.getuid() and st.st_mode & 0o077:
+            os.fchmod(fd, 0o700)
+        path = file_dir / f"traces-{service_name}-{os.getpid()}-{time.strftime('%Y%m%d', time.gmtime())}.jsonl"
+        _prune_fd(fd, keep=path.name)
+    finally:
+        os.close(fd)
+    return OtlpJsonFileExporter(path, (st.st_dev, st.st_ino))
+
+
+def _open_bound_dir(file_dir: Path, identity: tuple[int, int] | None) -> int | None:
+    """A descriptor on *file_dir* (``O_NOFOLLOW``), or ``None`` when it is not the directory recorded as *identity*.
+
+    Raises ``OSError`` when the directory is absent, unreadable, a symlink or not a directory. The caller
+    does everything else through this descriptor, so the check and the use cannot be split by a swap.
+    """
+    fd = os.open(file_dir, _DIR_FLAGS)
+    opened = os.fstat(fd)
+    if identity is not None and (opened.st_dev, opened.st_ino) != identity:
+        os.close(fd)
         return None
-    return (st.st_dev, st.st_ino) if stat.S_ISDIR(st.st_mode) else None
+    return fd
 
 
 def _prune(file_dir: Path, keep: Path, identity: tuple[int, int] | None = None) -> None:
@@ -139,45 +150,48 @@ def _prune(file_dir: Path, keep: Path, identity: tuple[int, int] | None = None) 
     unlinked, so a prune can never reach a file outside the export directory.
     """
     try:
-        fd = os.open(file_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        fd = _open_bound_dir(file_dir, identity)
     except OSError:
         logger.debug("otel_prune_skipped", reason="directory_unopenable")
         return
+    if fd is None:
+        logger.warning("otel_prune_skipped", reason="directory_replaced")
+        return
     try:
-        opened = os.fstat(fd)
-        if identity is not None and (opened.st_dev, opened.st_ino) != identity:
-            logger.warning("otel_prune_skipped", reason="directory_replaced")
-            return
-        files: list[tuple[float, int, str]] = []
-        total = 0
-        with os.scandir(fd) as entries:
-            for entry in entries:
-                if not (entry.name.startswith("traces-") and entry.name.endswith(".jsonl")):
-                    continue
-                try:  # a concurrent process may prune the same directory: skip what vanished
-                    if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
-                        continue
-                    st = entry.stat(follow_symlinks=False)
-                except OSError:  # trw-fail-silent-allow: a file another process pruned mid-scan is simply absent
-                    continue
-                total += st.st_size
-                if entry.name != keep.name:
-                    files.append((st.st_mtime, st.st_size, entry.name))
-        count = len(files) + 1  # the current process's file is about to exist
-        for _mtime, size, name in sorted(files):
-            if total < DIR_BUDGET_BYTES and count <= MAX_FILES:
-                break
-            try:
-                os.unlink(name, dir_fd=fd)
-            except FileNotFoundError:  # trw-fail-silent-allow: another process already pruned this file
-                pass
-            except OSError:
-                logger.debug("otel_prune_skipped", error_type="OSError")
-                continue
-            total -= size
-            count -= 1
+        _prune_fd(fd, keep=keep.name)
     finally:
         os.close(fd)
+
+
+def _prune_fd(fd: int, keep: str) -> None:
+    files: list[tuple[float, int, str]] = []
+    total = 0
+    with os.scandir(fd) as entries:
+        for entry in entries:
+            if not (entry.name.startswith("traces-") and entry.name.endswith(".jsonl")):
+                continue
+            try:  # a concurrent process may prune the same directory: skip what vanished
+                if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                    continue
+                st = entry.stat(follow_symlinks=False)
+            except OSError:  # trw-fail-silent-allow: a file another process pruned mid-scan is simply absent
+                continue
+            total += st.st_size
+            if entry.name != keep:
+                files.append((st.st_mtime, st.st_size, entry.name))
+    count = len(files) + 1  # the current process's file is about to exist
+    for _mtime, size, name in sorted(files):
+        if total < DIR_BUDGET_BYTES and count <= MAX_FILES:
+            break
+        try:
+            os.unlink(name, dir_fd=fd)
+        except FileNotFoundError:  # trw-fail-silent-allow: another process already pruned this file
+            pass
+        except OSError:
+            logger.debug("otel_prune_skipped", error_type="OSError")
+            continue
+        total -= size
+        count -= 1
 
 
 def _hex_ids(node: Any) -> None:
@@ -216,11 +230,16 @@ class OtlpJsonFileExporter:
     written, so no line is ever truncated; once a line does not fit, this and every later batch is dropped
     with one ``otel_file_cap_reached`` warning and ``SUCCESS`` (the SDK must not retry). I/O errors return
     ``FAILURE``; nothing raises into the host.
+
+    *dir_identity* is ``(st_dev, st_ino)`` of the export directory, recorded by the install that chose *path*
+    (:func:`_install_file_exporter`) and never derived here. Each export opens the directory ``O_NOFOLLOW``,
+    compares that descriptor with the recorded identity, and opens the file relative to the same descriptor, so
+    a swap at any point leaves the write in the verified directory or nowhere.
     """
 
-    def __init__(self, path: Path, dir_identity: tuple[int, int] | None = None) -> None:
+    def __init__(self, path: Path, dir_identity: tuple[int, int]) -> None:
         self._path = path
-        self._dir_identity = dir_identity if dir_identity is not None else _dir_identity(path.parent)
+        self._dir_identity = dir_identity
         self._capped = False
         self._write_lock = threading.Lock()
 
@@ -238,32 +257,42 @@ class OtlpJsonFileExporter:
             if self._capped:
                 return _result("SUCCESS")
             try:
-                size = self._path.stat().st_size if self._path.exists() else 0
-                if size + len(line) > FILE_CAP_BYTES:
-                    self._capped = True
-                    logger.warning("otel_file_cap_reached", cap_bytes=FILE_CAP_BYTES)
-                    return _result("SUCCESS")
-                if _dir_identity(self._path.parent) != self._dir_identity:  # swapped since install: write nowhere else
+                dir_fd = _open_bound_dir(self._path.parent, self._dir_identity)
+                if dir_fd is None:  # swapped since install: write nowhere else
                     logger.warning("otel_file_write_skipped", reason="directory_replaced")
                     return _result("FAILURE")
-                flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-                fd = os.open(self._path, flags, 0o600)
                 try:
-                    written = os.write(fd, line)
-                    if written != len(line):  # never leave a truncated line behind
-                        os.ftruncate(fd, size)
-                        raise OSError("short write")
-                except OSError:
-                    os.ftruncate(fd, size)
-                    raise
+                    return self._append(dir_fd, line)
                 finally:
-                    os.close(fd)
-                _prune(
-                    self._path.parent, self._path, self._dir_identity
-                )  # files grow after install: hold the budget on every write
+                    os.close(dir_fd)
             except OSError as exc:
                 logger.warning("otel_file_write_failed", error_type=type(exc).__name__)
                 return _result("FAILURE")
+
+    def _append(self, dir_fd: int, line: bytes) -> SpanExportResult:
+        """Append one line to this process's file, opened relative to the verified directory descriptor."""
+        name = self._path.name
+        try:
+            size = os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_size
+        except FileNotFoundError:
+            size = 0
+        if size + len(line) > FILE_CAP_BYTES:
+            self._capped = True
+            logger.warning("otel_file_cap_reached", cap_bytes=FILE_CAP_BYTES)
+            return _result("SUCCESS")
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(name, flags, 0o600, dir_fd=dir_fd)
+        try:
+            written = os.write(fd, line)
+            if written != len(line):  # never leave a truncated line behind
+                os.ftruncate(fd, size)
+                raise OSError("short write")
+        except OSError:
+            os.ftruncate(fd, size)
+            raise
+        finally:
+            os.close(fd)
+        _prune_fd(dir_fd, keep=name)  # files grow after install: hold the budget on every write
         return _result("SUCCESS")
 
     def shutdown(self) -> None:
