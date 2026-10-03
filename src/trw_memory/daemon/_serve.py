@@ -42,6 +42,7 @@ from trw_memory.daemon._lane import refuse_lane_submissions
 from trw_memory.daemon._offload import refuse_offload_submissions, shutdown_offload_pool
 from trw_memory.daemon._paths import DaemonPaths, served_store_path
 from trw_memory.daemon._verifier import LoopbackTokenVerifier
+from trw_memory.daemon._warmup import start_model_warmup
 from trw_memory.daemon.client import _package_version
 from trw_memory.exceptions import ConfigError, UntrustedDirectoryError
 from trw_memory.models.config import MemoryConfig
@@ -312,6 +313,7 @@ async def serve_loopback(options: DaemonServeOptions, *, paths: DaemonPaths | No
             tracker = _IdleTracker(_build_app(resolved))
             server = uvicorn.Server(uvicorn.Config(tracker, log_config=None, lifespan="on"))
             logger.info("daemon_serving", url=claim.info.url, pid=claim.info.pid)
+            start_model_warmup()
             watchdog = asyncio.create_task(_watch_idle(tracker, server, options.idle_shutdown_seconds))
             arm_drain(tracker, server, claim.drain_key, resolved)
             if not captured:

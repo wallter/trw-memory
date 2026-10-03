@@ -258,6 +258,13 @@ class TestSSESubscriberDaemonThread:
         mock_response.close.assert_called_once()
         mock_client.close.assert_called_once()
         mock_thread.join.assert_called_once_with(timeout=2.0)
+        # The handles are released: a second stop() must not close the stream again.
+        assert sub._active_response is None
+        assert sub._active_client is None
+        assert sub._stop_event.is_set()
+        sub.stop()
+        mock_response.close.assert_called_once()
+        mock_client.close.assert_called_once()
 
     @patch("trw_memory.sync.subscriber.httpx.Client")
     def test_listen_loop_reconnect_on_http_error(self, mock_client_cls: MagicMock) -> None:

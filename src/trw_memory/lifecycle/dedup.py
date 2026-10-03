@@ -310,6 +310,10 @@ def merge_entries(
     is_incident_upgrade = str(new_entry.type) == "incident" and str(existing.type) != "incident"
     merged_type = MemoryType.INCIDENT.value if is_incident_upgrade else existing.type
     merged_assertions = _union_assertions(existing.assertions, new_entry.assertions)
+    # PRD-SEC-023 FR07: a merge never launders a label; the survivor keeps the maximum stamp of its inputs (no stamp on either side: unchanged).
+    from trw_memory.labels import LabelPolicy
+
+    merged_metadata = LabelPolicy.current().joined(existing.metadata, new_entry.metadata)
 
     logger.debug(
         "dedup_merge_complete",
@@ -332,6 +336,7 @@ def merge_entries(
             "confidence": merged_confidence,
             "type": merged_type,
             "assertions": merged_assertions,
+            "metadata": merged_metadata,
             "updated_at": datetime.now(timezone.utc),
         }
     )

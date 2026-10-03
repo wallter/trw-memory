@@ -351,8 +351,12 @@ class LedgerView:
 
     def blocks(self, entry: MemoryEntry) -> bool:
         """Whether any identity key of *entry* currently resolves to ``quarantined``/``rejected``."""
+        return self.blocks_keys(entry_identity_keys(entry))
+
+    def blocks_keys(self, keys: Iterable[_Key]) -> bool:
+        """Whether any of *keys* (as ``entry_identity_keys`` builds them) currently resolves to a blocking decision."""
         index = self._index
-        return any((row := index.get(key)) is not None and row.blocks for key in entry_identity_keys(entry))
+        return any((row := index.get(key)) is not None and row.blocks for key in keys)
 
     def filter(self, entries: list[MemoryEntry]) -> list[MemoryEntry]:
         """*entries* minus every blocked one (*entries* itself when nothing is ledgered)."""

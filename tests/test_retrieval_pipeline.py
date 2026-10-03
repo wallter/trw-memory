@@ -134,8 +134,23 @@ class TestHybridSearch:
         with patch("trw_memory.retrieval.pipeline.dense_search") as mock_dense:
             mock_dense.return_value = []
             result = hybrid_search("pydantic", entries, embedder=embedder, stored_embeddings=None, scope=DEFAULT_SCOPE)
-        mock_dense.assert_called_once()
-        assert result
+        mock_dense.assert_called_once_with(
+            query="pydantic",
+            entry_ids=["e1", "e2", "e3", "e4", "e5"],
+            embedder=embedder,
+            query_embedding=None,
+            stored_embeddings=None,
+            top_k=50,
+        )
+        # No dense hits, so the result is the BM25 ranking alone.
+        assert [entry.id for entry in result] == ["e1"]
+
+        # Control: stored embeddings make dense hits count, so the empty dense list above is what dropped them.
+        with patch("trw_memory.retrieval.pipeline.dense_search", return_value=[("e5", 1.0)]):
+            fused = hybrid_search(
+                "pydantic", entries, embedder=embedder, stored_embeddings={"e5": [0.1, 0.2, 0.3]}, scope=DEFAULT_SCOPE
+            )
+        assert sorted(entry.id for entry in fused) == ["e1", "e5"]
 
     def test_entries_returned_are_original_objects(self) -> None:
         entries = self._entries()

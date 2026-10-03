@@ -73,10 +73,8 @@ def test_a_removed_knob_warns_once_and_never_raises(
     assert not hasattr(cfg, name)
 
 
-def test_trw_mcps_own_memory_prefixed_yaml_keys_are_not_called_retired(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """``memory_hot_ttl_days`` and friends are still live keys of trw-mcp's own YAML-store sweep."""
+def test_the_memory_prefixed_yaml_spellings_are_retired_too(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """trw-mcp's own YAML-store sweep (their only other reader) was removed (UF-PRD-23), so these are leftovers now."""
     (tmp_path / ".trw").mkdir()
     (tmp_path / ".trw" / "config.yaml").write_text(
         "memory_hot_ttl_days: 3\nmemory_cold_threshold_days: 45\nmemory_retention_days: 180\n", encoding="utf-8"
@@ -86,4 +84,8 @@ def test_trw_mcps_own_memory_prefixed_yaml_keys_are_not_called_retired(
     with capture_logs() as logs:
         MemoryConfig()
 
-    assert _retired(logs) == []
+    assert sorted(str(e["setting"]).lower() for e in _retired(logs)) == [
+        "memory_cold_threshold_days",
+        "memory_hot_ttl_days",
+        "memory_retention_days",
+    ]

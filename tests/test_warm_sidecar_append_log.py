@@ -84,7 +84,7 @@ class TestAccessRefreshAppends:
         sidecar = store._warm_sidecar_path()
         size_before = sidecar.stat().st_size
         later = T0 + timedelta(days=2)
-        with patch("trw_memory.lifecycle.tiers._warm.os.replace") as replace:
+        with patch("trw_memory.safe_fs.os.replace") as replace:
             _touch(store, [3, 7], later)
         replace.assert_not_called()
         appended = sidecar.read_bytes()[size_before:].decode("utf-8").splitlines()
@@ -190,7 +190,7 @@ class TestCrashSafety:
         store = _seeded(tmp_path, n=4)
         before = store._warm_sidecar_path().read_bytes()
         with (
-            patch("trw_memory.lifecycle.tiers._warm.os.replace", side_effect=OSError("crash before rename")),
+            patch("trw_memory.safe_fs.os.replace", side_effect=OSError("crash before rename")),
             pytest.raises(OSError),
         ):
             store.warm_add_many([("M-0001", _payload(1, content="changed"), None)])
@@ -254,7 +254,7 @@ class TestRecallPath:
             await memory_client.recall("sunrise painting", limit=5)
             warm = get_tier_manager(memory_client._config, "default")._warm_store
             before = datetime.now(timezone.utc)
-            with patch("trw_memory.lifecycle.tiers._warm.os.replace", wraps=os.replace) as replace:
+            with patch("trw_memory.safe_fs.os.replace", wraps=os.replace) as replace:
                 first = await memory_client.recall("sunrise painting", limit=5)
                 await memory_client.recall("painting lesson", limit=5)
         assert first

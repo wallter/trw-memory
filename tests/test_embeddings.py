@@ -167,6 +167,17 @@ class TestGracefulDegradationViaImport:
             result = provider.embed("test text")
         assert result is None
 
+        # Control: a loadable model for the same input yields its exact vector.
+        live_model = MagicMock()
+        live_model.encode.return_value = [0.5, 0.25]
+        with patch(
+            "trw_memory.embeddings.local.LocalEmbeddingProvider._load_model",
+            return_value=live_model,
+        ):
+            live = LocalEmbeddingProvider()
+            assert live.embed("test text") == [0.5, 0.25]
+        live_model.encode.assert_called_once_with("test text", normalize_embeddings=True)
+
     def test_available_returns_false_when_sentence_transformers_missing(self) -> None:
         with patch(
             "trw_memory.embeddings.local.LocalEmbeddingProvider._load_model",
@@ -380,6 +391,13 @@ class TestMockedModelSuccess:
 
         result = provider.embed("some text")
         assert result is None
+        mock_model.encode.assert_called_once_with("some text", normalize_embeddings=True)
+
+        # Control: once the model stops failing, the same provider returns the exact vector.
+        mock_model.encode.side_effect = None
+        mock_model.encode.return_value = [1.0, 2.0, 3.0]
+        assert provider.embed("some text") == [1.0, 2.0, 3.0]
+        assert mock_model.encode.call_count == 2
 
     def test_embed_batch_raises_handled_gracefully(self) -> None:
         provider = LocalEmbeddingProvider(dim=3)

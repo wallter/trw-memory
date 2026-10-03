@@ -27,12 +27,14 @@ from pydantic import TypeAdapter, ValidationError
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
-__all__ = ["CONTACT_ENV", "CONTACT_KEY", "platform_contact_enabled"]
+__all__ = ["CONTACT_ENV", "CONTACT_KEY", "platform_contact_enabled", "team_sync_enabled"]
 
 logger = structlog.get_logger(__name__)
 
 CONTACT_KEY = "platform_contact_enabled"
 CONTACT_ENV = "TRW_PLATFORM_CONTACT_ENABLED"
+TEAM_SYNC_KEY = "team_sync_enabled"
+TEAM_SYNC_ENV = "TRW_TEAM_SYNC_ENABLED"
 _BOOL: TypeAdapter[bool] = TypeAdapter(bool)
 
 
@@ -52,12 +54,34 @@ def platform_contact_enabled(project_root: Path | str | None = None, env: Mappin
         return False
 
 
-def _resolve(project_root: Path | str | None, environ: Mapping[str, str]) -> bool:
+def team_sync_enabled(project_root: Path | str | None = None, env: Mapping[str, str] | None = None) -> bool:
+    """Whether team sync (the consent that turns on shared recall) is on right now, read live.
+
+    Same layers as :func:`platform_contact_enabled` (environment, project config, machine config),
+    but the default is OFF and every fault resolves to OFF: a recall query may leave the machine only
+    on an explicit yes, never on a missing key or an unreadable file.
+    """
+    try:
+        return _resolve(project_root, os.environ if env is None else env, TEAM_SYNC_KEY, TEAM_SYNC_ENV, default=False)
+    except Exception:  # justified: fail closed, a consent that cannot be read grants nothing
+        with contextlib.suppress(Exception):  # trw-fail-silent-allow: even a failing log must not escape
+            logger.warning("team_sync_resolution_failed", outcome="query_stays_local", exc_info=True)
+        return False
+
+
+def _resolve(
+    project_root: Path | str | None,
+    environ: Mapping[str, str],
+    key: str = CONTACT_KEY,
+    env_name: str = CONTACT_ENV,
+    *,
+    default: bool = True,
+) -> bool:
     root = Path(project_root) if project_root else _project_root(environ)
     layers = (("environment", None), ("project config", root), ("machine config", Path.home()))
     for layer, where in layers:
         try:
-            raw = environ.get(CONTACT_ENV) if where is None else _config_value(where / ".trw" / "config.yaml")
+            raw = environ.get(env_name) if where is None else _config_value(where / ".trw" / "config.yaml", key)
         except (OSError, YAMLError, UnicodeDecodeError, ValueError):
             logger.warning("platform_contact_config_unreadable", layer=layer, outcome="contact_off")
             return False
@@ -66,9 +90,14 @@ def _resolve(project_root: Path | str | None, environ: Mapping[str, str]) -> boo
         try:
             return _BOOL.validate_python(raw)
         except ValidationError:
-            logger.warning("platform_contact_value_invalid", layer=layer, key=CONTACT_KEY, outcome="contact_off")
+            logger.warning(
+                "platform_contact_value_invalid",
+                layer=layer,
+                key=key,
+                outcome="contact_off" if key == CONTACT_KEY else "query_stays_local",
+            )
             return False
-    return True
+    return default
 
 
 def _project_root(environ: Mapping[str, str]) -> Path:
@@ -80,11 +109,11 @@ def _project_root(environ: Mapping[str, str]) -> Path:
     return found.parent if found is not None else Path.cwd()
 
 
-def _config_value(path: Path) -> object:
+def _config_value(path: Path, key: str = CONTACT_KEY) -> object:
     if not path.is_file():
         return None
     with path.open(encoding="utf-8") as handle:
         loaded = YAML(typ="safe").load(handle)
     if loaded is not None and not isinstance(loaded, dict):  # a list or bare scalar is not a config (sol P2)
         raise ValueError(f"{path} is not a mapping")
-    return loaded.get(CONTACT_KEY) if loaded else None
+    return loaded.get(key) if loaded else None

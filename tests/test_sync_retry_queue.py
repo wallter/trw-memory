@@ -437,7 +437,9 @@ class TestRetryQueue:
     def test_drain_retry_queue_republishes_payloads(self, tmp_path: Path) -> None:
         """The remote helper drains queued payloads through the publish transport."""
         queue = RetryQueue(tmp_path / "queue.jsonl")
-        queue.enqueue("M-001", {"summary": "test", "source_learning_id": "M-001"})
+        queue.enqueue(
+            "M-001", {"summary": "test", "source_learning_id": "M-001", "_ledger_keys": [["id", "default", "M-001"]]}
+        )
 
         with patch("trw_memory.sync.remote.httpx.Client") as mock_client_cls:
             _mock_httpx_client(mock_client_cls, status_code=200, json_data={"id": "42"})
@@ -455,7 +457,14 @@ class TestRetryQueue:
         """Payload metadata cannot redirect reconciliation to another local entry."""
         queue_path = tmp_path / "queue.jsonl"
         queue_path.write_text(
-            _record_line("M-canonical", {"summary": "test", "source_learning_id": "M-payload"}),
+            _record_line(
+                "M-canonical",
+                {
+                    "summary": "test",
+                    "source_learning_id": "M-payload",
+                    "_ledger_keys": [["id", "default", "M-payload"]],
+                },
+            ),
             encoding="utf-8",
         )
         queue = RetryQueue(queue_path)

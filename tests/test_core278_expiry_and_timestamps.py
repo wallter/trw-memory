@@ -148,9 +148,8 @@ class TestMaintenanceDoesNotStampContentTime:
             assert after.updated_at == before.updated_at
             assert after.last_accessed_at != before.last_accessed_at
             assert after.access_count == before.access_count + 1
-            # Replication still sees the row: selection is on sync_seq, not on
-            # updated_at (sync/delta.py).
-            assert after.sync_seq > before.sync_seq
+            # Counters are local telemetry: a recall is not a revision, so the row is not dirty for push.
+            assert after.sync_seq == before.sync_seq
 
     def test_a_content_update_still_moves_updated_at(self) -> None:
         with tempfile.TemporaryDirectory() as td, self._backend(td, "sqlite") as backend:

@@ -44,10 +44,22 @@ MIN_ANOMALY_BASELINE = 10
 _CODE_EXEMPT_PATTERNS = (
     re.compile(r"<script\b", re.IGNORECASE),
     re.compile(r"javascript[ \t]*:", re.IGNORECASE),
-    # Not ``\b``: a hyphen is a word boundary, so ``\beval`` matched the package name in
-    # "trw-eval (which reads ...)" and blocked ordinary prose. A dot must NOT exempt:
-    # ``window.eval(`` is the attack shape (release-verify 2026-09-17 P1).
-    re.compile(r"(?<![\w-])eval[ \t]*\(", re.IGNORECASE),
+    # ``eval(`` in COMMAND position only: at the start of a field or line, after a clause or sentence break, or
+    # after an execution word ("run", "then", "to", ...). Prose that names the builtin ("the helper calls
+    # eval(payload)", "Writing eval(...) in a note was flagged") instructs nobody, and refusing it cost real
+    # learnings (WRITE-GATE-EVAL-FP, 2026-10-01). A dotted receiver is still the attack shape in command position
+    # (``then run window.eval(`` -- release-verify 2026-09-17 P1); a sentence break needs whitespace after it, so
+    # the dot inside ``window.eval(`` is never itself an anchor. ``trw-eval (`` and ``my_eval(`` never match:
+    # nothing but a dotted name may sit between the anchor and ``eval``.
+    # A modal or a subject ("You should use eval(", "Make sure you eval(") may sit up to two words before the call
+    # (codex r1 block, WRITE-GATE-EVAL-FP). The rule stays lexical: an instruction phrased with none of these
+    # words passes, which is the accepted cost of storing notes that discuss eval( (CHANGELOG Known issues).
+    re.compile(
+        r"(?:^|[;:|&]|[.!?](?=[ \t\n])|\b(?:run|execute|exec|call|invoke|then|first|always|now|just|please|must"
+        r"|should|to)\b|\b(?:should|must|shall|need|needs|you|always|please)\b(?:[ \t]+[\w-]+){0,2}?)"
+        r"[ \t,\"'`(]*(?:[\w$]+\.)*eval[ \t]*\(",
+        re.IGNORECASE | re.MULTILINE,
+    ),
     re.compile(r"rm[ \t]+-rf[ \t]+/", re.IGNORECASE),
 )
 # NOTE on the classification: `<script` and `javascript:` are waivable because

@@ -7,7 +7,6 @@ for keyword search.
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Collection, Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -282,8 +281,10 @@ class WarmTierStore:
                 return
             # A torn tail (crash mid-append) is terminated first so the new
             # rows do not fuse with it; the fragment stays a skipped line.
-            with sidecar.open("a", encoding="utf-8") as fh:
-                fh.write(("\n" if parsed.torn_tail else "") + "".join(line + "\n" for line in dumped))
+            from trw_memory.safe_fs import append_beneath
+
+            text = ("\n" if parsed.torn_tail else "") + "".join(line + "\n" for line in dumped)
+            append_beneath(sidecar.parent.resolve(), sidecar.name, text.encode("utf-8"), mode=0o666)  # AIKIDO 2b
             self._sidecar_cache.record_append(sidecar, parsed, new_rows)
 
     def _replace_sidecar(self, sidecar: Path, rows: list[dict[str, object]]) -> None:
@@ -293,9 +294,10 @@ class WarmTierStore:
         cache) never sees a half-written file. Corrupt and superseded lines are
         dropped: this is also the compaction path.
         """
-        tmp = sidecar.with_name(sidecar.name + ".tmp")
-        tmp.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
-        os.replace(tmp, sidecar)
+        from trw_memory.safe_fs import write_beneath
+
+        payload = "".join(json.dumps(r) + "\n" for r in rows).encode("utf-8")
+        write_beneath(sidecar.parent.resolve(), sidecar.name, payload, mode=0o666)  # no predictable .tmp (AIKIDO 2b)
         self._sidecar_cache.record_rewrite(sidecar, rows)
 
     def warm_remove(self, entry_id: str) -> bool:

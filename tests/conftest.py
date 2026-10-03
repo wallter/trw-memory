@@ -270,6 +270,18 @@ def reset_embedding_provider_cache() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def no_daemon_model_warmup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the daemon's model warmup out of every test that serves in-process (DAEMON-MODEL-WARMUP).
+
+    ``serve_loopback`` starts a background thread that imports torch and loads two real models, about 5 s of
+    CPU and 670 MB. Left on, a test that serves in-process leaves that work running under the next tests of the
+    same xdist worker, and the timing-sensitive ones (lane queue budgets, served-tool offload) fail under load.
+    ``test_daemon_warmup.py`` exercises the warmup itself, with the loaders stubbed, through ``_warmup`` directly.
+    """
+    monkeypatch.setattr("trw_memory.daemon._serve.start_model_warmup", lambda *_a, **_k: None)
+
+
+@pytest.fixture(autouse=True)
 def restore_daemon_store_pins() -> Iterator[None]:
     """Undo the store pins a daemon start writes into ``os.environ``.
 

@@ -473,3 +473,9 @@ class TestModuleConstants:
 
     def test_fetch_timeout(self) -> None:
         assert FETCH_TIMEOUT == 3.0
+
+
+@pytest.fixture(autouse=True)
+def _team_sync_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shared fetch sends the query only with team sync on (test_recall_query_egress.py proves the gate)."""
+    monkeypatch.setenv("TRW_TEAM_SYNC_ENABLED", "true")

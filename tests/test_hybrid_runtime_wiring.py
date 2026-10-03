@@ -6,7 +6,7 @@ from collections.abc import MutableMapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import structlog
@@ -430,6 +430,18 @@ def test_client_get_embedder_uses_configured_settings(
     embedder_mock.assert_called_once_with(model_name="custom-model", dim=768, enabled=True)
     assert result is None
 
+    provider = _StubEmbedder()
+    configured = MemoryClient(namespace="default", mode="local")
+    try:
+        with patch("trw_memory.embeddings.get_local_embedder", return_value=provider) as provider_mock:
+            configured_result = configured._get_embedder()
+    finally:
+        if configured._backend is not None:
+            configured._backend.close()
+
+    assert provider_mock.call_args == call(model_name="custom-model", dim=768, enabled=True)
+    assert configured_result is provider
+
 
 def test_client_get_embedder_reuses_provider_for_client_lifetime(
     tmp_path: Path,
@@ -478,6 +490,20 @@ def test_client_get_embedder_caches_unavailable_result(
             backend.close()
 
     embedder_mock.assert_called_once()
+
+    provider = _StubEmbedder()
+    cached = MemoryClient(namespace="default", mode="local")
+    try:
+        with patch("trw_memory.embeddings.get_local_embedder", return_value=provider) as provider_mock:
+            first = cached._get_embedder()
+            second = cached._get_embedder()
+    finally:
+        if cached._backend is not None:
+            cached._backend.close()
+
+    assert provider_mock.call_count == 1
+    assert first is provider
+    assert second is provider
 
 
 async def test_client_close_releases_cached_embedder(

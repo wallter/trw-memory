@@ -8,8 +8,10 @@ from typing import cast
 import httpx
 import structlog
 
+from trw_memory.labels import LabelPolicy, Sink
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.security.egress_gate import egress_refused, identity_keys
 from trw_memory.security.pii import anonymize_installation_id, redact_paths, strip_pii
 from trw_memory.sync._remote_common import (
     MAX_DETAIL_LENGTH,
@@ -59,15 +61,26 @@ def _extract_remote_id(response: httpx.Response) -> str | None:
     return None
 
 
+#: The ledger keys a queued payload carries (PRD-CORE-333): never sent, read at the POST site.
+LEDGER_KEYS_FIELD = "_ledger_keys"
+
+
 def _publish_payload_result(
     payload: dict[str, object],
     cfg: MemoryConfig,
     *,
     entry_id: str = "",
+    ledger_keys: object = None,
 ) -> PublishResult:
     # Asked again at the one POST site, so every retry-drain send sees the switch as it is now.
     if platform_contact_blocked(cfg, "memory_publish"):
         return {"success": False, "remote_id": None, "retryable": False}
+    # PRD-CORE-333: the quarantine ledger is asked here too, immediately before the POST, so a row quarantined
+    # after it was queued never leaves the host. A payload with no identity cannot be proven clean: refused.
+    refusal = egress_refused(ledger_keys, cfg) if isinstance(ledger_keys, list) else "blocked"
+    if refusal is not None:
+        logger.info("memory_publish_withheld_by_quarantine", entry_id=entry_id, reason=refusal)
+        return {"success": False, "remote_id": None, "retryable": refusal == "unreadable"}
 
     try:
         publish_url = f"{cfg.platform_url.rstrip('/')}/v1/learnings"
@@ -96,9 +109,15 @@ def publish_memory_result(
 ) -> PublishResult:
     if platform_contact_blocked(cfg, "memory_publish") or entry.importance < cfg.sync_min_importance:
         return {"success": False, "remote_id": None, "retryable": False}
+    if not LabelPolicy.current().admit([entry], Sink.PLATFORM).admitted:
+        # PRD-SEC-023 FR05: a row labelled above team never leaves the host; not retryable, so it is never queued either.
+        logger.info("memory_publish_withheld_by_label", entry_id=entry.id)
+        return {"success": False, "remote_id": None, "retryable": False}
 
     payload = _anonymize_entry(entry, project_root)
-    return _publish_payload_result(cast("dict[str, object]", payload), cfg, entry_id=entry.id)
+    return _publish_payload_result(
+        cast("dict[str, object]", payload), cfg, entry_id=entry.id, ledger_keys=identity_keys(entry)
+    )
 
 
 def drain_retry_queue(queue: RetryQueue, cfg: MemoryConfig) -> RetryDrainResult:
@@ -125,7 +144,9 @@ def _drain_retry_queue_with_ids(
         payload.pop("embedding", None)
         source_learning_id = payload.get("source_learning_id")
         entry_id = str(source_learning_id) if isinstance(source_learning_id, str) else ""
-        result = _publish_payload_result(payload, cfg, entry_id=entry_id)
+        # The keys stay in the queued record (a failed send is re-persisted from this dict); only the POST omits them.
+        body = {key: value for key, value in payload.items() if key != LEDGER_KEYS_FIELD}
+        result = _publish_payload_result(body, cfg, entry_id=entry_id, ledger_keys=payload.get(LEDGER_KEYS_FIELD))
         if result["success"]:
             published_remote_ids.append(result["remote_id"])
         return result["success"]

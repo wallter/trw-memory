@@ -205,15 +205,9 @@ class TestSearchQueryIsSanitizedOnTheWire:
         "query",
         [
             "how do I tune the recall dedup threshold",
-            # A query is the caller's SEARCH INTENT, so the masking is deliberately
-            # narrower than strip_pii, which also masks PHONE/SSN/CREDIT_CARD/IP.
-            # Those detectors are shape-based and eat legitimate search terms: a
-            # bare 10-digit epoch matches the PHONE shape, and an internal IP is a
-            # perfectly good thing to search for. Masking them would leave no
-            # remote hit possible. Publish-direction egress keeps full strip_pii —
-            # a published learning is durable, a query is not.
-            "scheduler stalled at 1753833600",
-            "why does 10.0.0.5 refuse connections",
+            # A query leaves under the full strip_pii too (lead ruling 2026-10-02, RECALL-QUERY-EGRESS-CENSUS):
+            # only terms that carry no PII shape are sent unchanged. The shape-based IP/PHONE masking is
+            # covered by the next test; it costs remote hits on epochs and IPs.
             "why does /home/alice/proj/src/auth.py fail",
         ],
     )
@@ -224,6 +218,20 @@ class TestSearchQueryIsSanitizedOnTheWire:
 
         client.post.assert_called_once()
         assert client.post.call_args.kwargs["json"]["query"] == query
+
+    @pytest.mark.parametrize(
+        ("query", "sent"),
+        [
+            ("scheduler stalled at 1753833600", "scheduler stalled at <phone>"),
+            ("why does 10.0.0.5 refuse connections", "why does <ip> refuse connections"),
+        ],
+    )
+    def test_pii_shaped_terms_in_a_query_are_masked_on_the_wire(self, query: str, sent: str) -> None:
+        with patch("trw_memory.sync._remote_fetch.httpx.Client") as mock_cls:
+            client = _mock_client(mock_cls)
+            fetch_shared_memories(query, SYNC_CONFIG, admit=store_gate(SYNC_CONFIG, gate_backend()))
+
+        assert client.post.call_args.kwargs["json"]["query"] == sent
 
 
 class TestFailedFetchIsDistinguishableFromAnEmptyCorpus:
@@ -264,3 +272,9 @@ class TestFailedFetchIsDistinguishableFromAnEmptyCorpus:
         # Same empty list as the two failures above, and now a different status.
         assert (fetched.results, fetched.status) == ([], "ok")
         mock_logger.warning.assert_not_called()
+
+
+@pytest.fixture(autouse=True)
+def _team_sync_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shared fetch sends the query only with team sync on (test_recall_query_egress.py proves the gate)."""
+    monkeypatch.setenv("TRW_TEAM_SYNC_ENABLED", "true")

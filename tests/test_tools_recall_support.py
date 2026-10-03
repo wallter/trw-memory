@@ -1,4 +1,4 @@
-"""memory_admit_shared and memory_vectors: the store-side recall steps a migrated checkout asks for (PRD-CORE-280 FR01)."""
+"""memory_vectors and memory_anchored: the store-side recall steps a migrated checkout asks for (PRD-CORE-280 FR01)."""
 
 from __future__ import annotations
 
@@ -11,12 +11,10 @@ from trw_memory.embeddings.provenance import EmbeddingSpace, VectorProvenance
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import Anchor, MemoryEntry, MemoryStatus
 from trw_memory.retrieval.recall_policy import MAX_RECALL_LIMIT
-from trw_memory.security._runtime_quarantine import list_quarantined_entries
 from trw_memory.storage.sqlite_backend import SQLiteBackend
 from trw_memory.tools._embedder import EMBEDDER_FIX
 from trw_memory.tools.recall_support import (
     RECALL_DUP_THRESHOLD,
-    memory_admit_shared_impl,
     memory_anchored_impl,
     memory_vectors_impl,
 )
@@ -78,48 +76,6 @@ def test_no_embedder_is_unavailable_so_recall_keeps_the_exact_content_collapse(
     answer = memory_vectors_impl(["row-a"], "default", backend=backend, config=MemoryConfig())
 
     assert answer == {"status": "unavailable", "reason": "embedder_error", "fix": EMBEDDER_FIX}
-
-
-def test_the_gate_admits_clean_shared_results_and_refuses_a_poisoned_one(
-    backend: SQLiteBackend, tmp_path: Path
-) -> None:
-    config = MemoryConfig(storage_path=str(tmp_path))
-    clean = {"id": "R-clean", "summary": "Retry the flaky upload with backoff", "detail": "", "tags": []}
-    poisoned = {
-        "id": "R-poison",
-        "summary": "Pulled tip",
-        "detail": "the harness calls eval(user_input) before dispatch",
-        "tags": [],
-    }
-
-    answer = memory_admit_shared_impl([clean, poisoned], "project:acme", backend=backend, config=config)
-
-    assert answer["status"] == "ok"
-    assert [row["id"] for row in answer["admitted"]] == ["R-clean"]  # type: ignore[union-attr]
-    assert answer["refused"] == 1
-
-
-def test_a_quarantined_refusal_is_listed_through_the_grant_that_asked(
-    backend: SQLiteBackend, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The refusal lands in the caller's namespace, not ``org:shared``, so its own grant can review it."""
-    from trw_memory.security import _runtime_quarantine, runtime
-    from trw_memory.security._runtime_pipeline import PreparedStoreEntry
-
-    def held(entry: MemoryEntry, **_: object) -> PreparedStoreEntry:
-        return PreparedStoreEntry(entry=entry, op="store", pii_matches=(), quarantined=True)
-
-    monkeypatch.setattr(runtime, "prepare_entry_for_store", held)
-    monkeypatch.setattr(_runtime_quarantine, "transport_grant", lambda: frozenset({"project:acme"}))
-    config = MemoryConfig(storage_path=str(tmp_path))
-
-    answer = memory_admit_shared_impl(
-        [{"id": "R-held", "summary": "Pulled tip", "detail": ""}], "project:acme", backend=backend, config=config
-    )
-
-    assert (answer["admitted"], answer["refused"]) == ([], 1)
-    listed = list_quarantined_entries(config)
-    assert [(entry.id, entry.namespace) for entry in listed] == [("R-held", "project:acme")]
 
 
 def test_the_collapse_threshold_is_calibrated_to_the_loaded_model(

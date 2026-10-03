@@ -152,7 +152,13 @@ def _gated_entry_names(func: ast.AST, before: int) -> dict[str, str]:
     entries: dict[str, str] = {}
     containers: dict[str, str] = {}
 
-    for sub in ast.walk(func):
+    # Source order, not ``ast.walk``'s breadth-first order: a rebind at function level (``row = decision.entry``) is shallower than the gate call
+    # inside a ``try:`` (``decision = prepare_entry_for_store(...)``), so a breadth-first walk saw the rebind first and never marked ``row`` as gated
+    # (apply_synced_entry after embed-on-store, 2026-10-02).
+    in_source_order = sorted(
+        (n for n in ast.walk(func) if hasattr(n, "lineno")), key=lambda n: (n.lineno, getattr(n, "col_offset", 0))
+    )
+    for sub in in_source_order:
         if isinstance(sub, ast.Assign) and sub.lineno < before and len(sub.targets) == 1:
             target = sub.targets[0]
             value = sub.value
@@ -387,6 +393,35 @@ class TestScannerContracts:
         calls = self._scan_snippet(
             "def save(backend, entry):\n"
             "    prepare_entry_for_store(entry, backend=backend, config=cfg)\n"
+            "    backend.store(entry)\n"
+        )
+        assert [call.gate for call in calls] == [""]
+        assert _bypasses(calls) == calls
+
+    def test_scanner_clears_a_rebind_that_is_shallower_than_a_gate_inside_a_try(self) -> None:
+        """apply_synced_entry's shape: the gate runs inside ``try:``, the verdict is rebound at function level, the rebound row is stored."""
+        calls = self._scan_snippet(
+            "def apply(backend, entry):\n"
+            "    try:\n"
+            "        decision = prepare_entry_for_store(entry, backend=backend, config=cfg)\n"
+            "    except PoisoningError:\n"
+            "        return 'blocked'\n"
+            "    row = decision.entry\n"
+            "    with backend.transaction():\n"
+            "        backend.store(row)\n"
+        )
+        assert [call.gate for call in calls] == ["prepare_entry_for_store"]
+        assert _bypasses(calls) == []
+
+    def test_scanner_still_rejects_the_original_entry_stored_after_a_gate_in_a_try(self) -> None:
+        """The ordering fix must not loosen the rule: storing the ORIGINAL entry after a gated try block is still a bypass."""
+        calls = self._scan_snippet(
+            "def apply(backend, entry):\n"
+            "    try:\n"
+            "        decision = prepare_entry_for_store(entry, backend=backend, config=cfg)\n"
+            "    except PoisoningError:\n"
+            "        return 'blocked'\n"
+            "    row = decision.entry\n"
             "    backend.store(entry)\n"
         )
         assert [call.gate for call in calls] == [""]

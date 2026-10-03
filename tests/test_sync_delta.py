@@ -189,6 +189,9 @@ def test_fallback_dirty_scan_expands_past_synced_prefix() -> None:
         def count(self) -> int:
             return next(self.counts)
 
+        def filter_quarantined(self, entries: list[MemoryEntry]) -> list[MemoryEntry]:
+            return entries  # no quarantine ledger in this fake (PRD-CORE-333 asks every backend)
+
         def list_entries(self, *, limit: int) -> list[MemoryEntry]:
             self.limits.append(limit)
             return [synced] if limit < 10_004 else [synced, dirty]
@@ -212,6 +215,9 @@ def test_fallback_dirty_scan_is_bounded_when_backend_keeps_growing() -> None:
         def count(self) -> int:
             self.current_count += 2
             return self.current_count
+
+        def filter_quarantined(self, entries: list[MemoryEntry]) -> list[MemoryEntry]:
+            return entries  # no quarantine ledger in this fake (PRD-CORE-333 asks every backend)
 
         def list_entries(self, *, limit: int) -> list[MemoryEntry]:
             self.limits.append(limit)

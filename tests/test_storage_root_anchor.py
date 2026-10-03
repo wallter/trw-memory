@@ -277,7 +277,10 @@ def post_calls() -> Iterator[MagicMock]:
 def _publish_with_a_fresh_config() -> None:
     from trw_memory.sync._remote_publish import _publish_payload_result
 
-    _publish_payload_result({"source_learning_id": "M-1"}, MemoryConfig(), entry_id="M-1")
+    # A send carries its ledger identity (PRD-CORE-333); these tests are about the contact switch.
+    _publish_payload_result(
+        {"source_learning_id": "M-1"}, MemoryConfig(), entry_id="M-1", ledger_keys=[["id", "default", "M-1"]]
+    )
 
 
 def test_r2_unrelated_cwd_with_trw_dir_makes_zero_posts(

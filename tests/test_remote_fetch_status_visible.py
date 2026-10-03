@@ -24,6 +24,13 @@ from trw_memory.sync import fetch_shared_memories, store_gate
 
 pytestmark = pytest.mark.integration
 
+
+@pytest.fixture(autouse=True)
+def _team_sync_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests are about admission outcomes; the query reaches the platform only with team sync on."""
+    monkeypatch.setenv("TRW_TEAM_SYNC_ENABLED", "true")
+
+
 _ITEMS: list[dict[str, object]] = [
     {"source_learning_id": "R-1", "summary": "a peer learning", "detail": "d1"},
     {"source_learning_id": "R-2", "summary": "another peer learning", "detail": "d2"},

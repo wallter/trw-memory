@@ -53,7 +53,11 @@ class TestRefuseNewViolation:
         assert excinfo.value.reason == "verified_requires_observed_or_verified_evidence"
 
     def test_a_brand_new_valid_entry_is_accepted(self) -> None:
-        refuse_new_violation(None, _entry("M-1", confidence="verified", evidence_level="observed"))  # no raise
+        assert refuse_new_violation(None, _entry("M-1", confidence="verified", evidence_level="observed")) is None
+        # Control: the same entry with weaker evidence is refused.
+        with pytest.raises(SchemaValidationError) as excinfo:
+            refuse_new_violation(None, _entry("M-1", confidence="verified", evidence_level="inferred"))
+        assert excinfo.value.reason == "verified_requires_observed_or_verified_evidence"
 
     def test_an_edit_introducing_a_new_violation_is_refused(self) -> None:
         """The round-1 finding: an evidence-only downgrade on an already-valid verified row."""
@@ -66,7 +70,12 @@ class TestRefuseNewViolation:
         """The round-2 finding: a legacy violating row must still be editable."""
         existing = _entry("M-1", confidence="verified")  # legacy: evidence_level defaults to unknown
         edited = existing.model_copy(update={"status": "obsolete"})
-        refuse_new_violation(existing, edited)  # no raise
+        assert refuse_new_violation(existing, edited) is None
+        # Control: the exemption covers the same claim only; editing the content is refused.
+        rewritten = edited.model_copy(update={"content": "a different claim"})
+        with pytest.raises(SchemaValidationError) as excinfo:
+            refuse_new_violation(existing, rewritten)
+        assert excinfo.value.reason == "verified_requires_observed_or_verified_evidence"
 
     @pytest.mark.parametrize(
         "change",
@@ -344,4 +353,11 @@ def test_reject_unsubstantiated_verified_no_longer_owns_the_evidence_level_axis(
         evidence_level="inferred",
         assertions=[Assertion(type=AssertionType.GLOB_EXISTS, target="pyproject.toml")],
     )
-    reject_unsubstantiated_verified(entry, min_items=1)  # no raise: artifact present, evidence_level not its concern
+    # artifact present, evidence_level not its concern
+    assert reject_unsubstantiated_verified(entry, min_items=1) is None
+    assert violates_evidence_invariant(entry) is True  # the axis it no longer owns is still violated
+
+    # Control: the artifact-count rule it DOES own still refuses the same entry with no artifact.
+    bare = entry.model_copy(update={"assertions": []})
+    with pytest.raises(SchemaValidationError, match="requires a substantiating artifact"):
+        reject_unsubstantiated_verified(bare, min_items=1)

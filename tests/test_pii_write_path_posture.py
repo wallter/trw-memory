@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import call, patch
 
 import pytest
 
@@ -265,8 +265,33 @@ class TestEgressCredentialCoverageNotWeakened:
 def test_mock_helper_is_wired(monkeypatch: pytest.MonkeyPatch) -> None:
     """Non-vacuity: the httpx mock used above really captures the POST body."""
     with patch("httpx.Client") as mock_cls:
-        client = _mock_httpx_client(mock_cls, json_data={"id": "x"})
-        assert isinstance(client, MagicMock)
+        client = _mock_httpx_client(mock_cls, json_data={"id": "x"}, status_code=201)
+        assert client is mock_cls.return_value
+        with mock_cls() as entered:
+            response = entered.post("https://platform.example.com/v1/learnings", json={"summary": "s"})
+        assert entered is client
+        assert client.post.call_args == call("https://platform.example.com/v1/learnings", json={"summary": "s"})
+        assert response.status_code == 201
+        assert response.json() == {"id": "x"}
+
+    # Through a production consumer, with contrasting configurations (codex MOCK-DEPTH-5 r1): the helper's
+    # json_data and status_code are what publish_memory_result actually sees.
+    from trw_memory.models.memory import MemoryEntry
+
+    entry = MemoryEntry(id="M-wired", content="plain text", importance=0.9)
+    cfg = MemoryConfig(
+        sync_enabled=True,
+        platform_url="https://api.example.com",
+        platform_api_key="test-key-123",
+        sync_min_importance=0.7,
+    )
+    outcomes = []
+    for json_data, status_code in (({"id": "remote-1"}, 201), ({"id": "remote-2"}, 201), ({}, 500)):
+        with patch("httpx.Client") as mock_cls:
+            _mock_httpx_client(mock_cls, json_data=json_data, status_code=status_code)
+            result = publish_memory_result(entry, cfg, project_root="")
+        outcomes.append((result["success"], result["remote_id"]))
+    assert outcomes == [(True, "remote-1"), (True, "remote-2"), (False, None)]
 
 
 class TestReplacePiiOverlappingSpans:

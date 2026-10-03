@@ -76,8 +76,8 @@ class TestWriteYamlStorageError:
 
 class TestAppendJsonlStorageError:
     def test_oserror_in_append_raises_storage_error(self, tmp_path: Path) -> None:
-        """OSError from Path.open → StorageError (lines 229-230)."""
+        """An OSError while appending → StorageError (the append now writes through safe_fs, AIKIDO 2b)."""
         target = tmp_path / "log.jsonl"
-        with patch.object(Path, "open", side_effect=OSError("no space")):
+        with patch("trw_memory.safe_fs._write_all", side_effect=OSError("no space")):
             with pytest.raises(StorageError, match="Failed to append JSONL"):
                 append_jsonl(target, {"event": "test"})

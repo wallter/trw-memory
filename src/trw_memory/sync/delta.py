@@ -15,6 +15,8 @@ from trw_memory.models.memory import MemoryEntry
 from trw_memory.security._evidence_invariant import served_view
 
 if TYPE_CHECKING:
+    from trw_memory.embeddings.interface import EmbeddingProvider
+    from trw_memory.embeddings.provenance import VectorProvenance
     from trw_memory.models.config import MemoryConfig
     from trw_memory.storage.interface import StorageBackend
 
@@ -92,20 +94,34 @@ class DeltaTracker:
             cols = ", ".join("expires_at AS expires" if c == "expires_at" else c for c in ENTRY_COLUMNS)
             sql = (
                 f"SELECT {cols} FROM memories "  # noqa: S608
-                f"WHERE sync_seq > ? AND (last_synced_at IS NULL OR last_synced_at = '') "
-                f"AND (? IS NULL OR namespace = ?) ORDER BY sync_seq ASC LIMIT ?"
+                f"WHERE (sync_seq > ? OR (? IS NOT NULL AND sync_seq = ? AND id > ?)) "
+                f"AND (last_synced_at IS NULL OR last_synced_at = '') "
+                f"AND (? IS NULL OR namespace = ?) ORDER BY sync_seq ASC, id ASC LIMIT ?"
             )
-            params = (since_seq, namespace, namespace, -1 if limit is None else limit)
-            # Acquire backend._lock to match the locking pattern used by every
-            # other SQLite query in this backend (Bug: missing lock could race a
-            # concurrent write on the same connection).
-            if lock is not None:
-                with lock:
+            # PRD-CORE-333 (CORE-333-PUBLISHER-BYPASS): a row the quarantine ledger blocks never leaves the host. It
+            # stays dirty and sorts first, so the page is filled from the rows behind it instead of coming back short.
+            page: list[MemoryEntry] = []
+            # Keyset paging on (sync_seq, id): sync_seq is a per-row revision count, not a unique cursor, and a
+            # position (OFFSET) would skip or repeat rows that another call acknowledges between pages.
+            after: tuple[int, str] | None = None
+            while True:
+                last_seq, last_id = after if after is not None else (since_seq, None)
+                cap = -1 if limit is None else limit
+                params = (last_seq, last_id, last_seq, last_id, namespace, namespace, cap)
+                # Acquire backend._lock to match the locking pattern used by every
+                # other SQLite query in this backend (Bug: missing lock could race a
+                # concurrent write on the same connection).
+                if lock is not None:
+                    with lock:
+                        rows = conn.execute(sql, params).fetchall()
+                else:
                     rows = conn.execute(sql, params).fetchall()
-            else:
-                rows = conn.execute(sql, params).fetchall()
-            # PRD-CORE-312: dirty rows are served (pushed, returned by the daemon), so demote.
-            return [served_view(row_to_entry(tuple(r))) for r in rows]
+                # PRD-CORE-312: dirty rows are served (pushed, returned by the daemon), so demote.
+                entries = [served_view(row_to_entry(tuple(r))) for r in rows]
+                page += backend.filter_quarantined(entries)
+                if limit is None or len(rows) < limit or len(page) >= limit:
+                    return page if limit is None else page[:limit]
+                after = (entries[-1].sync_seq, entries[-1].id)
         # Fallback: hydrate a complete snapshot before filtering. Filtering
         # after a fixed limit can permanently hide an older dirty row behind
         # newer synced rows. Recount after each read so concurrent inserts that
@@ -124,11 +140,13 @@ class DeltaTracker:
             # can collect rows inserted concurrently without livelocking this
             # one.
             logger.warning("delta_fallback_scan_unstable", attempts=_FALLBACK_SCAN_ATTEMPTS)
-        dirty = [
-            e
-            for e in sorted(all_entries, key=lambda e: e.sync_seq)
-            if e.sync_seq > since_seq and e.last_synced_at is None and namespace in (None, e.namespace)
-        ]
+        dirty = backend.filter_quarantined(
+            [
+                e
+                for e in sorted(all_entries, key=lambda e: e.sync_seq)
+                if e.sync_seq > since_seq and e.last_synced_at is None and namespace in (None, e.namespace)
+            ]
+        )
         return dirty if limit is None else dirty[:limit]
 
     @staticmethod
@@ -227,8 +245,68 @@ def find_synced_entry(backend: StorageBackend, namespace: str, remote_id: str, i
     return None
 
 
+#: Remote ids, then ids, per SQL statement: well inside SQLite's bound-variable limit.
+_FIND_MANY_CHUNK = 400
+
+
+def find_synced_entries(
+    backend: StorageBackend, namespace: str, remote_ids: list[str], ids: list[str]
+) -> list[MemoryEntry]:
+    """Every row in *namespace* whose ``remote_id`` is in *remote_ids* or whose id is in *ids*.
+
+    :func:`find_synced_entry` for a whole pulled page in one statement per chunk; the caller maps each row back to
+    the learning it answers. Namespace-qualified like the single find (PRD-CORE-245 P1).
+    """
+    conn = getattr(backend, "_conn", None)
+    if conn is None:
+        wanted_remote, wanted_ids = set(remote_ids), set(ids)
+        everything = backend.list_entries(namespace=namespace, limit=max(backend.count(namespace=namespace), 1))
+        return [e for e in everything if e.remote_id in wanted_remote or e.id in wanted_ids]
+    from trw_memory.storage._row_mapper import row_to_entry
+
+    found: dict[str, MemoryEntry] = {}
+    for start in range(0, max(len(remote_ids), len(ids), 1), _FIND_MANY_CHUNK):
+        remote_chunk = remote_ids[start : start + _FIND_MANY_CHUNK]
+        id_chunk = ids[start : start + _FIND_MANY_CHUNK]
+        if not remote_chunk and not id_chunk:
+            continue
+        remote_marks = ", ".join("?" for _ in remote_chunk) or "NULL"
+        id_marks = ", ".join("?" for _ in id_chunk) or "NULL"
+        sql = f"SELECT * FROM memories WHERE namespace = ? AND (remote_id IN ({remote_marks}) OR id IN ({id_marks}))"  # noqa: S608
+        for row in conn.execute(sql, (namespace, *remote_chunk, *id_chunk)).fetchall():
+            entry = served_view(row_to_entry(tuple(row)))
+            found[entry.id] = entry
+    return list(found.values())
+
+
+def _encode_pulled(
+    embedder: EmbeddingProvider | None, text: str
+) -> tuple[list[float] | None, dict[str, VectorProvenance]]:
+    """*text*'s vector and provenance, encoded before the write transaction; ``(None, {})`` when it cannot be.
+
+    An encode failure is logged and the row lands without a vector, which ``memory reembed``
+    backfills and coverage reports: one bad encode must not hold the pull cursor on that item.
+    """
+    from trw_memory.embeddings.provenance import generation_provenance_kwargs
+
+    if embedder is None:
+        return None, {}
+    try:
+        vector = embedder.embed(text)
+    except Exception:  # justified: fail-open per pulled item, the row still lands and coverage shows the gap
+        logger.warning("sync_apply_embed_failed", event_type="sync_team_merge", outcome="error", exc_info=True)
+        return None, {}
+    return vector, generation_provenance_kwargs(embedder, text, vector) if vector is not None else {}
+
+
 def apply_synced_entry(
-    backend: StorageBackend, config: MemoryConfig, entry: MemoryEntry, *, if_revision: str | None, synced: bool = True
+    backend: StorageBackend,
+    config: MemoryConfig,
+    entry: MemoryEntry,
+    *,
+    if_revision: str | None,
+    synced: bool = True,
+    embedder: EmbeddingProvider | None = None,
 ) -> tuple[str, str]:
     """Write a merged pulled row through the write gate and leave it synced, or dirty when *synced* is false.
 
@@ -238,6 +316,10 @@ def apply_synced_entry(
     Returns ``("stored" | "quarantined" | "blocked" | "conflict" | "invalid", reason)``. A
     security refusal is a judged decision, not a store failure (PRD-FIX-138-FR01), so it is
     reported rather than raised.
+
+    With *embedder* the row is encoded as ``memory_store`` encodes a row, and its vector
+    commits with it, so a pulled learning is semantically recallable without a manual
+    reembed. A text change with no vector to replace the old one drops the old one.
     """
     from trw_memory.exceptions import PIIBlockError, PoisoningError
     from trw_memory.security.runtime import prepare_entry_for_store, store_quarantined_entry
@@ -253,11 +335,19 @@ def apply_synced_entry(
     if decision.quarantined:
         store_quarantined_entry(config, decision.entry)
         return "quarantined", ""
+    row = decision.entry
+    text = f"{row.content} {row.detail}"
+    vector, proof = _encode_pulled(embedder, text)
     # One commit: an edit that lands between the write and its ack must not be marked clean (C12 rc7).
     with backend.transaction():
-        if revision_of(backend.get(entry.id, namespace=entry.namespace)) != if_revision:
+        current = backend.get(entry.id, namespace=entry.namespace)
+        if revision_of(current) != if_revision:
             return "conflict", f"{entry.id} changed since it was read; nothing was written, re-read and retry"
-        backend.store(decision.entry)
+        backend.store(row)
+        if vector is not None:
+            backend.upsert_vector(row.id, vector, namespace=row.namespace, **proof)
+        elif current is not None and f"{current.content} {current.detail}" != text:
+            backend.delete_vector(row.id, namespace=row.namespace)
         if synced:
             DeltaTracker.mark_synced([entry.id], backend, namespace=entry.namespace)
     return "stored", ""

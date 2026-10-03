@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from opentelemetry import trace
@@ -111,12 +113,29 @@ def test_sdk_import_error_returns_false(spy: list[Any], tmp_path: Path, monkeypa
 
 
 def test_disabled_call_never_imports_the_sdk(tmp_path: Path) -> None:
-    code = (
-        "import sys; from pathlib import Path; from trw_memory.otel_setup import configure_tracing;"
-        f"assert configure_tracing('trw-mcp', Path({str(tmp_path)!r}) / 'o', enabled=False) is False;"
-        "assert not any(m.startswith('opentelemetry.sdk') for m in sys.modules), 'sdk imported'"
-    )
-    subprocess.run([sys.executable, "-c", code], check=True, timeout=60)
+    def run(enabled: bool) -> dict[str, Any]:
+        code = (
+            "import json, sys; from pathlib import Path; from trw_memory.otel_setup import configure_tracing;"
+            f"result = configure_tracing('trw-mcp', Path({str(tmp_path)!r}) / 'o', enabled={enabled!r});"
+            "print(json.dumps({'result': result, 'sdk_trace': 'opentelemetry.sdk.trace' in sys.modules,"
+            " 'sdk': 'opentelemetry.sdk' in sys.modules,"
+            " 'sdk_any': any(m.startswith('opentelemetry.sdk') for m in sys.modules)}))"
+        )
+        # No inherited OTEL_* override (e.g. a tracer provider) may pre-empt the provider configure_tracing installs.
+        env = {k: v for k, v in os.environ.items() if not k.startswith("OTEL_")}
+        env["OTEL_TRACES_EXPORTER"] = "none"  # the control installs a provider without any exporter or file
+        done = subprocess.run(
+            [sys.executable, "-c", code], check=True, timeout=60, capture_output=True, text=True, env=env
+        )
+        return cast("dict[str, Any]", json.loads(done.stdout.strip().splitlines()[-1]))
+
+    disabled = run(False)
+    assert disabled == {"result": False, "sdk_trace": False, "sdk": False, "sdk_any": False}
+    assert not (tmp_path / "o").exists()
+    # Control: the identical call with tracing enabled DOES import the SDK, so the absence above is the gate's doing.
+    enabled = run(True)
+    assert enabled["result"] is True
+    assert enabled["sdk_trace"] is True
 
 
 def test_otel_support_copies_are_byte_identical() -> None:

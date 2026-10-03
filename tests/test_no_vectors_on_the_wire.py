@@ -76,7 +76,9 @@ def test_retry_drain_strips_a_vector_queued_before_the_change(synced_client: Mem
     from trw_memory.sync.remote import drain_retry_queue
 
     queue = synced_client._retry_queue
-    assert queue.enqueue("L-2", {"summary": "queued", "source_learning_id": "L-2", "embedding": [0.1, 0.2]})
+    payload = {"summary": "queued", "source_learning_id": "L-2", "embedding": [0.1, 0.2]}
+    payload["_ledger_keys"] = [["id", "default", "L-2"]]  # a queued send carries its identity (PRD-CORE-333)
+    assert queue.enqueue("L-2", payload)
     with patch("trw_memory.sync._remote_publish.httpx.Client") as mock_cls:
         http = _transport(mock_cls, {"id": "8"})
         assert drain_retry_queue(queue, synced_client._config)["drained"] == 1
@@ -84,3 +86,9 @@ def test_retry_drain_strips_a_vector_queued_before_the_change(synced_client: Mem
     (body,) = _bodies(http, "/v1/learnings")
     assert body["summary"] == "queued"
     assert "embedding" not in body
+
+
+@pytest.fixture(autouse=True)
+def _team_sync_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shared fetch sends the query only with team sync on (test_recall_query_egress.py proves the gate)."""
+    monkeypatch.setenv("TRW_TEAM_SYNC_ENABLED", "true")

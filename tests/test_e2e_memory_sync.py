@@ -78,3 +78,9 @@ class TestSyncE2E:
         assert any(result["source"] == "shared" for result in results)
         assert results[0]["source"] == "local"
         await client.close()
+
+
+@pytest.fixture(autouse=True)
+def _team_sync_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shared fetch sends the query only with team sync on (test_recall_query_egress.py proves the gate)."""
+    monkeypatch.setenv("TRW_TEAM_SYNC_ENABLED", "true")

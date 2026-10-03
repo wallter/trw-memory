@@ -21,6 +21,7 @@ import structlog
 from trw_memory.decisions._judge import DecisionState
 from trw_memory.decisions._models import OVER_CEILING_HINT, DecisionFailure, DecisionOutcome, DecisionQuestion
 from trw_memory.decisions._wire import build_payload, parse_response
+from trw_memory.platform_contact import platform_contact_enabled
 
 logger = structlog.get_logger(__name__)
 
@@ -112,6 +113,8 @@ class JevHttpJudge:
         does not parse is ``malformed_response``. Details name a status and an error type
         only -- never the state or the body, which can carry the caller's data.
         """
+        if not platform_contact_enabled():  # the deny-all switch also vetoes this third-party send, read live
+            return DecisionFailure(kind="disabled", detail="platform contact is off: nothing was sent")
         start = time.monotonic()
         try:
             wire_state = self._redact(state) if self._redact is not None else state

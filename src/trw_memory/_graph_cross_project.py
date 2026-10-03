@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 from trw_memory._graph_sibling_index import SiblingStoreView
 from trw_memory.embeddings._similarity_calibration import calibrated_threshold
 from trw_memory.embeddings.provenance import EmbeddingSpace
+from trw_memory.labels import LabelPolicy, Sink
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage.interface import StorageBackend
@@ -188,9 +189,16 @@ def cross_validate_entries(
     changed since its candidates were read, or when a match must be written
     back to it. Re-reading every sibling on every write made a single-row
     store cost O(sibling namespaces x ``CANDIDATE_LIMIT``) row decodes.
+
+    PRD-SEC-023 FR07: a match is applied in NEITHER direction when the written
+    row or the sibling row is labelled above ``team`` (the clearance the
+    platform sink also has), so a personal row's existence never reaches
+    another project as an outcome event or an importance boost.
     """
     matched: dict[str, int] = {entry.id: 0 for entry, _embedding, _space in items}
-    live = [(entry, embedding, space) for entry, embedding, space in items if space is not None]
+    policy = LabelPolicy.current()
+    team = {id(entry) for entry in policy.admit([entry for entry, _e, _s in items], Sink.PLATFORM).admitted}
+    live = [(entry, embedding, space) for entry, embedding, space in items if space is not None and id(entry) in team]
     if not live:
         return matched
     from trw_memory.integrations import _backend as stores
@@ -214,6 +222,9 @@ def cross_validate_entries(
                         continue
                     threshold = calibrated_threshold(CROSS_VALIDATION_THRESHOLD, space)
                     for remote_id, similarity in candidates.above(embedding, threshold):
+                        sibling = view.backend().get(remote_id, namespace=namespace)
+                        if sibling is None or not policy.admit([sibling], Sink.PLATFORM).admitted:
+                            continue  # FR07: an unreadable or above-team sibling validates nothing, either way
                         _merged, applied = merge_cross_validated_entry(
                             backend, entry.id, project_id, similarity, namespace=entry.namespace
                         )

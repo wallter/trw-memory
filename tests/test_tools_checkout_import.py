@@ -1505,7 +1505,13 @@ class TestTheCopyIsAQuietSnapshot:
         work = self._store(tmp_path / "checkout")
         (tmp_path / "checkout" / "work.db-journal").write_bytes(b"")
 
-        self._refused(_private_checkout_copy(str(work.parent), str(work), "test_import"), "work.db-journal")
+        result = _private_checkout_copy(str(work.parent), str(work), "test_import")
+
+        assert result == {
+            "error": "test_import refused: work.db-journal sidecar present; checkpoint and close the source first",
+            "status": "refused",
+        }
+        assert self._residue() == [], "a refusal must happen before any private copy is made"
 
     def test_a_sqlite_writer_cannot_commit_while_the_copy_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1574,8 +1580,19 @@ class TestTheCopyIsAQuietSnapshot:
             work.write_bytes(b"a different file")
             return real_parent(root, path, operation)
 
+        probed: list[str] = []
         monkeypatch.setattr(checkout_import, "open_checkout_parent_fd", swap_then_open)
-        self._refused(_private_checkout_copy(str(work.parent), str(work), "test_import"), "no longer the file")
+        monkeypatch.setattr(
+            checkout_import, "_sidecar_present_no_follow", lambda parent_fd, name: probed.append(name) or False
+        )
+        result = _private_checkout_copy(str(work.parent), str(work), "test_import")
+
+        assert result == {
+            "error": "test_import refused: work.db is no longer the file that was opened",
+            "status": "refused",
+        }
+        assert probed == [], "no sidecar name may be probed beside a file that is not the one opened"
+        assert self._residue() == []
 
     def test_another_reader_or_import_of_the_same_file_never_drops_the_lock(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1616,7 +1633,15 @@ class TestTheCopyIsAQuietSnapshot:
         work = self._store(tmp_path / "checkout")
         os.link(work, work.with_name("alias.db"))
 
-        self._refused(_private_checkout_copy(str(work.parent), str(work), "test_import"), "2 hard links")
+        result = _private_checkout_copy(str(work.parent), str(work), "test_import")
+
+        assert result == {
+            "error": "test_import refused: work.db has 2 hard links; import a store that has exactly one name",
+            "status": "refused",
+        }
+        assert self._residue() == []
+        with contextlib.closing(sqlite3.connect(work)) as conn:
+            assert conn.execute("SELECT count(*) FROM t").fetchone() == (50,), "the source must be left untouched"
 
     def test_importing_a_store_this_daemon_has_open_is_refused_before_any_descriptor(self, tmp_path: Path) -> None:
         """C15: closing a descriptor on a live store would drop its connection's locks, so none is ever taken."""

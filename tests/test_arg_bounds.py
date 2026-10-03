@@ -184,29 +184,6 @@ async def test_sync_mark_synced_over_bound_never_reaches_the_impl(monkeypatch: p
     assert calls == [], "memory_sync_mark_synced_impl ran despite an over-bound acks argument"
 
 
-async def test_admit_shared_results_over_bound_is_refused() -> None:
-    limit = ab.bound("memory_admit_shared", "results")
-    assert limit is not None
-    results = [{"id": f"r{i}"} for i in range(limit + 1)]
-    data = await _call("memory_admit_shared", namespace=NS, results=results)
-    _assert_argument_too_large(data, "results", limit)
-
-
-async def test_admit_shared_over_bound_never_reaches_the_impl(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[object] = []
-
-    def _stub(*args: object, **kwargs: object) -> dict[str, object]:
-        calls.append((args, kwargs))
-        return {"status": "ok", "admitted": [], "refused": 0, "gate_errors": 0}
-
-    monkeypatch.setattr(recall_support, "memory_admit_shared_impl", _stub)
-    limit = ab.bound("memory_admit_shared", "results")
-    assert limit is not None
-    results = [{"id": f"r{i}"} for i in range(limit + 1)]
-    await _call("memory_admit_shared", namespace=NS, results=results)
-    assert calls == [], "memory_admit_shared_impl ran despite an over-bound results argument"
-
-
 async def test_vectors_ids_over_bound_is_refused() -> None:
     limit = ab.bound("memory_vectors", "ids")
     assert limit is not None

@@ -164,7 +164,12 @@ def _record_stamp(
         ):
             record["verify_sweeps"] = dict(kept[-VERIFY_SWEEPS_KEPT:])
         state[namespace] = record
-        locked.write_text(json.dumps(state, indent=2, sort_keys=True))
+        from trw_memory.safe_fs import write_beneath
+
+        payload = json.dumps(state, indent=2, sort_keys=True).encode("utf-8")
+        write_beneath(
+            locked.parent.resolve(), locked.name, payload, mode=0o666
+        )  # a planted link is refused (AIKIDO 2b)
     return record
 
 

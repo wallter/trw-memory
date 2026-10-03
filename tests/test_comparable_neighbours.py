@@ -78,6 +78,11 @@ def test_an_unproven_namespace_makes_a_single_space_window_incomplete(proven: ob
     backend = _backend([("L-new", 0.5)], {"L-new": _stored((1.0, 0.0), NEW_SPACE)}, proven)
 
     assert _window(backend) is None
+    backend.vectors_proven_in_space.assert_called_once_with(namespace="project:a", space=NEW_SPACE)
+
+    # Control: the same window with a census covering the whole namespace is a real verdict.
+    proven_backend = _backend([("L-new", 0.5)], {"L-new": _stored((1.0, 0.0), NEW_SPACE)}, 1)
+    assert _window(proven_backend) == [("L-new", 0.5)]
 
 
 def test_a_census_smaller_than_the_window_proves_nothing() -> None:

@@ -38,7 +38,6 @@ CENSUS: dict[str, tuple[str, str] | str] = {
     "storage/_snapshot.py:create_snapshot": "not a store: VACUUM INTO a new file, renamed onto the snapshot",
     "storage/_backup_archive.py:verified_archive": "not a store: removes its own staged temp copy and that copy's sidecars",
     "daemon/_paths.py:write_secret_file": "not a store: the daemon's finalize rename of a new secret file",
-    "lifecycle/tiers/_warm.py:_replace_sidecar": "not a store: the warm tier's own sidecar file",
     "security/audit.py:compact": "not a store: the JSONL audit log's compaction",
     "storage/_recovery_preflight.py:_write_json_atomic": "not a store: <db>.recovery.json and <db>.recovering",
     "storage/persistence.py:write_yaml": "not a store: a YAML entry file (YAML refusals are slice S4)",

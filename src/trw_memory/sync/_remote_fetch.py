@@ -20,8 +20,9 @@ from trw_memory.embeddings._similarity_calibration import calibrated_threshold
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
+from trw_memory.platform_contact import team_sync_enabled
 from trw_memory.retrieval.dense import cosine_similarity
-from trw_memory.security.pii import mask_query_credentials
+from trw_memory.security.pii import mask_query_credentials, strip_pii
 from trw_memory.sync._remote_admission import Gate
 from trw_memory.sync._remote_common import (
     FETCH_TIMEOUT,
@@ -140,7 +141,7 @@ def fetch_shared_memories(
 
     ``admit`` is required, not optional: it is the admission gate every candidate
     passes, run by whoever holds the store (``store_gate`` over a local backend, or
-    the daemon's ``memory_admit_shared``), and a fetch that cannot be gated must not
+    a caller's own gate), and a fetch that cannot be gated must not
     happen at all (PRD-CORE-245 FR06, NFR03 fail-closed; PRD-CORE-280 FR01). This is the ONE path to
     ``/v1/learnings/search`` in either package; the duplicate client in
     ``trw_mcp.telemetry.remote_recall`` was deleted with the same change.
@@ -154,8 +155,13 @@ def fetch_shared_memories(
     if blocked := platform_contact_blocked(cfg, "memory_fetch"):
         return SharedFetchResult([], blocked, 0, 0)
 
+    governing = cfg.project_root or (cfg.source_trw_dir and cfg.source_trw_dir.parent)
+    if not (governing and team_sync_enabled(governing)):
+        # The query is user content; it leaves only when this project turned on team sync (read live).
+        return SharedFetchResult([], "disabled", 0, 0)
+
     request_payload: dict[str, object] = encode_learning_api_v1_search(
-        query=mask_query_credentials(query), limit=limit, min_importance=cfg.sync_min_importance
+        query=strip_pii(mask_query_credentials(query)), limit=limit, min_importance=cfg.sync_min_importance
     )
 
     try:

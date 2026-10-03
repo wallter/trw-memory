@@ -29,6 +29,9 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
+from trw_memory.exceptions import StorageError
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.storage import _schema
 from trw_memory.storage._probe import StoreState, probe_store
@@ -179,7 +182,18 @@ def test_the_untrusted_store_allowlist_accepts_an_imported_v11_store(tmp_path: P
     _populate(store, count=5)
     store.close()
 
-    verify_untrusted_store(path)  # raises StorageError on refusal; no exception is the assertion
+    assert verify_untrusted_store(path) is None  # raises StorageError on refusal
+    with sqlite3.connect(path) as conn:
+        names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+    conn.close()
+    assert "idx_memories_namespace_source_identity" in names  # the index it admitted is really there
+
+    # Control: one partial index (a WHERE clause) beside it is refused, naming the index.
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE INDEX idx_partial ON memories(namespace) WHERE source_identity IS NOT NULL")
+    conn.close()
+    with pytest.raises(StorageError, match="schema objects trw-memory never creates: index idx_partial"):
+        verify_untrusted_store(path)
 
 
 def test_qual_147_probe_store_reads_a_v11_store_as_ready(tmp_path: Path) -> None:

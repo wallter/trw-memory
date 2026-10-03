@@ -119,6 +119,13 @@ def test_without_sqlite_vec_there_is_no_census() -> None:
     assert vector_space_census(conn, threading.RLock(), vec_available=False, namespace="default") is None
     conn.execute.assert_not_called()
 
+    # Control: with sqlite-vec available the same call queries the store; an empty namespace is an empty census.
+    live = MagicMock()
+    live.execute.return_value.fetchall.return_value = []
+    assert vector_space_census(live, threading.RLock(), vec_available=True, namespace="default") == {}
+    assert live.execute.call_count == 1
+    assert live.execute.call_args.args[1] == ("default",)
+
 
 def test_a_non_string_namespace_is_refused(backend: SQLiteBackend) -> None:
     with pytest.raises(TypeError):

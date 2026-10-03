@@ -1,12 +1,8 @@
-"""MCP tools: memory_admit_shared and memory_vectors -- two recall steps that need a store (PRD-CORE-280 FR01).
+"""MCP tools: the recall steps that need a store (PRD-CORE-280 FR01).
 
-A migrated checkout never opens its store, so the two steps of its recall that
+A migrated checkout never opens its store, so the steps of its recall that
 read one run here, inside the namespace grant, before any backend is opened:
 
-- ``memory_admit_shared`` runs shared results the checkout fetched from the
-  platform through the admission gate of the granted namespace's store. The gate
-  rate-limits, audits and quarantines what it refuses, so a second run is not a
-  no-op and a lost call is not replayed.
 - ``memory_vectors`` returns the stored vectors of some ids in the daemon's active
   embedding space, with that space and its calibrated collapse threshold, for
   near-duplicate collapse (PRD-CORE-302 C2). A read.
@@ -31,25 +27,10 @@ from trw_memory.models.memory import MemoryStatus
 from trw_memory.retrieval.recall_policy import MAX_RECALL_LIMIT
 from trw_memory.security.rbac import Permission
 from trw_memory.storage.interface import StorageBackend
-from trw_memory.sync._remote_admission import admit_remote_results
 from trw_memory.tools._embedder import resolve_embedder
 from trw_memory.tools._recall_helpers import GRAPH_RELATED_MAX, hydrate_active
 from trw_memory.tools._types import McpServer
 from trw_memory.tools.entry import serve_namespace
-
-
-def memory_admit_shared_impl(
-    results: list[dict[str, object]], namespace: str, *, backend: StorageBackend, config: MemoryConfig
-) -> dict[str, object]:
-    """Return ``{"status": "ok", "admitted": [...], "refused": n, "gate_errors": n}``; refusals quarantine in *namespace*."""
-    outcome = admit_remote_results(results, config=config, backend=backend, namespace=namespace)
-    return {
-        "status": "ok",
-        "admitted": outcome.admitted,
-        "refused": outcome.refused,
-        "gate_errors": outcome.gate_errors,
-    }
-
 
 #: Recall's near-duplicate collapse threshold on the reference scale (moved from trw-mcp, PRD-CORE-302 C2).
 RECALL_DUP_THRESHOLD = 0.9
@@ -141,15 +122,6 @@ def memory_anchored_impl(
 def register_recall_support_tools(mcp: McpServer) -> None:
     """Register the recall-support tools with a FastMCP server instance."""
 
-    async def memory_admit_shared(namespace: str, results: list[dict[str, object]]) -> dict[str, object]:
-        """Admit fetched shared results through *namespace*'s write gate; refused ones are quarantined."""
-        return await serve_namespace(
-            namespace,
-            Permission.WRITE,
-            "admit_shared",
-            lambda backend, config: memory_admit_shared_impl(results, namespace, backend=backend, config=config),
-        )
-
     async def memory_vectors(namespace: str, ids: list[str]) -> dict[str, object]:
         """Stored vectors of *ids* in *namespace* in the active space, with that space and its collapse threshold."""
         # Off the event loop: resolving the space loads the embedding model.
@@ -161,7 +133,6 @@ def register_recall_support_tools(mcp: McpServer) -> None:
             exclusive=False,
         )
 
-    mcp.tool()(memory_admit_shared)
     mcp.tool()(memory_vectors)
 
     async def memory_graph_related(

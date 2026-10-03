@@ -120,11 +120,15 @@ def write_beneath(root: Path, rel_path: str | PurePath, data: bytes, *, mode: in
         os.close(parent_fd)
 
 
-def append_beneath(root: Path, rel_path: str | PurePath, data: bytes, *, mode: int, sync: bool = False) -> None:
+def append_beneath(
+    root: Path, rel_path: str | PurePath, data: bytes, *, mode: int, sync: bool = False, lock: bool = False
+) -> None:
     """Append *data* to ``root/rel_path``, creating it at *mode* when absent; a symlinked leaf is refused.
 
     With *sync* the file is ``fsync``-ed before the call returns -- for the last append of a copy that
-    ``write_beneath`` would have synced whole.
+    ``write_beneath`` would have synced whole. With *lock* the write holds an exclusive ``flock`` on the very
+    no-follow fd it writes through (never a second open of the path), for a log whose readers take a shared one;
+    the Windows branch has no ``flock`` and appends unlocked.
     """
     dirs, leaf = _split(root, rel_path)
     if _BRANCH == "windows":
@@ -132,7 +136,7 @@ def append_beneath(root: Path, rel_path: str | PurePath, data: bytes, *, mode: i
         return
     parent_fd = _open_parent(root, dirs)
     try:
-        _append_at(parent_fd, root.joinpath(*dirs, leaf), leaf, data, mode, sync=sync)
+        _append_at(parent_fd, root.joinpath(*dirs, leaf), leaf, data, mode, sync=sync, lock=lock)
     finally:
         os.close(parent_fd)
 
@@ -283,7 +287,9 @@ def _discard_temp_at(parent_fd: int, tmp_name: str) -> None:
         logger.warning("safe_write_temp_not_removed", temp=tmp_name)
 
 
-def _append_at(parent_fd: int, shown: Path, leaf: str, data: bytes, mode: int, *, sync: bool = False) -> None:
+def _append_at(
+    parent_fd: int, shown: Path, leaf: str, data: bytes, mode: int, *, sync: bool = False, lock: bool = False
+) -> None:
     try:
         fd = open_or_create_at(parent_fd, leaf, _APPEND_FLAGS, mode)
     except OSError as exc:
@@ -298,6 +304,10 @@ def _append_at(parent_fd: int, shown: Path, leaf: str, data: bytes, mode: int, *
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise _refusal(shown, "leaf_not_regular_file")
+        if lock:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX)  # released by the close below
         _write_all(fd, data)
         if sync:
             os.fsync(fd)

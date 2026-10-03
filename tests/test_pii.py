@@ -128,6 +128,14 @@ class TestDetectPII:
         assert len(key_matches) >= 1
         assert key_matches[0].value.startswith("sk-")
 
+    def test_detect_api_key_split_by_invisible_format_character(self) -> None:
+        """Invisible format characters must not let a credential evade PII detection."""
+        text = "Use sk-\u200bant-api03-" + "A" * 93 + " for auth."
+        key_matches = [match for match in detect_pii(text) if match.pii_type == PIIType.API_KEY]
+        assert len(key_matches) == 1
+        match = key_matches[0]
+        assert text[match.start : match.end] == "sk-\u200bant-api03-" + "A" * 93
+
     def test_detect_api_key_token_prefix(self) -> None:
         """Token-prefixed keys are detected."""
         matches = detect_pii("Use token-abcdefghijklmnopqrstuvwxyz for auth.")

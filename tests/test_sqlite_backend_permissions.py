@@ -53,7 +53,12 @@ def test_a_sticky_world_writable_ancestor_serves(tmp_path: Path) -> None:
     store_dir = sticky_ancestor / "user" / "memory"
     store_dir.mkdir(parents=True, mode=0o700)
 
-    dir_trust.verify_ancestor_chain_trusted(store_dir)  # must not raise
+    assert dir_trust.verify_ancestor_chain_trusted(store_dir) is None
+
+    # Control: dropping the sticky bit from the same ancestor refuses the chain.
+    os.chmod(sticky_ancestor, 0o777)
+    with pytest.raises(UntrustedDirectoryError, match="group/world-writable without the sticky bit"):
+        dir_trust.verify_ancestor_chain_trusted(store_dir)
 
 
 @_POSIX_ONLY
@@ -64,7 +69,12 @@ def test_default_own_private_layout_serves(tmp_path: Path) -> None:
     store_dir = tmp_path / "own-home" / "user" / "memory"
     store_dir.mkdir(parents=True, mode=0o700)
 
-    dir_trust.verify_ancestor_chain_trusted(store_dir)  # must not raise
+    assert dir_trust.verify_ancestor_chain_trusted(store_dir) is None
+
+    # Control: the same layout with a group-writable ancestor is refused.
+    os.chmod(tmp_path / "own-home", 0o770)
+    with pytest.raises(UntrustedDirectoryError, match="group/world-writable without the sticky bit"):
+        dir_trust.verify_ancestor_chain_trusted(store_dir)
 
 
 @_POSIX_ONLY

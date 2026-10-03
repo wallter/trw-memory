@@ -115,8 +115,10 @@ _REPLAYABLE_TOOLS = frozenset(
         "memory_status",
         "memory_store",
         "memory_sync_apply",
+        "memory_sync_apply_many",
         "memory_sync_dirty_page",
         "memory_sync_find",
+        "memory_sync_find_many",
         "memory_sync_mark_synced",
         "memory_update",
         "memory_vectors",
@@ -453,9 +455,6 @@ class DaemonClient:
     async def update(self, entry_id: str, namespace: str, patch: dict[str, Any]) -> Any:
         """Correct one entry with a ``memory_update`` *patch* through the daemon, or fail closed."""
 
-    async def admit_shared(self, namespace: str, results: list[dict[str, object]]) -> Any:
-        """Admit fetched shared results through *namespace*'s gate (not replayed: the gate quarantines), or fail closed."""
-
     async def vectors(self, namespace: str, ids: list[str]) -> Any:
         """Active-space vectors of *ids* in *namespace*, with that space and its collapse threshold, or fail closed."""
 
@@ -522,10 +521,16 @@ class DaemonClient:
     async def sync_find(self, namespace: str, remote_id: str, ids: list[str]) -> Any:
         """The row in *namespace* a pulled learning maps to, or fail closed."""
 
+    async def sync_find_many(self, namespace: str, remote_ids: list[str], ids: list[str]) -> Any:
+        """Every row of *namespace* a whole pulled page maps to, in one call, or fail closed."""
+
     async def sync_apply(
         self, namespace: str, entry: dict[str, Any], *, if_revision: str | None, synced: bool = True
     ) -> Any:
         """Write a merged pulled row into *namespace* over the revision it was read at, or fail closed."""
+
+    async def sync_apply_many(self, namespace: str, items: list[dict[str, Any]]) -> Any:
+        """Write a pulled page into *namespace*, each row over the revision it was read at, in one call, or fail closed."""
 
     async def search(self, namespace: str, **kwargs: Any) -> Any:
         """Filter one namespace's entries through the daemon, or fail closed."""
@@ -554,7 +559,6 @@ _FORWARDED_METHODS = (
     "get",
     "find_duplicate",
     "update",
-    "admit_shared",
     "vectors",
     "anchored",
     "verify",
@@ -571,7 +575,9 @@ _FORWARDED_METHODS = (
     "sync_dirty_page",
     "sync_mark_synced",
     "sync_find",
+    "sync_find_many",
     "sync_apply",
+    "sync_apply_many",
     "search",
     "forget",
     "consolidate",

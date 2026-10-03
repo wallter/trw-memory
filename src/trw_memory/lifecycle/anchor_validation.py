@@ -35,6 +35,7 @@ descriptor walk FR02/FR03 already give every other checkout-scoped read.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from trw_memory._live_stores import close_reader_fd
@@ -51,7 +52,7 @@ def compute_anchor_validity(
     1. File exists at anchor.file (or anchor["file"]) relative to project_root,
        and is reachable WITHOUT following a symlink out of project_root or an
        absolute/``..`` escape (PRD-SEC-016 round-2 finding 2)
-    2. Symbol name appears in the file content (simple text search)
+    2. Symbol name appears in the file content as a whole name (no word character on either side)
 
     Accepts both ``list[Anchor]`` (Pydantic models) and ``list[dict]``
     (raw dicts from YAML/JSON) for backward compatibility.
@@ -85,8 +86,9 @@ def compute_anchor_validity(
         if content is None:
             continue
 
-        # Simple text search for symbol name
-        if symbol_name in content:
+        # Whole-name search: "run" is not valid because "runner" contains it. Lookarounds, not \b, which
+        # fails for a name that starts or ends with a non-word character (``__call__`` is fine, ``$ref`` is not).
+        if re.search(r"(?<!\w)" + re.escape(symbol_name) + r"(?!\w)", content):
             valid_count += 1.0
 
     return round(min(1.0, valid_count / len(anchors)), 2)

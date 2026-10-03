@@ -200,6 +200,10 @@ def _collect(entry: MemoryEntry, patch: LearningPatch) -> tuple[dict[str, object
         changes.append("assertions updated")
     metadata = {**entry.metadata, **(patch.metadata_add or {})}
     if patch.metadata_add:
+        from trw_memory.labels import LabelPolicy  # PRD-SEC-023 FR07: a correction can only raise the stored stamp
+
+        metadata = LabelPolicy.current().joined(metadata, entry.metadata)
+    if patch.metadata_add:
         changes.append("metadata updated")
     if (patch.summary is not None or patch.detail is not None) and (
         entry.metadata.get("provenance_content_hash") or entry.metadata.get("content_hash")

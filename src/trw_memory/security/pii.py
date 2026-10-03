@@ -19,11 +19,12 @@ from enum import Enum
 from pydantic import BaseModel, ConfigDict, Field
 
 from trw_memory.exceptions import ConfigError
+from trw_memory.security._scan_normalize import mask_with_invisible_splits
 from trw_memory.security.credentials import (
     _PROVIDER_SECRET_PATTERN,
     _SECRET_PREFIX_PATTERN,
-    credential_spans,
-    mask_credentials,
+    credential_spans_with_invisible_splits,
+    mask_credentials_as_written,
 )
 
 
@@ -347,6 +348,12 @@ def _validate_custom_pattern(raw_pattern: str) -> None:
 
 
 def mask_query_credentials(text: str) -> str:
+    """Mask credentials and emails in a recall query (see ``mask_query_credentials_as_written``); a value split
+    by an invisible character is masked too (PII-INVISIBLE-SPLIT)."""
+    return mask_with_invisible_splits(text, mask_query_credentials_as_written)
+
+
+def mask_query_credentials_as_written(text: str) -> str:
     """Mask credentials and emails in an outbound SEARCH QUERY, nothing else.
 
     A query is egressed content and must not carry a secret off the machine — the
@@ -366,6 +373,11 @@ def mask_query_credentials(text: str) -> str:
     your own secret has no legitimate hit. Publish-direction egress keeps the full
     :func:`strip_pii` treatment — the asymmetry is intentional, because a published
     learning is durable and a query is not.
+
+    SUPERSEDED 2026-10-02 (RECALL-QUERY-EGRESS-CENSUS): ``fetch_shared_memories`` now also applies
+    :func:`strip_pii` to the query before it leaves. A raw query on the wire is a privacy issue, while
+    masked IP/phone/epoch tokens only lower remote match precision; local search over pulled rows still
+    uses the unmasked text. This function remains the credential-and-email layer under that one.
     """
     text = _mask_emails(text)
     text = re.sub(_SECRET_PREFIX_PATTERN, "<api_key>", text, flags=re.IGNORECASE)
@@ -491,7 +503,7 @@ def detect_pii(
 
     # Credentials: one detector (``credentials.py``) shared with trw-mcp's ``redact_secrets``.
     # Every shape it blocks on is an API_KEY, the class the write gate refuses.
-    for start, end in credential_spans(text):
+    for start, end in credential_spans_with_invisible_splits(text):
         matches.append(PIIMatch(pii_type=PIIType.API_KEY, value=text[start:end], start=start, end=end, confidence=0.95))
 
     patterns = custom_patterns or []
@@ -589,6 +601,15 @@ _EGRESS_MARKERS: dict[PIIType, str] = {
 
 
 def strip_pii(text: str) -> str:
+    """Remove personal identifiers and credentials from text leaving the machine (see ``strip_pii_as_written``).
+
+    An identifier split by an invisible format character is removed too (PII-INVISIBLE-SPLIT): the text is
+    also masked with format characters removed, and the union of both is masked.
+    """
+    return mask_with_invisible_splits(text, strip_pii_as_written)
+
+
+def strip_pii_as_written(text: str) -> str:
     """Remove personal identifiers and credentials from text leaving the machine.
 
     Replaces recognised PII patterns with safe placeholders:
@@ -629,7 +650,7 @@ def strip_pii(text: str) -> str:
     # Every other credential shape (password assignments, URL credentials, JWTs, PEM blocks, hyphenated provider
     # keys). The two subs above keep their ``<api_key>`` marker where they matched; this catches what they do not.
     # Before the detector pass below for the reason it states: digits inside a credential match the SSN shape.
-    text = mask_credentials(text)
+    text = mask_credentials_as_written(text)  # as written: the union runs once, at strip_pii
     # Second pass, detector-driven so it inherits detect_pii's quality guards
     # (octet-validated IPv4 + version-context suppression) rather than re-inlining
     # weaker regexes. It MUST run after the credential subs above: a long digit run

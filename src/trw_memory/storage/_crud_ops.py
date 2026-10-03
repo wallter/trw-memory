@@ -449,6 +449,9 @@ def increment_recall_access(
     (2 statements + 1 WAL append per entry) that amplified WAL writes on every
     recall. De-duplicates ids so each entry is incremented at most once per
     call (matching the prior loop's per-id semantics). Returns rows updated.
+
+    Local telemetry: it does NOT bump ``sync_seq`` or clear ``last_synced_at``. The push payload never carried
+    these counters, so marking the row dirty only re-uploaded unchanged content (and, for a pulled row, a duplicate).
     """
     if not entry_ids:
         return 0
@@ -466,9 +469,7 @@ def increment_recall_access(
                     UPDATE memories
                     SET access_count = MIN(COALESCE(access_count, 0) + 1, {_MAX_COUNTER}),
                         recall_count = MIN(COALESCE(recall_count, 0) + 1, {_MAX_COUNTER}),
-                        last_accessed_at = ?,
-                        sync_seq = COALESCE(sync_seq, 0) + 1,
-                        last_synced_at = NULL
+                        last_accessed_at = ?
                     WHERE namespace = ? AND id IN ({placeholders})
                 """  # noqa: S608
                 backend._conn.execute(sql, [now_iso, namespace, *chunk])

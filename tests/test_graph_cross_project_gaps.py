@@ -77,9 +77,12 @@ class TestPersistCrossValidatedEntry:
         backend.store(entry)
 
         mock_backend = MagicMock()
-        # Pass same entry as both original and updated → no diff → early return
-        persist_cross_validated_entry(mock_backend, entry, entry)
-        mock_backend.update.assert_not_called()
+        # Pass same entry as both original and updated -> no diff -> early return
+        persist_cross_validated_entry(mock_backend, entry, entry.model_copy())
+        assert mock_backend.update.call_count == 0
+        assert mock_backend.method_calls == [], "an unchanged entry must touch the backend not at all"
+        stored = backend.get(entry.id, namespace="project:alpha")
+        assert stored is not None and stored.cross_validated is False and stored.outcome_history == []
 
     def test_update_called_when_entry_changed(self, tmp_path) -> None:
         """persist calls backend.update when updated != original."""
@@ -90,7 +93,24 @@ class TestPersistCrossValidatedEntry:
         updated = append_cross_validation(entry, "beta", 0.95)
         mock_backend = MagicMock()
         persist_cross_validated_entry(mock_backend, entry, updated)
-        mock_backend.update.assert_called_once()
+        assert mock_backend.update.call_count == 1
+        assert mock_backend.update.call_args.args == (entry.id,)
+        assert mock_backend.update.call_args.kwargs == {
+            "namespace": "project:alpha",
+            "cross_validated": True,
+            "importance": entry.importance,
+            "outcome_history": updated.outcome_history,
+            "updated_at": updated.updated_at,
+        }
+        assert len(updated.outcome_history) == 1
+        assert updated.outcome_history[0].startswith("cross_validated:project_id=beta:similarity=0.9500:")
+
+        # The same call against the real backend lands the validation in storage.
+        persist_cross_validated_entry(backend, entry, updated)
+        stored = backend.get(entry.id, namespace="project:alpha")
+        assert stored is not None
+        assert stored.cross_validated is True
+        assert stored.outcome_history == updated.outcome_history
 
 
 # ---------------------------------------------------------------------------
@@ -106,8 +126,10 @@ class TestBackendUpdateGuardYAMLPath:
         mock_backend._dir = tmp_path
 
         ctx = backend_update_guard(mock_backend)
-        # Should be an AbstractContextManager (lock_for_rmw result or nullcontext)
-        assert hasattr(ctx, "__enter__")
+        assert type(ctx).__name__ != "nullcontext", "a YAML-style backend with a _dir must take a real lock"
+        with ctx as locked:
+            assert locked == tmp_path / ".graph-update"
+            assert (tmp_path / ".graph-update.lock").exists(), "the lock file is created beside the target"
 
     def test_no_path_returns_nullcontext(self) -> None:
         """backend_update_guard with no path attr → nullcontext (line 113)."""

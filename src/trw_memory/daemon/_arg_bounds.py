@@ -36,7 +36,7 @@ from trw_memory.models.memory import MAX_TEXT_FIELD_CHARS
 from trw_memory.tools.checkout_import import IMPORT_MAX_IDS
 from trw_memory.tools.recall_support import SURFACED_MAX
 from trw_memory.tools.similar import MAX_SIMILAR_TEXT_CHARS
-from trw_memory.tools.sync import MAX_SYNC_DIRTY_PAGE
+from trw_memory.tools.sync import MAX_SYNC_APPLY_MANY, MAX_SYNC_DIRTY_PAGE
 
 __all__ = ["ARGUMENTS", "OVERRIDES", "ArgumentBounds", "bound", "call_with_body_cap"]
 
@@ -58,7 +58,7 @@ MAX_BODY_BYTES: Final = 16 * 1024 * 1024
 _NAMES: tuple[str, ...] = ("namespace", "source", "destination", "memory_id", "learning_id", "entry_id")
 _NAMES += ("remote_id", "actor", "status", "sort_by", "decision", "source_identity", "session_id", "expires")
 _NAMES += ("source_path", "project_root", "if_revision", "file")
-_ITEMS: tuple[str, ...] = ("ids", "results", "tags", "edge_types", "evidence", "assertions", "include_namespaces")
+_ITEMS: tuple[str, ...] = ("ids", "remote_ids", "tags", "edge_types", "evidence", "assertions", "include_namespaces")
 _ITEMS += ("include_source_kinds", "exclude_source_kinds", "after", "metadata", "learning", "entry", "patch")
 _ITEMS += ("consolidation", "settings", "types")
 
@@ -75,6 +75,7 @@ OVERRIDES: Final[dict[str, dict[str, int]]] = {
     "memory_import_checkout": {"ids": IMPORT_MAX_IDS},
     "memory_record_surfaced": {"ids": SURFACED_MAX},
     "memory_sync_mark_synced": {"acks": MAX_SYNC_DIRTY_PAGE},
+    "memory_sync_apply_many": {"items": MAX_SYNC_APPLY_MANY},
     "memory_similar": {"text": MAX_SIMILAR_TEXT_CHARS},
     "memory_drain": {"admin_key": 128},  # a 64-hex drain key; anything longer is not one
 }

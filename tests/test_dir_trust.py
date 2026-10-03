@@ -187,7 +187,12 @@ def test_verify_ancestor_chain_trusted_serves_the_default_private_layout(tmp_pat
     store_dir = tmp_path / "home" / "user" / "memory"
     store_dir.mkdir(parents=True, mode=0o700)
 
-    verify_ancestor_chain_trusted(store_dir)  # must not raise
+    assert verify_ancestor_chain_trusted(store_dir) is None
+
+    # Control: the same layout with one ancestor group/world-writable (no sticky bit) is refused.
+    (tmp_path / "home").chmod(0o777)
+    with pytest.raises(UntrustedDirectoryError, match="group/world-writable without the sticky bit"):
+        verify_ancestor_chain_trusted(store_dir)
 
 
 @pytest.fixture
@@ -313,9 +318,16 @@ def test_verify_ancestor_chain_trusted_sticky_ancestor_serves(tmp_path: Path) ->
     store_dir = sticky / "user" / "memory"
     store_dir.mkdir(parents=True, mode=0o700)
 
-    verify_ancestor_chain_trusted(store_dir)  # must not raise
+    assert verify_ancestor_chain_trusted(store_dir) is None
+
+    # Control: the same ancestor without the sticky bit is refused, naming that ancestor.
+    os.chmod(sticky, 0o777)
+    with pytest.raises(UntrustedDirectoryError, match="group/world-writable without the sticky bit") as excinfo:
+        verify_ancestor_chain_trusted(store_dir)
+    assert excinfo.value.path == str(sticky)
 
 
+@_POSIX_ONLY
 def test_verify_ancestor_chain_trusted_ignores_an_unreadable_ancestor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -333,7 +345,15 @@ def test_verify_ancestor_chain_trusted_ignores_an_unreadable_ancestor(
 
     monkeypatch.setattr(Path, "stat", _flaky_stat)
 
-    verify_ancestor_chain_trusted(store_dir)  # must not raise -- unreadable ancestor is skipped
+    assert verify_ancestor_chain_trusted(store_dir) is None  # unreadable ancestor is skipped
+
+    # Control: the walk goes on past the skipped ancestor, so a bad one above it is still refused.
+    tmp_path.chmod(0o777)
+    try:
+        with pytest.raises(UntrustedDirectoryError, match="group/world-writable without the sticky bit"):
+            verify_ancestor_chain_trusted(store_dir)
+    finally:
+        tmp_path.chmod(0o700)
 
 
 # ---------------------------------------------------------------------------

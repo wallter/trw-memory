@@ -38,14 +38,49 @@ def test_reopening_an_unchanged_existing_database_succeeds(tmp_path: Path) -> No
     db_path = tmp_path / "existing.db"
     sqlite3.connect(str(db_path)).close()  # create it first, exactly like a real prior session
 
+    seed = sqlite3.connect(str(db_path))
+    seed.execute("CREATE TABLE t (v INTEGER)")
+    seed.execute("INSERT INTO t VALUES (42)")
+    seed.commit()
+    seed.close()
+
     conn = connect(db_path, dbapi=sqlite3, timeout=5.0, check_same_thread=True)
-    conn.close()
+    try:
+        assert conn.execute("SELECT v FROM t").fetchone()[0] == 42
+    finally:
+        conn.close()
+
+    # Control: the same reopen is refused once the file is swapped for another inode mid-open.
+    real_connect = sqlite3.connect
+
+    def _swap_then_connect(path: str, **kwargs: object) -> object:
+        Path(path).unlink()
+        real_connect(f"{path}.seed").close()
+        Path(f"{path}.seed").rename(path)
+        return real_connect(path, **kwargs)  # type: ignore[arg-type]
+
+    with patch("trw_memory.storage._connection.sqlite3.connect", side_effect=_swap_then_connect):
+        with pytest.raises(StorageError, match="identity changed"):
+            connect(db_path, dbapi=sqlite3, timeout=5.0, check_same_thread=True)
 
 
-def test_an_in_memory_database_is_never_identity_checked() -> None:
+def test_an_in_memory_database_is_never_identity_checked(tmp_path: Path) -> None:
     """``:memory:`` has no file to stat; the check must not fire (and must not raise) for it."""
-    conn = connect(Path(":memory:"), dbapi=sqlite3, timeout=5.0, check_same_thread=True)
-    conn.close()
+    from trw_memory import _live_stores
+
+    mem = connect(Path(":memory:"), dbapi=sqlite3, timeout=5.0, check_same_thread=True)
+    try:
+        assert mem.execute("SELECT 1").fetchone()[0] == 1
+        assert mem not in _live_stores._CONNECTIONS  # never pinned or registered by inode
+    finally:
+        mem.close()
+
+    # Control: a file-backed open IS registered by the identity check.
+    filed = connect(tmp_path / "filed.db", dbapi=sqlite3, timeout=5.0, check_same_thread=True)
+    try:
+        assert filed in _live_stores._CONNECTIONS
+    finally:
+        filed.close()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="os.symlink/unlink-and-replace timing is POSIX-specific here")

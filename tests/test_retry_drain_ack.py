@@ -113,7 +113,12 @@ async def test_two_queued_revisions_mark_the_row_synced_at_the_newest(
     assert current is not None
     editor._retry_queue.enqueue(
         "queued-entry",
-        {"summary": "edited", "source_learning_id": "queued-entry"},
+        # A queued record carries its ledger identity (PRD-CORE-333); one without it is never sent.
+        {
+            "summary": "edited",
+            "source_learning_id": "queued-entry",
+            "_ledger_keys": [["id", "default", "queued-entry"]],
+        },
         revision=(current.sync_seq, current.sync_hash),
     )
     await editor.close()

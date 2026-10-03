@@ -33,6 +33,8 @@ def increment_session_counts(
 
     PRD-CORE-245 FR03: a bare id does not identify a row, so the namespace is
     required; an id's twin in another namespace is left alone.
+
+    Local telemetry: it does NOT bump ``sync_seq`` or clear ``last_synced_at`` (see ``increment_recall_access``).
     """
     if not entry_ids:
         return 0
@@ -46,9 +48,7 @@ def increment_session_counts(
     try:
         sql = f"""
             UPDATE memories
-            SET session_count = MIN(COALESCE(session_count, 0) + 1, {_MAX_COUNTER}),
-                sync_seq = COALESCE(sync_seq, 0) + 1,
-                last_synced_at = NULL
+            SET session_count = MIN(COALESCE(session_count, 0) + 1, {_MAX_COUNTER})
             WHERE namespace = ? AND id = ?
         """  # noqa: S608 — _MAX_COUNTER is a module-level int constant, not user input.
         with backend._lock:

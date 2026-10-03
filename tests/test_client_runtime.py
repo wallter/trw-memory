@@ -130,10 +130,14 @@ class TestContextManager:
 
         reopened = MemoryClient(namespace="default", mode="local")
         with patch("trw_memory.client.retire_remote_memory", return_value=True) as retire_mock:
-            await reopened.forget("queued-entry")
+            forgotten = await reopened.forget("queued-entry")
             await reopened.close()
 
         retire_mock.assert_called_once_with("42", reopened._config)
+        assert forgotten["memory_id"] == "queued-entry"
+        assert forgotten["status"] == "deleted"
+        assert forgotten["entries_deleted"] == 1
+        assert mock_client.post.call_count == 1
         assert reopened._backend is None
 
 

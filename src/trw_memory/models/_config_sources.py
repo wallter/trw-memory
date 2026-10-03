@@ -109,9 +109,6 @@ _RETIRED_SETTINGS: dict[str, tuple[str, str]] = {
         ),
     ),
 }
-#: Retired here, yet still LIVE under the ``memory_`` prefix in ``.trw/config.yaml``: trw-mcp's own YAML-store
-#: tier sweep reads them, so that spelling in that source is not a leftover.
-_LIVE_IN_TRW_MCP_YAML = frozenset({"hot_ttl_days", "cold_threshold_days", "retention_days"})
 _warned_retired_settings: set[tuple[str, str]] = set()
 _logger = structlog.get_logger(__name__)
 
@@ -123,8 +120,6 @@ def _warn_retired_settings(raw: dict[str, object], *, source: str) -> None:
             continue
         name = key.lower().removeprefix("memory_")
         if name not in _RETIRED_SETTINGS or (name, source) in _warned_retired_settings:
-            continue
-        if source == ".trw/config.yaml" and name in _LIVE_IN_TRW_MCP_YAML and key.lower().startswith("memory_"):
             continue
         _warned_retired_settings.add((name, source))
         prd, replacement = _RETIRED_SETTINGS[name]

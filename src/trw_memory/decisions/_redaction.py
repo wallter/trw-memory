@@ -17,13 +17,14 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from trw_memory.security.pii import strip_pii
+from trw_memory.security.credentials import mask_with_invisible_splits
+from trw_memory.security.pii import strip_pii_as_written
 
 _PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL)
 _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
 _AUTH = re.compile(r"(Authorization\s*:\s*)(?:Bearer|Token|Basic|ApiKey)?\s*\S+", re.IGNORECASE)
 _BEARER = re.compile(
-    r"\b(Bearer|Token)\s+(?:(?=[A-Za-z0-9._~+/=-]*\d)[A-Za-z0-9._~+/=-]{8,}|[A-Za-z0-9._~+/=-]{16,})",
+    r"\b(Bearer|Token)(\s+)(?:(?=[A-Za-z0-9._~+/=-]*\d)[A-Za-z0-9._~+/=-]{8,}|[A-Za-z0-9._~+/=-]{16,})",
     re.IGNORECASE,
 )
 _CONN = re.compile(r"\b([a-z][a-z0-9+.-]*://)[^\s:/@]+:[^\s:/@]+@")
@@ -43,15 +44,21 @@ def _is_secret_key(key: str) -> bool:
 
 
 def default_redactor(text: str) -> str:
-    """Credential shapes first (a PEM body would partial-match later passes), then PII."""
+    """Credential shapes first (a PEM body would partial-match later passes), then PII. A value split by an
+    invisible character is masked too: the whole pipeline is wrapped once (PII-INVISIBLE-SPLIT), so this
+    module's pre-pass cannot consume a token's head before the split-aware pass sees it."""
+    return mask_with_invisible_splits(text, _default_redactor_as_written)
+
+
+def _default_redactor_as_written(text: str) -> str:
     out = _PEM.sub("<REDACTED:private_key>", text)
     out = _CONN.sub(r"\1<REDACTED:credentials>@", out)
     out = _AUTH.sub(r"\1<REDACTED:authorization>", out)
     out = _JWT.sub("<REDACTED:jwt>", out)  # before _BEARER: "token eyJ..." must read as a JWT
-    out = _BEARER.sub(r"\1 <REDACTED:bearer>", out)
+    out = _BEARER.sub(r"\1\2<REDACTED:bearer>", out)  # whitespace kept as written: a pure substitution
     out = _APIKEY.sub("<REDACTED:api_key>", out)
     out = _ENVVAR.sub("<REDACTED:env>", out)
-    return strip_pii(out)
+    return strip_pii_as_written(out)
 
 
 def unique_key(candidate: str, taken: Mapping[str, Any] | set[str]) -> str:

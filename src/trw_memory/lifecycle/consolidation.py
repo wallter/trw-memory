@@ -21,6 +21,7 @@ from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.embeddings.provenance import generation_provenance_kwargs
 from trw_memory.exceptions import DimensionMismatchError, StorageError
 from trw_memory.graph import schedule_graph_update
+from trw_memory.labels import LabelPolicy, Sink
 from trw_memory.lifecycle._consolidated_fields import merged_entry_fields
 from trw_memory.lifecycle._consolidation_metrics import mean_pairwise_similarity as _mean_pairwise_similarity
 
@@ -200,6 +201,9 @@ def find_clusters(
         and not is_removal_exempt({"protection_tier": e.protection_tier})
         and e.metadata.get("system_canary") != "true"
     ]
+    # PRD-SEC-023 FR07: a row above team never joins a cluster, so neither the consolidated row, its tags nor an LLM summary
+    # (nor the embedder) ever sees it. Team is the platform sink's clearance.
+    entries = LabelPolicy.current().admit(entries, Sink.PLATFORM).admitted
 
     if len(entries) < min_cluster_size:
         return []

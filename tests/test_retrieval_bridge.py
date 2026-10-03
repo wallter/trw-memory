@@ -135,8 +135,19 @@ def test_pipeline_bridge_defaults_off() -> None:
     entries = _corpus()
     with patch("trw_memory.retrieval.bridge.extend_with_bridge") as ext:
         with patch("trw_memory.retrieval.reranker.cross_encode_scores", side_effect=_table_scores):
-            hybrid_search("pottery", entries, scope=_scope(), rerank=True, rerank_candidates=3)
+            off = hybrid_search("pottery", entries, scope=_scope(), rerank=True, rerank_candidates=3)
     ext.assert_not_called()
+    assert [e.id for e in off] == ["seed", "bridge"]
+
+    # Control: opting in reaches the bridge stage with the same query, so the default is what skips it.
+    from trw_memory.retrieval import bridge
+
+    with patch("trw_memory.retrieval.bridge.extend_with_bridge", wraps=bridge.extend_with_bridge) as ext_on:
+        with patch("trw_memory.retrieval.reranker.cross_encode_scores", side_effect=_table_scores):
+            on = hybrid_search("pottery", entries, scope=_scope(), rerank=True, rerank_candidates=3, bridge_hop=True)
+    assert ext_on.call_count == 1
+    assert ext_on.call_args.args[0] == "pottery"
+    assert [e.id for e in on] == ["seed", "bridge"]
 
 
 @pytest.mark.parametrize(("env", "expected"), [(None, True), ("false", False)])

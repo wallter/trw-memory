@@ -201,8 +201,16 @@ def test_the_gate_answers_none_without_sqlite_vec_or_on_a_sql_error() -> None:
 
     conn = MagicMock()
     assert vectors_proven_in_space(conn, threading.RLock(), False, "d", "k") is None
+    conn.execute.assert_not_called()
     conn.execute.side_effect = sqlite3.OperationalError("no such column: space_key")
     assert vectors_proven_in_space(conn, threading.RLock(), True, "d", "k") is None
+    assert conn.execute.call_count == 1
+
+    # Control: with sqlite-vec available and no SQL error the same call answers the proven count.
+    live = MagicMock()
+    live.execute.return_value.fetchone.return_value = (3,)
+    assert vectors_proven_in_space(live, threading.RLock(), True, "d", "k") == 3
+    assert live.execute.call_args.args[1] == ("d", "k")
 
 
 def _as_v8(path: Path) -> None:

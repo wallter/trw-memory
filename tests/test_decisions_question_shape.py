@@ -58,7 +58,12 @@ class TestScreenIsNotAQuestionType:
             "choice": {"type": "choice", "instructions": "x", "criteria": {"a": "x"}},
             "score": {"type": "score", "instructions": "x", "criteria": ["lo", "hi"]},
         }
-        parse_question("q", payloads[known_type])  # must not raise
+        parsed = parse_question("q", payloads[known_type])
+        assert parsed.type == known_type
+        assert type(parsed) is {"noul": NoulQuestion, "choice": ChoiceQuestion, "score": ScoreQuestion}[known_type]
+        # Control: the same payload under an unknown tag is refused by the tag check.
+        with pytest.raises(QuestionShapeError, match=r"'noul', 'choice' or 'score', got 'unknown'"):
+            parse_question("q", {**payloads[known_type], "type": "unknown"})
 
 
 class TestFieldRenames:
@@ -111,7 +116,12 @@ class TestNoulCriteriaKeys:
         payload = {"type": "noul", "instructions": "x"}
         if ok_keys is not None:
             payload["criteria"] = ok_keys
-        NoulQuestion.model_validate(payload)  # must not raise
+        question = NoulQuestion.model_validate(payload)
+        assert question.type == "noul"
+        assert question.criteria == ok_keys
+        # Control: the same criteria plus one key outside true/false is refused.
+        with pytest.raises(ValidationError, match="must be exactly 'true'/'false'"):
+            NoulQuestion.model_validate({**payload, "criteria": {**(ok_keys or {}), "maybe": "m"}})
 
 
 class TestParseQuestionsAggregatesAndFormats:

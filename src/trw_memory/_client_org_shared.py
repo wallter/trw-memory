@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from trw_memory._client_backend import client_logger as _client_logger
 from trw_memory.embeddings._similarity_calibration import calibrated_threshold
 from trw_memory.embeddings.interface import EmbeddingProvider
+from trw_memory.labels import LabelPolicy, Sink
 from trw_memory.models._type_coercion import coerce_memory_type_lenient
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.retrieval.dense import cosine_similarity
@@ -73,6 +74,10 @@ async def merge_shared_results(
             )
         if local_entries is None:
             local_entries = await load_entries_for_results(client, local_results)
+        if LabelPolicy.current().admit(local_entries, Sink.PLATFORM).withheld:
+            # PRD-SEC-023 FR06: the query that surfaced a row above team is session text about it; it is not sent.
+            _client_logger().info("memory_shared_fetch_withheld_by_label", op="recall", namespace=client._namespace)
+            return merge_shared_candidates(local_results, cached_shared)
         embedder = client._get_embedder()
         cached_shared = await dedupe_cached_shared_results(
             client,

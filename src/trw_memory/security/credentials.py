@@ -17,6 +17,13 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 
+from trw_memory.security._scan_normalize import (
+    mask_with_invisible_splits as mask_with_invisible_splits,
+)
+from trw_memory.security._scan_normalize import (
+    spans_with_invisible_splits,
+)
+
 # Generic ``<prefix>[-_]<20+ alnum>`` credential shape, tolerating ONE optional
 # environment/scope segment between the prefix and the random body.
 #
@@ -98,7 +105,12 @@ _API_KEY_RE = re.compile(
     r"|\bgithub_pat_[A-Za-z0-9_]{20,}"  # GitHub fine-grained PAT
     r"|\bxox[baprs]-[A-Za-z0-9-]{10,}"  # Slack bot/user/app/refresh/legacy
     r"|\bAIza[A-Za-z0-9_-]{35}"  # Google API key
-    r"|\btrw_[A-Za-z0-9]{24,}"  # TRW platform key: ``trw_`` + 24+ alnum, no separators
+    # TRW platform key. Minted as ``trw_`` or ``trw_dk_`` (device flow) + ``secrets.token_urlsafe(32)``:
+    # 43 chars of ``[A-Za-z0-9_-]``, so ``-``/``_`` occur INSIDE the body. The lookahead
+    # demands an uppercase letter or digit (a random body has one with probability ~1), so a
+    # long snake_case identifier such as a module or tool name is never consumed.
+    r"|\btrw_(?:dk_)?(?=[A-Za-z0-9_-]*[A-Z0-9])[A-Za-z0-9_-]{43,}"
+    r"|\btrw_[A-Za-z0-9]{24,}"  # legacy TRW key shape: ``trw_`` + 24+ alnum, no separators
     r")"
 )
 # A PEM private-key block. Structural, vendor-neutral, and the highest-severity
@@ -122,7 +134,7 @@ _PEM_KEY_RE = re.compile(
 _AUTH_HEADER_RE = re.compile(
     r"(?P<key>Authorization\s*:\s*)"
     r"(?!(?:(?:Bearer|Token|Basic|Digest|ApiKey)\s+)?<REDACTED:)"
-    r"(?:(?P<scheme>Bearer|Token|Basic|Digest|ApiKey)\s+)?"
+    r"(?:(?P<scheme>Bearer|Token|Basic|Digest|ApiKey)(?P<ws>\s+))?"
     r"\S+",
     re.IGNORECASE,
 )
@@ -136,7 +148,7 @@ _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]*
 # rejected token). The header rule above only fires with the header present;
 # this catches the same credential when the header text was trimmed away.
 _BARE_BEARER_RE = re.compile(
-    r"\b(Bearer|Token)\s+(?:(?=[A-Za-z0-9._~+/=-]*\d)[A-Za-z0-9._~+/=-]{8,}|[A-Za-z0-9._~+/=-]{16,})",
+    r"\b(Bearer|Token)(\s+)(?:(?=[A-Za-z0-9._~+/=-]*\d)[A-Za-z0-9._~+/=-]{8,}|[A-Za-z0-9._~+/=-]{16,})",
     re.IGNORECASE,
 )
 # Connection-string credentials: scheme://user:password@host. Redact the
@@ -234,7 +246,9 @@ _MASK_ONLY_SUBS: tuple[tuple[re.Pattern[str], str | Callable[[re.Match[str]], st
     (
         _AUTH_HEADER_RE,
         lambda m: (
-            m.group("key") + ((m.group("scheme") + " ") if m.group("scheme") else "") + "<REDACTED:authorization>"
+            m.group("key")
+            + ((m.group("scheme") + m.group("ws")) if m.group("scheme") else "")
+            + "<REDACTED:authorization>"
         ),
     ),
     (_ENV_RE, "<REDACTED:env>"),
@@ -257,6 +271,11 @@ def credential_spans(text: str) -> list[tuple[int, int]]:
     return merged
 
 
+def credential_spans_with_invisible_splits(text: str) -> list[tuple[int, int]]:
+    """Credential spans in original text, including secrets split by invisible characters."""
+    return spans_with_invisible_splits(text, credential_spans)
+
+
 def mask_low_confidence(text: str) -> str:
     """Mask the placeholder-prone shapes (``KEY=value``, URL credentials, JSON secrets, auth headers).
 
@@ -271,7 +290,17 @@ def mask_low_confidence(text: str) -> str:
 
 
 def mask_credentials(text: str) -> str:
-    """Replace every credential shape in *text* with a ``<REDACTED:kind>`` marker."""
+    """Replace every credential shape in *text* with a ``<REDACTED:kind>`` marker.
+
+    A credential split by an invisible format character is masked too (PII-INVISIBLE-SPLIT): the text is
+    also masked with format characters removed, and the union of both is masked.
+    """
+    return mask_with_invisible_splits(text, mask_credentials_as_written)
+
+
+def mask_credentials_as_written(text: str) -> str:
+    """The pattern pass over *text* exactly as given: no invisible-character handling. A building block for
+    composing maskers; anything sending text off the box uses :func:`mask_credentials`."""
     if not text:
         return text
     text = _PEM_KEY_RE.sub("<REDACTED:private_key>", text)
@@ -281,7 +310,8 @@ def mask_credentials(text: str) -> str:
     text = _JWT_RE.sub("<REDACTED:jwt>", text)
     for pattern in _API_KEY_PATTERNS:
         text = pattern.sub("<REDACTED:api_key>", text)
-    text = _BARE_BEARER_RE.sub(r"\1 <REDACTED:bearer>", text)
+    # The whitespace after the scheme is kept as written (a rewrite would shift every later character).
+    text = _BARE_BEARER_RE.sub(r"\1\2<REDACTED:bearer>", text)
     return _MASK_ONLY_SUBS[-1][0].sub("<REDACTED:env>", text)
 
 

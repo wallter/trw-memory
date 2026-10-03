@@ -452,6 +452,12 @@ async def test_the_bodies_the_loop_ran_one_at_a_time_still_never_interleave(tmp_
             "memory_sync_find_impl",
             {"namespace": "project:default", "remote_id": "r", "ids": []},
         ),
+        (
+            "memory_sync_find_many",
+            "trw_memory.tools.sync",
+            "memory_sync_find_many_impl",
+            {"namespace": "project:default", "remote_ids": ["r"], "ids": []},
+        ),
         # rc7: every learning-row writer shares the lane -- maintain's consolidation raced a forget, an
         # update landed between a sync apply's write and its ack or a verify's check and its write-back, and a
         # forget between a correction's read and write
@@ -461,6 +467,12 @@ async def test_the_bodies_the_loop_ran_one_at_a_time_still_never_interleave(tmp_
             "trw_memory.tools.sync",
             "memory_sync_apply_impl",
             {"namespace": "project:default", "entry": {"id": "L-x"}, "if_revision": None},
+        ),
+        (
+            "memory_sync_apply_many",
+            "trw_memory.tools.sync",
+            "memory_sync_apply_many_impl",
+            {"namespace": "project:default", "items": [{"entry": {"id": "L-x"}, "if_revision": None}]},
         ),
         (
             "memory_update",

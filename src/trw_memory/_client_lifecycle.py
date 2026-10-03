@@ -214,6 +214,10 @@ async def publish_entry(
 
     payload = await asyncio.to_thread(_c._anonymize_entry, entry, client._project_root)
     queue_payload = cast("dict[str, object]", payload)
+    from trw_memory.security.egress_gate import identity_keys
+    from trw_memory.sync._remote_publish import LEDGER_KEYS_FIELD
+
+    queue_payload[LEDGER_KEYS_FIELD] = identity_keys(entry)  # PRD-CORE-333: rechecked right before the retry's POST
     enqueued = await asyncio.to_thread(
         functools.partial(client._retry_queue.enqueue, revision=(entry.sync_seq, entry.sync_hash)),
         entry.id,

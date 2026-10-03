@@ -198,10 +198,31 @@ def test_a_vec0_table_other_than_the_one_trw_memory_writes_is_refused(tmp_path: 
 
 def test_a_vec0_table_of_any_width_trw_memory_writes_is_admitted(tmp_path: Path) -> None:
     """A checkout's vectors need not be as wide as the daemon's: the import compares them later."""
+    sqlite_vec = pytest.importorskip("sqlite_vec")
     store = tmp_path / "vec.db"
     _own_store(store, dim=4)
     _forget_verified_stores()
-    _under_deadline(store, verify_untrusted_store, store)
+    with contextlib.closing(sqlite3.connect(store)) as conn:
+        assert "float[4]" in conn.execute("SELECT sql FROM sqlite_master WHERE name = 'vec_memories'").fetchone()[0]
+    assert _under_deadline(store, verify_untrusted_store, store) is None
+
+    wide = tmp_path / "wide.db"
+    _own_store(wide, dim=8)
+    _forget_verified_stores()
+    with contextlib.closing(sqlite3.connect(wide)) as conn:
+        assert "float[8]" in conn.execute("SELECT sql FROM sqlite_master WHERE name = 'vec_memories'").fetchone()[0]
+    assert _under_deadline(wide, verify_untrusted_store, wide) is None
+
+    # Control: the same store with a vec0 option trw-memory never writes is refused.
+    with contextlib.closing(sqlite3.connect(store)) as conn:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.executescript(
+            "DROP TABLE vec_memories; CREATE VIRTUAL TABLE vec_memories USING vec0(embedding float[4], chunk_size=8);"
+        )
+    _forget_verified_stores()
+    with pytest.raises(StorageError, match="table vec_memories"):
+        _under_deadline(store, verify_untrusted_store, store)
 
 
 def test_a_reopen_of_a_registered_copy_from_another_thread_is_capped_too(tmp_path: Path) -> None:

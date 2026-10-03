@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -155,11 +156,50 @@ class TestRegisterStatusTool:
         from trw_memory.tools.status import register_status_tool
 
         mock_mcp = MagicMock()
-        mock_mcp.tool.return_value = lambda f: f
+        registered = []
+        mock_mcp.tool.return_value = lambda f: registered.append(f) or f
 
         register_status_tool(mock_mcp)
 
-        mock_mcp.tool.assert_called_once()
+        mock_mcp.tool.assert_called_once_with()
+        assert [f.__name__ for f in registered] == ["memory_status"]
+        assert inspect.iscoroutinefunction(registered[0])
+        assert list(inspect.signature(registered[0]).parameters) == ["namespace", "security_settings_only"]
+
+    async def test_the_registered_tool_scopes_the_store_and_short_circuits_security_settings(self) -> None:
+        """codex MOCK-DEPTH-5 r1: the registered wrapper's own behaviour, with contrasting inputs: it opens the
+        store for the requested namespace ("default" when none) and hands it to the impl, while
+        security_settings_only answers without opening any store."""
+        from trw_memory.tools.status import register_status_tool
+
+        backend = MagicMock()
+        opened: list[str] = []
+
+        @contextmanager
+        def _open(cfg, namespace):
+            opened.append(namespace)
+            yield backend
+
+        impl = MagicMock(side_effect=lambda namespace, **kwargs: {"impl_namespace": namespace})
+        registered = []
+        mock_mcp = MagicMock()
+        mock_mcp.tool.return_value = lambda f: registered.append(f) or f
+        # create_backend_from_config is bound when the tool is registered, so patch it first.
+        with (
+            patch("trw_memory.integrations._backend.create_backend_from_config", new=_open),
+            patch("trw_memory.tools.status.memory_status_impl", new=impl),
+        ):
+            register_status_tool(mock_mcp)
+            scoped = await registered[0](namespace="project:alpha")
+            unscoped = await registered[0]()
+            settings = await registered[0](namespace="project:alpha", security_settings_only=True)
+
+        assert scoped == {"impl_namespace": "project:alpha"}
+        assert unscoped == {"impl_namespace": None}
+        assert opened == ["project:alpha", "default"]
+        assert [c.kwargs["backend"] for c in impl.call_args_list] == [backend, backend]
+        assert sorted(settings) == ["daemon", "security_settings"]
+        assert impl.call_count == 2  # the settings-only call reached neither the store nor the impl
 
     async def test_registered_function_delegates_to_impl(self) -> None:
         from trw_memory.tools.status import register_status_tool

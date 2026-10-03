@@ -49,6 +49,11 @@ class TestExtractRemoteId:
         result = _extract_remote_id(resp)
         assert result is None
 
+        # Control: a decodable body yields its id, so None above comes from the decode error.
+        ok = MagicMock(spec=httpx.Response)
+        ok.json.return_value = {"id": 42}
+        assert _extract_remote_id(ok) == "42"
+
 
 # ---------------------------------------------------------------------------
 # _publish_payload_result
@@ -72,7 +77,9 @@ class TestPublishPayload:
         mock_client.__exit__ = MagicMock(return_value=False)
         mock_client.post.return_value = mock_resp
         with patch("trw_memory.sync._remote_publish.httpx.Client", return_value=mock_client):
-            result = _publish_payload_result({"source_learning_id": "M-001"}, cfg, entry_id="M-001")
+            result = _publish_payload_result(
+                {"source_learning_id": "M-001"}, cfg, entry_id="M-001", ledger_keys=[["id", "default", "M-001"]]
+            )
         assert result == {"success": True, "remote_id": "R-001", "retryable": False}
 
 
@@ -114,7 +121,7 @@ class TestDrainRetryQueue:
 
         def fake_drain(fn: object) -> tuple[dict[str, int], list[tuple[str, tuple[int, str] | None]]]:
             assert callable(fn)
-            fn({"source_learning_id": "M-payload"})  # type: ignore[operator]
+            fn({"source_learning_id": "M-payload", "_ledger_keys": [["id", "default", "M-payload"]]})  # type: ignore[operator]
             return {"drained": 1, "failed": 0, "skipped": 0}, [("M-1", None)]
 
         q._drain_with_ids.side_effect = fake_drain
@@ -184,7 +191,7 @@ class TestDrainRetryQueueClosure:
         def fake_drain(fn: object) -> tuple[dict[str, int], list[tuple[str, tuple[int, str] | None]]]:
             captured_fn.append(fn)
             assert callable(fn)
-            payload = {"source_learning_id": "M-closure"}
+            payload = {"source_learning_id": "M-closure", "_ledger_keys": [["id", "default", "M-closure"]]}
             fn(payload)  # type: ignore[operator]
             return {"drained": 1, "failed": 0, "skipped": 0}, [("M-canonical", None)]
 

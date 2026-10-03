@@ -61,14 +61,6 @@ _AUDITED_WRITES: dict[Site, tuple[str, str]] = {
         "unscheduled-checkout-write",
         "namespace metadata file inside the store dir, which is under a project's .trw when the store is project-scoped.",
     ),
-    ("lifecycle/tiers/_warm.py", "WarmTierStore._replace_sidecar", 1): (
-        "unscheduled-checkout-write",
-        "deterministic .tmp sibling of the warm sidecar written by name, then replaced.",
-    ),
-    ("lifecycle/tiers/_warm.py", "WarmTierStore._warm_sidecar_upsert_many", 1): (
-        "unscheduled-checkout-write",
-        "warm-tier sidecar append via Path.open('a') in the store dir.",
-    ),
     ("security/audit.py", "AuditLog.compact", 1): (
         "unscheduled-checkout-write",
         "os.fdopen on a mkstemp(dir=log parent) descriptor for the audit log compaction beside the store.",
@@ -93,13 +85,9 @@ _AUDITED_WRITES: dict[Site, tuple[str, str]] = {
         "unscheduled-checkout-write",
         "stale-handle sentinel beside the store db; plain write_text.",
     ),
-    ("storage/persistence.py", "append_jsonl", 1): (
-        "unscheduled-checkout-write",
-        "store JSONL append via Path.open('a'); follows a leaf symlink.",
-    ),
     ("storage/persistence.py", "lock_for_rmw", 1): (
         "unscheduled-checkout-write",
-        "sibling .lock opened 'a+b' beside a store file; follows a leaf symlink.",
+        "sibling .lock opened O_NOFOLLOW (no truncate, no bytes) since AIKIDO 2b; a symlinked parent is the residual.",
     ),
     ("storage/persistence.py", "write_yaml", 1): (
         "unscheduled-checkout-write",
@@ -112,10 +100,6 @@ _AUDITED_WRITES: dict[Site, tuple[str, str]] = {
     ("tools/checkout_import.py", "_private_checkout_copy", 1): (
         "own-state-stays",
         "os.fdopen on a create_private_file_fd descriptor in the private user import-tmp dir; not a checkout.",
-    ),
-    ("tools/maintain.py", "_record_stamp", 1): (
-        "unscheduled-checkout-write",
-        "maintenance-state JSON rewrite beside the store db under lock_for_rmw; plain write_text.",
     ),
     ("tools/namespace_admin.py", "_forget_move_progress", 1): (
         "unscheduled-checkout-write",

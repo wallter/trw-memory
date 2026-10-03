@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
@@ -59,7 +59,22 @@ class TestApplySec001RecallPolicy:
             mock_filter.return_value = mock_accepted
             result = _apply_sec001_recall_policy([result_entry], config=cfg)
 
-        assert isinstance(result, list)
+        # The row is the entry's own dump (keys only model_dump carries), not the caller's dict.
+        assert len(result) == 1
+        assert result[0]["id"] == "UNKNOWN-ID"
+        assert result[0]["content"] == "text"
+        assert result[0]["status"] == "active"
+        assert result[0]["metadata"] == {}
+
+        # Control: an entry that maps back to its source result is built from that dict instead.
+        with patch("trw_memory.tools._recall_helpers.filter_recall_window") as mock_filter:
+            mock_accepted = MagicMock()
+            mock_accepted.accepted = [MemoryEntry(id="M-unmapped::0", content="text")]
+            mock_filter.return_value = mock_accepted
+            mapped = _apply_sec001_recall_policy([result_entry], config=cfg)
+        assert len(mapped) == 1
+        assert mapped[0]["id"] == "M-unmapped"
+        assert "status" not in mapped[0]
 
     def test_none_source_result_strips_synthetic_suffix_from_id(self) -> None:
         """source_result is None and '::' in entry.id → strip suffix (line 70)."""
@@ -150,4 +165,14 @@ class TestRecordAccessByNamespace:
                 "project:default",
                 None,
             )
-        mock_record.assert_not_called()
+        assert mock_record.call_args_list == []
+
+        # Control: the same call with an id is recorded, proving the skip comes from the missing id.
+        with patch("trw_memory.tools._recall_helpers.record_recall_access") as mock_record:
+            _record_access_by_namespace(
+                [{"content": "no id here"}, {"id": "M-1", "content": "has id"}],
+                backend,
+                "project:default",
+                None,
+            )
+        assert mock_record.call_args_list == [call(backend, ["M-1"], namespace="project:default")]

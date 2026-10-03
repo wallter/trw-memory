@@ -293,3 +293,46 @@ def test_an_anchor_model_instance_with_a_legitimate_relative_file_still_works(tm
     anchor = Anchor(file="src/mod.py", symbol_name="my_func")
 
     assert compute_anchor_validity([anchor], tmp_path) == 1.0
+
+
+@pytest.mark.parametrize(
+    ("content", "valid"),
+    [
+        ("def run(): ...\n", True),
+        ("x = obj.run()\n", True),
+        ("def runner(): ...\n", False),  # a longer word contains it
+        ("rerun = 1\n", False),
+        ("def run_all(): ...\n", False),  # \w includes the underscore
+        ("def a_run(): ...\n", False),
+    ],
+)
+def test_a_symbol_matches_as_a_whole_word_not_a_substring(tmp_path: Path, content: str, valid: bool) -> None:
+    (tmp_path / "a.py").write_text(content, encoding="utf-8")
+
+    assert compute_anchor_validity([{"file": "a.py", "symbol_name": "run"}], tmp_path) == (1.0 if valid else 0.0)
+
+
+def test_a_symbol_with_regex_metacharacters_is_matched_literally(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("class A:\n    def __init__(self): ...\n", encoding="utf-8")
+
+    assert compute_anchor_validity([{"file": "a.py", "symbol_name": "__init__"}], tmp_path) == 1.0
+    assert compute_anchor_validity([{"file": "a.py", "symbol_name": "A.(x"}], tmp_path) == 0.0
+
+
+@pytest.mark.parametrize(
+    ("symbol", "content", "valid"),
+    [
+        ("$ref", "const x = {$ref: 1}\n", True),
+        ("$ref", "const y = a$ref\n", False),
+        ("foo?", "if foo? then\n", True),
+        ("foo?", "if foo?x then\n", False),
+        ("+=", "a += 1\n", True),
+        ("__call__", "def __call__(self): ...\n", True),
+    ],
+)
+def test_a_symbol_edged_by_a_non_word_character_still_matches_as_a_whole_name(
+    tmp_path: Path, symbol: str, content: str, valid: bool
+) -> None:
+    (tmp_path / "a.py").write_text(content, encoding="utf-8")
+
+    assert compute_anchor_validity([{"file": "a.py", "symbol_name": symbol}], tmp_path) == (1.0 if valid else 0.0)

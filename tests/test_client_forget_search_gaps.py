@@ -13,7 +13,7 @@ import pytest
 
 from trw_memory.client import MemoryClient
 from trw_memory.exceptions import MemoryNotFoundError
-from trw_memory.models.memory import MemoryEntry
+from trw_memory.models.memory import MemoryEntry, MemoryStatus
 
 
 @pytest.fixture
@@ -119,10 +119,23 @@ class TestSearchStatusEnumFallback:
         # Patch MemoryStatus in the _client_forget_search module so the try/except fires.
         # status="active" passes the allowlist check at line 169 but MemoryStatus("active")
         # then raises → hits except ValueError: _status_enum = None at line 193.
-        with patch("trw_memory._client_forget_search.MemoryStatus", side_effect=ValueError("bad enum")):
-            results = await client.search(status="active")
+        from trw_memory.storage.sqlite_backend import SQLiteBackend
+
+        original = SQLiteBackend.list_entries
+        with patch.object(SQLiteBackend, "list_entries", autospec=True, side_effect=original) as list_spy:
+            with patch("trw_memory._client_forget_search.MemoryStatus", side_effect=ValueError("bad enum")):
+                results = await client.search(status="active")
+            fallback_status = list_spy.call_args.kwargs["status"]
+
+            # Control: with a working MemoryStatus the same call filters by the enum.
+            controlled = await client.search(status="active")
+            controlled_status = list_spy.call_args.kwargs["status"]
 
         assert isinstance(results, list)
+        assert fallback_status is None
+        assert controlled_status == MemoryStatus.ACTIVE
+        assert [r["content"] for r in results] == ["some content"]
+        assert [r["content"] for r in controlled] == ["some content"]
 
 
 # ---------------------------------------------------------------------------

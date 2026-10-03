@@ -234,15 +234,11 @@ def append_jsonl(path: Path, record: dict[str, object]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(record, default=json_serializer) + "\n"
-        with path.open("a", encoding="utf-8") as fh:
-            if _FCNTL_AVAILABLE:
-                fcntl.flock(_handle_fileno(fh), fcntl.LOCK_EX)
-            try:
-                fh.write(line)
-                fh.flush()
-            finally:
-                if _FCNTL_AVAILABLE:
-                    fcntl.flock(_handle_fileno(fh), fcntl.LOCK_UN)
+        from trw_memory.safe_fs import append_beneath
+
+        # The resolved parent is the root: a symlinked leaf is refused (AIKIDO 2b), a symlinked directory the
+        # user placed on purpose still works. The lock is held on the no-follow fd the line is written through.
+        append_beneath(path.parent.resolve(), path.name, line.encode("utf-8"), mode=0o666, lock=_FCNTL_AVAILABLE)
         logger.debug("jsonl_appended", path=str(path))
     except (OSError, ValueError, TypeError) as exc:
         raise StorageError(
@@ -318,7 +314,12 @@ def lock_for_rmw(path: Path) -> Generator[Path, None, None]:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     process_lock = _in_process_lock_for(lock_path)
     with process_lock:
-        lock_fh = lock_path.open("a+b")
+        # No-follow and no truncate (AIKIDO 2b): a planted (even dangling) link at the lock name is refused
+        # instead of opening, or creating, the file it names.
+        flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        if not hasattr(os, "O_NOFOLLOW") and lock_path.is_symlink():
+            raise OSError(f"refusing to lock through a symlink: {lock_path}")
+        lock_fh = os.fdopen(os.open(lock_path, flags | getattr(os, "O_BINARY", 0), 0o666), "a+b")
         acquired = False
         try:
             _acquire_rmw_file_lock(lock_fh)
