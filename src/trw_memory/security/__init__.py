@@ -20,11 +20,6 @@ from trw_memory.security.canary import (
     CanaryStore,
     CanaryVerificationResult,
 )
-from trw_memory.security.observe_clock import (
-    ObserveClockState,
-    read_observe_clock,
-    start_observe_clock,
-)
 from trw_memory.security.pii import (
     PIIAction,
     PIIMatch,
@@ -32,9 +27,6 @@ from trw_memory.security.pii import (
     detect_pii,
     redact_text,
     shannon_entropy,
-)
-from trw_memory.security.poisoning import (
-    quarantine_entry,
 )
 from trw_memory.security.provenance import (
     ProvenanceEntry,
@@ -61,10 +53,6 @@ from trw_memory.security.rbac import (
 from trw_memory.security.recall_filter import (
     RecallFilterResult,
     filter_recall_window,
-)
-from trw_memory.security.trust_scorer import (
-    TrustScore,
-    score_intake,
 )
 
 if TYPE_CHECKING:
@@ -96,7 +84,6 @@ __all__ = [
     "CanaryStore",
     "CanaryVerificationResult",
     "ModelNotCachedError",
-    "ObserveClockState",
     "PIIAction",
     "PIIMatch",
     "PIIType",
@@ -104,7 +91,6 @@ __all__ = [
     "ProvenanceEntry",
     "RecallFilterResult",
     "Role",
-    "TrustScore",
     "check_permission",
     "detect_pii",
     "filter_recall_window",
@@ -115,11 +101,7 @@ __all__ = [
     "provenance_append_signed",
     "provenance_verify",
     "provenance_verify_signed",
-    "quarantine_entry",
-    "read_observe_clock",
     "redact_text",
     "require_namespace_permission",
-    "score_intake",
     "shannon_entropy",
-    "start_observe_clock",
 ]

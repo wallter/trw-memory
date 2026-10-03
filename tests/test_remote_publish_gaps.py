@@ -10,12 +10,18 @@ from unittest.mock import MagicMock, patch
 import httpx
 
 from trw_memory.models.config import MemoryConfig
+from trw_memory.models.memory import MemoryEntry
 from trw_memory.sync._remote_publish import (
     _extract_remote_id,
     _publish_payload_result,
     drain_retry_queue,
     retire_remote_memory,
 )
+
+
+def _row(entry_id: str) -> MemoryEntry:
+    """The queued entry as the drain reads it now: a team-labelled row, so the send-time label check admits it."""
+    return MemoryEntry(id=entry_id, content="queued", namespace="default", importance=0.9)
 
 
 def _cfg_sync_enabled(url: str = "https://platform.example.com") -> MemoryConfig:
@@ -101,7 +107,7 @@ class TestDrainRetryQueue:
         cfg.sync_enabled = False
         cfg.platform_url = ""
         q = self._mock_queue(depth=3)
-        result = drain_retry_queue(q, cfg)
+        result = drain_retry_queue(q, cfg, current_row=lambda _ns, _id: None)
         assert result["skipped"] == 3
         assert result["drained"] == 0
 
@@ -111,7 +117,7 @@ class TestDrainRetryQueue:
         cfg.sync_enabled = True
         cfg.platform_url = "bad-url"
         q = self._mock_queue(depth=2)
-        result = drain_retry_queue(q, cfg)
+        result = drain_retry_queue(q, cfg, current_row=lambda _ns, _id: None)
         assert result["skipped"] == 2
 
     def test_successful_drain_maps_remote_ids(self) -> None:
@@ -132,7 +138,7 @@ class TestDrainRetryQueue:
         mock_client.post.return_value = mock_resp
 
         with patch("trw_memory.sync._remote_publish.httpx.Client", return_value=mock_client):
-            result = drain_retry_queue(q, cfg)
+            result = drain_retry_queue(q, cfg, current_row=lambda _ns, entry_id: _row(entry_id))
 
         assert result["drained"] == 1
         assert result["remote_ids"] == {"M-1": "REMOTE-1"}
@@ -206,7 +212,7 @@ class TestDrainRetryQueueClosure:
         mock_client.post.return_value = mock_resp
 
         with patch("trw_memory.sync._remote_publish.httpx.Client", return_value=mock_client):
-            result = drain_retry_queue(q, cfg)
+            result = drain_retry_queue(q, cfg, current_row=lambda _ns, entry_id: _row(entry_id))
 
         assert result["drained"] == 1
         assert result["remote_ids"].get("M-canonical") == "REMOTE-CLOSURE"

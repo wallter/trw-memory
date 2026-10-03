@@ -512,8 +512,8 @@ class DaemonClient:
     async def status(self, namespace: str) -> Any:
         """Count *namespace*'s rows through the daemon, or fail closed."""
 
-    async def sync_dirty_page(self, namespace: str, limit: int) -> Any:
-        """The oldest *limit* rows of *namespace* that still need a push, or fail closed."""
+    async def sync_dirty_page(self, namespace: str, limit: int, cursor: str | None = None) -> Any:
+        """The oldest *limit* rows of *namespace* that still need a push (behind *cursor*, ``"<sync_seq>:<id>"``, when given), or fail closed."""
 
     async def sync_mark_synced(self, namespace: str, acks: dict[str, int]) -> Any:
         """Mark pushed rows of *namespace* synced, each at the ``sync_seq`` it was paged at, or fail closed."""

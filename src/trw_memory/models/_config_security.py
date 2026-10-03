@@ -14,26 +14,10 @@ __all__ = ["_SecurityConfigMixin"]
 
 
 class _SecurityConfigMixin(BaseModel):
-    # Poisoning defense
-    poisoning_detection_enabled: bool = Field(default=True, description="Enable statistical poisoning detection")
-    poisoning_detection_mode: Literal["observe", "enforce"] = Field(
-        default="observe",
-        description=(
-            "SEC-001 statistical-anomaly (size/tag-count) intake mode. 'observe' "
-            "(default) records rolling anomaly stats + emits telemetry but does NOT "
-            "quarantine — matching the documented SEC-001 observe-only rollout "
-            "(enforce-mode promotion was never signed off). 'enforce' quarantines "
-            "anomalous writes. This gates ONLY the statistical size/tag-count "
-            "detector; PII redaction, schema validation, write-rate limits, the "
-            "trust scorer (own trust_scoring_mode), and canary tamper halts are "
-            "unaffected. The per-entry MCP write path accumulates a reference "
-            "distribution as it stores, so a single long, well-formed learning can "
-            "score as a >3-sigma length outlier against a corpus of short entries "
-            "and be silently quarantined — observe-mode prevents that false-positive "
-            "from dropping high-value learnings out of recall."
-        ),
-    )
-    poisoning_z_threshold: float = Field(default=3.0, gt=0.0, description="Z-score threshold for anomaly detection")
+    # The statistical anomaly quarantine (poisoning_detection_enabled/_mode/_z_threshold) and the intake trust
+    # scorer (enable_trust_scoring, trust_score_threshold, trust_scoring_mode) were REMOVED on 2026-10-01
+    # (UF-MEM-03): 15 days of observe data, 0 real catches, only legitimate learnings flagged. Old configs that
+    # still set them load fine (extra="ignore"); the write gate and PII/API-key block are unchanged.
     # `anomaly_bypass_source_prefixes` was REMOVED on 2026-07-30. PRD-DIST-2045
     # shipped it as a per-source anomaly-quarantine carve-out; `209a47853` then
     # removed the carve-out from the runtime because `metadata['source']` is
@@ -47,12 +31,6 @@ class _SecurityConfigMixin(BaseModel):
     # behaviour is NOT the fix — the carve-out is exactly the caller-controlled
     # bypass class this package spent 2026-07-30 removing elsewhere.
     quarantine_path: str = Field(default="", description="Directory where quarantined entries are written")
-    enable_trust_scoring: bool = Field(default=True, description="Enable SEC-001 trust scoring on all ingest paths")
-    trust_score_threshold: float = Field(default=0.5, ge=0.0, le=1.0, description="SEC-001 quarantine threshold")
-    trust_scoring_mode: Literal["observe", "enforce", "strict"] = Field(
-        default="observe",
-        description="SEC-001 intake mode: observe logs only, enforce quarantines, strict rejects",
-    )
     # `quarantine_ttl_seconds` was REMOVED on 2026-09-26 (PRD-QUAL-145 wave 3).
     # `security/_runtime_quarantine.py` has no TTL sweep -- `delete_quarantined_entries`
     # only deletes what a caller names explicitly (memory_id or actor), and no lane job
@@ -67,9 +45,9 @@ class _SecurityConfigMixin(BaseModel):
         description="Append-only quarantine decision ledger (PRD-CORE-333 FR01); its own file, never an active store",
     )
     enable_recall_filter: bool = Field(default=True, description="Enable SEC-001 recall filtering")
-    recall_filter_mode: Literal["strict", "redact", "observe"] = Field(
-        default="redact",
-        description="SEC-001 recall filter mode",
+    recall_filter_mode: Literal["strict", "observe"] = Field(
+        default="strict",
+        description="SEC-001 recall filter: strict drops an entry whose content no longer matches its pinned hash",
     )
     canary_injection_rate: int = Field(default=5, ge=3, le=5, description="Number of in-code canaries to seed")
     canary_probe_interval: int = Field(default=25, ge=1, description="Probe canaries every N recalls")

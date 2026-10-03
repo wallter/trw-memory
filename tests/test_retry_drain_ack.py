@@ -142,7 +142,10 @@ async def test_a_later_success_without_an_id_keeps_the_earlier_remote_id(
     published = [("e", (row.sync_seq - 1, "old"), "42"), ("e", (row.sync_seq, row.sync_hash), None)]
     monkeypatch.setattr(
         "trw_memory.sync._remote_publish._drain_retry_queue_with_ids",
-        lambda _queue, _cfg: ({"drained": 2, "failed": 0, "skipped": 0, "remote_ids": {"e": "42"}}, published),
+        lambda _queue, _cfg, **_drain_kwargs: (
+            {"drained": 2, "failed": 0, "skipped": 0, "remote_ids": {"e": "42"}},
+            published,
+        ),
     )
 
     await _client_lifecycle._drain_retry_queue_once(client)

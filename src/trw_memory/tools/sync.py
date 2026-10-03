@@ -38,15 +38,29 @@ MAX_SYNC_DIRTY_PAGE = 1000
 MAX_SYNC_APPLY_MANY = 200
 
 
+def _parse_dirty_cursor(cursor: str) -> tuple[int, str] | None:
+    """``"<sync_seq>:<id>"`` -> ``(sync_seq, id)``; ``None`` when it is not that (the id may itself hold colons)."""
+    seq, _, row_id = cursor.partition(":")
+    # ASCII digits only and at most 18 of them: str.isdigit() accepts "\u00b2" (int() then raises) and a longer number overflows SQLite's 64-bit integer.
+    return (int(seq), row_id) if seq.isascii() and seq.isdigit() and len(seq) <= 18 and row_id else None
+
+
 def memory_sync_dirty_page_impl(
-    namespace: str, limit: int, *, backend: StorageBackend, config: MemoryConfig
+    namespace: str, limit: int, *, backend: StorageBackend, config: MemoryConfig, cursor: str | None = None
 ) -> dict[str, object]:
-    """The oldest *limit* rows of *namespace* that still need a push."""
+    """The oldest *limit* rows of *namespace* that still need a push; with *cursor* (``"<sync_seq>:<id>"``, the last row of the
+    previous page) only the rows behind it, so a pusher that holds back the front of the queue can still reach everything newer."""
     if limit < 1 or limit > MAX_SYNC_DIRTY_PAGE:
         return {"error": f"limit must be in [1, {MAX_SYNC_DIRTY_PAGE}]", "status": "invalid"}
+    after = None
+    if cursor is not None and (after := _parse_dirty_cursor(cursor)) is None:
+        return {
+            "error": "cursor must be '<sync_seq>:<id>' as read from the last row of the previous page",
+            "status": "invalid",
+        }
     if refused := refused_namespace(namespace, Permission.READ, "sync_dirty_page", config):
         return refused
-    entries = DeltaTracker.get_dirty_entries(backend, namespace=namespace, limit=limit)
+    entries = DeltaTracker.get_dirty_entries(backend, namespace=namespace, limit=limit, after=after)
     return {"entries": [entry.model_dump(mode="json") for entry in entries]}
 
 
@@ -215,13 +229,13 @@ def memory_sync_apply_many_impl(
 def register_sync_tools(mcp: McpServer) -> None:
     """Register the sync tools; each authorizes its namespace before opening a backend."""
 
-    async def memory_sync_dirty_page(namespace: str, limit: int = 500) -> dict[str, object]:
-        """Return the oldest *limit* rows of *namespace* that still need a push."""
+    async def memory_sync_dirty_page(namespace: str, limit: int = 500, cursor: str | None = None) -> dict[str, object]:
+        """Return the oldest *limit* rows of *namespace* that still need a push; *cursor* (``"<sync_seq>:<id>"``) starts behind that row."""
         return await serve_namespace(
             namespace,
             Permission.READ,
             "sync_dirty_page",
-            lambda b, c: memory_sync_dirty_page_impl(namespace, limit, backend=b, config=c),
+            lambda b, c: memory_sync_dirty_page_impl(namespace, limit, backend=b, config=c, cursor=cursor),
         )
 
     async def memory_sync_mark_synced(namespace: str, acks: dict[str, int]) -> dict[str, object]:

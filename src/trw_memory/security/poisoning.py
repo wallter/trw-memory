@@ -9,9 +9,7 @@ Uses 3-sigma (z-score) thresholds to detect three classes of anomaly:
 from __future__ import annotations
 
 import json
-import math
 import re
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import structlog
@@ -30,12 +28,6 @@ if TYPE_CHECKING:
     from trw_memory.decisions import DecisionJudge, Toolkit
 
 logger = structlog.get_logger(__name__)
-
-# Minimum number of clean reference entries before statistical (z-score) anomaly
-# detection produces meaningful results. Below this, score_series_anomaly returns
-# None (skipped). Single source of truth shared with security/runtime.py, which
-# audits the sub-baseline condition (trw-memory-10).
-MIN_ANOMALY_BASELINE = 10
 
 # Patterns a genuine stored code or shell snippet legitimately contains, and the
 # ONLY ones the code-snippet exemption (SYSTEM_CODE_FLAG_KEY) may waive. Each is a
@@ -155,17 +147,13 @@ _ALWAYS_ENFORCED_PATTERNS = (
 # fields — which breaks the invariant the join exists to provide ("a separator
 # cannot create a match that spans two fields") in both directions. It produced a
 # false positive on ordinary split prose ("...should ignore" / "previous
-# instructions from the stale queue"), and worse, a redact-mode LEAK: `_inspect`
-# joins the fields and flags the match, `_redact_entry` substitutes per field and
-# so removes nothing, and the entry is handed back labelled `redact` with the
-# payload fully intact. Redacting a subset is worse than not redacting, because
-# the caller is told the entry was sanitised.
+# instructions from the stale queue").
 #
 # `tests/test_injection_scan_surface.py::TestSeparatorsDoNotCrossFieldBoundaries`
 # pins this for every always-enforced pattern.
 
-#: Every injection pattern, in one tuple. ``trust_scorer`` and ``recall_filter``
-#: read this: neither has a code-snippet exemption, so both scan the full set.
+#: Every injection pattern, in one tuple: the write gate scans it (``validate_entry_payload``), minus the
+#: code-exempt half for an entry ``_flag_code_snippet`` marked as code.
 _INJECTION_PATTERNS = _ALWAYS_ENFORCED_PATTERNS + _CODE_EXEMPT_PATTERNS
 
 # System-only metadata key that signals `_flag_code_snippet` authoritatively
@@ -194,25 +182,6 @@ RESERVED_SYSTEM_METADATA_KEYS = (
     "security_status",
     "system_canary",
 )
-
-
-def quarantine_entry(entry: MemoryEntry) -> MemoryEntry:
-    """Move *entry* to quarantine by setting metadata flags.
-
-    Sets ``metadata["quarantined"]`` to ``"true"`` and
-    ``metadata["quarantined_at"]`` to the current UTC timestamp.
-
-    Args:
-        entry: The entry to quarantine.
-
-    Returns:
-        A new :class:`MemoryEntry` with quarantine metadata applied.
-    """
-    now = datetime.now(timezone.utc).isoformat()
-    new_metadata = dict(entry.metadata)
-    new_metadata["quarantined"] = "true"
-    new_metadata["quarantined_at"] = now
-    return entry.model_copy(update={"metadata": new_metadata})
 
 
 def strip_reserved_metadata(entry: MemoryEntry) -> MemoryEntry:
@@ -411,6 +380,25 @@ def _screen_injection_shadow(
         )
 
 
+def reject_injection(entry: MemoryEntry, *, judge: DecisionJudge | None = None) -> None:
+    """Raise ``PoisoningError(reason="injection_pattern")`` when any scanned field carries a known injection shape.
+
+    The one injection check both writers share: ``validate_entry_payload`` on store and
+    ``lifecycle.correction.apply_correction`` on a patch that changes a scanned field (UF-MEM-03 removed the
+    recall-time redactor that used to stand behind an unchecked correction).
+    """
+    code_flagged = entry.metadata.get(SYSTEM_CODE_FLAG_KEY) == "true"
+    patterns = _ALWAYS_ENFORCED_PATTERNS if code_flagged else _INJECTION_PATTERNS
+    combined = scannable_text(entry)
+    matched_pattern = next((pattern for pattern in patterns if pattern.search(combined)), None)
+    _screen_injection_shadow(entry, heuristic_blocked=matched_pattern is not None, text=combined, judge=judge)
+    if matched_pattern is not None:
+        raise PoisoningError(
+            f"memory entry matched blocked injection pattern {matched_pattern.pattern!r}",
+            reason="injection_pattern",
+        )
+
+
 def validate_entry_payload(
     entry: MemoryEntry,
     *,
@@ -460,16 +448,7 @@ def validate_entry_payload(
     # A code-flagged entry waives only the literal code/markup/shell tokens. It
     # never waives a natural-language imperative — see _ALWAYS_ENFORCED_PATTERNS
     # for why the previous blanket `return` was a total gate bypass.
-    code_flagged = entry.metadata.get(SYSTEM_CODE_FLAG_KEY) == "true"
-    patterns = _ALWAYS_ENFORCED_PATTERNS if code_flagged else _INJECTION_PATTERNS
-    combined = scannable_text(entry)
-    matched_pattern = next((pattern for pattern in patterns if pattern.search(combined)), None)
-    _screen_injection_shadow(entry, heuristic_blocked=matched_pattern is not None, text=combined, judge=judge)
-    if matched_pattern is not None:
-        raise PoisoningError(
-            f"memory entry matched blocked injection pattern {matched_pattern.pattern!r}",
-            reason="injection_pattern",
-        )
+    reject_injection(entry, judge=judge)
     # PRD-CORE-244 FR02 / NFR03: evaluated AFTER the injection scan, so a
     # poisoned entry is still rejected on the stronger ground first.
     reject_unsubstantiated_verified(entry, min_items=min_evidence_items_for_verified)
@@ -510,78 +489,3 @@ def validate_store_inputs(
             f"memory store schema invalid for fields: {', '.join(failed_fields)}",
             failed_fields=failed_fields,
         )
-
-
-def score_series_anomaly(
-    entry: MemoryEntry,
-    *,
-    lengths: list[float],
-    tag_counts: list[float],
-    z_threshold: float,
-) -> tuple[str, float] | None:
-    """Return the strongest anomaly dimension for *entry* against a reference
-    already reduced to its two series, or ``None``.
-
-    *lengths* (``len(content) + len(detail)``) and *tag_counts* hold one value
-    per clean (non-quarantined) reference entry, in the same order. The
-    runtime store path (``security/_runtime_anomaly.py::score_anomaly``, the
-    sole production caller) keeps these series cached per namespace instead
-    of re-reading the entries on every call.
-    """
-    if len(lengths) < MIN_ANOMALY_BASELINE:
-        # Statistical anomaly detection needs a stable baseline (>=10 clean
-        # entries) before z-scores are meaningful. New / freshly-purged
-        # namespaces fall below it, so they get no statistical protection —
-        # an attacker could seed up to 9 entries undetected by THIS check.
-        # Injection-pattern checks in validate_entry_payload run
-        # unconditionally on every write and still cover those entries; emit a
-        # WARNING so operators can observe sub-baseline write patterns.
-        logger.warning(
-            "anomaly_detection_skipped_insufficient_baseline",
-            op="poisoning",
-            namespace=entry.namespace,
-            sample_count=len(lengths),
-            min_baseline=MIN_ANOMALY_BASELINE,
-        )
-        return None
-
-    candidates: list[tuple[str, float, list[float]]] = [
-        ("entry_length", float(len(entry.content) + len(entry.detail)), lengths),
-        ("tag_count", float(len(entry.tags)), tag_counts),
-    ]
-
-    strongest: tuple[str, float] | None = None
-    for dimension, value, series in candidates:
-        mean, std = _mean_std(series)
-        if std == 0:
-            if value <= mean:
-                continue
-            z_score = float("inf")
-        else:
-            z_score = (value - mean) / std
-        if z_score >= z_threshold and (strongest is None or z_score > strongest[1]):
-            strongest = (dimension, round(z_score, 2) if math.isfinite(z_score) else z_threshold + 1.0)
-    return strongest
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
-def _mean_std(values: list[int] | list[float]) -> tuple[float, float]:
-    """Compute mean and population standard deviation.
-
-    Args:
-        values: Numeric values.
-
-    Returns:
-        Tuple of ``(mean, std_dev)``.  Returns ``(0.0, 0.0)`` for
-        empty input.
-    """
-    if not values:
-        return (0.0, 0.0)
-    n = len(values)
-    mean = sum(values) / n
-    variance = sum((v - mean) ** 2 for v in values) / n
-    return (mean, math.sqrt(variance))

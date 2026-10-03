@@ -352,3 +352,73 @@ def test_a_conditional_apply_needs_a_transactional_backend(tmp_path: Path, confi
 
     assert (status, "transactional" in reason) == ("invalid", True)
     assert store.get("Y-9", namespace=_ALPHA) is None
+
+
+# ── SYNC-PUSH-HELD-STALL: a keyset cursor lets a pusher page past rows it will not send ────────────────────────────────────────────────────────────────────
+
+
+def _cursor_of(row: dict[str, object]) -> str:
+    return f"{row['sync_seq']}:{row['id']}"
+
+
+def test_a_cursor_pages_past_the_rows_it_names_in_sync_seq_then_id_order(
+    backend: SQLiteBackend, config: MemoryConfig
+) -> None:
+    first = memory_sync_dirty_page_impl(_ALPHA, 1, backend=backend, config=config)
+    assert [row["id"] for row in first["entries"]] == ["A-0"]
+
+    second = memory_sync_dirty_page_impl(
+        _ALPHA, 1, backend=backend, config=config, cursor=_cursor_of(first["entries"][0])
+    )
+    assert [row["id"] for row in second["entries"]] == [
+        "A-1"
+    ]  # same sync_seq as A-0: the id breaks the tie, nothing repeats or is skipped
+
+    rest = memory_sync_dirty_page_impl(
+        _ALPHA, 10, backend=backend, config=config, cursor=_cursor_of(second["entries"][0])
+    )
+    assert [row["id"] for row in rest["entries"]] == ["A-2"]
+
+
+def test_a_cursor_past_the_last_row_returns_an_empty_page(backend: SQLiteBackend, config: MemoryConfig) -> None:
+    last = memory_sync_dirty_page_impl(_ALPHA, 10, backend=backend, config=config)["entries"][-1]
+    assert (
+        memory_sync_dirty_page_impl(_ALPHA, 10, backend=backend, config=config, cursor=_cursor_of(last))["entries"]
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    "cursor", ["garbage", "x:A-0", ":A-0", "3:", "-1:A-0", "", "\u00b2:A-0", "99999999999999999999:A-0"]
+)
+def test_a_malformed_cursor_is_refused_not_guessed(backend: SQLiteBackend, config: MemoryConfig, cursor: str) -> None:
+    answer = memory_sync_dirty_page_impl(_ALPHA, 10, backend=backend, config=config, cursor=cursor)
+    assert answer["status"] == "invalid" and "cursor" in str(answer["error"])
+
+
+def test_the_tracker_starts_its_keyset_after_the_given_row(backend: SQLiteBackend) -> None:
+    rows = DeltaTracker.get_dirty_entries(backend, namespace=_ALPHA)
+    after = (rows[0].sync_seq, rows[0].id)
+    assert [e.id for e in DeltaTracker.get_dirty_entries(backend, namespace=_ALPHA, after=after)] == ["A-1", "A-2"]
+
+
+def test_the_daemon_client_forwards_the_cursor_to_the_dirty_page_tool() -> None:
+    import inspect
+
+    from trw_memory.daemon.client import DaemonClient
+
+    assert "cursor" in inspect.signature(DaemonClient.sync_dirty_page).parameters
+
+
+def test_the_fallback_path_pages_equal_revision_rows_in_id_order_so_a_cursor_skips_none() -> None:
+    """The non-SQLite fallback sorted by sync_seq alone: rows sharing a revision came back in arbitrary order and a (sync_seq, id) cursor skipped some of them."""
+    import types
+
+    rows = [
+        make_entry(entry_id=name, namespace=_ALPHA, content=name) for name in ("A-9", "A-1", "A-5")
+    ]  # one revision, unsorted
+    backend = types.SimpleNamespace(
+        list_entries=lambda limit: rows, count=lambda: len(rows), filter_quarantined=lambda entries: entries
+    )
+    got = DeltaTracker.get_dirty_entries(backend, namespace=_ALPHA, after=(rows[0].sync_seq, "A-1"))  # type: ignore[arg-type]
+    assert [e.id for e in got] == ["A-5", "A-9"]

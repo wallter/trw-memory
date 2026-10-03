@@ -1,7 +1,7 @@
 """Namespace change tokens and change feeds for ``SQLiteBackend``.
 
-A caller that keeps a derived view of a namespace (the runtime anomaly
-reference window, ``security/_anomaly_reference.py``) needs to know, cheaply,
+A caller that keeps a derived view of a namespace (the graph namespace index,
+``_graph_namespace_index.py``) needs to know, cheaply,
 whether the namespace changed since it last looked and, if so, which rows. A
 row count or a re-read of the recent rows is O(namespace) or O(window) per
 call. The token here costs two index seeks:

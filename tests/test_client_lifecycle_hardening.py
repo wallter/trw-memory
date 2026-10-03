@@ -101,6 +101,7 @@ def test_invalid_timeout_is_rejected_before_backend_open(timeout: float) -> None
 async def test_retry_drain_failure_resets_restart_flag() -> None:
     client = MemoryClient.__new__(MemoryClient)
     client._retry_drain_started = True
+    client._namespace = "default"
     client._retry_queue = MagicMock()
     client._config = MagicMock()
 
@@ -120,6 +121,7 @@ async def test_retry_drain_failure_resets_restart_flag() -> None:
 async def test_retry_drain_cancellation_resets_restart_flag() -> None:
     client = MemoryClient.__new__(MemoryClient)
     client._retry_drain_started = True
+    client._namespace = "default"
     client._retry_queue = MagicMock()
     client._config = MagicMock()
 
@@ -136,6 +138,7 @@ async def test_retry_drain_cancellation_resets_restart_flag() -> None:
 async def test_skipped_retry_is_not_marked_published() -> None:
     client = MemoryClient.__new__(MemoryClient)
     client._retry_drain_started = True
+    client._namespace = "default"
     client._retry_queue = MagicMock()
     client._config = MagicMock()
     client._lock = asyncio.Lock()

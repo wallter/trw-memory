@@ -12,7 +12,7 @@ from trw_memory.exceptions import PoisoningError, SchemaValidationError
 from trw_memory.integrations._backend import create_backend_from_config
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import Anchor, Assertion, AssertionType, MemoryEntry
-from trw_memory.security.poisoning import score_series_anomaly, validate_entry_payload
+from trw_memory.security.poisoning import validate_entry_payload
 from trw_memory.security.write_gate import guarded_store
 from trw_memory.tools.store import memory_store_impl
 
@@ -132,59 +132,6 @@ class TestWriteTimeValidation:
             result = memory_store_impl("<script>alert(1)</script>", "project:default", backend=backend, config=cfg)
 
         assert result["status"] == "blocked"
-
-    def test_score_series_anomaly_flags_large_outlier(self) -> None:
-        # score_series_anomaly takes the reference already reduced to its two
-        # series (the shape the runtime store path caches per namespace) —
-        # see security/_runtime_anomaly.py::score_anomaly, the sole production
-        # caller.
-        reference = [
-            make_entry(entry_id=f"M-{index}", content="normal content", detail="ok", metadata={}) for index in range(20)
-        ]
-        outlier = make_entry(entry_id="M-outlier", content="A" * 5000, detail="")
-        lengths = [float(len(candidate.content) + len(candidate.detail)) for candidate in reference]
-        tag_counts = [float(len(candidate.tags)) for candidate in reference]
-        anomaly = score_series_anomaly(outlier, lengths=lengths, tag_counts=tag_counts, z_threshold=3.0)
-        assert anomaly is not None
-        assert anomaly[0] == "entry_length"
-
-    def test_score_series_anomaly_warns_when_baseline_insufficient(self) -> None:
-        import structlog
-
-        # Fewer than 10 clean reference entries → statistical detection is
-        # skipped, but a WARNING must be emitted so operators can observe
-        # sub-baseline (new-namespace) write patterns.
-        reference = [make_entry(entry_id=f"M-{i}", content="x") for i in range(5)]
-        outlier = make_entry(entry_id="M-outlier", content="A" * 5000)
-        lengths = [float(len(candidate.content) + len(candidate.detail)) for candidate in reference]
-        tag_counts = [float(len(candidate.tags)) for candidate in reference]
-
-        with structlog.testing.capture_logs() as logs:
-            result = score_series_anomaly(outlier, lengths=lengths, tag_counts=tag_counts, z_threshold=3.0)
-
-        assert result is None
-        skip_events = [
-            entry for entry in logs if entry.get("event") == "anomaly_detection_skipped_insufficient_baseline"
-        ]
-        assert len(skip_events) == 1
-        assert skip_events[0]["sample_count"] == 5
-        assert skip_events[0]["log_level"] == "warning"
-
-    def test_score_series_anomaly_no_skip_warning_when_baseline_sufficient(self) -> None:
-        import structlog
-
-        reference = [make_entry(entry_id=f"M-{i}", content="normal") for i in range(20)]
-        outlier = make_entry(entry_id="M-outlier", content="A" * 5000)
-        lengths = [float(len(candidate.content) + len(candidate.detail)) for candidate in reference]
-        tag_counts = [float(len(candidate.tags)) for candidate in reference]
-
-        with structlog.testing.capture_logs() as logs:
-            score_series_anomaly(outlier, lengths=lengths, tag_counts=tag_counts, z_threshold=3.0)
-
-        skip_events = [
-            entry for entry in logs if entry.get("event") == "anomaly_detection_skipped_insufficient_baseline"
-        ]
-        assert skip_events == []
 
 
 class TestSystemPromptPatternIsActionShaped:

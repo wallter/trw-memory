@@ -151,7 +151,7 @@ def test_a_running_config_stops_every_sender_the_moment_the_switch_turns_off(
     _switch(project, "false")
     refuse.urls.clear()
     publish_memory_result(entry, cfg)
-    drain = drain_retry_queue(queue, cfg)
+    drain = drain_retry_queue(queue, cfg, current_row=lambda _ns, entry_id: entry.model_copy(update={"id": entry_id}))
     retire_remote_memory("R-1", cfg)
     fetched = fetch_shared_memories("anything", cfg, admit=lambda _entry: True)
 

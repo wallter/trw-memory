@@ -257,7 +257,8 @@ def _through_intake(tmp_path: Path, canary_id: str) -> MemoryEntry:
         entry = store.get(canary_id, namespace="default")
     finally:
         store.close()
-    assert entry is not None and "trust_score" in entry.metadata and "system_canary" not in entry.metadata
+    # Proof it went through the intake: the provenance stamp (the trust_score stamp went with UF-MEM-03).
+    assert entry is not None and "provenance_ts" in entry.metadata and "system_canary" not in entry.metadata
     return entry
 
 

@@ -38,7 +38,6 @@ from trw_memory.lifecycle.tiers._runtime import embedding_has_consumer, remember
 from trw_memory.models.entry_factory import new_memory_id
 from trw_memory.models.memory import Assertion, MemoryEntry
 from trw_memory.namespaces.manager import NamespaceManager
-from trw_memory.security._runtime_anomaly import shared_anomaly_reference
 from trw_memory.security.poisoning import validate_store_inputs
 from trw_memory.security.rbac import Permission
 from trw_memory.security.runtime import (
@@ -169,10 +168,8 @@ async def bulk_store_impl(
         now = datetime.now(timezone.utc)
 
         decisions: list[Any] = [None] * len(prepared)
-        # Every row is scored before any is persisted, so all rows of the batch
-        # share one anomaly reference window: read (and record) it once. The
-        # batch is also ONE write per writer session for the rate limiter.
-        with shared_anomaly_reference(), single_write_operation():
+        # The batch is ONE write per writer session for the rate limiter.
+        with single_write_operation():
             for i, (req, validation_error) in enumerate(prepared):
                 if validation_error is not None:
                     item_slots[i] = BulkStoreItemResult(

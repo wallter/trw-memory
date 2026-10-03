@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Literal
 import structlog
 
 from trw_memory.labels import _file
-from trw_memory.labels._levels import STAMP_VALUES, Level, Sink, Surface
+from trw_memory.labels._levels import STAMP_VALUES, Level, Sink, Surface, tag_key
 
 if TYPE_CHECKING:
     from trw_memory.models.memory import MemoryEntry
@@ -113,7 +113,7 @@ class LabelPolicy:
             floor, by_tag = self._for_namespace(namespace)
             level = max(level, floor)
             for tag in entry.tags:
-                key = tag.lower()
+                key = tag_key(tag)
                 level = max(level, self._tag_levels.get(key, Level.PUBLIC), by_tag.get(key, Level.PUBLIC))
         stamp = entry.metadata.get(_STAMP_KEY)
         if stamp is not None:

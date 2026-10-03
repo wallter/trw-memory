@@ -13,16 +13,16 @@ straight-line function body, so the sequence is auditable and test-pinnable
 
 Order-dependence a naive uniform pipeline would break (do NOT reorder):
   1. classify (op/actor) reads pre-mutation backend state BEFORE any model_copy.
-  2. trust-quarantine short-circuit signs provenance on UN-redacted content and
-     SKIPS rate-limit / PII / anomaly — running those uniformly on a held entry
-     would change stored content + provenance timing.
-  3. PII redaction (``_stage_pii_policy``) MUST precede provenance hashing
+  2. PII redaction (``_stage_pii_policy``) MUST precede provenance hashing
      (``_stage_provenance_hash``) so the stored hash reflects stored content
      (PRD-DIST-2046 c793 — prevents recall-time hash_pin_drift).
-  4. rate-limit .. anomaly all sit inside ONE try whose except emits the
+  3. rate-limit .. provenance all sit inside ONE try whose except emits the
      ``store_rejected`` audit (carrying ``retry_after`` / ``failed_fields``)
      then re-raises. Audit is NOT pushed into individual stages.
-  5. the anomaly-stats write runs ONLY on success (after the try).
+
+The intake trust scorer, the statistical anomaly quarantine and their observe clock were removed (UF-MEM-03,
+2026-10-01): in 15 days of observe data they caught nothing and flagged only legitimate learnings. The write
+gate (``validate_entry_payload``) still refuses known injection shapes, and PII/API keys are still blocked.
 
 ``enforce_write_rate_limit`` / ``append_audit_event`` /
 ``ensure_security_maintenance`` deliberately stay in ``runtime`` and are reached
@@ -34,7 +34,7 @@ monkeypatch seam (``enforce_write_rate_limit`` reads the ``time`` global of the
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Callable
@@ -42,28 +42,18 @@ from types import ModuleType
 
 import structlog
 
-from trw_memory.exceptions import PIIBlockError, ProvenanceKeyUnavailableError, RateLimitError, ScorerUnavailableError
+from trw_memory.exceptions import PIIBlockError, ProvenanceKeyUnavailableError, RateLimitError
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.pii import PIIMatch
 from trw_memory.security.poisoning import (
-    MIN_ANOMALY_BASELINE,
-    quarantine_entry,
-    scannable_text,
     strip_reserved_metadata as _strip,
     validate_entry_payload,
 )
-from trw_memory.security.provenance import TRUST_FLAGS, TRUST_SCORE, build_entry_provenance
+from trw_memory.security.provenance import build_entry_provenance
 from trw_memory.security.startup import _discover_anchor, resolve_security_path, verify_defaults
-from trw_memory.security.telemetry_emit import build_security_traceability, emit_security_event
-from trw_memory.security.trust_scorer import score_intake
 from trw_memory.storage.interface import StorageBackend
 
-from trw_memory.security._runtime_anomaly import (
-    AnomalyStats,
-    score_anomaly as _score_entry_anomaly,
-    write_anomaly_stats as _write_anomaly_stats,
-)
 from trw_memory.security._runtime_pii import (
     apply_runtime_pii_policy as _apply_runtime_pii_policy,
     flag_code_snippet as _flag_code_snippet,
@@ -104,8 +94,6 @@ class _StoreContext:
     actor: str = ""
     op: str = "store"
     pii_matches: tuple[PIIMatch, ...] = ()
-    anomaly: tuple[str, float] | None = None
-    anomaly_stats: AnomalyStats | None = None
     rate_receipt: float | None = None
 
 
@@ -115,18 +103,6 @@ class _StoreContext:
 # --------------------------------------------------------------------------- #
 def _actor_for_entry(entry: MemoryEntry) -> str:
     return entry.source_identity or entry.source or "system"
-
-
-def _intake_scannable_text(entry: MemoryEntry) -> str:
-    """Alias for the canonical scan surface — see ``poisoning.scannable_text``.
-
-    This used to be a second, independent definition that omitted ``tags``, while
-    ``validate_entry_payload`` had a third that omitted ``evidence`` and assertion
-    evidence. Every field one copy missed was a live bypass on that copy's path, so
-    the derivation now lives in exactly one place. Kept as a named alias because the
-    trust-scorer stage and its tests import it.
-    """
-    return scannable_text(entry)
 
 
 def _resolve_provenance_session_id(entry: MemoryEntry, session_id: str | None) -> str:
@@ -156,69 +132,9 @@ def _rejection_reason(exc: Exception) -> str:
     return getattr(exc, "reason", exc.__class__.__name__)
 
 
-def _apply_sec001_intake(
-    entry: MemoryEntry,
-    *,
-    config: MemoryConfig,
-    session_id: str | None,
-    trw_dir: Path | None = None,
-) -> MemoryEntry:
-    anchor_dir = trw_dir or _discover_anchor(config)
-    verify_defaults(config, trw_dir=anchor_dir)
-    trust_metadata = {**entry.metadata, "source_identity": entry.source_identity}
-    if config.enable_trust_scoring:
-        try:
-            trust_result = score_intake(
-                _intake_scannable_text(entry),
-                trust_metadata,
-                observe_mode=config.trust_scoring_mode == "observe",
-                trw_dir=anchor_dir,
-            )
-        except Exception as exc:
-            raise ScorerUnavailableError(f"trust scorer unavailable: {exc}") from exc
-        updated_metadata = {
-            **entry.metadata,
-            TRUST_SCORE: f"{trust_result.score:.4f}",
-            TRUST_FLAGS: "|".join(trust_result.reasons),
-        }
-        entry = entry.model_copy(update={"metadata": updated_metadata})
-        would_be_decision = next(
-            (reason.removeprefix("WOULD-BE:") for reason in trust_result.reasons if reason.startswith("WOULD-BE:")),
-            trust_result.decision,
-        )
-        telemetry_session_id, telemetry_run_id = _resolve_security_trace_context(
-            session_id=session_id or _resolve_provenance_session_id(entry, session_id)
-        )
-        emit_security_event(
-            config,
-            emitter="trust_scorer",
-            session_id=telemetry_session_id,
-            run_id=telemetry_run_id,
-            payload={
-                "event_name": "trust_score_decision",
-                "entry_id": entry.id,
-                "namespace": entry.namespace,
-                "mode": config.trust_scoring_mode,
-                "score": trust_result.score,
-                "decision": trust_result.decision,
-                "would_be_decision": would_be_decision,
-                "flags": list(trust_result.reasons),
-                "traceability": build_security_traceability(
-                    live_path="security.runtime.prepare_entry_for_store",
-                    requirement_ids=["FR-001", "FR-008", "NFR-010", "NFR-011"],
-                ),
-            },
-        )
-        if config.trust_scoring_mode == "strict" and trust_result.score < config.trust_score_threshold:
-            from trw_memory.exceptions import PoisoningError
-
-            raise PoisoningError("trust score below threshold", reason="trust_score_below_threshold")
-        if config.trust_scoring_mode == "enforce" and trust_result.score < config.trust_score_threshold:
-            entry = quarantine_entry(entry)
-
-    # Provenance hash + signature run in _apply_provenance_hash (PRD-DIST-2046
-    # c793) so they follow _apply_runtime_pii_policy and the stored hash
-    # reflects the stored content.
+def _apply_sec001_intake(entry: MemoryEntry, *, config: MemoryConfig, trw_dir: Path | None = None) -> MemoryEntry:
+    """Fail closed when the SEC-001 security defaults are not in place (``verify_defaults``)."""
+    verify_defaults(config, trw_dir=trw_dir or _discover_anchor(config))
     return entry
 
 
@@ -292,15 +208,15 @@ def _stage_flag_code(ctx: _StoreContext) -> None:
     ctx.entry = _flag_code_snippet(ctx.entry)
 
 
-def _stage_trust_intake(ctx: _StoreContext) -> None:
-    ctx.entry = _apply_sec001_intake(ctx.entry, config=ctx.config, session_id=ctx.session_id, trw_dir=ctx.trw_dir)
+def _stage_verify_defaults(ctx: _StoreContext) -> None:
+    ctx.entry = _apply_sec001_intake(ctx.entry, config=ctx.config, trw_dir=ctx.trw_dir)
 
 
-_PRE_QUARANTINE_STAGES: list[Callable[[_StoreContext], None]] = [
+_PRE_AUDIT_STAGES: list[Callable[[_StoreContext], None]] = [
     _stage_queue_drain,
     _stage_classify,
     _stage_flag_code,
-    _stage_trust_intake,
+    _stage_verify_defaults,
 ]
 
 
@@ -332,134 +248,12 @@ def _stage_provenance_hash(ctx: _StoreContext) -> None:
     ctx.entry = _apply_provenance_hash(ctx.entry, config=ctx.config, session_id=ctx.session_id, trw_dir=ctx.trw_dir)
 
 
-def _stage_anomaly_score(ctx: _StoreContext) -> None:
-    ctx.anomaly, ctx.anomaly_stats = _score_entry_anomaly(ctx.entry, ctx.backend, config=ctx.config)
-
-
 _AUDITED_STAGES: list[Callable[[_StoreContext], None]] = [
     _stage_rate_limit,
     _stage_validate_payload,
     _stage_pii_policy,
     _stage_provenance_hash,
-    _stage_anomaly_score,
 ]
-
-
-def _finalize_trust_quarantine(ctx: _StoreContext) -> PreparedStoreEntry:
-    # A trust-score quarantine must still carry provenance so it stays auditable
-    # (audit_entry() reports `quarantined` + verified rather than
-    # `legacy_unsigned`). No PII redaction runs on this path, so signing the
-    # quarantined content as-is keeps hash + signature internally consistent.
-    # Best-effort: if the signing key is unavailable, keep the (still-quarantined)
-    # entry unsigned rather than failing the store — a held entry is never
-    # recalled until a review approves it.
-    try:
-        ctx.entry = _apply_provenance_hash(ctx.entry, config=ctx.config, session_id=ctx.session_id, trw_dir=ctx.trw_dir)
-    except ProvenanceKeyUnavailableError:
-        logger.warning(
-            "quarantine_provenance_sign_skipped",
-            entry_id=ctx.entry.id,
-            namespace=ctx.entry.namespace,
-            outcome="signing_key_unavailable",
-        )
-    trust_score = float(ctx.entry.metadata.get("trust_score", "0.0") or "0.0")
-    return PreparedStoreEntry(
-        entry=ctx.entry,
-        op=ctx.op,
-        pii_matches=(),
-        quarantined=True,
-        anomaly_dimension="trust_score",
-        anomaly_z_score=trust_score,
-    )
-
-
-def _finalize_anomaly_decision(ctx: _StoreContext) -> PreparedStoreEntry:
-    config = ctx.config
-    # _stage_anomaly_score always sets anomaly_stats. A bare `assert` would be
-    # stripped under `python -O`, silently admitting an unscored entry into the
-    # store; on a security intake path the guard must fail closed for real.
-    if ctx.anomaly_stats is None:
-        raise ScorerUnavailableError("anomaly_stats missing after the anomaly-scoring stage")
-    _write_anomaly_stats(config, ctx.anomaly_stats)  # the stats write runs only on success
-    if ctx.anomaly is None or not config.poisoning_detection_enabled:
-        # trw-memory-10: emit an AUDIT event for the sub-baseline condition so a
-        # namespace with < MIN_ANOMALY_BASELINE clean entries (detector silently
-        # skipped) is visible to audit-trail analysis, not only structured logs.
-        if (
-            ctx.anomaly is None
-            and config.poisoning_detection_enabled
-            and ctx.anomaly_stats.sample_count < MIN_ANOMALY_BASELINE
-        ):
-            _rt().append_audit_event(
-                config,
-                "anomaly_baseline_insufficient",
-                entry_id=ctx.entry.id,
-                actor=ctx.actor,
-                namespace=ctx.entry.namespace,
-                data={
-                    "sample_count": ctx.anomaly_stats.sample_count,
-                    "min_baseline": MIN_ANOMALY_BASELINE,
-                    "reason": "below_statistical_baseline",
-                },
-            )
-        return PreparedStoreEntry(entry=ctx.entry, op=ctx.op, pii_matches=ctx.pii_matches)
-
-    dimension, z_score = ctx.anomaly
-
-    # SEC-001 observe-mode (documented default): an anomaly was detected but the
-    # detector is NOT promoted to enforce. Record + audit the would-be quarantine
-    # and store normally. Quarantine only fires under explicit enforce-mode.
-    if config.poisoning_detection_mode != "enforce":
-        logger.info(
-            "anomaly_observed_not_quarantined",
-            op="store",
-            outcome="observe_mode",
-            entry_id=ctx.entry.id,
-            namespace=ctx.entry.namespace,
-            anomaly_dimension=dimension,
-            z_score=z_score,
-        )
-        _rt().append_audit_event(
-            config,
-            "anomaly_observed",
-            entry_id=ctx.entry.id,
-            actor=ctx.actor,
-            namespace=ctx.entry.namespace,
-            data={
-                "anomaly_dimension": dimension,
-                "z_score": z_score,
-                "mode": "observe",
-                "would_quarantine": True,
-            },
-        )
-        return PreparedStoreEntry(
-            entry=ctx.entry,
-            op=ctx.op,
-            pii_matches=ctx.pii_matches,
-            quarantined=False,
-            anomaly_dimension=dimension,
-            anomaly_z_score=z_score,
-        )
-
-    quarantined = quarantine_entry(
-        ctx.entry.model_copy(
-            update={
-                "metadata": {
-                    **ctx.entry.metadata,
-                    "anomaly_dimension": dimension,
-                    "z_score": f"{z_score:.2f}",
-                }
-            }
-        )
-    )
-    return PreparedStoreEntry(
-        entry=quarantined,
-        op=ctx.op,
-        pii_matches=ctx.pii_matches,
-        quarantined=True,
-        anomaly_dimension=dimension,
-        anomaly_z_score=z_score,
-    )
 
 
 def prepare_entry_for_store(
@@ -470,18 +264,14 @@ def prepare_entry_for_store(
     session_id: str | None = None,
     trw_dir: Path | None = None,
 ) -> PreparedStoreEntry:
-    """Apply rate limits, PII handling, and anomaly scoring before a write.
+    """Apply the security defaults check, rate limits, the write gate, PII handling and provenance before a write.
 
-    ``strip_reserved_metadata`` (Q1) runs UNCONDITIONALLY, before any stage —
-    not as a list entry — so a caller-set ``quarantined``/etc. metadata key
-    can never reach the trust-quarantine short-circuit's own check below.
+    ``strip_reserved_metadata`` (Q1) runs UNCONDITIONALLY, before any stage — not as a list entry — so a
+    caller-set ``quarantined``/etc. metadata key can never be stored as if the system had set it.
     """
     ctx = _StoreContext(entry=_strip(entry), backend=backend, config=config, session_id=session_id, trw_dir=trw_dir)
-    for stage in _PRE_QUARANTINE_STAGES:
+    for stage in _PRE_AUDIT_STAGES:
         stage(ctx)
-
-    if ctx.entry.metadata.get("quarantined") == "true":
-        return _finalize_trust_quarantine(ctx)
 
     try:
         for stage in _AUDITED_STAGES:
@@ -502,5 +292,4 @@ def prepare_entry_for_store(
         )
         raise
 
-    # _finalize_anomaly_decision fails closed on missing stats, then writes them.
-    return replace(_finalize_anomaly_decision(ctx), rate_receipt=ctx.rate_receipt)
+    return PreparedStoreEntry(entry=ctx.entry, op=ctx.op, pii_matches=ctx.pii_matches, rate_receipt=ctx.rate_receipt)

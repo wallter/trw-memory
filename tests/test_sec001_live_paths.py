@@ -6,10 +6,8 @@ import pytest
 
 from trw_memory.client import MemoryClient
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import MAX_TEXT_FIELD_CHARS, MemoryEntry
-from trw_memory.security.provenance import TRUST_FLAGS
+from trw_memory.models.memory import MemoryEntry
 from trw_memory.security.startup import resolve_security_path, verify_defaults
-from trw_memory.security.trust_scorer import _DEFAULT_SIZE_CEILING
 
 
 @pytest.fixture()
@@ -17,74 +15,12 @@ def secure_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryClie
     monkeypatch.setenv("TRW_DIR", str(tmp_path / ".trw"))
     monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
     monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
-    monkeypatch.setenv("MEMORY_ENABLE_TRUST_SCORING", "true")
-    monkeypatch.setenv("MEMORY_TRUST_SCORING_MODE", "enforce")
-    monkeypatch.setenv("MEMORY_TRUST_SCORE_THRESHOLD", "0.8")
     monkeypatch.setenv("MEMORY_ENABLE_RECALL_FILTER", "true")
     monkeypatch.setenv("MEMORY_RECALL_FILTER_MODE", "strict")
     monkeypatch.setenv("MEMORY_PROVENANCE_REQUIRED", "true")
     monkeypatch.setenv("MEMORY_CANARY_PROBE_INTERVAL", "1")
     monkeypatch.setenv("MEMORY_CANARY_FAIL_MODE", "halt")
-    # The oversized-content live path below deliberately trips the trust
-    # scorer's own size heuristic (_DEFAULT_SIZE_CEILING=100_000) to reach
-    # trust-quarantine without also tripping the unrelated hard payload-size
-    # cap that Q1's approve-time revalidation now enforces (max_entry_chars
-    # default 10_240 is far below that heuristic's ceiling).
-    monkeypatch.setenv("MEMORY_MAX_ENTRY_CHARS", "250000")
     return MemoryClient(namespace="default", mode="local")
-
-
-async def test_store_quarantine_review_and_audit_live_path(secure_client: MemoryClient) -> None:
-    # The size heuristic scores the whole scannable text (content + detail + ...),
-    # while each of content/detail is capped at MAX_TEXT_FIELD_CHARS (64 KiB,
-    # PRD-CORE-331 FR07). Split the oversized payload across both fields so it
-    # stays a *valid* store that trips the >100_000 size anomaly, instead of a
-    # single 200k content field the store now refuses before scoring.
-    field_chars = MAX_TEXT_FIELD_CHARS - 1
-    assert 2 * field_chars > _DEFAULT_SIZE_CEILING
-    stored = await secure_client.store(
-        "benign oversized note " + ("x" * (field_chars - 22)),
-        detail="y" * field_chars,
-        source_identity="sec-audit-agent",
-        session_id="sess-1",
-    )
-
-    assert stored["status"] == "quarantined"
-    assert stored["anomaly_dimension"] == "trust_score"
-
-    quarantined = await secure_client.search(status="quarantined")
-    assert [entry["memory_id"] for entry in quarantined] == [stored["memory_id"]]
-    # Quarantined for the size anomaly, not for some other trust signal.
-    assert quarantined[0]["metadata"][TRUST_FLAGS].startswith("size_anomaly:")
-
-    assert await secure_client.recall("benign oversized", limit=10) == []
-
-    audit_before = await secure_client.audit_learning(stored["memory_id"])
-    assert audit_before["status"] == "quarantined"
-    assert audit_before["content_hash"]
-    assert audit_before["signature"]
-    assert audit_before["verified"] is True
-    assert audit_before["status_history"][0]["status"] == "quarantined"
-
-    review = await secure_client.review_quarantined(
-        stored["memory_id"],
-        decision="approve",
-        reviewer_id="maintainer-1",
-    )
-    assert review["status"] == "approved"
-
-    recalled = await secure_client.recall("benign oversized", limit=10)
-    assert [entry["memory_id"] for entry in recalled] == [stored["memory_id"]]
-
-    audit_after = await secure_client.audit_learning(stored["memory_id"])
-    assert [item["status"] for item in audit_after["status_history"]] == ["quarantined", "active"]
-
-    second_review = await secure_client.review_quarantined(
-        stored["memory_id"],
-        decision="reject",
-        reviewer_id="maintainer-2",
-    )
-    assert second_review["status"] == "already_resolved"
 
 
 async def test_audit_marks_legacy_unsigned_rows(secure_client: MemoryClient) -> None:
@@ -133,23 +69,6 @@ async def test_audit_and_review_hide_other_namespace_rows(tmp_path: Path) -> Non
     finally:
         await owner.close()
         await other.close()
-
-
-async def test_observe_mode_store_starts_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    trw_dir = tmp_path / ".trw"
-    monkeypatch.setenv("TRW_DIR", str(trw_dir))
-    monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
-    monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
-    monkeypatch.setenv("MEMORY_ENABLE_TRUST_SCORING", "true")
-    monkeypatch.setenv("MEMORY_TRUST_SCORING_MODE", "observe")
-    monkeypatch.setenv("MEMORY_PROVENANCE_REQUIRED", "true")
-
-    client = MemoryClient(namespace="default", mode="local")
-    await client.store(
-        "observe content", detail="observe detail", source_identity="observer", session_id="observe-sess"
-    )
-
-    assert (trw_dir / "memory" / "security" / "observe_start.yaml").exists()
 
 
 def test_security_path_resolution_anchors_to_trw_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

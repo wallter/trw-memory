@@ -54,20 +54,6 @@ class TestCallerCannotForgeTheQuarantineShortCircuit:
         assert key not in prepared.entry.metadata
         assert prepared.quarantined is False
 
-    def test_a_genuine_trust_quarantine_still_quarantines(self, tmp_path: Path) -> None:
-        """Non-vacuity: stripping must not also break the LEGITIMATE short-circuit."""
-        cfg = MemoryConfig(
-            storage_path=str(tmp_path / "mem"),
-            enable_trust_scoring=True,
-            trust_scoring_mode="enforce",
-            trust_score_threshold=0.99,  # force below-threshold on any content
-        )
-        entry = MemoryEntry(id="M-held", content="ordinary content", namespace="project:default")
-        with SQLiteBackend(tmp_path / "active.db") as backend:
-            prepared = prepare_entry_for_store(entry, backend=backend, config=cfg, session_id="s1")
-        assert prepared.quarantined is True
-        assert prepared.entry.metadata.get("quarantined") == "true"
-
 
 class TestApprovalRevalidatesBeforePromotion:
     def test_approving_a_pii_bearing_quarantined_entry_is_blocked_not_promoted(self, tmp_path: Path) -> None:

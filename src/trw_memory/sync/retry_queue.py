@@ -111,14 +111,20 @@ class RetryQueue:
     def _drain_with_ids(
         self,
         publish_fn: Callable[[dict[str, object]], bool],
+        owns: Callable[[dict[str, object]], bool] | None = None,
     ) -> tuple[dict[str, int], list[Drained]]:
-        """Drain queued records and return each published record's entry id and queued revision."""
+        """Drain queued records and return each published record's entry id and queued revision.
+
+        A record whose payload *owns* rejects belongs to another drainer (the queue is shared by every namespace of a
+        storage root): it is kept exactly as it is, with no backoff, send or retry spent on it.
+        """
         with lock_for_rmw(self._drain_lock_path):
-            return self._drain_serialized(publish_fn)
+            return self._drain_serialized(publish_fn, owns)
 
     def _drain_serialized(
         self,
         publish_fn: Callable[[dict[str, object]], bool],
+        owns: Callable[[dict[str, object]], bool] | None = None,
     ) -> tuple[dict[str, int], list[Drained]]:
         """Process one drain while the cross-instance drain lock is held."""
         # Collect work under lock, then release before sleeping/publishing so
@@ -148,6 +154,10 @@ class RetryQueue:
                     last_error=record.get("last_error"),
                 )
                 skipped += 1
+                continue
+            # After exhaustion, so a retired namespace's dead records are still evicted from the shared queue.
+            if owns is not None and not owns(record["payload"]):
+                remaining.append(record)
                 continue
 
             retry_count = int(record["retry_count"])

@@ -238,10 +238,6 @@ class SecurityDependencyError(MemoryError):
     """Base class for fail-loud SEC-001 dependency failures."""
 
 
-class ScorerUnavailableError(SecurityDependencyError):
-    """Raised when trust-scoring cannot be loaded or executed."""
-
-
 class QuarantineUnreachableError(SecurityDependencyError):
     """Raised when the quarantine database cannot be reached."""
 

@@ -46,7 +46,6 @@ def _security_posture(cfg: MemoryConfig) -> dict[str, object] | None:
     maintenance = security_maintenance_status() if transport_grant() is None else {}
     signals: dict[str, object] = {
         "recall_filter_mode": "disabled" if not cfg.enable_recall_filter else cfg.recall_filter_mode,
-        "trust_scoring_mode": "disabled" if not cfg.enable_trust_scoring else cfg.trust_scoring_mode,
         "quarantine_count": quarantine_count,
         "canary_status": "halt" if cfg.canary_fail_mode == "halt" else f"degraded:{cfg.canary_fail_mode}",
         "provenance_mode": "required" if cfg.provenance_required else "optional",
@@ -59,19 +58,13 @@ def _security_posture(cfg: MemoryConfig) -> dict[str, object] | None:
     quarantine_degraded = quarantine_count is None or quarantine_count > 0
     degraded = (
         not cfg.enable_recall_filter
-        or not cfg.enable_trust_scoring
         or not cfg.provenance_required
         or not cfg.pii_enabled
         or cfg.canary_fail_mode != "halt"
         or queued_count > 0
         or quarantine_degraded
     )
-    non_default = (
-        cfg.recall_filter_mode != "redact"
-        or cfg.trust_scoring_mode != "observe"
-        or cfg.pii_action != "warn"
-        or not cfg.security_maintenance_inline
-    )
+    non_default = cfg.recall_filter_mode != "strict" or cfg.pii_action != "warn" or not cfg.security_maintenance_inline
     if not degraded and not non_default:
         return None
     return {"status": "degraded" if degraded else "non_default", **signals}
@@ -82,13 +75,11 @@ def _status_introspection(cfg: MemoryConfig) -> dict[str, object]:
     security_fields = sorted(
         field_name
         for field_name in MemoryConfig.model_fields
-        if field_name.startswith(("audit_", "pii_", "poisoning_", "quarantine_", "provenance_", "canary_"))
+        if field_name.startswith(("audit_", "pii_", "quarantine_", "provenance_", "canary_"))
         or field_name
         in {
             "enable_recall_filter",
-            "enable_trust_scoring",
             "recall_filter_mode",
-            "trust_scoring_mode",
             "security_maintenance_inline",
         }
     )

@@ -78,11 +78,18 @@ class DeltaTracker:
 
     @staticmethod
     def get_dirty_entries(
-        backend: StorageBackend, since_seq: int = 0, *, namespace: str | None = None, limit: int | None = None
+        backend: StorageBackend,
+        since_seq: int = 0,
+        *,
+        namespace: str | None = None,
+        limit: int | None = None,
+        after: tuple[int, str] | None = None,
     ) -> list[MemoryEntry]:
         """Get entries needing sync (sync_seq > since_seq and not yet synced), oldest first.
 
-        *namespace* keeps one tenant's push from paging another's rows; *limit* bounds the page.
+        *namespace* keeps one tenant's push from paging another's rows; *limit* bounds the page. *after* is a keyset
+        position ``(sync_seq, id)``: only rows strictly behind it are returned, so a caller that will not send the rows
+        at the front of the queue can page past them (SYNC-PUSH-HELD-STALL); it takes the place of *since_seq*.
         """
         # Try SQLite direct query for efficiency
         conn = getattr(backend, "_conn", None)
@@ -103,7 +110,6 @@ class DeltaTracker:
             page: list[MemoryEntry] = []
             # Keyset paging on (sync_seq, id): sync_seq is a per-row revision count, not a unique cursor, and a
             # position (OFFSET) would skip or repeat rows that another call acknowledges between pages.
-            after: tuple[int, str] | None = None
             while True:
                 last_seq, last_id = after if after is not None else (since_seq, None)
                 cap = -1 if limit is None else limit
@@ -143,8 +149,12 @@ class DeltaTracker:
         dirty = backend.filter_quarantined(
             [
                 e
-                for e in sorted(all_entries, key=lambda e: e.sync_seq)
-                if e.sync_seq > since_seq and e.last_synced_at is None and namespace in (None, e.namespace)
+                for e in sorted(all_entries, key=lambda e: (e.sync_seq, e.id))
+                if (
+                    (e.sync_seq, e.id) > after if after is not None else e.sync_seq > since_seq
+                )  # a cursor replaces since_seq, as in the SQL path
+                and e.last_synced_at is None
+                and namespace in (None, e.namespace)
             ]
         )
         return dirty if limit is None else dirty[:limit]

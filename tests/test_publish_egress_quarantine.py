@@ -42,6 +42,11 @@ def _entry(entry_id: str = "L-1", *, source: str = "") -> MemoryEntry:
     return MemoryEntry(id=entry_id, namespace="proj", content="a learning", importance=0.9, metadata=metadata)
 
 
+def _only(entry: MemoryEntry) -> _remote_publish.RowResolver:
+    """A resolver that knows only *entry*, under its own namespace and id."""
+    return lambda namespace, entry_id: entry if (namespace, entry_id) == (entry.namespace, entry.id) else None
+
+
 def test_publish_refuses_an_entry_quarantined_by_its_source_id(cfg: MemoryConfig, posts: MagicMock) -> None:
     ledger_for_config(cfg).append(
         LedgerIdentity(namespace="x", entry_id="x", source_learning_id="S-9"), "quarantined", actor="system"
@@ -65,7 +70,7 @@ def test_a_row_quarantined_after_it_was_queued_is_never_sent(
     assert queue.enqueue(entry.id, payload)
     ledger_for_config(cfg).append(LedgerIdentity.of(entry), "rejected", actor="reviewer")
 
-    result, published = _remote_publish._drain_retry_queue_with_ids(queue, cfg)
+    result, published = _remote_publish._drain_retry_queue_with_ids(queue, cfg, current_row=_only(entry))
 
     posts.assert_not_called()
     assert published == [] and result["drained"] == 0
@@ -79,7 +84,7 @@ def test_a_queued_record_without_an_identity_is_never_sent(cfg: MemoryConfig, po
     queue = RetryQueue(tmp_path / "queue.jsonl")
     assert queue.enqueue("L-legacy", dict(_remote_publish._anonymize_entry(_entry("L-legacy"))))
 
-    _remote_publish._drain_retry_queue_with_ids(queue, cfg)
+    _remote_publish._drain_retry_queue_with_ids(queue, cfg, current_row=_only(_entry("L-legacy")))
 
     posts.assert_not_called()
 
@@ -95,7 +100,7 @@ def test_a_clean_queued_record_is_sent_without_its_ledger_keys(
     payload[_remote_publish.LEDGER_KEYS_FIELD] = identity_keys(entry)
     assert queue.enqueue(entry.id, payload)
 
-    result, _ = _remote_publish._drain_retry_queue_with_ids(queue, cfg)
+    result, _ = _remote_publish._drain_retry_queue_with_ids(queue, cfg, current_row=_only(entry))
 
     assert result["drained"] == 1
     sent = posts.call_args.kwargs["json"]

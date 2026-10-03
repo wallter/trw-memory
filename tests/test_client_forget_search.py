@@ -9,6 +9,8 @@ import pytest
 
 from trw_memory.client import MemoryClient
 from trw_memory.exceptions import MemoryNotFoundError
+from trw_memory.models.memory import MemoryEntry
+from trw_memory.security._runtime_quarantine import store_quarantined_entry
 from trw_memory.security.audit import AuditLog
 
 
@@ -97,28 +99,25 @@ class TestSearch:
         assert all("python" in r["tags"] for r in results)
 
     async def test_search_actor_and_quarantined_filters(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Quarantine only fires under enforce mode (observe mode, the default,
-        # records the anomaly but stores the entry normally — by design).
-        # This test exercises the full quarantine path so it must opt in to
-        # enforce mode explicitly, matching the pattern used in
-        # test_sec001_live_paths.py::secure_client.
+        # No intake gate quarantines a new entry since UF-MEM-03 removed the anomaly quarantine, so the row is
+        # quarantined directly; the filters and the access audit are what this test pins.
         monkeypatch.setenv("MEMORY_STORAGE_PATH", str(tmp_path / "storage"))
         monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "sqlite")
-        monkeypatch.setenv("MEMORY_POISONING_DETECTION_MODE", "enforce")
         client = MemoryClient(namespace="default", mode="local")
 
-        for index in range(20):
-            await client.store(f"baseline {index}", source_identity="seed")
+        await client.store("alice's active note", source_identity="alice")
+        for memory_id, actor in (("Q-alice", "alice"), ("Q-bob", "bob")):
+            store_quarantined_entry(
+                client._config,
+                MemoryEntry(id=memory_id, content=f"{actor} held", namespace="default", source_identity=actor),
+            )
 
-        result = await client.store("A" * 5000, source_identity="alice")
         quarantined = await client.search(actor="alice", status="quarantined")
         audit_records = AuditLog(Path(client._config.audit_log_path)).read_all()
 
-        assert result["status"] == "quarantined"
-        assert len(quarantined) == 1
-        assert quarantined[0]["memory_id"] == result["memory_id"]
-        assert quarantined[0]["anomaly_dimension"] == result["anomaly_dimension"]
-        assert quarantined[0]["z_score"] == result["z_score"]
+        assert [r["memory_id"] for r in quarantined] == ["Q-alice"]
+        # The status filter separates the stores: alice's active row is not in the quarantine results and vice versa.
+        assert [r["content"] for r in await client.search(actor="alice", status="active")] == ["alice's active note"]
         assert audit_records[-1].op == "access"
         assert audit_records[-1].actor == "alice"
 

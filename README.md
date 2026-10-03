@@ -143,7 +143,7 @@ results = backend.search("query", top_k=10, namespace="default")
 ```
 
 ## What's new in 5.x
-<!-- whats-new: 5.2.0 -->
+<!-- whats-new: 5.2.1 -->
 
 - **Confidentiality labels for every memory.** `trw_memory.labels` labels rows by tag rule, and rows labelled above `team` stay out of platform publishing.
 - **Secrets stay masked even when disguised.** Credential and PII masking catches an email, API key or token split by an invisible character such as a zero-width space or soft hyphen.
@@ -239,7 +239,7 @@ Candidates come from two places: the most recently updated rows of the namespace
 |---------|---------------|
 | Encryption at rest | Not supported: trw-memory does not encrypt its store. It rejects `encryption_enabled=true` at config load, backend creation and `trw-memory-server` startup with `EncryptionAtRestUnsupportedError`. Protect the store with disk encryption (FileVault, LUKS, BitLocker) and the owner-only file permissions. |
 | PII detection | Regex patterns (email, phone, SSN, credit card, API keys) plus Shannon entropy. The store path **blocks** writes that contain a recognised credential (API keys and provider access tokens) and **records** every other detection as metadata without rewriting your text. Masking happens at the publish boundary (`strip_pii`). |
-| Poisoning defense | Z-score anomaly detection on frequency, size and content patterns. Observe mode by default; `enforce` is opt-in. |
+| Injection refusal | The write gate refuses known prompt- and code-injection shapes on every store path, team-sync pulls included (`PoisoningError`). Recall drops any entry whose content no longer matches its signed hash. |
 | Access control | Role-based (admin/editor/viewer) per namespace |
 | Audit trail | Append-only security event log |
 
@@ -298,7 +298,7 @@ Graph, sync, namespace-administration and import tools are also registered; `REG
 
 **Trust boundary: a token reaches only its grant.** `trw-mcp memory token` mints a token for the calling checkout's project namespace plus `user:local`. Without `--namespace` it grants the pinned `project_namespace` only when that pin matches the namespace derived from the checkout's location; for a moved checkout, name it with `--namespace`. The daemon keeps only the token's sha256 digest, in the 0600 `daemon-grants.json`; the raw token lives in that checkout's `.trw/runtime/memory-token`. Every namespaced call is checked against the grant before RBAC, so a request for any other namespace is refused even with RBAC off. A leftover Slice A `daemon-token` (one all-namespace bearer) makes the daemon refuse to start; `trw-mcp memory token --migrate` deletes it. These grants and the `0600`/`0700` file modes stop one checkout from accidentally reading another's namespace on the same machine; they are not a security boundary against another process running as the same OS user, which can read the token file and the store like any of its own files.
 
-**Security settings are daemon-wide.** RBAC, the recall filter, canary, poisoning, trust-scoring and provenance settings come from the environment the daemon starts from.
+**Security settings are daemon-wide.** RBAC, the recall filter, canary and provenance settings come from the environment the daemon starts from.
 
 **Concurrency: four workers.** Each `memory_recall`, `memory_store` and `memory_maintain` call runs its synchronous work in a bounded thread pool (`OFFLOAD_MAX_WORKERS = 4`), with its own SQLite connection. Four calls make progress at once; the fifth queues, and the queue is unbounded. A request cancelled after it starts still runs to completion; only the result is discarded.
 
@@ -351,8 +351,8 @@ trw-memory is **local-first**: all data lives in a local SQLite store (and an op
 |-----------|---------|-------|
 | Encryption at rest | **not supported** | `encryption_enabled=true` is rejected at config load, backend creation and `trw-memory-server` startup with `EncryptionAtRestUnsupportedError`. Use full-disk encryption (FileVault, LUKS, BitLocker) |
 | PII detection | **on** (`pii_enabled=True`) | scans `content`, `detail`, `tags`, `evidence[]` and `Assertion.last_evidence` on the store path. Recognised credentials (API keys and provider access tokens, detected as `PIIType.API_KEY`, the only type in `BLOCKING_PII_TYPES`) **block the write** (`PIIBlockError`); every other type is recorded in `pii_types` metadata and stored **verbatim**. `pii_action` (default `warn`) is only reported by `memory_status`; it does not change what the store path does. Emails, IPs, SSNs, phone numbers and card numbers are masked at the publish boundary. Set `pii_custom_patterns` to opt in to local masking with your own regexes |
-| Poisoning / size-anomaly detection | **observe** (`poisoning_detection_mode="observe"`) | records anomaly stats and telemetry but does **not** quarantine; `enforce` is opt-in. A caller-supplied `metadata['source']` cannot skip enforce-mode quarantine |
-| Trust scoring | **observe** (`trust_scoring_mode="observe"`) | logs intake trust decisions; `enforce` and `strict` are opt-in |
+| Injection-shape refusal | **on** | the write gate refuses known prompt- and code-injection shapes on every store path, team-sync pulls included (`PoisoningError`) |
+| Recall integrity | **strict** (`recall_filter_mode="strict"`) | an entry whose content no longer matches its signed hash is dropped from recall; `observe` reports it instead |
 | Provenance signing | **required** (`provenance_required=True`) | persisted rows carry a signed provenance hash chain |
 | Canary tamper response | **halt** (`canary_fail_mode="halt"`) | seeded canaries are probed on recall; tampering halts by default (`degrade` and `log-only` are opt-in) |
 | Remote sync / publishing | **off** (`sync_enabled=False`) | text only; vectors never leave the machine |

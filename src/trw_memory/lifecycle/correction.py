@@ -33,7 +33,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from trw_memory.embeddings.provenance import generation_provenance_kwargs
-from trw_memory.exceptions import SchemaValidationError
+from trw_memory.exceptions import PoisoningError, SchemaValidationError
 from trw_memory.lifecycle.tiers._runtime import (
     remember_entries_data_in_tiers,
     remove_entry_from_tiers,
@@ -50,7 +50,7 @@ from trw_memory.models.memory import (
     MemoryType,
     ProtectionTier,
 )
-from trw_memory.security.poisoning import reject_unsubstantiated_verified
+from trw_memory.security.poisoning import reject_injection, reject_unsubstantiated_verified
 from trw_memory.storage._shared import revision_of
 from trw_memory.storage._utf8_validator import refuse_overlong_text_fields
 from trw_memory.storage.interface import is_transactional
@@ -216,6 +216,24 @@ def _collect(entry: MemoryEntry, patch: LearningPatch) -> tuple[dict[str, object
     return fields, changes
 
 
+# The fields ``poisoning.scannable_text`` reads, under their stored names: a patch that changes none of them is never
+# scanned, so retiring or re-rating a row stored before a pattern existed still works.
+_SCANNED_FIELDS = frozenset({"content", "detail", "nudge_line", "tags", "evidence", "assertions"})
+
+
+def _refuse_injection(entry: MemoryEntry, fields: dict[str, object]) -> dict[str, str] | None:
+    # UF-MEM-03: the store path's injection gate on the post-correction row. The recall-time redactor that used to
+    # stand behind an unchecked correction is gone, and a correction refreshes the content hash, so nothing else would.
+    if not _SCANNED_FIELDS & fields.keys():
+        return None
+    try:
+        reject_injection(entry.model_copy(update={k: v for k, v in fields.items() if k in _SCANNED_FIELDS}))
+    except PoisoningError as exc:
+        logger.warning("injection_correction_rejected", learning_id=entry.id)
+        return {"status": "invalid", "error": str(exc), "reason": exc.reason}
+    return None
+
+
 def _refuse_unsubstantiated(entry: MemoryEntry, fields: dict[str, object], min_items: int) -> dict[str, str] | None:
     # PRD-CORE-244 FR02 on the update path: only a promotion needs a basis, and the
     # entry judged is the post-update one, since this call may carry the assertions.
@@ -289,7 +307,9 @@ def apply_correction(
             msg = f"{entry.id} changed since revision {patch.if_revision[:12]}; nothing was written, re-read and retry"
             return {"learning_id": entry.id, "status": "conflict", "error": msg}
         fields, changes = _collect(current, patch)
-        refusal = _refuse_unsubstantiated(current, fields, int(store.config.min_evidence_items_for_verified))
+        refusal = _refuse_injection(current, fields) or _refuse_unsubstantiated(
+            current, fields, int(store.config.min_evidence_items_for_verified)
+        )
         if refusal is not None:
             return refusal
         if fields:

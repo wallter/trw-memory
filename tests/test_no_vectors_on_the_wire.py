@@ -13,8 +13,14 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 
 from trw_memory.client import MemoryClient
+from trw_memory.models.memory import MemoryEntry
 
 pytestmark = pytest.mark.integration
+
+
+def _queued_row(entry_id: str) -> MemoryEntry:
+    """The queued entry as the drain reads it now: a team-labelled row, so the send-time label check admits it."""
+    return MemoryEntry(id=entry_id, content="queued", namespace="default", importance=0.9)
 
 
 def _transport(mock_cls: MagicMock, answer: object) -> MagicMock:
@@ -57,7 +63,6 @@ async def test_org_shared_recall_sends_no_embedding(synced_client: MemoryClient)
 
 
 def test_publish_sends_no_embedding(synced_client: MemoryClient) -> None:
-    from trw_memory.models.memory import MemoryEntry
     from trw_memory.sync.remote import publish_memory_result
 
     with patch("trw_memory.sync._remote_publish.httpx.Client") as mock_cls:
@@ -81,7 +86,12 @@ def test_retry_drain_strips_a_vector_queued_before_the_change(synced_client: Mem
     assert queue.enqueue("L-2", payload)
     with patch("trw_memory.sync._remote_publish.httpx.Client") as mock_cls:
         http = _transport(mock_cls, {"id": "8"})
-        assert drain_retry_queue(queue, synced_client._config)["drained"] == 1
+        assert (
+            drain_retry_queue(queue, synced_client._config, current_row=lambda _ns, entry_id: _queued_row(entry_id))[
+                "drained"
+            ]
+            == 1
+        )
 
     (body,) = _bodies(http, "/v1/learnings")
     assert body["summary"] == "queued"

@@ -10,12 +10,18 @@ from unittest.mock import patch
 
 from structlog.testing import capture_logs
 
+from trw_memory.models.memory import MemoryEntry
 from trw_memory.sync._remote_publish import _drain_retry_queue_with_ids
 from trw_memory.sync.remote import drain_retry_queue
 from trw_memory.sync.retry_queue import MAX_QUEUE_BYTES, MAX_QUEUE_DEPTH, MAX_RETRIES, RetryQueue
 
 from ._test_sync_support import make_sync_config as _make_config
 from ._test_sync_support import mock_httpx_client as _mock_httpx_client
+
+
+def _row(entry_id: str) -> MemoryEntry:
+    """The queued entry as the drain reads it now: a team-labelled row, so the send-time label check admits it."""
+    return MemoryEntry(id=entry_id, content="queued", namespace="default", importance=0.9)
 
 
 def _record_line(
@@ -443,7 +449,7 @@ class TestRetryQueue:
 
         with patch("trw_memory.sync.remote.httpx.Client") as mock_client_cls:
             _mock_httpx_client(mock_client_cls, status_code=200, json_data={"id": "42"})
-            result = drain_retry_queue(queue, _make_config())
+            result = drain_retry_queue(queue, _make_config(), current_row=lambda _ns, entry_id: _row(entry_id))
 
         assert result == {
             "drained": 1,
@@ -471,7 +477,9 @@ class TestRetryQueue:
 
         with patch("trw_memory.sync._remote_publish.httpx.Client") as mock_client_cls:
             _mock_httpx_client(mock_client_cls, status_code=200, json_data={"id": "42"})
-            result, published_ids = _drain_retry_queue_with_ids(queue, _make_config())
+            result, published_ids = _drain_retry_queue_with_ids(
+                queue, _make_config(), current_row=lambda _ns, entry_id: _row(entry_id)
+            )
 
         assert published_ids == [("M-canonical", None, "42")]
         assert result["remote_ids"] == {"M-canonical": "42"}
@@ -481,7 +489,7 @@ class TestRetryQueue:
         queue = RetryQueue(tmp_path / "queue.jsonl")
         queue.enqueue("M-001", {"summary": "test"})
 
-        result = drain_retry_queue(queue, _make_config(sync_enabled=False))
+        result = drain_retry_queue(queue, _make_config(sync_enabled=False), current_row=lambda _ns, _id: None)
 
         assert result == {
             "drained": 0,
@@ -496,7 +504,9 @@ class TestRetryQueue:
         queue = RetryQueue(tmp_path / "queue.jsonl")
         queue.enqueue("M-001", {"summary": "test"})
 
-        result = drain_retry_queue(queue, _make_config(platform_url="file:///etc/passwd"))
+        result = drain_retry_queue(
+            queue, _make_config(platform_url="file:///etc/passwd"), current_row=lambda _ns, _id: None
+        )
 
         assert result == {
             "drained": 0,

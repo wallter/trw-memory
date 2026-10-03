@@ -12,7 +12,7 @@ import pytest
 
 from trw_memory._client_bulk_store import bulk_store_impl
 from trw_memory.client import BulkStoreRequest, MemoryClient
-from trw_memory.exceptions import ScorerUnavailableError
+from trw_memory.exceptions import SecurityDependencyError
 
 
 @pytest.fixture
@@ -163,9 +163,9 @@ class TestBulkStoreQuarantinePath:
     async def test_security_dependency_failure_propagates_without_writes(self, isolated_client: MemoryClient) -> None:
         with patch(
             "trw_memory._client_bulk_store.prepare_entry_for_store",
-            side_effect=ScorerUnavailableError("scorer unavailable"),
+            side_effect=SecurityDependencyError("security dependency unavailable"),
         ):
-            with pytest.raises(ScorerUnavailableError, match="scorer unavailable"):
+            with pytest.raises(SecurityDependencyError, match="security dependency unavailable"):
                 await isolated_client.bulk_store([BulkStoreRequest(content="test", detail="d")])
 
         assert isolated_client._get_backend().count(namespace=isolated_client.namespace) == 0

@@ -15,7 +15,7 @@ from typing import Any
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
-from trw_memory.labels._levels import Level
+from trw_memory.labels._levels import Level, tag_key
 
 FILE_NAME = "labels.yaml"
 MAX_BYTES = 64 * 1024
@@ -136,5 +136,7 @@ def _rule(item: Any) -> Rule:
             raise InvalidLabelsFile("bad_rule")
         if not all(isinstance(t, str) and t and len(t) <= _MAX_TEXT for t in tags):
             raise InvalidLabelsFile("bad_rule")
-        clean = frozenset(t.lower() for t in tags)
+        # A tag that is only spacing or invisible characters keys as "" and still matches a blank row tag, as before.
+        # Never a reason to load strict: strict drops EVERY rule, which would lower the label of every rule-matched row.
+        clean = frozenset(tag_key(t) for t in tags)
     return Rule(namespace, clean, _RULE_LEVELS[level])

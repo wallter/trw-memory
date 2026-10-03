@@ -227,10 +227,7 @@ class TestRetrievalConfig:
 class TestSecurityConfig:
     def test_defaults_are_sensible(self) -> None:
         cfg = _SecurityModel()
-        assert cfg.poisoning_detection_enabled is True
-        assert cfg.poisoning_detection_mode == "observe"
-        assert cfg.trust_scoring_mode == "observe"
-        assert cfg.recall_filter_mode == "redact"
+        assert cfg.recall_filter_mode == "strict"
         assert cfg.canary_fail_mode == "halt"
         assert cfg.memory_recovery_policy == "strict"
         # int budgets are ints, not None
@@ -278,17 +275,19 @@ class TestSecurityConfig:
         """
         assert "sync_namespace" not in _SecurityModel.model_fields
 
-    def test_z_threshold_must_be_positive(self) -> None:
-        with pytest.raises(ValidationError):
-            _SecurityModel(poisoning_z_threshold=0.0)
-        with pytest.raises(ValidationError):
-            _SecurityModel(poisoning_z_threshold=-1.0)
-
-    def test_trust_score_threshold_is_fraction(self) -> None:
-        assert _SecurityModel(trust_score_threshold=0.0).trust_score_threshold == 0.0
-        assert _SecurityModel(trust_score_threshold=1.0).trust_score_threshold == 1.0
-        with pytest.raises(ValidationError):
-            _SecurityModel(trust_score_threshold=1.1)
+    def test_retired_poisoning_and_trust_fields_are_gone(self) -> None:
+        """The anomaly quarantine and the intake trust scorer were removed 2026-10-01 (UF-MEM-03): 15 days of
+        observe data, 0 real catches, only legitimate learnings flagged. A config that still sets them loads."""
+        retired = (
+            "poisoning_detection_enabled",
+            "poisoning_detection_mode",
+            "poisoning_z_threshold",
+            "enable_trust_scoring",
+            "trust_score_threshold",
+            "trust_scoring_mode",
+        )
+        assert not [name for name in retired if name in _SecurityModel.model_fields]
+        assert _SecurityModel(trust_scoring_mode="enforce", poisoning_detection_mode="enforce").recall_filter_mode
 
     def test_canary_injection_rate_bounds(self) -> None:
         # ge=3, le=5
@@ -305,11 +304,7 @@ class TestSecurityConfig:
 
     def test_unknown_enum_modes_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            _SecurityModel(poisoning_detection_mode="quarantine_everything")
-        with pytest.raises(ValidationError):
-            _SecurityModel(trust_scoring_mode="permissive")
-        with pytest.raises(ValidationError):
-            _SecurityModel(recall_filter_mode="block")
+            _SecurityModel(recall_filter_mode="redact")  # removed 2026-10-01 with the recall-time redaction
         with pytest.raises(ValidationError):
             _SecurityModel(canary_fail_mode="ignore")
         with pytest.raises(ValidationError):

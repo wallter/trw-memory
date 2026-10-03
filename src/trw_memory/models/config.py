@@ -162,9 +162,6 @@ DAEMON_WIDE_SECURITY_KEYS = (
     "enable_recall_filter",
     "recall_filter_mode",
     "canary_fail_mode",
-    "poisoning_detection_mode",
-    "enable_trust_scoring",
-    "trust_scoring_mode",
     "provenance_required",
 )
 

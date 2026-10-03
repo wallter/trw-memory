@@ -17,7 +17,7 @@ from trw_memory.lifecycle.tiers._scoring import compute_importance_score
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry, MemoryStatus
 from trw_memory.retrieval.lexical import lexical_relevance, tokenize_query
-from trw_memory.security.recall_filter import filter_recall_window, redacted_scan_fields
+from trw_memory.security.recall_filter import entry_text_fields, filter_recall_window
 from trw_memory.security.telemetry_emit import build_security_traceability, emit_security_event
 from trw_memory.storage.interface import StorageBackend
 
@@ -79,7 +79,7 @@ def _apply_sec001_recall_policy(
                 source["id"] = entry.id.rsplit("::", 1)[0]
         else:
             source = dict(source_result)
-        source.update(redacted_scan_fields(entry))
+        source.update(entry_text_fields(entry))
         source["metadata"] = dict(entry.metadata)
         secured.append(source)
     return secured

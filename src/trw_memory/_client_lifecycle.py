@@ -50,12 +50,11 @@ from trw_memory._client_sse import (
     should_start_sse_subscription as should_start_sse_subscription,
 )
 from trw_memory._project_anchor import resolve_storage_root
-from trw_memory.exceptions import MemoryConnectionError, SecurityDependencyError, StorageError
+from trw_memory.exceptions import MemoryConnectionError, SecurityDependencyError
 from trw_memory.lifecycle.tiers._runtime import tier_runtime_enabled, warmup_tier_manager
 from trw_memory.models.config import MemoryConfig
 from trw_memory.models.memory import MemoryEntry
 from trw_memory.namespaces.validation import validate_namespace
-from trw_memory.security._runtime_anomaly import flush_anomaly_stats
 from trw_memory.security.pii import anonymize_installation_id
 from trw_memory.security.runtime import initialize_canaries
 from trw_memory.security.startup import verify_defaults
@@ -287,17 +286,6 @@ async def _drain_owned_graph_updates(backend: StorageBackend) -> asyncio.Cancell
     return cancellation
 
 
-def _flush_anomaly_stats(client: MemoryClient) -> None:
-    """Write the anomaly-stats snapshot the store path deferred (``write_anomaly_stats``)."""
-    config = getattr(client, "_config", None)  # absent on a client whose __init__ failed
-    if config is None:
-        return
-    try:
-        flush_anomaly_stats(config)
-    except StorageError:  # trw-fail-silent-allow: close must still release the backend; the snapshot is observability-only and the next store rewrites it
-        _client_logger().warning("anomaly_stats_flush_failed", op="close", outcome="skipped", exc_info=True)
-
-
 async def close_client(client: MemoryClient) -> None:
     if client._sse_subscriber is not None:
         client._sse_subscriber.stop()
@@ -333,9 +321,6 @@ async def close_client(client: MemoryClient) -> None:
                 _client_logger().warning("client_close_failed_during_cancellation", exc_info=True)
             else:
                 _client_logger().debug("client_closed", op="close", namespace=client._namespace)
-    # Only after a clean teardown: a cancelled or failed close leaves the pending
-    # snapshot to the interpreter-exit flush rather than delay releasing the backend.
-    _flush_anomaly_stats(client)
 
 
 # ---------------------------------------------------------------------------
@@ -370,10 +355,20 @@ async def _drain_retry_queue_once(client: MemoryClient) -> None:
     from trw_memory.sync._remote_publish import _drain_retry_queue_with_ids
     from trw_memory.sync.delta import ack_revision
 
+    # SYNC-RETRY-LABEL-RECHECK: the drain asks the label of each queued row as it is now, just before its send. The
+    # queue is shared by every namespace of this storage root but each namespace has its own store, so this client
+    # drains only its own namespace's records. The backend's own lock serializes these reads with the client's
+    # writes; a client closed mid-drain reads nothing, so it sends nothing.
+    def current_row(namespace: str, entry_id: str) -> MemoryEntry | None:
+        backend = client._backend
+        return None if backend is None else backend.get(entry_id, namespace=namespace)
+
     result, published = await asyncio.to_thread(
         _drain_retry_queue_with_ids,
         client._retry_queue,
         client._config,
+        current_row=current_row,
+        namespace=client._namespace,
     )
     if published:
         async with client._lock:
