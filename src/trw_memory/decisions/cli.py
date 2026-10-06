@@ -15,7 +15,7 @@ failures before trusting the rest). Enablement follows the process env / project
 (``--dotenv``'s directory: its ``.trw/config.yaml`` or ``TRW_JEV_ENABLED`` in its ``.env``) / user
 scope (``~/.trw/config.yaml``) precedence in
 :func:`trw_memory.decisions._enablement.resolve_backend_enablement`; ``OPENROUTER_API_KEY`` comes
-from the environment or the project ``.env``. With nothing configured it resolves to the null
+from the environment, the project ``.env`` or the ``~/.trw/jev.env`` machine store. With nothing configured it resolves to the null
 judge and every outcome is a ``disabled`` failure without touching the network.
 """
 

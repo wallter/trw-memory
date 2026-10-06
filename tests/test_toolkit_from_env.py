@@ -23,8 +23,11 @@ from trw_memory.testing.daemon_reaper import daemon_env_passthrough
 _SRC = str(Path(__file__).resolve().parents[1] / "src")
 
 
-def test_disabled_path_never_imports_jev_http_or_httpx() -> None:
-    """A fresh interpreter, Jev off: neither ``_jev_http`` nor ``httpx`` ever loads."""
+def test_disabled_path_never_imports_jev_http_or_httpx(tmp_path: Path) -> None:
+    """A fresh interpreter, Jev off: neither ``_jev_http`` nor ``httpx`` ever loads.
+
+    ``HOME`` is an empty directory: the child would otherwise read the real ``~/.trw/jev.env`` machine store.
+    """
     script = (
         "import sys\n"
         "import trw_memory.decisions as d\n"
@@ -37,7 +40,7 @@ def test_disabled_path_never_imports_jev_http_or_httpx() -> None:
     result = subprocess.run(
         [sys.executable, "-c", script],
         cwd=str(Path(__file__).resolve().parents[1]),
-        env={"PATH": "/usr/bin:/bin", "PYTHONPATH": _SRC, **daemon_env_passthrough()},
+        env={"PATH": "/usr/bin:/bin", "PYTHONPATH": _SRC, **daemon_env_passthrough(), "HOME": str(tmp_path)},
         capture_output=True,
         text=True,
         timeout=30,

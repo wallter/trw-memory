@@ -18,8 +18,9 @@ value short-circuits before any lower layer's file is even read):**
 4. Default: off.
 
 **2026-09-23 operator decision relaxed the prior rule.** A project used to be able to switch the
-backend OFF but never ON; a project may now enable it too (the key stays per-repo,
-``OPENROUTER_API_KEY`` in the env or the project ``.env``, and the base-URL host allowlist in
+backend OFF but never ON; a project may now enable it too (the key comes from the env, the
+project ``.env`` or the operator's ``~/.trw/jev.env`` machine store — resolved by
+:func:`trw_memory.decisions._machine_store.resolve_jev_settings` — and the base-URL host allowlist in
 :mod:`trw_memory.decisions._env` is unchanged — this resolver only ever decides on/off, never
 where the key is sent). An explicit value at a higher-precedence layer wins outright, whether
 true or false: an explicit env ``false`` beats a project ``true``, and an explicit project

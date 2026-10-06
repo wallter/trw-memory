@@ -9,8 +9,9 @@ to TypeSafe's Jev model over OpenRouter's Decisions API.
 **Interface.** Construct a judge with :func:`judge_from_env` (enablement via
 :func:`resolve_backend_enablement` — process env beats project scope beats
 user scope beats off; ``TRW_JEV_BASE_URL``/``TRW_JEV_MODEL`` come from the
-PROCESS env only; ``OPENROUTER_API_KEY`` may also come from a project
-``.env``; off by default) or instantiate :class:`JevHttpJudge` directly for
+process env, else the owner-only ``~/.trw/jev.env`` machine store;
+``OPENROUTER_API_KEY`` from the env, a project ``.env``, else that store —
+one resolver, :func:`resolve_jev_settings`; off by default) or instantiate :class:`JevHttpJudge` directly for
 explicit control. Describe a decision with :class:`NoulQuestion`
 (yes/no), :class:`ChoiceQuestion` (pick one of N) or :class:`ScoreQuestion`
 (ordered rubric); call ``judge.decide(state, questions)``.
@@ -37,6 +38,7 @@ from __future__ import annotations
 from trw_memory.decisions._enablement import resolve_backend_enablement
 from trw_memory.decisions._env import judge_from_env, toolkit_from_env
 from trw_memory.decisions._judge import DecisionJudge, DecisionState, NullJudge
+from trw_memory.decisions._machine_store import JevSettings, resolve_jev_settings
 from trw_memory.decisions._models import (
     ChoiceAnswer,
     ChoiceQuestion,
@@ -63,6 +65,7 @@ __all__ = [
     "DecisionQuestion",
     "DecisionResult",
     "DecisionState",
+    "JevSettings",
     "NoulAnswer",
     "NoulQuestion",
     "NullJudge",
@@ -73,6 +76,7 @@ __all__ = [
     "judge_from_env",
     "redact_state",
     "resolve_backend_enablement",
+    "resolve_jev_settings",
     "toolkit_from_env",
     "unique_key",
 ]

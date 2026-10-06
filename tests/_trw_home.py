@@ -59,9 +59,10 @@ _REAL_HOME = Path.home()
 #: The one home-scoped file TRW's init/update/uninstall writes (Antigravity CLI's global MCP config). A test run
 #: touching it is a hard failure. Watched by (mtime_ns, size) only; the tripwire never opens it.
 _WATCHED_HARD = (".gemini/config/mcp_config.json",)
-#: Rewritten by every live Claude Code session, and never by TRW: a change here proves nothing about the run, so
-#: it is reported once as a warning and never fails a test.
-_WATCHED_SOFT = (".claude.json",)
+#: Rewritten by live client sessions (every Claude Code session; the Codex app, for ~/.codex/config.toml, which
+#: TRW writes only on an explicit trust-codex-hooks): a change here proves nothing about the run, so it is
+#: reported once as a warning and never fails a test.
+_WATCHED_SOFT = (".claude.json", ".codex/config.toml")
 
 _Stat = tuple[int, int] | None
 _baseline: dict[str, _Stat] = {}
@@ -171,6 +172,8 @@ def _redirect_home(mp: pytest.MonkeyPatch, home_dir: Path) -> None:
         # Every macOS home has ~/.Trash; uninstall moves TRW's own unchanged captures there.
         (home_dir / ".Trash").mkdir(exist_ok=True)
     mp.setenv("HOME", str(home_dir))
+    # uninstall revokes Codex hook approvals under $CODEX_HOME (else ~/.codex)
+    mp.delenv("CODEX_HOME", raising=False)
     mp.setenv("XDG_CONFIG_HOME", str(home_dir / ".config"))
     mp.setenv("XDG_DATA_HOME", str(home_dir / ".local" / "share"))
     mp.setenv("TRW_USER_DIR", str(home_dir / ".trw-user"))

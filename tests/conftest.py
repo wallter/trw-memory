@@ -608,8 +608,13 @@ def _no_live_decision_backend(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[
     """
     import httpx
 
+    from trw_memory.decisions import _machine_store
+
     for name in _JEV_ENV:
         monkeypatch.delenv(name, raising=False)
+    # The operator's real ~/.trw/jev.env (the machine key store) must never feed a test: a test that
+    # wants the store pins HOME and re-points this, as the store's own tests do.
+    monkeypatch.setattr(_machine_store, "machine_store_path", lambda: Path("/nonexistent/trw-test/jev.env"))
     attempted: list[str] = []
 
     def _guard(real: Any) -> Any:

@@ -21,7 +21,11 @@ PROCESS environment ONLY. A project ``.env`` — which is repo-controlled and
 therefore attacker-authored in a cloned repo — may supply ONLY the credential
 ``OPENROUTER_API_KEY``, and can never redirect where the key is sent: enabling
 the backend from project scope does not widen the credential or endpoint
-trust boundary, only the on/off decision. The resolved base URL must
+trust boundary, only the on/off decision. The operator's machine store
+(``~/.trw/jev.env``, owner-only) is the lowest-precedence source of all three
+values: it is outside every repo, so it may name the endpoint and model. The
+one resolver is :func:`trw_memory.decisions._machine_store.resolve_jev_settings`.
+The resolved base URL must
 additionally be ``https`` with a host in :data:`_ALLOWED_BASE_URL_HOSTS` on
 the default port; anything else resolves to :class:`NullJudge` (the call
 abstains, nothing leaves the machine) rather than raising.
@@ -37,8 +41,8 @@ from urllib.parse import urlsplit
 
 import structlog
 
-from trw_memory.decisions._dotenv import parse_dotenv_subset
 from trw_memory.decisions._judge import DecisionJudge, NullJudge
+from trw_memory.decisions._machine_store import MACHINE_STORE_LABEL, resolve_jev_settings
 
 if TYPE_CHECKING:
     # Only for type hints — importing this at module scope would pull in httpx
@@ -46,10 +50,6 @@ if TYPE_CHECKING:
     from trw_memory.decisions.toolkit import Toolkit
 
 logger = structlog.get_logger(__name__)
-
-#: The ONLY key a dotenv file is read for. Enablement, base URL and model are
-#: deliberately NOT read from it — see the module docstring's trust split.
-_DOTENV_ALLOWED_KEYS = frozenset({"OPENROUTER_API_KEY"})
 
 #: Hosts the API key may be sent to. Kept as a constant rather than a new
 #: config surface: the key belongs to exactly one provider.
@@ -99,8 +99,8 @@ def judge_from_env(
     machine switch instead of silently ignoring it. Returns :class:`JevHttpJudge` only when ALSO
     an ``OPENROUTER_API_KEY`` is found and the resolved ``TRW_JEV_BASE_URL`` is ``https`` on an
     allowlisted host; otherwise :class:`NullJudge`. ``TRW_JEV_BASE_URL``/``TRW_JEV_MODEL`` come
-    from ``env`` only; ``dotenv_path``, when given, is parsed for ``OPENROUTER_API_KEY`` and
-    nothing else (no ``python-dotenv`` dependency; see :mod:`trw_memory.decisions._dotenv`). See
+    from ``env``, else the machine store; ``dotenv_path``, when given, is parsed for
+    ``OPENROUTER_API_KEY`` and nothing else (no ``python-dotenv`` dependency; see :mod:`trw_memory.decisions._dotenv`). See
     :func:`_inspect_base_url` for exactly which URLs are allowed.
     """
     process_env = os.environ if env is None else env
@@ -112,19 +112,17 @@ def judge_from_env(
     if not enabled:
         return NullJudge("judge not enabled: set TRW_JEV_ENABLED=1 (or assess_enabled: true in .trw/config.yaml)")
 
-    api_key = process_env.get("OPENROUTER_API_KEY") or (
-        parse_dotenv_subset(dotenv_path, allowed_keys=_DOTENV_ALLOWED_KEYS).get("OPENROUTER_API_KEY")
-        if dotenv_path is not None
-        else None
-    )
-    if not api_key:
-        return NullJudge("judge enabled, but no OPENROUTER_API_KEY in the environment or the project .env")
+    settings = resolve_jev_settings(process_env, dotenv_path)
+    if not settings.api_key:
+        return NullJudge(
+            f"judge enabled, but no OPENROUTER_API_KEY in the environment, the project .env or {MACHINE_STORE_LABEL}"
+        )
 
     # Lazy: JevHttpJudge (and its httpx dependency) is imported only once we know the backend is
     # actually being enabled — every disabled/off-by-default caller never loads httpx (PRD-CORE-295-FR01).
     from trw_memory.decisions._jev_http import DEFAULT_BASE_URL, DEFAULT_MODEL, JevHttpJudge
 
-    base_url = process_env.get("TRW_JEV_BASE_URL") or DEFAULT_BASE_URL
+    base_url = settings.base_url or DEFAULT_BASE_URL
     allowed, host, scheme = _inspect_base_url(base_url)
     if not allowed:
         logger.info(
@@ -137,8 +135,8 @@ def judge_from_env(
             "judge enabled, but TRW_JEV_BASE_URL is not https on an allowlisted host; the key was not sent"
         )
 
-    model = process_env.get("TRW_JEV_MODEL") or DEFAULT_MODEL
-    return JevHttpJudge(api_key, base_url=base_url, model=model)
+    model = settings.model or DEFAULT_MODEL
+    return JevHttpJudge(settings.api_key, base_url=base_url, model=model)
 
 
 def toolkit_from_env(
