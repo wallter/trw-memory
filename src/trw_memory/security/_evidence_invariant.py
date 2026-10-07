@@ -97,10 +97,18 @@ def refuse_new_violation(existing: MemoryEntry | None, entry: MemoryEntry) -> No
     # ``str(enum_member)`` on a ``str, Enum`` mixin renders "ClassName.MEMBER",
     # not the plain value, so the two cases need separate handling.
     level = entry.evidence_level.value if isinstance(entry.evidence_level, EvidenceLevel) else str(entry.evidence_level)
+    stored_note = ""
+    if existing is not None and violates_evidence_invariant(existing):
+        stored_note = (
+            "; the stored row already has confidence='verified' with unsubstantiated evidence, and a change to its "
+            "content or detail is a new claim -- in the same request also give evidence_level as "
+            f"{EvidenceLevel.OBSERVED.value!r} or {EvidenceLevel.VERIFIED.value!r}, "
+            "or lower confidence"
+        )
     raise SchemaValidationError(
         f"confidence='verified' requires evidence_level in "
         f"{{{EvidenceLevel.OBSERVED.value!r}, {EvidenceLevel.VERIFIED.value!r}}}, "
-        f"got evidence_level={level!r}",
+        f"got evidence_level={level!r}{stored_note}",
         failed_fields=["confidence", "evidence_level"],
         reason="verified_requires_observed_or_verified_evidence",
     )

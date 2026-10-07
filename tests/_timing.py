@@ -39,6 +39,16 @@ RECORDS: list[dict[str, Any]] = []
 OUTCOMES: dict[str, str] = {}
 
 
+#: For a budget whose bound is only meaningful with the host to itself: skipped in any xdist run
+#: with more than one worker (xdist exports the count to each worker), so it is measured where
+#: it runs alone -- the release timing stages (``-n 0`` or ``-n 1``) or a serial local run. A string
+#: condition, so it is read when the test runs, not when this module is imported.
+serial_timing_only = pytest.mark.skipif(
+    "int(os.environ.get('PYTEST_XDIST_WORKER_COUNT') or 1) > 1",
+    reason="host-resource budget: measured only by a serial timing run (-n 0 or -n 1), never beside parallel workers",
+)
+
+
 def on_ci_runner() -> bool:
     return bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
 

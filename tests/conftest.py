@@ -44,6 +44,7 @@ import pytest
 # silently miss them. Pulling trw_memory in here at the top of conftest
 # guarantees the swap is in place before any test module is loaded.
 import trw_memory as _trw_memory_shim_trigger  # noqa: F401
+from tests import _admission_lock
 from tests._cwd_isolation import (  # the autouse fixture must be imported BY NAME to be active
     _cwd_outside_the_package,  # noqa: F401
     fail_session_on_leaked_store,
@@ -83,7 +84,12 @@ pytest_plugins = (
 # monorepo it is developed in — no shared test-support module exists across
 # these independently-distributed packages (trw-mcp and trw-memory ship to
 # PyPI; a new cross-package test dependency is not worth it for 15 lines).
-_MAX_XDIST_WORKERS = 4
+# The 2026-09-05 OOM was on an older machine. On the 64 GB arm64 Mac a full
+# trw-mcp run at -n 8 peaked at 12.5 GB with no swap, and trw-memory ran green
+# at -n 8 in 111 s against 137 s at -n 4 (2026-10-06), so the cap is 8. The
+# admission lock (tests/_admission_lock.py) admits one wide run per host, so
+# two agents' runs queue rather than stack at 8 each.
+_MAX_XDIST_WORKERS = 8
 _ALLOW_WIDE_XDIST_ENV = "TRW_PYTEST_ALLOW_WIDE_XDIST"
 
 
@@ -144,6 +150,10 @@ def _refuse_on_low_disk(config: pytest.Config) -> None:
         )
 
 
+#: The admission lock's descriptor, held by a wide controller from configure to unconfigure.
+_ADMISSION_FD = pytest.StashKey[int]()
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Refuse a wide xdist fan-out before it OOMs the workstation again, and a near-full disk.
 
@@ -166,11 +176,26 @@ def pytest_configure(config: pytest.Config) -> None:
     violation = _xdist_fanout_violation(getattr(config.option, "numprocesses", None), allow_wide)
     if violation is not None:
         pytest.exit(
-            f"{violation}. xdist fan-out capped at 4 workers on this "
-            "workstation (2026-09-05 OOM); use -n 4 or set "
+            f"{violation}. xdist fan-out capped at {_MAX_XDIST_WORKERS} workers on this "
+            f"workstation (2026-09-05 OOM); use -n {_MAX_XDIST_WORKERS} or set "
             "TRW_PYTEST_ALLOW_WIDE_XDIST=1",
             returncode=3,
         )
+    # Heavy-suite admission: one wide run per host at a time (see tests/_admission_lock.py).
+    try:
+        fd = _admission_lock.admit(getattr(config.option, "numprocesses", None))
+    except _admission_lock.AdmissionRefused as exc:
+        pytest.exit(str(exc), returncode=3)
+    if fd is not None:
+        config.stash[_ADMISSION_FD] = fd
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Release the admission lock as soon as the run ends (process death releases it too)."""
+    fd = config.stash.get(_ADMISSION_FD, None)
+    if fd is not None:
+        del config.stash[_ADMISSION_FD]
+        _admission_lock.dismiss(fd)
 
 
 #: This process's ``TRW_PYTEST_DAEMON_OWNER`` token. Every pytest process (the xdist controller and each

@@ -38,8 +38,18 @@ import os
 import re
 from pathlib import Path
 
+import structlog
+
 from trw_memory._live_stores import close_reader_fd
 from trw_memory.models.memory import Anchor
+
+logger = structlog.get_logger(__name__)
+
+#: Leading segments of a legacy anchor whose absolute path lost its leading '/'.
+_MACHINE_ROOTS = frozenset({"Users", "home", "private", "var", "tmp", "opt", "mnt", "Volumes", "root"})
+#: (root, file) pairs already reported, so a recall loop logs a missing anchor once.
+_REPORTED_MISSING: set[tuple[str, str]] = set()
+_REPORTED_CAP = 4096
 
 
 def compute_anchor_validity(
@@ -108,6 +118,8 @@ def _read_anchor_file(root: str, file_str: str) -> str | None:
 
     opened = open_checkout_file_fd(root, file_str, "anchor_validation")
     if isinstance(opened, dict):
+        if opened.get("missing"):
+            _note_missing(root, file_str)
         return None
     try:
         # closefd=False: the descriptor is closed through close_reader_fd, which
@@ -120,3 +132,21 @@ def _read_anchor_file(root: str, file_str: str) -> str | None:
         return None
     finally:
         close_reader_fd(opened)
+
+
+def _note_missing(root: str, file_str: str) -> None:
+    """Log (debug, once per (root, file)) that an anchor target is absent; a refusal is logged by the opener at error.
+
+    A missing target is an expected state (a deleted file, or a legacy row whose absolute path lost its leading
+    '/', e.g. ``Users/x/other/a.ts``), so it must not be ERROR-logged on every recall.
+    """
+    key = (root, file_str)
+    if key in _REPORTED_MISSING or len(_REPORTED_MISSING) >= _REPORTED_CAP:
+        return
+    _REPORTED_MISSING.add(key)
+    first = Path(file_str).parts[:1]
+    logger.debug(
+        "anchor_out_of_tree" if first and first[0] in _MACHINE_ROOTS else "anchor_file_missing",
+        root=root,
+        file=file_str,
+    )

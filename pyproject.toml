@@ -9,7 +9,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "trw-memory"
-version = "5.2.2"
+version = "5.2.3"
 description = "Persistent memory engine with hybrid retrieval, tiered storage, and semantic dedup for AI agents"
 readme = "README.md"
 license = "BUSL-1.1"
@@ -143,6 +143,7 @@ otel = [
 # it here would reference a nonexistent extra and pip would warn.
 all = ["trw-memory[embeddings]"]
 dev = [
+    "setuptools>=83.0.0",  # PYSEC-2026-3447: a Python 3.11 venv bundles setuptools 79.0.1, which the CI pip-audit step flags
     "pytest>=9.0.3",  # security pin floor, asserted by test_pyproject_security_pin_floors_are_patched
     "pytest-cov>=5.0.0",
     "pytest-asyncio>=0.24.0",

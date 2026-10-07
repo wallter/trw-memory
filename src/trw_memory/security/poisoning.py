@@ -33,8 +33,14 @@ logger = structlog.get_logger(__name__)
 # ONLY ones the code-snippet exemption (SYSTEM_CODE_FLAG_KEY) may waive. Each is a
 # literal code/markup/shell token, so a snippet quoting it is documentation rather
 # than an instruction.
+_SCRIPT_PATTERN = re.compile(r"<script\b", re.IGNORECASE)
+#: Appended to the rejection of ``<script`` so a shell or path note can be reworded rather than abandoned.
+_SCRIPT_WORKAROUND = (
+    " -- the pattern is '<script' followed by a non-word character, so '<script>' and '<script-path>' are both "
+    "refused; write the placeholder as <path-to-script> or name the real path (scripts/x.sh)"
+)
 _CODE_EXEMPT_PATTERNS = (
-    re.compile(r"<script\b", re.IGNORECASE),
+    _SCRIPT_PATTERN,
     re.compile(r"javascript[ \t]*:", re.IGNORECASE),
     # ``eval(`` in COMMAND position only: at the start of a field or line, after a clause or sentence break, or
     # after an execution word ("run", "then", "to", ...). Prose that names the builtin ("the helper calls
@@ -393,8 +399,9 @@ def reject_injection(entry: MemoryEntry, *, judge: DecisionJudge | None = None) 
     matched_pattern = next((pattern for pattern in patterns if pattern.search(combined)), None)
     _screen_injection_shadow(entry, heuristic_blocked=matched_pattern is not None, text=combined, judge=judge)
     if matched_pattern is not None:
+        hint = _SCRIPT_WORKAROUND if matched_pattern is _SCRIPT_PATTERN else ""
         raise PoisoningError(
-            f"memory entry matched blocked injection pattern {matched_pattern.pattern!r}",
+            f"memory entry matched blocked injection pattern {matched_pattern.pattern!r}{hint}",
             reason="injection_pattern",
         )
 

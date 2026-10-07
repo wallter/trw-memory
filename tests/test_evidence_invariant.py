@@ -88,6 +88,36 @@ class TestRefuseNewViolation:
         with pytest.raises(SchemaValidationError):
             refuse_new_violation(existing, existing.model_copy(update={**change, "evidence_level": "inferred"}))
 
+    def test_a_legacy_detail_edit_refusal_names_the_stored_violation_and_the_fix(self) -> None:
+        """Feedback #137: the refusal says the stored row was already inconsistent and how to proceed."""
+        existing = _entry("M-1", confidence="verified")
+        with pytest.raises(SchemaValidationError) as excinfo:
+            refuse_new_violation(existing, existing.model_copy(update={"detail": "new supporting prose"}))
+        message = str(excinfo.value)
+        assert "stored row already has confidence='verified'" in message
+        assert "evidence_level" in message and "'observed'" in message and "lower confidence" in message
+        assert "inferred" not in message
+
+    @pytest.mark.parametrize(
+        "remedy",
+        [{"evidence_level": "observed"}, {"evidence_level": "verified"}, {"confidence": "unverified"}],
+        ids=["observed", "verified", "lower-confidence"],
+    )
+    def test_each_advertised_remedy_actually_succeeds(self, remedy: dict[str, str]) -> None:
+        existing = _entry("M-1", confidence="verified")
+        edited = existing.model_copy(update={"detail": "new supporting prose", **remedy})
+        assert refuse_new_violation(existing, edited) is None
+
+    def test_the_unadvertised_inferred_level_is_still_refused(self) -> None:
+        existing = _entry("M-1", confidence="verified")
+        with pytest.raises(SchemaValidationError):
+            refuse_new_violation(existing, existing.model_copy(update={"detail": "x", "evidence_level": "inferred"}))
+
+    def test_a_brand_new_violation_keeps_the_plain_message(self) -> None:
+        with pytest.raises(SchemaValidationError) as excinfo:
+            refuse_new_violation(None, _entry("M-1", confidence="verified"))
+        assert "stored row" not in str(excinfo.value)
+
 
 class TestServedView:
     def test_a_violating_entry_is_served_demoted_with_a_marker(self) -> None:

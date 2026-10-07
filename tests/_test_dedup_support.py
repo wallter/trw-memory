@@ -21,6 +21,7 @@ def make_entry(
     merged_from: list[str] | None = None,
     confidence: Confidence = Confidence.UNVERIFIED,
     type: MemoryType = MemoryType.PATTERN,
+    evidence_level: str = "unknown",
 ) -> MemoryEntry:
     now = datetime.now(timezone.utc)
     return MemoryEntry(
@@ -35,6 +36,7 @@ def make_entry(
         merged_from=merged_from or [],
         confidence=confidence,
         type=type,
+        evidence_level=evidence_level,
         created_at=now,
         updated_at=now,
     )

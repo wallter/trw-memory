@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from trw_memory.lifecycle.dedup import merge_entries
+from trw_memory.models.memory import MemoryEntry
 
 from ._test_dedup_support import make_entry
 
@@ -99,7 +102,7 @@ class TestMergeEntries:
     def test_confidence_takes_higher(self) -> None:
         from trw_memory.models.memory import Confidence
 
-        existing = make_entry("e1", "content", confidence=Confidence.UNVERIFIED)
+        existing = make_entry("e1", "content", confidence=Confidence.UNVERIFIED, evidence_level="observed")
         new_entry = make_entry("e2", "content", confidence=Confidence.VERIFIED)
 
         updated = merge_entries(existing, new_entry)
@@ -198,3 +201,22 @@ def test_multi_line_incoming_summary_rides_the_header_on_one_line() -> None:
     header = merged.detail.split("---\n", 1)[1]
     assert header.startswith("Merged from L-b on ")
     assert header.endswith(": Different summary spanning lines")
+
+
+@pytest.mark.parametrize(
+    ("survivor_level", "expected"),
+    [("unknown", "unverified"), ("inferred", "unverified"), ("observed", "verified"), ("verified", "verified")],
+)
+def test_merge_takes_verified_confidence_only_where_the_survivor_evidence_supports_it(
+    survivor_level: str, expected: str
+) -> None:
+    """Feedback #145: the survivor keeps its evidence_level; a merge never trips the store invariant."""
+    from trw_memory.models.memory import EvidenceLevel
+
+    existing = MemoryEntry(id="m-1", content="a", evidence_level=EvidenceLevel(survivor_level))
+    incoming = MemoryEntry(id="m-2", content="a", confidence="verified", evidence_level=EvidenceLevel.OBSERVED)
+
+    merged = merge_entries(existing, incoming)
+
+    assert str(getattr(merged.confidence, "value", merged.confidence)) == expected
+    assert merged.evidence_level == EvidenceLevel(survivor_level)

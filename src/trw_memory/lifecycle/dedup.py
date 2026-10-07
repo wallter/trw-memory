@@ -17,7 +17,15 @@ from trw_memory.embeddings._similarity_calibration import calibrated_threshold
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.exceptions import DimensionMismatchError
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import Assertion, MemoryEntry, MemoryStatus, MemoryType, ProtectionTier
+from trw_memory.models.memory import (
+    Assertion,
+    Confidence,
+    EvidenceLevel,
+    MemoryEntry,
+    MemoryStatus,
+    MemoryType,
+    ProtectionTier,
+)
 from trw_memory.retrieval.dense import cosine_similarity
 
 logger = structlog.get_logger(__name__)
@@ -307,6 +315,13 @@ def merge_entries(
     merged_recall_count = existing.recall_count + new_entry.recall_count
     merged_protection_tier = _stronger_protection_tier(existing.protection_tier, new_entry.protection_tier)
     merged_confidence = _stronger(str(existing.confidence), str(new_entry.confidence), _CONFIDENCE_ORDER, "unverified")
+    if merged_confidence == Confidence.VERIFIED.value and existing.evidence_level not in (
+        EvidenceLevel.OBSERVED,
+        EvidenceLevel.VERIFIED,
+    ):
+        # The survivor keeps its evidence_level, and a merge never launders a claim: verified confidence
+        # is taken only where the survivor's evidence supports it under the store invariant (feedback #145).
+        merged_confidence = getattr(existing.confidence, "value", str(existing.confidence))
     is_incident_upgrade = str(new_entry.type) == "incident" and str(existing.type) != "incident"
     merged_type = MemoryType.INCIDENT.value if is_incident_upgrade else existing.type
     merged_assertions = _union_assertions(existing.assertions, new_entry.assertions)

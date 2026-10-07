@@ -336,3 +336,102 @@ def test_a_symbol_edged_by_a_non_word_character_still_matches_as_a_whole_name(
     (tmp_path / "a.py").write_text(content, encoding="utf-8")
 
     assert compute_anchor_validity([{"file": "a.py", "symbol_name": symbol}], tmp_path) == (1.0 if valid else 0.0)
+
+
+def test_missing_machine_shaped_anchor_is_out_of_tree_without_error_log(tmp_path: Path) -> None:
+    """Feedback #162: a legacy anchor whose leading '/' was lost ('Users/x/...') is skipped, never ERROR-logged."""
+    import structlog
+
+    anchors = [{"file": "Users/x/other/a.ts", "symbol_name": "foo"}]
+    with structlog.testing.capture_logs() as logs:
+        assert compute_anchor_validity(anchors, tmp_path) == 0.0
+        assert compute_anchor_validity(anchors, tmp_path) == 0.0
+    assert [e for e in logs if e["log_level"] in ("error", "warning")] == []
+    out_of_tree = [e for e in logs if e["event"] == "anchor_out_of_tree"]
+    assert len(out_of_tree) == 1  # deduped per (root, file)
+
+
+def test_machine_shaped_anchor_present_under_root_is_still_validated(tmp_path: Path) -> None:
+    (tmp_path / "Users" / "x").mkdir(parents=True)
+    (tmp_path / "Users" / "x" / "a.py").write_text("def foo(): pass")
+    assert compute_anchor_validity([{"file": "Users/x/a.py", "symbol_name": "foo"}], tmp_path) == 1.0
+
+
+def test_missing_plain_anchor_file_does_not_log_error(tmp_path: Path) -> None:
+    import structlog
+
+    with structlog.testing.capture_logs() as logs:
+        assert compute_anchor_validity([{"file": "gone/a.py", "symbol_name": "foo"}], tmp_path) == 0.0
+    assert [e for e in logs if e["log_level"] == "error"] == []
+
+
+def test_genuine_refusal_stays_at_error(tmp_path: Path) -> None:
+    """A symlinked component is a real refusal and must still be logged at ERROR."""
+    import structlog
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "a.py").write_text("def foo(): pass")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "link").symlink_to(outside)
+    with structlog.testing.capture_logs() as logs:
+        assert compute_anchor_validity([{"file": "link/a.py", "symbol_name": "foo"}], root) == 0.0
+    assert any(e["log_level"] == "error" for e in logs)
+
+
+def test_missing_file_behind_a_symlinked_dir_still_reaches_the_opener_and_logs_the_refusal(tmp_path: Path) -> None:
+    """Review P1: a lexists() probe followed the symlink and called this 'absent' before the opener could refuse."""
+    import structlog
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "link").symlink_to(outside)
+    with structlog.testing.capture_logs() as logs:
+        assert compute_anchor_validity([{"file": "link/missing.py", "symbol_name": "foo"}], root) == 0.0
+    assert any(e["log_level"] == "error" for e in logs)
+    assert not any(e["event"] in ("anchor_file_missing", "anchor_out_of_tree") for e in logs)
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions and non-root")
+def test_permission_denied_directory_is_not_classified_as_missing(tmp_path: Path) -> None:
+    import structlog
+
+    root = tmp_path / "root"
+    (root / "locked").mkdir(parents=True)
+    (root / "locked" / "a.py").write_text("def foo(): pass")
+    (root / "locked").chmod(0)
+    try:
+        with structlog.testing.capture_logs() as logs:
+            assert compute_anchor_validity([{"file": "locked/a.py", "symbol_name": "foo"}], root) == 0.0
+    finally:
+        (root / "locked").chmod(0o700)
+    assert any(e["log_level"] == "error" for e in logs)
+    assert not any(e["event"] in ("anchor_file_missing", "anchor_out_of_tree") for e in logs)
+
+
+def test_plain_missing_file_logs_debug_once_and_never_error(tmp_path: Path) -> None:
+    import structlog
+
+    anchors = [{"file": "gone/a.py", "symbol_name": "foo"}]
+    with structlog.testing.capture_logs() as logs:
+        assert compute_anchor_validity(anchors, tmp_path) == 0.0
+        assert compute_anchor_validity(anchors, tmp_path) == 0.0
+    assert [e["event"] for e in logs if e["event"].startswith("anchor_")] == ["anchor_file_missing"]
+    assert not any(e["log_level"] in ("error", "warning") for e in logs)
+
+
+def test_missing_file_behind_a_symlinked_root_is_refused_at_error(tmp_path: Path) -> None:
+    """Review round 3: the secure opener, not a hand-rolled walk, classifies a symlinked ROOT."""
+    import structlog
+
+    real = tmp_path / "real"
+    real.mkdir()
+    link_root = tmp_path / "linkroot"
+    link_root.symlink_to(real)
+    with structlog.testing.capture_logs() as logs:
+        assert compute_anchor_validity([{"file": "missing.py", "symbol_name": "foo"}], link_root) == 0.0
+    assert any(e["log_level"] == "error" for e in logs)
+    assert not any(e["event"] in ("anchor_file_missing", "anchor_out_of_tree") for e in logs)

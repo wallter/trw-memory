@@ -725,3 +725,16 @@ class TestInjectionScreenShadow:
         rendered = "\n".join(r.getMessage() + str(r.__dict__) for r in caplog.records)
         assert "injection_screen_shadow_failed" in rendered
         assert '"error_type": "ConnectionError"' in rendered
+
+
+@pytest.mark.parametrize("text", ["run <script> now", "Edit <script-path> first", "<script.sh"])
+def test_script_rejection_names_a_working_workaround(text: str) -> None:
+    """Feedback #118: the filter is unchanged, but the refusal says how to reword and the reword is accepted."""
+    from trw_memory.exceptions import PoisoningError
+    from trw_memory.models.memory import MemoryEntry
+    from trw_memory.security.poisoning import reject_injection
+
+    with pytest.raises(PoisoningError) as excinfo:
+        reject_injection(MemoryEntry(id="M-1", namespace="project:default", content=text))
+    assert "<path-to-script>" in str(excinfo.value)
+    reject_injection(MemoryEntry(id="M-2", namespace="project:default", content="Run <path-to-script> or scripts/x.sh"))

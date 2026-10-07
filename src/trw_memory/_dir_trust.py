@@ -441,5 +441,8 @@ def _refuse(path: Path, exc: OSError) -> UntrustedDirectoryError:
     hint = ""
     if getattr(exc, "errno", None) == _errno.ELOOP or path.is_symlink():
         hint = " (the path is a symlink; refusing to follow it)"
-    logger.error("dir_open_refused", path=str(path), error=type(exc).__name__)
+    # A missing component is an expected state for callers that probe stored paths;
+    # only a real refusal (symlink, loop, permission) is an error.
+    log = logger.debug if isinstance(exc, FileNotFoundError) else logger.error
+    log("dir_open_refused", path=str(path), error=type(exc).__name__)
     return UntrustedDirectoryError(f"Cannot securely open directory {path}: {exc}{hint}", path=str(path))

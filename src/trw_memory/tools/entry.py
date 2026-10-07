@@ -202,7 +202,13 @@ def open_checkout_file_fd(root: str, path: str, operation: str) -> int | dict[st
         leaf = opened.pop()
         return leaf
     except UntrustedDirectoryError as exc:
-        return _refused(operation, path, f"{path} could not be opened without following a symlink ({exc})")
+        reason = f"{path} could not be opened without following a symlink ({exc})"
+        if isinstance(exc.__cause__, FileNotFoundError):
+            # An absent component is an expected state for a caller probing a stored path, not a boundary
+            # violation: same refused reply, marked ``missing`` and logged at debug.
+            logger.debug("checkout_path_missing", operation=operation, path=path)
+            return {"error": f"{operation} refused: {reason}", "status": "refused", "missing": True}
+        return _refused(operation, path, reason)
     finally:
         for fd in opened:
             os.close(fd)
