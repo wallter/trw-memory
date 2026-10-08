@@ -9,7 +9,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "trw-memory"
-version = "5.2.3"
+version = "5.2.4"
 description = "Persistent memory engine with hybrid retrieval, tiered storage, and semantic dedup for AI agents"
 readme = "README.md"
 license = "BUSL-1.1"
@@ -97,7 +97,7 @@ dependencies = [
     "authlib>=1.6.12",
     "idna>=3.15",
     "pygments>=2.20.0",
-    "pyjwt>=2.13.0",
+    "pyjwt>=2.15.0",
     "python-dotenv>=1.2.2",
 ]
 
@@ -120,7 +120,7 @@ sqlite-fix = [
 # No [encryption] extra: encryption at rest is refused (EncryptionAtRestUnsupportedError) and its
 # SQLCipher and master-key code was removed in 4.1; use full-disk encryption.
 embeddings = [
-    "sentence-transformers>=2.0.0",
+    "sentence-transformers>=5.6.0",  # security floor: GHSA-jhr6-gm9c-rqjv (local model loading ran custom Python despite trust_remote_code=False) is fixed in 5.6.0
     # numpy>=2.5 ships PEP-695 `type X = ...` stubs that mypy rejects under
     # python_version="3.11" (PRD-INFRA-200 raised the floor from 3.10; the
     # stub incompatibility is unrelated to which floor is pinned). Pin below

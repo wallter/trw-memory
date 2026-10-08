@@ -143,14 +143,14 @@ results = backend.search("query", top_k=10, namespace="default")
 ```
 
 ## What's new in 5.x
-<!-- whats-new: 5.2.3 -->
+<!-- whats-new: 5.2.4 -->
 
 - **Machine-wide secrets, owner-only.** `trw_memory.machine_secrets` reads and writes `~/.trw` secret files only when they are private to you; the jev key can live in `~/.trw/jev.env`.
 - **Confidentiality labels for every memory.** `trw_memory.labels` labels rows by tag rule, and rows labelled above `team` stay out of platform publishing.
 - **Secrets stay masked even when disguised.** Credential and PII masking catches an email, API key or token split by an invisible character such as a zero-width space or soft hyphen.
 - **Quarantined memories never leave the host.** Every platform send, including a queued retry, checks the quarantine ledger first.
 - **Faster team sync.** `memory_sync_apply_many` writes a pulled page in one daemon call, `memory_sync_find_many` matches a page in one call, and pulled learnings are embedded as they are stored.
-- **A faster first recall.** The daemon loads its embedding and rerank models as soon as it is serving, instead of on the first recall.
+- **Patched dependencies by default.** Installs pull PyJWT 2.15.0 or later; the `embeddings` extra needs sentence-transformers 5.6.0 or later, closing a way for a local model to run its own Python.
 - **Merges never overstate evidence.** A deduplicated memory keeps the survivor's evidence level, so merging cannot raise a learning's confidence beyond what supports it.
 
 5.0.0 is a breaking release (custom `StorageBackend`s must add `get_many`, and unprefixed settings variables such as `DAEMON_PORT` are no longer read, so use `MEMORY_<SETTING>`; Python <!-- inv:python_min_trw_memory -->3.11<!-- /inv -->+): read the [CHANGELOG](https://github.com/wallter/trw-memory/blob/main/CHANGELOG.md) before upgrading, and upgrade trw-mcp to 8.0.0 with it.
