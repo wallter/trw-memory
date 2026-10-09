@@ -99,7 +99,7 @@ def conversation_requests(
     tags: list[str] | None = None,
     importance: float = 0.5,
     metadata: dict[str, str] | None = None,
-    source: Literal["human", "agent", "tool", "consolidated"] = "human",
+    source: Literal["human", "agent", "tool", "consolidated", "distill"] = "human",
 ) -> list[BulkStoreRequest]:
     """Shape *messages* into ``BulkStoreRequest`` rows with rolling context.
 
@@ -178,7 +178,7 @@ async def store_conversation_impl(
     tags: list[str] | None = None,
     importance: float = 0.5,
     metadata: dict[str, str] | None = None,
-    source: Literal["human", "agent", "tool", "consolidated"] = "human",
+    source: Literal["human", "agent", "tool", "consolidated", "distill"] = "human",
 ) -> BulkStoreSummary:
     """Async impl for :meth:`MemoryClient.store_conversation`."""
     requests = conversation_requests(

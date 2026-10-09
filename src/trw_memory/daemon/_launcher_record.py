@@ -7,9 +7,13 @@ store (and its ``PYTHONPATH`` for a source worktree), written by whoever points 
 through :func:`write_launcher_record`. ``DaemonClient`` starts the daemon from it, whichever client it is
 (trw-mcp, the ``trw-memory`` CLI), so no client reads another package's records.
 
-Fail closed: a record whose interpreter is gone, or no longer serves the version the record names, or that cannot
+Fail closed: a record whose interpreter is gone, or serves an OLDER version than the record names, or that cannot
 be read, refuses the start naming the fix. Starting from the client's own interpreter instead is the bug being
 closed. A store with NO record is one nobody pointed at an interpreter: the client's own start stands.
+
+An interpreter that now serves a NEWER version was upgraded in place (``pip install -U``, or a version bump in a
+``swap --src`` tree): the store is still pointed at it, so it starts and the record takes the new version. Refusing
+there left every client without a daemon until someone ran ``swap`` again (2026-10-08).
 """
 
 from __future__ import annotations
@@ -101,7 +105,9 @@ def launch_from_record(paths: DaemonPaths) -> SpawnedDaemon | None:
     if record is None:
         return None
     served = _served_version(record)
-    if served != record.version:
+    if served is not None and is_older(record.version, served):
+        write_launcher_record(paths, Path(record.python), served, pythonpath=record.pythonpath)
+    elif served != record.version:
         raise DaemonUnreachableError(
             f"{paths.launcher} names interpreter {record.python} for trw-memory {record.version}, but it "
             f"{'does not run' if served is None else f'serves {served}'}, so no memory daemon was started from this "

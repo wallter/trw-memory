@@ -36,7 +36,7 @@ class LearningFields(BaseModel):
     anchors: list[Anchor] | None = None
     nudge_line: str | None = None
     # PRD-CORE-298 FR01: provenance the daemon store forwards for trw-mcp writes.
-    source: Literal["human", "agent", "tool", "consolidated", "team_sync", "company_sync"] | None = None
+    source: Literal["human", "agent", "tool", "consolidated", "distill", "team_sync", "company_sync"] | None = None
     client_profile: str | None = None
     model_id: str | None = None
     anchor_validity: float | None = None

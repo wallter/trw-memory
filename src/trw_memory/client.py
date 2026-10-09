@@ -21,7 +21,7 @@ from trw_memory.retrieval.recall_selection import LocalCandidate, RecallInvocati
 
 import asyncio
 import threading
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast, runtime_checkable
@@ -33,7 +33,7 @@ from typing_extensions import NotRequired
 from trw_memory.embeddings.interface import EmbeddingProvider
 from trw_memory.exceptions import MemoryConnectionError
 from trw_memory.models.config import MemoryConfig
-from trw_memory.models.memory import Assertion, MemoryEntry
+from trw_memory.models.memory import Anchor, Assertion, MemoryEntry
 from trw_memory.security.rbac import Permission, require_namespace_permission as require_namespace_permission  # noqa: F401 — re-exported for downstream consumers
 from trw_memory.security.runtime import (
     audit_entry,
@@ -238,14 +238,19 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin):
         evidence: list[str] | None = None,
         assertions: list[Assertion] | None = None,
         *,
-        source: Literal["human", "agent", "tool", "consolidated"] = "agent",
+        anchors: Sequence[Anchor | Mapping[str, object]] | None = None,
+        source: Literal["human", "agent", "tool", "consolidated", "distill"] = "agent",
         source_identity: str = "",
         session_id: str | None = None,
         entry_id: str | None = None,
     ) -> StoreResultDict:
         """Store a new memory entry.
 
-        Implementation lives in ``_client_store.store_impl``
+        ``anchors`` (repo-relative code references) given as a list replaces the entry's anchors, an empty
+        list clears them, and omitting it keeps them.
+
+        ``anchors`` (code references, repo-relative) given as a list replaces the entry's anchors, an empty
+        list clears them, and omitting it keeps them. Implementation lives in ``_client_store.store_impl``
         (PRD-DIST-246 batch 110). Full per-entry write path: schema
         validation, security gate, vector upsert with rollback, graph
         schedule, tier register, audit, optional remote publish.
@@ -262,6 +267,7 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin):
             metadata=metadata,
             expires=expires,
             assertions=assertions,
+            anchors=anchors,
             source=source,
             source_identity=source_identity,
             session_id=session_id,
@@ -298,7 +304,7 @@ class MemoryClient(ClientContextMixin, ClientOperationsMixin):
         tags: list[str] | None = None,
         importance: float = 0.5,
         metadata: dict[str, str] | None = None,
-        source: Literal["human", "agent", "tool", "consolidated"] = "human",
+        source: Literal["human", "agent", "tool", "consolidated", "distill"] = "human",
     ) -> BulkStoreSummary:
         """Store chat turns as memories, each carrying its preceding turns as context.
 

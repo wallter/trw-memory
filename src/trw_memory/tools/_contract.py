@@ -54,7 +54,7 @@ class StoreImpl(Protocol):
         detail: str = "",
         metadata: dict[str, str] | None = None,
         config: MemoryConfig | None = None,
-        source: Literal["human", "agent", "tool", "consolidated", "team_sync", "company_sync"] = "tool",
+        source: Literal["human", "agent", "tool", "consolidated", "distill", "team_sync", "company_sync"] = "tool",
         source_identity: str = "",
         session_id: str | None = None,
         entry_id: str | None = None,

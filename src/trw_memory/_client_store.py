@@ -21,9 +21,11 @@ Extracted as PRD-DIST-246 batch 110.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal
 
+from trw_memory._client_anchors import validate_store_anchors
 from trw_memory._client_backend import client_logger as _client_logger
 from trw_memory._client_lifecycle import publish_entry, schedule_background_task, should_attempt_remote_publish
 from trw_memory._otel import memory_op
@@ -32,7 +34,7 @@ from trw_memory.exceptions import MemoryNotFoundError, SchemaValidationError, St
 from trw_memory.graph import schedule_graph_update
 from trw_memory.lifecycle.tiers._runtime import embedding_has_consumer, remember_entry_in_tiers
 from trw_memory.models.entry_factory import new_entry, new_memory_id, revise_entry
-from trw_memory.models.memory import Assertion, MemoryEntry
+from trw_memory.models.memory import Anchor, Assertion, MemoryEntry
 from trw_memory.namespaces.manager import NamespaceManager
 from trw_memory.security.poisoning import validate_store_inputs
 from trw_memory.security.rbac import Permission
@@ -74,7 +76,8 @@ def _build_store_entry(
     metadata: dict[str, str] | None,
     expires: str,
     assertions: list[Assertion] | None,
-    source: Literal["human", "agent", "tool", "consolidated"],
+    anchors: list[Anchor] | None = None,
+    source: Literal["human", "agent", "tool", "consolidated", "distill"],
     source_identity: str,
     now: datetime,
     installation_id: str,
@@ -101,6 +104,7 @@ def _build_store_entry(
                 "metadata": entry_metadata,
                 "expires": entry_expires,
                 "assertions": list(assertions or []),
+                "anchors": list(anchors or []),
                 "source": source,
                 "source_identity": source_identity,
             },
@@ -119,6 +123,7 @@ def _build_store_entry(
             "metadata": entry_metadata,
             "expires": entry_expires,
             "assertions": list(assertions) if assertions is not None else existing.assertions,
+            "anchors": list(anchors) if anchors is not None else existing.anchors,
             "source": source,
             "source_identity": source_identity or existing.source_identity,
         },
@@ -137,7 +142,8 @@ async def store_impl(
     evidence: list[str] | None = None,
     assertions: list[Assertion] | None = None,
     *,
-    source: Literal["human", "agent", "tool", "consolidated"] = "agent",
+    anchors: Sequence[Anchor | Mapping[str, object]] | None = None,
+    source: Literal["human", "agent", "tool", "consolidated", "distill"] = "agent",
     source_identity: str = "",
     session_id: str | None = None,
     entry_id: str | None = None,
@@ -157,6 +163,7 @@ async def store_impl(
             assertions=assertions,
             entry_id=entry_id,
         )
+        checked_anchors = validate_store_anchors(anchors)
     except SchemaValidationError as exc:
         append_audit_event(
             client._config,
@@ -189,6 +196,7 @@ async def store_impl(
             metadata=metadata,
             expires=expires,
             assertions=assertions,
+            anchors=checked_anchors,
             source=source,
             source_identity=source_identity,
             now=now,

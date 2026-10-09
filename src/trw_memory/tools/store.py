@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import structlog
 
+from trw_memory._client_anchors import validate_store_anchors
 from trw_memory._client_store import _existing_entry_for_namespace
 from trw_memory._otel import memory_op
 from trw_memory._project_anchor import resolve_storage_root
@@ -71,7 +72,7 @@ def memory_store_impl(
     detail: str = "",
     metadata: dict[str, str] | None = None,
     config: MemoryConfig | None = None,
-    source: Literal["human", "agent", "tool", "consolidated", "team_sync", "company_sync"] = "tool",
+    source: Literal["human", "agent", "tool", "consolidated", "distill", "team_sync", "company_sync"] = "tool",
     source_identity: str = "",
     session_id: str | None = None,
     entry_id: str | None = None,
@@ -170,6 +171,7 @@ def memory_store_impl(
             assertions=assertions,
             entry_id=entry_id,
         )
+        anchors = validate_store_anchors(anchors)
     except SchemaValidationError as exc:
         append_audit_event(
             cfg,

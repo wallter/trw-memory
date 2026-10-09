@@ -99,15 +99,34 @@ def test_another_stores_record_sets_that_stores_user_dir(tmp_path: Path, home: P
     assert environ["PYTHONPATH"] == _SRC
 
 
-@pytest.mark.parametrize("version", ["0.0.1", "99.0.0"])
-def test_a_record_whose_interpreter_serves_another_version_refuses(tmp_path: Path, start: _Start, version: str) -> None:
+def test_a_record_whose_interpreter_serves_an_older_version_refuses(tmp_path: Path, start: _Start) -> None:
     paths = _paths(tmp_path / "memory")
-    write_launcher_record(paths, Path(sys.executable), version, pythonpath=_SRC)
+    write_launcher_record(paths, Path(sys.executable), "99.0.0", pythonpath=_SRC)
 
     with pytest.raises(DaemonUnreachableError, match="serves " + __version__.replace(".", r"\.")):
         launch_from_record(paths)
 
     assert start.calls == [], "falling back to the client's own interpreter is the bug being closed"
+    record = read_launcher_record(paths)
+    assert record is not None and record.version == "99.0.0"
+
+
+def test_a_recorded_interpreter_upgraded_in_place_starts_and_the_record_follows(tmp_path: Path, start: _Start) -> None:
+    """`pip install -U` (or a version bump in a `swap --src` tree) under a live record: 2026-10-08, recall was down
+    for every session on the machine from the daemon's next exit until a manual `swap`."""
+    paths = _paths(tmp_path / "memory")
+    write_launcher_record(paths, Path(sys.executable), "0.0.1", pythonpath=_SRC)
+
+    assert launch_from_record(paths) == "spawned"
+
+    (_, kwargs), record = start.calls[0], read_launcher_record(paths)
+    assert kwargs["python"] == sys.executable, "the RECORD's interpreter, never the client's own"
+    assert kwargs["environ"]["PYTHONPATH"] == _SRC
+    assert record is not None and (record.python, record.version, record.pythonpath) == (
+        sys.executable,
+        __version__,
+        _SRC,
+    )
 
 
 def test_a_record_whose_interpreter_is_gone_refuses(tmp_path: Path, start: _Start) -> None:
@@ -161,7 +180,7 @@ def test_a_client_with_a_stale_record_refuses_and_starts_nothing(
     own: list[DaemonPaths] = []
     monkeypatch.setattr(client_module, "start_daemon_detached", own.append)
     paths = _paths(tmp_path / "memory")
-    write_launcher_record(paths, Path(sys.executable), "0.0.1", pythonpath=_SRC)
+    write_launcher_record(paths, Path(sys.executable), "99.0.0", pythonpath=_SRC)
 
     with pytest.raises(DaemonUnreachableError, match="so no memory daemon was started"):
         DaemonClient(

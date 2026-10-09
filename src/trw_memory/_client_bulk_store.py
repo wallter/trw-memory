@@ -67,7 +67,7 @@ class BulkStoreRequest:
     tags: list[str] | None = None
     importance: float = 0.5
     metadata: dict[str, str] | None = None
-    source: Literal["human", "agent", "tool", "consolidated"] = "agent"
+    source: Literal["human", "agent", "tool", "consolidated", "distill"] = "agent"
     source_identity: str = ""
     #: Writer session. Keys the write-rate limiter, which charges a whole
     #: ``bulk_store`` call ONE write per distinct session (not one per row).
@@ -413,7 +413,7 @@ async def store_many_impl(client: MemoryClient, entries: list[dict[str, object]]
             expires=str(entry.get("expires", "")),
             assertions=cast("list[Assertion] | None", entry.get("assertions")),
             source=cast(
-                "Literal['human', 'agent', 'tool', 'consolidated']",
+                "Literal['human', 'agent', 'tool', 'consolidated', 'distill']",
                 entry.get("source", "agent"),
             ),
             source_identity=str(entry.get("source_identity", "")),

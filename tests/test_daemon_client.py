@@ -340,6 +340,21 @@ async def test_memory_anchored_served_by_real_daemon(
     assert page["memories"][0]["anchors"][0]["file"] == "./pkg/mod.py"
 
 
+async def test_memory_store_over_a_real_daemon_carries_anchors_and_distill_source(
+    shared_paths: DaemonPaths, config: MemoryConfig, shared_running_daemon: DaemonInfo
+) -> None:
+    """The daemon's store tool takes the same ``anchors`` and the ``distill`` source the library client now does."""
+    namespace = "project:distill-ffffffff"
+    client = DaemonClient(mint_grant(shared_paths, [namespace]), config=config, paths=shared_paths)
+    anchors = [{"file": "pkg/mod.py", "symbol_name": "handler"}]
+    stored = await client.store("a mined lesson", namespace, learning={"anchors": anchors, "source": "distill"})
+
+    page = await client.anchored(namespace, "pkg/mod.py", 10, status="active")
+
+    assert [row["id"] for row in page["memories"]] == [stored["memory_id"]]
+    assert page["memories"][0]["source"] == "distill"
+
+
 async def test_a_record_still_refusing_past_the_deadline_names_its_holder(
     paths: DaemonPaths, config: MemoryConfig
 ) -> None:

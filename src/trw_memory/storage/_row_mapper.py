@@ -33,7 +33,7 @@ from trw_memory.storage._parsing import (
 from trw_memory.storage._shared import VERIFICATION_STATUS_VALUES
 
 # Source provenance values accepted by MemoryEntry.
-_SourceType = Literal["human", "agent", "tool", "consolidated"]
+_SourceType = Literal["human", "agent", "tool", "consolidated", "distill"]
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
 
