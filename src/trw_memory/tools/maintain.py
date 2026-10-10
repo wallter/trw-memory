@@ -55,6 +55,7 @@ from trw_memory.tools._types import McpServer
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Callable
 
+    from trw_memory.lifecycle.claim_tree import ClaimTree
     from trw_memory.lifecycle.consolidation import ClusterWrite
     from trw_memory.models.memory import MemoryEntry
     from trw_memory.storage.interface import StorageBackend
@@ -336,6 +337,21 @@ def _run_checkpoint(backend: StorageBackend) -> dict[str, object]:
     return {"status": _ERROR if failed else _OK, "scope": "store", **result}
 
 
+def _verification_root(config: MemoryConfig) -> tuple[Path | None, bool]:
+    """The root a verification sweep reads, and whether it is a usable directory.
+
+    An in-process caller's own root is resolved once here, so a symlinked path (macOS /tmp) survives the
+    no-follow anchor walk. A grant's root was resolved at mint and is never re-resolved: that would follow
+    a root or ancestor swapped for a symlink after the grant (C12). The file walk and the claim tree
+    (PRD-CORE-362) are given this one value.
+    """
+    root = Path(config.project_root) if config.project_root else None
+    usable = root is not None and root.is_dir()
+    if root is not None and usable and not transport_root()[0]:
+        root = root.resolve()
+    return root, usable
+
+
 def _run_verification(
     namespace: str,
     backend: StorageBackend,
@@ -344,6 +360,7 @@ def _run_verification(
     after: tuple[str, str] | None = None,
     seconds: float | None = None,
     rows: int | None = None,
+    claim_tree: ClaimTree | None = None,
     **knobs: Any,
 ) -> dict[str, object]:
     """Verify *namespace*'s assertions/anchors against ``config.project_root``, resuming *after* a
@@ -354,16 +371,10 @@ def _run_verification(
     """
     from trw_memory.lifecycle import verification_pass
 
-    root = Path(config.project_root) if config.project_root else None
-    usable = root is not None and root.is_dir()
+    root, usable = _verification_root(config)
     try:
         # Runs even without a usable root: the sweep then clears any prior
-        # "verified" verdict it can no longer re-check. An in-process caller's own root
-        # is resolved once here, so a symlinked path (macOS /tmp) survives the no-follow
-        # anchor walk. A grant's root was resolved at mint and is never re-resolved: that
-        # would follow a root or ancestor swapped for a symlink after the grant (C12).
-        if root is not None and usable and not transport_root()[0]:
-            root = root.resolve()
+        # "verified" verdict it can no longer re-check.
         summary = verification_pass.run_maintain_verify(
             backend,
             project_root=root if usable else None,
@@ -371,6 +382,7 @@ def _run_verification(
             after=after,
             seconds=seconds,
             max_rows=rows,
+            claim_tree=claim_tree,
             **knobs,
         )
     except Exception as exc:  # justified: one failing pass must not abort the others

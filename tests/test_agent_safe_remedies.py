@@ -52,3 +52,27 @@ def test_the_version_mismatch_error_is_addressed_to_the_user(monkeypatch: pytest
     _assert_user_addressed(message, 4242)
     assert "No memory was read or written" in message
     assert "restarting the MCP client alone leaves it running" in message, "restart advice alone would not resolve it"
+
+
+def test_a_newer_daemon_is_not_the_one_the_user_is_told_to_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An installation that meets a daemon of a later major is the old one: upgrading it is the remedy.
+
+    The 5.3.0 text said "stop the old daemon (process N)" in both directions. Rehearsed on 2026-10-10 with a
+    daemon one major ahead, N was the new daemon: stopping it let the old installation start its own again,
+    which the next call from the upgraded one replaced.
+    """
+    from trw_memory.daemon import client as client_mod
+    from trw_memory.daemon.client import DaemonClient, DaemonVersionMismatchError
+
+    monkeypatch.setattr(client_mod, "_package_version", lambda: "3.9.0")
+    with pytest.raises(DaemonVersionMismatchError) as raised:
+        DaemonClient._compatible(
+            DaemonClient.__new__(DaemonClient), _info("1.0"), "trw-memory 4.0.1 is not a major version older than 3.9.0"
+        )
+
+    message = str(raised.value)
+    _assert_user_addressed(message, 4242)
+    assert "No memory was read or written" in message
+    assert "pip install -U trw-mcp trw-memory" in message, "the remedy is to upgrade this installation"
+    assert "stop the old daemon" not in message, "the daemon is the newer of the two"
+    assert "did not replace it automatically" not in message, "an older client never replaces a newer daemon"

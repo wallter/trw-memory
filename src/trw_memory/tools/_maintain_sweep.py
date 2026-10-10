@@ -24,6 +24,7 @@ import structlog
 
 from trw_memory.daemon._lane import INTERACTIVE, MAINTENANCE, run_on_lane, run_slices
 from trw_memory.daemon._offload import run_offloaded
+from trw_memory.lifecycle.claim_tree import ClaimTree
 from trw_memory.lifecycle.verification_pass import MaintainVerifySummary, VerifySettings
 from trw_memory.models.config import MemoryConfig
 from trw_memory.security.rbac import Permission
@@ -106,6 +107,9 @@ class MaintainRun:
     passes: dict[str, object] = field(default_factory=dict)
     knobs: dict[str, Any] = field(default_factory=dict)
     key: str = ""
+    #: PRD-CORE-362: the checkout's view of its own commit, built at the first slice and shared by the rest,
+    #: so one call costs one HEAD lookup plus one process per distinct commit, not that per slice.
+    claim_tree: ClaimTree | None = None
 
     def rows_verified(self) -> int:
         return rows_verified(self.passes.get("verification"))
@@ -150,8 +154,18 @@ def verify_slice(
 ) -> dict[str, object]:
     """Verify on from where *run*'s sweep stands for about *seconds* and at most *rows* rows
     (``None``: to the end)."""
+    if run.claim_tree is None:
+        root, usable = maintain._verification_root(run.config)
+        run.claim_tree = ClaimTree(root) if root is not None and usable else None
     more = maintain._run_verification(
-        run.namespace, backend, run.config, after=run.after, seconds=seconds, rows=rows, **run.knobs
+        run.namespace,
+        backend,
+        run.config,
+        after=run.after,
+        seconds=seconds,
+        rows=rows,
+        claim_tree=run.claim_tree,
+        **run.knobs,
     )
     done = run.passes.get("verification")
     merged = add_sweep_counts(done, more) if isinstance(done, dict) else dict(more)

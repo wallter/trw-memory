@@ -31,6 +31,8 @@ from trw_memory.models.config import MemoryConfig
 pytest.importorskip("fastmcp")
 
 _BOOT_CEILING_S = 30.0
+#: How long the fixture waits for a daemon it signalled to be gone (normally well under a second).
+_STOP_CEILING_S = 15.0
 _NAMESPACE = "project:boot-aaaaaaaa"
 
 _BOOT_PATH_MODULES = ("trw_memory.daemon._serve", "trw_memory.daemon.client", "trw_mcp.server._cli")
@@ -73,7 +75,19 @@ def paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[DaemonPat
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:  # trw-fail-silent-allow: the daemon already exited, nothing to stop
-            pass
+            return
+        # The signal is a request, not a stop: wait until the process is gone. The session-end reaper fails the
+        # run on any daemon still alive under this home, and when this was the last test of its worker it found
+        # one that was merely shutting down (the trw-memory release check of 2026-10-09 failed that way once and
+        # passed on the same tree a minute later).
+        deadline = time.monotonic() + _STOP_CEILING_S
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:  # trw-fail-silent-allow: gone is the state being waited for
+                return
+            time.sleep(0.05)
+        pytest.fail(f"the auto-started daemon {pid} was still alive {_STOP_CEILING_S:.0f} s after SIGTERM")
 
 
 async def test_a_cold_auto_start_publishes_discovery_in_under_30_seconds(

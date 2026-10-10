@@ -33,6 +33,7 @@ from typing import Any, Literal, cast
 import structlog
 
 from trw_memory._sweep import sweep
+from trw_memory.lifecycle.claim_tree import ClaimTree
 from trw_memory.namespaces.validation import DEFAULT_NAMESPACE
 
 logger = structlog.get_logger(__name__)
@@ -79,6 +80,8 @@ class VerificationOutcome:
     #: Nothing is persisted in that case: the historical ``first_failed_at``
     #: values would otherwise convict an entry that was never re-examined.
     verifiable: bool = True
+    #: PRD-CORE-362: at least one assertion was held as unknown because the checkout is behind its claim.
+    tree_behind: bool = False
 
     def update_fields(self) -> dict[str, object]:
         """The exact kwargs for the single batched ``backend.update()`` call.
@@ -173,6 +176,15 @@ def _apply_verdict(outcome: VerificationOutcome, *, moment: datetime, anchor_flo
         outcome.verification_status = "verified"
 
 
+def _held_evidence(claim_tree: ClaimTree | None, commit_hash: str | None) -> str:
+    """Why an assertion was held: both abbreviated commits (PRD-CORE-362 FR05)."""
+    head = (claim_tree.head if claim_tree is not None else None) or ""
+    return (
+        f"checkout HEAD {head[:12]} is an ancestor of {(commit_hash or '')[:12]}, the commit this assertion was "
+        "written at; this tree cannot contain the claim's state"
+    )
+
+
 def run_verification_pass(
     entry_id: str,
     raw_assertions: list[object],
@@ -184,6 +196,7 @@ def run_verification_pass(
     anchor_validity_verified_floor: float,
     project_root: Path | None,
     now: datetime | None = None,
+    claim_tree: ClaimTree | None = None,
 ) -> VerificationOutcome:
     """Verify one entry's assertions and re-verify its anchors.
 
@@ -199,18 +212,28 @@ def run_verification_pass(
             ``"verified"`` verdict tolerates (FR03).
         project_root: Repo root for filesystem-scoped verification, or ``None``.
         now: Injectable clock for tests; defaults to ``datetime.now(utc)``.
+        claim_tree: PRD-CORE-362: when given, an assertion whose ``commit_hash`` is a commit this
+            checkout is strictly behind is held as unknown (no file is read for it, and the entry's
+            anchors are not rescored). ``None``: every assertion is evaluated.
 
     Returns:
         A :class:`VerificationOutcome`. Never raises for a per-entry failure —
         the caller keeps scanning the remaining entries.
     """
-    from trw_memory.lifecycle.verification import verify_assertions
+    from trw_memory.lifecycle.verification import _result, verify_assertions
     from trw_memory.models.memory import Assertion
 
     moment = now or datetime.now(timezone.utc)
     stale_threshold = moment - timedelta(days=assertion_stale_threshold_days)
     outcome = VerificationOutcome(entry_id=entry_id, namespace=namespace)
-    outcome.anchor_validity = _reverify_anchors(raw_anchors, project_root, entry_id)
+    assertions_list = [Assertion.model_validate(a, strict=False) for a in raw_assertions if isinstance(a, dict)]
+    held = [
+        claim_tree is not None and project_root is not None and claim_tree.behind(a.commit_hash)
+        for a in assertions_list
+    ]
+    outcome.tree_behind = any(held)
+    # A tree that cannot judge one claim of an entry cannot judge its anchors either: the stored score stands.
+    outcome.anchor_validity = None if outcome.tree_behind else _reverify_anchors(raw_anchors, project_root, entry_id)
 
     if not raw_assertions:
         # Anchors-only entry: unavailable anchors must not erase prior evidence.
@@ -219,13 +242,18 @@ def run_verification_pass(
         _apply_verdict(outcome, moment=moment, anchor_floor=anchor_validity_verified_floor)
         return outcome
 
-    assertions_list = [Assertion.model_validate(a, strict=False) for a in raw_assertions if isinstance(a, dict)]
-    results = verify_assertions(assertions_list, project_root)
+    evaluated = iter(
+        verify_assertions([a for a, is_held in zip(assertions_list, held, strict=True) if not is_held], project_root)
+    )
+    results = [
+        _result(a, None, _held_evidence(claim_tree, a.commit_hash)) if is_held else next(evaluated)
+        for a, is_held in zip(assertions_list, held, strict=True)
+    ]
 
     outcome.passing = sum(1 for r in results if r.passed is True)
     outcome.failing = sum(1 for r in results if r.passed is False)
     outcome.stale = sum(1 for r in results if r.passed is None)
-    outcome.verifiable = any(r.passed is not None for r in results)
+    outcome.verifiable = outcome.tree_behind or any(r.passed is not None for r in results)
     outcome.assertion_status = {
         "passing": outcome.passing,
         "failing": outcome.failing,
@@ -239,18 +267,27 @@ def run_verification_pass(
         outcome.penalty = assertion_failure_penalty * (outcome.failing / len(results))
 
     # FR06: fold verification results back into the stored assertion payload.
-    for assertion, result in zip(assertions_list, results, strict=False):
+    for assertion, result, is_held in zip(assertions_list, results, held, strict=True):
         # mode="json" is load-bearing: a plain model_dump() leaves datetimes as
         # objects, so json.dumps() raised TypeError and the whole persist was
         # swallowed by the best-effort handler for any assertion that already
         # carried a first_failed_at — i.e. exactly the stale candidates.
         a_dict = assertion.model_dump(mode="json")
-        if result.passed is not None:
+        if is_held:
+            # PRD-CORE-362 FR06: unknown overwrites whatever was stored, a failure included -- it may have been
+            # recorded on a tree that could not judge the claim. (No root at all leaves the stored fields alone.)
+            a_dict["last_result"] = None
+            a_dict["last_verified_at"] = moment.isoformat()
+            a_dict["last_evidence"] = result.evidence
+            a_dict["first_failed_at"] = None
+        elif result.passed is not None:
             a_dict["last_result"] = result.passed
             a_dict["last_verified_at"] = moment.isoformat()
             a_dict["last_evidence"] = result.evidence
         # FR08: track first_failed_at transitions.
-        if result.passed is False:
+        if is_held:
+            pass
+        elif result.passed is False:
             if assertion.first_failed_at is None:
                 a_dict["first_failed_at"] = moment.isoformat()
         elif result.passed is True:
@@ -359,6 +396,8 @@ class MaintainVerifySummary:
     invalidated: int = 0
     #: 1 when a configured root was refused by the no-follow walk (swapped for a symlink).
     root_unwalkable: int = 0
+    #: PRD-CORE-362: entries with at least one assertion held as unknown because the checkout is behind its claim.
+    tree_behind: int = 0
     duration_ms: int = 0
     #: The (namespace, id) after which a sweep stopped at its deadline resumes; ``None`` once it finished.
     #: A position, not a count, so it is not in :meth:`as_dict`.
@@ -422,6 +461,7 @@ def _verify_entry(
     assertion_failure_penalty: float,
     assertion_stale_threshold_days: int,
     anchor_validity_verified_floor: float,
+    claim_tree: ClaimTree | None = None,
 ) -> None:
     """Check one entry and persist its verdict, counting the result in *summary*."""
     entry_id = str(getattr(entry, "id", ""))
@@ -440,6 +480,7 @@ def _verify_entry(
             assertion_stale_threshold_days=assertion_stale_threshold_days,
             anchor_validity_verified_floor=anchor_validity_verified_floor,
             project_root=project_root,
+            claim_tree=claim_tree,
         )
         # Nothing could be checked: never convict on historical
         # timestamps, and never let an old "verified" stand unexamined.
@@ -452,6 +493,7 @@ def _verify_entry(
         return
 
     summary.entries_processed += 1
+    summary.tree_behind += outcome.tree_behind
     if not outcome.verifiable:
         return
     if not (landed := persist_verification_outcome(backend, outcome, read=entry)):
@@ -478,6 +520,7 @@ def run_maintain_verify(
     after: tuple[str, str] | None = None,
     seconds: float | None = None,
     max_rows: int | None = None,
+    claim_tree: ClaimTree | None = None,
 ) -> MaintainVerifySummary:
     """Verify every active assertion/anchor entry and persist observed verdicts.
 
@@ -502,6 +545,9 @@ def run_maintain_verify(
             ``resume_after`` (a slice of a sweep, so one caller's sweep does not hold a serialized
             lane for its whole length). The first entry always runs, and one entry's own checks can
             run past the time.
+        max_rows: Stop after about this many rows.
+        claim_tree: PRD-CORE-362: the checkout's view of its own commit; a daemon call passes one so its
+            slices share it. ``None``: one is built for this sweep when the root is usable.
 
     Returns:
         A :class:`MaintainVerifySummary` describing the sweep.
@@ -510,6 +556,10 @@ def run_maintain_verify(
     summary = MaintainVerifySummary()
     configured, project_root = project_root, _walkable_root(project_root)
     summary.root_unwalkable = int(configured is not None and project_root is None)
+    if project_root is None:
+        claim_tree = None  # nothing is checkable, so there is nothing to hold (PRD-CORE-362 NFR05)
+    elif claim_tree is None:
+        claim_tree = ClaimTree(project_root)
 
     def fetch(cursor: tuple[str, str] | None, limit: int) -> list[Any]:
         entries = backend.entries_with_assertions(namespace=namespace, limit=limit, include_anchors=True, after=cursor)
@@ -529,6 +579,7 @@ def run_maintain_verify(
                 assertion_failure_penalty=assertion_failure_penalty,
                 assertion_stale_threshold_days=assertion_stale_threshold_days,
                 anchor_validity_verified_floor=anchor_validity_verified_floor,
+                claim_tree=claim_tree,
             )
             if time.monotonic() > ends:
                 return done

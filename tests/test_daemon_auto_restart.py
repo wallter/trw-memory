@@ -181,7 +181,8 @@ async def test_autostart_off_refuses_and_reports_without_stopping(
     ("version", "capabilities", "reason"),
     [
         (_OLDER, "", "drain handshake"),  # every 4.x/5.0.0 daemon: no capability advertised
-        (_NEWER, "drain", "not a major version older"),  # a newer daemon is never stopped
+        # A newer daemon is never stopped, and it is not the one to stop: the remedy is to upgrade this installation.
+        (_NEWER, "drain", "This installation is the older one"),
     ],
 )
 async def test_a_daemon_that_cannot_be_drained_keeps_todays_refusal(

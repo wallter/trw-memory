@@ -57,7 +57,7 @@ from trw_memory.daemon._paths import DaemonPaths
 from trw_memory.daemon._session import is_unauthorized, never_sent, open_session
 from trw_memory.daemon._spawn import SpawnedDaemon, start_daemon_detached
 from trw_memory.daemon._upgrade import replace_older_daemon, withdrawn
-from trw_memory.daemon._versions import majors_differ
+from trw_memory.daemon._versions import major, majors_differ
 from trw_memory.exceptions import (
     DaemonAuthError,
     DaemonProtocolError,
@@ -258,14 +258,25 @@ class DaemonClient:
     def _compatible(self, info: DaemonInfo, why: str = "") -> DaemonInfo:
         """*info*, unless it serves another major version than this client's (PRD-CORE-302 C7).
 
-        *why* names the reason the client did not replace it itself (DAEMON-AUTO-RESTART-ON-UPGRADE).
+        *why* names the reason the client did not replace it itself (DAEMON-AUTO-RESTART-ON-UPGRADE). A daemon
+        of a NEWER major is never the one to stop: this installation is the old one, and the remedy says so.
         """
-        if not majors_differ(info.version, _package_version()):
+        mine = _package_version()
+        if not majors_differ(info.version, mine):
             return info
+        refused = (
+            f"daemon_version_mismatch: the trw-memory daemon (pid {info.pid}) serves {info.version}, but this client "
+            f"is {mine}; their tool signatures differ. No memory was read or written."
+        )
+        if (major(info.version) or 0) > (major(mine) or 0):
+            raise DaemonVersionMismatchError(
+                f"{refused} This installation is the older one: the user should upgrade it (pip install -U trw-mcp "
+                f"trw-memory) and reconnect the MCP server. Stopping the daemon (process {info.pid}) would not "
+                f"resolve it: the newer installation replaces an older daemon when it can. {AGENT_MUST_NOT_STOP}"
+            )
         not_replaced = f" The client did not replace it automatically: {why}." if why else ""
         raise DaemonVersionMismatchError(
-            f"daemon_version_mismatch: the trw-memory daemon (pid {info.pid}) serves {info.version}, but this client "
-            f"is {_package_version()}; their tool signatures differ. No memory was read or written.{not_replaced} "
+            f"{refused}{not_replaced} "
             f"The user should stop the old daemon (process {info.pid}); restarting the MCP client alone leaves it "
             f"running. The next call then starts a daemon from this installation. {AGENT_MUST_NOT_STOP}"
         )
