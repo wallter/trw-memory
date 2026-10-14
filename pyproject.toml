@@ -76,7 +76,7 @@ dependencies = [
     # install as supported. `import trw_memory` still worked, which is why it
     # went unnoticed -- and CI installed `.[dev,vectors,bm25,mcp]`, so a
     # core-only install was never exercised.
-    "fastmcp>=3.2.0,<4.0.0",
+    "fastmcp>=3.2.0,<5.0.0",
     # PRD-CORE-342 FR01: the one OTel API floor. Already transitive via fastmcp-slim[client]
     # (>=1.20.0), so this raises the floor and adds no package. Libraries import the API only.
     "opentelemetry-api>=1.38,<2",
